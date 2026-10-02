@@ -11,8 +11,8 @@ use slopty_core::{WallMs, WorkerId};
 use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, NodeDetail, Peer,
-    Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer, StepKind,
+    Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, Need, NodeDetail,
+    Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer, StepKind,
     StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
@@ -107,7 +107,22 @@ pub struct ProjectView<'a> {
     orchestrator: Option<String>,
     limits: Limits,
     metadata: Option<Value>,
+    /// What each kind of its work needs of its machines.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    needs: Vec<NeedView<'a>>,
     created_ms: WallMs,
+}
+
+/// A need, for JSON.
+#[derive(Debug, Serialize)]
+pub struct NeedView<'a> {
+    name: &'a str,
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    paths: &'a [String],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    require: &'a [String],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    prefer: Vec<PreferView<'a>>,
 }
 
 /// A project, for JSON.
@@ -122,6 +137,20 @@ pub fn project(p: &Project) -> ProjectView<'_> {
         orchestrator: p.orchestrator.map(term_string),
         limits: p.limits,
         metadata: metadata(p.metadata.as_deref()),
+        needs: p
+            .needs
+            .iter()
+            .map(|n| NeedView {
+                name: &n.name,
+                paths: &n.paths,
+                require: &n.require,
+                prefer: n
+                    .prefer
+                    .iter()
+                    .map(|p| PreferView { expr: &p.expr, weight: p.weight })
+                    .collect(),
+            })
+            .collect(),
         created_ms: p.created_ms,
     }
 }
@@ -255,6 +284,8 @@ pub struct TaskView<'a> {
     status: Option<&'a str>,
     /// Its terminal.
     term: Option<String>,
+    /// Why its agent went to the worker it runs on, in the ranking's words.
+    placed: Option<&'a str>,
     agent_since_ms: Option<WallMs>,
     agent_ended_ms: Option<WallMs>,
     branch: Option<&'a str>,
@@ -286,6 +317,8 @@ pub struct CardView<'a> {
     state: &'static str,
     status: Option<&'a str>,
     term: Option<String>,
+    /// Why its agent went to the worker it runs on.
+    placed: Option<&'a str>,
     agent_since_ms: Option<WallMs>,
     agent_ended_ms: Option<WallMs>,
     branch: Option<&'a str>,
@@ -319,6 +352,7 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         state: state_word(t.state),
         status: t.status.as_deref(),
         term: t.assignment.as_ref().map(|a| term_string(a.term)),
+        placed: t.assignment.as_ref().and_then(|a| a.placed.as_ref()).map(|p| p.why.as_str()),
         agent_since_ms: t.assignment.as_ref().map(|a| a.since_ms),
         agent_ended_ms: t.assignment.as_ref().and_then(|a| a.ended_ms),
         branch: t.branch.as_deref(),
@@ -367,6 +401,7 @@ pub fn task(t: &Task) -> TaskView<'_> {
         state: state_word(t.state),
         status: t.status.as_deref(),
         term: t.assignment.as_ref().map(|a| term_string(a.term)),
+        placed: t.assignment.as_ref().and_then(|a| a.placed.as_ref()).map(|p| p.why.as_str()),
         agent_since_ms: t.assignment.as_ref().map(|a| a.since_ms),
         agent_ended_ms: t.assignment.as_ref().and_then(|a| a.ended_ms),
         branch: t.branch.as_deref(),
@@ -432,6 +467,8 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
         Moment::Limits { limits } => ("limits", format!("limits now {}", limits_text(limits))),
         Moment::TaskCreated { title } => ("task_created", format!("made: {title}")),
         Moment::Claimed { paths } => ("claimed", format!("owns {}", paths_text(paths))),
+        Moment::Needs { names } if names.is_empty() => ("needs", "needs nothing".to_owned()),
+        Moment::Needs { names } => ("needs", format!("needs: {}", names.join(", "))),
         Moment::Assigned { spawned: true, .. } => ("assigned", "started for it".to_owned()),
         Moment::Assigned { spawned: false, .. } => ("assigned", "terminal put on it".to_owned()),
         Moment::Proposed { .. } => ("proposed", "start proposed, waits for the person".to_owned()),
@@ -622,6 +659,9 @@ pub struct ReasonView<'a> {
     points: i64,
     #[serde(skip_serializing_if = "str::is_empty")]
     detail: &'a str,
+    /// The project's need it comes from, by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    need: Option<&'a str>,
 }
 
 #[expect(
@@ -660,10 +700,27 @@ pub fn suggestions(ranked: &[Suggestion]) -> Vec<SuggestionView<'_>> {
                     held: r.held,
                     points: r.points,
                     detail: &r.detail,
+                    need: r.need.as_deref(),
                 })
                 .collect(),
         })
         .collect()
+}
+
+/// A project's need as a person reads it: `need Apple work (apps/ios): requires os ==
+/// "macos"`.
+fn need_text(need: &Need) -> String {
+    let paths = if need.paths.is_empty() { "every task".to_owned() } else { need.paths.join(", ") };
+    let mut said = Vec::new();
+    if !need.require.is_empty() {
+        said.push(format!("requires {}", need.require.join(" and ")));
+    }
+    let prefers: Vec<String> =
+        need.prefer.iter().map(|p| format!("{} {:+}", p.expr, p.weight)).collect();
+    if !prefers.is_empty() {
+        said.push(format!("prefers {}", prefers.join(", ")));
+    }
+    format!("need {} ({paths}): {}", need.name, said.join("; "))
 }
 
 /// Workers ranked for a placement, best first, as a person reads them.
@@ -678,7 +735,8 @@ pub fn suggestions_text(ranked: &[Suggestion]) -> String {
             let points = if r.points == 0 { String::new() } else { format!(" ({:+})", r.points) };
             let detail =
                 if r.detail.is_empty() { String::new() } else { format!(": {}", r.detail) };
-            let _infallible = writeln!(out, "  {mark} {}{points}{detail}", r.rule);
+            let need = r.need.as_ref().map_or_else(String::new, |n| format!(" [{n}]"));
+            let _infallible = writeln!(out, "  {mark} {}{need}{points}{detail}", r.rule);
         }
     }
     out
@@ -740,6 +798,9 @@ pub fn status_text<S: std::hash::BuildHasher>(
         None => out.push_str("  orchestrator  none named\n"),
     }
     counts_text(&mut out, s.orchestrator_natives, 2);
+    for need in &p.needs {
+        let _infallible = writeln!(out, "  {}", need_text(need));
+    }
     let mut children: HashMap<Option<u32>, Vec<&TaskCard>> = HashMap::new();
     for t in &s.tasks {
         children.entry(t.parent.map(|p| p.0)).or_default().push(t);
@@ -763,6 +824,9 @@ pub fn status_text<S: std::hash::BuildHasher>(
         );
         if let Some(status) = &t.status {
             let _infallible = writeln!(out, "{indent}   {status}");
+        }
+        if let Some(why) = t.assignment.as_ref().and_then(|a| a.placed.as_ref()) {
+            let _infallible = writeln!(out, "{indent}   placed: {}", why.why);
         }
         if !t.depends_on.is_empty() {
             let on: Vec<String> = t.depends_on.iter().map(|d| format!("#{d}")).collect();
@@ -844,5 +908,55 @@ fn natives_text(out: &mut String, natives: &Natives, depth: usize) {
     for t in &natives.tasks {
         let mark = if t.done { "x" } else { " " };
         let _infallible = writeln!(out, "{indent}[{mark}] {}", t.subject);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_core::WorkerId;
+    use slopty_proto::project::{Need, Preference, Reason, Suggestion};
+
+    /// A need reads as what it covers and what it asks, and a reason a need brought names it,
+    /// in text and in JSON.
+    #[test]
+    fn a_need_and_the_reasons_it_brings_say_its_name() {
+        let apple = Need {
+            name: "Apple work".to_owned(),
+            paths: vec!["apps/ios".to_owned(), "crates/ui".to_owned()],
+            require: vec![r#"os == "macos""#.to_owned(), "has(toolchains.xcode)".to_owned()],
+            prefer: vec![Preference { expr: "cpus".to_owned(), weight: 2 }],
+        };
+        assert_eq!(
+            super::need_text(&apple),
+            r#"need Apple work (apps/ios, crates/ui): requires os == "macos" and has(toolchains.xcode); prefers cpus +2"#
+        );
+        let linux = Need {
+            name: "Linux first".to_owned(),
+            paths: Vec::new(),
+            require: Vec::new(),
+            prefer: vec![Preference { expr: r#"os == "linux""#.to_owned(), weight: 20 }],
+        };
+        assert_eq!(
+            super::need_text(&linux),
+            r#"need Linux first (every task): prefers os == "linux" +20"#
+        );
+
+        let ranked = [Suggestion {
+            worker: WorkerId::nil(),
+            name: "box".to_owned(),
+            fits: true,
+            score: 20,
+            reasons: vec![Reason {
+                rule: r#"os == "linux""#.to_owned(),
+                held: true,
+                points: 20,
+                detail: String::new(),
+                need: Some("Linux first".to_owned()),
+            }],
+        }];
+        let text = super::suggestions_text(&ranked);
+        assert!(text.contains(r#"+ os == "linux" [Linux first] (+20)"#), "{text}");
+        let json = serde_json::to_value(super::suggestions(&ranked)).unwrap();
+        assert_eq!(json[0]["reasons"][0]["need"], "Linux first");
     }
 }

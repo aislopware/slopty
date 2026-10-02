@@ -26,8 +26,8 @@ use slopty_proto::server::{FromServer, Liveness, Os};
 use slopty_proto::terminal::{RepoId, SessionSummary};
 
 use super::{
-    Again, Entry, Hub, State, WAIT_CAP_MS, WeakHub, branch_of, digest, error, keep_start, keyed,
-    known_term, remember, start_again, start_answered, term_of,
+    Again, Entry, Hub, State, WAIT_CAP_MS, WeakHub, branch_of, codex, digest, error, keep_start,
+    keyed, known_term, remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Ranking};
@@ -204,6 +204,7 @@ pub(super) fn agent_scope(
         verb,
         Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
+            | Verb::ProjectNeeds { .. }
             | Verb::TaskCreate { .. }
             | Verb::TaskClaim { .. }
             | Verb::TaskUpdate { .. }
@@ -283,6 +284,12 @@ pub(super) fn agent_scope(
                 named(project, *term)?;
             }
         }
+        Verb::ProjectNeeds { project, .. } => {
+            in_own(project)?;
+            if task_of.is_some() {
+                return refuse("only the person or the project's orchestrator says what it needs");
+            }
+        }
         Verb::TaskClaim { project, task, .. }
         | Verb::TaskUpdate { project, task, .. }
         | Verb::TaskSpawn { project, task, .. } => {
@@ -344,6 +351,34 @@ fn names_verifier(verb: &Verb) -> bool {
         Verb::TaskUpdate { change, .. } => change.verifier.is_some(),
         _ => false,
     }
+}
+
+/// Every rule of `needs` compiles, within the comprehensions the person allows, and all of
+/// them together fit one placement, as they do for a task that has every need.
+fn needs_compile(needs: &[slopty_proto::project::Need], depth: u8) -> Result<(), Outcome> {
+    let mut all = Placement::default();
+    for need in needs {
+        let rules = Placement {
+            require: need.require.clone(),
+            prefer: need.prefer.clone(),
+            ..Placement::default()
+        };
+        placement::check(&rules, depth).map_err(|refused| match refused {
+            Outcome::Error { code, message } => {
+                Outcome::Error { code, message: format!("the need {:?}: {message}", need.name) }
+            }
+            other => other,
+        })?;
+        all.require.extend(rules.require);
+        all.prefer.extend(rules.prefer);
+    }
+    placement::check(&all, depth).map_err(|refused| match refused {
+        Outcome::Error { code, message } => Outcome::Error {
+            code,
+            message: format!("the needs together, as a task with all of them has them: {message}"),
+        },
+        other => other,
+    })
 }
 
 /// Whether `verb` turns pushing a project's target on or off: publishing is the person's.
@@ -502,6 +537,18 @@ fn facts_of(entry: &Entry, agents_here: u16, made: &[(String, RepoId)]) -> Facts
     for (name, fact) in known {
         facts.insert(name.to_owned(), fact);
     }
+    // The agents it registered with are installed before its own facts say so.
+    if !caps.agents.is_empty() {
+        let agents = facts.entry("agents".to_owned()).or_insert_with(|| Fact::Map(Facts::new()));
+        if let Fact::Map(installed) = agents {
+            for agent in &caps.agents {
+                let name = match agent.kind {
+                    AgentKind::ClaudeCode => CLAUDE,
+                };
+                installed.entry(name.to_owned()).or_insert_with(|| text(&agent.version));
+            }
+        }
+    }
     facts
 }
 
@@ -581,10 +628,17 @@ const WORKTREE_FLAGS: [&str; 2] = ["--worktree", "-w"];
 struct Place {
     /// The clone's root there.
     path: String,
-    /// The worktree its agent works in, by the name Claude Code is given (`--worktree`), for
-    /// an agent that writes. Each such task has its own, so agents in one clone never edit
-    /// the same checkout.
-    worktree: Option<String>,
+    /// The worktree its agent works in, for an agent that writes. Each such task has its own,
+    /// so agents in one clone never edit the same checkout.
+    worktree: Option<Worktree>,
+}
+
+/// The git worktree a writing agent works in, made by the agent itself.
+enum Worktree {
+    /// Claude Code's, by the name it is given (`--worktree <name>`), reopened by that name.
+    Named(String),
+    /// Codex's, which it makes and names itself (`--worktree`).
+    Codex,
 }
 
 /// The placement rule that holds on a worker with a clone of `id`: either key of it in its
@@ -652,7 +706,12 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
     ];
     if let Some(Place { path, worktree }) = at {
         lines.push(match worktree {
-            Some(name) => format!(
+            Some(Worktree::Codex) => format!(
+                "- You work in a git worktree Codex made for you from the clone at {}. Commit \
+                 your work there, and name its branch when you report done.",
+                plain(path)
+            ),
+            Some(Worktree::Named(name)) => format!(
                 "- You work in a git worktree of your own, {name}, made from the clone at {} \
                  (branch worktree-{name}). Commit your work there, and name that branch when \
                  you report done.",
@@ -687,10 +746,29 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
          (`proposed` on the task) and it starts once they say so: propose the whole plan, then \
          wait for the starts and reports rather than spawning again."
             .to_owned(),
-        "- Work that needs no Apple platform belongs on a Linux worker: require \
-         `os == \"linux\"` in its placement."
-            .to_owned(),
     ];
+    if project.needs.is_empty() {
+        lines.push(
+            "- Work that needs no Apple platform belongs on a Linux worker. Say so once with \
+             project_needs before you split the goal: a need such as \"Apple work\" over the \
+             paths that build only on a Mac requires `os == \"macos\"`, and one such as \
+             \"Linux first\" over every path prefers `os == \"linux\"`. The board then names \
+             the need as the reason each task went where it did."
+                .to_owned(),
+        );
+    } else {
+        let names: Vec<String> = project.needs.iter().map(|n| plain(&n.name)).collect();
+        lines.push(format!(
+            "- Its needs place every task by the paths it owns ({}); project_status shows them, \
+             and project_needs says them anew.",
+            names.join(", ")
+        ));
+    }
+    lines.push(
+        "- task_spawn runs Claude Code; `agent: \"codex\"` runs the person's Codex instead, \
+         with the same tools, on a worker that has it."
+            .to_owned(),
+    );
     if let Some(key) = &clones.key {
         let on: Vec<String> = clones
             .on
@@ -993,6 +1071,13 @@ impl Hub {
                 }
                 Ok((status(set.0), set.1))
             }),
+            Verb::ProjectNeeds { project, needs } => {
+                let depth = state.projects.policy().bounds_for(Some(&project)).comprehension_depth;
+                needs_compile(&needs, depth).and_then(|()| {
+                    let set = state.projects.set_needs(&project, needs, &running, now)?;
+                    Ok((status(set.0), set.1))
+                })
+            }
             Verb::TaskCreate { project, spec } => {
                 state.projects.create_task(&project, *spec, now).map(|(t, u)| (task(t), u))
             }
@@ -1191,6 +1276,7 @@ impl Hub {
                     worker,
                     name: e.info.name.clone(),
                     online: e.info.liveness == Liveness::Online && e.link.is_some(),
+                    reported: !e.facts.is_empty(),
                     facts: facts_of(e, fleet_live, made_on(state, worker)),
                     live: project.map_or(0, |p| state.projects.live_on(p, worker, &running)),
                     fleet_live,
@@ -1205,8 +1291,9 @@ impl Hub {
             fleet_per_worker: Some(bounds.live_per_worker),
             comprehensions: bounds.comprehension_depth,
             until: None,
+            agent: None,
         };
-        Gathered { candidates, peers, ranking }
+        Gathered { candidates, peers, ranking, named: Vec::new() }
     }
 
     /// Rank `gathered` for `placement` on the blocking pool, [`RANKERS`] at a time, judging
@@ -1225,14 +1312,21 @@ impl Hub {
         let Ok(Ok(permit)) = tokio::time::timeout(RANK_DEADLINE, turn).await else {
             return Err(busy());
         };
-        let Gathered { candidates, peers, mut ranking } = gathered;
+        let Gathered { candidates, peers, mut ranking, named } = gathered;
         ranking.until = start.checked_add(RANK_DEADLINE);
         let ranked = tokio::task::spawn_blocking(move || {
             let _turn = permit;
             placement::rank(&placement, &candidates, &peers, ranking)
         })
         .await;
-        ranked.unwrap_or_else(|e| Err(error(ErrorCode::Failed, &format!("ranking ended: {e}"))))
+        let mut ranked = ranked
+            .unwrap_or_else(|e| Err(error(ErrorCode::Failed, &format!("ranking ended: {e}"))))?;
+        // A rule a need brought says the need's name.
+        for reason in ranked.iter_mut().flat_map(|s| s.reasons.iter_mut()) {
+            reason.need =
+                named.iter().find(|(rule, _)| *rule == reason.rule).map(|(_, need)| need.clone());
+        }
+        Ok(ranked)
     }
 
     /// Rank every worker for a placement.
@@ -1261,18 +1355,24 @@ impl Hub {
         task: Option<TaskId>,
         placement: Option<Placement>,
     ) -> Result<(Placement, Gathered), Outcome> {
-        let placement = match (project, task, placement) {
-            (_, _, Some(placement)) => placement,
-            (Some(p), Some(t), None) => state.projects.task(p, t)?.placement.clone(),
+        let wanted = match (project, task, placement) {
+            (_, _, Some(placement)) => Wanted { placement, ..Wanted::default() },
+            (Some(p), Some(t), None) => {
+                // A start already proposed says which agent it runs.
+                let proposed = state.projects.task(p, t)?.proposal.as_ref();
+                let agent = proposed.and_then(|proposal| agent_of(&proposal.launch.run));
+                Wanted { agent, ..Self::needed(state, p, t)? }
+            }
             (None, Some(_), None) => {
                 return Err(error(ErrorCode::Invalid, "a task is named within its project"));
             }
-            (_, None, None) => Placement::default(),
+            (_, None, None) => Wanted::default(),
         };
         if let Some(p) = project {
             state.projects.limits(p)?;
         }
-        Ok((placement, Self::candidates(state, project)))
+        let gathered = Self::candidates(state, project).wanting(&wanted);
+        Ok((wanted.placement, gathered))
     }
 
     /// Start a plain agent under an id the hub chooses: checked against the person's bounds
@@ -1535,7 +1635,10 @@ impl Hub {
             let mut state = self.inner.state.lock();
             Self::loosens(&state, project, &launch)
                 .and_then(|()| Self::placement_for(&state, project, task, &launch))
-                .map(|placement| (placement, Self::candidates(&mut state, Some(project))))
+                .map(|wanted| {
+                    let gathered = Self::candidates(&mut state, Some(project)).wanting(&wanted);
+                    (wanted.placement, gathered)
+                })
         };
         let (placement, gathered) = match inputs {
             Ok(inputs) => inputs,
@@ -1550,7 +1653,8 @@ impl Hub {
             Err(_) => (None, None),
         };
         let runs = match &launch.run {
-            Runner::Claude { .. } => "claude".to_owned(),
+            Runner::Claude { .. } => CLAUDE.to_owned(),
+            Runner::Codex { .. } => codex::PROGRAM.to_owned(),
             Runner::Command { argv } => {
                 argv.first().map_or("a shell", |p| p.rsplit('/').next().unwrap_or(p)).to_owned()
             }
@@ -1626,36 +1730,81 @@ impl Hub {
     /// this project's agents.
     fn loosens(state: &State, project: &ProjectId, launch: &TaskLaunch) -> Result<(), Outcome> {
         let bounds = state.projects.policy().bounds_for(Some(project));
-        let args = match &launch.run {
-            Runner::Claude { args, .. } => Some(args.clone()),
-            Runner::Command { argv } => claude_args(argv),
-        };
-        if !bounds.permission_flags
-            && let Some(flag) = args.as_deref().and_then(loosening)
-        {
-            return Err(loosened(&flag, Some(project)));
+        if bounds.permission_flags {
+            return Ok(());
         }
-        Ok(())
+        let flag = match &launch.run {
+            Runner::Claude { args, .. } => loosening(args),
+            Runner::Command { argv } => claude_args(argv)
+                .as_deref()
+                .and_then(loosening)
+                .or_else(|| codex::args_of(argv).and_then(codex::loosening)),
+            Runner::Codex { args, .. } => codex::loosening(args),
+        };
+        flag.map_or(Ok(()), |flag| Err(loosened(&flag, Some(project))))
     }
 
-    /// The placement a start of `task` ranks: the task's, pinned where the start says, and
-    /// beside a clone of the project's repository when it names no directory.
+    /// What a start of `task` asks: the task's placement with its needs', pinned where the
+    /// start says, beside a clone of the project's repository when it names no directory, on
+    /// a worker with the agent it runs.
     fn placement_for(
         state: &State,
         project: &ProjectId,
         task: TaskId,
         launch: &TaskLaunch,
-    ) -> Result<Placement, Outcome> {
-        let mut placement = state.projects.task(project, task)?.placement.clone();
-        placement.pin = launch.pin.or(placement.pin);
+    ) -> Result<Wanted, Outcome> {
+        let mut wanted = Self::needed(state, project, task)?;
+        wanted.placement.pin = launch.pin.or(wanted.placement.pin);
+        wanted.agent = agent_of(&launch.run);
         // With no directory named, it goes beside a clone of the project's repository.
         let repo = state.projects.project(project)?.repo_id.as_ref();
         if launch.cwd.trim().is_empty()
             && let Some(rule) = repo.and_then(beside_a_clone)
         {
-            placement.require.push(rule);
+            wanted.placement.require.push(rule);
         }
-        Ok(placement)
+        Ok(wanted)
+    }
+
+    /// `task`'s own placement with the rules of each of its project's needs it has
+    /// ([`slopty_proto::project::Need`]), each named after its need. A rule the task holds
+    /// already is not added twice.
+    ///
+    /// # Errors
+    /// Refused when the task's own rules and its needs' come to more than a placement holds.
+    fn needed(state: &State, project: &ProjectId, task: TaskId) -> Result<Wanted, Outcome> {
+        let mut placement = state.projects.task(project, task)?.placement.clone();
+        let needs = state.projects.needs_of(project, task)?;
+        let mut named = Vec::new();
+        for need in &needs {
+            for rule in &need.require {
+                if !placement.require.iter().any(|r| r.trim() == rule.trim()) {
+                    placement.require.push(rule.clone());
+                }
+                named.push((rule.trim().to_owned(), need.name.clone()));
+            }
+            for preference in &need.prefer {
+                if !placement.prefer.iter().any(|p| p.expr.trim() == preference.expr.trim()) {
+                    placement.prefer.push(preference.clone());
+                }
+                named.push((preference.expr.trim().to_owned(), need.name.clone()));
+            }
+        }
+        let counts = [("require", placement.require.len()), ("prefer", placement.prefer.len())];
+        let most = slopty_proto::project::RULES_MAX;
+        if let Some((kind, n)) = counts.into_iter().find(|(_, n)| *n > most) {
+            let names: Vec<&str> = needs.iter().map(|n| n.name.as_str()).collect();
+            return Err(error(
+                ErrorCode::BadExpression,
+                &format!(
+                    "task {task}'s own rules and those of its needs ({}) make {n} {kind} rules, \
+                     over the {most} a placement may hold: fewer rules on the task or its \
+                     needs",
+                    names.join(", ")
+                ),
+            ));
+        }
+        Ok(Wanted { placement, named, agent: None })
     }
 
     /// Everything a start checks before it is placed, read together: the placement it ranks,
@@ -1665,15 +1814,15 @@ impl Hub {
         project: &ProjectId,
         task: TaskId,
         launch: &TaskLaunch,
-    ) -> Result<(Placement, bool), Outcome> {
+    ) -> Result<(Wanted, bool), Outcome> {
         let bounds = state.projects.policy().bounds_for(Some(project));
         Self::loosens(state, project, launch)?;
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         state.projects.may_start(project, task, launch.ignore_dependencies, &running)?;
         fleet_room(state, &running, bounds, None)?;
-        let placement = Self::placement_for(state, project, task, launch)?;
-        Ok((placement, bounds.permission_flags))
+        let wanted = Self::placement_for(state, project, task, launch)?;
+        Ok((wanted, bounds.permission_flags))
     }
 
     /// Hold a place on `worker` for a start, read again: others may have started while the
@@ -1698,7 +1847,7 @@ impl Hub {
             return Err(error(ErrorCode::Unplaced, &message));
         }
         fleet_room(state, &running, bounds, Some(worker))?;
-        let agent = matches!(launch.run, Runner::Claude { .. });
+        let agent = matches!(launch.run, Runner::Claude { .. } | Runner::Codex { .. });
         Ok(Self::place(state, worker, Some((project.clone(), task)), agent, placed))
     }
 
@@ -1729,12 +1878,12 @@ impl Hub {
         &self,
         project: &ProjectId,
         launch: &TaskLaunch,
-        placement: &Placement,
+        wanted: &Wanted,
     ) -> Option<(WorkerId, Option<Placed>)> {
         if !launch.cwd.trim().is_empty() {
             return None;
         }
-        let (bare, gathered) = self.without_the_clone_rule(project, placement)?;
+        let (bare, gathered) = self.without_the_clone_rule(project, wanted)?;
         let ranked = self.rank(bare.clone(), gathered).await.ok()?;
         let worker = placement::choose(&bare, &ranked).ok()?;
         Some((worker, placed_on(&ranked, worker)))
@@ -1745,15 +1894,15 @@ impl Hub {
     fn without_the_clone_rule(
         &self,
         project: &ProjectId,
-        placement: &Placement,
+        wanted: &Wanted,
     ) -> Option<(Placement, Gathered)> {
         let mut state = self.inner.state.lock();
         let id = state.projects.project(project).ok()?.repo_id.clone()?;
         id.url.as_ref()?;
         let rule = beside_a_clone(&id)?;
-        let mut bare = placement.clone();
+        let mut bare = wanted.placement.clone();
         bare.require.retain(|r| *r != rule);
-        let gathered = Self::candidates(&mut state, Some(project));
+        let gathered = Self::candidates(&mut state, Some(project)).wanting(wanted);
         drop(state);
         Some((bare, gathered))
     }
@@ -1786,20 +1935,23 @@ impl Hub {
     ) -> Outcome {
         let inputs = {
             let mut state = self.inner.state.lock();
-            Self::may_start(&mut state, project, task, &launch)
-                .map(|(placement, _)| (placement, Self::candidates(&mut state, Some(project))))
+            Self::may_start(&mut state, project, task, &launch).map(|(wanted, _)| {
+                let gathered = Self::candidates(&mut state, Some(project)).wanting(&wanted);
+                (wanted, gathered)
+            })
         };
-        let (placement, gathered) = match inputs {
+        let (wanted, gathered) = match inputs {
             Ok(inputs) => inputs,
             Err(refused) => return refused,
         };
+        let placement = &wanted.placement;
         let ranked = match self.rank(placement.clone(), gathered).await {
             Ok(ranked) => ranked,
             Err(refused) => return refused,
         };
-        let chosen = match placement::choose(&placement, &ranked) {
+        let chosen = match placement::choose(placement, &ranked) {
             Ok(worker) => Ok((worker, placed_on(&ranked, worker))),
-            Err(why) => self.placed_for_a_clone(project, &launch, &placement).await.ok_or(why),
+            Err(why) => self.placed_for_a_clone(project, &launch, &wanted).await.ok_or(why),
         };
         let (worker, placed) = match chosen {
             Ok(chosen) => chosen,
@@ -1837,10 +1989,14 @@ impl Hub {
                     let clone =
                         launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
                     let at = clone.flatten().map(|path| {
-                        let writes = !card.read_only
-                            && matches!(&launch.run, Runner::Claude { args, .. }
-                            if !names(args, &WORKTREE_FLAGS));
-                        let worktree = writes.then(|| format!("slopty-{project}-{task}"));
+                        let worktree = match &launch.run {
+                            _ if card.read_only => None,
+                            Runner::Claude { args, .. } if !names(args, &WORKTREE_FLAGS) => {
+                                Some(Worktree::Named(format!("slopty-{project}-{task}")))
+                            }
+                            Runner::Codex { .. } => Some(Worktree::Codex),
+                            Runner::Claude { .. } | Runner::Command { .. } => None,
+                        };
                         Place { path, worktree }
                     });
                     let role = agent_role(record, card, at.as_ref());
@@ -1867,7 +2023,7 @@ impl Hub {
         let session = Some(term.session);
         let (start, conversation) = match run {
             Runner::Claude { prompt, mut args } => {
-                if let Some(name) = worktree {
+                if let Some(Worktree::Named(name)) = worktree {
                     args.splice(0..0, [WORKTREE_FLAGS[0].to_owned(), name]);
                 }
                 let (args, conversation) = started_args(args, permission_flags, Some(role));
@@ -1890,6 +2046,20 @@ impl Hub {
                     worker,
                     cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
                     command: argv,
+                    env,
+                    name: Some(format!("{project} #{task}")),
+                    size,
+                    session,
+                };
+                (open, None)
+            }
+            // The worker gives it Slopty's tools as it opens (`Worker::as_agent`).
+            Runner::Codex { prompt, args } => {
+                let in_worktree = matches!(worktree, Some(Worktree::Codex));
+                let open = Verb::OpenTerminal {
+                    worker,
+                    cwd: Some(cwd).filter(|c| !c.trim().is_empty()),
+                    command: codex::command(&role, in_worktree, args, prompt),
                     env,
                     name: Some(format!("{project} #{task}")),
                     size,
@@ -2059,7 +2229,51 @@ pub(super) struct Gathered {
     candidates: Vec<Candidate>,
     peers: BTreeMap<TaskId, WorkerId>,
     ranking: Ranking,
+    /// Each rule the task's needs brought, and the need's name, for the reasons to say.
+    named: Vec<(String, String)>,
 }
+
+impl Gathered {
+    /// Ranked for `wanted`: the agent it runs must be installed, and its needs' rules say
+    /// their names.
+    fn wanting(mut self, wanted: &Wanted) -> Self {
+        self.ranking.agent = wanted.agent;
+        self.named.clone_from(&wanted.named);
+        self
+    }
+}
+
+/// What a start asks of the worker it goes to.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Wanted {
+    /// The task's own placement, with the rules of each of its project's needs it has.
+    placement: Placement,
+    /// Each rule a need brought, trimmed as a reason names it, and that need's name.
+    named: Vec<(String, String)>,
+    /// The agent it runs, by its name among a worker's `agents` facts.
+    agent: Option<&'static str>,
+}
+
+/// The agent `run` starts, by its name among a worker's `agents` facts: a worker must have it
+/// installed to be chosen. A command is judged by its program, so `claude …` run as a command
+/// still needs Claude Code.
+fn agent_of(run: &Runner) -> Option<&'static str> {
+    match run {
+        Runner::Claude { .. } => Some(CLAUDE),
+        Runner::Codex { .. } => Some(codex::PROGRAM),
+        Runner::Command { argv } => {
+            let program = argv.first()?;
+            match program.rsplit('/').next().unwrap_or(program) {
+                CLAUDE => Some(CLAUDE),
+                codex::PROGRAM => Some(codex::PROGRAM),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Claude Code's program, and its name among a worker's `agents` facts.
+const CLAUDE: &str = "claude";
 
 /// How often the watcher looks for checks falling due.
 const CHECKS_TICK: Duration = Duration::from_secs(10);
@@ -2189,6 +2403,7 @@ mod tests {
             worker: WorkerId::new(),
             name: name.to_owned(),
             online: true,
+            reported: true,
             facts: Facts::from([("repos".to_owned(), repos_of(sessions, &[]))]),
             live: 0,
             fleet_live: 0,

@@ -259,6 +259,11 @@ fn every_moment_reads_as_a_sentence() {
     );
     assert_eq!(say(Moment::Assigned { term, spawned: true }), "Started on studio");
     assert_eq!(
+        say(Moment::Needs { names: vec!["Apple work".into(), "Linux first".into()] }),
+        "Needs: Apple work, Linux first"
+    );
+    assert_eq!(say(Moment::Needs { names: Vec::new() }), "Needs nothing of its workers");
+    assert_eq!(
         say(Moment::State { from: TaskState::Running, to: TaskState::Blocked }),
         "Needs you"
     );
@@ -859,4 +864,100 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
     assert!(fix.contains("Pull request #42's checks failed: clippy (macos)."), "{fix}");
     assert!(!b.actions(TaskId(3)).contains(&TaskAction::Merge), "{:?}", b.actions(TaskId(3)));
     assert_eq!(b.open_todos(TaskId(3)), 2);
+}
+
+/// Each node says where it is: the orchestrator and a running task where their agents run, an
+/// ended one where it ran, then a pin, then a proposal, with the worktree, branch and reason;
+/// only a task not started yet can move.
+#[test]
+fn a_node_says_where_it_runs_and_why_and_whether_it_can_move() {
+    use slopty_proto::project::{Placed, Proposed};
+
+    use super::model::{Place, PlaceHow, os_name};
+
+    let (studio, linux) = (WorkerId::new(), WorkerId::new());
+    let orchestrator = TermRef { worker: studio, session: SessionId::new() };
+    let mut running =
+        on(card(1, "Ship the app", TaskState::Running, None), studio, SessionId::new());
+    running.worktree = Some("/w/board-1".into());
+    if let Some(a) = running.assignment.as_mut() {
+        a.placed = Some(Placed { pinned: false, score: 0, why: "Apple work".into() });
+    }
+    let mut ended = on(card(2, "Write docs", TaskState::Done, None), linux, SessionId::new());
+    if let Some(a) = ended.assignment.as_mut() {
+        a.ended_ms = Some(AT);
+    }
+    let mut pinned = card(3, "Pinned", TaskState::Planned, None);
+    pinned.pin = Some(linux);
+    let mut proposed = card(4, "Proposed", TaskState::Planned, None);
+    proposed.proposed = Some(Proposed {
+        since_ms: AT,
+        runs: "codex".into(),
+        on: Some(linux),
+        why: "Linux first +20".into(),
+    });
+    let loose = card(5, "Anywhere", TaskState::Planned, None);
+    let mut mirror = Projects::default();
+    let tasks = vec![running, ended, pinned, proposed, loose];
+    mirror.apply_part(snapshot(
+        10,
+        vec![status(project("board", Some(orchestrator)), tasks, Vec::new())],
+    ));
+    let board = board(&mirror);
+
+    let place = |node| board.place(node).map(|p| (p.worker, p.how, p.why));
+    assert_eq!(place(None), Some((studio, PlaceHow::Runs, None)));
+    assert_eq!(
+        board.place(Some(TaskId(1))),
+        Some(Place {
+            worker: studio,
+            how: PlaceHow::Runs,
+            worktree: Some("/w/board-1".into()),
+            branch: Some("slopty/board/1".into()),
+            why: Some("Apple work".into()),
+        })
+    );
+    assert_eq!(place(Some(TaskId(2))), Some((linux, PlaceHow::Ran, None)));
+    assert_eq!(place(Some(TaskId(3))), Some((linux, PlaceHow::Pinned, Some("pinned".into()))));
+    assert_eq!(
+        place(Some(TaskId(4))),
+        Some((linux, PlaceHow::Proposed, Some("Linux first +20".into())))
+    );
+    assert_eq!(place(Some(TaskId(5))), None, "nowhere yet: no place to show");
+    let movable: Vec<u32> = (1..=5).filter(|t| board.movable(TaskId(*t))).collect();
+    assert_eq!(movable, [3, 4, 5]);
+    assert_eq!(os_name(slopty_proto::server::Os::Linux), "Linux");
+    assert_eq!(os_name(slopty_proto::server::Os::MacOs), "macOS");
+}
+
+/// A need says the paths it covers, or every task, and what it asks of a worker.
+#[test]
+fn a_need_says_what_it_covers_and_what_it_asks() {
+    use slopty_proto::project::{Need, Preference};
+
+    use super::model::need_words;
+
+    let apple = Need {
+        name: "Apple work".into(),
+        paths: vec!["apps/ios".into(), "crates/ui".into()],
+        require: vec![r#"os == "macos""#.into(), "has(toolchains.xcode)".into()],
+        prefer: vec![Preference { expr: "cpus".into(), weight: 2 }],
+    };
+    assert_eq!(
+        need_words(&apple),
+        (
+            "apps/ios, crates/ui".to_owned(),
+            r#"Requires os == "macos" and has(toolchains.xcode); prefers cpus +2"#.to_owned()
+        )
+    );
+    let linux = Need {
+        name: "Linux first".into(),
+        paths: Vec::new(),
+        require: Vec::new(),
+        prefer: vec![Preference { expr: r#"os == "linux""#.into(), weight: -5 }],
+    };
+    assert_eq!(
+        need_words(&linux),
+        ("Every task".to_owned(), r#"Prefers os == "linux" -5"#.to_owned())
+    );
 }

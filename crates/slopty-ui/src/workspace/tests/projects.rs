@@ -819,6 +819,7 @@ fn the_machines_lens_shows_where_everything_runs_and_where_a_task_will(cx: &mut 
         held,
         points: 0,
         detail: detail.to_owned(),
+        need: None,
     };
     let ranked = vec![
         Suggestion {
@@ -1281,4 +1282,82 @@ fn the_board_talks_to_its_orchestrator(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape 3");
     let lens = b.read_with(cx, |b, _| b.lens());
     assert_eq!(lens, Lens::Timeline, "the board has its keys back");
+}
+
+/// Every node says where it is at a glance: the worker and its system on its row and its card,
+/// the card with why it went there. A task's place still to come moves from it ("Run on…"
+/// asks the server to rank the workers); a running one's shows the machines lens.
+#[gpui::test]
+fn every_node_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut TestAppContext) {
+    use slopty_proto::project::Placed;
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (_, agent) = setup.agent;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut running = on(card(1, "Wire the board", TaskState::Running, None), worker, agent);
+    if let Some(a) = running.assignment.as_mut() {
+        a.placed = Some(Placed { pinned: false, score: 0, why: "Apple work".into() });
+    }
+    let mut pinned = card(3, "Golden files", TaskState::Planned, Some(1));
+    pinned.pin = Some(worker);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", running, None), cx);
+        v.project_update(12, task_changed("board", pinned, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    for node in ["orchestrator", "1", "2", "3"] {
+        let id = format!("project-row-project-node-{node}-where");
+        assert!(cx.debug_bounds(Box::leak(id.clone().into_boxed_str())).is_some(), "{id}");
+    }
+    let said = labels(&view, cx);
+    let row = said.iter().find(|l| l.starts_with("Wire the board")).expect("task 1's row");
+    assert!(row.contains("studio \u{b7} macOS"), "{row}");
+    assert!(
+        said.iter().any(|l| l.starts_with("Runs on studio, macOS. Branch slopty/board/1. Why: Apple work")),
+        "{said:?}"
+    );
+    assert!(said.iter().any(|l| l.starts_with("Pinned to studio, macOS")), "{said:?}");
+
+    click(cx, "project-row-project-node-3-where");
+    let verbs = sent(&mut queue, cx, |_| Outcome::Suggestions(Vec::new()));
+    assert!(
+        matches!(verbs.as_slice(), [Verb::PlacementSuggest { task: Some(TaskId(3)), .. }]),
+        "a place still to come moves: {verbs:?}"
+    );
+    let b = board(&view, cx, orchestrator);
+    b.update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-card-project-node-1-where").is_some(), "on its card");
+    assert!(cx.debug_bounds("project-card-1-why").is_some(), "and why it went there");
+    b.update(cx, |b, cx| b.show(Lens::Tree, cx));
+    cx.run_until_parked();
+    let _answered = sent(&mut queue, cx, done);
+    click(cx, "project-row-project-node-1-where");
+    assert_eq!(b.read_with(cx, |b, _| b.lens()), Lens::Machines, "a running one's machines");
+
+    // The machines lens says what the project's work needs of them.
+    let mut needing = project("board", Some(TermRef { worker, session: orchestrator }));
+    needing.needs = vec![slopty_proto::project::Need {
+        name: "Apple work".into(),
+        paths: vec!["apps/slopty".into()],
+        require: vec![r#"os == "macos""#.into()],
+        prefer: Vec::new(),
+    }];
+    let update = ProjectUpdate {
+        project: fixtures::id("board"),
+        record: Some(needing),
+        task: None,
+        native: None,
+        entry: None,
+    };
+    view.update_in(cx, |v, _w, cx| v.project_update(13, update, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-machines-needs").is_some(), "its heading");
+    let said = labels(&view, cx);
+    let need = r#"Apple work, apps/slopty, Requires os == "macos""#;
+    assert!(said.iter().any(|l| l == need), "{said:?}");
 }

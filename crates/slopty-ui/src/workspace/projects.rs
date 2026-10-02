@@ -27,7 +27,7 @@ use crate::icons::Status;
 use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction};
 use crate::project::recap::{Looked, Recap};
 use crate::project::spend::MetersBySession;
-use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject};
+use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
 
 /// What the palette and the header call turning a tile to its board.
 pub(crate) const SHOW_BOARD: &str = "Show project board";
@@ -351,17 +351,25 @@ impl WorkspaceView {
                 self.make_board(project.clone(), cx);
             }
         }
-        let names: BTreeMap<WorkerId, String> = self
+        let names: BTreeMap<WorkerId, WorkerSeen> = self
             .projects
             .mirror
             .boards()
             .flat_map(|b| {
                 let orchestrator = b.project.orchestrator.map(|t| t.worker);
-                let tasks =
-                    b.tasks.values().filter_map(|c| c.assignment.as_ref().map(|a| a.term.worker));
+                let tasks = b.tasks.values().flat_map(|c| {
+                    let ran = c.assignment.as_ref().map(|a| a.term.worker);
+                    let proposed = c.proposed.as_ref().and_then(|p| p.on);
+                    let step = c.step.as_ref().map(|s| s.worker);
+                    [ran, c.pin, proposed, step].into_iter().flatten()
+                });
                 orchestrator.into_iter().chain(tasks).collect::<Vec<_>>()
             })
-            .filter_map(|id| Some((id, self.workers.get(&worker_key(id))?.name.clone())))
+            .filter_map(|id| {
+                let worker = self.workers.get(&worker_key(id))?;
+                let os = worker.caps.as_ref().map(|c| c.os);
+                Some((id, WorkerSeen { name: worker.name.clone(), os }))
+            })
             .collect();
         let now = WallMs::now();
         // Only the boards on show: a hidden one is handed everything as it shows again.

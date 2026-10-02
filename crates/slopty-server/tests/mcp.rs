@@ -162,6 +162,7 @@ mod tests {
                 "forget_worker",
                 "project_create",
                 "project_update",
+                "project_needs",
                 "project_list",
                 "project_status",
                 "task_get",
@@ -315,7 +316,7 @@ mod tests {
         // another test's listener bound to `127.0.0.1` on the same port would answer instead.
         let inside = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 44);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 45);
         serving.abort();
     }
 }

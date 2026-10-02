@@ -19,10 +19,10 @@ use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, CHECK_NAME_MAX, CHECKS_NAMED, Checks, DEPENDS_MAX,
     KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Merge, Moment, NOTE_MAX, Native,
-    NativeAgent, NativeChange, Natives, NodeDetail, NodeNatives, Placed, Project, ProjectStatus,
-    ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState,
-    Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
-    TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    NativeAgent, NativeChange, Natives, Need, NodeDetail, NodeNatives, Placed, Project,
+    ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent,
+    StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange,
+    TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -1022,6 +1022,7 @@ impl Projects {
         within("a repository", Some(&new.repo), REF_MAX)?;
         within("a target branch", Some(&new.target), REF_MAX)?;
         let project = Project {
+            needs: Vec::new(),
             orchestrator_spent: Spent::default(),
             id: new.id.clone(),
             title,
@@ -1102,6 +1103,68 @@ impl Projects {
         }
         let status = self.status(id, None, running)?;
         Ok((status, updates))
+    }
+
+    /// Say what each kind of `id`'s work needs of its machines, in place of what was said; the
+    /// rules were compiled by the caller. A change is on the timeline, since it moves where
+    /// work goes from then on.
+    pub(crate) fn set_needs(
+        &mut self,
+        id: &ProjectId,
+        needs: Vec<Need>,
+        running: &Running<'_>,
+        now: WallMs,
+    ) -> Changed<ProjectStatus> {
+        if needs.len() > Need::MAX {
+            return Err(invalid(format!("a project names at most {} needs", Need::MAX)));
+        }
+        let mut names = BTreeSet::new();
+        for need in &needs {
+            let name = need.name.trim();
+            if name.is_empty() || name.len() > Need::NAME_MAX {
+                return Err(invalid(format!(
+                    "a need's name is 1 to {} bytes: what it is, in a few words",
+                    Need::NAME_MAX
+                )));
+            }
+            if !names.insert(name.to_owned()) {
+                return Err(invalid(format!("the need {name:?} is named twice")));
+            }
+            let items = [need.paths.len(), need.require.len(), need.prefer.len()];
+            if items.into_iter().any(|n| n > Need::ITEMS_MAX) {
+                return Err(invalid(format!(
+                    "a need names at most {} paths, rules and preferences each",
+                    Need::ITEMS_MAX
+                )));
+            }
+            if need.require.is_empty() && need.prefer.is_empty() {
+                return Err(invalid(format!("the need {name:?} requires and prefers nothing")));
+            }
+            for path in &need.paths {
+                within("a need's path", Some(path), REF_MAX)?;
+            }
+        }
+        let needs: Vec<Need> = needs
+            .into_iter()
+            .map(|need| Need { name: need.name.trim().to_owned(), ..need })
+            .collect();
+        let record = self.record(id)?;
+        let mut updates = Vec::new();
+        if record.project.needs != needs {
+            let names = needs.iter().map(|n| n.name.clone()).collect();
+            record.project.needs = needs;
+            let entry = record.log(None, Moment::Needs { names }, now);
+            updates.push(record.record_update(Some(entry)));
+        }
+        let status = self.status(id, None, running)?;
+        Ok((status, updates))
+    }
+
+    /// The needs of `id` that `task` has, by what it owns.
+    pub(crate) fn needs_of(&self, id: &ProjectId, task: TaskId) -> Result<Vec<Need>, Refused> {
+        let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
+        let owns = &record.task(task)?.owns;
+        Ok(record.project.needs.iter().filter(|n| n.applies(owns)).cloned().collect())
     }
 
     /// Make a task, owning `spec.owns`.

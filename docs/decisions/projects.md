@@ -542,7 +542,7 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   already reaches the board through the status line. A verb of our own would duplicate all of
   that and still need the status line to report it.
 - The orchestrator's role says this, and that work needing no Apple platform belongs on a
-  Linux worker (`os == "linux"`).
+  Linux worker, said once as the project's needs (below).
 - Tests: `a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own` (hub, with a
   Linux clone found by its first commit only), and
   `a_task_with_no_directory_starts_in_a_worktree_of_the_project_s_clone` in
@@ -1406,6 +1406,92 @@ Tests:
 - Tests: `the_person_s_words_go_at_once_beside_the_server_s` (`slopty-server::deliver`, now
   with the orchestrator's node) and `the_board_talks_to_its_orchestrator`
   (`slopty-ui::workspace`).
+
+## Where the work goes, by what it needs (2026-10-02)
+
+**A project says what each kind of its work needs of a machine.** ✅ 2026-10-02
+- Before: every task carried its own placement rules, so an orchestrator had to repeat "this
+  needs a Mac" on each task it made. The role told it to add `os == "linux"` by hand, and the
+  board could only show the raw rule as the reason a task went where it did.
+- Now `Project.needs` holds `Need { name, paths, require, prefer }`, said with
+  `Verb::ProjectNeeds` (MCP `project_needs`, `slopty project need`). A task owning one of a
+  need's paths, a path within one or one that holds one, has that need; a need with no paths is
+  every task's. Its rules join the task's own wherever the task is ranked: a spawn, a proposal,
+  "Run on…" and `placement_suggest`. A rule the task holds already is not added twice.
+- The rules stay CEL over the workers' open facts, so a need is as open as a rule: "Apple
+  work" over the app's paths requires `os == "macos"`, "Linux first" over everything prefers
+  `os == "linux"`, "GPU work" requires `has(probes.cuda)`. The name is free text the person or
+  the orchestrator chooses; nothing in Slopty knows a list of them.
+- Explainable: each `Reason` a need brought carries the need's name (`Reason.need`), and
+  `Suggestion::why` says the name in the rule's place: the card's place reads "Apple work", a
+  ranking "Linux first +20", and a worker kept out "fails Apple work (os == "macos")". The rule
+  itself stays in the reason for anyone who asks.
+- Only the person or the orchestrator says the needs; a task's agent is refused. A rule that
+  does not compile is refused naming its need, and so are the needs together when they would
+  hold more rules than one placement may (32 of each kind), since a task with every need has
+  all of them. A task whose own rules and its needs' come to more is refused naming the needs.
+  A change is a timeline entry (`Moment::Needs`), since it moves where work goes from then on.
+- The machines lens lists the needs under "What the work needs", each with the paths it covers
+  and what it asks. Each row of the tree, and each card, ends in a place chip: the worker and
+  its system ("studio · macOS"), how it is there (runs, ran, pinned, would start), its worktree,
+  branch and reason in the hint. A click on a task not started yet opens "Run on…"; on any
+  other it shows the machines lens. The chips sit at the end of the line so they read as one
+  column down the tree.
+- Rejected: a fixed list of platforms or capabilities on a task. It could not say "a Mac on AC
+  power" or "the box with the GPU", which open facts and CEL already do.
+- Tests: `a_need_follows_the_paths_a_task_owns` and `a_ranking_says_what_decides_it`
+  (`slopty-proto`), `work_goes_where_its_needs_say_and_the_board_says_which` (`slopty-server`),
+  `a_need_and_the_reasons_it_brings_say_its_name` (`slopty-tools`),
+  `a_need_says_what_it_covers_and_what_it_asks` and
+  `a_node_says_where_it_runs_and_why_and_whether_it_can_move` (`slopty-ui::project`),
+  `every_node_says_where_it_runs_and_a_waiting_one_moves_from_there` (`slopty-ui::workspace`),
+  and `a_live_task_shows_its_checks_its_time_and_its_next_steps` (app e2e, where the project
+  needs a Mac for its Apple work and the card says so).
+
+**An agent goes only where it is installed, pinned or not.** ✅ 2026-10-02
+- A start that runs an agent (Claude Code, Codex, or a command whose program is one of them)
+  is ranked with a built-in check, `agent`: the worker's `agents` facts must list it. A pin
+  does not get round it, unlike a rule: opening a program that is not there only fails later,
+  in a terminal nobody is watching.
+- The agents a worker registered with (`WorkerCaps.agents`) count as installed before its own
+  facts arrive, so a worker that just started takes Claude Code tasks at once. A worker that
+  has not reported its facts yet is refused for any other agent with "has not said yet whether
+  codex is installed", which an orchestrator can retry; one that has reported says "codex is not
+  installed".
+- A held `agent` check is left out of `why`, like `online`, since every worker that fits shares
+  it.
+- Tests: `an_agent_goes_only_where_it_is_installed_even_pinned` (`slopty-server::placement`) and
+  `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (`slopty-server`).
+
+**Codex runs a task, with Slopty's tools.** ✅ 2026-10-02
+- `Runner::Codex { prompt, args }` (MCP `task_spawn` with `agent: "codex"`, `slopty task spawn
+  --codex`) opens the person's own `codex`, unmodified. The server gives it its role through
+  Codex's own `developer_instructions` config (`-c developer_instructions="…"`), the place Codex
+  documents for instructions a tool adds, rather than inside the first prompt. The brief stays
+  the first prompt the person sees, and the role is not lost when the conversation compacts.
+  The cost is that it replaces any `developer_instructions` in the person's own config for that
+  run.
+- The worker wires Slopty's tools in as it opens the terminal, as it does for Claude Code: `-c
+  mcp_servers.slopty.command="<relay>"`, `args=["mcp"]` and `env_vars` naming the server,
+  project, task, session and token variables, since Codex hands an MCP server only the
+  variables it is told to. Codex 0.156.1 reads these keys back as given (`codex mcp get slopty
+  --json` with the overrides, under an empty `CODEX_HOME`). Arguments that name the `slopty`
+  server themselves are left alone; a prompt that merely mentions it is not taken for one.
+- A writing task beside a clone runs with Codex's own `--worktree`, so two Codex tasks never
+  edit one checkout. Codex makes and names that worktree itself, so its role tells it to name
+  the branch when it reports done.
+- Its arguments are judged before it starts, as Claude Code's are: only what asks the person no
+  less goes through without the person's `permission_flags`. That is the model, images, a
+  worktree, a `read-only` or `workspace-write` sandbox, the `untrusted` or `on-request` approval
+  policy, and `-c` keys of the model alone. A bypass, `--full-auto`, `--approve-for-me`, a
+  looser sandbox or policy, a profile, any other config key (an MCP server, a hook, a policy),
+  another root, a subcommand and `--` are refused, naming the word.
+- Tests: `only_what_asks_the_person_no_less_goes_through` and
+  `codex_starts_with_its_role_and_its_brief` (`slopty-server::hub::codex`),
+  `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (`slopty-server`),
+  `codex_opened_on_a_worker_with_a_server_gets_slopty_s_tools` (`slopty-worker`, the stub
+  standing in for `codex`), and the `task_spawn` and `project_needs` cases of
+  `the_project_tools_default_to_the_caller_s_own_project_and_task` (`slopty-tools`).
 
 ## Phases
 

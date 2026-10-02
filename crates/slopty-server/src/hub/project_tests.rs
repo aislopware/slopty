@@ -45,8 +45,18 @@ fn worker_again(
     registration.caps = slopty_proto::server::WorkerCaps { os, ..caps() };
     let (tx, rx) = mpsc::channel(8);
     let ip = IpAddr::from([100, 64, 0, if name == "box" { 9 } else { 7 }]);
+    registration.caps.agents = vec![slopty_proto::server::InstalledAgent {
+        kind: AgentKind::ClaudeCode,
+        version: "2.1.0".to_owned(),
+    }];
     let lease = hub.register(registration, ip, tx).unwrap();
     (worker, lease, rx)
+}
+
+/// A worker's facts that say these agents are installed, and nothing else.
+pub(super) fn installed(agents: &[&str]) -> BTreeMap<String, Fact> {
+    let agents = agents.iter().map(|a| ((*a).to_owned(), Fact::Text("1.0.0".to_owned())));
+    BTreeMap::from([("agents".to_owned(), Fact::Map(agents.collect()))])
 }
 
 async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsChange) {
@@ -1979,4 +1989,178 @@ async fn the_person_lets_a_project_go_and_every_client_hears_it() {
     }
     assert!(file.projects.is_empty(), "the store's replay forgets it: {file:?}");
     create(&hub, None).await;
+}
+
+/// What a project's work needs places it: a task owning the app's paths goes to the Mac as
+/// "Apple work", one owning the docs to the Linux worker as "Linux first", and the card and the
+/// ranking say the need by name. A rule that does not compile, a name given twice, and needs
+/// that together hold more rules than a placement are refused; a name is kept trimmed.
+#[tokio::test]
+async fn work_goes_where_its_needs_say_and_the_board_says_which() {
+    use slopty_proto::project::{Need, Preference};
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (linux, _linux_lease, _linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    create(&hub, None).await;
+    let needs = |needs: Vec<Need>| Verb::ProjectNeeds { project: project(), needs };
+    let apple = Need {
+        name: " Apple work ".to_owned(),
+        paths: vec!["apps/slopty".to_owned()],
+        require: vec![r#"os == "macos""#.to_owned()],
+        prefer: Vec::new(),
+    };
+    let linux_first = Need {
+        name: "Linux first".to_owned(),
+        paths: Vec::new(),
+        require: Vec::new(),
+        prefer: vec![Preference { expr: r#"os == "linux""#.to_owned(), weight: 20 }],
+    };
+    let broken = Need { require: vec!["os ==".to_owned()], ..apple.clone() };
+    let answer = hub.dispatch(needs(vec![broken])).await;
+    let message = refused(&answer, ErrorCode::BadExpression);
+    assert!(message.starts_with("the need \" Apple work \""), "{message}");
+    let twice = Need { name: "Apple work".to_owned(), ..apple.clone() };
+    refused(&hub.dispatch(needs(vec![apple.clone(), twice])).await, ErrorCode::Invalid);
+    let many = |name: &str| Need {
+        name: name.to_owned(),
+        paths: Vec::new(),
+        require: (0..20).map(|n| format!("cpus > {n}")).collect(),
+        prefer: Vec::new(),
+    };
+    let answer = hub.dispatch(needs(vec![many("a"), many("b")])).await;
+    let message = refused(&answer, ErrorCode::BadExpression);
+    assert!(message.starts_with("the needs together"), "{message}");
+    let Outcome::Project(said) = hub.dispatch(needs(vec![apple, linux_first])).await else {
+        panic!("needs said")
+    };
+    let names: Vec<&str> = said.project.needs.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["Apple work", "Linux first"]);
+    let s = status(&hub).await;
+    assert!(s.timeline.iter().any(|e| matches!(&e.what, Moment::Needs { names }
+        if names == &["Apple work", "Linux first"])));
+
+    let owning = |path: &str| TaskSpec {
+        title: "Work".to_owned(),
+        brief: "Do it.".to_owned(),
+        owns: vec![path.to_owned()],
+        ..TaskSpec::default()
+    };
+    let made = |spec| Verb::TaskCreate { project: project(), spec: Box::new(spec) };
+    let Outcome::Task(app) = hub.dispatch(made(owning("apps/slopty/src"))).await else {
+        panic!("made")
+    };
+    let Outcome::Task(docs) = hub.dispatch(made(owning("docs"))).await else { panic!("made") };
+
+    let asked =
+        spawn(&hub, Verb::TaskSpawn { project: project(), task: app.id, launch: claude(&[]) });
+    let start = request(&mut mac_rx).await;
+    assert_eq!(chosen(&start.1).0, mac);
+    opened(&mac_lease, &start);
+    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
+    let placed = started.assignment.and_then(|a| a.placed).expect("why");
+    assert_eq!(placed.why, "Apple work", "{placed:?}");
+
+    let suggest =
+        Verb::PlacementSuggest { project: Some(project()), task: Some(docs.id), placement: None };
+    let Outcome::Suggestions(ranked) = hub.dispatch(suggest).await else { panic!("ranked") };
+    let first = ranked.first().expect("a worker");
+    assert_eq!((first.worker, first.why()), (linux, "Linux first +20".to_owned()));
+    let mac_ranked = ranked.iter().find(|s| s.worker == mac).expect("the Mac");
+    let reason = mac_ranked.reasons.iter().find(|r| r.rule == r#"os == "linux""#).unwrap();
+    assert_eq!(reason.need.as_deref(), Some("Linux first"), "{reason:?}");
+
+    // A task's own rules and its needs' together are held to one placement's count.
+    let own = TaskSpec {
+        placement: Placement {
+            require: (0..32).map(|n| format!("cpus > {n}")).collect(),
+            ..Placement::default()
+        },
+        ..owning("apps/slopty/big")
+    };
+    let Outcome::Task(big) = hub.dispatch(made(own)).await else { panic!("made") };
+    let suggest =
+        Verb::PlacementSuggest { project: Some(project()), task: Some(big.id), placement: None };
+    let message = refused(&hub.dispatch(suggest).await, ErrorCode::BadExpression).to_owned();
+    assert!(message.contains("(Apple work, Linux first) make 33 require rules"), "{message}");
+}
+
+/// A task never goes to a worker that cannot run its agent: a Codex task only where Codex is
+/// installed, pinned or not, and the refusal says so of each worker, with the need that kept
+/// the other out. It opens the person's own `codex` with its role as developer instructions,
+/// in a worktree of its own beside a clone, its brief last; a flag that would loosen what it
+/// asks the person is refused unless the person allows it.
+#[tokio::test]
+async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
+    use slopty_proto::project::Need;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mac, mac_lease, _mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    mac_lease.handle(ToServer::Facts(installed(&["claude"])));
+    linux_lease.handle(ToServer::Facts(installed(&["codex"])));
+    create(&hub, None).await;
+    let apple = Need {
+        name: "Apple work".to_owned(),
+        paths: vec!["apps/slopty".to_owned()],
+        require: vec![r#"os == "macos""#.to_owned()],
+        prefer: Vec::new(),
+    };
+    let said = hub.dispatch(Verb::ProjectNeeds { project: project(), needs: vec![apple] }).await;
+    assert!(matches!(said, Outcome::Project(_)), "{said:?}");
+    let owning = |path: &str| TaskSpec {
+        title: "Work".to_owned(),
+        brief: "Do it.".to_owned(),
+        owns: vec![path.to_owned()],
+        ..TaskSpec::default()
+    };
+    let made = |spec| Verb::TaskCreate { project: project(), spec: Box::new(spec) };
+    let Outcome::Task(app) = hub.dispatch(made(owning("apps/slopty/ios"))).await else {
+        panic!("made")
+    };
+    let Outcome::Task(docs) = hub.dispatch(made(owning("docs"))).await else { panic!("made") };
+    let codex = |args: &[&str], pin: Option<WorkerId>| TaskLaunch {
+        pin,
+        run: Runner::Codex {
+            prompt: Some("Read your brief.".to_owned()),
+            args: args.iter().map(|a| (*a).to_owned()).collect(),
+        },
+        ..claude(&[])
+    };
+    let spawn_verb =
+        |task: TaskId, launch: TaskLaunch| Verb::TaskSpawn { project: project(), task, launch };
+
+    let message =
+        refused(&hub.dispatch(spawn_verb(app.id, codex(&[], None))).await, ErrorCode::Unplaced)
+            .to_owned();
+    assert!(message.contains("studio: codex is not installed"), "{message}");
+    assert!(message.contains(r#"box: fails Apple work (os == "macos")"#), "{message}");
+    let pinned = hub.dispatch(spawn_verb(docs.id, codex(&[], Some(mac)))).await;
+    let message = refused(&pinned, ErrorCode::Unplaced);
+    assert!(message.contains("studio: codex is not installed"), "a pin is no way round: {message}");
+    let loose = codex(&["--dangerously-bypass-approvals-and-sandbox"], None);
+    let answer = hub.dispatch(spawn_verb(docs.id, loose)).await;
+    let message = refused(&answer, ErrorCode::Limit);
+    assert!(
+        message.starts_with("--dangerously-bypass-approvals-and-sandbox may give"),
+        "{message}"
+    );
+    let suggest =
+        Verb::PlacementSuggest { project: Some(project()), task: Some(docs.id), placement: None };
+    let Outcome::Suggestions(ranked) = hub.dispatch(suggest).await else { panic!("ranked") };
+    assert!(ranked.iter().all(|s| s.fits), "no start proposed, so no agent is asked of them");
+
+    let asked = spawn(&hub, spawn_verb(docs.id, codex(&["-m", "o3"], None)));
+    let start = request(&mut linux_rx).await;
+    let Verb::OpenTerminal { worker, command, env, .. } = &start.1 else { panic!("{:?}", start.1) };
+    assert_eq!(*worker, linux);
+    assert_eq!(command[..2], ["codex", "-c"]);
+    assert!(
+        command[2].starts_with("developer_instructions=\"You are the agent of task"),
+        "{command:?}"
+    );
+    assert_eq!(command[3..], ["-m", "o3", "Read your brief."], "a named cwd: no worktree");
+    assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == docs.id.to_string()), "{env:?}");
+    opened(&linux_lease, &start);
+    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
+    let placed = started.assignment.and_then(|a| a.placed).expect("why");
+    assert!(!placed.why.contains("agent"), "an agent installed is said by no worker: {placed:?}");
 }

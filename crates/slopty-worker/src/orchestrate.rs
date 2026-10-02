@@ -281,6 +281,7 @@ impl Orchestrator {
             | Verb::ProjectDelete { .. }
             | Verb::TaskStart { .. }
             | Verb::TaskTell { .. }
+            | Verb::ProjectNeeds { .. }
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
             | Verb::TaskCreate { .. }

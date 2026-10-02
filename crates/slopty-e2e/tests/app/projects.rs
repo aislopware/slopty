@@ -29,6 +29,21 @@ fn session_of(term: &str) -> String {
     term.rsplit_once('/').map_or(term, |(_, s)| s).to_owned()
 }
 
+/// Wait until the worker says Claude Code is installed: an agent's task goes only to a worker
+/// known to have it, and a worker says so once its facts are gathered.
+async fn claude_installed(stack: &ProjectStack) {
+    let started = tokio::time::Instant::now();
+    loop {
+        let workers = stack.slopty(&["workers"]).await.unwrap();
+        let listed = workers.as_array().into_iter().flatten();
+        if listed.into_iter().any(|w| w["facts"]["agents"]["claude"].is_string()) {
+            return;
+        }
+        assert!(started.elapsed() < STEP, "Claude Code on the worker: {workers}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 /// Render the window as `name` and hold it to its golden.
 async fn golden(stack: &mut ProjectStack, name: &str) {
     let frame = stack.driver.render(&stack.path(&format!("{name}.png"))).await.unwrap();
@@ -92,6 +107,7 @@ async fn a_project_board_follows_its_orchestration() {
         create.extend_from_slice(args);
         stack.slopty(&create).await.unwrap();
     }
+    claude_installed(&stack).await;
     let spawned =
         stack.slopty(&["task", "spawn", "--project", PROJECT, "1", "--cwd", &repo]).await.unwrap();
     let update = |task: &'static str, more: &'static [&'static str]| {
@@ -238,12 +254,19 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
 
-    // ↓ stands on the orchestrator, ↓ again on task 1, ↩ opens its agent.
+    // ↓ stands on the orchestrator, ↓ again on task 1, ↩ opens its agent: its tile is the
+    // active one and has the keyboard, on its terminal or its conversation, whichever it shows.
     stack.driver.keys("down down enter").await.unwrap();
-    let focused = format!("terminal:{agent_session}");
     let d = stack
         .driver
-        .wait_for("task 1's agent with the keyboard", STEP, |d| d.focused == focused)
+        .wait_for("task 1's agent with the keyboard", STEP, |d| {
+            let active = d
+                .items
+                .iter()
+                .any(|i| i.active && i.session.as_deref() == Some(agent_session.as_str()));
+            let board = d.focused.starts_with("project:");
+            active && !board && !matches!(d.focused.as_str(), "workspace" | "none")
+        })
         .await
         .unwrap();
     assert_eq!(project(&d).and_then(|p| p.picked.clone()).as_deref(), Some("1"));
@@ -258,7 +281,9 @@ const AT_WORK: Duration = Duration::from_secs(75);
 /// A live task as the board shows it: its agent at work for over a minute, its pull request's
 /// own checks failing as the worker's `gh` reports them, and its reviewer on the forge asking
 /// for changes. Its row says the time, the board offers Fix CI and Address comments, and its
-/// card draws the pipeline. `gh` is a stand-in on the worker's `PATH`; no forge is asked.
+/// card draws the pipeline. The project needs a Mac for its Apple work, so the task goes to
+/// the Mac and its card says where and why. `gh` is a stand-in on the worker's `PATH`; no
+/// forge is asked.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
@@ -294,6 +319,9 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     for title in ["Read a pull request's checks", "Draw the pipeline row"] {
         stack.slopty(&["task", "create", "--project", PROJECT, "--title", title]).await.unwrap();
     }
+    // What the work needs places it, and its card says so.
+    let need = ["project", "need", PROJECT, "Apple work", "--require", r#"os == "macos""#];
+    stack.slopty(&need).await.unwrap();
     let hooks = serde_json::json!([
         { "hook_event_name": "SessionStart", "source": "startup" },
         { "hook_event_name": "UserPromptSubmit", "prompt": "Read the checks with gh" },
@@ -316,6 +344,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         },
     ]);
     let env = format!("STUB_HOOKS={hooks}");
+    claude_installed(&stack).await;
     let spawned = stack
         .slopty(&["task", "spawn", "--project", PROJECT, "1", "--cwd", &repo, "--env", &env])
         .await
@@ -335,6 +364,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
     assert_eq!(failing["tasks"][0]["checks"]["failing"], serde_json::json!(["clippy (macos)"]));
+    assert_eq!(failing["tasks"][0]["placed"], "Apple work", "{failing}");
     let since = failing["tasks"][0]["at_work_since_ms"].as_u64().unwrap();
     let at_work = || {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
@@ -364,6 +394,13 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     let picked = |want: &'static str| {
         move |d: &Dump| project(d).and_then(|p| p.lens.clone()).as_deref() == Some(want)
     };
+    // The board's tile takes the keys again, whatever the agent's own tile did meanwhile.
+    stack.driver.reveal(&orchestrator_session).await.unwrap();
+    stack
+        .driver
+        .wait_for("the board with the keyboard", STEP, |d| d.focused.starts_with("project:"))
+        .await
+        .unwrap();
     // Each render follows a lens turned to, so it is a frame drawn after the minute.
     stack.driver.keys("2").await.unwrap();
     stack.driver.wait_for("the lanes", STEP, picked("Board")).await.unwrap();

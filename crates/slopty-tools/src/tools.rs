@@ -19,7 +19,7 @@ use slopty_core::{DisplayId, WindowId};
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{ErrorCode, EventFilter, IdempotencyKey, Input, Size, WaitUntil};
 use slopty_proto::project::{
-    LimitsChange, Preference, Report, ReportKind, Runner, TaskChange, TaskId,
+    LimitsChange, Need, Preference, Report, ReportKind, Runner, TaskChange, TaskId,
 };
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::search::SearchQuery;
@@ -48,7 +48,8 @@ goal bigger than one agent, make a project (project_create) and split it into ta
 (task_create): each owns the paths it writes (or only reads), may depend on others and nest to \
 any depth the project allows, and says where it may run as CEL rules over the workers' facts \
 (list_workers shows them; placement_suggest ranks the workers with reasons) or pins a worker \
-outright. Start what runs for a task, Claude Code or any command, with task_spawn, and follow \
+outright; project_needs says once what each kind of the project's work needs of its machines. \
+Start what runs for a task, Claude Code, Codex or any command, with task_spawn, and follow \
 the tree with project_status (since and timeout_ms wait for news; bounds and live say how much \
 room there is). Agents started for a task have these tools too, their project and task the \
 defaults.";
@@ -191,13 +192,15 @@ struct PreferArgs {
     weight: Option<i32>,
 }
 
+impl PreferArgs {
+    fn preference(self) -> Preference {
+        Preference { expr: self.expr, weight: self.weight.unwrap_or(1) }
+    }
+}
+
 impl PlacementArgs {
     fn spec(self) -> PlacementSpec {
-        let prefer = self
-            .prefer
-            .into_iter()
-            .map(|p| Preference { expr: p.expr, weight: p.weight.unwrap_or(1) })
-            .collect();
+        let prefer = self.prefer.into_iter().map(PreferArgs::preference).collect();
         PlacementSpec {
             pin: self.pin,
             require: self.require,
@@ -532,13 +535,16 @@ struct TaskSpawnArgs {
     worker: Option<String>,
     /// Working directory on the worker, usually the repository's root; home when omitted.
     cwd: Option<String>,
-    /// Run this instead of Claude Code: any program and its arguments, such as another
-    /// agent's CLI, a build or a benchmark; `[]` for the login shell.
+    /// Run this instead of Claude Code: any program and its arguments, such as a build or a
+    /// benchmark; `[]` for the login shell.
     command: Option<Vec<String>>,
-    /// Claude Code's first prompt, typed once it is ready; say where its brief is.
+    /// Which agent: `claude` (the default) or `codex`. Codex gets Slopty's tools and its
+    /// brief as its first prompt, and goes only to a worker with Codex installed.
+    agent: Option<AgentArg>,
+    /// The agent's first prompt; say where its brief is.
     prompt: Option<String>,
-    /// Arguments for `claude`, e.g. `["--model", "opus"]`. Flags that loosen its permissions
-    /// are refused unless the person allows them for the project.
+    /// Arguments for the agent, e.g. `["--model", "opus"]`. Flags that loosen Claude Code's
+    /// permissions are refused unless the person allows them for the project.
     #[serde(default)]
     args: Vec<String>,
     /// Extra environment variables.
@@ -553,6 +559,46 @@ struct TaskSpawnArgs {
     ignore_dependencies: bool,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
     idempotency_key: Option<String>,
+}
+
+/// Which agent a task runs.
+#[derive(Debug, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum AgentArg {
+    /// Claude Code.
+    Claude,
+    /// Codex.
+    Codex,
+}
+
+/// `project_needs`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ProjectNeedsArgs {
+    /// The project; yours when omitted.
+    project: Option<String>,
+    /// Every need, in place of those said before; `[]` for none.
+    needs: Vec<NeedArgs>,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
+/// One kind of work and what it needs of its machine.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NeedArgs {
+    /// What it is, in a few words the board shows: "Apple work".
+    name: String,
+    /// The paths whose owners have it, as tasks' `owns` name them; every task when empty.
+    #[serde(default)]
+    paths: Vec<String>,
+    /// CEL rules a worker must hold for such a task, such as `os == "macos"`.
+    #[serde(default)]
+    require: Vec<String>,
+    /// CEL rules that score a worker for such a task, such as `{"expr": "os == \"linux\"",
+    /// "weight": 20}`.
+    #[serde(default)]
+    prefer: Vec<PreferArgs>,
 }
 
 /// `placement_suggest`.
@@ -1299,6 +1345,18 @@ pub fn list() -> Vec<Tool> {
              stay within the person's bounds, which no tool raises.",
             Kind::Write,
         ),
+        tool::<ProjectNeedsArgs>(
+            "project_needs",
+            "Say what each kind of the project's work needs of the machine it runs on, in place \
+             of what was said: a task owning one of a need's `paths` (every task when none) gets \
+             its `require` and `prefer` rules beside its own wherever it is placed, and the board \
+             names the need as the reason. Say the platform's needs once, such as \
+             {\"name\": \"Apple work\", \"paths\": [\"apps/ios\"], \"require\": \
+             [\"os == \\\"macos\\\"\"]} and {\"name\": \"Linux first\", \"prefer\": \
+             [{\"expr\": \"os == \\\"linux\\\"\", \"weight\": 20}]}, so work that needs \
+             no Mac goes to a Linux worker.",
+            Kind::Write,
+        ),
         tool_with(
             "project_list",
             "Every project: name, title, repository, target branch, verifier, orchestrator, \
@@ -1373,9 +1431,10 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<TaskSpawnArgs>(
             "task_spawn",
-            "Start what runs for a task, Claude Code (with Slopty's tools) or any `command`, \
-             on the worker you name or the best its placement ranks, with the project and \
-             the task in its environment. A task whose `depends_on` are not done waits, unless \
+            "Start what runs for a task, Claude Code or Codex (`agent`, each with Slopty's \
+             tools) or any `command`, on the worker you name or the best its placement and \
+             its project's needs rank, with the project and the task in its environment. An \
+             agent goes only to a worker that has it installed, pinned or not. A task whose `depends_on` are not done waits, unless \
              you say `ignore_dependencies`. Every start counts against the project's limits \
              and the person's bounds. Refused with each worker's reason when none fits. \
              Returns the task with its terminal's `term`. When the person asks to start each \
@@ -1387,8 +1446,8 @@ pub fn list() -> Vec<Tool> {
             "placement_suggest",
             "Rank every worker for a task's placement, or for a `placement` you try: best \
              first, each with `fits`, its `score` and the `reasons` (each rule, whether it held, \
-             its points, and why not). Changes nothing; pin the one you like with task_spawn's \
-             `worker`.",
+             its points, why not, and the project's `need` it comes from). Changes nothing; pin \
+             the one you like with task_spawn's `worker`.",
             Kind::Read,
         ),
         tool::<WakeWorkerArgs>(
@@ -1576,6 +1635,22 @@ async fn run<D: Dispatch>(
             let set = ops::project_set(&mut res, a.project.as_deref(), edit, key);
             json(&view::projects::status(&set.await?))
         }
+        "project_needs" => {
+            let a: ProjectNeedsArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let needs = a
+                .needs
+                .into_iter()
+                .map(|n| Need {
+                    name: n.name,
+                    paths: n.paths,
+                    require: n.require,
+                    prefer: n.prefer.into_iter().map(PreferArgs::preference).collect(),
+                })
+                .collect();
+            let set = ops::project_needs(dispatch, a.project.as_deref(), needs, key);
+            json(&view::projects::status(&set.await?))
+        }
         "project_list" => {
             if !arguments.is_empty() {
                 return Err(ToolError::invalid("project_list takes no arguments"));
@@ -1658,14 +1733,19 @@ async fn run<D: Dispatch>(
         "task_spawn" => {
             let a: TaskSpawnArgs = args(arguments)?;
             let key = checked_key(a.idempotency_key)?;
-            let run = match a.command {
-                Some(argv) if a.prompt.is_none() && a.args.is_empty() => Runner::Command { argv },
-                Some(_) => {
+            let run = match (a.command, a.agent) {
+                (Some(argv), None) if a.prompt.is_none() && a.args.is_empty() => {
+                    Runner::Command { argv }
+                }
+                (Some(_), _) => {
                     return Err(ToolError::invalid(
-                        "prompt and args are Claude Code's; a command takes its own arguments",
+                        "prompt, args and agent are an agent's; a command takes its own arguments",
                     ));
                 }
-                None => Runner::Claude { prompt: a.prompt, args: a.args },
+                (None, Some(AgentArg::Codex)) => Runner::Codex { prompt: a.prompt, args: a.args },
+                (None, Some(AgentArg::Claude) | None) => {
+                    Runner::Claude { prompt: a.prompt, args: a.args }
+                }
             };
             let launch = LaunchSpec {
                 pin: a.worker,
@@ -1950,6 +2030,7 @@ mod tests {
     fn project_status(id: ProjectId) -> ProjectStatus {
         ProjectStatus {
             project: Project {
+                needs: Vec::new(),
                 orchestrator_spent: slopty_proto::project::Spent::default(),
                 id,
                 title: "Slopty".to_owned(),
@@ -2089,7 +2170,7 @@ mod tests {
                 Verb::TaskUpdate { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, None, "Review", true)))
                 }
-                Verb::ProjectStatus { project, .. } => {
+                Verb::ProjectStatus { project, .. } | Verb::ProjectNeeds { project, .. } => {
                     Outcome::Project(Box::new(project_status(project)))
                 }
                 Verb::WorkerFacts { .. } => {
@@ -2179,6 +2260,30 @@ mod tests {
         let argv = vec!["cargo".to_owned(), "test".to_owned()];
         assert_eq!(launch.run, Runner::Command { argv });
 
+        let codex = json!({"task": 7, "agent": "codex", "prompt": "Go", "args": ["-m", "o3"]});
+        let (failed, text) = call_json(&fake, "task_spawn", codex).await;
+        assert!(!failed, "{text}");
+        let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
+        let args = vec!["-m".to_owned(), "o3".to_owned()];
+        assert_eq!(launch.run, Runner::Codex { prompt: Some("Go".to_owned()), args });
+        let mixed = json!({"task": 7, "agent": "codex", "command": ["codex"]});
+        let (failed, text) = call_json(&fake, "task_spawn", mixed).await;
+        assert!(failed && text.contains("an agent's"), "{text}");
+
+        let needs = json!({"needs": [
+            {"name": "Apple work", "paths": ["apps/ios"], "require": ["os == \"macos\""]},
+            {"name": "Linux first", "prefer": [{"expr": "os == \"linux\""}]},
+        ]});
+        let (failed, text) = call_json(&fake, "project_needs", needs).await;
+        assert!(!failed, "{text}");
+        let Some(Verb::ProjectNeeds { project, needs }) = fake.verbs().pop() else { panic!() };
+        assert_eq!(project.as_str(), "slopty", "the caller's own");
+        assert_eq!(
+            (needs[0].paths.as_slice(), needs[1].paths.len()),
+            (&["apps/ios".to_owned()][..], 0)
+        );
+        assert_eq!(needs[1].prefer, [Preference { expr: "os == \"linux\"".to_owned(), weight: 1 }]);
+
         let bad = call_json(&fake, "task_create", json!({"title": "x", "os": "linux"})).await;
         assert!(bad.0 && bad.1.contains("unknown field `os`"), "{bad:?}");
         let (failed, text) =
@@ -2263,6 +2368,7 @@ mod tests {
                 "forget_worker",
                 "project_create",
                 "project_update",
+                "project_needs",
                 "project_list",
                 "project_status",
                 "task_get",

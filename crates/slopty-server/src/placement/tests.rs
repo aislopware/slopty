@@ -16,6 +16,7 @@ fn worker(name: &str, os: &str, cpus: i64, load: f64) -> Candidate {
         worker: WorkerId::new(),
         name: name.to_owned(),
         online: true,
+        reported: true,
         facts,
         live: 0,
         fleet_live: 0,
@@ -221,6 +222,41 @@ fn a_worker_at_the_project_s_cap_does_not_fit_even_pinned() {
         rank(&pinned, &fleet, &BTreeMap::new(), Ranking { per_worker: Some(2), ..free() }).unwrap();
     let why = choose(&pinned, &ranked).unwrap_err();
     assert!(why.starts_with("full: runs 2"), "{why}");
+}
+
+/// A start's agent must be installed where it goes, pinned or not: a worker whose facts list
+/// it fits, one that reported none does not and says so, and one that has not reported yet
+/// says it has not said.
+#[test]
+fn an_agent_goes_only_where_it_is_installed_even_pinned() {
+    let installed = |w: &mut Candidate, agents: &[&str]| {
+        let map = agents.iter().map(|a| ((*a).to_owned(), text("1.0"))).collect();
+        w.facts.insert("agents".to_owned(), Fact::Map(map));
+    };
+    let mut fleet = [
+        worker("has", "linux", 8, 1.0),
+        worker("lacks", "linux", 16, 0.0),
+        worker("quiet", "linux", 32, 0.0),
+    ];
+    installed(&mut fleet[0], &["claude", "codex"]);
+    installed(&mut fleet[1], &["claude"]);
+    fleet[2].reported = false;
+    let codex = Ranking { agent: Some("codex"), ..free() };
+    let ranked = rank(&Placement::default(), &fleet, &BTreeMap::new(), codex).unwrap();
+    assert_eq!(names(&ranked)[0], "has", "the only one that fits, for all its load");
+    assert!(ranked[0].fits && !ranked[1].fits && !ranked[2].fits);
+    let lacks = ranked.iter().find(|s| s.name == "lacks").unwrap();
+    assert_eq!(reason(lacks, "agent").detail, "codex is not installed");
+    let quiet = ranked.iter().find(|s| s.name == "quiet").unwrap();
+    assert_eq!(reason(quiet, "agent").detail, "has not said yet whether codex is installed");
+
+    let pinned = Placement { pin: Some(fleet[1].worker), ..Placement::default() };
+    let ranked = rank(&pinned, &fleet, &BTreeMap::new(), codex).unwrap();
+    let why = choose(&pinned, &ranked).unwrap_err();
+    assert_eq!(why, "lacks: codex is not installed");
+    let ranked =
+        rank(&pinned, &fleet, &BTreeMap::new(), Ranking { agent: Some("claude"), ..free() });
+    assert_eq!(choose(&pinned, &ranked.unwrap()), Ok(fleet[1].worker));
 }
 
 #[test]

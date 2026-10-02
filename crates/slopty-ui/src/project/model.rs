@@ -273,6 +273,65 @@ impl TaskAction {
     }
 }
 
+/// Where a node is, as its row's map chip says it ([`Board::place`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    /// The worker.
+    pub worker: WorkerId,
+    /// How it is there.
+    pub how: PlaceHow,
+    /// The worktree its work is in, when its agent said.
+    pub worktree: Option<String>,
+    /// The branch its work is on.
+    pub branch: Option<String>,
+    /// Why it went there, in the ranking's words: a need's name, the rules that scored.
+    pub why: Option<String>,
+}
+
+/// How a node is on its worker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaceHow {
+    /// Its agent runs there.
+    Runs,
+    /// Its agent ran there last.
+    Ran,
+    /// It is pinned there and has not started.
+    Pinned,
+    /// It would start there, as its proposal says.
+    Proposed,
+}
+
+/// A need as the board says it: the paths it covers ("Every task" when none), and what it
+/// asks of a worker ("Requires os == "macos"; prefers cpus +2").
+#[must_use]
+pub fn need_words(need: &slopty_proto::project::Need) -> (String, String) {
+    let covers =
+        if need.paths.is_empty() { "Every task".to_owned() } else { need.paths.join(", ") };
+    let mut asks = Vec::new();
+    if !need.require.is_empty() {
+        asks.push(format!("requires {}", need.require.join(" and ")));
+    }
+    if !need.prefer.is_empty() {
+        let prefers: Vec<String> =
+            need.prefer.iter().map(|p| format!("{} {:+}", p.expr, p.weight)).collect();
+        asks.push(format!("prefers {}", prefers.join(", ")));
+    }
+    let mut asks = asks.join("; ");
+    if let Some(first) = asks.get(..1) {
+        asks = format!("{}{}", first.to_uppercase(), asks.get(1..).unwrap_or_default());
+    }
+    (covers, asks)
+}
+
+/// A system's name as the board says it.
+#[must_use]
+pub const fn os_name(os: slopty_proto::server::Os) -> &'static str {
+    match os {
+        slopty_proto::server::Os::MacOs => "macOS",
+        slopty_proto::server::Os::Linux => "Linux",
+    }
+}
+
 /// One stage of a task's way to the target, as its pipeline row says it ([`Board::pipeline`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stage {
@@ -592,6 +651,43 @@ impl Board {
                 a.open().then_some((a.term.worker, a.term.session))
             }
         }
+    }
+
+    /// Where `node` runs, ran last, is pinned to or would start, with the worktree and branch
+    /// its work is in and why it went there: the board's map of the fleet, row by row.
+    #[must_use]
+    pub fn place(&self, node: Node) -> Option<Place> {
+        let Some(task) = node else {
+            let worker = self.project.orchestrator?.worker;
+            return Some(Place {
+                worker,
+                how: PlaceHow::Runs,
+                worktree: None,
+                branch: None,
+                why: None,
+            });
+        };
+        let card = self.tasks.get(&task)?;
+        let (worktree, branch) = (card.worktree.clone(), card.branch.clone());
+        if let Some(a) = &card.assignment {
+            let how = if a.open() { PlaceHow::Runs } else { PlaceHow::Ran };
+            let why = a.placed.as_ref().map(|p| p.why.clone()).filter(|w| !w.is_empty());
+            return Some(Place { worker: a.term.worker, how, worktree, branch, why });
+        }
+        if let Some(pin) = card.pin {
+            let why = Some("pinned".to_owned());
+            return Some(Place { worker: pin, how: PlaceHow::Pinned, worktree, branch, why });
+        }
+        let proposed = card.proposed.as_ref()?;
+        let why = Some(proposed.why.clone()).filter(|w| !w.is_empty());
+        Some(Place { worker: proposed.on?, how: PlaceHow::Proposed, worktree, branch, why })
+    }
+
+    /// Whether the person may move `task` to another worker now: a start not made yet, which
+    /// "Run on…" points elsewhere. A running agent stays where it is.
+    #[must_use]
+    pub fn movable(&self, task: TaskId) -> bool {
+        self.tasks.get(&task).is_some_and(|card| self.not_started(card))
     }
 
     /// The worker a node runs on, or ran on last.
@@ -1081,6 +1177,10 @@ pub fn moment_line(
     match &entry.what {
         Moment::Created => "Project created".to_owned(),
         Moment::Orchestrator { term } => format!("Orchestrator on {}", name(term.worker)),
+        Moment::Needs { names } => match names.as_slice() {
+            [] => "Needs nothing of its workers".to_owned(),
+            names => format!("Needs: {}", names.join(", ")),
+        },
         Moment::Limits { limits } => format!(
             "Limits: {} agents in all, {} per worker",
             limits.live_per_project, limits.live_per_worker

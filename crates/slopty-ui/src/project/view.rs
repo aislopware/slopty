@@ -28,9 +28,9 @@ use slopty_proto::project::{
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, Machine, RunOnPicker, Stage, StageKind, TaskAction, TreeRow, finding_place,
-    pull_words, queue_words, review_detail, short_commit, state_status, state_word, verdict_detail,
-    verdict_tail,
+    Board, Lane, Machine, Place, PlaceHow, RunOnPicker, Stage, StageKind, TaskAction, TreeRow,
+    finding_place, need_words, os_name, pull_words, queue_words, review_detail, short_commit,
+    state_status, state_word, verdict_detail, verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
@@ -70,6 +70,8 @@ pub(crate) const NO_MACHINES_HINT: &str =
 pub(crate) const AWAY: &str = "Away";
 /// The machines lens's heading over the tasks still to start.
 pub(crate) const NOT_STARTED: &str = "Not started";
+/// The machines lens's heading over what the project's work needs of its machines.
+pub(crate) const NEEDS: &str = "What the work needs";
 /// The "Run on" picker's first choice.
 pub(crate) const ANYWHERE: &str = "Anywhere";
 /// What "Anywhere" means.
@@ -198,13 +200,23 @@ pub struct AgentSeen {
     pub asks: Option<String>,
 }
 
+/// A worker as the board names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerSeen {
+    /// Its name.
+    pub name: String,
+    /// Its system, once it has said.
+    pub os: Option<slopty_proto::server::Os>,
+}
+
 /// What the workspace hands a board: the project and what the board names it by.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Seen {
     /// The project, or `None` once the server has let it go.
     pub board: Option<Arc<Board>>,
-    /// Each worker's name.
-    pub workers: BTreeMap<WorkerId, String>,
+    /// The workers the board names: the orchestrator's, and every one a task runs on, ran on,
+    /// is pinned or proposed to, or takes a step on.
+    pub workers: BTreeMap<WorkerId, WorkerSeen>,
     /// The agents this client sees, by session.
     pub agents: HashMap<SessionId, AgentSeen>,
     /// The server's clock now, near enough, for the timeline's ages.
@@ -617,7 +629,95 @@ impl ProjectView {
     }
 
     fn worker_name(&self, worker: WorkerId) -> String {
-        self.seen.workers.get(&worker).cloned().unwrap_or_else(|| "a worker".to_owned())
+        self.seen.workers.get(&worker).map_or_else(|| "a worker".to_owned(), |w| w.name.clone())
+    }
+
+    /// Where `node` is, as its chip says it ("studio · macOS") and as its hint and its label
+    /// say it in full: how it is there, its worktree and branch, why it went there, and what a
+    /// click does.
+    fn where_words(&self, board: &Board, node: Node) -> Option<(Place, String, String)> {
+        let place = board.place(node)?;
+        let name = self.worker_name(place.worker);
+        let os = self.seen.workers.get(&place.worker).and_then(|w| w.os).map(os_name);
+        let short = os.map_or_else(|| name.clone(), |os| format!("{name} \u{b7} {os}"));
+        let on = os.map_or_else(|| name.clone(), |os| format!("{name}, {os}"));
+        let mut lines = vec![match place.how {
+            PlaceHow::Runs => format!("Runs on {on}"),
+            PlaceHow::Ran => format!("Ran on {on}"),
+            PlaceHow::Pinned => format!("Pinned to {on}"),
+            PlaceHow::Proposed => format!("Would start on {on}"),
+        }];
+        lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
+        lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
+        lines.extend(place.why.as_ref().map(|why| format!("Why: {why}")));
+        let task = node.filter(|t| board.movable(*t));
+        lines.push(if task.is_some() { MOVE_HINT } else { MACHINES_HINT }.to_owned());
+        Some((place, short, lines.join("\n")))
+    }
+
+    /// `node`'s place as a quiet chip: the worker and its system, in a stronger ink while its
+    /// agent runs there. Its hint says the rest; a click moves a task not started yet ("Run
+    /// on…") and shows the machines lens otherwise.
+    fn where_chip(
+        &self,
+        board: &Board,
+        node: Node,
+        prefix: &str,
+        cx: &Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let (place, short, hint) = self.where_words(board, node)?;
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let (glyph, tone) = match place.how {
+            PlaceHow::Runs => (IconName::Server, s.text_secondary),
+            PlaceHow::Ran => (IconName::Server, s.text_muted),
+            PlaceHow::Pinned => (IconName::Lock, s.text_muted),
+            PlaceHow::Proposed => (IconName::MoveRight, s.text_muted),
+        };
+        let movable = node.filter(|t| board.movable(*t));
+        let id = format!("{prefix}-{}-where", node_key(node));
+        let selector = id.clone();
+        let hint_theme = Rc::clone(&self.hint_theme);
+        let label = hint.replace('\n', ". ");
+        let el = div()
+            .id(SharedString::from(id))
+            .debug_selector(move || selector)
+            .role(Role::Button)
+            .aria_label(SharedString::from(label))
+            .flex_none()
+            .max_w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(sp.xxs))
+            .px(self.z(sp.xxs))
+            .rounded(self.z(theme.radii.sm))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_size(self.z(theme.typography.meta()))
+            .text_color(hsla(tone))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+            .child(
+                icon(theme, glyph, IconSize::Inline, hsla(tone))
+                    .size(self.z(theme.typography.meta())),
+            )
+            .child(
+                div().min_w_0().overflow_hidden().text_ellipsis().child(SharedString::from(short)),
+            )
+            .tooltip(move |_window, cx| {
+                let theme = Rc::clone(&hint_theme);
+                cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
+            });
+        Some(tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
+            cx.stop_propagation();
+            this.picked = Some(Pick::Node(node));
+            match movable {
+                Some(task) => cx.emit(ProjectEvent::Act(task, TaskAction::RunOn)),
+                None => this.show(Lens::Machines, cx),
+            }
+            cx.notify();
+        })))
     }
 
     /// The agent running `node` as this client sees it, when it sees it.
@@ -705,6 +805,10 @@ pub(crate) const RECAP: &str = "Since you last looked";
 pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 /// The recap's last line when it could not read back as far as the person's last look.
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
+/// What a click on a task's place does while it can still move.
+pub(crate) const MOVE_HINT: &str = "Click to choose where it runs";
+/// What a click on a place does once its agent has started.
+pub(crate) const MACHINES_HINT: &str = "Click to see the machines";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 
@@ -1361,8 +1465,21 @@ impl ProjectView {
             .filter(|_| prefix == "project-row")
             .and_then(|c| Self::check(board, c))
             .filter(|c| !c.cleared());
+        // A row that says its own line, and the machines lens's, which groups by worker, show
+        // no place.
+        let placed = second.is_none() && prefix != "project-machine";
         let meta =
             second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref(), false));
+        // The place sits at the end of a line it shares, so the rows' places read as one
+        // column; alone, it stands where the line's words would.
+        let place = placed
+            .then(|| self.where_chip(board, node, prefix, cx))
+            .flatten()
+            .map(|chip| chip.when(!meta.is_empty(), gpui::Styled::ml_auto));
+        let place_words = placed
+            .then(|| self.where_words(board, node))
+            .flatten()
+            .map_or_else(String::new, |(_, short, _)| short);
         let key = format!("{prefix}-{}", node_key(node));
         let spent = self.spent_readout(&key, &spend);
         let picked = self.picked() == Some(node)
@@ -1406,17 +1523,28 @@ impl ProjectView {
                     .child(word)
             }))
             .children(actions);
-        let second = (!meta.is_empty()).then(|| {
+        let text = (!meta.is_empty()).then(|| {
             div()
+                .flex_1()
                 .min_w_0()
                 .overflow_hidden()
                 .whitespace_nowrap()
                 .text_ellipsis()
-                .text_size(self.z(theme.typography.meta()))
-                .text_color(hsla(s.text_muted))
                 .child(dotted(theme, meta.clone()))
         });
-        let label = said(&[&title, word.map_or("", |(word, _)| word), &meta, &spent_words]);
+        let second = (place.is_some() || text.is_some()).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(self.z(sp.xs))
+                .min_w_0()
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .children(text)
+                .children(place)
+        });
+        let label =
+            said(&[&title, word.map_or("", |(word, _)| word), &meta, &place_words, &spent_words]);
         let selector = key.clone();
         let row = div()
             .id(SharedString::from(key.clone()))
@@ -1594,9 +1722,6 @@ impl ProjectView {
             if let Some(status) = card.status.as_deref().filter(|s| !s.is_empty()) {
                 parts.push(crate::kit::first_line(status).to_owned());
             }
-        }
-        if let Some(worker) = board.worker(node) {
-            parts.push(self.worker_name(worker));
         }
         if let Some(card) = card {
             if let Some(branch) = card.branch.as_ref().filter(|_| !piped) {
@@ -2012,6 +2137,15 @@ impl ProjectView {
         }
         let piped = !stages.is_empty();
         let meta = self.node_meta(board, node, Some(card), check.as_ref(), piped);
+        let place = self.where_chip(board, node, "project-card", cx);
+        // A reason that says only that the worker had room tells the card nothing.
+        let placed = board.place(node);
+        let reason = placed
+            .as_ref()
+            .and_then(|p| p.why.clone())
+            .filter(|why| why != slopty_proto::project::Suggestion::UNDECIDED);
+        let place_words =
+            self.where_words(board, node).map_or_else(String::new, |(_, short, _)| short);
         let pipeline = self.pipeline_row(&key, &stages);
         let block = check.as_ref().map(|c| self.check_block(&key, c, cx));
         // A parent standing in a lane for a descendant says whose it is.
@@ -2019,7 +2153,37 @@ impl ProjectView {
         let arrive = ElementId::Name(format!("{key}-in").into());
         let selector = key.clone();
         let along: Vec<&str> = stages.iter().map(|stage| stage.words.as_str()).collect();
-        let label = said(&[&card.title, state_word(card.state), &meta, &along.join(", ")]);
+        let label = said(&[
+            &card.title,
+            state_word(card.state),
+            &place_words,
+            reason.as_deref().unwrap_or(""),
+            &meta,
+            &along.join(", "),
+        ]);
+        // Where it runs and why it went there, on a line of its own: what the fleet map is
+        // made of, card by card.
+        let where_line = place.map(|chip| {
+            div()
+                .flex()
+                .items_center()
+                .gap(self.z(sp.xs))
+                .min_w_0()
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .child(chip)
+                .children(reason.map(|why| {
+                    let id = format!("{key}-why");
+                    div()
+                        .debug_selector(move || id)
+                        .flex_1()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(SharedString::from(why))
+                }))
+        });
         let el = div()
             .id(SharedString::from(key))
             .debug_selector(move || selector)
@@ -2068,6 +2232,7 @@ impl ProjectView {
                     .text_color(hsla(s.text_muted))
                     .child(dotted(theme, meta))
             }))
+            .children(where_line)
             .children(pipeline)
             .children(block)
             .children(self.run_on_block(card.id, "project-card", cx))
@@ -2337,6 +2502,12 @@ impl ProjectView {
         }
         let per_worker = board.project.limits.live_per_worker;
         let mut out = Vec::new();
+        if !board.project.needs.is_empty() {
+            out.push(self.heading("project-machines-needs", NEEDS, None).into_any_element());
+            for (at, need) in board.project.needs.iter().enumerate() {
+                out.push(self.need_row(at, need).into_any_element());
+            }
+        }
         for group in groups {
             let key = format!("project-host-{}", group.worker);
             let online = group.machine.as_ref().is_none_or(|m| m.online);
@@ -2425,6 +2596,44 @@ impl ProjectView {
             }
         }
         out
+    }
+
+    /// One of the project's needs: its name, then the paths it covers and what it asks of a
+    /// worker, cut to the line; the label says it all.
+    fn need_row(&self, at: usize, need: &slopty_proto::project::Need) -> Stateful<Div> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let (covers, asks) = need_words(need);
+        let key = format!("project-need-{at}");
+        let selector = key.clone();
+        div()
+            .id(SharedString::from(key))
+            .debug_selector(move || selector)
+            .role(Role::ListItem)
+            .aria_label(said(&[&need.name, &covers, &asks]))
+            .flex()
+            .items_baseline()
+            .gap(self.z(sp.xs))
+            .px(self.z(sp.inset()))
+            .py(self.z(sp.xxs))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(hsla(s.text))
+                    .child(SharedString::from(need.name.clone())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(self.z(theme.typography.meta()))
+                    .text_color(hsla(s.text_muted))
+                    .child(dotted(theme, format!("{covers} \u{b7} {asks}"))),
+            )
     }
 
     /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",
@@ -2691,7 +2900,7 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
     let (glyph, tone) = match what {
         Moment::Created | Moment::TaskCreated { .. } => (IconName::Plus, s.text_muted),
         Moment::Orchestrator { .. } => (IconName::Bot, s.text_secondary),
-        Moment::Limits { .. } => (IconName::ListFilter, s.text_muted),
+        Moment::Limits { .. } | Moment::Needs { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
         Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
         Moment::Proposed { .. } => (IconName::Hand, s.text_secondary),

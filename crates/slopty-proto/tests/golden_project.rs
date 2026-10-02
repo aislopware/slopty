@@ -15,7 +15,7 @@ mod golden_project {
     };
     use slopty_proto::project::{
         AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Merge, Moment,
-        Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail, Peer, Placed,
+        Native, NativeAgent, NativeChange, NativeTask, Natives, Need, NodeDetail, Peer, Placed,
         Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart,
         Reason, Report, ReportKind, RunOn, Runner, Spent, StepKind, StepState, Suggestion, Task,
         TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
@@ -58,6 +58,7 @@ mod golden_project {
 
     fn project() -> Project {
         Project {
+            needs: Vec::new(),
             orchestrator_spent: Spent { active_ms: 480_000, since_ms: None },
             id: project_id(),
             title: "Projects mode".to_owned(),
@@ -350,6 +351,34 @@ mod golden_project {
                 task: TaskId(4),
                 launch: launch(bench),
             }),
+        );
+        let codex = Runner::Codex {
+            prompt: Some("Read your brief.".to_owned()),
+            args: vec!["--model".to_owned(), "o3".to_owned()],
+        };
+        snap(
+            "task_spawn_codex",
+            &request(Verb::TaskSpawn {
+                project: project_id(),
+                task: TaskId(5),
+                launch: launch(codex),
+            }),
+        );
+        let apple = Need {
+            name: "Apple work".to_owned(),
+            paths: vec!["apps/slopty-ios".to_owned()],
+            require: vec!["os == \"macos\"".to_owned()],
+            prefer: Vec::new(),
+        };
+        let linux = Need {
+            name: "Linux first".to_owned(),
+            paths: Vec::new(),
+            require: Vec::new(),
+            prefer: vec![Preference { expr: "os == \"linux\"".to_owned(), weight: 20 }],
+        };
+        snap(
+            "project_needs",
+            &request(Verb::ProjectNeeds { project: project_id(), needs: vec![apple, linux] }),
         );
         snap(
             "placement_suggest",
@@ -674,12 +703,14 @@ mod golden_project {
                 score: 105,
                 reasons: vec![
                     Reason {
+                        need: None,
                         rule: "online".to_owned(),
                         held: true,
                         points: 0,
                         detail: String::new(),
                     },
                     Reason {
+                        need: Some("GPU work".to_owned()),
                         rule: "has(probes.cuda)".to_owned(),
                         held: true,
                         points: 5,
@@ -693,6 +724,7 @@ mod golden_project {
                 fits: false,
                 score: 0,
                 reasons: vec![Reason {
+                    need: None,
                     rule: r#"os == "linux" && cpus >= 16"#.to_owned(),
                     held: false,
                     points: 0,
@@ -771,6 +803,7 @@ mod golden_project {
             Moment::Reported { report: report() },
             Moment::Delivered { term: term(), reports: 3 },
             Moment::Note { text: "ready".to_owned() },
+            Moment::Needs { names: vec!["Apple work".to_owned()] },
             Moment::Step(TaskStep {
                 kind: StepKind::Clone,
                 worker: term().worker,

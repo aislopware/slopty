@@ -18,7 +18,7 @@ pub mod recap;
 pub mod spend;
 mod view;
 
-pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen};
+pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
 use crate::icons::IconName;
 

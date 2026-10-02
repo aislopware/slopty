@@ -59,6 +59,7 @@ use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
 use crate::deliver::Deliveries;
 use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
 
+mod codex;
 mod ladder;
 mod projects;
 mod queue;
@@ -877,6 +878,7 @@ impl Hub {
             | Verb::TaskAssign { .. }
             | Verb::TaskReport { .. }
             | Verb::TaskTell { .. }
+            | Verb::ProjectNeeds { .. }
             | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
@@ -1526,6 +1528,7 @@ fn remember(
         | Verb::TaskSpawn { project, .. }
         | Verb::TaskStart { project, .. }
         | Verb::TaskTell { project, .. }
+        | Verb::ProjectNeeds { project, .. }
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. } => Some(project),
         _ => None,
@@ -1658,6 +1661,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskSpawn { .. }
         | Verb::TaskStart { .. }
         | Verb::TaskTell { .. }
+        | Verb::ProjectNeeds { .. }
         | Verb::PlacementSuggest { .. }
         | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }

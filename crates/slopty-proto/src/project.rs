@@ -458,6 +458,8 @@ pub struct Project {
     pub limits: Limits,
     /// Anything its agents keep with it: the text of a JSON object.
     pub metadata: Option<String>,
+    /// What each kind of its work needs of the machine it runs on ([`Need`]).
+    pub needs: Vec<Need>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
 }
@@ -512,7 +514,8 @@ impl Placement {
 /// Why a worker may or may not run a task, and how it scored.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Reason {
-    /// The rule: an expression, or `pin`, `online`, `live_per_worker`, `near`, `avoid`.
+    /// The rule: an expression, or `pin`, `online`, `live_per_worker`, `agent` (the agent the
+    /// start runs is installed there), `near`, `avoid`.
     pub rule: String,
     /// Whether it held.
     pub held: bool,
@@ -520,6 +523,71 @@ pub struct Reason {
     pub points: i64,
     /// Why, when it did not hold or did not evaluate: the error, the cap reached.
     pub detail: String,
+    /// The project's need it comes from, by name ([`Need::name`]), when it is one of a need's
+    /// rules: what the board says in its place.
+    pub need: Option<String>,
+}
+
+/// What a kind of work needs of the machine it runs on: the project's say over where its tasks
+/// go.
+///
+/// A task owning any of `paths` gets `require` and `prefer` beside its own rules, every task
+/// when `paths` is empty. "Apple work" over the app's crates requires `os == "macos"`, and
+/// "Linux first" over everything prefers `os == "linux"`, so work that needs no Mac goes to
+/// a Linux worker. The board names the need where a rule of it decided.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Need {
+    /// What it is, in a few words: "Apple work".
+    pub name: String,
+    /// The paths whose owners have it, as [`TaskSpec::owns`] names paths; every task when
+    /// empty.
+    pub paths: Vec<String>,
+    /// Each must hold on a worker for such a task (CEL, as [`Placement::require`]).
+    pub require: Vec<String>,
+    /// Each that holds scores a worker for such a task.
+    pub prefer: Vec<Preference>,
+}
+
+impl Need {
+    /// The most paths and rules one need names, each.
+    pub const ITEMS_MAX: usize = 32;
+    /// The most needs a project names.
+    pub const MAX: usize = 16;
+    /// The longest name, in bytes.
+    pub const NAME_MAX: usize = 64;
+
+    /// Whether a task owning `owns` has it: an owned path is one of `paths`, within one, or
+    /// holds one.
+    #[must_use]
+    pub fn applies(&self, owns: &[String]) -> bool {
+        let fold = |p: &str| p.trim().trim_matches('/').to_owned();
+        let holds = |outer: &str, inner: &str| {
+            outer.is_empty()
+                || inner == outer
+                || inner.strip_prefix(outer).is_some_and(|rest| rest.starts_with('/'))
+        };
+        self.paths.is_empty()
+            || self.paths.iter().any(|need| {
+                let need = fold(need);
+                owns.iter().map(|o| fold(o)).any(|own| holds(&need, &own) || holds(&own, &need))
+            })
+    }
+
+    /// About how many bytes it takes on the wire, never less.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let texts = self.paths.iter().chain(&self.require).map(|t| t.len().saturating_add(2));
+        let prefs = self.prefer.iter().map(|p| p.expr.len().saturating_add(8));
+        texts.chain(prefs).fold(self.name.len().saturating_add(16), usize::saturating_add)
+    }
+}
+
+impl Reason {
+    /// What the board calls it: its need's name, else the rule itself.
+    #[must_use]
+    pub fn said(&self) -> &str {
+        self.need.as_deref().unwrap_or(&self.rule)
+    }
 }
 
 /// One worker, ranked for a task.
@@ -538,6 +606,8 @@ pub struct Suggestion {
 }
 
 impl Suggestion {
+    /// [`Self::why`] for a worker that fits when nothing but room decided it.
+    pub const UNDECIDED: &str = "it has room, and nothing is preferred";
     /// The longest [`Self::why`], in bytes.
     pub const WHY_MAX: usize = STATUS_MAX;
 
@@ -546,7 +616,8 @@ impl Suggestion {
     /// keeps it out.
     #[must_use]
     pub fn why(&self) -> String {
-        const BUILT_IN: [&str; 4] = ["pin", "online", "live_per_worker", "fleet live_per_worker"];
+        const BUILT_IN: [&str; 5] =
+            ["pin", "online", "live_per_worker", "fleet live_per_worker", "agent"];
         let built_in = |r: &Reason| BUILT_IN.contains(&r.rule.as_str());
         let mut parts: Vec<String> = Vec::new();
         if self.fits {
@@ -557,26 +628,30 @@ impl Suggestion {
             scored.sort_by_key(|r| std::cmp::Reverse(r.points));
             parts.extend(scored.into_iter().map(|r| {
                 let sign = if r.points > 0 { "+" } else { "\u{2212}" };
-                format!("{} {sign}{}", r.rule, r.points.unsigned_abs())
+                format!("{} {sign}{}", r.said(), r.points.unsigned_abs())
             }));
             parts.extend(
                 self.reasons
                     .iter()
                     .filter(|r| r.held && r.points == 0 && !built_in(r))
-                    .map(|r| r.rule.clone()),
+                    .map(|r| r.said().to_owned()),
             );
             if parts.is_empty() {
-                parts.push("it has room, and nothing is preferred".to_owned());
+                parts.push(Self::UNDECIDED.to_owned());
             }
         } else {
             parts.extend(self.reasons.iter().filter(|r| !r.held).map(|r| {
-                match (built_in(r), r.detail.is_empty()) {
-                    (true, false) => r.detail.clone(),
-                    (_, true) => format!("{} does not hold", r.rule),
-                    (false, false) => format!("{}: {}", r.rule, r.detail),
+                match (built_in(r), &r.need, r.detail.is_empty()) {
+                    (true, _, false) => r.detail.clone(),
+                    (_, Some(need), _) => format!("fails {need} ({})", r.rule),
+                    (_, None, true) => format!("{} does not hold", r.rule),
+                    (false, None, false) => format!("{}: {}", r.rule, r.detail),
                 }
             }));
         }
+        // A need's rules say its name once.
+        let mut said = std::collections::HashSet::new();
+        parts.retain(|part| said.insert(part.clone()));
         parts.truncate(3);
         let mut why = parts.join(", ");
         if why.len() > Self::WHY_MAX {
@@ -676,6 +751,14 @@ pub enum Runner {
     Command {
         /// The program and its arguments.
         argv: Vec<String>,
+    },
+    /// The person's own Codex, with Slopty's tools on its MCP servers and its brief as its
+    /// first prompt; it goes only where `codex` is installed.
+    Codex {
+        /// The first prompt.
+        prompt: Option<String>,
+        /// Arguments after `codex`, before the prompt.
+        args: Vec<String>,
     },
 }
 
@@ -1487,6 +1570,12 @@ pub enum Moment {
     /// A step for the task began, finished or failed; its progress between is on its card
     /// alone.
     Step(TaskStep),
+    /// What the project's work needs of its machines was said ([`Need`]): the needs' names,
+    /// none when they were all taken away.
+    Needs {
+        /// Each need's name.
+        names: Vec<String>,
+    },
 }
 
 impl TimelineEntry {
@@ -1498,7 +1587,7 @@ impl TimelineEntry {
         let texts = |ts: &[String]| ts.iter().map(|t| text(t)).fold(0_usize, usize::saturating_add);
         let what = match &self.what {
             Moment::TaskCreated { title } => text(title),
-            Moment::Claimed { paths } => texts(paths),
+            Moment::Claimed { paths } | Moment::Needs { names: paths } => texts(paths),
             Moment::Branch { branch, .. } => branch.as_deref().map_or(0, text),
             Moment::Verified(run) => run.approx_bytes(),
             Moment::Checks(checks) => checks.approx_bytes(),
@@ -1563,6 +1652,7 @@ impl Project {
             self.verifier.as_deref().map_or(0, str::len),
             self.metadata.as_deref().map_or(0, str::len),
             self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
+            self.needs.iter().map(Need::approx_bytes).sum(),
         ]
         .into_iter()
         .fold(128_usize, |sum, len| sum.saturating_add(len).saturating_add(10))
@@ -1836,6 +1926,7 @@ mod tests {
             held,
             points,
             detail: detail.to_owned(),
+            need: None,
         };
         let ranked = |fits: bool, reasons: Vec<Reason>| Suggestion {
             worker: WorkerId::nil(),
@@ -1873,5 +1964,51 @@ mod tests {
         let long = ranked(true, vec![reason(&"é".repeat(Suggestion::WHY_MAX), true, 0, "")]);
         let why = long.why();
         assert!(why.len() <= Suggestion::WHY_MAX && why.ends_with('\u{2026}'), "{}", why.len());
+
+        let of_need = |rule: &str, held: bool, points: i64, need: &str| Reason {
+            need: Some(need.to_owned()),
+            ..reason(rule, held, points, "false here")
+        };
+        let linux = ranked(
+            true,
+            vec![of_need(r#"os == "linux""#, true, 20, "Linux first"), reason("x", true, 0, "")],
+        );
+        assert_eq!(linux.why(), "Linux first +20, x");
+        let apple = ranked(
+            false,
+            vec![
+                of_need(r#"os == "macos""#, false, 0, "Apple work"),
+                of_need("has(toolchains.xcode)", false, 0, "Apple work"),
+            ],
+        );
+        assert_eq!(
+            apple.why(),
+            r#"fails Apple work (os == "macos"), fails Apple work (has(toolchains.xcode))"#
+        );
+        let no_codex = ranked(false, vec![reason("agent", false, 0, "codex is not installed")]);
+        assert_eq!(no_codex.why(), "codex is not installed");
+        let codex = ranked(true, vec![reason("agent", true, 0, ""), reason("x", true, 0, "")]);
+        assert_eq!(codex.why(), "x", "an agent installed says nothing a worker does not share");
+    }
+
+    /// A need is a task's when it owns one of the need's paths, a path within one, or one that
+    /// holds one; a need of no paths is every task's.
+    #[test]
+    fn a_need_follows_the_paths_a_task_owns() {
+        let need = |paths: &[&str]| Need {
+            name: "Apple work".to_owned(),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+            require: vec![r#"os == "macos""#.to_owned()],
+            prefer: Vec::new(),
+        };
+        let owns = |paths: &[&str]| paths.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        let apple = need(&["crates/slopty-ui", "apps/slopty/"]);
+        assert!(apple.applies(&owns(&["crates/slopty-ui/src/project/view.rs"])));
+        assert!(apple.applies(&owns(&["docs", "apps/slopty"])));
+        assert!(apple.applies(&owns(&["crates"])), "a path that holds the need's");
+        assert!(!apple.applies(&owns(&["crates/slopty-ui-kit"])), "a sibling is not within");
+        assert!(!apple.applies(&owns(&["crates/slopty-server"])));
+        assert!(!apple.applies(&[]), "a task that owns nothing has no path's need");
+        assert!(need(&[]).applies(&owns(&["anything"])) && need(&[]).applies(&[]));
     }
 }

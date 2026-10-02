@@ -223,6 +223,7 @@ fn candidate(n: u8) -> Candidate {
         worker: WorkerId::new(),
         name: format!("worker-{n}"),
         online: true,
+        reported: true,
         facts,
         live: 0,
         fleet_live: 0,

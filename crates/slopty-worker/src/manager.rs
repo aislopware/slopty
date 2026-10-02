@@ -402,11 +402,23 @@ impl Worker {
     /// permission prompts reach the app; with Slopty's tools when this worker has a server;
     /// with the mod; and pinned to a conversation id, so it can come back after a reboot. It
     /// is the person's own, so the mode that asks no permission is not locked. The request's
-    /// arguments and variables are kept, and the mod's variables go last.
+    /// arguments and variables are kept, and the mod's variables go last. One whose program is
+    /// Codex gets Slopty's tools on its MCP servers when this worker has a server.
     async fn as_agent(&self, req: &OpenSession) -> (Vec<String>, Vec<(String, String)>) {
         let unchanged = (req.command.clone(), req.env.clone());
         let Some(program) = req.command.first() else { return unchanged };
         let name = program.rsplit('/').next().unwrap_or(program);
+        if name == CODEX {
+            let relay = self.agent_launch().relay.filter(|_| self.served());
+            let args = req.command.get(1..).unwrap_or_default();
+            return match relay {
+                Some(relay) if !codex_names_server(args) => {
+                    let wired = codex_with_mcp(args, &relay);
+                    (std::iter::once(program.clone()).chain(wired).collect(), req.env.clone())
+                }
+                _ => unchanged,
+            };
+        }
         if name != "claude" || !slopty_agent::detect::is_claude(name, &req.command) {
             return unchanged;
         }
@@ -416,12 +428,7 @@ impl Worker {
         let Some(relay) = launch.relay.filter(|_| !started.relay && !started.print) else {
             return unchanged;
         };
-        let served = self
-            .inner
-            .session_env
-            .lock()
-            .iter()
-            .any(|(k, _)| k == slopty_proto::project::SERVER_ENV);
+        let served = self.served();
         let cwd = req.cwd.as_deref().map_or_else(slopty_platform::dirs::home, |cwd| {
             crate::file::expand_home(Path::new(cwd))
         });
@@ -440,6 +447,11 @@ impl Worker {
             None => (args, req.env.clone()),
         };
         (std::iter::once(program.clone()).chain(args).collect(), env)
+    }
+
+    /// Whether this worker has a server, so `slopty mcp` can serve an agent Slopty's tools.
+    fn served(&self) -> bool {
+        self.inner.session_env.lock().iter().any(|(k, _)| k == slopty_proto::project::SERVER_ENV)
     }
 
     /// Reopen every kept session whose shell was lost (ptyd did not hold it when this worker
@@ -804,6 +816,37 @@ async fn send_tap(ptyd: &mut PtydClient, tap: &Tap) -> Result<(), PtyError> {
         Tap::Checkpoint { id, state, .. } => ptyd.checkpoint(*id, state).await,
         Tap::Resize { id, size } => ptyd.resize(*id, *size).await,
     }
+}
+
+/// Codex's program name.
+const CODEX: &str = "codex";
+/// The name Slopty's tools take among Codex's MCP servers.
+const CODEX_SERVER: &str = "mcp_servers.slopty";
+
+/// Whether `codex` arguments name Slopty's tools server themselves (`-c mcp_servers.slopty…`).
+fn codex_names_server(args: &[String]) -> bool {
+    let named = |value: &str| value.trim_start().starts_with(CODEX_SERVER);
+    args.iter()
+        .zip(args.iter().skip(1))
+        .any(|(flag, value)| matches!(flag.as_str(), "-c" | "--config") && named(value))
+        || args.iter().any(|a| a.strip_prefix("--config=").is_some_and(named))
+}
+
+/// `codex` arguments that also serve it Slopty's tools: `<relay> mcp` among its MCP servers,
+/// for that run alone, with the variables that say which server, project, task and terminal it
+/// is (Codex hands an MCP server only the variables it is told to).
+fn codex_with_mcp(args: &[String], relay: &str) -> Vec<String> {
+    use slopty_proto::ctl::{SESSION_ENV, SESSION_TOKEN_ENV};
+    use slopty_proto::project::{PROJECT_ENV, SERVER_ENV, TASK_ENV};
+    let toml = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let vars = [SERVER_ENV, PROJECT_ENV, TASK_ENV, SESSION_ENV, SESSION_TOKEN_ENV];
+    let vars: Vec<String> = vars.iter().map(|v| toml(v)).collect();
+    let config = [
+        format!("{CODEX_SERVER}.command={}", toml(relay)),
+        format!("{CODEX_SERVER}.args=[\"mcp\"]"),
+        format!("{CODEX_SERVER}.env_vars=[{}]", vars.join(",")),
+    ];
+    config.into_iter().flat_map(|c| ["-c".to_owned(), c]).chain(args.iter().cloned()).collect()
 }
 
 #[cfg(test)]

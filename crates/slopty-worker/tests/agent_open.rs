@@ -42,6 +42,8 @@ mod agent_open {
         let programs = dir.join("programs");
         std::fs::create_dir_all(&programs).unwrap();
         std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        // It records whatever it was started with, so it stands in for `codex` too.
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("codex")).unwrap();
         let socket = dir.join("ptyd.sock");
         let mut child = Command::new(bin("slopty-ptyd"));
         slopty_testkit::env::scrub(child.as_std_mut(), &dir.join("home"));
@@ -146,6 +148,52 @@ mod agent_open {
         worker.set_relay(None);
         let seen = started(&worker, &dir, &["claude"]).await;
         assert!(argv(&seen).is_empty(), "no relay to hand out: {:?}", argv(&seen));
+    }
+
+    /// A `codex` opened on a worker with a server gets Slopty's tools among its MCP servers,
+    /// as `<relay> mcp` with the variables that name its server, project, task and terminal,
+    /// its own arguments after; one that names Slopty's server already, and a worker with no
+    /// server, start as asked.
+    #[tokio::test]
+    async fn codex_opened_on_a_worker_with_a_server_gets_slopty_s_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let (_ptyd, socket) = ptyd(&dir).await;
+        let (worker, _reports) =
+            Worker::connect(Some(socket), Arc::new(NoAgents), &dir.join("kept")).await.unwrap();
+        let relay = dir.join("relay/slopty");
+        std::fs::create_dir_all(relay.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/true", &relay).unwrap();
+        worker.set_relay(Some(relay.clone()));
+        worker.set_session_env(vec![(
+            slopty_proto::project::SERVER_ENV.to_owned(),
+            "127.0.0.1:9".to_owned(),
+        )]);
+
+        let seen = started(&worker, &dir, &["codex", "--model", "o3", "Read the brief"]).await;
+        let config = |key: &str| {
+            let args = argv(&seen);
+            let at = args.iter().position(|a| a.starts_with(&format!("mcp_servers.slopty.{key}=")));
+            let at = at.unwrap_or_else(|| panic!("{key}: {args:?}"));
+            assert_eq!(args[at - 1], "-c", "{args:?}");
+            args[at].split_once('=').unwrap().1.to_owned()
+        };
+        assert_eq!(config("command"), format!("\"{}\"", relay.display()));
+        assert_eq!(config("args"), r#"["mcp"]"#);
+        let vars = config("env_vars");
+        for var in ["SLOPTY_SERVER", "SLOPTY_PROJECT", "SLOPTY_TASK", "SLOPTY_SESSION_TOKEN"] {
+            assert!(vars.contains(&format!("\"{var}\"")), "{vars}");
+        }
+        assert_eq!(argv(&seen)[6..], ["--model", "o3", "Read the brief"], "its own after");
+
+        let own = ["codex", "-c", "mcp_servers.slopty.command=\"x\"", "go"];
+        let seen = started(&worker, &dir, &own).await;
+        assert_eq!(argv(&seen), own[1..], "wired already: as asked");
+        let seen = started(&worker, &dir, &["codex", "set mcp_servers.slopty up"]).await;
+        assert_eq!(argv(&seen).len(), 7, "a prompt that names it is no config: {:?}", argv(&seen));
+        worker.set_session_env(Vec::new());
+        let seen = started(&worker, &dir, &["codex", "go"]).await;
+        assert_eq!(argv(&seen), ["go"], "no server to serve its tools: as asked");
     }
 
     fn uuid_like(word: &str) -> bool {

@@ -65,6 +65,9 @@ pub(crate) struct Candidate {
     pub name: String,
     /// Whether it is online now.
     pub online: bool,
+    /// Whether it has reported its own facts yet: until it has, only the agents it registered
+    /// with are known to be installed.
+    pub reported: bool,
     /// Its facts, the server's and its own.
     pub facts: Facts,
     /// How many of the project's agents run on it, and are being started there.
@@ -84,6 +87,9 @@ pub(crate) struct Ranking {
     pub comprehensions: u8,
     /// When the ranking stops judging: a rule not judged by then does not hold.
     pub until: Option<Instant>,
+    /// The agent the start runs, by its name among a worker's `agents` facts: a worker that
+    /// does not report it installed does not fit, pinned or not.
+    pub agent: Option<&'static str>,
 }
 
 /// A rule that compiled.
@@ -445,7 +451,13 @@ pub(crate) fn choose(placement: &Placement, ranked: &[Suggestion]) -> Result<Wor
         .filter(|s| placement.pin.is_none_or(|pin| pin == s.worker))
         .map(|s| {
             let failed = s.reasons.iter().find(|r| !r.held && blocks(&r.rule, placement));
-            let why = failed.map_or("does not fit", |r| r.detail.as_str());
+            let why = failed.map_or_else(
+                || "does not fit".to_owned(),
+                |r| match &r.need {
+                    Some(need) => format!("fails {need} ({})", r.rule),
+                    None => r.detail.clone(),
+                },
+            );
             format!("{}: {why}", s.name)
         })
         .collect();
@@ -453,10 +465,10 @@ pub(crate) fn choose(placement: &Placement, ranked: &[Suggestion]) -> Result<Wor
 }
 
 /// Whether a failed rule keeps a worker from running the task: a preference never does, and
-/// with a pin only being online and having room do.
+/// with a pin only being online, having room and having the agent do.
 fn blocks(rule: &str, placement: &Placement) -> bool {
     match rule {
-        "online" | "live_per_worker" | "pin" | "fleet live_per_worker" => true,
+        "online" | "live_per_worker" | "pin" | "fleet live_per_worker" | "agent" => true,
         _ if placement.pin.is_some() => false,
         _ => placement.require.iter().any(|r| r.trim() == rule),
     }
@@ -472,7 +484,7 @@ fn judge(
     let mut reasons = Vec::new();
     let mut fits = true;
     let mut held = |rule: &str, ok: bool, points: i64, detail: String| {
-        reasons.push(Reason { rule: rule.to_owned(), held: ok, points, detail });
+        reasons.push(Reason { rule: rule.to_owned(), held: ok, points, detail, need: None });
     };
     if let Some(pin) = placement.pin {
         let here = pin == c.worker;
@@ -504,6 +516,17 @@ fn judge(
             )
         };
         held("fleet live_per_worker", room, 0, detail);
+    }
+    if let Some(agent) = ranking.agent {
+        let has = matches!(c.facts.get("agents"), Some(Fact::Map(installed))
+            if installed.contains_key(agent));
+        let detail = match (has, c.reported) {
+            (true, _) => String::new(),
+            (false, true) => format!("{agent} is not installed"),
+            (false, false) => format!("has not said yet whether {agent} is installed"),
+        };
+        fits &= has;
+        held("agent", has, 0, detail);
     }
     let ctx = context(&c.facts);
     let pinned = placement.pin.is_some();

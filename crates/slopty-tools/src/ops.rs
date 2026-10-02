@@ -772,6 +772,20 @@ pub async fn project_set<D: Dispatch>(
     project_answer(res.dispatch(), key, verb).await
 }
 
+/// Say what each kind of a project's work needs of its machines, in place of what was said.
+///
+/// # Errors
+/// The project is not named or known, a rule does not compile, or a name is given twice.
+pub async fn project_needs<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    needs: Vec<slopty_proto::project::Need>,
+    key: Option<IdempotencyKey>,
+) -> Result<ProjectStatus, ToolError> {
+    let project = project_named(project, &own(dispatch).await?)?;
+    project_answer(dispatch, key, Verb::ProjectNeeds { project, needs }).await
+}
+
 /// Every project.
 pub async fn projects<D: Dispatch>(dispatch: &D) -> Result<Vec<Project>, ToolError> {
     match dispatch.call(Verb::ProjectList).await {

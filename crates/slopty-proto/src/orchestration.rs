@@ -843,6 +843,18 @@ pub enum Verb {
         /// A GitLab merge request rather than a GitHub pull request.
         merge_request: bool,
     },
+    /// Say what each kind of a project's work needs of the machine it runs on, in place of
+    /// what was said ([`crate::project::Need`]): the rules join each task's own wherever it is
+    /// ranked from then on. Answered with [`Outcome::Project`]; a rule that does not compile,
+    /// or needs that together hold more rules than one placement, are
+    /// [`ErrorCode::BadExpression`], and a name given twice or too many are
+    /// [`ErrorCode::Invalid`].
+    ProjectNeeds {
+        /// Which.
+        project: ProjectId,
+        /// Every need, at most [`crate::project::Need::MAX`].
+        needs: Vec<crate::project::Need>,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -914,6 +926,7 @@ impl Verb {
             | Self::AnswerPermission { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
+            | Self::ProjectNeeds { .. }
             | Self::TaskCreate { .. }
             | Self::TaskClaim { .. }
             | Self::TaskUpdate { .. }

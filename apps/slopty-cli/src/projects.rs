@@ -110,6 +110,26 @@ pub enum ProjectCmd {
         #[arg(long)]
         metadata: Option<String>,
     },
+    /// Say what one kind of a project's work needs of the machine it runs on, in place of
+    /// what it was said to need: tasks owning its paths (every task with none) get its rules.
+    Need {
+        /// The project.
+        project: String,
+        /// The need's name, in a few words: "Apple work".
+        name: String,
+        /// A path whose owners have it; repeatable. Every task when none.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// A CEL rule a worker must hold, such as `os == "macos"`; repeatable.
+        #[arg(long)]
+        require: Vec<String>,
+        /// A CEL rule that scores a worker, `WEIGHT:CEL` or `CEL`; repeatable.
+        #[arg(long, value_parser = preference)]
+        prefer: Vec<Preference>,
+        /// Take the need away instead.
+        #[arg(long, conflicts_with_all = ["paths", "require", "prefer"])]
+        remove: bool,
+    },
     /// Tell a project's orchestrator something, as the person: the words reach it through its
     /// hooks, and wake it when it is idle.
     Tell {
@@ -327,12 +347,15 @@ pub enum TaskCmd {
         /// Working directory on the worker; its home when omitted.
         #[arg(long)]
         cwd: Option<String>,
-        /// Claude Code's first prompt, typed once it is ready.
+        /// The agent's first prompt.
         #[arg(long, conflicts_with = "command")]
         prompt: Option<String>,
-        /// Run the words after `--` as the program, not as `claude`'s arguments.
+        /// Run the words after `--` as the program, not as the agent's arguments.
         #[arg(long)]
         command: bool,
+        /// Run the person's Codex rather than Claude Code, with the same tools.
+        #[arg(long, conflicts_with = "command")]
+        codex: bool,
         /// An environment variable, `KEY=VALUE`; repeatable.
         #[arg(long = "env", value_name = "KEY=VALUE", value_parser = key_value)]
         env: Vec<(String, String)>,
@@ -512,6 +535,28 @@ pub async fn project(
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
         }
+        ProjectCmd::Need { project, name, paths, require, prefer, remove } => {
+            let mut needs = ops::project_status(link, Some(&project), None, 0).await?.project.needs;
+            let had = needs.len();
+            needs.retain(|n| n.name != name.trim());
+            if remove && needs.len() == had {
+                bail!("{project} has no need named {name:?}");
+            }
+            if !remove {
+                needs.push(slopty_proto::project::Need { name, paths, require, prefer });
+            }
+            let status = ops::project_needs(link, Some(&project), needs, key).await?;
+            if json {
+                return print_json(&view::status(&status));
+            }
+            let names: Vec<&str> = status.project.needs.iter().map(|n| n.name.as_str()).collect();
+            if names.is_empty() {
+                println!("{project} needs nothing of its machines");
+            } else {
+                println!("{project} needs: {}", names.join(", "));
+            }
+            Ok(())
+        }
         ProjectCmd::Tell { project, words } => {
             ops::orchestrator_tell(link, &project, words.join(" "), key).await?;
             println!("Told {project}'s orchestrator");
@@ -658,6 +703,7 @@ pub async fn task(
             cwd,
             prompt,
             command,
+            codex,
             env,
             size,
             ignore_dependencies,
@@ -665,6 +711,8 @@ pub async fn task(
         } => {
             let run = if command {
                 Runner::Command { argv: args }
+            } else if codex {
+                Runner::Codex { prompt, args }
             } else {
                 Runner::Claude { prompt, args }
             };
