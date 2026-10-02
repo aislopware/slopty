@@ -850,8 +850,8 @@ pub fn install(keymap: Keymap, cx: &mut App) {
 }
 
 /// gpui-kit's window root (`gpui_base::Root`), the context around every view. The kit binds
-/// Tab and ⇧Tab there to walk the focus, and ⌃C to copy a selection on every target but macOS,
-/// the iPhone and iPad among them.
+/// Tab and ⇧Tab there to walk the focus, and a copy of a selection: ⌘C on macOS and iOS, ⌃C
+/// elsewhere.
 const KIT_ROOT: &str = "Root";
 
 /// The views that take every key the table leaves them: a terminal's program and a remote

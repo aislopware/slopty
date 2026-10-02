@@ -9181,9 +9181,9 @@ mod tests {
         assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
     }
 
-    /// Under gpui-kit's window root, the keys the kit binds around every view are the
-    /// program's: Tab and ⇧Tab type rather than walk the focus, and ⌃C, which the kit binds to
-    /// copy on the iPhone and iPad (bound here as it binds it there), interrupts rather than
+    /// Under gpui-kit's window root, the keys the kit binds around every view without ⌘ are
+    /// the program's: Tab and ⇧Tab type rather than walk the focus, and ⌃C, which the kit binds
+    /// to copy off Apple's platforms (bound here as it binds it there), interrupts rather than
     /// copies. The shell keeps the focus.
     #[gpui::test]
     fn the_kits_keys_around_a_shell_go_to_the_program(cx: &mut TestAppContext) {

@@ -174,6 +174,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   keymap's meta is weaker than the kit's untagged bindings); and making the terminal's Copy
   pass when nothing is selected, which would still copy over ⌃C with a selection. gpui-kit's
   root should bind ⌘C on iOS as its text fields already do; that is the fork's to change.
+  Amended the same day: the fork's roots now bind ⌘C on iOS as on macOS (gpui-kit
+  `c9c4b5b2`), so on an iPad ⌘C copies the kit's selections and ⌃C was never the kit's. The
+  derivation stays as it is and now releases only Tab and ⇧Tab there, since it follows the
+  kit's bindings rather than naming them.
   Tests: `the_kits_keys_around_a_shell_go_to_the_program` (terminal),
   `the_kits_tab_around_a_remote_window_goes_to_the_worker` (screen),
   `a_hardware_keyboard_on_the_simulator_arrives_through_presses` and
