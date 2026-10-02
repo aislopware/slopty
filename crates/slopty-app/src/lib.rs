@@ -23,6 +23,7 @@
 mod e2e;
 mod hangs;
 pub mod net;
+mod presence;
 mod server;
 pub mod settings;
 pub mod ssh;
@@ -475,6 +476,8 @@ pub struct Workspace {
     heard_terminals: std::collections::HashMap<SessionId, Heard>,
     /// What the Dock tile's bar shows, so a terminal's redraw sets it only when it changes.
     dock_progress: Option<slopty_platform::dock::DockProgress>,
+    /// Where the person is, as the server is told it.
+    presenting: presence::Presenting,
     /// How the worker loops dial: over the network, or a test's stand-in.
     dial: Dialer,
     /// The time iOS grants after the app leaves the screen, held until it returns, so the links
@@ -516,8 +519,16 @@ impl Workspace {
         let events = cx.subscribe(&view, |ws: &mut Self, _view, event, cx| match event {
             // The badge is the inbox's count, which `Self::look` follows.
             WorkspaceEvent::NeedsYou(_) => {}
-            // As a Mac app's alert: heard only while the human is elsewhere.
+            // As a Mac app's alert: heard only while the human is elsewhere. Led by a server,
+            // its notice sounds it instead, so a moment never sounds twice.
             WorkspaceEvent::Attention(_session) => {
+                let active = cx.active_window().is_some();
+                if !ws.attention.server_led() && settings::agent_alerts(&ws.settings, active) {
+                    alert();
+                }
+            }
+            // A program's own notification is this client's, server or not.
+            WorkspaceEvent::Program(_session) => {
                 if settings::agent_alerts(&ws.settings, cx.active_window().is_some()) {
                     alert();
                 }
@@ -538,6 +549,7 @@ impl Workspace {
         // the tile it sends keys to moves, never for the rest of the view's news.
         let changes = cx.observe(&view, |ws, _view, cx| {
             ws.look(cx);
+            ws.presence_changed(cx);
             if ws.follow_key_target(cx) {
                 cx.notify();
             }
@@ -585,6 +597,7 @@ impl Workspace {
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
             heard_terminals: std::collections::HashMap::new(),
             dock_progress: None,
+            presenting: presence::Presenting::default(),
             dial,
             #[cfg(target_os = "ios")]
             grace: None,
@@ -592,6 +605,7 @@ impl Workspace {
             paste_key: None,
         };
         this.publish_updates(cx);
+        Self::watch_presence(cx);
         this
     }
 
@@ -2837,6 +2851,7 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::FoundFiles { root, query, paths, notice }) => {
             view.update(cx, |v, cx| {
                 v.files_found(&root, &query, &paths, cx);
+                v.threads_found(key, &root, &query, &paths, cx);
                 if let Some(notice) = notice {
                     v.show_notice(notice, cx);
                 }

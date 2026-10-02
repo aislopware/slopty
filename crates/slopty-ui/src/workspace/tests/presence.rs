@@ -32,3 +32,33 @@ fn presence_names_the_seat_the_terminals_in_view_and_the_focused_one(cx: &mut Te
     let presence = view.update_in(cx, |v, window, _| v.presence(window));
     assert_eq!(presence.seat, Seat::Handheld, "a phone is carried");
 }
+
+/// A program's own notification and an agent's moment are told apart, so a server that leads
+/// the agent moments leaves the program's to this client: an `OSC 9` is `Program`, an agent that
+/// needs the person is `Attention`.
+#[gpui::test]
+fn a_program_s_notification_is_its_own_event_apart_from_an_agent_s(cx: &mut TestAppContext) {
+    use crate::terminal::TerminalViewEvent;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let _tile = opens(&view, cx, &studio, session, studio.me, 1);
+    let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let seen = Rc::clone(&events);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_v, e: &WorkspaceEvent, _cx| seen.borrow_mut().push(*e)).detach();
+    });
+    let terminal = view.read_with(cx, |v, _| v.terminals.get(&session).cloned()).expect("a shell");
+    terminal.update(cx, |_, cx| {
+        cx.emit(TerminalViewEvent::Notification { title: "build".into(), body: "done".into() });
+    });
+    cx.run_until_parked();
+    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::Program(session)]);
+
+    events.borrow_mut().clear();
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    cx.run_until_parked();
+    assert!(events.borrow().contains(&WorkspaceEvent::Attention(session)), "{:?}", events.borrow());
+    assert!(!events.borrow().contains(&WorkspaceEvent::Program(session)));
+}

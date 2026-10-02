@@ -337,8 +337,8 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
     assert!(listed(cx), "and the navigator lists it under Working");
     // The row and its agent line under Working: what the face says, never the hook's "Idle".
     let lines = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, _| {
-            let meta = v.item(tile).map(|item| v.tile_meta(item, SystemTime::now()).0);
+        view.read_with(cx, |v, cx| {
+            let meta = v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0);
             let words = v
                 .working()
                 .into_iter()
@@ -672,4 +672,42 @@ fn an_agent_with_a_thread_opens_on_its_thread_view(cx: &mut TestAppContext) {
         thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }),
         "the TUI picked lets the thread go"
     );
+}
+
+/// An agent's subagents are the table's rows whose chain of parents reaches its thread, however
+/// deep; another agent's are not, nor a chain that loops.
+#[gpui::test]
+fn an_agent_s_subagents_are_the_rows_under_its_thread(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::TableFrame;
+    use slopty_proto::thread::{Cursor, ItemId, Link, ThreadId};
+
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let (_tile, session) = agent_tile(&view, cx, &mut studio);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+
+    let mut root = crate::conversation::thread::fixtures::empty();
+    root.meta.terminal = Some(session);
+    let row = |parent: Option<ThreadId>| {
+        let mut state = crate::conversation::thread::fixtures::empty();
+        state.meta.parent = parent.map(|thread| Link { thread, item: ItemId("call".to_owned()) });
+        state.row(WallMs::ZERO)
+    };
+    let child = row(Some(root.meta.id));
+    let grandchild = row(Some(child.id));
+    let other = row(Some(ThreadId::new()));
+    let mut looping = row(None);
+    looping.parent = Some(Link { thread: looping.id, item: ItemId("call".to_owned()) });
+    let rows = vec![root.row(WallMs::ZERO), child.clone(), grandchild.clone(), other, looping];
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
+    cx.run_until_parked();
+
+    let mut found: Vec<ThreadId> =
+        view.read_with(cx, |v, cx| v.subagents(session, cx).into_iter().map(|r| r.id).collect());
+    found.sort();
+    let mut want = vec![child.id, grandchild.id];
+    want.sort();
+    assert_eq!(found, want);
 }

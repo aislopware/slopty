@@ -409,6 +409,21 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   comments are anchored by their line's text, dropped when it changes, and go as one message
   of `path L<n>: body` lines. A keep or revert the worker acted on asks for the review again.
 
+- ✅ **The thread composer's menus never blank, and a waiting message is changed in place**
+  (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/composing.rs`;
+  `thread/tests/composing.rs`). `/` lists the commands the thread says its agent takes, ranked
+  as the conversation face ranks them; a source the client does not know ranks after plugins
+  and is named as the agent named it. `@` asks the worker's file index under the thread's
+  directory (`FindFiles`), the same one the palette asks. While the answer for the newest key
+  is on its way, the last answer narrowed here stands in, so the list never empties between
+  keys. Attachments go up as a drop on the tile does and the message carries their paths after
+  its text; nothing goes while one is still uploading. A waiting message's pencil puts its
+  words in the composer and the draft aside: ↵ sends `Intent::Edit` and brings the draft back,
+  and Esc brings it back with nothing changed. The line shows the new words from the frame of
+  the edit. A refused edit puts the old words back with the reason, and the person's words stay
+  on the pencil until they dismiss it. If the message goes while it is being changed, its words
+  stay in the composer as a new draft, with the draft that was put aside after them.
+
 - ✅ **Codex: Slopty is one more client of the user's app-server, and the first answer to an
   approval settles it** (2026-10-02, verified against Codex 0.160.0;
   `crates/slopty-agent/src/codex/`, `xtask/src/codex/`; `crates/slopty-agent/tests/codex.rs`
@@ -480,3 +495,16 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       interrupt is `turn/interrupt`. Queueing is not offered yet (no `queue` capability).
     - Not carried yet: starting a Codex thread or its TUI from Slopty (`codex --remote`), the
       models list, images in a user message, and expanding a clipped output.
+
+- ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
+  (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;
+  `crates/slopty-e2e/tests/app/conversation.rs`, `thread/tests/steps.rs`). A subagent's call
+  opens its thread in the same view, under a bar that names it and leads back (Esc too), with
+  the thread above kept followed and kept as the reader left it. ⌃O opens every step and folds
+  them again. Commands run in the background sit over the composer with their last line, the
+  running ones and those that ended in the last turn. Pictures sent with a message or returned
+  by a call are drawn at the size their header gives, so a row keeps its height while the
+  bytes come. A long message shows its start until "Show more". The working line shows only
+  while the agent says it works: a turn whose end was never written is not under way once the
+  agent is idle. Every behaviour the old face's e2e covered is now a thread-view e2e of the
+  same behaviour, with the goldens renamed `thread-*`. The old face's code waits for S2.

@@ -180,6 +180,12 @@ impl ReviewView {
         self.thread
     }
 
+    /// The title of the thread it reviews, once known.
+    #[must_use]
+    pub fn title(&self, cx: &App) -> Option<String> {
+        self.hub.read(cx).threads().title(self.thread).map(str::to_owned)
+    }
+
     /// The span on show.
     #[must_use]
     pub const fn scope(&self) -> Scope {

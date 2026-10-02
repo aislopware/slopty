@@ -49,6 +49,7 @@ use slopty_proto::conversation::{
 use slopty_theme::Theme;
 
 use super::approval::Approvals;
+use super::composer::Attach;
 use super::diff::Block;
 use super::model::Model;
 use super::rows::{self, Density, Input, Row, RowKey};
@@ -156,43 +157,6 @@ pub enum FaceEvent {
     Rewind,
     /// Dial the unreachable worker now rather than at the end of its backoff.
     Reconnect,
-}
-
-/// What an attachment is before it goes up.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Attach {
-    /// A picture pasted into the composer: its bytes and the name it lands under.
-    Picture {
-        /// The name, [`composer::picture_name`].
-        name: String,
-        /// The encoded picture.
-        bytes: Vec<u8>,
-    },
-    /// Files copied here, pasted into the composer.
-    Files(Vec<std::path::PathBuf>),
-}
-
-/// The format of a pasted picture named `name` ([`composer::picture_name`]).
-fn picture_format(name: &str) -> Option<gpui::ImageFormat> {
-    match name.rsplit_once('.')?.1 {
-        "png" => Some(gpui::ImageFormat::Png),
-        "jpg" => Some(gpui::ImageFormat::Jpeg),
-        "gif" => Some(gpui::ImageFormat::Gif),
-        "webp" => Some(gpui::ImageFormat::Webp),
-        _ => None,
-    }
-}
-
-/// The extension of a picture Claude Code reads, for a pasted picture in `format`; `None` for
-/// one it does not.
-const fn picture_extension(format: gpui::ImageFormat) -> Option<&'static str> {
-    match format {
-        gpui::ImageFormat::Png => Some("png"),
-        gpui::ImageFormat::Jpeg => Some("jpg"),
-        gpui::ImageFormat::Gif => Some("gif"),
-        gpui::ImageFormat::Webp => Some("webp"),
-        _ => None,
-    }
 }
 
 /// A session's conversation face.
@@ -323,20 +287,6 @@ impl EventEmitter<FaceEvent> for ConversationView {}
 impl Focusable for ConversationView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.composer.focus_handle(cx)
-    }
-}
-
-/// What an attachment's chip calls it: the picture's name, the one file's, or how many.
-fn attachment_name(what: &Attach) -> String {
-    match what {
-        Attach::Picture { name, .. } => name.clone(),
-        Attach::Files(paths) => match paths.as_slice() {
-            [one] => one.file_name().map_or_else(
-                || one.to_string_lossy().into_owned(),
-                |n| n.to_string_lossy().into_owned(),
-            ),
-            many => format!("{} files", many.len()),
-        },
     }
 }
 
@@ -1152,43 +1102,14 @@ impl ConversationView {
     /// A paste into the composer: a picture with no text on the clipboard, or files copied here,
     /// are attached rather than pasted as text. Whether the paste was taken.
     pub fn paste_attachment(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
-        let mut files = Vec::new();
-        let mut picture = None;
-        for entry in item.entries() {
-            match entry {
-                gpui::ClipboardEntry::ExternalPaths(paths) => {
-                    files.extend_from_slice(paths.paths());
-                }
-                gpui::ClipboardEntry::Image(image) => {
-                    picture = picture.or_else(|| {
-                        picture_extension(image.format).map(|ext| (ext, image.bytes.clone()))
-                    });
-                }
-                gpui::ClipboardEntry::String(_) => {}
-            }
-        }
-        if !files.is_empty() {
-            self.attach(Attach::Files(files), cx);
-            return true;
-        }
-        let texted = item.text().is_some_and(|t| !t.is_empty());
-        match picture {
-            Some((ext, bytes)) if !texted => {
-                self.attach(Attach::Picture { name: composer::picture_name(ext), bytes }, cx);
-                true
-            }
-            _ => false,
-        }
+        Attach::of_paste(item).map(|what| self.attach(what, cx)).is_some()
     }
 
     /// Show `what`'s chip and ask the workspace to send it up.
     pub fn attach(&mut self, what: Attach, cx: &mut Context<Self>) {
-        let id = self.attachments.add(attachment_name(&what));
-        if let Attach::Picture { name, bytes } = &what
-            && let Some(format) = picture_format(name)
-        {
-            let picture = gpui::Image::from_bytes(format, bytes.clone());
-            self.thumbnails.insert(id, std::sync::Arc::new(picture));
+        let id = self.attachments.add(what.name());
+        if let Some(picture) = what.picture() {
+            self.thumbnails.insert(id, picture);
         }
         cx.emit(FaceEvent::Attach { id, what });
         cx.notify();
@@ -1197,7 +1118,7 @@ impl ConversationView {
     /// Show the chip of `what`, which the workspace sends up itself (a drop on the face), and
     /// say which it is.
     pub fn start_attachment(&mut self, what: &Attach) -> u64 {
-        self.attachments.add(attachment_name(what))
+        self.attachments.add(what.name())
     }
 
     /// The chips of what is attached to the draft.

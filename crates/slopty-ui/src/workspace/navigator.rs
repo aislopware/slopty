@@ -70,6 +70,7 @@ use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
+use slopty_proto::thread::attention::Rung;
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::actions::{ToggleNavigator, ToggleNavigatorLens};
@@ -647,6 +648,21 @@ const fn has_figure(progress: Progress) -> bool {
     measured && progress.percent.is_some()
 }
 
+/// What an agent says, its subagents at work folded in as a count: "Editing parser.rs, 2
+/// subagents", or the count alone. A count is a part of the words rather than a part of the
+/// line, so the line keeps its two separators.
+fn with_subagents(words: Option<String>, subagents: usize) -> Option<String> {
+    let count = match subagents {
+        0 => return words,
+        1 => "1 subagent".to_owned(),
+        n => format!("{n} subagents"),
+    };
+    Some(match words {
+        Some(words) if !words.is_empty() => format!("{words}, {count}"),
+        _ => count,
+    })
+}
+
 /// A progress report's figure at the end of a row's second line: "42%" while it has one.
 pub(super) fn progress_figure(progress: Progress) -> Option<String> {
     let percent = progress.percent.filter(|_| has_figure(progress))?;
@@ -1027,10 +1043,18 @@ impl WorkspaceView {
     /// ends in "Needs approval" already, and "Needs approval: …" under it said the state twice.
     /// An agent at rest gives what it last said and no state at all, "Idle · done" having read
     /// as two states; its age runs from when it came to rest, the one thing its row should say.
-    pub(super) fn tile_meta(&self, item: &Item, now: SystemTime) -> (String, Option<Duration>) {
+    ///
+    /// An agent's subagents at work fold into its words as a count (`cx` reads them).
+    pub(super) fn tile_meta(
+        &self,
+        item: &Item,
+        now: SystemTime,
+        cx: &gpui::App,
+    ) -> (String, Option<Duration>) {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let (doing, since) = self.shell_doing(*session);
+                let doing = with_subagents(doing, self.live_subagents(*session, cx));
                 let branch = self.summary(*session).and_then(|s| s.branch.as_deref());
                 let place = self
                     .session_tail(*session)
@@ -1092,13 +1116,15 @@ impl WorkspaceView {
         tile: TileRef,
         item: &Item,
         now: SystemTime,
+        cx: &gpui::App,
     ) -> (String, Option<Duration>) {
         let worker = self.worker_name(tile.worker);
         let ItemKind::Terminal { session } = item.kind else {
-            let (meta, age) = self.tile_meta(item, now);
+            let (meta, age) = self.tile_meta(item, now, cx);
             return (meta_line([Some(worker.as_str()), Some(meta.as_str())]), age);
         };
         let (doing, since) = self.shell_doing(session);
+        let doing = with_subagents(doing, self.live_subagents(session, cx));
         let summary = self.summary(session);
         let branch = summary.and_then(|s| s.branch.as_deref());
         let place = match summary.and_then(|s| Some((s.repo.as_deref()?, s.cwd.as_deref()?))) {
@@ -1140,9 +1166,9 @@ impl WorkspaceView {
                 rollup.add(mark, unseen);
                 let title = self.tile_title(item);
                 let (meta, age) = if by_repo {
-                    self.tile_meta_by_repo(tile, item, now)
+                    self.tile_meta_by_repo(tile, item, now, cx)
                 } else {
-                    self.tile_meta(item, now)
+                    self.tile_meta(item, now, cx)
                 };
                 let repo = match &item.kind {
                     ItemKind::Terminal { session } => {
@@ -1274,6 +1300,15 @@ impl WorkspaceView {
             place,
             since_ms: agent.map_or(0, |a| a.since_ms.as_millis()),
         }
+    }
+
+    /// How many of `session`'s subagents are at it: working, waiting on their own work, or on
+    /// the person. One that finished is its parent's history, not its present.
+    fn live_subagents(&self, session: slopty_core::SessionId, cx: &gpui::App) -> usize {
+        self.subagents(session, cx)
+            .iter()
+            .filter(|row| matches!(Rung::of(row), Rung::NeedsYou | Rung::Working | Rung::Waiting))
+            .count()
     }
 
     /// The words an agent's row under *Working* says.
@@ -1452,7 +1487,13 @@ impl WorkspaceView {
         let agents = |list: &[Waiting], status: Status| -> Vec<NavAgent> {
             list.iter()
                 .filter(|at| !seen(at))
-                .map(|at| self.nav_agent(*at, status))
+                .map(|at| {
+                    let mut agent = self.nav_agent(*at, status);
+                    let words = (!agent.words.is_empty()).then(|| std::mem::take(&mut agent.words));
+                    let subagents = self.live_subagents(at.session, cx);
+                    agent.words = with_subagents(words, subagents).unwrap_or_default();
+                    agent
+                })
                 .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
                 .collect()
         };

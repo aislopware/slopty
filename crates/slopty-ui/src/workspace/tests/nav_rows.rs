@@ -674,3 +674,48 @@ fn the_repository_lens_groups_across_workers(cx: &mut TestAppContext) {
     let saved = view.read_with(cx, |v, _| v.layout.save().navigator.lens);
     assert_eq!(saved, NavLens::Repositories, "kept with the layout");
 }
+
+/// An agent's subagents at work fold into its row as a count, and one that finished is not
+/// counted: the rail lists the agent once, saying how many it has out.
+#[gpui::test]
+fn an_agents_subagents_at_work_fold_into_its_row_as_a_count(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::TableFrame;
+    use slopty_proto::thread::{Cursor, Link, Phase, ThreadId};
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &studio, session, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let root = state.row(WallMs::ZERO);
+    let child = |phase: Phase| {
+        let mut row = root.clone();
+        row.id = ThreadId::new();
+        row.terminal = None;
+        row.parent =
+            Some(Link { thread: root.id, item: slopty_proto::thread::ItemId("call".to_owned()) });
+        row.status.phase = phase;
+        row
+    };
+    let meta = |rows: Vec<slopty_proto::thread::wire::ThreadRow>, cx: &mut VisualTestContext| {
+        let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+        view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
+        cx.run_until_parked();
+        view.update(cx, |v, cx| {
+            let item = v.item(tile).cloned().expect("the tile");
+            v.tile_meta(&item, SystemTime::now(), cx).0
+        })
+    };
+    let one = meta(vec![root.clone(), child(Phase::Working), child(Phase::Done)], cx);
+    assert!(one.contains("1 subagent") && !one.contains("subagents"), "{one}");
+    let two = meta(vec![root.clone(), child(Phase::Working), child(Phase::Waiting)], cx);
+    assert!(two.contains("2 subagents"), "{two}");
+    let none = meta(vec![root.clone(), child(Phase::Done)], cx);
+    assert!(!none.contains("subagent"), "a finished one is not counted: {none}");
+}

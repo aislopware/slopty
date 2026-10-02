@@ -251,6 +251,12 @@ impl Attention {
         self.server_led = led;
     }
 
+    /// Whether the server's notices decide which agent moments post and sound.
+    #[must_use]
+    pub const fn server_led(&self) -> bool {
+        self.server_led
+    }
+
     /// The server picked this client to say `heard`: posted while the app is not in front,
     /// where the inbox already says it. A wait's note gets its approval buttons from the next
     /// [`Self::look`].

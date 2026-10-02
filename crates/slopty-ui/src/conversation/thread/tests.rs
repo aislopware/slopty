@@ -289,3 +289,6 @@ fn timing_of_the_thread_path() {
     println!("rows built, settled turns folded: {built:?}; every turn open: {built_open:?}");
     println!("activity bar: {bar:?}");
 }
+
+mod composing;
+mod steps;

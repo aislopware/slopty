@@ -11,7 +11,6 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{Context, Subscription, Window};
-use slopty_client::layout::WorkerKey;
 use slopty_core::{ItemId, SessionId};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::ThreadId;
@@ -34,13 +33,12 @@ impl WorkspaceView {
     /// Open the review a thread view asked for since the last frame: go to its tile when one is
     /// open, else add one on the worker whose agent runs the thread.
     pub(super) fn settle_reviews(&mut self, cx: &mut Context<Self>) {
-        let Some((thread, view)) = self.take_review() else { return };
+        let Some((key, thread, view)) = self.take_review() else { return };
         self.hear_review(thread, &view, cx);
         if let Some(id) = self.review_item(thread) {
             self.go_to(id, cx);
             return;
         }
-        let Some(key) = self.thread_worker(thread, cx) else { return };
         let item = Item {
             id: ItemId::new(),
             kind: ItemKind::Review { thread },
@@ -105,11 +103,6 @@ impl WorkspaceView {
             .flat_map(|w| w.sessions.keys())
             .copied()
             .find(|s| self.thread_face(*s).is_some_and(|v| v.read(cx).thread() == thread))
-    }
-
-    /// The worker whose agent runs `thread`.
-    fn thread_worker(&self, thread: ThreadId, cx: &gpui::App) -> Option<WorkerKey> {
-        self.thread_session(thread, cx).and_then(|s| self.worker_of_session(s))
     }
 
     /// Hear the review of `thread`: comments sent take the keyboard to the agent's tile.

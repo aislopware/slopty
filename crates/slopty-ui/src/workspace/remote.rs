@@ -7,7 +7,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{AppContext as _, Context, Entity, WeakEntity, Window};
+use gpui::{AppContext as _, Context, WeakEntity, Window};
 use slopty_client::clip::{Answer, Fetched, relay};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
@@ -34,7 +34,8 @@ pub use drop_in::DropIn;
 use super::actions::{ListPorts, SaveCopy};
 use super::{KeyTarget, WorkspaceView};
 use crate::clipboard::{ClipFiles, ClipSync, provider, shell_paste, worker_file_paths};
-use crate::conversation::{Attach, ConversationView};
+use crate::conversation::Attach;
+use crate::conversation::composer::Target;
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
 use crate::terminal::{ClipHook, ClipPaste};
@@ -64,8 +65,8 @@ pub struct Upload {
     pub paste: Option<WeakEntity<ScreenView>>,
     /// Where files brought from another worker wait to go up, deleted once the upload ends.
     pub scratch: Option<PathBuf>,
-    /// The face whose composer the files are attached to, and the attachment's chip there.
-    pub attach: Option<(WeakEntity<ConversationView>, u64)>,
+    /// The composer the files are attached to, and the attachment's chip there.
+    pub attach: Option<(Target, u64)>,
     /// The drag from this device whose drop the files are, into its landing on the worker.
     pub drag: Option<DragId>,
 }
@@ -104,10 +105,10 @@ impl Upload {
     }
 
     /// Nothing sent yet, to a directory of its own on the worker, its paths typed into
-    /// `face`'s composer once done, where chip `id` shows it meanwhile.
+    /// `composer` once done, where chip `id` shows it meanwhile.
     #[must_use]
-    pub fn to_face(tile: TileRef, face: WeakEntity<ConversationView>, id: u64) -> Self {
-        Self { attach: Some((face, id)), ..Self::to_staging(tile) }
+    pub fn to_face(tile: TileRef, composer: Target, id: u64) -> Self {
+        Self { attach: Some((composer, id)), ..Self::to_staging(tile) }
     }
 
     /// Nothing sent yet, into the landing on the worker of `drag`, a drag over `tile`, which
@@ -422,8 +423,8 @@ impl WorkspaceView {
         if let Some(view) = upload.paste {
             let _gone = view.update(cx, |v, _cx| v.release_paste());
         }
-        if let Some((face, id)) = upload.attach {
-            let _gone = face.update(cx, |v, cx| v.attachment_ended(id, cx));
+        if let Some((composer, id)) = upload.attach {
+            composer.ended(id, cx);
         }
         if let Some(scratch) = upload.scratch {
             cx.background_executor()
@@ -487,16 +488,16 @@ impl WorkspaceView {
     pub(super) fn attach_to_face(
         &mut self,
         session: SessionId,
+        composer: Target,
         id: u64,
         what: Attach,
         cx: &mut Context<Self>,
     ) {
-        let Some(face) = self.faces.views.get(&session).map(Entity::downgrade) else { return };
         let Some(tile) = self.tile_of_session(session) else {
-            let _gone = face.update(cx, |v, cx| v.attachment_ended(id, cx));
+            composer.ended(id, cx);
             return;
         };
-        let upload = Upload::to_face(tile, face, id);
+        let upload = Upload::to_face(tile, composer, id);
         match what {
             Attach::Files(paths) => {
                 let _started = self.upload(tile, &paths, upload, cx);
@@ -528,10 +529,9 @@ impl WorkspaceView {
 
     /// The human took attachment `id` off `session`'s draft: its upload stops. A picture still
     /// being written here has no upload yet; it goes up, and lands on no chip.
-    pub(super) fn detach_from_face(&mut self, session: SessionId, id: u64, cx: &mut Context<Self>) {
-        let Some(face) = self.faces.views.get(&session).map(Entity::downgrade) else { return };
+    pub(super) fn detach_from_face(&mut self, composer: &Target, id: u64, cx: &mut Context<Self>) {
         let xfer = self.uploads.iter().find_map(|(xfer, upload)| {
-            upload.attach.as_ref().filter(|(f, at)| *at == id && *f == face).map(|_| *xfer)
+            upload.attach.as_ref().filter(|(c, at)| *at == id && c == composer).map(|_| *xfer)
         });
         if let Some(xfer) = xfer {
             self.cancel_upload(xfer, cx);
@@ -559,12 +559,10 @@ impl WorkspaceView {
         let landing = self.drop_landing.take();
         let upload = match self.item(tile).map(|i| &i.kind) {
             Some(ItemKind::Terminal { session })
-                if let Some(face) =
-                    self.faces.views.get(session).filter(|_| self.face_shown(*session)) =>
+                if let Some(composer) = self.shown_composer(*session)
+                    && let Some(id) = composer.start(&Attach::Files(paths.to_vec()), cx) =>
             {
-                let what = Attach::Files(paths.to_vec());
-                let id = face.update(cx, |v, _cx| v.start_attachment(&what));
-                Upload::to_face(tile, face.downgrade(), id)
+                Upload::to_face(tile, composer, id)
             }
             Some(ItemKind::Terminal { session }) => Upload::to_shell(tile, *session),
             Some(ItemKind::Window { .. } | ItemKind::Display { .. }) => Upload::to_staging(tile),
@@ -674,10 +672,8 @@ impl WorkspaceView {
                     && upload.done != done
                 {
                     upload.done = done;
-                    if let Some((face, id)) = upload.attach.clone() {
-                        let fraction = upload.fraction();
-                        let _gone =
-                            face.update(cx, |v, cx| v.attachment_progress(id, fraction, cx));
+                    if let Some((composer, id)) = upload.attach.clone() {
+                        composer.progress(id, upload.fraction(), cx);
                     }
                     cx.notify();
                 }
@@ -696,8 +692,8 @@ impl WorkspaceView {
                         );
                     }
                     Some(_) => {}
-                    None if let Some((face, id)) = upload.attach.clone() => {
-                        let _gone = face.update(cx, |v, cx| v.attachment_landed(id, &paths, cx));
+                    None if let Some((composer, id)) = upload.attach.clone() => {
+                        composer.landed(id, &paths, cx);
                     }
                     None if upload.dir.is_some() => self.refresh_folder(upload.tile.item, cx),
                     None if upload.paste.is_some() || upload.drag.is_some() => {}

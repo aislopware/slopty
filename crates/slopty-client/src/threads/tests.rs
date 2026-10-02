@@ -357,3 +357,27 @@ fn an_item_s_revision_moves_with_it_and_with_a_fresh_snapshot() {
     let _took = threads.frame(thread, snapshot(thread, 9));
     assert_ne!(rev(&threads, &u2), other, "a snapshot replaces every item");
 }
+
+#[test]
+fn a_thread_s_title_is_its_state_s_else_its_row_s() {
+    let (titled, untitled, unknown) = (ThreadId::new(), ThreadId::new(), ThreadId::new());
+    let mut threads = followed(titled);
+    let mut bare = meta(untitled);
+    bare.title = String::new();
+    let rows = vec![
+        ThreadState::new(meta(titled)).row(WallMs::ZERO),
+        ThreadState::new(bare).row(WallMs::ZERO),
+    ];
+    threads.table(&TableFrame::Snapshot { cursor: Cursor { epoch: 3, seq: 1 }, rows });
+    assert_eq!(threads.title(titled), Some("Fix the build"), "followed, from its state");
+    assert_eq!(threads.title(untitled), None, "a blank title is none");
+    let mut row = ThreadState::new(meta(unknown)).row(WallMs::ZERO);
+    row.title = "From the table".to_owned();
+    let delta = TableFrame::Delta {
+        cursor: Cursor { epoch: 3, seq: 2 },
+        rows: vec![row],
+        removed: Vec::new(),
+    };
+    threads.table(&delta);
+    assert_eq!(threads.title(unknown), Some("From the table"), "unfollowed, from its row");
+}

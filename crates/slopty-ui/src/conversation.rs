@@ -22,6 +22,7 @@
 
 mod actions;
 pub mod approval;
+pub mod chips;
 pub mod composer;
 pub mod diff;
 pub mod figures;
@@ -38,7 +39,8 @@ pub mod tools;
 pub mod view;
 
 pub use actions::{CycleDensity, Interrupt};
-pub use view::{Attach, ConversationView, FaceEvent, HeaderChips};
+pub use composer::Attach;
+pub use view::{ConversationView, FaceEvent, HeaderChips};
 
 /// The key context the face binds in.
 pub const CTX: &str = "Conversation";

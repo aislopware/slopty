@@ -12,7 +12,7 @@ use std::time::Duration;
 use gpui::Context;
 use slopty_client::directory::{self, Change, Dial, Directory, ServerState};
 use slopty_client::layout::WorkerKey;
-use slopty_client::server::{ServerEvent, ServerTask};
+use slopty_client::server::{ServerCaller, ServerEvent, ServerTask};
 use slopty_core::WorkerId;
 use slopty_net::HostAddr;
 use slopty_net::server::ServerLink;
@@ -133,6 +133,11 @@ pub(crate) async fn write_cache(
 }
 
 impl Workspace {
+    /// A handle on the server link, while one runs.
+    pub(crate) fn server_caller(&self) -> Option<ServerCaller> {
+        self.server.as_ref()?.task.as_ref().map(ServerTask::caller)
+    }
+
     /// Use the server at `address`, or none. The same address again changes nothing; another
     /// one drops the old link and the workers only it listed. `first` is a link that already
     /// proved the address.
@@ -149,6 +154,7 @@ impl Workspace {
         let had_server = previous.is_some();
         // The old link ends here, before the new one is dialled.
         drop(previous.and_then(|s| s.task));
+        self.server_leads(false, cx);
         self.server_generation = self.server_generation.wrapping_add(1);
         let unlisted = self.directory.clear();
         self.view.update(cx, |v, cx| {
@@ -231,6 +237,7 @@ impl Workspace {
                 tracing::info!(%name, link, "server linked");
                 self.directory.set_server(ServerState::Linked { name, link });
                 self.view.update(cx, |v, cx| v.set_server_status(None, cx));
+                self.server_leads(true, cx);
             }
             ServerEvent::Unlinked { why } => self.server_down(why, UNREACHABLE, cx),
             ServerEvent::Refused(why) => {
@@ -260,6 +267,7 @@ impl Workspace {
     /// The server link is down, for `why`; the titlebar says `status` until it is back.
     fn server_down(&mut self, why: String, status: &str, cx: &mut Context<Self>) {
         let was_linked = self.directory.linked();
+        self.server_leads(false, cx);
         self.directory.set_server(ServerState::Unreachable { why });
         self.view.update(cx, |v, cx| v.set_server_status(Some(status.to_owned()), cx));
         if was_linked {
@@ -328,8 +336,10 @@ impl Workspace {
                 | Happening::SessionOpened { .. }
                 | Happening::SessionExited { .. } => {}
             },
-            // The workspace's to show; until it does, nothing here takes them.
-            Change::Ladder(_) | Change::Present(_) | Change::Notice(_) => {}
+            Change::Present(present) => self.heard_present(&present),
+            Change::Notice(notice) => self.heard_notice(&notice, cx),
+            // The workspace's to show; until it does, nothing here takes it.
+            Change::Ladder(_) => {}
             Change::Terminals(terminals) => {
                 let agents = terminals
                     .into_iter()

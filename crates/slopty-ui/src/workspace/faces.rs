@@ -17,7 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use gpui::{AppContext as _, Context, Entity, Focusable as _, Keystroke, Window};
+use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Keystroke, Window};
 use slopty_client::layout::WorkerKey;
 use slopty_core::{ClientId, SessionId};
 use slopty_proto::ClientMsg;
@@ -25,12 +25,12 @@ use slopty_proto::agent::AgentStatus;
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
 use slopty_proto::items::ItemKind;
 use slopty_proto::terminal::TermRequest;
-use slopty_proto::thread::ThreadId;
-use slopty_proto::thread::wire::{IntentDone, TableFrame, ThreadFrame};
+use slopty_proto::thread::wire::{IntentDone, TableFrame, ThreadFrame, ThreadRow};
+use slopty_proto::thread::{Meters, ThreadId};
 
 use super::WorkspaceView;
 use super::actions::ToggleConversation;
-use crate::conversation::composer::{self, Step};
+use crate::conversation::composer::{self, Step, Target};
 use crate::conversation::thread::{HubEvent, ThreadHub, ThreadView, ThreadViewEvent};
 use crate::conversation::{ConversationView, FaceEvent, menu};
 use crate::icons::Status;
@@ -77,8 +77,8 @@ pub(super) struct ThreadFaces {
     /// A thread view asked for its thread's review: made in the next sync, for the strip to
     /// open ([`WorkspaceView::take_review`]).
     review_asked: Option<(WorkerKey, ThreadId)>,
-    /// A review tile made and not yet opened.
-    review_made: Option<ThreadId>,
+    /// A review tile made and not yet opened, and the worker whose agent runs its thread.
+    review_made: Option<(WorkerKey, ThreadId)>,
 }
 
 impl WorkspaceView {
@@ -102,11 +102,30 @@ impl WorkspaceView {
         self.faces.threads.views.get(&session).filter(|_| self.face_shown(session))
     }
 
-    /// The review tile a thread view asked for since this was last asked, for the strip to
-    /// open as a tile (`Handed::Review`).
-    pub fn take_review(&mut self) -> Option<(ThreadId, Entity<ReviewView>)> {
-        let thread = self.faces.threads.review_made.take()?;
-        self.faces.threads.reviews.get(&thread).map(|view| (thread, view.clone()))
+    /// The review tile a thread view asked for since this was last asked, with the worker
+    /// whose agent runs its thread, for the strip to open as a tile there (`Handed::Review`).
+    pub fn take_review(&mut self) -> Option<(WorkerKey, ThreadId, Entity<ReviewView>)> {
+        let (key, thread) = self.faces.threads.review_made.take()?;
+        self.faces.threads.reviews.get(&thread).map(|view| (key, thread, view.clone()))
+    }
+
+    /// The review tile of `thread` on `key`, made when there is none yet: a review item the
+    /// registry holds with no view, as after a relaunch, gets its view here.
+    pub fn open_review(
+        &mut self,
+        key: WorkerKey,
+        thread: ThreadId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ReviewView> {
+        if let Some(view) = self.faces.threads.reviews.get(&thread) {
+            return view.clone();
+        }
+        let hub = self.thread_hub(key, cx);
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| ReviewView::new(hub, thread, theme, window, cx));
+        self.faces.threads.reviews.insert(thread, view.clone());
+        view
     }
 
     /// The review tile of `thread`, while one is open.
@@ -166,9 +185,18 @@ impl WorkspaceView {
     }
 
     /// A frame of `key`'s thread table.
+    /// The meters of each terminal's own thread go to the boards whose nodes it runs.
     pub fn thread_table(&mut self, key: WorkerKey, frame: &TableFrame, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
+        let before = root_meters(&hub, cx);
         hub.update(cx, |hub, cx| hub.table(frame, cx));
+        let after = root_meters(&hub, cx);
+        for session in before.keys().filter(|s| !after.contains_key(s)) {
+            self.thread_meters(*session, None, cx);
+        }
+        for (session, meters) in after {
+            self.thread_meters(session, Some(meters), cx);
+        }
     }
 
     /// A frame of one of `key`'s threads.
@@ -232,33 +260,110 @@ impl WorkspaceView {
             let theme = self.theme.clone();
             let view = cx.new(|cx| ThreadView::new(hub, thread, theme, window, cx));
             let session = *session;
-            let asks =
-                cx.subscribe(&view, move |this, _view, event: &ThreadViewEvent, cx| match event {
-                    ThreadViewEvent::ShowTerminal => this.show_face(session, false, cx),
-                    ThreadViewEvent::Review { thread } => {
-                        if let Some(key) = this.worker_of_session(session) {
-                            this.faces.threads.review_asked = Some((key, *thread));
-                            cx.notify();
-                        }
-                    }
-                });
+            let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
+                this.thread_view_event(session, &view, event.clone(), cx);
+            });
             self.faces.threads.asks.insert(session, asks);
             self.faces.threads.views.insert(session, view);
         }
         if let Some((key, thread)) = self.faces.threads.review_asked.take() {
-            if !self.faces.threads.reviews.contains_key(&thread) {
-                let hub = self.thread_hub(key, cx);
-                let theme = self.theme.clone();
-                let review = cx.new(|cx| ReviewView::new(hub, thread, theme, window, cx));
-                self.faces.threads.reviews.insert(thread, review);
-            }
-            self.faces.threads.review_made = Some(thread);
+            let _view = self.open_review(key, thread, window, cx);
+            self.faces.threads.review_made = Some((key, thread));
             cx.notify();
         }
         let threads = &mut self.faces.threads;
         threads.views.retain(|s, _| wanted.contains(s) && threads.of_session.contains_key(s));
         let views = &threads.views;
         threads.asks.retain(|s, _| views.contains_key(s));
+    }
+
+    /// The subagent threads under `session`'s own thread, however deep: each row whose chain
+    /// of parents reaches it.
+    pub(super) fn subagents(&self, session: SessionId, cx: &App) -> Vec<ThreadRow> {
+        let Some(root) = self.faces.threads.of_session.get(&session).copied() else {
+            return Vec::new();
+        };
+        let Some(hub) =
+            self.worker_of_session(session).and_then(|k| self.faces.threads.hubs.get(&k))
+        else {
+            return Vec::new();
+        };
+        let rows = &hub.read(cx).threads().rows().rows;
+        let under = |row: &ThreadRow| {
+            // A chain longer than the table loops: it reaches nothing.
+            let mut link = row.parent.as_ref();
+            for _ in 0..rows.len() {
+                let Some(parent) = link else { return false };
+                if parent.thread == root {
+                    return true;
+                }
+                link = rows.get(&parent.thread).and_then(|r| r.parent.as_ref());
+            }
+            false
+        };
+        rows.values().filter(|row| under(row)).cloned().collect()
+    }
+
+    /// What a thread view asks for.
+    fn thread_view_event(
+        &mut self,
+        session: SessionId,
+        view: &Entity<ThreadView>,
+        event: ThreadViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ThreadViewEvent::ShowTerminal => self.show_face(session, false, cx),
+            ThreadViewEvent::Review { thread } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.faces.threads.review_asked = Some((key, thread));
+                    cx.notify();
+                }
+            }
+            ThreadViewEvent::Attach { id, what } => {
+                self.attach_to_face(session, Target::Thread(view.downgrade()), id, what, cx);
+            }
+            ThreadViewEvent::Detach { id } => {
+                self.detach_from_face(&Target::Thread(view.downgrade()), id, cx);
+            }
+            ThreadViewEvent::PickFiles => {
+                if let Some(tile) = self.tile_of_session(session) {
+                    self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+                }
+            }
+            ThreadViewEvent::FindFiles { root, query } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.send(key, ClientMsg::FindFiles { root, query });
+                }
+            }
+        }
+    }
+
+    /// `key` found `paths` under `root` for `query`: the thread views of its tiles that asked
+    /// list them in their `@` menus.
+    pub fn threads_found(
+        &self,
+        key: WorkerKey,
+        root: &str,
+        query: &str,
+        paths: &[String],
+        cx: &mut Context<Self>,
+    ) {
+        for (session, view) in &self.faces.threads.views {
+            if self.worker_of_session(*session) == Some(key) {
+                view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
+            }
+        }
+    }
+
+    /// The composer files dropped on `session`'s tile are attached to: its thread view's
+    /// while that shows, else its conversation face's while that shows.
+    pub(super) fn shown_composer(&self, session: SessionId) -> Option<Target> {
+        if let Some(view) = self.thread_face(session) {
+            return Some(Target::Thread(view.downgrade()));
+        }
+        let face = self.faces.views.get(&session).filter(|_| self.face_shown(session))?;
+        Some(Target::Face(face.downgrade()))
     }
 
     /// Whether `session`'s tile shows its face with an approval open in it: the card then says
@@ -466,8 +571,16 @@ impl WorkspaceView {
                 self.send_session(session, ClientMsg::Conversation(expand));
             }
             FaceEvent::ShowTerminal => self.show_face(session, false, cx),
-            FaceEvent::Attach { id, what } => self.attach_to_face(session, id, what, cx),
-            FaceEvent::Detach { id } => self.detach_from_face(session, id, cx),
+            FaceEvent::Attach { id, what } => {
+                if let Some(face) = self.faces.views.get(&session).map(Entity::downgrade) {
+                    self.attach_to_face(session, Target::Face(face), id, what, cx);
+                }
+            }
+            FaceEvent::Detach { id } => {
+                if let Some(face) = self.faces.views.get(&session).map(Entity::downgrade) {
+                    self.detach_from_face(&Target::Face(face), id, cx);
+                }
+            }
             FaceEvent::PickFiles => {
                 if let Some(tile) = self.tile_of_session(session) {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
@@ -589,4 +702,16 @@ impl WorkspaceView {
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
         self.face(session)?.summary.clone()
     }
+}
+
+/// The meters of each terminal's own thread in `hub`'s table: a subagent's are its parent's.
+fn root_meters(hub: &Entity<ThreadHub>, cx: &App) -> HashMap<SessionId, Meters> {
+    hub.read(cx)
+        .threads()
+        .rows()
+        .rows
+        .values()
+        .filter(|row| row.parent.is_none())
+        .filter_map(|row| Some((row.terminal?, row.meters.clone())))
+        .collect()
 }

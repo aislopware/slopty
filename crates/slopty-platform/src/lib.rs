@@ -30,6 +30,8 @@ pub mod drag;
 pub mod file_drop;
 pub mod fs;
 #[cfg(target_os = "macos")]
+pub mod idle;
+#[cfg(target_os = "macos")]
 pub mod input_source;
 #[cfg(target_vendor = "apple")]
 pub mod keyboard;

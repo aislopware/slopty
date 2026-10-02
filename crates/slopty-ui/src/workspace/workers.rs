@@ -717,7 +717,7 @@ impl WorkspaceView {
             TerminalViewEvent::Bell => cx.emit(WorkspaceEvent::Bell(sid)),
             // The Dock bounce; the banner while the app is away is the app's
             // (`attention::Attention::program`).
-            TerminalViewEvent::Notification { .. } => cx.emit(WorkspaceEvent::Attention(sid)),
+            TerminalViewEvent::Notification { .. } => cx.emit(WorkspaceEvent::Program(sid)),
             TerminalViewEvent::Exited(status) => this.session_exited(sid, *status, cx),
             TerminalViewEvent::CloseConfirmed => this.close_shell(sid, cx),
             TerminalViewEvent::Title(_) => this.terminal_changed(sid, cx),

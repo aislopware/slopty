@@ -23,10 +23,11 @@ use gpui::{
     ListState, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
     Styled as _, Subscription, Task, Window, div, list, px, relative,
 };
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{self, InputEvent, Textarea, TextareaState};
 use gpui_kit::component::text::{TextView, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
+use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::{Expanded, Intent};
 use slopty_proto::thread::{
     AgentId, Clipped, Delivery, Effect, IntentId, Item, ItemBody, ItemId, Phase, Request, ThreadId,
@@ -34,13 +35,15 @@ use slopty_proto::thread::{
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
-use super::activity::{Activity, Asked, STEP_DONE};
+use self::composing::Composing;
+use super::activity::{Activity, Asked, Edit, STEP_DONE};
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
+use crate::conversation::composer::Attach;
 use crate::conversation::diff::{self, Block};
 use crate::conversation::lines::{self, Ink};
-use crate::conversation::{CTX, Interrupt};
+use crate::conversation::{CTX, CycleDensity, Interrupt};
 use crate::icons::{IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
 
@@ -71,11 +74,19 @@ const PARAGRAPH: f32 = 10.0;
 /// The widest a message's bubble grows, as a share of the column.
 const BUBBLE: f32 = 0.85;
 
+/// A message longer than this many lines or characters shows its start first.
+const BUBBLE_LINES: usize = 8;
+const BUBBLE_CHARS: usize = 480;
+
+mod composing;
+mod pictures;
+mod trail;
+
 /// Diffs coloured once, by call.
 type Coloured = HashMap<ItemId, Rc<[Block]>>;
 
 /// What a thread view asks of the workspace.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ThreadViewEvent {
     /// Show the agent's own terminal in the tile instead.
     ShowTerminal,
@@ -83,6 +94,30 @@ pub enum ThreadViewEvent {
     Review {
         /// The thread.
         thread: ThreadId,
+    },
+    /// Upload this for the draft; its chip is attachment `id`, which the workspace reports on
+    /// ([`ThreadView::attachment_progress`], [`ThreadView::attachment_landed`],
+    /// [`ThreadView::attachment_ended`]).
+    Attach {
+        /// The chip.
+        id: u64,
+        /// What goes up.
+        what: Attach,
+    },
+    /// The person took attachment `id` off the draft: its upload stops. Its chip is gone.
+    Detach {
+        /// The chip.
+        id: u64,
+    },
+    /// Show the system's picker; the files picked are attached as a drop on the tile is.
+    PickFiles,
+    /// Ask the worker for the paths under `root` an `@` query matches; the answer comes to
+    /// [`ThreadView::files_found`].
+    FindFiles {
+        /// The agent's directory.
+        root: String,
+        /// What follows the `@`.
+        query: String,
     },
 }
 
@@ -118,6 +153,12 @@ pub struct ThreadView {
     diffs: RefCell<Coloured>,
     /// Ticks once a second while the agent works (the elapsed time).
     clock: Option<Task<()>>,
+    /// The composer's menus, attachments and the waiting message being changed.
+    composing: Composing,
+    /// The threads above a subagent's on show, the tile's own first.
+    trail: Vec<trail::Above>,
+    /// Pictures decoded once, by digest.
+    pictures: RefCell<HashMap<String, Arc<gpui::Image>>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -161,12 +202,15 @@ impl ThreadView {
                 .auto_grow(1, COMPOSER_ROWS)
                 .submit_on_enter(true)
         });
-        let composing = cx.subscribe_in(&composer, window, |this, _input, event, window, cx| {
-            if let InputEvent::PressEnter { secondary, shift: false } = event {
-                let delivery = if *secondary { Delivery::Queue } else { Delivery::Steer };
-                this.submit(delivery, window, cx);
-            }
-        });
+        let composing =
+            cx.subscribe_in(&composer, window, |this, _input, event, window, cx| match event {
+                InputEvent::PressEnter { secondary, shift: false } => {
+                    let delivery = if *secondary { Delivery::Queue } else { Delivery::Steer };
+                    this.submit(delivery, window, cx);
+                }
+                InputEvent::Change => this.composer_changed(cx),
+                _ => {}
+            });
         let hearing = cx.subscribe(&hub, |this, _hub, event, cx| match event {
             HubEvent::Thread(t) if *t == this.thread => this.rebuild(cx),
             HubEvent::Table | HubEvent::Expanded(_) => cx.notify(),
@@ -182,7 +226,13 @@ impl ThreadView {
             }
         });
         cx.on_release(move |this, cx| {
-            this.hub.update(cx, |hub, cx| hub.close(thread, cx));
+            let shown: Vec<ThreadId> =
+                this.trail.iter().map(trail::Above::thread).chain([this.thread]).collect();
+            this.hub.update(cx, |hub, cx| {
+                for thread in shown {
+                    hub.close(thread, cx);
+                }
+            });
         })
         .detach();
         let mut view = Self {
@@ -205,6 +255,9 @@ impl ThreadView {
             plan_open: false,
             diffs: RefCell::default(),
             clock: None,
+            composing: Composing::default(),
+            trail: Vec::new(),
+            pictures: RefCell::default(),
             focus: cx.focus_handle(),
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -215,9 +268,15 @@ impl ThreadView {
 
     // ----- reading -----------------------------------------------------------------------
 
-    /// The thread on show.
+    /// The tile's own thread, whichever of its subagents' is on show.
     #[must_use]
-    pub const fn thread(&self) -> ThreadId {
+    pub fn thread(&self) -> ThreadId {
+        self.trail.first().map_or(self.thread, trail::Above::thread)
+    }
+
+    /// The thread on show: the tile's own, or a subagent's opened from it.
+    #[must_use]
+    pub const fn shown(&self) -> ThreadId {
         self.thread
     }
 
@@ -316,9 +375,7 @@ impl ThreadView {
     }
 
     fn working(&self, cx: &App) -> bool {
-        self.state(cx)
-            .and_then(ThreadState::last_turn)
-            .is_some_and(|t| matches!(t.state, TurnState::Active))
+        self.state(cx).and_then(rows::under_way).is_some()
     }
 
     // ----- rows ------------------------------------------------------------------------
@@ -410,15 +467,38 @@ impl ThreadView {
         self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx))
     }
 
-    /// Send the draft: now, into the turn under way (↵), or once it ends (⌘↵).
-    fn submit(&self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.draft(cx).trim().to_owned();
-        if text.is_empty() {
+    /// Send the draft, led by what was attached: now, into the turn under way (↵), or once it
+    /// ends (⌘↵). While a waiting message is being changed, either sends the change.
+    fn submit(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composing.editing() {
+            self.save_edit(window, cx);
             return;
         }
+        let Some(text) = self.take_message(cx) else { return };
         let _id = self.intent(Intent::Send { text, delivery }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
         self.list.scroll_to_end();
+    }
+
+    /// A key the composer's field would take: `take` has it first, while the field has the
+    /// keyboard and no input method composes, and the field never sees it once taken.
+    fn menu_key(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        take: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> bool,
+    ) {
+        if !self.composing(cx) && self.composer_focused(window, cx) && take(self, window, cx) {
+            cx.stop_propagation();
+        }
+    }
+
+    /// Esc in the composer with nothing else to close: the turn under way stops. Whether one
+    /// was under way.
+    fn stop_by_key(&self, cx: &mut Context<Self>) -> bool {
+        let working = self.working(cx);
+        self.interrupt(cx);
+        working
     }
 
     /// Stop the turn under way.
@@ -431,6 +511,34 @@ impl ThreadView {
 
     fn answer(&self, ask: slopty_proto::thread::AskId, choice: String, cx: &mut Context<Self>) {
         let _id = self.intent(Intent::Answer { ask, choice, message: None }, cx);
+    }
+
+    /// ⌃O: every settled turn opens and every step with it, the turn under way's too; all
+    /// open, they fold again.
+    fn every_step(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.state(cx) else { return };
+        let settled: Vec<TurnId> = state
+            .turns
+            .iter()
+            .filter(|t| !matches!(t.state, TurnState::Active))
+            .map(|t| t.id)
+            .collect();
+        let steps: Vec<ItemId> = state
+            .items
+            .iter()
+            .filter(|i| matches!(i.body, ItemBody::Reasoning(_) | ItemBody::Tool(_)))
+            .map(|i| i.id.clone())
+            .collect();
+        let all_open = settled.iter().all(|t| self.open.contains(t))
+            && steps.iter().all(|i| self.items_open.contains(i));
+        if all_open {
+            self.open.clear();
+            self.items_open.clear();
+        } else {
+            self.open.extend(settled);
+            self.items_open.extend(steps);
+        }
+        self.rebuild(cx);
     }
 
     fn toggle_turn(&mut self, turn: TurnId, cx: &mut Context<Self>) {
@@ -671,7 +779,7 @@ impl ThreadView {
         self.column(inner).pt(self.z(if first { spacing.lg } else { gap })).into_any_element()
     }
 
-    fn user_row(&self, ix: usize, id: &ItemId, cx: &Context<Self>) -> AnyElement {
+    fn user_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
         let Some(Item { body: ItemBody::User(message), .. }) = self.item(ix, id, cx) else {
             return div().into_any_element();
         };
@@ -679,19 +787,51 @@ impl ThreadView {
             Some(command) if message.text.text.trim().is_empty() => format!("/{command}"),
             _ => message.text.text.clone(),
         };
-        self.bubble(words, None, false)
+        let images = message.images.clone();
+        let pictures = self.pictures_row(&images, true, cx);
+        // A long message shows its start until the reader asks for the rest.
+        let cut = (!self.whole.contains(id)).then(|| clamp(&words)).flatten();
+        let more = cut.is_some().then(|| {
+            let item = id.clone();
+            let s = self.theme.surfaces;
+            div()
+                .id(ElementId::Name(format!("more-{}", id.0).into()))
+                .role(Role::Button)
+                .aria_label("Show more")
+                .text_size(self.z(self.theme.typography.small()))
+                .text_color(hsla(s.text_muted))
+                .cursor_pointer()
+                .hover(move |el| el.text_color(hsla(s.text)))
+                .child("Show more")
+                .on_click(cx.listener(move |this, _ev, _w, cx| this.show_whole(item.clone(), cx)))
+                .into_any_element()
+        });
+        let shown = cut.unwrap_or(words);
+        self.bubble(format!("item-{}", id.0), shown, pictures, more, false)
     }
 
-    /// What the person sent, on the raised surface at the column's right.
-    fn bubble(&self, words: String, under: Option<AnyElement>, faded: bool) -> AnyElement {
+    /// What the person sent, on the raised surface at the column's right, its pictures over it.
+    fn bubble(
+        &self,
+        id: String,
+        words: String,
+        pictures: Option<AnyElement>,
+        under: Option<AnyElement>,
+        faded: bool,
+    ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
+        let label = SharedString::from(format!("You: {}", kit::first_line(&words)));
         div()
+            .id(ElementId::Name(id.into()))
+            .role(Role::Article)
+            .aria_label(label)
             .w_full()
             .flex()
             .flex_col()
             .items_end()
             .gap(self.z(theme.spacing.xxs))
+            .children(pictures)
             .child(
                 div()
                     .max_w(relative(BUBBLE))
@@ -719,7 +859,11 @@ impl ThreadView {
         };
         let (text, clipped_more) = self.text_of(id, &clipped, cx);
         let theme = &self.theme;
+        let label = SharedString::from(kit::first_line(&text).to_owned());
         div()
+            .id(ElementId::Name(format!("item-{}", id.0).into()))
+            .role(Role::Article)
+            .aria_label(label)
             .w_full()
             .flex()
             .flex_col()
@@ -748,6 +892,7 @@ impl ThreadView {
                 div()
                     .id(ElementId::Name(format!("reasoning-{}", id.0).into()))
                     .role(Role::Button)
+                    .aria_label("Thought")
                     .aria_expanded(open)
                     .flex()
                     .items_center()
@@ -786,9 +931,11 @@ impl ThreadView {
             .into_any_element()
     }
 
-    fn tool_row(&self, ix: usize, id: &ItemId, cx: &Context<Self>) -> AnyElement {
-        let Some(item) = self.item(ix, id, cx) else { return div().into_any_element() };
+    fn tool_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
+        let Some(item) = self.item(ix, id, cx).cloned() else { return div().into_any_element() };
         let ItemBody::Tool(call) = &item.body else { return div().into_any_element() };
+        // A subagent's call opens its thread, once the table has it.
+        let child = call.child.filter(|c| self.hub.read(cx).threads().rows().rows.contains_key(c));
         let theme = &self.theme;
         let s = theme.surfaces;
         let open = self.items_open.contains(id);
@@ -806,6 +953,12 @@ impl ThreadView {
             .filter(|end| *end > item.at_ms && !item.at_ms.is_zero())
             .map(|end| kit::duration(Duration::from_millis(end.millis_since(item.at_ms))));
         let waiting = matches!(call.state, ToolState::Pending { .. });
+        let called = title.clone();
+        let label = match (&call.state, child) {
+            (ToolState::Streaming, _) => format!("Preparing {}", call.name),
+            (_, Some(_)) => format!("Subagent {title}"),
+            _ => title.clone(),
+        };
         let toggle = id.clone();
         let line = div()
             .id(ElementId::Name(format!("tool-{}", id.0).into()))
@@ -814,8 +967,8 @@ impl ThreadView {
                 move || format!("tool-{id}")
             })
             .role(Role::Button)
-            .aria_label(SharedString::from(title.clone()))
-            .aria_expanded(open)
+            .aria_label(SharedString::from(label))
+            .when(child.is_none(), |el| el.aria_expanded(open))
             .w_full()
             .flex()
             .items_center()
@@ -847,14 +1000,22 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(t))
             }))
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_item(toggle.clone(), cx)));
+            .when_some(child, |el, _| el.child(self.icon(IconName::ChevronRight, s.text_muted)))
+            .on_click(cx.listener(move |this, _ev, window, cx| match child {
+                Some(child) => this.open_subagent(child, called.clone(), window, cx),
+                None => this.toggle_item(toggle.clone(), cx),
+            }));
+        let body = open.then(|| self.tool_body(id, call)).flatten();
+        let pictures = if open { self.pictures_row(&call.images, false, cx) } else { None };
+        let indent = self.z(TOOL_ROW + self.theme.spacing.xs);
         div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(self.z(theme.spacing.xxs))
+            .gap(self.z(self.theme.spacing.xxs))
             .child(line)
-            .when(open, |el| el.children(self.tool_body(id, call)))
+            .children(body)
+            .children(pictures.map(|p| div().pl(indent).child(p)))
             .into_any_element()
     }
 
@@ -1070,7 +1231,13 @@ impl ThreadView {
         };
         div()
             .debug_selector(move || format!("sending-{intent}"))
-            .child(self.bubble(text.clone(), Some(under), sent.failure().is_none()))
+            .child(self.bubble(
+                format!("sending-bubble-{}", sent.id),
+                text.clone(),
+                None,
+                Some(under),
+                sent.failure().is_none(),
+            ))
             .into_any_element()
     }
 
@@ -1108,6 +1275,7 @@ impl ThreadView {
                 .id("thread-header")
                 .debug_selector(|| "thread-header".to_owned())
                 .role(Role::Banner)
+                .aria_label(SharedString::from(title.clone()))
                 .flex_none()
                 .w_full()
                 .flex()
@@ -1210,6 +1378,9 @@ impl ThreadView {
         }
         for queued in &bar.queue {
             sections.push(self.queued_line(queued, bar.can_withdraw, cx));
+        }
+        if !bar.background.is_empty() {
+            sections.push(self.background_section(&bar.background));
         }
         for task in &bar.tasks {
             sections.push(self.task_line(task, bar.can_stop, cx));
@@ -1427,6 +1598,7 @@ impl ThreadView {
             self.section()
                 .id("thread-plan")
                 .role(Role::Button)
+                .aria_label(SharedString::from(format!("Plan, {done} of {total} done")))
                 .aria_expanded(open)
                 .cursor_pointer()
                 .text_color(hsla(s.text_secondary))
@@ -1481,7 +1653,10 @@ impl ThreadView {
         };
         let thread = self.thread;
         self.section()
+            .id("thread-edited")
             .debug_selector(|| "thread-edited".to_owned())
+            .role(Role::Group)
+            .aria_label(SharedString::from(words.clone()))
             .text_color(hsla(s.text_secondary))
             .child(self.slot().child(self.icon(IconName::FilePen, s.text_muted)))
             .child(
@@ -1502,20 +1677,31 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// A waiting message: its first line, where it is, and the ways to change it or take it
+    /// back while the worker holds it.
     fn queued_line(
         &self,
         queued: &super::activity::Queued,
-        can_withdraw: bool,
+        can_change: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
         let s = self.theme.surfaces;
         let pending = queued.intent;
-        let state = match (&queued.held, queued.on_worker, queued.withdrawing) {
-            (_, _, true) => Some("Taking back".to_owned()),
-            (Some(why), ..) => Some(why.clone()),
-            (None, false, _) => Some("Sending".to_owned()),
-            (None, true, false) => None,
+        let refused = match &queued.edit {
+            Some(Edit::Refused { intent, text, reason }) => Some((*intent, text.clone(), reason)),
+            Some(Edit::Sending) | None => None,
         };
+        let state = match (&queued.held, queued.on_worker, queued.withdrawing, &refused) {
+            (_, _, true, _) => Some("Taking back".to_owned()),
+            (.., Some((_, _, reason))) => Some(format!("Not changed: {reason}")),
+            (Some(why), ..) => Some(why.clone()),
+            (None, false, ..) => Some("Sending".to_owned()),
+            (None, true, false, None) => None,
+        };
+        let open = can_change && queued.on_worker && !queued.withdrawing;
+        let editable = open && !queued.going && !self.composing.editing();
+        // The words the composer takes: a refused change's, so they are not lost.
+        let words = refused.as_ref().map_or_else(|| queued.text.clone(), |(_, t, _)| t.clone());
         self.section()
             .debug_selector(move || format!("queued-{pending}"))
             .text_color(hsla(s.text_secondary))
@@ -1537,10 +1723,25 @@ impl ThreadView {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .text_size(self.z(self.theme.typography.meta()))
-                    .text_color(hsla(s.text_muted))
+                    .text_color(hsla(if refused.is_some() { s.warn } else { s.text_muted }))
                     .child(SharedString::from(st))
             }))
-            .when(can_withdraw && queued.on_worker && !queued.withdrawing, |el| {
+            .when(editable, |el| {
+                el.child(
+                    self.icon_button(format!("edit-{pending}"), IconName::Pencil, "Edit").on_click(
+                        cx.listener(move |this, _ev, window, cx| {
+                            this.start_edit(pending, &words, window, cx);
+                        }),
+                    ),
+                )
+            })
+            .when_some(refused.map(|(intent, ..)| intent), |el, intent| {
+                el.child(
+                    self.icon_button(format!("edit-dismiss-{pending}"), IconName::X, "Dismiss")
+                        .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(intent, cx))),
+                )
+            })
+            .when(open && queued.edit.is_none(), |el| {
                 el.child(
                     self.icon_button(format!("withdraw-{pending}"), IconName::X, "Take back")
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -1548,6 +1749,69 @@ impl ThreadView {
                         })),
                 )
             })
+            .into_any_element()
+    }
+
+    /// The commands run in the background, each with how it stands and its last line.
+    fn background_section(&self, background: &[super::activity::Background<'_>]) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let lines = background.iter().map(|bg| {
+            let state = match bg.detail.status {
+                ExecStatus::Running => "Running".to_owned(),
+                ExecStatus::Done => bg.detail.duration_ms.map_or_else(
+                    || "Done".to_owned(),
+                    |ms| format!("Done \u{b7} {}", kit::duration(Duration::from_millis(ms))),
+                ),
+                ExecStatus::Failed => "Failed".to_owned(),
+                ExecStatus::Interrupted => "Stopped".to_owned(),
+            };
+            let running = matches!(bg.detail.status, ExecStatus::Running);
+            let last = bg.output.and_then(|o| o.lines().rev().find(|l| !l.trim().is_empty()));
+            let label = SharedString::from(format!("{}: {state}", bg.title));
+            self.section()
+                .id(ElementId::Name(format!("background-{}", bg.item.0).into()))
+                .debug_selector({
+                    let id = bg.item.0.clone();
+                    move || format!("background-{id}")
+                })
+                .role(Role::Status)
+                .aria_label(label)
+                .text_color(hsla(s.text_secondary))
+                .child(self.slot().child(if running {
+                    self.spinner(true)
+                } else {
+                    self.icon(IconName::Terminal, s.text_muted)
+                }))
+                .child(div().flex_none().child(SharedString::from(bg.title.to_owned())))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .font_family(self.mono())
+                        .text_size(self.z(theme.typography.meta()))
+                        .text_color(hsla(s.text_muted))
+                        .children(last.map(|l| SharedString::from(l.trim().to_owned()))),
+                )
+                .child(
+                    kit::tabular(div())
+                        .flex_none()
+                        .text_size(self.z(theme.typography.meta()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(state)),
+                )
+        });
+        div()
+            .id("thread-background")
+            .role(Role::List)
+            .aria_label("In the background")
+            .w_full()
+            .flex()
+            .flex_col()
+            .children(lines)
             .into_any_element()
     }
 
@@ -1587,12 +1851,17 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// The field, over it the menu, the chips of what is attached or the line saying a waiting
+    /// message is being changed, and under it the way to attach, the model, and the way to
+    /// stop the turn.
     fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let working = self.working(cx);
         let stopping = self.hub.read(cx).threads().stopping(self.thread);
         let model = self.state(cx).and_then(|st| st.meters.model.clone());
+        let editing = self.composing.editing();
+        let view = cx.weak_entity();
         div()
             .id("thread-composer")
             .debug_selector(|| "thread-composer".to_owned())
@@ -1607,11 +1876,17 @@ impl ThreadView {
             .border_color(hsla(s.border))
             .bg(hsla(s.elevated))
             .text_size(self.z(theme.typography.prose()))
+            .children(self.menu_section(cx))
+            .children(self.editing_strip(cx))
+            .children(self.attachment_chips(cx))
             .child(
                 Textarea::new(&self.composer)
                     .appearance(false)
                     .bordered(false)
-                    .aria_label("Message"),
+                    .aria_label("Message")
+                    .on_paste(move |item, _window, cx| {
+                        view.update(cx, |v, cx| v.paste_attachment(item, cx)).unwrap_or(false)
+                    }),
             )
             .child(
                 div()
@@ -1620,6 +1895,14 @@ impl ThreadView {
                     .gap(self.z(theme.spacing.xs))
                     .text_size(self.z(theme.typography.meta()))
                     .text_color(hsla(s.text_muted))
+                    .when(!editing, |el| {
+                        el.child(
+                            self.icon_button("thread-attach", IconName::Paperclip, "Attach files")
+                                .on_click(cx.listener(|_this, _ev, _w, cx| {
+                                    cx.emit(ThreadViewEvent::PickFiles);
+                                })),
+                        )
+                    })
                     .children(model.map(|m| div().child(SharedString::from(m))))
                     .child(div().flex_1())
                     .when(working && !stopping, |el| {
@@ -1671,13 +1954,16 @@ impl ThreadView {
 }
 
 impl Render for ThreadView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_edit(window, cx);
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let header = self.header_bar(cx);
+        let trail = self.trail_bar(cx);
         let rows = self.list_region(cx);
         let bar = self.activity_bar(cx);
-        let composer = self.composer_box(cx);
+        // A subagent takes no messages: its thread is read, and answered from the bar.
+        let composer = (!self.in_subagent()).then(|| self.composer_box(cx));
         div()
             .id("thread")
             .debug_selector(|| "thread".to_owned())
@@ -1685,7 +1971,37 @@ impl Render for ThreadView {
             .track_focus(&self.focus)
             .role(Role::Group)
             .aria_label("Thread")
-            .on_action(cx.listener(|this, _: &Interrupt, _w, cx| this.interrupt(cx)))
+            .on_action(cx.listener(|this, _: &Interrupt, window, cx| {
+                if !this.leave_subagent(window, cx) {
+                    this.interrupt(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
+            // The composer's menu and a change to a waiting message take the arrows, ↵, ⇥ and
+            // Esc before the field does; Esc otherwise stops the turn under way. While an input
+            // method composes, these keys are all its own.
+            .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
+                this.menu_key(window, cx, |this, _w, cx| this.menu_step(-1, cx));
+            }))
+            .capture_action(cx.listener(|this, _: &input::MoveDown, window, cx| {
+                this.menu_key(window, cx, |this, _w, cx| this.menu_step(1, cx));
+            }))
+            .capture_action(cx.listener(|this, enter: &input::Enter, window, cx| {
+                if !enter.shift && !enter.secondary {
+                    this.menu_key(window, cx, Self::menu_enter);
+                }
+            }))
+            .capture_action(cx.listener(|this, _: &input::IndentInline, window, cx| {
+                this.menu_key(window, cx, Self::menu_enter);
+            }))
+            .capture_action(cx.listener(|this, _: &input::Escape, window, cx| {
+                this.menu_key(window, cx, |this, window, cx| {
+                    this.menu_close(cx)
+                        || this.cancel_edit(window, cx)
+                        || this.leave_subagent(window, cx)
+                        || this.stop_by_key(cx)
+                });
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -1695,6 +2011,7 @@ impl Render for ThreadView {
             .text_size(self.z(theme.typography.ui_size))
             .text_color(hsla(s.text))
             .children(header)
+            .children(trail)
             .child(rows)
             .child(
                 self.column(
@@ -1705,7 +2022,7 @@ impl Render for ThreadView {
                         .gap(self.z(theme.spacing.xs))
                         .pb(self.z(theme.spacing.md))
                         .children(bar)
-                        .child(composer),
+                        .children(composer),
                 ),
             )
     }
@@ -1742,6 +2059,28 @@ fn placeholder(agent: &AgentId) -> String {
         _ => "the agent",
     };
     format!("Message {name}")
+}
+
+/// The start of a message too long to show whole at first, cut at a word, with an ellipsis;
+/// `None` for one short enough.
+fn clamp(words: &str) -> Option<String> {
+    let lines: Vec<&str> = words.lines().collect();
+    let by_lines = lines.len() > BUBBLE_LINES;
+    let by_chars = words.chars().count() > BUBBLE_CHARS;
+    if !by_lines && !by_chars {
+        return None;
+    }
+    let head = if by_lines {
+        lines.get(..BUBBLE_LINES).unwrap_or_default().join("\n")
+    } else {
+        words.to_owned()
+    };
+    let head: String = head.chars().take(BUBBLE_CHARS).collect();
+    let cut = head
+        .rfind(char::is_whitespace)
+        .filter(|_| by_chars)
+        .map_or(head.as_str(), |at| head.get(..at).unwrap_or(&head));
+    Some(format!("{}\u{2026}", cut.trim_end()))
 }
 
 /// The glyph of an agent's kind.

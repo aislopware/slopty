@@ -341,9 +341,9 @@ fn overview_labels_say_state_place_and_worker(cx: &mut TestAppContext) {
     let meta = cx.debug_bounds(selector("shapes-meta", first)).expect("one meta line");
     assert!(meta.left() >= label.right() - px(0.5), "after the name: {meta:?} {label:?}");
     assert!((meta.center().y - label.center().y).abs() < px(1.0), "on its line");
-    let lines = view.read_with(cx, |v, _| {
+    let lines = view.read_with(cx, |v, cx| {
         let item = v.item(shells[1].1).cloned();
-        item.map(|item| v.tile_meta(&item, std::time::SystemTime::now()).0)
+        item.map(|item| v.tile_meta(&item, std::time::SystemTime::now(), cx).0)
     });
     assert_eq!(lines.as_deref(), Some("oss/slopty"));
     let ix = view.read_with(cx, |v, _| v.layout.active_workspace());

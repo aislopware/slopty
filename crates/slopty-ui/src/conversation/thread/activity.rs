@@ -3,10 +3,11 @@
 //! background. Nothing here draws.
 
 use slopty_client::threads::{Sent, Threads};
+use slopty_proto::thread::detail::{ExecDetail, ExecStatus};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    BackgroundTask, Cap, Delivery, IntentId, ItemBody, PendingState, Plan, Request, ThreadId,
-    ThreadState, ToolDetail,
+    BackgroundTask, Cap, Delivery, IntentId, ItemBody, ItemId, PendingState, Plan, Request,
+    ThreadId, ThreadState, ToolDetail,
 };
 
 /// A request as the bar shows it.
@@ -32,6 +33,27 @@ pub struct Queued {
     pub on_worker: bool,
     /// A withdrawal of it is on its way.
     pub withdrawing: bool,
+    /// It is going to the agent now, past changing.
+    pub going: bool,
+    /// This client's last change to it, while the thread does not show it yet.
+    pub edit: Option<Edit>,
+}
+
+/// A change to a waiting message, on its way or turned down.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Edit {
+    /// On its way: the line already reads as it says.
+    Sending,
+    /// The worker turned it down: the line reads as before, saying why, until the person
+    /// dismisses it or edits again.
+    Refused {
+        /// The edit, to dismiss.
+        intent: IntentId,
+        /// What it said.
+        text: String,
+        /// Why, in words.
+        reason: String,
+    },
 }
 
 /// A file the turn edited.
@@ -45,6 +67,19 @@ pub struct Edited {
     pub removed: u32,
 }
 
+/// A command run in the background.
+#[derive(Clone, Debug)]
+pub struct Background<'a> {
+    /// The call that started it.
+    pub item: &'a ItemId,
+    /// What it is, as the call says.
+    pub title: &'a str,
+    /// How it stands.
+    pub detail: &'a ExecDetail,
+    /// The end of what it printed.
+    pub output: Option<&'a str>,
+}
+
 /// What the bar stacks, top to bottom.
 #[derive(Clone, Debug, Default)]
 pub struct Activity<'a> {
@@ -56,6 +91,9 @@ pub struct Activity<'a> {
     pub edited: Vec<Edited>,
     /// The messages waiting to go, in their order.
     pub queue: Vec<Queued>,
+    /// The commands the agent ran in the background: those still running, and those of the
+    /// last turn that ended.
+    pub background: Vec<Background<'a>>,
     /// The work running in the background.
     pub tasks: Vec<&'a BackgroundTask>,
     /// Whether a task can be stopped from here.
@@ -82,15 +120,34 @@ impl<'a> Activity<'a> {
         let mut queue: Vec<Queued> = state
             .pending
             .iter()
-            .map(|p| Queued {
-                intent: p.intent,
-                text: p.text.clone(),
-                held: match &p.state {
-                    PendingState::Held { reason } => Some(reason.clone()),
-                    PendingState::Waiting | PendingState::Sending => None,
-                },
-                on_worker: true,
-                withdrawing: withdrawing.contains(&p.intent),
+            .map(|p| {
+                let mut queued = Queued {
+                    intent: p.intent,
+                    text: p.text.clone(),
+                    held: match &p.state {
+                        PendingState::Held { reason } => Some(reason.clone()),
+                        PendingState::Waiting | PendingState::Sending => None,
+                    },
+                    on_worker: true,
+                    withdrawing: withdrawing.contains(&p.intent),
+                    going: matches!(p.state, PendingState::Sending),
+                    edit: None,
+                };
+                // The newest edit of it speaks for it.
+                let edit = threads.unshown(thread).filter_map(|s| match &s.intent {
+                    Intent::Edit { pending, text } if *pending == p.intent => Some((s, text)),
+                    _ => None,
+                });
+                if let Some((sent, text)) = edit.last() {
+                    if let Some(reason) = sent.failure() {
+                        queued.edit =
+                            Some(Edit::Refused { intent: sent.id, text: text.clone(), reason });
+                    } else {
+                        queued.text.clone_from(text);
+                        queued.edit = Some(Edit::Sending);
+                    }
+                }
+                queued
             })
             .collect();
         queue.extend(threads.unshown(thread).filter_map(|s| match &s.intent {
@@ -100,6 +157,8 @@ impl<'a> Activity<'a> {
                 held: None,
                 on_worker: false,
                 withdrawing: false,
+                going: false,
+                edit: None,
             }),
             _ => None,
         }));
@@ -107,6 +166,7 @@ impl<'a> Activity<'a> {
             asked,
             plan: state.plan.as_ref().filter(|p| p.steps.iter().any(|s| s.status != STEP_DONE)),
             edited: edited(state),
+            background: background(state),
             queue,
             tasks: state.tasks.iter().filter(|t| t.state == TASK_RUNNING).collect(),
             can_stop: state.meta.can(Cap::STOP_TASK),
@@ -121,6 +181,7 @@ impl<'a> Activity<'a> {
             && self.plan.is_none()
             && self.edited.is_empty()
             && self.queue.is_empty()
+            && self.background.is_empty()
             && self.tasks.is_empty()
     }
 
@@ -135,6 +196,26 @@ pub const STEP_DONE: &str = "completed";
 
 /// A background task's state while it runs, as agents name it.
 pub const TASK_RUNNING: &str = "running";
+
+/// The commands run in the background that still run, or ended in the last turn.
+fn background(state: &ThreadState) -> Vec<Background<'_>> {
+    let last = state.last_turn().map(|t| t.id);
+    state
+        .items
+        .iter()
+        .filter_map(|item| {
+            let ItemBody::Tool(call) = &item.body else { return None };
+            let Some(ToolDetail::Exec(exec)) = &call.detail else { return None };
+            let running = matches!(exec.status, ExecStatus::Running);
+            (exec.background && (running || Some(item.turn) == last)).then(|| Background {
+                item: &item.id,
+                title: exec.description.as_deref().unwrap_or(&call.title),
+                detail: exec,
+                output: call.output.as_ref().map(|o| o.text.as_str()),
+            })
+        })
+        .collect()
+}
 
 /// The files the last turn's edits and writes changed, each once, with what it did to them.
 fn edited(state: &ThreadState) -> Vec<Edited> {
@@ -260,6 +341,41 @@ mod tests {
         let state = threads.mirror(thread).unwrap().state().unwrap();
         let bar = Activity::of(&threads, thread, state);
         assert!(!bar.queue.first().unwrap().withdrawing, "a refused withdrawal puts it back");
+    }
+
+    /// An edit reads on the line in the frame it was made; a refusal puts the old words back
+    /// and says why, until the message reads as the edit says.
+    #[test]
+    fn a_queued_message_reads_as_its_edit_and_a_refusal_says_why() {
+        let mut state = fixtures::empty();
+        state.meta.caps = vec![Cap::named(Cap::QUEUE)];
+        let waiting = IntentId::new();
+        state.pending = vec![Pending {
+            intent: waiting,
+            text: "after this".to_owned(),
+            delivery: Delivery::Queue,
+            state: PendingState::Waiting,
+        }];
+        let (mut threads, thread) = threads_over(state);
+        let edit = Intent::Edit { pending: waiting, text: "after that".to_owned() };
+        let (refused, _msg) = threads.intent(thread, edit.clone());
+        let line = |threads: &Threads| {
+            let state = threads.mirror(thread).unwrap().state().unwrap();
+            Activity::of(threads, thread, state).queue.first().cloned().unwrap()
+        };
+        let sending = line(&threads);
+        assert_eq!((sending.text.as_str(), &sending.edit), ("after that", &Some(Edit::Sending)));
+        let _mine = threads.done(&IntentDone {
+            id: refused,
+            outcome: Outcome::Refused { reason: "It went".to_owned() },
+        });
+        let back = line(&threads);
+        assert_eq!(back.text, "after this", "the worker's words again");
+        assert!(matches!(&back.edit, Some(Edit::Refused { reason, .. }) if reason == "It went"));
+        let _gone = threads.dismiss(refused);
+        let (done, _msg) = threads.intent(thread, edit);
+        let _mine = threads.done(&IntentDone { id: done, outcome: Outcome::Done });
+        assert_eq!(line(&threads).text, "after that", "done, until the stream says so");
     }
 
     #[test]

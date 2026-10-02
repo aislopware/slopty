@@ -4624,3 +4624,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `workspace::tests::review_tile::a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it`,
     `attention::tests::led_by_the_server_only_its_notices_post_for_agents` and
     `a_server_notice_leads_to_its_tile_and_names_the_subagent`.
+
+- ✅ **An agent's subagents fold into its row as a count** (2026-10-02, GUI-first plan §4.3).
+  The fleet rail lists each agent once. Its subagents at work (working, waiting on their own
+  work, or on the person) join its words as a count: "Editing parser.rs, 2 subagents", or the
+  count alone. A count is part of the words rather than a part of the line, so the second line
+  keeps its two separators. One that finished is the agent's history and is not counted. The
+  rows come from the agent's thread table (`WorkspaceView::subagents`), under its root thread
+  however deep.
+  - Test: `workspace::tests::nav_rows::an_agents_subagents_at_work_fold_into_its_row_as_a_count`.

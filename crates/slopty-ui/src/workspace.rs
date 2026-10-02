@@ -250,7 +250,11 @@ pub enum WorkspaceEvent {
     /// A terminal rang its bell.
     Bell(SessionId),
     /// A coding agent in this session needs the human (permission, question, finished turn).
+    /// Led by a server, its notices say this instead ([`attention::Attention::server_led`]).
     Attention(SessionId),
+    /// A program in this session asked for a desktop notification (`OSC 9`, `OSC 777`): this
+    /// client's own moment, never the server's.
+    Program(SessionId),
     /// How many agents are waiting on the human right now, across every worker (the Dock
     /// badge).
     NeedsYou(usize),

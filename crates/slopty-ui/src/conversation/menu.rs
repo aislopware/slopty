@@ -14,6 +14,7 @@
 //! Offsets are UTF-8 byte offsets into the draft, as the composer's caret is.
 
 use slopty_proto::conversation::{CommandSource, SlashCommand};
+use slopty_proto::thread;
 
 /// Rows a menu shows at most; the rest are reached by typing more.
 pub const ROWS: usize = 50;
@@ -65,50 +66,106 @@ pub fn token(text: &str, caret: usize) -> Option<Token> {
     Some(Token::Mention { at: word_start, query: query.to_owned() })
 }
 
+/// A command a menu lists: the old conversation stream's or the thread model's.
+pub trait Listed {
+    /// Its name, without the slash.
+    fn name(&self) -> &str;
+    /// What it does.
+    fn description(&self) -> &str;
+    /// Where it comes from, as the menu ranks it: the project's first, then the person's,
+    /// plugins', and the agent's own last.
+    fn source_rank(&self) -> u8;
+    /// Where it comes from, as the menu's right edge says it; nothing for the agent's own,
+    /// which are most of the list.
+    fn source_label(&self) -> Option<String>;
+}
+
+impl Listed for SlashCommand {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn source_rank(&self) -> u8 {
+        match self.source {
+            CommandSource::Project => 0,
+            CommandSource::Personal => 1,
+            CommandSource::Plugin => 2,
+            CommandSource::BuiltIn => 3,
+        }
+    }
+
+    fn source_label(&self) -> Option<String> {
+        match self.source {
+            CommandSource::BuiltIn => None,
+            CommandSource::Personal => Some("Personal".to_owned()),
+            CommandSource::Project => Some("Project".to_owned()),
+            CommandSource::Plugin => Some("Plugin".to_owned()),
+        }
+    }
+}
+
+/// The thread model's source is open: the known ones rank as the conversation stream's, and
+/// one this client does not know ranks after plugins and is named as the agent named it.
+impl Listed for thread::Command {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn source_rank(&self) -> u8 {
+        match self.source.as_str() {
+            "project" => 0,
+            "personal" => 1,
+            "plugin" => 2,
+            "built-in" | "" => 4,
+            _ => 3,
+        }
+    }
+
+    fn source_label(&self) -> Option<String> {
+        match self.source.as_str() {
+            "built-in" | "" => None,
+            other => {
+                let mut chars = other.chars();
+                chars.next().map(|first| first.to_uppercase().chain(chars).collect())
+            }
+        }
+    }
+}
+
 /// The commands `query` matches, best first, at most [`ROWS`].
 ///
 /// A name that starts with it comes first, then a name that holds it, then a description that
-/// holds every word of it; within each, the project's and the person's before plugins' and
-/// Claude Code's own, then by name.
+/// holds every word of it; within each, by where it comes from ([`Listed::source_rank`]), then
+/// by name.
 #[must_use]
-pub fn commands<'a>(all: &'a [SlashCommand], query: &str) -> Vec<&'a SlashCommand> {
+pub fn commands<'a, C: Listed>(all: &'a [C], query: &str) -> Vec<&'a C> {
     let needle = query.to_lowercase();
-    let source_rank = |source: CommandSource| match source {
-        CommandSource::Project => 0_u8,
-        CommandSource::Personal => 1,
-        CommandSource::Plugin => 2,
-        CommandSource::BuiltIn => 3,
-    };
-    let mut ranked: Vec<(u8, u8, &SlashCommand)> = all
+    let mut ranked: Vec<(u8, u8, &C)> = all
         .iter()
         .filter_map(|command| {
-            let name = command.name.to_lowercase();
+            let name = command.name().to_lowercase();
             let rank = if name.starts_with(&needle) {
                 0
             } else if name.contains(&needle) {
                 1
-            } else if crate::picker::matches(query, &command.description) {
+            } else if crate::picker::matches(query, command.description()) {
                 2
             } else {
                 return None;
             };
-            Some((rank, source_rank(command.source), command))
+            Some((rank, command.source_rank(), command))
         })
         .collect();
-    ranked.sort_by(|a, b| (a.0, a.1, &a.2.name).cmp(&(b.0, b.1, &b.2.name)));
+    ranked.sort_by(|a, b| (a.0, a.1, a.2.name()).cmp(&(b.0, b.1, b.2.name())));
     ranked.into_iter().take(ROWS).map(|(_, _, command)| command).collect()
-}
-
-/// Where a command comes from, as the menu's right edge says it; nothing for Claude Code's
-/// own, which are most of the list.
-#[must_use]
-pub const fn source_label(source: CommandSource) -> Option<&'static str> {
-    match source {
-        CommandSource::BuiltIn => None,
-        CommandSource::Personal => Some("Personal"),
-        CommandSource::Project => Some("Project"),
-        CommandSource::Plugin => Some("Plugin"),
-    }
 }
 
 /// The draft once command `name` is picked, and where the caret goes: `/name ` in place of the
@@ -228,6 +285,31 @@ mod tests {
         assert_eq!(names("mit"), ["commit", "review"], "a name before a description");
         assert_eq!(names(""), ["commit", "review", "compact", "model"]);
         assert!(names("zzz").is_empty());
+    }
+
+    /// The thread model's open sources rank as the known ones do, an unknown one after
+    /// plugins and before the agent's own, and say themselves in sentence case.
+    #[test]
+    fn a_thread_command_ranks_and_names_its_open_source() {
+        let command = |name: &str, source: &str| thread::Command {
+            name: name.to_owned(),
+            description: String::new(),
+            argument_hint: None,
+            source: source.to_owned(),
+        };
+        let all = [
+            command("compact", "built-in"),
+            command("commit", "project"),
+            command("context", "skill"),
+            command("config", "plugin"),
+        ];
+        let names: Vec<&str> = commands(&all, "co").iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["commit", "config", "context", "compact"]);
+        let labels: Vec<Option<String>> = all.iter().map(Listed::source_label).collect();
+        assert_eq!(
+            labels,
+            [None, Some("Project".to_owned()), Some("Skill".to_owned()), Some("Plugin".to_owned())]
+        );
     }
 
     /// Picking writes the command or the path over the word, keeps the rest, and puts the caret

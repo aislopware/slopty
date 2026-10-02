@@ -83,6 +83,141 @@ pub fn with_paths(text: &str, paths: &[String]) -> String {
     }
 }
 
+/// What an attachment is before it goes up.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Attach {
+    /// A picture pasted into the composer: its bytes and the name it lands under.
+    Picture {
+        /// The name, [`picture_name`].
+        name: String,
+        /// The encoded picture.
+        bytes: Vec<u8>,
+    },
+    /// Files copied here, pasted into the composer.
+    Files(Vec<std::path::PathBuf>),
+}
+
+impl Attach {
+    /// What a paste into a composer attaches rather than pastes as text: files copied here, or
+    /// a picture with no text beside it on the clipboard.
+    #[must_use]
+    pub fn of_paste(item: &gpui::ClipboardItem) -> Option<Self> {
+        let mut files = Vec::new();
+        let mut picture = None;
+        for entry in item.entries() {
+            match entry {
+                gpui::ClipboardEntry::ExternalPaths(paths) => {
+                    files.extend_from_slice(paths.paths());
+                }
+                gpui::ClipboardEntry::Image(image) => {
+                    picture = picture.or_else(|| {
+                        picture_extension(image.format).map(|ext| (ext, image.bytes.clone()))
+                    });
+                }
+                gpui::ClipboardEntry::String(_) => {}
+            }
+        }
+        if !files.is_empty() {
+            return Some(Self::Files(files));
+        }
+        let texted = item.text().is_some_and(|t| !t.is_empty());
+        picture
+            .filter(|_| !texted)
+            .map(|(ext, bytes)| Self::Picture { name: picture_name(ext), bytes })
+    }
+
+    /// What its chip calls it: the picture's name, the one file's, or how many.
+    #[must_use]
+    pub fn name(&self) -> String {
+        match self {
+            Self::Picture { name, .. } => name.clone(),
+            Self::Files(paths) => match paths.as_slice() {
+                [one] => one.file_name().map_or_else(
+                    || one.to_string_lossy().into_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                ),
+                many => format!("{} files", many.len()),
+            },
+        }
+    }
+
+    /// The picture its chip draws, for a pasted picture in a format gpui decodes.
+    #[must_use]
+    pub fn picture(&self) -> Option<std::sync::Arc<gpui::Image>> {
+        let Self::Picture { name, bytes } = self else { return None };
+        let format = picture_format(name)?;
+        Some(std::sync::Arc::new(gpui::Image::from_bytes(format, bytes.clone())))
+    }
+}
+
+/// The format of a pasted picture named `name` ([`picture_name`]).
+fn picture_format(name: &str) -> Option<gpui::ImageFormat> {
+    match name.rsplit_once('.')?.1 {
+        "png" => Some(gpui::ImageFormat::Png),
+        "jpg" => Some(gpui::ImageFormat::Jpeg),
+        "gif" => Some(gpui::ImageFormat::Gif),
+        "webp" => Some(gpui::ImageFormat::Webp),
+        _ => None,
+    }
+}
+
+/// The extension of a picture Claude Code reads, for a pasted picture in `format`; `None` for
+/// one it does not.
+const fn picture_extension(format: gpui::ImageFormat) -> Option<&'static str> {
+    match format {
+        gpui::ImageFormat::Png => Some("png"),
+        gpui::ImageFormat::Jpeg => Some("jpg"),
+        gpui::ImageFormat::Gif => Some("gif"),
+        gpui::ImageFormat::Webp => Some("webp"),
+        _ => None,
+    }
+}
+
+/// The composer an upload's chip is in, which hears how it goes: a conversation face's or a
+/// thread view's.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Target {
+    /// The conversation face's.
+    Face(gpui::WeakEntity<super::ConversationView>),
+    /// The thread view's.
+    Thread(gpui::WeakEntity<super::thread::ThreadView>),
+}
+
+impl Target {
+    /// Show the chip of `what`, which the workspace sends up itself; which chip it is, unless
+    /// the composer is gone.
+    pub fn start(&self, what: &Attach, cx: &mut gpui::App) -> Option<u64> {
+        match self {
+            Self::Face(face) => face.update(cx, |v, _cx| v.start_attachment(what)).ok(),
+            Self::Thread(view) => view.update(cx, |v, _cx| v.start_attachment(what)).ok(),
+        }
+    }
+
+    /// Chip `id` is `fraction` of the way up.
+    pub fn progress(&self, id: u64, fraction: f32, cx: &mut gpui::App) {
+        let _gone = match self {
+            Self::Face(face) => face.update(cx, |v, cx| v.attachment_progress(id, fraction, cx)),
+            Self::Thread(view) => view.update(cx, |v, cx| v.attachment_progress(id, fraction, cx)),
+        };
+    }
+
+    /// Chip `id` landed at `paths` on the worker.
+    pub fn landed(&self, id: u64, paths: &[String], cx: &mut gpui::App) {
+        let _gone = match self {
+            Self::Face(face) => face.update(cx, |v, cx| v.attachment_landed(id, paths, cx)),
+            Self::Thread(view) => view.update(cx, |v, cx| v.attachment_landed(id, paths, cx)),
+        };
+    }
+
+    /// Chip `id`'s upload is over, however it ended.
+    pub fn ended(&self, id: u64, cx: &mut gpui::App) {
+        let _gone = match self {
+            Self::Face(face) => face.update(cx, |v, cx| v.attachment_ended(id, cx)),
+            Self::Thread(view) => view.update(cx, |v, cx| v.attachment_ended(id, cx)),
+        };
+    }
+}
+
 /// One attachment of the draft: its chip in the composer.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Attachment {

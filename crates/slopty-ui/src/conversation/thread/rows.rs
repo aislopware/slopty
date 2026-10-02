@@ -12,8 +12,8 @@ use std::time::Duration;
 use slopty_client::threads::Sent;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    Delivery, IntentId, Item, ItemBody, ItemId, ThreadState, ToolDetail, ToolState, Turn, TurnId,
-    TurnState, kind,
+    Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadState, ToolDetail, ToolState, Turn,
+    TurnId, TurnState, kind,
 };
 
 /// How many kinds of work a fold names before it counts the rest.
@@ -149,13 +149,23 @@ pub fn build_spans(input: Input<'_>) -> Built {
         }
         at = run.end;
     }
-    if let Some(last) = state.last_turn().filter(|t| matches!(t.state, TurnState::Active)) {
+    if let Some(last) = under_way(state) {
         built.push(Row::Working { turn: last.id }, 0..0);
     }
     for sent in input.unshown.iter().filter(|s| bubble(s)) {
         built.push(Row::Sending { intent: sent.id }, 0..0);
     }
     built
+}
+
+/// The turn the agent is working on: the last one, while open and the agent says it works.
+///
+/// A turn whose end the agent never wrote (a session left mid-turn, a transcript read from
+/// before) is not, once the agent says it is idle.
+#[must_use]
+pub fn under_way(state: &ThreadState) -> Option<&Turn> {
+    let working = matches!(state.status.phase, Phase::Working | Phase::Waiting);
+    state.last_turn().filter(|t| working && matches!(t.state, TurnState::Active))
 }
 
 /// Whether an unshown intent is drawn in the thread: a message sent now, or one the worker
@@ -515,10 +525,11 @@ mod tests {
     fn the_live_turn_never_folds_and_says_it_works() {
         let mut live = turn(2, TurnState::Active, 0);
         live.ended_ms = None;
-        let state = state(
+        let mut state = state(
             vec![turn(1, TurnState::Complete, 3), live],
             vec![user("u1", 1), text("a1", 1), user("u2", 2), exec("x", 2), text("a2", 2)],
         );
+        state.status.phase = Phase::Working;
         let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
         let id = |s: &str| ItemId(s.to_owned());
         assert_eq!(
@@ -532,6 +543,12 @@ mod tests {
                 Row::Working { turn: TurnId(2) },
             ],
             "a turn with nothing but its answer has no fold"
+        );
+        state.status.phase = Phase::Idle;
+        let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
+        assert!(
+            !rows.iter().any(|r| matches!(r, Row::Working { .. })),
+            "an agent that says it is idle is not working on a turn it never ended"
         );
     }
 

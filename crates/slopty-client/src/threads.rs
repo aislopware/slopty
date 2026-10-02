@@ -94,6 +94,16 @@ impl Threads {
         self.mirrors.get(&thread)
     }
 
+    /// `thread`'s title: its state's when followed here and titled, else its table row's.
+    #[must_use]
+    pub fn title(&self, thread: ThreadId) -> Option<&str> {
+        let followed = self.mirror(thread).and_then(Mirror::state).map(|s| s.meta.title.as_str());
+        followed
+            .filter(|t| !t.is_empty())
+            .or_else(|| self.table.rows.get(&thread).map(|r| r.title.as_str()))
+            .filter(|t| !t.is_empty())
+    }
+
     /// The threads open here.
     pub fn open(&self) -> impl Iterator<Item = ThreadId> + '_ {
         self.mirrors.keys().copied()

@@ -393,7 +393,7 @@ impl ConversationView {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(command.description.clone())),
             )
-            .children(menu::source_label(command.source).map(|source| {
+            .children(menu::Listed::source_label(command).map(|source| {
                 div()
                     .flex_none()
                     .text_size(self.z(theme.typography.meta()))

@@ -1,17 +1,17 @@
-//! The conversation face of an agent's terminal, rendered by the app over recorded Claude Code
+//! The thread view of an agent's terminal, rendered by the app over recorded Claude Code
 //! sessions that reach it the way a live one would: the transcripts laid out as Claude Code
 //! keeps them, and `SessionStart`, the status line and `PermissionRequest` played through the
-//! real relay (`slopty hook`, a child of the test). The worker decodes them, streams the
-//! conversation to the app once ⌘J shows the face, and holds the permission prompt for it.
-//! Nothing is typed into a shell and no agent runs.
+//! real relay (`slopty hook`, a child of the test). The worker maps them onto its thread model,
+//! its table names the terminal, and the tile opens on the thread with no key pressed. Nothing
+//! is typed into a shell and no agent runs.
 //!
 //! What the model writes before the transcript has it comes from Slopty's Claude Code mod: its
 //! recorded events are posted to the worker's mod socket as the mod posts them.
 //!
-//! Goldens: the face with a held prompt over an edit's diff, light and dark; a subagent's own
-//! thread; the face on a phone-width window, where it is the default; a step the model is
-//! still writing; and the work beyond words (a pasted picture, a plan, the task list, a build
-//! in the background), folded and in Verbose.
+//! Goldens: the thread with a request over the composer, light and dark; a settled turn and a
+//! subagent's own thread; a file attached by a drop; the thread on a phone-width window; a step
+//! the model is still writing; and the work beyond words (a pasted picture, the plan, a build in
+//! the background), folded and with every step open.
 
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,7 @@ use slopty_e2e::{Command, Driver, Dump, Stack};
 
 use crate::gallery::{STEP, first_shell, golden};
 
-/// The face's renders: room for the list, the approval card and the header's chips.
+/// The thread's renders: room for the list, the request card and the header's chips.
 const WINDOW: (f32, f32) = (1000.0, 720.0);
 /// An iPhone's portrait width in points, with the height of one.
 const PHONE: (f32, f32) = (393.0, 852.0);
@@ -98,60 +98,58 @@ fn has(d: &Dump, role: &str, label: &str) -> bool {
     d.a11y_node(role, Some(label)).is_some()
 }
 
-/// ⌘J once the app knows the agent: the relay exiting means the worker has the hook, not that
-/// the status has reached the app, and before it has ⌘J only says no agent runs there.
-async fn show_face(drv: &mut Driver) {
-    drv.wait_for("the agent", STEP, |d| {
-        d.terminals.iter().any(|t| t.agent_source.is_some() && t.agent.as_deref() != Some("none"))
-    })
-    .await
-    .unwrap();
-    drv.keys("cmd-j").await.unwrap();
+/// Whether the tile shows its thread.
+fn thread_shows(d: &Dump) -> bool {
+    has(d, "Group", "Thread")
 }
 
-/// An agent working through an edit asks to run a command: the face shows the turn it is on,
-/// the edit's diff in it, and the prompt in the composer's place with its three answers; the
-/// header says how many lines changed, how full the context is and which model it is. The
-/// same, dark.
+/// Whether a button's label starts with `prefix`.
+fn button_starts(d: &Dump, prefix: &str) -> bool {
+    labels(d, "Button").iter().any(|l| l.starts_with(prefix))
+}
+
+/// An agent's tile opens on its thread, with no key pressed, once the worker's thread table
+/// names its terminal: the thread drawn from the worker's own model of it, its settled turns
+/// folded, and the request the agent holds stacked over the composer with the answers Claude
+/// Code takes. The same, dark.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_face_holds_a_prompt_over_the_turn_it_interrupts() {
+async fn an_agent_tile_opens_on_its_thread() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     let dump = first_shell(&mut stack.driver).await;
     let session = dump.terminals[0].session.clone();
     let transcript = start_recorded(&stack, &session, "edit").await;
-    show_face(&mut stack.driver).await;
     stack
         .driver
-        .wait_for("the conversation", STEP, |d| {
-            has(d, "Group", "Conversation") && !labels(d, "Article").is_empty()
-        })
+        .wait_for("the thread, face-first", STEP, |d| thread_shows(d) && any_label(d, "Worked"))
         .await
         .unwrap();
     let _held = stack.relay_hook(&session, &[], &permission_request(&transcript)).unwrap();
     let drv = &mut stack.driver;
     let dump = drv
-        .wait_for("the prompt held for the face", STEP, |d| {
-            has(d, "AlertDialog", "Claude wants to run a command")
+        .wait_for("the request over the composer", STEP, |d| {
+            d.a11y.iter().any(|n| n.role == "Dialog")
         })
         .await
         .unwrap();
-    for answer in ["Allow once", "Always allow", "Deny"] {
+    let asks = labels(&dump, "Dialog");
+    assert!(asks.iter().any(|l| l.starts_with("Allow Bash")), "{asks:?}");
+    for answer in ["Allow", "Deny"] {
         assert!(labels(&dump, "Button").iter().any(|l| l == answer), "{answer}: {:#?}", dump.a11y);
     }
-    golden(drv, &dir, "conversation").await;
+    golden(drv, &dir, "thread").await;
     stack.set_appearance("dark").unwrap();
     let drv = &mut stack.driver;
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
-    golden(drv, &dir, "conversation-dark").await;
+    golden(drv, &dir, "thread-dark").await;
     stack.shutdown().await;
 }
 
 /// A settled turn reads as its prompt, one line of what it did and its answer, with the files
-/// it changed; a subagent's card opens its own thread, under a bar that names it and leads
-/// back.
+/// it changed over the composer; ⌃O opens every step, the subagent's call among them, which
+/// opens the subagent's own thread under a bar that names it and leads back.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_subagent_has_a_thread_of_its_own() {
@@ -162,51 +160,51 @@ async fn a_subagent_has_a_thread_of_its_own() {
     let session = dump.terminals[0].session.clone();
     start_recorded(&stack, &session, "tools").await;
     let drv = &mut stack.driver;
-    show_face(drv).await;
-    drv.wait_for("the conversation", STEP, |d| has(d, "Group", "Conversation")).await.unwrap();
-    // Settled: the prompt, the turn folded to its figures, the answer and the files it changed.
     drv.wait_for("the settled turn", STEP, |d| {
-        labels(d, "Button").iter().any(|l| l.starts_with("Worked for 35 s"))
-            && has(d, "List", "Changed files")
+        thread_shows(d)
+            && button_starts(d, "Worked")
+            && labels(d, "Group").iter().any(|l| l.starts_with("Edited"))
     })
     .await
     .unwrap();
-    golden(drv, &dir, "conversation-settled").await;
-    // Every step shown: the settled turn opens, the subagent's card with it, above the tail.
-    drv.keys("ctrl-o ctrl-o").await.unwrap();
-    drv.wait_for("every step", STEP, |d| any_label(d, "Updated a task")).await.unwrap();
-    let card_shows = |d: &Dump| {
-        d.a11y
-            .iter()
-            .any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Subagent Count lines")))
-    };
-    let dump = scroll_up_until(drv, "the subagent's card", card_shows).await;
+    golden(drv, &dir, "thread-settled").await;
+    drv.keys("ctrl-o").await.unwrap();
+    let card_shows = |d: &Dump| button_starts(d, "Subagent ");
+    let dump = scroll_up_until(drv, "the subagent's call", card_shows).await;
     let card = dump
         .a11y
         .iter()
-        .find(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Subagent Count lines")))
+        .find(|n| {
+            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Subagent "))
+        })
         .unwrap();
-    // The scroll can leave the card partly under the tile's header: click its part in the list.
-    let list = dump
-        .a11y
-        .iter()
-        .find(|n| n.role == "Group" && n.label.as_deref() == Some("Conversation"))
-        .unwrap();
+    // The scroll can leave the call partly under the tile's header: click its part in the list.
+    let list = dump.a11y_node("Group", Some("Thread")).unwrap();
     let [x, y, w, h] = card.bounds;
     let (top, bottom) = (y.max(list.bounds[1]), (y + h).min(list.bounds[1] + list.bounds[3]));
     drv.click(x + w / 2.0, f32::midpoint(top, bottom)).await.unwrap();
-    drv.wait_for("the subagent's thread", STEP, |d| has(d, "Navigation", "Subagent Count lines"))
-        .await
-        .unwrap();
-    golden(drv, &dir, "conversation-subagent").await;
+    drv.wait_for("the subagent's thread", STEP, |d| {
+        labels(d, "Navigation").iter().any(|l| l.starts_with("Subagent "))
+            && !labels(d, "Article").is_empty()
+    })
+    .await
+    .unwrap();
+    golden(drv, &dir, "thread-subagent").await;
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("back on the thread", STEP, |d| {
+        labels(d, "Navigation").iter().all(|l| !l.starts_with("Subagent ")) && card_shows(d)
+    })
+    .await
+    .unwrap();
     stack.shutdown().await;
 }
 
-/// A file dropped on the face while it shows is attached to the draft: its chip waits over the
-/// composer's field, saying how far it got and offering to stop it, and only the chip says so.
+/// A file dropped on the thread while it shows is attached to the draft: its chip waits over
+/// the composer's field, saying how far it got and offering to stop it, and only the chip says
+/// so.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_file_dropped_on_the_face_waits_in_the_composer() {
+async fn a_file_dropped_on_the_thread_waits_in_the_composer() {
     // Held before its first byte, so the chip reads 0% however fast this machine is.
     let held = [(slopty_e2e::HOLD_UPLOADS_ENV, "1")];
     let mut stack = Stack::launch_with("e2e-worker", &held).await.unwrap();
@@ -219,11 +217,8 @@ async fn a_file_dropped_on_the_face_waits_in_the_composer() {
     let session = dump.terminals[0].session.clone();
     start_recorded(&stack, &session, "tools").await;
     let drv = &mut stack.driver;
-    show_face(drv).await;
     let dump = drv
-        .wait_for("the settled conversation", STEP, |d| {
-            has(d, "Group", "Conversation") && has(d, "List", "Changed files")
-        })
+        .wait_for("the settled thread", STEP, |d| thread_shows(d) && button_starts(d, "Worked"))
         .await
         .unwrap();
     let tile = dump.item("terminal").unwrap().bounds;
@@ -240,14 +235,7 @@ async fn a_file_dropped_on_the_face_waits_in_the_composer() {
         dump.a11y
     );
     drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
-    let frame = drv.render(&dir.join("conversation-attachment.png")).await.unwrap();
-    slopty_e2e::snapshot::assert_matches(
-        "conversation-attachment",
-        &frame,
-        slopty_e2e::snapshot::MAC_TOLERANCE,
-        &slopty_e2e::harness::artifacts_dir(),
-    )
-    .unwrap();
+    golden(drv, &dir, "thread-attachment").await;
     let stop = drv.dump().await.unwrap();
     let stop = stop.a11y_node("Button", Some("Remove screen-recording.mov")).map(|n| n.bounds);
     let [x, y, w, h] = stop.expect("the chip's way to stop it");
@@ -258,15 +246,15 @@ async fn a_file_dropped_on_the_face_waits_in_the_composer() {
     stack.shutdown().await;
 }
 
-/// Scroll the conversation up a few lines at a time until `shows` holds, as a reader looking
-/// for something above the tail would.
+/// Scroll the thread up a few lines at a time until `shows` holds, as a reader looking for
+/// something above the tail would.
 async fn scroll_up_until(drv: &mut Driver, what: &str, shows: impl Fn(&Dump) -> bool) -> Dump {
     for _ in 0..60 {
         let dump = drv.dump().await.unwrap();
         if shows(&dump) {
             return dump;
         }
-        let list = dump.a11y_node("Group", Some("Conversation")).expect("the conversation");
+        let list = dump.a11y_node("Group", Some("Thread")).expect("the thread");
         let [x, y, w, h] = list.bounds;
         // The wheel's delta is in lines: a few at a time pass nothing by.
         drv.scroll(x + w / 2.0, y + h / 2.0, 0.0, 5.0).await.unwrap();
@@ -274,11 +262,11 @@ async fn scroll_up_until(drv: &mut Driver, what: &str, shows: impl Fn(&Dump) -> 
     drv.wait_for(what, STEP, shows).await.unwrap()
 }
 
-/// On a phone-width window an agent's tile opens on its conversation, with no key pressed,
-/// and a prompt the agent asks takes the composer's place there too.
+/// On a phone-width window an agent's tile opens on its thread too, and a request the agent
+/// asks stacks over the composer there.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_phone_opens_on_the_conversation() {
+async fn a_phone_opens_on_the_thread() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: PHONE.0, height: PHONE.1 }).await.unwrap();
@@ -287,19 +275,17 @@ async fn a_phone_opens_on_the_conversation() {
     let transcript = start_recorded(&stack, &session, "edit").await;
     stack
         .driver
-        .wait_for("the conversation, unasked", STEP, |d| {
-            has(d, "Group", "Conversation") && !labels(d, "Article").is_empty()
-        })
+        .wait_for("the thread, unasked", STEP, |d| thread_shows(d) && any_label(d, "Worked"))
         .await
         .unwrap();
     let _held = stack.relay_hook(&session, &[], &permission_request(&transcript)).unwrap();
     let drv = &mut stack.driver;
-    drv.wait_for("the prompt held for the face", STEP, |d| {
-        has(d, "AlertDialog", "Claude wants to run a command")
+    drv.wait_for("the request over the composer", STEP, |d| {
+        d.a11y.iter().any(|n| n.role == "Dialog")
     })
     .await
     .unwrap();
-    golden(drv, &dir, "conversation-phone").await;
+    golden(drv, &dir, "thread-phone").await;
     stack.shutdown().await;
 }
 
@@ -330,9 +316,9 @@ fn recorded_mod(name: &str, session: &str) -> (Vec<Value>, Vec<String>) {
     (batches, records)
 }
 
-/// While the model writes a step, the face shows it after the thread's last entry in a lighter
-/// tone: the answer as it grows and the tool call being prepared. When the step stops and the
-/// transcript has its entries, they take the live blocks' place.
+/// While the model writes a step, the thread shows it after its last item: the answer as it
+/// grows and the tool call being prepared. When the step stops and the transcript has its
+/// entries, they take the live items' place.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
@@ -350,12 +336,7 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
     });
     let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
     assert!(done.success(), "the relay ran");
-    show_face(&mut stack.driver).await;
-    stack
-        .driver
-        .wait_for("the conversation", STEP, |d| has(d, "Group", "Conversation"))
-        .await
-        .unwrap();
+    stack.driver.wait_for("the thread", STEP, thread_shows).await.unwrap();
 
     // The first step as the model writes it: its answer, then the Bash call's input.
     let (batches, records) = recorded_mod("bash", &session);
@@ -364,39 +345,31 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
     for batch in &batches[..first_stop] {
         assert_eq!(stack.post_mod(batch).await.unwrap(), 204, "{batch}");
     }
-    let writing = "Writing: Let me run it.";
+    let writing = "Let me run it.";
     let drv = &mut stack.driver;
     drv.wait_for("the live step", STEP, |d| {
-        has(d, "Article", writing) && has(d, "Status", "Preparing Bash")
+        has(d, "Article", writing) && has(d, "Button", "Preparing Bash")
     })
     .await
     .unwrap();
-    assert!(labels(&drv.dump().await.unwrap(), "Article").iter().all(|l| l == writing));
-    golden(drv, &dir, "conversation-live").await;
+    golden(drv, &dir, "thread-live").await;
 
-    // The step stops and the transcript gets the answer and the call: both settle, into the
-    // turn's fold now that the agent has no turn going.
+    // The step stops and the transcript gets the answer and the call: both settle, the call
+    // by the name the transcript gives it.
     assert_eq!(stack.post_mod(&batches[first_stop]).await.unwrap(), 204);
     let result = records.iter().position(|l| l.contains(r#""type":"tool_result""#)).unwrap();
     let mut transcript = records[..result].join("\n");
     transcript.push('\n');
     std::fs::write(&main, transcript).unwrap();
-    let dump = stack
+    stack
         .driver
         .wait_for("the step settled", STEP, |d| {
-            // The fold carries the turn's figures from the transcript: what it wrote. Its model
-            // is the one the composer names, so the fold leaves it out.
-            labels(d, "Button").iter().any(|l| l == "Worked \u{b7} Ran 1 command \u{b7} 20 tokens")
-                && !has(d, "Article", writing)
-                && !has(d, "Status", "Preparing Bash")
+            has(d, "Button", "Say hi")
+                && has(d, "Article", writing)
+                && !has(d, "Button", "Preparing Bash")
         })
         .await
         .unwrap();
-    assert!(
-        !labels(&dump, "Article").iter().any(|l| l.starts_with("Writing: ")),
-        "{:#?}",
-        dump.a11y
-    );
     stack.shutdown().await;
 }
 
@@ -581,13 +554,13 @@ fn build_finished() -> String {
     format!("{record}\n")
 }
 
-/// A turn's work beyond its words: the pasted screenshot on the prompt, the plan in view when
-/// the turn folds, the task list over the composer, and the build run in the background with
-/// its last line, following the file it writes as it grows and ending when its notice comes.
-/// In Verbose, the thinking opens and the screenshot the `Read` returned shows on it.
+/// A turn's work beyond its words: the pasted screenshot on the prompt, the plan over the
+/// composer, and the build run in the background with its last line, following the file it
+/// writes as it grows and ending when its notice comes. With every step open (⌃O) the thinking
+/// shows, and the screenshot the `Read` returned shows on its call.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn the_face_shows_the_work_beyond_words() {
+async fn the_thread_shows_the_work_beyond_words() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -596,16 +569,17 @@ async fn the_face_shows_the_work_beyond_words() {
     let (main, output) = work_session(&stack);
     start(&stack, &session, &main).await;
     let drv = &mut stack.driver;
-    show_face(drv).await;
     let building = "Build the release binary: Running";
+    let picture = "Picture, 640 \u{d7} 400";
     drv.wait_for("the build in the background", STEP, |d| {
         has(d, "List", "In the background")
-            && labels(d, "Button").iter().any(|l| l.starts_with(building))
-            && has(d, "Article", "Plan: Let the header's chips give way, Approved")
+            && labels(d, "Status").iter().any(|l| l == building)
+            && labels(d, "Button").iter().any(|l| l.starts_with("Plan, 1 of 3 done"))
+            && has(d, "Image", picture)
     })
     .await
     .unwrap();
-    // The build prints on: the tray follows its file.
+    // The build prints on: the bar follows its file.
     let mut file = std::fs::OpenOptions::new().append(true).open(&output).unwrap();
     std::io::Write::write_all(
         &mut file,
@@ -618,26 +592,26 @@ async fn the_face_shows_the_work_beyond_words() {
         .and_then(|mut f| std::io::Write::write_all(&mut f, build_finished().as_bytes()))
         .unwrap();
     drv.wait_for("the build done", STEP, |d| {
-        labels(d, "Button").iter().any(|l| l == "Build the release binary: Done \u{b7} 1m 5s")
+        labels(d, "Status").iter().any(|l| l.starts_with("Build the release binary: Done"))
     })
     .await
     .unwrap();
-    golden(drv, &dir, "conversation-work").await;
-    drv.keys("ctrl-o ctrl-o").await.unwrap();
-    // Every step shows, the build's call among them, so its finished row leaves the tray.
+    golden(drv, &dir, "thread-work").await;
+    drv.keys("ctrl-o").await.unwrap();
+    // Every step open: the thinking, and the screenshot the `Read` returned on its call.
     drv.wait_for("every step", STEP, |d| {
-        any_label(d, "Updated the tasks")
-            && any_label(d, "Picture, 640 \u{d7} 400")
-            && !labels(d, "Button").iter().any(|l| l.starts_with("Build the release binary: "))
+        has(d, "Button", "Thought")
+            && has(d, "Button", "Read /work/shots/header.png")
+            && has(d, "Image", picture)
     })
     .await
     .unwrap();
-    golden(drv, &dir, "conversation-work-verbose").await;
-    // Above the tail: the thinking, open in Verbose, and how long it took.
-    scroll_up_until(drv, "the thinking", |d| {
-        labels(d, "Button").iter().any(|l| l == "Thought for 9 s")
-    })
-    .await;
+    golden(drv, &dir, "thread-work-open").await;
+    // Above the steps: the prompt, with the screenshot pasted on it.
+    let prompt = |d: &Dump| {
+        labels(d, "Article").iter().any(|l| l.starts_with("You: ")) && has(d, "Image", picture)
+    };
+    scroll_up_until(drv, "the prompt", prompt).await;
     stack.shutdown().await;
 }
 
@@ -773,17 +747,17 @@ fn synthetic_session(turns: usize) -> String {
 mod frame_time {
     use super::*;
 
-    /// The face over a long conversation while the model writes an answer, the frame-time case
-    /// behind `docs/MEASUREMENTS.md` ("the conversation face under a streaming answer").
+    /// The thread view over a long thread while the model writes an answer, the frame-time case
+    /// behind `docs/MEASUREMENTS.md` ("the thread view under a streaming answer").
     ///
     /// (h) the list following the tail while an answer grows by a piece every 16 ms, as Slopty's
     /// Claude Code mod reports it; (i) the same with the reader panning the history at 120
     /// events per second.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
-    async fn the_face_draws_a_streaming_answer_within_a_frame() {
+    async fn the_thread_draws_a_streaming_answer_within_a_frame() {
         let run = std::time::Duration::from_secs(5);
-        // The face keeps GPUI's motion, which the self-test otherwise holds still.
+        // The thread keeps GPUI's motion, which the self-test otherwise holds still.
         let mut stack =
             Stack::launch_with("e2e-worker", &[("SLOPTY_E2E_MOTION", "1")]).await.unwrap();
         stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -798,12 +772,9 @@ mod frame_time {
         });
         let done = stack.relay_hook(&session, &[], &start).unwrap().wait().await.unwrap();
         assert!(done.success(), "the relay ran");
-        show_face(&mut stack.driver).await;
         stack
             .driver
-            .wait_for("the conversation", STEP, |d| {
-                has(d, "Group", "Conversation") && labels(d, "Article").len() > 4
-            })
+            .wait_for("the thread", STEP, |d| thread_shows(d) && labels(d, "Article").len() > 2)
             .await
             .unwrap();
 
@@ -846,7 +817,7 @@ mod frame_time {
         stack
             .driver
             .wait_for("the live answer", STEP, |d| {
-                labels(d, "Article").iter().any(|l| l.starts_with("Writing: "))
+                labels(d, "Article").iter().any(|l| l.starts_with("Writing"))
             })
             .await
             .unwrap();
@@ -856,13 +827,13 @@ mod frame_time {
             .dump()
             .await
             .unwrap()
-            .a11y_node("Group", Some("Conversation"))
-            .expect("the face")
+            .a11y_node("Group", Some("Thread"))
+            .expect("the thread")
             .bounds;
         let (x, y) = (region[0] + region[2] / 2.0, region[1] + region[3] / 2.0);
         for (scenario, pan) in [
-            ("(h) face, following a streaming answer", false),
-            ("(i) face, panning while it streams", true),
+            ("(h) thread, following a streaming answer", false),
+            ("(i) thread, panning while it streams", true),
         ] {
             stack.driver.frames_reset().await.unwrap();
             let begin = tokio::time::Instant::now();

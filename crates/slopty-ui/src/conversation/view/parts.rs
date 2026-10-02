@@ -10,8 +10,8 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement as _,
-    ObjectFit, ParentElement as _, PathBuilder, Pixels, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, canvas, div, img, point, px,
+    ParentElement as _, PathBuilder, Pixels, SharedString, StatefulInteractiveElement as _,
+    Styled as _, canvas, div, point, px,
 };
 use gpui_kit::component::input::{Input, Textarea};
 use slopty_core::WallMs;
@@ -22,16 +22,9 @@ use super::entries::READING;
 use super::{ConversationView, Pane};
 use crate::colors::hsla;
 use crate::conversation::approval::{self, Outcome};
-use crate::conversation::composer::Attachment;
 use crate::conversation::rows;
 use crate::icons::IconName;
 use crate::kit::{self, ButtonKind};
-
-/// The widest an attachment's chip grows, in points at zoom 1; a longer name is cut short.
-const ATTACHMENT_WIDTH: f32 = 240.0;
-
-/// The side of a pasted picture's chip, in points at zoom 1: a two-line row's height.
-const THUMBNAIL: f32 = 40.0;
 
 impl ConversationView {
     /// Over the list once the reader scrolled up: back to the newest row.
@@ -551,154 +544,15 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// The chips of what is attached to the draft, in a wrapping row over the field: a pasted
-    /// picture as the picture, a file by its name, each with a way to take it off the draft and,
-    /// while it uploads, how far it got. `None` while nothing is attached. The chip is the one
-    /// place the upload is said: the tile's header leaves an attachment's out.
+    /// The chips of what is attached to the draft ([`crate::conversation::chips`]).
     fn attachment_chips(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let chips = self.attachments();
-        if chips.is_empty() {
-            return None;
-        }
-        let row = div()
-            .id("composer-attachments")
-            .debug_selector(|| "composer-attachments".to_owned())
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap(self.z(self.theme.spacing.xs))
-            .pl(self.z(kit::FIELD_INSET))
-            .children(chips.iter().map(|chip| match self.attachment_picture(chip.id) {
-                Some(picture) => self.picture_chip(chip, picture, cx),
-                None => self.file_chip(chip, cx),
-            }));
-        Some(row.into_any_element())
-    }
-
-    /// What a chip says to a screen reader: its name, and how far it got while it uploads.
-    fn chip_label(chip: &Attachment) -> SharedString {
-        if chip.landed() {
-            SharedString::from(format!("Attached {}", chip.name))
-        } else {
-            SharedString::from(format!("Attaching {}, {}", chip.name, chip.progress()))
-        }
-    }
-
-    /// The way to take attachment `id` off the draft, its ✕ `side` points square.
-    fn chip_remove(&self, chip: &Attachment, side: f32, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let id = chip.id;
-        let remove = div()
-            .id(SharedString::from(format!("attachment-remove-{id}")))
-            .debug_selector(|| "composer-attachment-remove".to_owned())
-            .role(Role::Button)
-            .aria_label(SharedString::from(format!("Remove {}", chip.name)))
-            .flex_none()
-            .size(self.z(side))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .on_click(cx.listener(move |this, _ev, _w, cx| this.detach(id, cx)))
-            .child(
-                crate::icons::icon(
-                    theme,
-                    IconName::X,
-                    crate::icons::IconSize::Inline,
-                    hsla(s.text_muted),
-                )
-                .size(self.z(theme.typography.meta())),
-            );
-        crate::a11y::tab_stop(remove, s.accent).into_any_element()
-    }
-
-    /// A pasted picture's chip: the picture itself in a small square on the hairline, its ✕ on
-    /// a lifted disc in the top corner, and while it uploads a progress line along its foot.
-    fn picture_chip(
-        &self,
-        chip: &Attachment,
-        picture: std::sync::Arc<gpui::Image>,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let disc = theme.typography.icon_large();
-        let remove = kit::elevate(div(), theme)
-            .absolute()
-            .top(self.z(theme.spacing.xxs))
-            .right(self.z(theme.spacing.xxs))
-            .rounded_full()
-            .overflow_hidden()
-            .hover(move |el| el.bg(hsla(s.raised)))
-            .child(self.chip_remove(chip, disc, cx));
-        let progress = (!chip.landed()).then(|| {
-            div()
-                .debug_selector(|| "composer-attachment-progress".to_owned())
-                .absolute()
-                .left_0()
-                .bottom_0()
-                .h(self.z(theme.spacing.xxs))
-                .w(self.z(THUMBNAIL * chip.fraction.clamp(0.0, 1.0)))
-                .bg(hsla(s.accent_fill))
-        });
-        div()
-            .id(SharedString::from(format!("attachment-{}", chip.id)))
-            .debug_selector(|| "composer-attachment".to_owned())
-            .role(Role::Image)
-            .aria_label(Self::chip_label(chip))
-            .relative()
-            .flex_none()
-            .size(self.z(THUMBNAIL))
-            .rounded(self.z(theme.radii.sm))
-            .overflow_hidden()
-            .border_1()
-            .border_color(hsla(s.border_subtle))
-            .bg(hsla(s.raised))
-            .child(img(picture).size_full().object_fit(ObjectFit::Cover))
-            .children(progress)
-            .child(remove)
-            .into_any_element()
-    }
-
-    /// A file's chip: its name on the pill, how far it got while it uploads, and its ✕.
-    fn file_chip(&self, chip: &Attachment, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        let side = (-2.0_f32).mul_add(theme.spacing.xxs, kit::PILL_HEIGHT);
-        let progress = (!chip.landed()).then(|| {
-            kit::tabular(div())
-                .flex_none()
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(chip.progress()))
-        });
-        kit::pill_frame(theme, self.zoom)
-            .id(SharedString::from(format!("attachment-{}", chip.id)))
-            .debug_selector(|| "composer-attachment".to_owned())
-            .role(Role::Status)
-            .aria_label(Self::chip_label(chip))
-            .max_w(self.z(ATTACHMENT_WIDTH))
-            // The way off sits in the pill's own end, a pad's width from its edge.
-            .pr(self.z(theme.spacing.xxs))
-            .bg(hsla(s.raised))
-            .text_color(hsla(s.text_secondary))
-            .child(self.icon(IconName::File, s.text_muted))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .child(SharedString::from(chip.name.clone())),
-            )
-            .children(progress)
-            .child(
-                div()
-                    .rounded(self.z(theme.radii.xs))
-                    .hover(move |el| el.bg(hsla(s.overlay)))
-                    .child(self.chip_remove(chip, side, cx)),
-            )
-            .into_any_element()
+        crate::conversation::chips::row(
+            &self.theme,
+            self.zoom,
+            self.attachments(),
+            &|id| self.attachment_picture(id),
+            &|id| Box::new(cx.listener(move |this, _ev, _w, cx| this.detach(id, cx))),
+        )
     }
 
     /// The field that types into the agent's terminal, and under it the model it runs and its

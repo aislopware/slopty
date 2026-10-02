@@ -193,3 +193,21 @@ ARCHITECTURE said "multi-client is cheap" and nothing exercised two live clients
     and `a_failed_open_is_its_own_requests_error` (`slopty-cli`). Goldens:
     `client_open_session`, `worker_session_opened`, `worker_session_changed` and
     `worker_failed`.
+- ✅ **A client tells the server where the person is, and a Mac left alone stops counting**
+  (2026-10-02, GUI-first plan item 8). The app sends its `Presence` when its window comes to
+  the front or leaves it, 150 ms after any change to the workspace (the workspace in front,
+  the tiles on screen, the focus), so a strip that animates sends once after it has drawn, and
+  again every 5 s, which also catches a tile scrolled into view without telling. A send is
+  dropped when nothing changed (`ServerCaller::presence`).
+  - **Away.** A Mac counts as in use only while its last input, from any app, is under two
+    minutes old: the window server's record for the login session
+    (`slopty_platform::idle::since_input`), which needs neither Accessibility nor Input
+    Monitoring. A Mac left on with the app in front would otherwise keep every notice from the
+    phone in the person's pocket. An iPhone or iPad needs no clock: the system locks it, which
+    takes the app out of the front.
+  - **Handheld goes quiet.** On the server's list of clients, a handheld stays quiet while
+    another client, on a desk seat, is active. While linked, the server's notices are the only
+    agent moments that post a note, and one that needs the person sounds the alert as the
+    agent-alert setting says.
+  - Tests: `presence::tests::a_handheld_is_quiet_while_a_desk_is_in_use` (`slopty-app`) and
+    `idle::tests::the_session_s_last_input_is_read` (`slopty-platform`).

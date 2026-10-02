@@ -92,7 +92,7 @@ impl WorkspaceView {
                     .child(SharedString::from(self.tile_title(item))),
             );
         let worker = (self.workers.len() > 1).then(|| self.worker_name(placed.tile.worker));
-        let (meta, _) = self.tile_meta(item, std::time::SystemTime::now());
+        let (meta, _) = self.tile_meta(item, std::time::SystemTime::now(), cx);
         let meta = super::rollup::meta_line([Some(meta.as_str()), worker.as_deref()]);
         let meta = (!meta.is_empty()).then(|| {
             div()
