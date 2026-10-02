@@ -18,9 +18,10 @@ use gpui::{
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Choice, Effect, ItemId, Request};
+use slopty_proto::thread::{BackgroundTask, Choice, Effect, ItemId, Request};
 use slopty_theme::{Rgb, Theme, Typography};
 
+use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, ThreadViewEvent, tail};
 use crate::colors::hsla;
 use crate::conversation::thread::activity::{Activity, Asked, Edit, STEP_DONE};
@@ -186,8 +187,10 @@ impl ThreadView {
         if !bar.background.is_empty() {
             sections.push(self.background_section(&bar.background));
         }
-        for task in &bar.tasks {
-            sections.push(self.task_line(task, bar.can_stop, cx));
+        if self.tasks_open {
+            for task in &bar.tasks {
+                sections.push(self.task_line(task, bar.can_stop, cx));
+            }
         }
         if sections.is_empty() && request.is_none() {
             return None;
@@ -762,20 +765,55 @@ impl ThreadView {
             .into_any_element()
     }
 
-    fn task_line(
-        &self,
-        task: &slopty_proto::thread::BackgroundTask,
-        can_stop: bool,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let s = self.theme.surfaces;
+    /// One piece of background work in the panel: its kind, what it is, the end of what it
+    /// printed, how it stands and for how long, and the way to stop it while it runs.
+    fn task_line(&self, task: &BackgroundTask, can_stop: bool, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
         let id = task.id.clone();
+        let running = task.is_running();
         let stopping = self.hub.read(cx).threads().unshown(self.thread).any(|sent| {
             matches!(&sent.intent, Intent::StopTask { task: t } if *t == id) && !sent.failed()
         });
+        let mark = if running {
+            self.spinner(true)
+        } else {
+            let icon = if task.kind == BackgroundTask::AGENT {
+                IconName::Workflow
+            } else {
+                IconName::SquareTerminal
+            };
+            self.icon(icon, s.text_muted)
+        };
+        let last = task
+            .output
+            .as_ref()
+            .and_then(|o| o.text.lines().rev().find(|l| !l.trim().is_empty()))
+            .map(|l| l.trim().to_owned());
+        let took = (!task.started_ms.is_zero()).then(|| {
+            let end = task.ended_ms.unwrap_or_else(slopty_core::WallMs::now);
+            kit::duration(Duration::from_secs(end.millis_since(task.started_ms) / 1_000))
+        });
+        let state = if stopping { "Stopping".to_owned() } else { sentence(&task.state) };
+        let standing = took.map_or_else(|| state.clone(), |t| format!("{state} \u{b7} {t}"));
+        let tag = id.clone();
+        let label = SharedString::from(format!("{}: {state}", task.title));
         self.section()
+            .id(ElementId::Name(format!("task-{id}").into()))
+            .debug_selector(move || format!("task-{tag}"))
+            .role(Role::Status)
+            .aria_label(label)
             .text_color(hsla(s.text_secondary))
-            .child(self.slot().child(self.spinner(true)))
+            .child(self.slot().child(mark))
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(relative(0.5))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(task.title.clone())),
+            )
             .child(
                 div()
                     .min_w_0()
@@ -783,10 +821,19 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .child(SharedString::from(task.title.clone())),
+                    .font_family(self.mono())
+                    .text_size(self.z(theme.typography.meta()))
+                    .text_color(hsla(s.text_muted))
+                    .children(last.map(SharedString::from)),
             )
-            .when(stopping, |el| el.child(div().text_color(hsla(s.text_muted)).child("Stopping")))
-            .when(can_stop && !stopping, |el| {
+            .child(
+                kit::tabular(div())
+                    .flex_none()
+                    .text_size(self.z(theme.typography.meta()))
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(standing)),
+            )
+            .when(running && can_stop && !stopping, |el| {
                 el.child(
                     self.button(format!("stop-task-{id}"), "Stop", ButtonKind::Ghost).on_click(
                         cx.listener(move |this, _ev, _w, cx| {

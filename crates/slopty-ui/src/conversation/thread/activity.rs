@@ -94,7 +94,7 @@ pub struct Activity<'a> {
     /// The commands the agent ran in the background: those still running, and those of the
     /// last turn that ended.
     pub background: Vec<Background<'a>>,
-    /// The work running in the background.
+    /// The work the agent lists as run in the background, what still runs first.
     pub tasks: Vec<&'a BackgroundTask>,
     /// Whether a task can be stopped from here.
     pub can_stop: bool,
@@ -166,9 +166,14 @@ impl<'a> Activity<'a> {
             asked,
             plan: state.plan.as_ref().filter(|p| p.steps.iter().any(|s| s.status != STEP_DONE)),
             edited: edited(state),
-            background: background(state),
+            // An agent that lists its background work says it better than the calls do.
+            background: if state.tasks.is_empty() { background(state) } else { Vec::new() },
             queue,
-            tasks: state.tasks.iter().filter(|t| t.state == TASK_RUNNING).collect(),
+            tasks: {
+                let mut tasks: Vec<&BackgroundTask> = state.tasks.iter().collect();
+                tasks.sort_by_key(|t| !t.is_running());
+                tasks
+            },
             can_stop: state.meta.can(Cap::STOP_TASK),
             can_withdraw: state.meta.can(Cap::QUEUE),
         }
@@ -193,9 +198,6 @@ impl<'a> Activity<'a> {
 
 /// A plan step's status once done, as agents name it.
 pub const STEP_DONE: &str = "completed";
-
-/// A background task's state while it runs, as agents name it.
-pub const TASK_RUNNING: &str = "running";
 
 /// The commands run in the background that still run, or ended in the last turn.
 fn background(state: &ThreadState) -> Vec<Background<'_>> {

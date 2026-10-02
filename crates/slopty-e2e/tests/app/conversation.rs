@@ -647,9 +647,11 @@ async fn the_thread_shows_the_work_beyond_words() {
     let drv = &mut stack.driver;
     let building = "Build the release binary: Running";
     let picture = "Picture, 640 \u{d7} 400";
+    // The agent lists its background work: a chip says one runs, and opens the panel of it.
+    drv.wait_for("the background chip", STEP, |d| has(d, "Button", "1 running")).await.unwrap();
+    click(drv, "Button", "1 running").await;
     drv.wait_for("the build in the background", STEP, |d| {
-        has(d, "List", "In the background")
-            && labels(d, "Status").iter().any(|l| l == building)
+        labels(d, "Status").iter().any(|l| l == building)
             && labels(d, "Button").iter().any(|l| l.starts_with("Plan, 1 of 3 done"))
             && has(d, "Image", picture)
     })
@@ -668,7 +670,7 @@ async fn the_thread_shows_the_work_beyond_words() {
         .and_then(|mut f| std::io::Write::write_all(&mut f, build_finished().as_bytes()))
         .unwrap();
     drv.wait_for("the build done", STEP, |d| {
-        labels(d, "Status").iter().any(|l| l.starts_with("Build the release binary: Done"))
+        labels(d, "Status").iter().any(|l| l.starts_with("Build the release binary: Completed"))
     })
     .await
     .unwrap();

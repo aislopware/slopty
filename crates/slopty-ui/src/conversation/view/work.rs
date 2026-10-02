@@ -704,7 +704,7 @@ impl ConversationView {
                 hsla(s.text_muted),
             ),
             (Standing::Stopped, _) => self.icon(IconName::CirclePause, s.text_muted),
-            (_, Some(_)) => self.icon(IconName::Bot, s.text_muted),
+            (_, Some(_)) => self.icon(IconName::Sparkles, s.text_muted),
             (_, None) => self.icon(IconName::SquareTerminal, s.text_muted),
         };
         let failed = (work.standing == Standing::Failed).then(|| {

@@ -54,6 +54,9 @@ pub struct Line {
 pub struct Block {
     /// Where it starts in the new file, for the hunk's divider.
     pub new_start: u32,
+    /// The line before it that names where it is, as git gives it after `@@ … @@` (a
+    /// function's signature); none for a hunk at a file's top.
+    pub heading: Option<String>,
     /// Its lines.
     pub lines: Vec<Line>,
 }
@@ -69,16 +72,20 @@ pub fn blocks(path: &str, patch: &Patch) -> Rc<[Block]> {
 #[must_use]
 pub fn thread_blocks(path: &str, patch: &slopty_proto::thread::Patch) -> Rc<[Block]> {
     let syntax = Syntax::for_path(path, "");
-    patch.hunks.iter().map(|h| block_of(h.old_start, h.new_start, &h.lines, syntax)).collect()
+    patch
+        .hunks
+        .iter()
+        .map(|h| block_of((h.old_start, h.new_start), h.heading.clone(), &h.lines, syntax))
+        .collect()
 }
 
 fn block(hunk: &Hunk, syntax: Option<Syntax>) -> Block {
-    block_of(hunk.old_start, hunk.new_start, &hunk.lines, syntax)
+    block_of((hunk.old_start, hunk.new_start), hunk.heading.clone(), &hunk.lines, syntax)
 }
 
 fn block_of(
-    old_start: u32,
-    new_start: u32,
+    (old_start, new_start): (u32, u32),
+    heading: Option<String>,
     hunk_lines: &[String],
     syntax: Option<Syntax>,
 ) -> Block {
@@ -146,7 +153,8 @@ fn block_of(
         });
     }
     emphasise(&mut lines);
-    Block { new_start, lines }
+    let heading = heading.filter(|h| !h.trim().is_empty());
+    Block { new_start, heading, lines }
 }
 
 /// The bytes of a line that changed.
@@ -511,6 +519,16 @@ mod tests {
         assert_eq!(emph(1), ["old_name"], "it pairs past the line rewritten whole");
         assert_eq!(emph(4), ["new_name"]);
         assert!(emph(3).is_empty(), "a line that pairs with none is all wash");
+    }
+
+    /// A hunk keeps the line git names it by, and a blank one is none.
+    #[test]
+    fn a_hunk_keeps_its_heading() {
+        let mut patch = hunk(&[" a", "-b", "+B"]);
+        patch.hunks[0].heading = Some("impl Client {".to_owned());
+        assert_eq!(blocks("x.rs", &patch)[0].heading.as_deref(), Some("impl Client {"));
+        patch.hunks[0].heading = Some("  ".to_owned());
+        assert_eq!(blocks("x.rs", &patch)[0].heading, None);
     }
 
     /// A tab widens to spaces, and the colours after it move with the text.

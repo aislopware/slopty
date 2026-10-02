@@ -41,7 +41,7 @@ use crate::colors::hsla;
 use crate::conversation::composer::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{CTX, CycleDensity, Interrupt};
-use crate::icons::{IconName, IconSize, Status};
+use crate::icons::{Glyph, IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
 
 /// The widest the reading column's text runs, in points at zoom 1 (`design.md` §3).
@@ -84,6 +84,7 @@ const BUBBLE_CHARS: usize = 480;
 mod asking;
 mod composer;
 mod composing;
+mod notes;
 mod pictures;
 mod tools;
 mod trail;
@@ -158,6 +159,8 @@ pub struct ThreadView {
     /// Which waiting request the bar shows, by its place among them.
     asked_at: usize,
     plan_open: bool,
+    /// The panel of the work the agent runs in the background is open.
+    tasks_open: bool,
     /// Diffs coloured once, by call.
     diffs: RefCell<Coloured>,
     /// Ticks once a second while the agent works (the elapsed time).
@@ -262,6 +265,7 @@ impl ThreadView {
             whole: HashSet::new(),
             asked_at: 0,
             plan_open: false,
+            tasks_open: false,
             diffs: RefCell::default(),
             clock: None,
             composing: Composing::default(),
@@ -627,6 +631,13 @@ impl ThreadView {
     }
 
     // ----- drawing: pieces -------------------------------------------------------------
+
+    /// An agent's mark, at the size of an icon or of a large one.
+    fn agent_mark(&self, agent: Option<&AgentId>, large: bool, tone: Rgb) -> AnyElement {
+        let theme = &self.theme;
+        let side = if large { theme.typography.icon_large() } else { theme.typography.icon() };
+        crate::icons::glyph(theme, agent_icon(agent), self.z(side), hsla(tone))
+    }
 
     fn icon(&self, name: IconName, tone: Rgb) -> AnyElement {
         crate::icons::icon(&self.theme, name, IconSize::Inline, hsla(tone))
@@ -995,39 +1006,6 @@ impl ThreadView {
             .into_any_element()
     }
 
-    fn note_row(&self, ix: usize, id: &ItemId, cx: &Context<Self>) -> AnyElement {
-        let Some(item) = self.item(ix, id, cx) else { return div().into_any_element() };
-        let s = self.theme.surfaces;
-        let (icon, words) = match &item.body {
-            ItemBody::Compaction(c) => (
-                IconName::Scissors,
-                match (c.before_tokens, c.after_tokens) {
-                    (Some(b), Some(a)) => format!(
-                        "Compacted the conversation from {} to {} tokens",
-                        tokens(b),
-                        tokens(a)
-                    ),
-                    _ => "Compacted the conversation".to_owned(),
-                },
-            ),
-            ItemBody::Notice(n) => (IconName::Info, kit::first_line(&n.text.text).to_owned()),
-            ItemBody::Review { .. } => (IconName::ListChecks, "Reviewed the changes".to_owned()),
-            ItemBody::Extra { kind, .. } => (IconName::Info, composer::sentence(kind)),
-            _ => return div().into_any_element(),
-        };
-        div()
-            .w_full()
-            .flex()
-            .items_center()
-            .gap(self.z(self.theme.spacing.xs))
-            .min_h(self.z(TOOL_ROW))
-            .text_size(self.z(self.theme.typography.small()))
-            .text_color(hsla(s.text_muted))
-            .child(self.slot().child(self.icon(icon, s.text_muted)))
-            .child(div().min_w_0().whitespace_normal().child(SharedString::from(words)))
-            .into_any_element()
-    }
-
     fn fold_row(&self, ix: usize, turn: TurnId, open: bool, cx: &Context<Self>) -> AnyElement {
         let Some(state) = self.state(cx) else { return div().into_any_element() };
         let Some(figures) = state.turn(turn) else { return div().into_any_element() };
@@ -1036,6 +1014,8 @@ impl ThreadView {
         let s = theme.surfaces;
         let changes = kit::changes(theme, fold.added, fold.removed);
         let (line, when, label) = (fold.line(), fold.when(), fold.label());
+        let (model, spent) = notes::turn_footer(figures, &state.meters);
+        let hint_theme = theme.clone();
         div()
             .id(ElementId::Name(format!("fold-{}", turn.0).into()))
             .debug_selector(move || format!("fold-{}", turn.0))
@@ -1065,11 +1045,25 @@ impl ThreadView {
             )
             .children(changes)
             .child(div().flex_1())
+            .children(model.map(|m| {
+                div()
+                    .debug_selector(move || format!("turn-model-{}", turn.0))
+                    .flex_none()
+                    .text_size(self.z(theme.typography.meta()))
+                    .child(SharedString::from(m))
+            }))
             .children(when.map(|w| {
                 kit::tabular(div())
+                    .id(ElementId::Name(format!("turn-when-{}", turn.0).into()))
                     .flex_none()
                     .text_size(self.z(theme.typography.meta()))
                     .child(SharedString::from(w))
+                    .when_some(spent, |el, spent| {
+                        el.tooltip(move |_window, cx| {
+                            let theme = Rc::new(hint_theme.clone());
+                            cx.new(|_| kit::Hint::new(spent.clone(), "", theme)).into()
+                        })
+                    })
             }))
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_turn(turn, cx)))
             .into_any_element()
@@ -1127,16 +1121,26 @@ impl ThreadView {
             .map(|t| kit::duration(Duration::from_secs(WallMs::now().millis_since(t) / 1_000)));
         let s = self.theme.surfaces;
         let asks = self.state(cx).is_some_and(|st| st.status.phase == Phase::NeedsYou);
-        let words = match (stopping, asks) {
-            (true, _) => "Stopping",
-            (false, true) => "Waiting for you",
-            (false, false) => "Working",
+        // The agent trying a failed request again says so, rather than looking hung.
+        let retry = self
+            .state(cx)
+            .and_then(|st| st.items.last().filter(|i| i.turn == turn))
+            .and_then(|i| match &i.body {
+                ItemBody::Notice(n) => n.retry.as_ref().map(notes::retrying),
+                _ => None,
+            });
+        let retrying = retry.is_some() && !stopping && !asks;
+        let words = match (stopping, asks, retry) {
+            (true, ..) => "Stopping".to_owned(),
+            (false, true, _) => "Waiting for you".to_owned(),
+            (false, false, Some(retry)) => retry,
+            (false, false, None) => "Working".to_owned(),
         };
         div()
             .id("thread-working")
             .debug_selector(|| "thread-working".to_owned())
             .role(Role::Status)
-            .aria_label(words)
+            .aria_label(SharedString::from(words.clone()))
             .w_full()
             .flex()
             .items_center()
@@ -1145,7 +1149,11 @@ impl ThreadView {
             .text_size(self.z(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(self.slot().child(self.spinner(stopping || asks)))
-            .child(div().child(words))
+            .child(
+                div()
+                    .when(retrying, |el| el.debug_selector(|| "thread-retrying".to_owned()))
+                    .child(SharedString::from(words)),
+            )
             .child(div().flex_1())
             .children(elapsed.map(|e| {
                 kit::tabular(div())
@@ -1253,7 +1261,7 @@ impl ThreadView {
                 .min_h(self.z(kit::Row::Two.height(theme)))
                 .border_b_1()
                 .border_color(hsla(s.border_subtle))
-                .child(self.icon(agent_icon(agent), s.text_secondary))
+                .child(self.agent_mark(agent, false, s.text_secondary))
                 .child(
                     div()
                         .min_w_0()
@@ -1342,15 +1350,7 @@ impl ThreadView {
                 .aria_label(words)
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
-                .children(agent.map(|agent| {
-                    crate::icons::icon(
-                        theme,
-                        agent_icon(Some(agent)),
-                        IconSize::Large,
-                        hsla(s.text_muted),
-                    )
-                    .size(self.z(theme.typography.icon_large()))
-                }))
+                .children(agent.map(|agent| self.agent_mark(Some(agent), true, s.text_muted)))
                 .child(words)
                 .into_any_element();
         }
@@ -1504,12 +1504,9 @@ fn clamp(words: &str) -> Option<String> {
     Some(format!("{}\u{2026}", cut.trim_end()))
 }
 
-/// The glyph of an agent's kind: its own mark where Slopty has one, else a neutral one.
-fn agent_icon(agent: Option<&AgentId>) -> IconName {
-    match agent.map(|a| a.0.as_str()) {
-        Some(AgentId::CLAUDE_CODE) => IconName::Asterisk,
-        _ => IconName::Bot,
-    }
+/// The glyph of an agent's kind: its own mark where Slopty has one, else the neutral one.
+fn agent_icon(agent: Option<&AgentId>) -> Glyph {
+    Glyph::agent(agent.map_or("", |a| a.0.as_str()))
 }
 
 /// The one vocabulary's word for a phase; none for a thread at rest.
@@ -1541,7 +1538,7 @@ fn tool_icon(kind: &str) -> IconName {
         kind::SEARCH => IconName::Search,
         kind::FETCH | kind::WEB_SEARCH => IconName::Globe,
         kind::MCP => IconName::Plug,
-        kind::AGENT => IconName::Bot,
+        kind::AGENT => IconName::Sparkles,
         kind::QUESTION => IconName::MessageSquare,
         kind::PLAN => IconName::Map,
         kind::TASKS => IconName::ListTodo,
@@ -1554,6 +1551,14 @@ fn path_patch(call: &ToolCall) -> Option<(&str, &slopty_proto::thread::Patch)> {
         Some(ToolDetail::Edit(d)) => Some((&d.path, &d.patch)),
         Some(ToolDetail::Write(d)) => Some((&d.path, &d.patch)),
         _ => None,
+    }
+}
+
+/// The one file a call reads or writes, for its row to lead with the file's type.
+fn call_path(call: &ToolCall) -> Option<&str> {
+    match &call.detail {
+        Some(ToolDetail::Read(d)) => Some(&d.path),
+        _ => path_patch(call).map(|(path, _)| path),
     }
 }
 

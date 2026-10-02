@@ -128,7 +128,7 @@ impl ThreadView {
                         let _was = this.leave_subagent(window, cx);
                     }),
                 ))
-                .child(self.icon(IconName::Bot, s.text_muted))
+                .child(self.icon(IconName::Sparkles, s.text_muted))
                 .child(
                     div()
                         .min_w_0()

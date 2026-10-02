@@ -39,7 +39,8 @@ Button │ Review the changes
 MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Opus 5.5
-Label │ Mode, default
+Label │ Mode, Default
+Label │ Context 34% of 200k
 Button │ Send
 Group │ Status
 Status │ e2e-worker

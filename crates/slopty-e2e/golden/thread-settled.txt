@@ -28,11 +28,11 @@ Article │ done
 Group │ Activity
 Group │ Edits · notes.md
 Button │ Review
-List │ In the background
-Status │ Background sleep and echo: Done
 MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Opus 5.5
+Button │ 1 in the background
+Label │ Context 34% of 200k
 Button │ Send
 Group │ Status
 Status │ e2e-worker

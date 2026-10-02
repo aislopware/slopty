@@ -9,15 +9,15 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::Cap;
 use slopty_proto::thread::wire::Intent;
 
-use super::{ThreadView, ThreadViewEvent, agent_icon, agent_name};
+use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
 use crate::kit::{self, ButtonKind};
@@ -36,6 +36,23 @@ pub(super) struct Whereabouts {
     pub added: u32,
     /// And removed.
     pub removed: u32,
+}
+
+/// The fact that names how far a thread's sandbox reaches (Codex's), as the worker sets it.
+const SANDBOX: &str = "sandbox";
+
+/// The context and each of the plan's rate windows, one line each: "Context 34% of 200k",
+/// "Five hour 41%".
+pub(super) fn meter_words(meters: &slopty_proto::thread::Meters) -> Vec<String> {
+    let context = super::context_used(meters).map(|u| match meters.context_window {
+        Some(window) => format!("Context {u:.0}% of {}", super::tokens(window)),
+        None => format!("Context {u:.0}%"),
+    });
+    let limits = meters.limits.iter().map(|l| {
+        let used = f64::from(l.used_bp) / 100.0;
+        format!("{} {used:.0}%", sentence(&l.name))
+    });
+    context.into_iter().chain(limits).collect()
 }
 
 /// The fact that names a thread's branch, as the workers set it.
@@ -274,13 +291,7 @@ impl ThreadView {
         let switch = state.meta.can(Cap::SET_MODEL) && !state.meta.models.is_empty();
         let name =
             state.meters.model.clone().unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
-        let mark = crate::icons::icon(
-            theme,
-            agent_icon(Some(&state.meta.agent)),
-            IconSize::Inline,
-            hsla(s.text_secondary),
-        )
-        .size(self.z(theme.typography.icon()));
+        let mark = self.agent_mark(Some(&state.meta.agent), false, s.text_secondary);
         let chip = self.chip("thread-model", format!("Model, {name}")).child(mark).child(
             div()
                 .min_w_0()
@@ -313,12 +324,117 @@ impl ThreadView {
     }
 
     /// The mode chip: the permission mode the agent says it is in.
+    ///
+    /// Where the agent says how far its sandbox reaches (Codex's), that follows: "On request ·
+    /// Workspace write".
     fn mode_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let mode = self.state(cx)?.meters.mode.clone().filter(|m| !m.trim().is_empty())?;
+        let state = self.state(cx)?;
+        let mode = state.meters.mode.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        let sandbox = state.meta.facts.get(SANDBOX).map(|f| f.trim()).filter(|f| !f.is_empty());
+        let words: Vec<String> = mode.into_iter().chain(sandbox).map(sentence).collect();
+        if words.is_empty() {
+            return None;
+        }
+        let words = words.join(" \u{b7} ");
         Some(
-            self.chip("thread-mode", format!("Mode, {mode}"))
+            self.chip("thread-mode", format!("Mode, {words}"))
                 .role(Role::Label)
-                .child(SharedString::from(sentence(&mode)))
+                .child(SharedString::from(words))
+                .into_any_element(),
+        )
+    }
+
+    /// The effort chip: how hard the model thinks, as the agent names it.
+    fn effort_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let effort = self.state(cx)?.meters.effort.clone().filter(|e| !e.trim().is_empty())?;
+        let words = sentence(&effort);
+        Some(
+            self.chip("thread-effort", format!("Effort, {words}"))
+                .role(Role::Label)
+                .child(
+                    crate::icons::icon(
+                        &self.theme,
+                        IconName::Brain,
+                        IconSize::Inline,
+                        hsla(self.theme.surfaces.text_muted),
+                    )
+                    .size(self.z(self.theme.typography.meta())),
+                )
+                .child(SharedString::from(words))
+                .into_any_element(),
+        )
+    }
+
+    /// The background chip, while the agent lists background work: how much still runs, and
+    /// the panel of it on a press.
+    fn tasks_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let tasks = &self.state(cx)?.tasks;
+        if tasks.is_empty() {
+            return None;
+        }
+        let running = tasks.iter().filter(|t| t.is_running()).count();
+        let words = if running > 0 {
+            format!("{running} running")
+        } else {
+            format!("{} in the background", tasks.len())
+        };
+        let mark = if running > 0 {
+            self.spinner(true)
+        } else {
+            self.icon(IconName::Activity, s.text_muted)
+        };
+        let open = self.tasks_open;
+        Some(
+            crate::a11y::tab_stop(
+                self.chip("thread-tasks", words.clone())
+                    .role(Role::Button)
+                    .aria_expanded(open)
+                    .cursor_pointer()
+                    .when(open, |el| el.bg(hsla(s.raised)))
+                    .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                    .child(mark)
+                    .child(SharedString::from(words))
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        this.tasks_open = !this.tasks_open;
+                        cx.notify();
+                    })),
+                s.accent,
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// How full the context is, a ring and its share, with the plan's rate windows in its
+    /// hint: quiet until asked.
+    fn meter(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let meters = &self.state(cx)?.meters;
+        let used = super::context_used(meters);
+        if used.is_none() && meters.limits.is_empty() {
+            return None;
+        }
+        let hint = meter_words(meters).join("\n");
+        let hint_theme = theme.clone();
+        Some(
+            self.chip("thread-meter", hint.replace('\n', ", "))
+                .role(Role::Label)
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .children(used.map(|u| {
+                    crate::conversation::view::context_ring(
+                        theme,
+                        u,
+                        theme.typography.small() * self.zoom,
+                    )
+                }))
+                .children(used.map(|u| SharedString::from(format!("{u:.0}%"))))
+                .tooltip(move |_window, cx| {
+                    let theme = std::rc::Rc::new(hint_theme.clone());
+                    cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
+                })
                 .into_any_element(),
         )
     }
@@ -432,8 +548,11 @@ impl ThreadView {
                         )
                     })
                     .children(self.model_chip(cx))
+                    .children(self.effort_chip(cx))
                     .children(self.mode_chip(cx))
+                    .children(self.tasks_chip(cx))
                     .child(div().flex_1())
+                    .children(self.meter(cx))
                     .children(self.handoff_button(cx))
                     .child(self.send_button(cx)),
             )
@@ -443,7 +562,23 @@ impl ThreadView {
 
 #[cfg(test)]
 mod tests {
-    use super::{checkout, sentence};
+    use super::{checkout, meter_words, sentence};
+
+    /// The meter's hint names the context and each rate window as the agent names it.
+    #[test]
+    fn the_meter_names_the_context_and_each_window() {
+        let meters = slopty_proto::thread::Meters {
+            context_tokens: Some(68_000),
+            context_window: Some(200_000),
+            limits: vec![slopty_proto::thread::Limit {
+                name: "five-hour".to_owned(),
+                used_bp: 4_100,
+                resets_ms: None,
+            }],
+            ..slopty_proto::thread::Meters::default()
+        };
+        assert_eq!(meter_words(&meters), ["Context 34% of 200k", "Five hour 41%"]);
+    }
 
     /// A mode reads as words in sentence case, however the agent spells it.
     #[test]

@@ -17,12 +17,12 @@ use gpui::{
 };
 use slopty_proto::thread::{ItemBody, ItemId, ToolCall, ToolDetail, ToolState};
 
-use super::{PEEK_LINES, TOOL_ROW, ThreadView, patch_of, path_patch, tail, tool_icon};
+use super::{PEEK_LINES, TOOL_ROW, ThreadView, call_path, patch_of, path_patch, tail, tool_icon};
 use crate::colors::hsla;
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
-use crate::icons::IconName;
+use crate::icons::{FileType, Glyph, IconName};
 use crate::kit;
 
 /// How a call is drawn.
@@ -168,7 +168,16 @@ impl ThreadView {
         let mark = match call.state {
             ToolState::Streaming | ToolState::Running => self.spinner(false),
             ToolState::Pending { .. } => self.spinner(true),
-            _ => self.icon(tool_icon(&call.kind), s.text_muted),
+            _ => {
+                let kind = Glyph::Icon(tool_icon(&call.kind));
+                let glyph = call_path(call).and_then(FileType::of).map_or(kind, Glyph::File);
+                crate::icons::glyph(
+                    theme,
+                    glyph,
+                    self.z(theme.typography.icon()),
+                    hsla(s.text_muted),
+                )
+            }
         };
         let cwd = self.state(cx).map(|st| st.meta.cwd.clone()).unwrap_or_default();
         let title = if call.title.is_empty() { call.name.clone() } else { tidy(&call.title, &cwd) };

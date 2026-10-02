@@ -8,8 +8,8 @@ use gpui::{
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    AskId, Cap, Changed, Clipped, Item, ItemBody, ItemId, Model, Phase, ToolCall, ToolState, Turn,
-    TurnId, TurnState, Usage, kind,
+    AskId, BackgroundTask, Cap, Changed, Clipped, Compaction, Item, ItemBody, ItemId, Model,
+    Notice, Phase, Retry, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, kind,
 };
 
 use super::{approval, hub, intents, snapshot, view};
@@ -212,4 +212,110 @@ fn the_composer_shrinks_with_the_zoom(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let small = cx.debug_bounds("thread-composer").expect("the composer").size.height;
     assert!(small <= tall * 0.3, "{small:?} against {tall:?} at a quarter");
+}
+
+/// The agent's background work stays out of the way: a chip says how much runs, and opens
+/// the panel of it, each piece with what it last printed.
+#[gpui::test]
+fn background_work_opens_from_a_chip(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.tasks = vec![BackgroundTask {
+        id: "b1".to_owned(),
+        kind: BackgroundTask::SHELL.to_owned(),
+        title: "cargo build".to_owned(),
+        state: BackgroundTask::RUNNING.to_owned(),
+        item: None,
+        output: Some(Clipped::whole("Compiling slopty-ui")),
+        started_ms: WallMs::from_millis(1_000),
+        ended_ms: None,
+    }];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("task-b1").is_none(), "the panel waits to be asked");
+    let chip = cx.debug_bounds("thread-tasks").expect("the chip says one runs").center();
+    cx.simulate_click(chip, Modifiers::none());
+    assert!(cx.debug_bounds("task-b1").is_some(), "the panel lists it");
+}
+
+/// The composer names how hard the model thinks and how far a Codex sandbox reaches, beside
+/// the approval mode.
+#[gpui::test]
+fn the_composer_names_the_effort_and_the_sandbox(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meters.effort = Some("high".to_owned());
+    state.meters.mode = Some("on-request".to_owned());
+    state.meta.facts.insert("sandbox".to_owned(), "workspaceWrite".to_owned());
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-effort").is_some(), "the effort chip");
+    assert!(cx.debug_bounds("thread-mode").is_some(), "the mode chip");
+}
+
+/// A retried failure says when the agent tries again; a compaction opens on its summary.
+#[gpui::test]
+fn a_retry_and_a_compaction_say_what_they_hold(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![live_turn()];
+    state.items = vec![
+        item(
+            "n",
+            ItemBody::Notice(Notice {
+                kind: Notice::API_ERROR.to_owned(),
+                text: Clipped::whole("Overloaded"),
+                retry: Some(Retry { attempt: 2, max: Some(10), in_ms: Some(3_000) }),
+            }),
+        ),
+        item(
+            "c",
+            ItemBody::Compaction(Compaction {
+                trigger: None,
+                before_tokens: Some(120_000),
+                after_tokens: Some(18_000),
+                summary: Some(Clipped::whole("The build passes; the docs wait.")),
+            }),
+        ),
+    ];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("retry-n").is_some(), "the retry under its notice");
+    assert!(cx.debug_bounds("summary-c").is_none(), "the summary waits to be asked");
+    let note = cx.debug_bounds("note-c").expect("the compaction").center();
+    cx.simulate_click(note, Modifiers::none());
+    assert!(cx.debug_bounds("summary-c").is_some(), "the summary opens under it");
+}
+
+/// While the agent tries a failed request again, the working line says so.
+#[gpui::test]
+fn a_turn_that_retries_says_so(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.phase = Phase::Working;
+    state.turns = vec![live_turn()];
+    state.items = vec![item(
+        "n",
+        ItemBody::Notice(Notice {
+            kind: Notice::API_ERROR.to_owned(),
+            text: Clipped::whole("Overloaded"),
+            retry: Some(Retry { attempt: 2, max: None, in_ms: Some(3_000) }),
+        }),
+    )];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-retrying").is_some(), "retrying, not just working");
 }

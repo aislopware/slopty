@@ -166,8 +166,8 @@ impl Ink<'_> {
             .child(side(new, |l| l.new))
     }
 
-    /// The divider before a hunk: where it starts in the new file, between hairlines, with
-    /// no band.
+    /// The divider before a hunk, between hairlines, with no band: the line git names it by
+    /// (the function it is in), else where it starts in the new file.
     #[must_use]
     pub fn hunk_head(&self, block: &Block) -> Div {
         let s = self.theme.surfaces;
@@ -178,9 +178,18 @@ impl Ink<'_> {
             .border_y_1()
             .border_color(hsla(s.border_subtle))
             .text_color(hsla(s.text_muted))
-            .font_family(self.theme.typography.ui_family.clone())
             .text_size(self.z(self.theme.typography.meta()))
-            .child(SharedString::from(format!("Line {}", block.new_start)))
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .map(|el| match &block.heading {
+                Some(heading) => {
+                    el.font_family(self.mono()).child(SharedString::from(heading.trim().to_owned()))
+                }
+                None => el
+                    .font_family(self.theme.typography.ui_family.clone())
+                    .child(SharedString::from(format!("Line {}", block.new_start))),
+            })
     }
 }
 

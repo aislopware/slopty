@@ -207,7 +207,7 @@ pub fn title(call: &ToolCall, tasks: &[Task]) -> Title {
                 .unwrap_or_else(|| first_line(&agent.prompt.text).to_owned());
             let kind = agent.agent_type.clone().unwrap_or_else(|| "Agent".to_owned());
             let meta = agent.background.then(|| "In the background".to_owned());
-            t(IconName::Bot, kind, Some(subject), false, meta)
+            t(IconName::Sparkles, kind, Some(subject), false, meta)
         }
         ToolDetail::TaskCreate(task) => t(
             IconName::ListTodo,

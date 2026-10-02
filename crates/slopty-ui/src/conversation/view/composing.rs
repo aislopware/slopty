@@ -483,7 +483,7 @@ impl ConversationView {
         )
         .size(self.z(theme.typography.meta()));
         let button = self
-            .foot_chip("composer-model", IconName::Asterisk, s.text_muted, model.to_owned())
+            .foot_chip("composer-model", IconName::Sparkles, s.text_muted, model.to_owned())
             .role(Role::Button)
             .aria_label(SharedString::from(format!("Model: {model}")))
             .aria_expanded(open)
