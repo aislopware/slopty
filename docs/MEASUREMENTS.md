@@ -13458,6 +13458,17 @@ than 15 % more), and `slopty-workerd`'s and `slopty-cli`'s binaries as links of 
 once unchanged. In `gh run view <id> --json jobs`: the `cargo xtask setup` step against its 3.2
 min average, and the slowest job, which should be clippy-ios at about 19 min.
 
+**What the lands showed** (wall minutes per job, from `gh run view <id> --json jobs`):
+
+| Run | Cache | tools | clippy-host + rustdoc | clippy-ios | tests ui | tests worker | tests rest | push → promote |
+|---|---|---|---|---|---|---|---|---|
+| 36992664501 (4c330979) | cold, first run of the new profile | 4.6 | 16.2 | 20.8 | 25.2 | 27.8 | 30.4 | 30.6 |
+| 37008187045 (6272fec2) | warm | 1.5 | 18.4 | 21.2 | 11.5 | 15.2 | 21.0 | 21.5 |
+
+Before the change the tests lane alone took 27–48 min and bounded every run (39 min typical). A
+warm run now promotes main in 21.5 min, bounded by clippy-ios and the `rest` shard together, so
+the next cut is the clippy-ios lane's Linux clippy step and the `rest` shard's split.
+
 ```sh
 # CI
 gh run list --branch gate -L 22 --json databaseId,conclusion
