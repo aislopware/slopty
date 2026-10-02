@@ -2523,3 +2523,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `a_decoder_stuck_in_a_submission_is_replaced_and_the_stream_runs_on`,
     `what_a_full_queue_drops_is_counted`,
     `a_stream_backlogs_until_attached_and_the_backlog_keeps_the_newest` (client).
+
+- ✅ **The worker gives up an encode that does not come back from VideoToolbox** (2026-10-02).
+  The clock test timed out on CI (run 36989451177, a hosted virtual Mac) after 36 pictures: for
+  170 s it reported a frame being coded in VideoToolbox, until the runner's 180 s limit. A call
+  into the encoder had not returned, and the encode held the held capture's lock and the
+  sessions' lock across it, so every other encode, the repair loop's included, waited behind it
+  for good. In a product that is a remote desktop frozen until the client reconnects. The
+  client had the same failure on the decode side and was fixed first ("The client decodes on a
+  thread per lane"); this is the worker's half (MEASUREMENTS.md, "an encode that never
+  returned").
+  - *No lock across a call into the encoder.* Encodes still go one at a time, which keeps the
+    presentation times in order and a rebuild wholly before or after a frame, but what they
+    hold is a turn (`Gate`), not a lock. An encode reads and writes the held capture and the
+    sessions under their locks, decides what each session is to be told, takes out what the
+    submits need (the sessions, the image, the lower stripe's helper), lets both locks go, and
+    only then tells the sessions and submits. The callback inside an aligned submit took none
+    of those locks before either.
+  - *The beat watches the turn.* Each look of the stream's beat (every 25 ms or sooner) charges
+    the encode inside the encoder the time since the last look, at most `STUCK_CREDIT`
+    (100 ms), the same rule the client's decode thread follows: a starved machine holds the
+    whole process for seconds, and an encode that waited out the same hold has not stopped.
+    The beat was chosen because it already wakes on that period while video flows and while it
+    does not, so the watch adds no wakeup.
+  - *Two seconds, doubling.* `ENCODE_STUCK` is 2 s of that charged time. A frame takes 5–23 ms
+    one at a time on the M1 Max, and the deepest queue an unaligned session built held a submit
+    110 ms (MEASUREMENTS.md, "encode time against frame size"), so 2 s is eighteen times the
+    worst wait measured and 120 frame periods at 60 fps. It is the client's `DECODE_STUCK`, so
+    a frozen picture is bounded alike on both ends. Each session given up on that coded nothing
+    since the last doubles the patience, up to 32 s, as every give-up leaves a thread inside
+    the encoder.
+  - *Giving up.* The beat numbers the sessions out of force, so what they return later is
+    dropped as a replaced session's (`replaced_dropped`), takes the turn from the stuck encode
+    and frees it, starts a new encode thread in case the stuck one was it, wakes the repair loop
+    out of waiting on a stuck repair, and wakes the geometry tick, which builds new sessions at
+    the size in force as it does for a lost session. The next encode takes the old sessions out
+    of force, and until the new ones are put in the stream codes nothing; their first frame is
+    a keyframe from whatever is held. The stuck thread is left where it is, holding nothing
+    anyone waits on. If its call returns, it finds its turn gone and changes nothing.
+  - *Counted on the wire.* `ScreenStats::encoders_replaced` (control socket, `ctl_reply_screens`
+    golden).
+  - *The stream tests tell the machine from the stream.* `next_or_stopped` still takes a frame
+    inside VideoToolbox as the machine's doing, but only until the beat has charged it its
+    patience. Past that the beat should have given it up, so the test fails at once instead of
+    waiting for the runner.
+  - Cost: about 500 more instructions an encode (11 850 → 12 400, the gate, a retain of the
+    image and the sessions' references), no change in wall time at 0.8 µs for the whole path
+    around the encoder, against 5–23 ms inside it.
+  - Not taken: a submit thread per session, with the encode waiting on it with a timeout. It is
+    simpler, but every frame would pay a hop between threads (the decode thread's hop measured
+    7.6–15.8 µs at the median, with tails of milliseconds under load) for a failure seen once.
+  - Tests: `the_watch_charges_the_beats_own_time_and_waits_longer_on_sessions_that_coded_nothing`,
+    `an_encode_that_never_comes_back_is_given_up_and_the_stream_goes_on`,
+    `nothing_but_an_encode_waits_on_one`,
+    `a_submit_that_never_comes_back_is_given_up_and_the_pictures_go_on` (worker).

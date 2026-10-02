@@ -25,17 +25,20 @@
 //!
 //! # Locks
 //!
-//! An encode (`Shared::try_encode`) holds `held` and then `encoder` from reading the requests
-//! to the end of the submit, and tells the session its bitrate and frame rate under them. A
-//! session whose sides are multiples of 16 codes the frame inside the submit and runs its
-//! output callback there, on the encoding thread, before the submit returns. So the callback
-//! path (`on_session_packet` → `on_packet`) takes nothing an encode holds, and nothing whose
-//! holder waits on an encode: it takes `counters.in_flight`, `counters.encode`, `watch`,
+//! An encode (`Shared::try_encode`) takes the stream's turn (`Gate`) from reading the requests
+//! to the end of the submit, so encodes go one at a time. It reads and writes `held` and then
+//! `encoder` under their locks, lets both go, and only then calls into VideoToolbox: what it
+//! tells the session (bitrate, frame rate, layers) and the submits. No lock is held across a
+//! call into the encoder, so a call that never returns holds nothing anyone waits on but the
+//! turn, and the beat takes the turn from it ([`ENCODE_STUCK`], `Shared::unstick`). A session
+//! whose sides are multiples of 16 codes the frame inside the submit and runs its output
+//! callback there, on the encoding thread, before the submit returns. The callback path
+//! (`on_session_packet` → `on_packet`) takes `counters.in_flight`, `counters.encode`, `watch`,
 //! `refine`, `rate` and `ltr` one at a time, then `packetizer` → `lane` → the sink. `refine` is
-//! a leaf: whoever takes it takes nothing else under it. It moves the rung
-//! in atomics; the next encode tells the session.
+//! a leaf: whoever takes it takes nothing else under it. It moves the rung in atomics; the next
+//! encode tells the session.
 //!
-//! Nothing but an encode takes `held` or `encoder`, so no runtime task waits on one (15 ms at
+//! Nothing but an encode waits for the turn, so no runtime task waits on one (15 ms at
 //! 3024 × 1968, about 38 at 5K). The runtime reads the held capture's time from `held_us`,
 //! leaves a new session in `staged` for the next encode to put in, and leaves the bitrate and
 //! the rung in atomics for the next encode to tell the session. The capture leaves frames in
@@ -43,9 +46,9 @@
 //! callback waited to tell the session a new rung, was a deadlock (MEASUREMENTS.md, "Stream
 //! sides padded to 16").
 //!
-//! Where two are held together the order is `held` → `encoder` → any of `staged`, `ltr` →
-//! `pending`, `rate`, `watch`, `counters.*` and `packetizer` → `lane`. `rate` is never held
-//! while another is taken, nor while anything is asked of the session. Every other lock is
+//! Where two are held together the order is the turn → `held` → `encoder` → any of `staged`,
+//! `ltr` → `pending`, `rate`, `watch`, `counters.*` and `packetizer` → `lane`. `rate` is never
+//! held while another is taken, nor while anything is asked of the session. Every other lock is
 //! taken alone.
 
 use std::collections::VecDeque;
@@ -846,8 +849,8 @@ pub async fn listing() -> Result<ScreenEvent, ScreenError> {
 
 /// A coder's session in force, and what it was last told ([`Shared::tell`]).
 struct Live<V> {
-    /// Shared with the thread that submits the lower stripe ([`Helper`]) for one submit at a
-    /// time, always within the encode that holds this.
+    /// Shared with the encode's calls into it for the length of its turn, the lower stripe's on
+    /// its [`Helper`]; a turn given up on there keeps its own reference.
     session: Option<Arc<V>>,
     /// The bitrate it was last set to; 0 for the one it was built with.
     bps: u32,
@@ -867,8 +870,22 @@ impl<V> Live<V> {
     }
 }
 
+/// What an encode tells a session before its frame ([`Shared::tell`]); `None` for what is
+/// unchanged.
+#[derive(Clone, Copy, Default, Debug)]
+struct Told {
+    /// The session's share of the bitrate.
+    bps: Option<u32>,
+    /// The stream's whole bitrate the share is of.
+    whole: u32,
+    fps: Option<u16>,
+    /// Whether it writes temporal layers.
+    layers: Option<bool>,
+}
+
 /// The sessions in force for the stream's coders, and what codes the lower stripe: what an
-/// encode holds from reading the requests to the end of its submits ([`Shared::try_encode`]).
+/// encode reads and writes in its turn, and lets go before it calls into the encoder
+/// ([`Shared::try_encode`]).
 struct Lives<V> {
     /// The whole picture, or the top stripe.
     top: Live<V>,
@@ -906,6 +923,15 @@ struct Staged<V> {
     top: (V, u64),
     lower: Option<(V, u64)>,
     layout: Option<[CodedStripe; 2]>,
+}
+
+/// What an encode takes out of [`Lives`] for its calls into the encoder ([`Shared::hand`]).
+struct Handed<V> {
+    /// The sessions of the coders with a frame to code, top first.
+    sessions: [Option<Arc<V>>; Stripe::MAX],
+    told: [Told; Stripe::MAX],
+    /// The lower stripe's thread, while both stripes are coded.
+    helper: Option<Helper>,
 }
 
 /// A job for the [`Helper`]: the lower stripe's submit.
@@ -1138,6 +1164,8 @@ struct Counters {
     ltr_acked: AtomicU64,
     refreshes_idr: AtomicU64,
     refreshes_delta: AtomicU64,
+    /// Encodes given up on inside the encoder, their sessions replaced ([`Shared::unstick`]).
+    encoders_replaced: AtomicU64,
     capture: Mutex<LatencyRing>,
     encode: Mutex<LatencyRing>,
     beat_gap: Mutex<LatencyRing>,
@@ -1181,6 +1209,7 @@ impl Counters {
             ltr_acked: AtomicU64::new(0),
             refreshes_idr: AtomicU64::new(0),
             refreshes_delta: AtomicU64::new(0),
+            encoders_replaced: AtomicU64::new(0),
             capture: Mutex::new(LatencyRing::default()),
             encode: Mutex::new(LatencyRing::default()),
             beat_gap: Mutex::new(LatencyRing::default()),
@@ -1207,6 +1236,7 @@ impl Counters {
             },
             encoder_bps: self.encoder_bps.load(Ordering::Relaxed),
             repaired: self.repaired.load(Ordering::Relaxed),
+            encoders_replaced: self.encoders_replaced.load(Ordering::Relaxed),
             refined: self.refined.load(Ordering::Relaxed),
             superseded: self.superseded.load(Ordering::Relaxed),
             laned: self.laned.load(Ordering::Relaxed),
@@ -1379,10 +1409,167 @@ impl StreamControl {
     }
 }
 
+/// How long one encode may stay inside the encoder before its sessions are given up on and new
+/// ones built. A frame takes 5–23 ms one at a time on the M1 Max, and a session whose sides are
+/// off 16 holds about five, so the longest a submit waited in any measurement was 110 ms
+/// (MEASUREMENTS.md, "encode time against frame size"). Two seconds is eighteen times that and
+/// 120 periods at 60 fps, and the client gives up on a decoder after the same two seconds
+/// (`DECODE_STUCK`), so a frozen picture is bounded alike on both ends. On a hosted virtual Mac
+/// one submit never returned (MEASUREMENTS.md, "an encode that never returned").
+const ENCODE_STUCK: Duration = Duration::from_secs(2);
+/// The most of an encode's time inside the encoder one look of the beat charges it: four
+/// beats. A look later than that found the worker itself held up, as a starved machine holds it
+/// for seconds, and an encode that waited out the same hold has not stopped.
+const STUCK_CREDIT: Duration = Duration::from_millis(100);
+/// The longest [`ENCODE_STUCK`] grows to while sessions in a row are given up on without a
+/// frame: each one given up on leaves a thread waiting inside the encoder.
+const ENCODE_STUCK_MAX: Duration = Duration::from_secs(32);
+
+/// The one encode at a time, from reading its requests to the end of its submits: what keeps the
+/// presentation times the encoder sees in order and a rebuild wholly before or after a frame.
+///
+/// It is not a lock held across the call into the encoder. An encode takes its turn, reads and
+/// writes `held` and `encoder` under their locks, lets them go, and only then calls into
+/// VideoToolbox. A call that does not return ([`ENCODE_STUCK`]) has its turn taken from it
+/// ([`Shared::unstick`]), and the stream goes on without it.
+#[derive(Default)]
+struct Gate {
+    turn: Mutex<Turn>,
+    free: parking_lot::Condvar,
+    /// The turn inside the encoder now, `0` while none is: what the beat's watch reads.
+    inside: AtomicU64,
+}
+
+#[derive(Default)]
+struct Turn {
+    /// The turn being taken, `0` while the gate is free.
+    holder: u64,
+    /// The last turn handed out.
+    issued: u64,
+}
+
+impl Gate {
+    /// Wait for the gate, and take it: the turn's number.
+    fn take(&self) -> u64 {
+        let mut turn = self.turn.lock();
+        while turn.holder != 0 {
+            self.free.wait(&mut turn);
+        }
+        turn.issued = turn.issued.wrapping_add(1).max(1);
+        turn.holder = turn.issued;
+        turn.holder
+    }
+
+    /// Turn `n` calls into the encoder.
+    fn enter(&self, n: u64) {
+        self.inside.store(n, Ordering::Release);
+    }
+
+    /// Turn `n` is back from the encoder: whether it still holds the gate, `false` once it was
+    /// given up on there.
+    fn back(&self, n: u64) -> bool {
+        let turn = self.turn.lock();
+        let held = turn.holder == n;
+        if held {
+            self.inside.store(0, Ordering::Release);
+        }
+        drop(turn);
+        held
+    }
+
+    /// Let the gate go after turn `n`, unless it was given up on.
+    fn leave(&self, n: u64) {
+        let mut turn = self.turn.lock();
+        if turn.holder != n {
+            return;
+        }
+        turn.holder = 0;
+        drop(turn);
+        self.free.notify_one();
+    }
+
+    /// Take the gate from turn `n`, still inside the encoder, running `first` before the next
+    /// turn can be taken; whether it was.
+    fn give_up(&self, n: u64, first: impl FnOnce()) -> bool {
+        let mut turn = self.turn.lock();
+        if n == 0 || turn.holder != n || self.inside.load(Ordering::Acquire) != n {
+            return false;
+        }
+        first();
+        self.inside.store(0, Ordering::Release);
+        turn.holder = 0;
+        drop(turn);
+        self.free.notify_all();
+        true
+    }
+}
+
+/// How long the encode inside the encoder has been there on the worker's own time, from the
+/// beat's looks ([`beat_loop`]), and how long it may be.
+#[derive(Debug)]
+struct StuckWatch {
+    /// The turn seen inside at the last look; `0` for none.
+    seen: u64,
+    /// How long the beat ran on time since that turn went in, microseconds.
+    charged_us: u64,
+    /// When the watch last looked.
+    looked_us: u64,
+    /// How long a turn may stay: [`ENCODE_STUCK`], doubled for each in a row given up on whose
+    /// sessions brought no frame.
+    patience_us: u64,
+    /// The stream's encoded frames when a turn was last given up on.
+    encoded_at_give_up: u64,
+}
+
+impl StuckWatch {
+    fn new(now_us: u64) -> Self {
+        Self {
+            seen: 0,
+            charged_us: 0,
+            looked_us: now_us,
+            patience_us: micros(ENCODE_STUCK),
+            encoded_at_give_up: 0,
+        }
+    }
+
+    /// Look at `now_us`, turn `inside` inside the encoder (`0` for none): the turn to give up
+    /// on, once it has been there its patience on time.
+    fn look(&mut self, inside: u64, now_us: u64) -> Option<u64> {
+        let ran = now_us.saturating_sub(self.looked_us).min(micros(STUCK_CREDIT));
+        self.looked_us = now_us;
+        if inside == 0 || inside != self.seen {
+            self.seen = inside;
+            self.charged_us = 0;
+            return None;
+        }
+        self.charged_us = self.charged_us.saturating_add(ran);
+        (self.charged_us >= self.patience_us).then_some(inside)
+    }
+
+    /// The turn seen was given up on with the stream at `encoded` frames: the next waits as
+    /// long again if the sessions given up on brought none since the last.
+    fn gave_up(&mut self, encoded: u64) {
+        self.patience_us = if encoded > self.encoded_at_give_up {
+            micros(ENCODE_STUCK)
+        } else {
+            self.patience_us.saturating_mul(2).min(micros(ENCODE_STUCK_MAX))
+        };
+        self.encoded_at_give_up = encoded;
+        self.seen = 0;
+        self.charged_us = 0;
+    }
+}
+
+/// `d` in whole microseconds.
+fn micros(d: Duration) -> u64 {
+    u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
+}
+
 struct Shared<P: Platform = Native> {
     id: StreamId,
-    /// The sessions in force and what they were last told. Only an encode takes it, across
-    /// the submits ([`Self::try_encode`]; the module's "Locks").
+    /// The sessions in force and what they were last told. Only an encode takes it, in its
+    /// turn and never across a call into the encoder ([`Self::try_encode`]; the module's
+    /// "Locks").
     encoder: Mutex<Lives<P::Video>>,
     /// Sessions built for the stream and not yet put in: the next encode puts them in, in
     /// place of the ones in force ([`Self::install`]).
@@ -1451,9 +1638,19 @@ struct Shared<P: Platform = Native> {
     /// The newest capture of the target, kept after it is encoded. ScreenCaptureKit sends
     /// nothing while the picture is still, so this is the only picture a skipped frame, a
     /// refresh or a keyframe asked for on a still screen can be answered with
-    /// ([`repair_loop`]). Every encode goes through this lock, which also keeps the
-    /// presentation timestamps the encoder sees in order; so the runtime never takes it.
+    /// ([`repair_loop`]). Only an encode takes it, inside its turn ([`Self::gate`]), and never
+    /// across a call into the encoder.
     held: Mutex<Option<Frame<P>>>,
+    /// The one encode at a time, which keeps the presentation timestamps the encoder sees in
+    /// order; the beat takes it from an encode stuck inside VideoToolbox ([`Self::unstick`]).
+    gate: Gate,
+    /// The beat's watch on the encode inside the encoder ([`StuckWatch`]).
+    stuck: Mutex<StuckWatch>,
+    /// The encode thread that takes the mailbox now; one numbered otherwise ends at its next
+    /// capture ([`start_encode_thread`]).
+    encode_thread: AtomicU64,
+    /// Wakes [`repair_loop`] out of waiting on a repair given up on inside the encoder.
+    unstuck: tokio::sync::Notify,
     /// The held capture's time, `0` while none is held: what the runtime reads of it.
     held_us: AtomicU64,
     /// The held capture has not reached the encoder.
@@ -1560,6 +1757,10 @@ impl<P: Platform> Shared<P> {
             pace_us: AtomicU64::new(0),
             sessions: AtomicU64::new(0),
             held: Mutex::new(None),
+            gate: Gate::default(),
+            stuck: Mutex::new(StuckWatch::new(now::<P>())),
+            encode_thread: AtomicU64::new(0),
+            unstuck: tokio::sync::Notify::new(),
             held_us: AtomicU64::new(0),
             owed: AtomicBool::new(false),
             repair: tokio::sync::Notify::new(),
@@ -1723,33 +1924,29 @@ impl<P: Platform> Shared<P> {
         retire(old_lower.session);
     }
 
-    /// Tell coder `index`'s session in force its share of the bitrate and the frame rate asked
-    /// of the stream since it was last told; `lives` is the encode's lock. Once each: a refusal
-    /// is logged, not retried per frame.
-    fn tell(&self, lives: &mut Lives<P::Video>, index: usize, fps: u16) {
+    /// What coder `index`'s session in force is to be told before its next frame: its share of
+    /// the bitrate and the frame rate asked of the stream since it was last told, and whether
+    /// it writes temporal layers; `lives` is the encode's lock. Decided here and recorded as
+    /// told, and told once the lock is let go ([`Self::tell_session`]): once each, as a refusal
+    /// is logged, not retried per frame. The frames the session dropped are read here, an
+    /// atomic of the session's own.
+    fn tell(&self, lives: &mut Lives<P::Video>, index: usize, fps: u16) -> Told {
         let (rows, of) = lives.share(index);
         let live = lives.live(index);
-        let Some(session) = live.session.as_ref() else { return };
+        let Some(session) = live.session.as_ref() else { return Told::default() };
         let whole = self.encoder_bps.load(Ordering::Relaxed);
         let bps = u64::from(whole)
             .saturating_mul(u64::from(rows))
             .checked_div(u64::from(of))
             .map_or(whole, |bps| u32::try_from(bps).unwrap_or(u32::MAX));
+        let mut told = Told { whole, ..Told::default() };
         if bps != 0 && bps != live.bps {
             live.bps = bps;
-            match session.set_bitrate(bps) {
-                Ok(()) if index == 0 => {
-                    self.counters.encoder_bps.store(u64::from(whole), Ordering::Relaxed);
-                }
-                Ok(()) => {}
-                Err(e) => tracing::warn!(stream = %self.id, index, bps, error = %e, "set bitrate"),
-            }
+            told.bps = Some(bps);
         }
         if fps != live.fps {
             live.fps = fps;
-            if let Err(e) = session.set_frame_rate(fps) {
-                tracing::warn!(stream = %self.id, index, fps, error = %e, "set frame rate");
-            }
+            told.fps = Some(fps);
         }
         let dropped = session.frames_dropped();
         self.encoder_dropped.fetch_add(dropped.saturating_sub(live.dropped), Ordering::Relaxed);
@@ -1762,6 +1959,29 @@ impl<P: Platform> Shared<P> {
         live.frames = live.frames.saturating_add(1);
         if layers != live.layers {
             live.layers = layers;
+            told.layers = Some(layers);
+        }
+        told
+    }
+
+    /// Tell coder `index`'s `session` what [`Self::tell`] decided: calls into VideoToolbox, made
+    /// with no lock held.
+    fn tell_session(&self, index: usize, session: &P::Video, told: Told) {
+        if let Some(bps) = told.bps {
+            match session.set_bitrate(bps) {
+                Ok(()) if index == 0 => {
+                    self.counters.encoder_bps.store(u64::from(told.whole), Ordering::Relaxed);
+                }
+                Ok(()) => {}
+                Err(e) => tracing::warn!(stream = %self.id, index, bps, error = %e, "set bitrate"),
+            }
+        }
+        if let Some(fps) = told.fps
+            && let Err(e) = session.set_frame_rate(fps)
+        {
+            tracing::warn!(stream = %self.id, index, fps, error = %e, "set frame rate");
+        }
+        if let Some(layers) = told.layers {
             match session.set_temporal_layers(layers) {
                 Ok(written) => {
                     tracing::debug!(stream = %self.id, index, layers, written, "temporal layers");
@@ -2029,13 +2249,7 @@ impl<P: Platform> Shared<P> {
             self.forget_held();
             return;
         }
-        let mut held = self.held.lock();
-        self.held_us.store(frame.capture_ts_us.max(1), Ordering::Relaxed);
-        let replaced = held.replace(frame);
-        self.owed.store(true, Ordering::Relaxed);
-        let attempt = self.try_encode(&mut held, true, now::<P>());
-        drop(held);
-        drop(replaced);
+        let attempt = self.try_encode(Some(frame), now::<P>());
         if attempt != Attempt::Sent {
             self.repair.notify_one();
         }
@@ -2068,9 +2282,20 @@ impl<P: Platform> Shared<P> {
         true
     }
 
-    /// Encode the held capture if the gates let it through. `fresh` is a capture that just
-    /// arrived; otherwise it is [`repair_loop`] sending the held one again at `now`. `held` is
-    /// the held capture's lock, which the caller holds throughout.
+    /// Encode the held capture if the gates let it through, in the stream's turn ([`Gate`]).
+    /// `fresh` is a capture that just arrived, held from here on as the newest picture;
+    /// without one it is [`repair_loop`] sending the held one again at `now`.
+    fn try_encode(&self, fresh: Option<Frame<P>>, now: u64) -> Attempt {
+        let turn = self.gate.take();
+        let attempt = self.encode_turn(turn, fresh, now);
+        self.gate.leave(turn);
+        attempt
+    }
+
+    /// [`Self::try_encode`] in turn `turn`. `held` and `encoder` are let go before the calls
+    /// into the encoder: one that does not return holds nothing but the turn, which the beat
+    /// takes from it ([`Self::unstick`]); it then answers [`Attempt::GivenUp`] and changes
+    /// nothing.
     ///
     /// A striped stream codes a new capture in both stripes at once, under one stamp: the lower
     /// stripe on the [`Helper`]'s thread, the top one on this. A repair codes only the stripes
@@ -2082,12 +2307,29 @@ impl<P: Platform> Shared<P> {
     /// not coded: VideoToolbox would take it and code it into the session's size. The session's
     /// keyframe stays wanted for the first capture of its own size.
     #[expect(clippy::too_many_lines, reason = "one decision, read top to bottom")]
-    fn try_encode(&self, held: &mut Option<Frame<P>>, fresh: bool, now: u64) -> Attempt {
+    fn encode_turn(&self, turn: u64, fresh: Option<Frame<P>>, now: u64) -> Attempt {
+        // Declared ahead of the lock, so the capture a fresh one replaces is let go after it.
+        let mut replaced = None;
+        let mut held = self.held.lock();
+        let is_fresh = fresh.is_some();
+        if let Some(frame) = fresh {
+            self.held_us.store(frame.capture_ts_us.max(1), Ordering::Relaxed);
+            self.owed.store(true, Ordering::Relaxed);
+            replaced = held.replace(frame);
+        }
+        let fresh = is_fresh;
         let Some(frame) = held.as_ref() else { return Attempt::Nothing };
-        // Held from reading the requests to the end of the submits, so a rebuild is wholly
-        // before or wholly after them ([`Self::install`]).
+        // In the turn from reading the requests to the end of the submits, so a rebuild is
+        // wholly before or wholly after them ([`Self::install`]).
         let mut lives = self.encoder.lock();
         self.put_in(&mut lives);
+        // Sessions given up on inside the encoder code nothing more ([`Self::unstick`]): none
+        // is in force until the geometry tick's replacements are put in.
+        if self.top.session.load(Ordering::Relaxed) == 0 && lives.top.session.is_some() {
+            retire(lives.top.session.take());
+            retire(lives.lower.session.take());
+            lives.helper = None;
+        }
         let count = lives.count();
         let owed = self.owed.load(Ordering::Relaxed);
         // What each coder is asked for, bit `i` for coder `i`.
@@ -2216,7 +2458,8 @@ impl<P: Platform> Shared<P> {
         if stripes.count_ones() > 1 && !refining {
             *self.join.lock() = Join { pts, waiting: coding, took: None, keyframe: false };
         }
-        for (i, coder) in self.coders(count) {
+        let mut told = [Told::default(); Stripe::MAX];
+        for ((i, coder), told) in self.coders(count).zip(&mut told) {
             if coding & (1 << i) == 0 {
                 continue;
             }
@@ -2227,7 +2470,7 @@ impl<P: Platform> Shared<P> {
             } else {
                 coder.refine.lock().other_sent(now);
             }
-            self.tell(&mut lives, i, fps);
+            *told = self.tell(&mut lives, i, fps);
             coder.submitted(pts, now, stripes);
             // Marked in flight before the submit, as the callback that clears the mark may run
             // inside it: marked after, a keyframe already out read as one still being encoded
@@ -2236,7 +2479,20 @@ impl<P: Platform> Shared<P> {
                 coder.keyframe_submitted_us.store(now.max(1), Ordering::Relaxed);
             }
         }
-        let outcomes = self.submit(&mut lives, &frame.image, pts, &options);
+        let handed = self.hand(&mut lives, &options, told);
+        let (image, captured) = (frame.image.clone(), frame.capture_ts_us);
+        drop(lives);
+        drop(held);
+        drop(replaced);
+        self.gate.enter(turn);
+        let outcomes = self.submit(&handed, &image, pts, &options);
+        if !self.gate.back(turn) {
+            tracing::debug!(stream = %self.id, pts, "an encode given up on came back: dropped");
+            return Attempt::GivenUp;
+        }
+        if let Some(helper) = handed.helper {
+            self.encoder.lock().helper = Some(helper);
+        }
         let mut stale = false;
         let mut failed = false;
         for (((i, coder), outcome), asked) in self.coders(count).zip(outcomes).zip(&options) {
@@ -2280,11 +2536,19 @@ impl<P: Platform> Shared<P> {
                 }
             }
         }
-        drop(lives);
         if stale {
-            self.held_us.store(0, Ordering::Relaxed);
-            self.owed.store(false, Ordering::Relaxed);
-            *held = None;
+            // The capture this turn coded, unless the target was let go of meanwhile
+            // ([`Self::forget_held`]): no other encode can have held another.
+            let mut held = self.held.lock();
+            let dropped = if held.as_ref().is_some_and(|frame| frame.capture_ts_us == captured) {
+                self.held_us.store(0, Ordering::Relaxed);
+                self.owed.store(false, Ordering::Relaxed);
+                held.take()
+            } else {
+                None
+            };
+            drop(held);
+            drop(dropped);
             return Attempt::Nothing;
         }
         if failed {
@@ -2297,43 +2561,64 @@ impl<P: Platform> Shared<P> {
         Attempt::Sent
     }
 
-    /// Submit `image` stamped `pts` to every coder `options` has a frame for: the lower stripe
-    /// on the [`Helper`]'s thread while the top one is submitted here, when both are asked for.
-    /// What became of each; `None` for a coder not asked or with no session in (a stream
-    /// between its open and its first build, or a test's).
-    fn submit(
+    /// What the encode's submits need once its locks are let go, taken out of `lives`: the
+    /// sessions of the coders `options` has a frame for, what each is to be told, and the
+    /// [`Helper`] when both stripes are coded, which the encode puts back once it is done.
+    fn hand(
         &self,
         lives: &mut Lives<P::Video>,
-        image: &<Source<P> as CaptureSource>::Image,
-        pts: u64,
         options: &[Option<(FrameOptions, bool)>; Stripe::MAX],
-    ) -> [Option<Result<(), CodecError>>; Stripe::MAX] {
+        told: [Told; Stripe::MAX],
+    ) -> Handed<P::Video> {
         let [top, lower] = options;
-        let encode = |live: &Live<P::Video>, options: &FrameOptions| {
-            live.session.as_ref().map(|session| session.encode(image, pts, options))
+        let session = |live: &Live<P::Video>, asked: bool| {
+            live.session.as_ref().filter(|_| asked).map(Arc::clone)
         };
-        let (Some((top, _)), Some((lower, _))) = (top, lower) else {
-            return [
-                top.as_ref().and_then(|(options, _)| encode(&lives.top, options)),
-                lower.as_ref().and_then(|(options, _)| encode(&lives.lower, options)),
-            ];
-        };
-        if lives.helper.is_none() {
+        let sessions = [session(&lives.top, top.is_some()), session(&lives.lower, lower.is_some())];
+        let both = sessions.iter().all(Option::is_some);
+        if both && lives.helper.is_none() {
             lives.helper = Helper::start(self.id)
                 .inspect_err(|e| tracing::warn!(stream = %self.id, error = %e, "no thread for the lower stripe: one after the other"))
                 .ok();
         }
-        let handed = match (&lives.helper, &lives.lower.session) {
-            (Some(helper), Some(session)) => {
-                let (session, image, options) = (Arc::clone(session), image.clone(), lower.clone());
+        let helper = if both { lives.helper.take() } else { None };
+        Handed { sessions, told, helper }
+    }
+
+    /// Tell the sessions `handed` what they are to be told, then submit `image` stamped `pts`
+    /// to each that `options` has a frame for: the lower stripe on the [`Helper`]'s thread
+    /// while the top one is submitted here, when both are. No lock is held: these are the
+    /// calls into the encoder. What became of each; `None` for a coder not asked or with no
+    /// session in (a stream between its open and its first build, or a test's).
+    fn submit(
+        &self,
+        handed: &Handed<P::Video>,
+        image: &<Source<P> as CaptureSource>::Image,
+        pts: u64,
+        options: &[Option<(FrameOptions, bool)>; Stripe::MAX],
+    ) -> [Option<Result<(), CodecError>>; Stripe::MAX] {
+        for (i, (session, told)) in handed.sessions.iter().zip(handed.told).enumerate() {
+            if let Some(session) = session {
+                self.tell_session(i, session, told);
+            }
+        }
+        let [top, lower] = &handed.sessions;
+        let [top_options, lower_options] = options;
+        let encode = |session: &Option<Arc<P::Video>>, options: &Option<(FrameOptions, bool)>| {
+            session.as_ref().zip(options.as_ref()).map(|(s, (o, _))| s.encode(image, pts, o))
+        };
+        let lower_handed = match (&handed.helper, lower, lower_options) {
+            (Some(helper), Some(session), Some((options, _))) => {
+                let (session, image, options) =
+                    (Arc::clone(session), image.clone(), options.clone());
                 helper.submit(Box::new(move || session.encode(&image, pts, &options)))
             }
-            _no_helper_or_session => false,
+            _no_helper => false,
         };
-        let top = encode(&lives.top, top);
-        let lower = match (&lives.helper, handed) {
+        let top = encode(top, top_options);
+        let lower = match (&handed.helper, lower_handed) {
             (Some(helper), true) => Some(helper.wait()),
-            _inline => encode(&lives.lower, lower),
+            _inline => encode(lower, lower_options),
         };
         [top, lower]
     }
@@ -2391,8 +2676,60 @@ impl<P: Platform> Shared<P> {
             self.forget_held();
             return Attempt::Nothing;
         }
-        let mut held = self.held.lock();
-        self.try_encode(&mut held, false, now)
+        self.try_encode(None, now)
+    }
+
+    /// While an encode is inside the encoder: how long the beat has charged it, and its
+    /// patience, microseconds ([`StuckWatch`]).
+    #[cfg(test)]
+    fn coding(&self) -> Option<(u64, u64)> {
+        let inside = self.gate.inside.load(Ordering::Acquire);
+        let stuck = self.stuck.lock();
+        (inside != 0)
+            .then(|| (if stuck.seen == inside { stuck.charged_us } else { 0 }, stuck.patience_us))
+    }
+
+    /// The beat's look at the encode inside the encoder at `now` ([`StuckWatch`]): one that has
+    /// been there [`ENCODE_STUCK`] of the worker's own time is given up on. Its sessions are
+    /// numbered out, so what they return later is dropped as a replaced session's, and the next
+    /// encode takes them out of force. The turn is taken from it, a new thread takes the
+    /// captures in case it held the old one, the repair loop stops waiting on it, and the
+    /// geometry tick builds new sessions at the size in force ([`Pipeline::follow_lost`]): a
+    /// keyframe, and the stream goes on. The thread inside the encoder is left there, holding
+    /// no lock; it ends once the call returns, if it ever does.
+    fn unstick(self: &Arc<Self>, now: u64) {
+        let inside = self.gate.inside.load(Ordering::Acquire);
+        let Some(turn) = self.stuck.lock().look(inside, now) else { return };
+        let given_up = self.gate.give_up(turn, || {
+            self.top.session.store(0, Ordering::Relaxed);
+            self.lower.session.store(0, Ordering::Relaxed);
+        });
+        if !given_up {
+            return;
+        }
+        let encoded = self.counters.encoded.load(Ordering::Relaxed);
+        let patience_us = {
+            let mut stuck = self.stuck.lock();
+            let patience_us = stuck.patience_us;
+            stuck.gave_up(encoded);
+            patience_us
+        };
+        let replaced = self.counters.encoders_replaced.fetch_add(1, Ordering::Relaxed);
+        for coder in [&self.top, &self.lower] {
+            coder.in_flight.lock().clear();
+        }
+        tracing::warn!(
+            stream = %self.id,
+            turn,
+            patience_ms = patience_us / 1_000,
+            replaced = replaced.saturating_add(1),
+            "an encode has not come back from the encoder: new sessions"
+        );
+        if let Err(e) = start_encode_thread(self) {
+            tracing::warn!(stream = %self.id, error = %e, "no new encode thread: captures wait on the old one");
+        }
+        self.unstuck.notify_waiters();
+        self.geometry_wake.notify_one();
     }
 
     /// Hand a frame's video datagrams on: straight to QUIC while no audio flows, through the
@@ -2605,6 +2942,9 @@ enum Attempt {
     NoRoom,
     /// The encoder refused it; the requests it carried are pending again.
     Failed,
+    /// It stayed inside the encoder until its sessions were given up on ([`Shared::unstick`]),
+    /// and came back after: nothing it did counts.
+    GivenUp,
 }
 
 impl<P: Platform> Shared<P> {
@@ -3032,14 +3372,18 @@ const ENCODE_THREAD_IDLE: Duration = Duration::from_millis(500);
 /// capture that arrives while the encoder is still busy replaces the one waiting, so the encoder
 /// always takes the newest picture and nothing queues behind it.
 ///
-/// The thread ends once the stream's [`Shared`] is gone.
+/// The thread ends once the stream's [`Shared`] is gone, or once another took its place
+/// ([`Shared::unstick`]).
 fn start_encode_thread<P: Platform>(shared: &Arc<Shared<P>>) -> Result<(), ScreenError> {
     let weak = Arc::downgrade(shared);
+    let this = shared.encode_thread.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
     std::thread::Builder::new()
         .name(format!("slopty-encode-{}", shared.id))
         .spawn(move || {
             slopty_platform::user_interactive_thread();
-            while let Some(shared) = weak.upgrade() {
+            while let Some(shared) = weak.upgrade()
+                && shared.encode_thread.load(Ordering::Relaxed) == this
+            {
                 if let Some(frame) = shared.mailbox.take(ENCODE_THREAD_IDLE) {
                     shared.on_frame(frame);
                 }
@@ -4075,7 +4419,8 @@ impl<P: Platform> Pipeline<P> {
         Some(self.start_rebuild(self.native, self.desired, self.encoder_config))
     }
 
-    /// Sessions in place of one the system took away ([`Shared::encoder_lost`]), at the size,
+    /// Sessions in place of one the system took away ([`Shared::encoder_lost`]) or one given up
+    /// on inside the encoder ([`Shared::unstick`]), at the size,
     /// quality and chroma in force: new sessions, so keyframes, and nothing for the client to
     /// hear but the keyframes. Only while the lost session is in force: the frames it refuses
     /// while its replacements build, or before they go in at the next encode, ask for nothing
@@ -4085,10 +4430,13 @@ impl<P: Platform> Pipeline<P> {
         let in_force = [&self.shared.top, &self.shared.lower]
             .iter()
             .any(|coder| coder.session.load(Ordering::Relaxed) == lost);
-        if lost == 0 || !in_force || self.shared.staged.lock().is_some() {
+        // Sessions given up on inside the encoder leave none numbered in force
+        // ([`Shared::unstick`]); before the first is put in, the open's are staged.
+        let given_up = self.shared.top.session.load(Ordering::Relaxed) == 0;
+        if !(lost != 0 && in_force || given_up) || self.shared.staged.lock().is_some() {
             return None;
         }
-        tracing::info!(stream = %self.id, "rebuilding for a lost encoder session");
+        tracing::info!(stream = %self.id, given_up, "rebuilding for a lost encoder session");
         Some(self.start_rebuild(self.native, self.desired, self.encoder_config))
     }
 
@@ -4647,6 +4995,7 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
     let late_beat_us = heartbeat_after_us.saturating_mul(4);
     while !shared.sink.is_closed() {
         let now = now::<P>();
+        shared.unstick(now);
         // The beat itself counts as traffic even when the transport refused it, so a refusal is
         // retried a period later instead of spun on.
         let last_out = shared.last_push_us.load(Ordering::Relaxed).max(last_beat_us.unwrap_or(0));
@@ -4691,16 +5040,22 @@ async fn repair_loop<P: Platform>(shared: Arc<Shared<P>>) {
         let period = period_us(shared.fps.load(Ordering::Relaxed));
         // Off the runtime: VideoToolbox may encode inside the submit ([`start_encode_thread`]).
         let repairing = Arc::clone(&shared);
-        let Ok(attempt) = tokio::task::spawn_blocking(move || repairing.repair_now(now)).await
-        else {
-            break;
+        // Made before the repair starts, so a give-up while it is inside the encoder wakes it.
+        let unstuck = shared.unstuck.notified();
+        let attempt = tokio::select! {
+            repaired = tokio::task::spawn_blocking(move || repairing.repair_now(now)) => {
+                let Ok(attempt) = repaired else { break };
+                attempt
+            }
+            // A repair given up on inside the encoder is left to its thread ([`Shared::unstick`]).
+            () = unstuck => continue,
         };
         let wait = match attempt {
             Attempt::Sent | Attempt::Nothing => continue,
             // A keyframe put off for a refresh waits for the cadence like any frame.
             Attempt::NotDue => shared.due_at().saturating_sub(now).max(1_000),
             // The link or the encoder is not taking it; ask again a period on, not on a spin.
-            Attempt::NoRoom | Attempt::Failed => period,
+            Attempt::NoRoom | Attempt::Failed | Attempt::GivenUp => period,
         };
         let _woken =
             tokio::time::timeout(Duration::from_micros(wait), shared.repair.notified()).await;
@@ -6512,6 +6867,41 @@ mod tests {
         /// Where it hands each frame's packet inside the submit, as an aligned VideoToolbox
         /// session does; `None` holds them.
         inline: Option<Emit>,
+        /// What each submit waits for before it codes, as a call into VideoToolbox that does not
+        /// return; `None` codes at once.
+        hold: Option<Arc<Latch>>,
+    }
+
+    /// A gate a thread waits at until the test opens it.
+    #[derive(Default)]
+    struct Latch {
+        open: Mutex<bool>,
+        opened: parking_lot::Condvar,
+        waiting: AtomicBool,
+    }
+
+    impl Latch {
+        fn wait(&self) {
+            self.waiting.store(true, Ordering::Release);
+            let mut open = self.open.lock();
+            while !*open {
+                self.opened.wait(&mut open);
+            }
+        }
+
+        fn open(&self) {
+            *self.open.lock() = true;
+            self.opened.notify_all();
+        }
+
+        /// Wait until a thread waits here.
+        fn reached(&self) {
+            let deadline = Instant::now().checked_add(Duration::from_secs(30)).expect("a deadline");
+            while !self.waiting.load(Ordering::Acquire) {
+                assert!(Instant::now() < deadline, "nothing reached the latch");
+                std::thread::yield_now();
+            }
+        }
     }
 
     /// A packet handed on from inside a [`Recorder`]'s submit.
@@ -6526,6 +6916,7 @@ mod tests {
             layers: Arc::default(),
             dropped: Arc::default(),
             inline: None,
+            hold: None,
         }
     }
 
@@ -6550,6 +6941,9 @@ mod tests {
                 return Err(CodecError::WrongSize { image: size, session: self.size });
             }
             self.log.lock().push((self.session, options.force_keyframe));
+            if let Some(hold) = &self.hold {
+                hold.wait();
+            }
             if let Some(emit) = &self.inline {
                 emit(EncodedPacket { pts_us, ..packet(900, options.force_keyframe, None, false) });
             }
@@ -6582,13 +6976,154 @@ mod tests {
         at: &std::cell::Cell<u64>,
     ) -> Attempt {
         at.set(at.get().saturating_add(1_000_000));
-        let mut held = shared.held.lock();
         shared.held_us.store(frame.capture_ts_us, Ordering::Relaxed);
-        *held = Some(frame);
+        *shared.held.lock() = Some(frame);
         shared.owed.store(true, Ordering::Relaxed);
-        let attempt = shared.try_encode(&mut held, false, at.get());
-        drop(held);
-        attempt
+        shared.try_encode(None, at.get())
+    }
+
+    /// What the encode path costs around the call into the encoder: a fresh capture through
+    /// [`Shared::on_frame`] to its datagrams on the wire, its session a [`Recorder`] that hands a
+    /// 900-byte frame on inside the submit, as an aligned VideoToolbox session does. Retired
+    /// instructions on this thread, in release (MEASUREMENTS.md, "an encode that never
+    /// returned"):
+    /// `cargo test -p slopty-worker --release --lib measure_the_encode_path -- --ignored`.
+    #[test]
+    #[ignore = "a measurement, run in release"]
+    fn measure_the_encode_path_around_the_encoder() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let weak = Arc::downgrade(&shared);
+        let inline: Emit = Arc::new(move |packet| {
+            if let Some(shared) = weak.upgrade() {
+                shared.on_session_packet(0, 1, &packet);
+            }
+        });
+        let session = Recorder { inline: Some(inline), ..recorder(1, Log::default()) };
+        drop(shared.install(whole(session), [1, 0]));
+        let frame = a_frame();
+        let base = host_now_us();
+        let bench = slopty_testkit::bench::Bench::new("worker.encode_path");
+        let mut series = bench.series("fresh_capture");
+        for i in 1..=4_000_u64 {
+            // A second apart, so the cadence never holds one back.
+            let capture = CapturedFrame {
+                capture_ts_us: base.saturating_add(i * 1_000_000),
+                ..again(&frame)
+            };
+            series.time(|| shared.on_frame(capture));
+            if i % 64 == 0 {
+                drop(wire.drain());
+            }
+        }
+        assert_eq!(shared.stats().encoded, 4_000, "every capture went out");
+        series.report().unwrap();
+    }
+
+    /// The watch charges an encode inside the encoder only the time the beat ran on time: a
+    /// look later than [`STUCK_CREDIT`] charges the credit. One there [`ENCODE_STUCK`] is given
+    /// up on; another encode going in starts its own charge; and the patience doubles, up to
+    /// [`ENCODE_STUCK_MAX`], while the sessions given up on bring no frame.
+    #[test]
+    fn the_watch_charges_the_beats_own_time_and_waits_longer_on_sessions_that_coded_nothing() {
+        let beat = micros(HEARTBEAT_AFTER);
+        let mut watch = StuckWatch::new(0);
+        assert_eq!(watch.look(0, beat), None, "nothing inside");
+        assert_eq!(watch.look(7, 2 * beat), None, "first seen: nothing charged");
+        // The worker was held up for five seconds: the look charges its credit.
+        let mut now = 2 * beat + 5_000_000;
+        assert_eq!(watch.look(7, now), None);
+        assert_eq!(watch.charged_us, micros(STUCK_CREDIT));
+        let mut looks = 0_u64;
+        let given_up = loop {
+            now += beat;
+            looks += 1;
+            if let Some(turn) = watch.look(7, now) {
+                break turn;
+            }
+            assert!(looks < 1_000, "never given up");
+        };
+        assert_eq!(given_up, 7);
+        assert_eq!(looks, (micros(ENCODE_STUCK) - micros(STUCK_CREDIT)) / beat, "on time");
+
+        watch.gave_up(10);
+        assert_eq!(watch.patience_us, micros(ENCODE_STUCK), "the stream coded since");
+        assert_eq!(watch.look(8, now + beat), None);
+        assert_eq!(watch.look(9, now + 2 * beat), None, "another encode: its own charge");
+        assert_eq!(watch.charged_us, 0);
+        let mut patience = Vec::new();
+        for _ in 0..6 {
+            watch.gave_up(10);
+            patience.push(watch.patience_us / 1_000_000);
+        }
+        assert_eq!(patience, [4, 8, 16, 32, 32, 32], "seconds, while nothing is coded");
+        watch.gave_up(11);
+        assert_eq!(watch.patience_us, micros(ENCODE_STUCK), "back once a frame came");
+    }
+
+    /// An encode that never comes back from the encoder holds nothing but the stream's turn,
+    /// and the beat takes that from it after [`ENCODE_STUCK`] of looks on time: the session's
+    /// number goes out of force, the next capture waits for no one and finds no session in
+    /// force, the replacement codes a keyframe, and what the stuck call coded when it comes
+    /// back after all is dropped as a replaced session's.
+    #[test]
+    fn an_encode_that_never_comes_back_is_given_up_and_the_stream_goes_on() {
+        let wire = Wire::new();
+        let sink: Arc<dyn DatagramSink> = Arc::<Wire>::clone(&wire);
+        let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
+        let weak = Arc::downgrade(&shared);
+        let inline: Emit = Arc::new(move |packet| {
+            if let Some(shared) = weak.upgrade() {
+                shared.on_session_packet(0, 1, &packet);
+            }
+        });
+        let latch = Arc::new(Latch::default());
+        let log = Log::default();
+        let stuck = Recorder {
+            inline: Some(inline),
+            hold: Some(Arc::clone(&latch)),
+            ..recorder(1, Arc::clone(&log))
+        };
+        drop(shared.install(whole(stuck), [1, 0]));
+        let base = host_now_us();
+        let capture = |k: u64| CapturedFrame { capture_ts_us: base + k * 1_000_000, ..a_frame() };
+        let encoding = std::thread::spawn({
+            let (shared, frame) = (Arc::clone(&shared), capture(1));
+            move || shared.try_encode(Some(frame), host_now_us())
+        });
+        latch.reached();
+        let turn = shared.gate.inside.load(Ordering::Acquire);
+        assert_ne!(turn, 0, "the encode is inside the encoder");
+        assert!(shared.held.try_lock().is_some(), "the held capture is not locked across it");
+        assert!(shared.encoder.try_lock().is_some(), "nor the sessions");
+
+        let beat = micros(HEARTBEAT_AFTER);
+        let mut now = base;
+        shared.stuck.lock().looked_us = now;
+        let mut looks = 0_u64;
+        while shared.stats().encoders_replaced == 0 {
+            now += beat;
+            shared.unstick(now);
+            looks += 1;
+            assert!(looks < 1_000, "never given up");
+        }
+        assert_eq!(looks, 1 + micros(ENCODE_STUCK) / beat, "seen, then charged on time");
+        assert_eq!(shared.top.session.load(Ordering::Relaxed), 0, "out of force");
+        assert_eq!(shared.gate.inside.load(Ordering::Acquire), 0);
+
+        assert_eq!(shared.try_encode(Some(capture(2)), host_now_us()), Attempt::Sent);
+        assert_eq!(*log.lock(), vec![(1, true)], "nothing more for the session given up on");
+        let replacement = Log::default();
+        drop(shared.install(whole(recorder(2, Arc::clone(&replacement))), [2, 0]));
+        assert_eq!(shared.try_encode(Some(capture(3)), host_now_us()), Attempt::Sent);
+        assert_eq!(*replacement.lock(), vec![(2, true)], "the replacement's keyframe");
+
+        latch.open();
+        assert_eq!(encoding.join().unwrap(), Attempt::GivenUp, "came back after all");
+        assert_eq!(shared.replaced_dropped.load(Ordering::Relaxed), 1, "what it coded, dropped");
+        assert_eq!(shared.top.session.load(Ordering::Relaxed), 2, "the replacement stays");
+        assert_eq!(shared.stats().encoders_replaced, 1);
     }
 
     /// Layers follow the gate only on a session that has coded [`LAYERS_AFTER_FRAMES`]; frames
@@ -6751,10 +7286,7 @@ mod tests {
             *shared.held.lock() = Some(a_frame());
             shared.owed.store(true, Ordering::Relaxed);
             at.set(at.get() + 1_000_000);
-            let mut held = shared.held.lock();
-            let attempt = shared.try_encode(&mut held, false, at.get());
-            drop(held);
-            assert_eq!(attempt, Attempt::Sent);
+            assert_eq!(shared.try_encode(None, at.get()), Attempt::Sent);
             let (keyframe, refresh) = {
                 let pending = shared.top.pending.lock();
                 (pending.keyframe, pending.refresh)
@@ -6788,12 +7320,7 @@ mod tests {
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
         drop(shared.install(whole(recorder(1, Arc::clone(&log))), [1, 0]));
-        *shared.held.lock() = Some(a_frame());
-        shared.owed.store(true, Ordering::Relaxed);
-        let now = host_now_us();
-        let mut held = shared.held.lock();
-        assert_eq!(shared.try_encode(&mut held, true, now), Attempt::Sent);
-        drop(held);
+        assert_eq!(shared.try_encode(Some(a_frame()), host_now_us()), Attempt::Sent);
         assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
 
         shared.request_refresh(0, 0, true);
@@ -6833,11 +7360,7 @@ mod tests {
         });
         let session = Recorder { inline: Some(inline), ..recorder(1, Arc::clone(&log)) };
         drop(shared.install(whole(session), [1, 0]));
-        *shared.held.lock() = Some(a_frame());
-        shared.owed.store(true, Ordering::Relaxed);
-        let mut held = shared.held.lock();
-        assert_eq!(shared.try_encode(&mut held, true, host_now_us()), Attempt::Sent);
-        drop(held);
+        assert_eq!(shared.try_encode(Some(a_frame()), host_now_us()), Attempt::Sent);
         assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
         assert!(!wire.sent.lock().is_empty(), "and came out inside the submit");
         assert_eq!(shared.top.keyframe_submitted_us.load(Ordering::Relaxed), 0, "none in flight");
@@ -7048,17 +7571,14 @@ mod tests {
             move || {
                 let base = host_now_us();
                 for i in 1..=FRAMES {
-                    let mut held = shared.held.lock();
                     let at =
                         base.saturating_add(u64::try_from(i).unwrap().saturating_mul(1_000_000));
-                    *held = Some(CapturedFrame { capture_ts_us: at, ..again(&picture) });
-                    shared.owed.store(true, Ordering::Relaxed);
+                    let frame = CapturedFrame { capture_ts_us: at, ..again(&picture) };
                     let _gone = go_tx.send(i);
                     // Handed over a tenth of a second ago as far as the encode's clock goes: every
                     // frame is back late at 60, however quickly this picture codes.
                     let now = host_now_us().saturating_sub(100_000);
-                    let attempt = shared.try_encode(&mut held, true, now);
-                    drop(held);
+                    let attempt = shared.try_encode(Some(frame), now);
                     assert_eq!(attempt, Attempt::Sent, "frame {i}");
                 }
                 let _gone = done_tx.send("encodes");
@@ -7103,7 +7623,8 @@ mod tests {
     /// Nothing the stream's owner, its runtime tasks or the capture's queue call waits on an
     /// encode. An aligned session codes the frame inside the submit, 15 ms at 3024 × 1968 and
     /// about 38 ms at 5K, and a runtime worker waiting that long is one not answering input, the
-    /// pointer or the link. Here the test holds what an encode holds across its submit.
+    /// pointer or the link. Here the test holds what an encode holds across its submit: the
+    /// stream's turn, inside the encoder.
     #[test]
     fn nothing_but_an_encode_waits_on_one() {
         let wire = Wire::new();
@@ -7113,8 +7634,8 @@ mod tests {
         drop(shared.install(whole(recorder(1, Log::default())), [1, 0]));
         assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent);
 
-        let held = shared.held.lock();
-        let encoder = shared.encoder.lock();
+        let turn = shared.gate.take();
+        shared.gate.enter(turn);
         let (tx, answered) = std::sync::mpsc::channel();
         let caller = std::thread::spawn({
             let shared = Arc::clone(&shared);
@@ -7131,8 +7652,8 @@ mod tests {
             }
         });
         let answered = answered.recv_timeout(Duration::from_secs(2)).is_ok();
-        drop(encoder);
-        drop(held);
+        assert!(shared.gate.back(turn));
+        shared.gate.leave(turn);
         caller.join().unwrap();
         assert!(answered, "a call off the encode path waited on the encode");
     }

@@ -1000,7 +1000,10 @@ mod tests {
     /// it does every 50 ms while it runs: a task that stopped just after a report still counts
     /// the datagrams it read before it. Waiting on the machine is
     /// the runner's to time out; a stream whose two sides ran and still sent no picture has
-    /// stopped. `false` once the client's stream has ended.
+    /// stopped. A frame inside VideoToolbox counts as the machine's only until the worker's
+    /// beat has charged it its patience (`ENCODE_STUCK`): past that the beat should have
+    /// given it up and new sessions taken over, so one still inside has stopped the stream.
+    /// `false` once the client's stream has ended.
     async fn next_or_stopped<P: Platform>(
         frames: &mut tokio::sync::watch::Receiver<Option<Arc<slopty_client::screen::Presentable>>>,
         stream: &mut Pipeline<P>,
@@ -1015,13 +1018,26 @@ mod tests {
                 changed = frames.changed() => return changed.is_ok(),
                 () = wake.notified() => follow(stream).await,
                 () = tokio::time::sleep(STALLED) => {
-                    let coding = stream.shared.held.try_lock().is_none();
+                    let coding = stream.shared.coding();
+                    // The beat gives an encode up once it has charged its patience; one charged
+                    // well past it was not given up on, and the stream has stopped there.
+                    if let Some((charged, patience)) = coding
+                        && charged > patience + crate::screen::micros(crate::screen::STUCK_CREDIT)
+                    {
+                        panic!(
+                            "no picture for {STALLED:?} {}: a frame inside VideoToolbox for {} ms of the worker's own time, past its {} ms, was not given up on: worker {:?}",
+                            what(),
+                            charged / 1_000,
+                            patience / 1_000,
+                            stream.stats()
+                        );
+                    }
                     let client = handle.stats();
                     let now = ran(stream);
                     let lately = client.reported_at.is_some_and(|at| at.elapsed() < Duration::from_secs(1));
                     let (captured, reported) = (now.0 > since.0, now.1 > since.1 && lately);
                     since = now;
-                    let held = if coding {
+                    let held = if coding.is_some() {
                         "a frame being coded in VideoToolbox"
                     } else if client.decoding > 0 {
                         "frames being decoded in VideoToolbox"
@@ -1036,7 +1052,11 @@ mod tests {
                             stream.stats()
                         );
                     };
-                    eprintln!("no picture for {STALLED:?} {}: {held}, waiting on it", what());
+                    eprintln!(
+                        "no picture for {STALLED:?} {}: {held}, waiting on it ({} encodes given up on)",
+                        what(),
+                        stream.stats().encoders_replaced
+                    );
                 }
             }
         }
@@ -1254,14 +1274,15 @@ mod tests {
                 errors.sort_unstable();
                 let p50 = percentile(&errors, 50);
                 eprintln!(
-                    "MEASURE clock estimate at {:.0} ms each way: off the shared clock p50 {:.3} / max {:.3} ms over {} frames, widest bound a frame was placed within {:.3} ms, last bound {:.3} ms, rtt {:.3} ms",
+                    "MEASURE clock estimate at {:.0} ms each way: off the shared clock p50 {:.3} / max {:.3} ms over {} frames, widest bound a frame was placed within {:.3} ms, last bound {:.3} ms, rtt {:.3} ms, {} encodes given up on",
                     ms(one_way),
                     ms(p50),
                     ms(max),
                     errors.len(),
                     ms(widest),
                     ms(estimate.bound),
-                    ms(estimate.rtt)
+                    ms(estimate.rtt),
+                    stream.stats().encoders_replaced
                 );
                 assert!(p50 <= Duration::from_millis(1), "p50 {p50:?}, {estimate:?}");
                 drop(handle);
@@ -1416,6 +1437,171 @@ mod tests {
                 (usize::try_from(width).unwrap(), usize::try_from(height).unwrap()),
                 "at the size in force"
             );
+            drop(handle);
+            drain.abort();
+            stream.close().await;
+        });
+    }
+
+    /// The drawn screen whose first encoder session never comes back from its
+    /// [`WEDGED_AT`]th submit until the test lets it, as one did on a hosted virtual Mac
+    /// (MEASUREMENTS.md, "an encode that never returned").
+    enum Wedging {}
+
+    impl Platform for Wedging {
+        type Audio = slopty_codec::Opus;
+        type Capture = Studio;
+        type Input = Poke;
+        type Video = Wedged;
+    }
+
+    /// The submit of [`Wedging`]'s first session that does not come back.
+    const WEDGED_AT: u32 = 20;
+
+    /// Sessions built for [`Wedging`].
+    static WEDGED_BUILT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// When the submit that does not come back went in.
+    static WEDGED_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+
+    /// Whether the test let the stuck submit come back, and the wait for it.
+    static UNWEDGED: Mutex<bool> = Mutex::new(false);
+    static UNWEDGE: parking_lot::Condvar = parking_lot::Condvar::new();
+
+    /// VideoToolbox, the first session of which waits inside its [`WEDGED_AT`]th submit until
+    /// [`UNWEDGED`].
+    struct Wedged {
+        session: slopty_codec::VideoToolbox,
+        wedges: bool,
+        frames: std::sync::atomic::AtomicU32,
+    }
+
+    impl slopty_codec::VideoEncoder for Wedged {
+        type Image = PixelBuffer;
+
+        fn new(
+            config: slopty_codec::EncoderConfig,
+            sink: impl Fn(slopty_codec::EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, slopty_codec::CodecError> {
+            let session = slopty_codec::VideoToolbox::new(config, sink)?;
+            let built = WEDGED_BUILT.fetch_add(1, Ordering::Relaxed);
+            Ok(Self { session, wedges: built == 0, frames: 0.into() })
+        }
+
+        fn encode(
+            &self,
+            image: &PixelBuffer,
+            pts_us: u64,
+            options: &slopty_codec::FrameOptions,
+        ) -> Result<(), slopty_codec::CodecError> {
+            if self.wedges && self.frames.fetch_add(1, Ordering::Relaxed) == WEDGED_AT {
+                *WEDGED_SINCE.lock() = Some(Instant::now());
+                let mut unwedged = UNWEDGED.lock();
+                while !*unwedged {
+                    UNWEDGE.wait(&mut unwedged);
+                }
+            }
+            self.session.encode(image, pts_us, options)
+        }
+
+        fn set_bitrate(&self, bps: u32) -> Result<(), slopty_codec::CodecError> {
+            self.session.set_bitrate(bps)
+        }
+
+        fn set_frame_rate(&self, fps: u16) -> Result<(), slopty_codec::CodecError> {
+            self.session.set_frame_rate(fps)
+        }
+
+        fn set_temporal_layers(&self, on: bool) -> Result<bool, slopty_codec::CodecError> {
+            self.session.set_temporal_layers(on)
+        }
+
+        fn frames_dropped(&self) -> u64 {
+            self.session.frames_dropped()
+        }
+    }
+
+    /// A submit that never comes back costs the stream its sessions and not its pictures: the
+    /// drawn screen through the real encoder and decoder, its first session waiting inside its
+    /// twentieth submit ([`Wedged`]). The beat gives that encode up once it has charged it
+    /// [`ENCODE_STUCK`](crate::screen::ENCODE_STUCK) of the worker's own time, not before;
+    /// the geometry tick builds new sessions, whose keyframe answers the client, and a hundred
+    /// pictures come after it. [`next_or_stopped`] fails the test if the beat ever charges the
+    /// encode past its patience without giving it up.
+    #[test]
+    fn a_submit_that_never_comes_back_is_given_up_and_the_pictures_go_on() {
+        use crate::screen::{ENCODE_STUCK, STUCK_CREDIT};
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
+            let quality = Quality { scale: 0.25, ..Quality::default() };
+            let (mut stream, opened) = Pipeline::<Wedging>::open(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                quality,
+                wire,
+                |_event| {},
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, width, height, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            let control = stream.control();
+            let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+            let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
+            let uplink = Uplink {
+                control: reports_tx,
+                feedback: Box::new(move |bytes| {
+                    answer(&control, &bytes);
+                    true
+                }),
+                rtt: Box::new(|| Some(Duration::from_millis(1))),
+            };
+            let handle =
+                spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
+            let mut frames = handle.frames();
+            let (mut before, mut after) = (0_u32, 0_u32);
+            let mut resumed = None;
+            while after < 100 {
+                let what = || format!("after {before} pictures before the stuck submit, {after} after");
+                let next = next_or_stopped(&mut frames, &mut stream, &handle, what).await;
+                assert!(next, "the client's stream ended");
+                // A picture of the first session's may still arrive after its stuck submit
+                // went in; the replacement is built only once that was given up on.
+                let since = *WEDGED_SINCE.lock();
+                match since.filter(|_| WEDGED_BUILT.load(Ordering::Relaxed) > 1) {
+                    Some(since) => {
+                        resumed.get_or_insert_with(|| since.elapsed());
+                        after += 1;
+                    }
+                    None => before += 1,
+                }
+            }
+            let resumed = resumed.unwrap_or_default();
+            let built = WEDGED_BUILT.load(Ordering::Relaxed);
+            let worker = stream.stats();
+            eprintln!(
+                "MEASURE a submit that never came back: {before} pictures, then the first after it {:.0} ms on, {after} on {built} sessions; worker {worker:?}",
+                ms(resumed)
+            );
+            assert!(before <= WEDGED_AT + 1, "the first session's pictures: {before}");
+            assert_eq!(worker.encoders_replaced, 1, "given up on once");
+            assert_eq!(built, 2, "one replacement, built once");
+            assert!(
+                resumed >= ENCODE_STUCK.saturating_sub(STUCK_CREDIT),
+                "given up on after its patience, not {resumed:?}"
+            );
+            let picture = frames.borrow().clone().expect("a picture");
+            assert_eq!(
+                picture.size(),
+                (usize::try_from(width).unwrap(), usize::try_from(height).unwrap()),
+                "at the size in force"
+            );
+            *UNWEDGED.lock() = true;
+            UNWEDGE.notify_all();
             drop(handle);
             drain.abort();
             stream.close().await;

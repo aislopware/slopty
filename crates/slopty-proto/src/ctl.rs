@@ -527,6 +527,10 @@ pub struct ScreenStats {
     /// Frames encoded from the held capture rather than a fresh one: the last capture of a
     /// picture that went still, or a refresh or keyframe answered while nothing changed.
     pub repaired: u64,
+    /// Encodes that stayed inside the encoder past the worker's patience
+    /// (`slopty_worker::screen::ENCODE_STUCK`, on the worker's own time), their sessions given
+    /// up on and rebuilt for a keyframe. What the stuck call returns later is dropped.
+    pub encoders_replaced: u64,
     /// Refinement frames of a still picture: the held capture coded again at a finer quality
     /// once it stopped changing. Sent and painted like any frame, and not among
     /// [`Self::encoded`], which counts the source's frames only: painted frames are at most

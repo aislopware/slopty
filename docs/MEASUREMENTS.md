@@ -13514,3 +13514,52 @@ SLOPTY_BENCH_OUT=target/bench/laneT.jsonl \
   graphics storage changed (`graphics_changed`, one image sent again) lays out and lists all
   fifty above the screen, with no rows to diff. Both are new series, recorded as budgets in
   `xtask/budgets.toml` at these numbers.
+
+## 2026-10-02 — an encode that never returned
+
+The clock test timed out on CI (run 36989451177, a hosted virtual Mac) at 180 s. After 36
+pictures its wait printed "a frame being coded in VideoToolbox, waiting on it" 17 times, every
+10 s: the held capture's lock stayed taken for 170 s. Only an encode takes it, across its calls
+into VideoToolbox, so one call into the encoder never returned, and every encode after it, the
+repair loop's included, waited behind it.
+
+Mac Studio M1 Max, macOS 27.0.1, load average 8–10 from other sessions. The fix and its ruling
+are in `docs/decisions/video.md` ("The worker gives up an encode that does not come back from
+VideoToolbox").
+
+**Reproduced and recovered.** `a_submit_that_never_comes_back_is_given_up_and_the_pictures_go_on`
+streams the drawn screen through the real encoder and decoder, with the first session's 20th
+submit waiting until the test lets it go. Before the fix nothing could take the stream past
+that submit, since the lock it held is the one every encode takes. After it, over 6 runs in a
+row and 3 more at once under `taskpolicy -b`:
+
+| | pictures before | first picture after the stuck submit went in | after | sessions built | encodes given up on |
+| --- | --- | --- | --- | --- | --- |
+| 6 runs in a row | 18–20 | 2 038–2 108 ms | 100 | 2 | 1 |
+| 3 at once, background QoS | 20 | 2 088–2 111 ms | 100 | 2 | 1 |
+
+The 2 s is `ENCODE_STUCK`, charged by the beat. The rest is the build and the keyframe. The
+clock test ran beside it every time, 9 runs, and gave no encode up (`0 encodes given up on` in
+its `MEASURE` line), background QoS included.
+
+**The path around the encoder, before and after.** `measure_the_encode_path_around_the_encoder`
+takes a fresh capture through `on_frame` to its datagrams on the wire, 4 000 times, with a
+session that hands a 900-byte frame on inside the submit, as an aligned VideoToolbox session
+does. So it times everything an encode does except VideoToolbox. Release build, retired
+instructions per capture (median), runs on one build each:
+
+| | instructions | wall p50 / p95 / p99 |
+| --- | --- | --- |
+| before (held lock across the submit) | 11 815, 11 846, 11 852, 11 915 | 0.8 / 1.0 / 1.1–1.9 µs |
+| after (the turn, locks let go before the submit) | 12 315, 12 340, 12 479, 12 490 | 0.8–0.9 / 1.0 / 1.1–2.0 µs |
+
+About 500 instructions more a capture (+4 %): the turn's three uncontended locks, a retain and
+release of the image and the sessions' references. The wall time does not move. A frame
+spends 5–23 ms inside the encoder.
+
+```sh
+cargo test -p slopty-worker --release --lib measure_the_encode_path -- --ignored --nocapture
+cargo test -p slopty-worker --lib -- screen::synthetic::tests::a_submit_that_never_comes_back \
+  screen::synthetic::tests::the_clock_probes --nocapture
+cargo test -p slopty-worker --lib screen::tests::an_encode_that_never_comes_back
+```
