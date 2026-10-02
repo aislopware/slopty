@@ -9,12 +9,12 @@
 //! on with a filled one, ⌘↵ goes on from anywhere, ←/→ step between questions.
 //!
 //! One [`Intent::Answer`](slopty_proto::thread::wire::Intent::Answer) answers them all
-//! ([`choice`]). A multi-choice answer joins its picks with `", "` and puts the words of one's
-//! own last, as Claude Code's own dialog does.
+//! ([`Answer::choice`]). A multi-choice answer joins its picks ([`Answer::JOIN`]) and puts the
+//! words of one's own last, as Claude Code's own dialog does.
 
 use gpui::{
     AnyElement, App, AppContext as _, Entity, IntoElement as _, ParentElement as _, SharedString,
-    Styled as _, Window,
+    Styled as _, Window, div,
 };
 use gpui_kit::component::input::InputState;
 use gpui_kit::component::questionnaire::{
@@ -26,6 +26,7 @@ use gpui_kit::component::questionnaire::{
 };
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::detail::{Answer, Question};
+use slopty_theme::Theme;
 
 /// What a question with answers calls the field for one of one's own.
 pub const OTHER: &str = "Other";
@@ -33,25 +34,12 @@ pub const OTHER: &str = "Other";
 /// What the field of a question that offers nothing says before anything is typed.
 pub const WRITTEN: &str = "Your answer";
 
-/// The choice that answers `questions` with `answers`.
-///
-/// What was written, for one question that offers nothing (a pi dialog asking for words);
-/// otherwise the answers as JSON, one per question keyed by its text, which is what Claude
-/// Code's `AskUserQuestion` takes.
+/// An answer to `questions` in words, for the line that stands for the card once answered:
+/// the answers in their order ([`Answer::read`]), or the choice itself when it holds none.
 #[must_use]
-pub fn choice(questions: &[Question], answers: &[Answer]) -> String {
-    match (questions, answers) {
-        ([question], [answer]) if question.options.is_empty() => answer.answer.clone(),
-        _ => serde_json::to_string(answers).unwrap_or_default(),
-    }
-}
-
-/// An answer [`choice`] made, in words for the line that stands for the card once answered:
-/// the answers in their order, or the choice itself when it holds none.
-#[must_use]
-pub fn words(choice: &str) -> String {
-    serde_json::from_str::<Vec<Answer>>(choice).map_or_else(
-        |_| choice.to_owned(),
+pub fn words(questions: &[Question], choice: &str) -> String {
+    Answer::read(questions, choice).map_or_else(
+        || choice.to_owned(),
         |answers| answers.into_iter().map(|a| a.answer).collect::<Vec<_>>().join("; "),
     )
 }
@@ -72,7 +60,7 @@ pub fn answers(questions: &[Question], submission: &QuestionnaireSubmission) -> 
                 });
             let typed = given.and_then(|a| a.freeform()).map(|w| w.trim());
             let answer: Vec<&str> = picked.chain(typed).filter(|w| !w.is_empty()).collect();
-            Answer { question: question.text.clone(), answer: answer.join(", ") }
+            Answer { question: question.text.clone(), answer: answer.join(Answer::JOIN) }
         })
         .collect()
 }
@@ -177,8 +165,12 @@ impl Questions {
     /// The questionnaire drawn: the question on show, its answers, the field, what is
     /// missing, and the ways on, with `lead` (the request's own answers) first in their row.
     /// The question's header is the card's to show ([`Questions::current`]).
-    pub fn element(&self, lead: Vec<AnyElement>) -> AnyElement {
+    pub fn element(&self, theme: &Theme, lead: Vec<AnyElement>) -> AnyElement {
         let state = &self.state;
+        let spacing = theme.spacing;
+        // The field stands as tall as an answer's card at this size (the kit's own measure:
+        // 32 + 4), so one's own answer reads as one more answer, not a footnote.
+        let field = gpui::px(spacing.xxl + spacing.xs);
         let items = self.questions.iter().enumerate().map(|(ix, question)| {
             let name = SharedString::from(ix.to_string());
             let answers = (!question.options.is_empty()).then(|| {
@@ -190,7 +182,7 @@ impl Questions {
             QuestionnaireItem::new(state, name.clone())
                 .child(QuestionnaireTitle::new(state, name.clone()))
                 .children(answers)
-                .child(QuestionnaireInput::new(state, name.clone()))
+                .child(QuestionnaireInput::new(state, name.clone()).h(field))
                 .child(QuestionnaireError::new(state, name))
         });
         Questionnaire::new(state)
@@ -199,7 +191,11 @@ impl Questions {
             .child(
                 QuestionnaireActions::new(state)
                     .flex_wrap()
-                    .children(lead)
+                    .pt(gpui::px(spacing.xs))
+                    // The ways out of the form stand apart at the left, quiet; the way through
+                    // it at the right.
+                    .child(div().flex().flex_wrap().gap(gpui::px(spacing.xxs)).children(lead))
+                    .child(div().flex_1())
                     .child(QuestionnairePrevious::new(state))
                     .child(QuestionnaireNext::new(state))
                     .child(QuestionnaireSubmit::new(state)),
@@ -230,33 +226,14 @@ mod tests {
         Answer { question: question.to_owned(), answer: answer.to_owned() }
     }
 
-    /// One question that offers nothing is answered in its words; anything else is the
-    /// answers keyed by each question's text, which the Claude Code adapter reads back.
-    #[test]
-    fn a_choice_is_the_words_for_a_lone_written_question_and_json_otherwise() {
-        let written = [question("Commit message?", &[], false)];
-        assert_eq!(choice(&written, &[answer("Commit message?", "Fix it")]), "Fix it");
-
-        let asked = [question("Which layout?", &["Split", "Stacked"], false)];
-        let answered = [answer("Which layout?", "Split")];
-        let sent = choice(&asked, &answered);
-        assert_eq!(sent, r#"[{"question":"Which layout?","answer":"Split"}]"#);
-        let read: Vec<slopty_proto::conversation::Answer> = serde_json::from_str(&sent).unwrap();
-        assert_eq!(read[0].answer, "Split", "the adapter's own type reads it");
-
-        let two = [question("Name?", &[], false), question("Why?", &[], false)];
-        let both = [answer("Name?", "a"), answer("Why?", "b")];
-        assert!(choice(&two, &both).starts_with('['), "two written questions are JSON");
-    }
-
     /// The answered line reads the answers, not their JSON; a plain choice reads as itself.
     #[test]
     fn the_words_of_an_answer_read_its_answers() {
-        let sent = choice(
-            &[question("A?", &["x"], false), question("B?", &["y", "z"], true)],
-            &[answer("A?", "x"), answer("B?", "y, z")],
-        );
-        assert_eq!(words(&sent), "x; y, z");
-        assert_eq!(words("Fix it"), "Fix it");
+        let asked = [question("A?", &["x"], false), question("B?", &["y", "z"], true)];
+        let sent = Answer::choice(&asked, &[answer("A?", "x"), answer("B?", "y, z")]);
+        assert_eq!(words(&asked, &sent), "x; y, z");
+        let written = [question("Name?", &[], false)];
+        assert_eq!(words(&written, "Fix it"), "Fix it");
+        assert_eq!(words(&asked, "deny"), "deny", "a choice that holds no answers");
     }
 }

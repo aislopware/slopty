@@ -1,0 +1,456 @@
+//! The composer: a card at the foot of the column.
+//!
+//! Its top row says where the agent works (the checkout, its branch, what the thread changed
+//! there, which opens the review) and whether it is at work; then the menu, the chips, the
+//! field; then a row with the way to attach, the model with the agent's mark, the mode, and at
+//! the right the one solid: send, or stop while a turn runs and nothing is typed. While the
+//! agent's own TUI holds the session, a strip saying so stands in its place.
+
+use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
+use gpui::{
+    AnyElement, App, Context, Div, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+};
+use gpui_kit::component::input::Textarea;
+use slopty_proto::thread::Cap;
+use slopty_proto::thread::wire::Intent;
+
+use super::{ThreadView, ThreadViewEvent, agent_icon, agent_name};
+use crate::colors::hsla;
+use crate::icons::{IconName, IconSize};
+use crate::kit::{self, ButtonKind};
+
+/// What the composer says before anything is typed: what it takes, and its two menus.
+pub(super) const PLACEHOLDER: &str = "Ask, build, / for commands, @ for references\u{2026}";
+
+/// Where the agent works, as the composer's top row reads it.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(super) struct Whereabouts {
+    /// The checkout's folder name.
+    pub checkout: Option<String>,
+    /// Its branch, when the worker says.
+    pub branch: Option<String>,
+    /// Lines added and removed over the thread.
+    pub added: u32,
+    /// And removed.
+    pub removed: u32,
+}
+
+/// The fact that names a thread's branch, as the workers set it.
+const BRANCH: &str = "branch";
+
+/// The last part of `cwd`, the checkout's name; none for an empty one.
+pub(super) fn checkout(cwd: &str) -> Option<String> {
+    let name = cwd.trim_end_matches('/').rsplit('/').next().unwrap_or_default();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// An open name (a mode, an item's kind) in words, sentence case: `acceptEdits` and
+/// `AcceptEdits` read "Accept edits", `skill-loaded` "Skill loaded".
+pub(super) fn sentence(mode: &str) -> String {
+    let mut words = String::with_capacity(mode.len().saturating_add(4));
+    let mut prev: Option<char> = None;
+    for c in mode.trim().chars() {
+        match c {
+            '-' | '_' | ' ' => {
+                if !words.ends_with(' ') && !words.is_empty() {
+                    words.push(' ');
+                }
+            }
+            c if c.is_uppercase() => {
+                if prev.is_some_and(|p| p.is_lowercase() || p.is_ascii_digit())
+                    && !words.ends_with(' ')
+                {
+                    words.push(' ');
+                }
+                words.extend(c.to_lowercase());
+            }
+            c => words.push(c),
+        }
+        prev = Some(c);
+    }
+    let mut chars = words.trim_end().chars();
+    chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+}
+
+impl ThreadView {
+    /// Who holds the session, when the thread can move between Slopty and the agent's own
+    /// TUI ([`Cap::HANDOFF`]): `Some(true)` while the TUI does, `Some(false)` while Slopty
+    /// drives it.
+    pub(super) fn tui_holds(&self, cx: &App) -> Option<bool> {
+        let meta = &self.state(cx)?.meta;
+        meta.can(Cap::HANDOFF).then_some(meta.terminal.is_some())
+    }
+
+    /// Whether this client's `intent` is on its way and not yet answered.
+    fn moving(&self, cx: &App, intent: &Intent) -> bool {
+        self.hub
+            .read(cx)
+            .threads()
+            .unshown(self.thread)
+            .any(|s| s.outcome.is_none() && s.intent == *intent)
+    }
+
+    /// Where the agent works: the checkout, its branch, and what the thread changed.
+    pub(super) fn where_it_works(&self, cx: &App) -> Whereabouts {
+        let threads = self.hub.read(cx).threads();
+        let row = threads.rows().rows.get(&self.thread);
+        let state = self.state(cx);
+        let branch = state
+            .and_then(|st| st.meta.facts.get(BRANCH))
+            .or_else(|| row.and_then(|r| r.facts.get(BRANCH)))
+            .filter(|b| !b.is_empty())
+            .cloned();
+        let changed = row.map(|r| r.changed).unwrap_or_default();
+        Whereabouts {
+            checkout: state.and_then(|st| checkout(&st.meta.cwd)),
+            branch,
+            added: changed.added,
+            removed: changed.removed,
+        }
+    }
+
+    /// In the composer's place while the agent's own TUI holds the session: where it is, and
+    /// the way to take it back once it rests.
+    fn held_strip(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let name = self.state(cx).map_or("the agent", |st| agent_name(&st.meta.agent));
+        let taking = self.moving(cx, &Intent::TakeBack);
+        div()
+            .id("thread-held")
+            .debug_selector(|| "thread-held".to_owned())
+            .role(Role::Status)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.md))
+            .py(self.z(theme.spacing.sm))
+            .rounded(self.z(theme.radii.lg))
+            .border_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.elevated))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_secondary))
+            .child(self.icon(IconName::SquareTerminal, s.text_muted))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(SharedString::from(format!("In {name}'s own terminal now"))),
+            )
+            .child(if taking {
+                div()
+                    .flex_none()
+                    .text_color(hsla(s.text_muted))
+                    .child("Taking it back once it rests")
+                    .into_any_element()
+            } else {
+                self.button("thread-take-back", "Take back", ButtonKind::Secondary)
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        let _id = this.intent(Intent::TakeBack, cx);
+                    }))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    /// The composer's way to hand the session to the agent's own TUI, while Slopty drives it.
+    fn handoff_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.tui_holds(cx) != Some(false) {
+            return None;
+        }
+        if self.moving(cx, &Intent::Handoff) {
+            return Some(div().child("Handing over once it rests").into_any_element());
+        }
+        Some(
+            self.button("thread-handoff", "Continue in the terminal", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _ev, _w, cx| {
+                    let _id = this.intent(Intent::Handoff, cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// A small fact in the composer's top row: its mark, then its words.
+    fn fact(&self, icon: IconName, words: String) -> Div {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        div()
+            .flex_none()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .child(
+                crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_muted))
+                    .size(self.z(theme.typography.meta())),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(words)),
+            )
+    }
+
+    /// The composer's top row: the checkout, its branch, what the thread changed (which opens
+    /// the review), and a spinner while the agent works.
+    fn context_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let here = self.where_it_works(cx);
+        let working = self.working(cx);
+        if here.checkout.is_none() && here.branch.is_none() && !working {
+            return None;
+        }
+        let thread = self.thread;
+        let changes = kit::changes_at(theme, here.added, here.removed, self.zoom).map(|counts| {
+            div()
+                .id("thread-changes")
+                .debug_selector(|| "thread-changes".to_owned())
+                .role(Role::Button)
+                .aria_label("Review the changes")
+                .flex_none()
+                .px(self.z(theme.spacing.xs))
+                .rounded(self.z(theme.radii.xs))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.raised)))
+                .child(counts)
+                .on_click(cx.listener(move |_this, _ev, _w, cx| {
+                    cx.emit(ThreadViewEvent::Review { thread });
+                }))
+        });
+        Some(
+            div()
+                .debug_selector(|| "thread-where".to_owned())
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.sm))
+                .px(self.z(theme.spacing.md))
+                .pt(self.z(theme.spacing.sm))
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_muted))
+                .children(here.checkout.map(|c| self.fact(IconName::Folder, c)))
+                .children(here.branch.map(|b| self.fact(IconName::GitBranch, b)))
+                .children(changes)
+                .child(div().flex_1())
+                .when(working, |el| el.child(self.spinner(true)))
+                .into_any_element(),
+        )
+    }
+
+    /// A quiet chip in the composer's foot: the model, the mode.
+    fn chip(&self, id: &'static str, label: String) -> gpui::Stateful<Div> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .aria_label(SharedString::from(label))
+            .flex_none()
+            .h(self.z(theme.density.control))
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.sm))
+            .rounded(self.z(theme.radii.sm))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_secondary))
+    }
+
+    /// The model chip: the agent's mark and the model's name; a menu of the agent's models
+    /// when it can switch.
+    fn model_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let state = self.state(cx)?;
+        let switch = state.meta.can(Cap::SET_MODEL) && !state.meta.models.is_empty();
+        let name =
+            state.meters.model.clone().unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
+        let mark = crate::icons::icon(
+            theme,
+            agent_icon(Some(&state.meta.agent)),
+            IconSize::Inline,
+            hsla(s.text_secondary),
+        )
+        .size(self.z(theme.typography.icon()));
+        let chip = self.chip("thread-model", format!("Model, {name}")).child(mark).child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(SharedString::from(name)),
+        );
+        Some(if switch {
+            crate::a11y::tab_stop(
+                chip.role(Role::Button)
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            IconName::ChevronDown,
+                            IconSize::Inline,
+                            hsla(s.text_muted),
+                        )
+                        .size(self.z(theme.typography.meta())),
+                    )
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
+                s.accent,
+            )
+            .into_any_element()
+        } else {
+            chip.role(Role::Label).into_any_element()
+        })
+    }
+
+    /// The mode chip: the permission mode the agent says it is in.
+    fn mode_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let mode = self.state(cx)?.meters.mode.clone().filter(|m| !m.trim().is_empty())?;
+        Some(
+            self.chip("thread-mode", format!("Mode, {mode}"))
+                .role(Role::Label)
+                .child(SharedString::from(sentence(&mode)))
+                .into_any_element(),
+        )
+    }
+
+    /// The one solid: send what is typed, or stop the turn while one runs and nothing is.
+    fn send_button(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let stopping = self.hub.read(cx).threads().stopping(self.thread);
+        let empty = self.composer.read(cx).value().trim().is_empty();
+        let stop = self.working(cx) && empty && !stopping && !self.composing.editing();
+        let (id, icon, label) = if stop {
+            ("thread-stop", IconName::Square, "Stop")
+        } else {
+            ("thread-send", IconName::ArrowUp, "Send")
+        };
+        let el = div()
+            .id(id)
+            .debug_selector(move || id.to_owned())
+            .role(Role::Button)
+            .aria_label(label)
+            .flex_none()
+            .size(self.z(theme.density.control))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(self.z(theme.radii.sm))
+            .cursor_pointer()
+            .child(
+                crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.solid_ink))
+                    .size(self.z(theme.typography.icon())),
+            );
+        let el =
+            kit::solid_pressable(el, theme).on_click(cx.listener(move |this, _ev, window, cx| {
+                if stop {
+                    this.interrupt(cx);
+                } else {
+                    let delivery = this.send_now(cx);
+                    this.submit(delivery, window, cx);
+                }
+            }));
+        crate::a11y::tab_stop(el, s.accent).into_any_element()
+    }
+
+    /// The composer card. While the agent's own TUI holds the session, where it is instead.
+    pub(super) fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
+        if self.tui_holds(cx) == Some(true) {
+            return self.held_strip(cx);
+        }
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let editing = self.composing.editing();
+        let view = cx.weak_entity();
+        div()
+            .id("thread-composer")
+            .debug_selector(|| "thread-composer".to_owned())
+            .w_full()
+            .flex()
+            .flex_col()
+            .rounded(self.z(theme.radii.lg))
+            .border_1()
+            .border_color(hsla(s.border))
+            .bg(hsla(s.elevated))
+            .children(self.context_row(cx))
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(self.z(theme.spacing.xs))
+                    .px(self.z(theme.spacing.md))
+                    .pt(self.z(theme.spacing.sm))
+                    .text_size(self.z(theme.typography.prose()))
+                    .children(self.menu_section(cx))
+                    .children(self.editing_strip(cx))
+                    .children(self.attachment_chips(cx))
+                    .child(
+                        Textarea::new(&self.composer)
+                            .appearance(false)
+                            .bordered(false)
+                            .aria_label("Message")
+                            .on_paste(move |item, _window, cx| {
+                                view.update(cx, |v, cx| v.paste_attachment(item, cx))
+                                    .unwrap_or(false)
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.xxs))
+                    .px(self.z(theme.spacing.sm))
+                    .pb(self.z(theme.spacing.sm))
+                    .pt(self.z(theme.spacing.xs))
+                    .when(!editing, |el| {
+                        el.child(
+                            self.icon_button("thread-attach", IconName::Plus, "Attach files")
+                                .on_click(cx.listener(|_this, _ev, _w, cx| {
+                                    cx.emit(ThreadViewEvent::PickFiles);
+                                })),
+                        )
+                    })
+                    .children(self.model_chip(cx))
+                    .children(self.mode_chip(cx))
+                    .child(div().flex_1())
+                    .children(self.handoff_button(cx))
+                    .child(self.send_button(cx)),
+            )
+            .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{checkout, sentence};
+
+    /// A mode reads as words in sentence case, however the agent spells it.
+    #[test]
+    fn a_mode_reads_as_words() {
+        assert_eq!(sentence("AcceptEdits"), "Accept edits");
+        assert_eq!(sentence("acceptEdits"), "Accept edits");
+        assert_eq!(sentence("bypass-permissions"), "Bypass permissions");
+        assert_eq!(sentence("plan"), "Plan");
+        assert_eq!(sentence("read_only"), "Read only");
+    }
+
+    /// The checkout reads as its folder's name, a trailing slash or not.
+    #[test]
+    fn a_checkout_reads_as_its_folders_name() {
+        assert_eq!(checkout("/Users/me/src/slopty/").as_deref(), Some("slopty"));
+        assert_eq!(checkout("/Users/me/src/slopty").as_deref(), Some("slopty"));
+        assert_eq!(checkout(""), None);
+    }
+}

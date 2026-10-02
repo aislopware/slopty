@@ -21,8 +21,7 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Button │ Thought
-Button │ Propose a plan
-Button │ Update the task list
+Button │ 2 steps
 Button │ Read /work/shots/header.png
 Image │ Picture, 640 × 400
 Button │ Build the release binary
@@ -33,5 +32,7 @@ List │ In the background
 Status │ Build the release binary: Done
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Model, Opus 5.5
+Button │ Send
 Group │ Status
 Status │ e2e-worker

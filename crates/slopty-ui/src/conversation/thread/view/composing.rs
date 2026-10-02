@@ -7,6 +7,8 @@
 //!   on its way, the last answer filtered here stands in for it, so the list never blanks between
 //!   keys. ↑/↓ move, ↵ or ⇥ pick, Esc closes the menu until the caret leaves the word. Picking only
 //!   writes into the draft.
+//! - **Models.** The model chip opens a menu of the models the agent can switch to; picking one
+//!   asks the agent to switch (`Intent::SetModel`), and the chip reads as the agent then says.
 //! - **Attachments.** A pasted picture, files copied here, a drop on the tile or the picker's files
 //!   go up through the workspace as a drop on the face does; each shows as a chip
 //!   ([`crate::conversation::chips`]) until the message goes, which carries their paths after its
@@ -28,7 +30,7 @@ use gpui::{
 };
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Command, IntentId};
+use slopty_proto::thread::{Command, IntentId, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
@@ -49,6 +51,8 @@ pub(super) enum MenuRows {
     Paths(Option<Vec<String>>),
     /// An `@` with nothing after it yet.
     Hint,
+    /// The models the agent can switch to, opened from the model chip.
+    Models(Vec<Model>),
 }
 
 impl MenuRows {
@@ -57,6 +61,7 @@ impl MenuRows {
             Self::Commands(commands) => commands.len(),
             Self::Paths(paths) => paths.as_ref().map_or(0, Vec::len),
             Self::Hint => 0,
+            Self::Models(models) => models.len(),
         }
     }
 }
@@ -92,6 +97,8 @@ pub(super) struct Composing {
     /// A pasted picture's chip draws the picture, by attachment.
     pictures: HashMap<u64, Arc<gpui::Image>>,
     editing: Option<Editing>,
+    /// The model chip's menu is open.
+    models: bool,
 }
 
 impl Composing {
@@ -144,6 +151,10 @@ impl ThreadView {
 
     /// What the menu lists now, if it is open.
     pub(super) fn menu_rows(&self, cx: &App) -> Option<MenuRows> {
+        if self.composing.models {
+            let models = self.state(cx).map(|s| s.meta.models.clone()).unwrap_or_default();
+            return (!models.is_empty()).then_some(MenuRows::Models(models));
+        }
         match self.menu_token(cx)? {
             Token::Command { query } => {
                 let all = &self.state(cx)?.commands;
@@ -240,6 +251,11 @@ impl ThreadView {
 
     /// Esc with the menu open closes it for the word the caret is in. Whether it was open.
     pub(super) fn menu_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.composing.models {
+            self.composing.models = false;
+            cx.notify();
+            return true;
+        }
         let Some(token) = self.menu_token(cx) else { return false };
         self.composing.dismissed = Some(token.start());
         cx.notify();
@@ -254,6 +270,13 @@ impl ThreadView {
             (composer.value().to_string(), composer.cursor())
         };
         let written = match (rows, self.menu_token(cx)) {
+            (MenuRows::Models(models), _) => {
+                let Some(model) = models.get(ix) else { return };
+                self.composing.models = false;
+                let _id = self.intent(Intent::SetModel { model: model.id.clone() }, cx);
+                cx.notify();
+                return;
+            }
             (MenuRows::Commands(commands), _) => {
                 let Some(command) = commands.get(ix) else { return };
                 menu::pick_command(&text, &command.name)
@@ -306,6 +329,7 @@ impl ThreadView {
         let theme = &self.theme;
         let label = match &rows {
             MenuRows::Commands(_) => "Commands",
+            MenuRows::Models(_) => "Models",
             MenuRows::Paths(_) | MenuRows::Hint => "Files",
         };
         let body: Vec<AnyElement> = match &rows {
@@ -322,6 +346,14 @@ impl ThreadView {
             }
             MenuRows::Paths(None) => vec![self.menu_note("Searching…")],
             MenuRows::Hint => vec![self.menu_note("Type to find a file or folder")],
+            MenuRows::Models(models) => {
+                let now = self.state(cx).and_then(|s| s.meters.model_id.clone());
+                models
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, model)| self.model_row(ix, model, now.as_deref(), cx))
+                    .collect()
+            }
         };
         Some(
             div()
@@ -421,6 +453,39 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(source))
             }))
+            .into_any_element()
+    }
+
+    /// The model chip's menu open or shut; open, the keyboard walks it from its first row.
+    pub(super) fn toggle_models(&mut self, cx: &mut Context<Self>) {
+        self.composing.models = !self.composing.models;
+        self.composing.selected = 0;
+        cx.notify();
+    }
+
+    /// A model the agent can switch to, with a check on the one it runs.
+    fn model_row(
+        &self,
+        ix: usize,
+        model: &Model,
+        now: Option<&str>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let current = now == Some(model.id.as_str());
+        self.menu_row(ix, model.label.clone(), cx)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(self.z(theme.typography.small()))
+                    .child(SharedString::from(model.label.clone())),
+            )
+            .when(current, |el| el.child(self.icon(IconName::Check, s.text_secondary)))
             .into_any_element()
     }
 
@@ -634,7 +699,8 @@ impl ThreadView {
     fn queued_text(&self, pending: IntentId, cx: &App) -> Option<String> {
         let hub = self.hub.read(cx);
         let state = self.state(cx)?;
-        let bar = super::Activity::of(hub.threads(), self.thread, state);
+        let bar =
+            crate::conversation::thread::activity::Activity::of(hub.threads(), self.thread, state);
         bar.queue.into_iter().find(|q| q.intent == pending).map(|q| q.text)
     }
 

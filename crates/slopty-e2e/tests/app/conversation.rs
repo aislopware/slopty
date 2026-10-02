@@ -239,7 +239,7 @@ async fn a_subagent_has_a_thread_of_its_own() {
     drv.wait_for("the settled turn", STEP, |d| {
         thread_shows(d)
             && button_starts(d, "Worked")
-            && labels(d, "Group").iter().any(|l| l.starts_with("Edited"))
+            && labels(d, "Group").iter().any(|l| l.starts_with("Edits"))
     })
     .await
     .unwrap();

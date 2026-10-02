@@ -13,23 +13,22 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Div, ElementId, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledText,
-    div,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_core::WallMs;
 use slopty_proto::conversation::{
     AgentDetail, AgentRun, BashDetail, Entry, Patch, QuestionDetail, ResultStatus, ThreadId,
     ToolCall, ToolDetail,
 };
-use slopty_theme::{Rgb, alpha};
+use slopty_theme::Rgb;
 
 use super::{ConversationView, SPLIT_FROM};
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::conversation::diff::{self, Block, Kind, Line};
+use crate::conversation::lines::Ink;
 use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Level};
 use crate::conversation::tools;
-use crate::highlight;
 use crate::icons::IconName;
 
 /// Lines of a command's output a summary shows: its end, where a log says how it went.
@@ -896,37 +895,18 @@ impl ConversationView {
             .into_any_element()
     }
 
-    fn hunk_divider(&self, block: &Block) -> AnyElement {
-        let s = self.theme.surfaces;
-        div()
-            .px(self.z(self.theme.spacing.sm))
-            .py(self.z(self.theme.spacing.xxs))
-            .my(self.z(self.theme.spacing.xxs))
-            .bg(hsla(s.canvas))
-            .text_color(hsla(s.text_muted))
-            .font_family(self.theme.typography.ui_family.clone())
-            .child(SharedString::from(format!("Line {}", block.new_start)))
-            .into_any_element()
+    /// The one diff renderer's ink, at this face's zoom (`lines`).
+    const fn ink(&self) -> Ink<'_> {
+        Ink { theme: &self.theme, zoom: self.zoom, digits: 1 }
     }
 
-    /// A line's text in its grammar's colours (a context line muted).
+    fn hunk_divider(&self, block: &Block) -> AnyElement {
+        self.ink().hunk_head(block).my(self.z(self.theme.spacing.xxs)).into_any_element()
+    }
+
+    /// A line's text as the one diff renderer draws it, with the mark of a file that ends
+    /// without a newline after it.
     fn line_text(&self, line: &Line) -> AnyElement {
-        let s = self.theme.surfaces;
-        let (text, spans) = diff::detab(&line.text, line.spans.as_deref());
-        let text = if text.is_empty() { " ".to_owned() } else { text };
-        let context = line.kind == Kind::Context;
-        let ink = match line.kind {
-            Kind::Context => s.text_secondary,
-            Kind::Added | Kind::Removed => s.text,
-        };
-        let styled = match spans.filter(|sp| !sp.is_empty() && !context) {
-            Some(spans) => {
-                let font = gpui::font(self.mono());
-                let runs = highlight::runs(text.len(), Some(&spans), &font, &self.theme);
-                StyledText::new(SharedString::from(text)).with_runs(runs).into_any_element()
-            }
-            None => SharedString::from(text).into_any_element(),
-        };
         let marker = line.no_newline.then(|| self.no_newline_mark());
         div()
             .flex_1()
@@ -934,7 +914,7 @@ impl ConversationView {
             .flex()
             .items_baseline()
             .gap(self.z(self.theme.spacing.xs))
-            .child(div().min_w_0().whitespace_normal().text_color(hsla(ink)).child(styled))
+            .child(self.ink().text(line))
             .children(marker)
             .into_any_element()
     }
@@ -965,14 +945,9 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// The line's wash and its sign's tone.
+    /// The line's wash and its sign's tone, as the one diff renderer has them.
     fn line_tone(&self, kind: Kind) -> (Option<gpui::Hsla>, &'static str, Rgb) {
-        let s = self.theme.surfaces;
-        match kind {
-            Kind::Added => (Some(hsla_alpha(s.success_fill, alpha::FAINT)), "+", s.success),
-            Kind::Removed => (Some(hsla_alpha(s.error_fill, alpha::FAINT)), "\u{2212}", s.error),
-            Kind::Context => (None, " ", s.text_muted),
-        }
+        self.ink().tone(kind)
     }
 
     fn number(&self, n: Option<u32>, digits: u8) -> Div {

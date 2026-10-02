@@ -2,6 +2,7 @@
 
 use gpui::{App, Context, Subscription, Window};
 use gpui_kit::component::questionnaire::{QuestionnaireEvent, QuestionnaireSubmission};
+use slopty_proto::thread::detail::Answer;
 use slopty_proto::thread::{AskId, Request};
 
 use super::ThreadView;
@@ -69,7 +70,7 @@ impl ThreadView {
     fn answer_questions(&self, submission: &QuestionnaireSubmission, cx: &mut Context<Self>) {
         let Some(asking) = &self.asking else { return };
         let asked = asking.questions.questions();
-        let choice = questions::choice(asked, &questions::answers(asked, submission));
+        let choice = Answer::choice(asked, &questions::answers(asked, submission));
         self.answer(asking.ask.clone(), choice, cx);
     }
 }

@@ -23,8 +23,7 @@ Group │ Thread
 Article │ You: The header clips its chips on a narrow window, as here.
 Image │ Picture, 640 × 400
 Button │ Thought
-Button │ Propose a plan
-Button │ Update the task list
+Button │ 2 steps
 Button │ Read /work/shots/header.png
 Button │ Build the release binary
 Article │ The chips now give way from the right, the model first. The release build runs in the background; I will check a phone-width window once it is done.
@@ -34,5 +33,7 @@ List │ In the background
 Status │ Build the release binary: Done
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Model, Opus 5.5
+Button │ Send
 Group │ Status
 Status │ e2e-worker

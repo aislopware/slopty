@@ -1,5 +1,8 @@
-//! A thread as the view's rows: each turn's message, then its work, a settled turn folded to
-//! one line over its answer, the live turn whole, and the sends on their way at the foot.
+//! A thread as the view's rows.
+//!
+//! Each turn's message, then its work, a settled turn folded to one line over its answer, the
+//! live turn whole (two or more quiet calls in a row there as one line, "Read 3 files ·
+//! Searched once"), and the sends on their way at the foot.
 //!
 //! Nothing here draws. [`build`] runs over the mirror on every change and is cheap enough to:
 //! it walks the items once and allocates a row each.
@@ -12,8 +15,8 @@ use std::time::Duration;
 use slopty_client::threads::Sent;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadState, ToolDetail, ToolState, Turn,
-    TurnId, TurnState, kind,
+    Delivery, IntentId, Item, ItemBody, ItemId, Phase, ThreadState, ToolCall, ToolDetail,
+    ToolState, Turn, TurnId, TurnState, kind,
 };
 
 /// How many kinds of work a fold names before it counts the rest.
@@ -49,6 +52,13 @@ pub enum Row {
         /// The item.
         item: ItemId,
     },
+    /// Quiet calls done one after another in the live turn, as one line, open or folded.
+    Group {
+        /// The first of them, which names the group.
+        first: ItemId,
+        /// The reader opened it.
+        open: bool,
+    },
     /// A notice, a compaction, a review, or an item of a kind this client does not know: a
     /// quiet line.
     Note {
@@ -78,7 +88,8 @@ impl Row {
             | Self::Text { item }
             | Self::Reasoning { item }
             | Self::Tool { item }
-            | Self::Note { item } => item.hash(&mut h),
+            | Self::Note { item }
+            | Self::Group { first: item, .. } => item.hash(&mut h),
             Self::Fold { turn, .. } | Self::Working { turn } => turn.hash(&mut h),
             Self::Sending { intent } => intent.hash(&mut h),
         }
@@ -95,6 +106,8 @@ pub struct Input<'a> {
     pub unshown: &'a [&'a Sent],
     /// The settled turns the reader opened.
     pub open: &'a HashSet<TurnId>,
+    /// The groups of quiet calls the reader opened, by their first call.
+    pub groups: &'a HashSet<ItemId>,
 }
 
 /// The rows of a thread, and where in its items each row's content is.
@@ -128,6 +141,7 @@ pub fn build_spans(input: Input<'_>) -> Built {
     let capacity = state.items.len().saturating_add(4);
     let mut built =
         Built { rows: Vec::with_capacity(capacity), spans: Vec::with_capacity(capacity) };
+    let last = state.last_turn().map(|t| t.id);
     let mut at = 0;
     while let Some(first) = state.items.get(at) {
         let turn = first.turn;
@@ -138,12 +152,12 @@ pub fn build_spans(input: Input<'_>) -> Built {
         let run = at..at.saturating_add(len);
         let items = state.items.get(run.clone()).unwrap_or_default();
         let figures = state.turn(turn);
-        let settled = figures.is_some_and(|t| !matches!(t.state, TurnState::Active));
+        // A turn the agent never wrote the end of (its stop went unheard) is over once a
+        // newer one began: only the last turn can still be under way.
+        let settled =
+            figures.is_some_and(|t| !matches!(t.state, TurnState::Active) || Some(t.id) != last);
         if turn == TurnId::BEFORE || !settled {
-            for (ix, item) in items.iter().enumerate() {
-                let at = run.start.saturating_add(ix);
-                built.push(row_of(item), at..at.saturating_add(1));
-            }
+            live_rows(&mut built, items, run.start, input.groups);
         } else {
             turn_rows(&mut built, turn, items, run.clone(), input.open.contains(&turn));
         }
@@ -198,6 +212,55 @@ fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>,
         if open {
             built.push(row_of(item), at..at.saturating_add(1));
         }
+    }
+}
+
+/// The fewest quiet calls in a row that make a group.
+const GROUP: usize = 2;
+
+/// Whether `item` is a call that only looked and is done: a group's kind of call.
+fn groups(item: &Item) -> bool {
+    match &item.body {
+        ItemBody::Tool(call) => {
+            quiet(call)
+                && matches!(call.state, ToolState::Completed)
+                && call.child.is_none()
+                && call.images.is_empty()
+        }
+        _ => false,
+    }
+}
+
+/// Whether `call` only looks (a read, a search, a fetch) and asks nothing: a quiet line, not a
+/// card.
+#[must_use]
+pub fn quiet(call: &ToolCall) -> bool {
+    !matches!(call.kind.as_str(), kind::EDIT | kind::WRITE | kind::EXEC)
+        && !matches!(call.state, ToolState::Pending { .. })
+}
+
+/// The live turn's rows, each item its own but quiet calls in a row as one group.
+fn live_rows(built: &mut Built, items: &[Item], start: usize, open: &HashSet<ItemId>) {
+    let mut ix = 0_usize;
+    while let Some(item) = items.get(ix) {
+        let at = start.saturating_add(ix);
+        let len = items.get(ix..).unwrap_or_default().iter().take_while(|i| groups(i)).count();
+        if len < GROUP {
+            built.push(row_of(item), at..at.saturating_add(1));
+            ix = ix.saturating_add(1);
+            continue;
+        }
+        let shown = open.contains(&item.id);
+        built.push(Row::Group { first: item.id.clone(), open: shown }, at..at.saturating_add(len));
+        if shown {
+            for (k, call) in
+                items.get(ix..ix.saturating_add(len)).unwrap_or_default().iter().enumerate()
+            {
+                let at = at.saturating_add(k);
+                built.push(row_of(call), at..at.saturating_add(1));
+            }
+        }
+        ix = ix.saturating_add(len);
     }
 }
 
@@ -274,6 +337,20 @@ impl Fold {
             removed: turn.changed.removed,
             ..Self::default()
         };
+        fold.count(items);
+        fold
+    }
+
+    /// What a group of calls adds up to: its kinds of work, untimed.
+    #[must_use]
+    pub fn of_calls(items: &[Item]) -> Self {
+        let mut fold = Self::default();
+        fold.count(items);
+        fold
+    }
+
+    fn count(&mut self, items: &[Item]) {
+        let fold = self;
         let bump = |n: &mut u32| *n = n.saturating_add(1);
         for item in items {
             let ItemBody::Tool(call) = &item.body else { continue };
@@ -297,7 +374,6 @@ impl Fold {
                 _ => {}
             }
         }
-        fold
     }
 
     fn edit(&mut self, path: &str) {
@@ -322,7 +398,7 @@ impl Fold {
         }
     }
 
-    /// What the work was, the weightiest first: "ran a command", "read 3 files", then
+    /// What the work was, the weightiest first: "Ran a command", "Read 3 files", then
     /// "2 more" for the steps not named.
     #[must_use]
     pub fn what(&self) -> Vec<String> {
@@ -334,17 +410,17 @@ impl Fold {
             (
                 edited,
                 match self.edited.as_slice() {
-                    [one] => format!("edited {one}"),
-                    _ => format!("edited {edited} files"),
+                    [one] => format!("Edited {one}"),
+                    _ => format!("Edited {edited} files"),
                 },
                 self.edit_calls,
             ),
-            (self.ran, say(self.ran, "ran a command", "ran # commands"), self.ran),
-            (self.read, say(self.read, "read a file", "read # files"), self.read),
-            (self.searched, say(self.searched, "searched once", "searched # times"), self.searched),
+            (self.ran, say(self.ran, "Ran a command", "Ran # commands"), self.ran),
+            (self.read, say(self.read, "Read a file", "Read # files"), self.read),
+            (self.searched, say(self.searched, "Searched once", "Searched # times"), self.searched),
             (
                 self.delegated,
-                say(self.delegated, "started a subagent", "started # subagents"),
+                say(self.delegated, "Started a subagent", "Started # subagents"),
                 self.delegated,
             ),
         ];
@@ -360,11 +436,37 @@ impl Fold {
         out
     }
 
-    /// The fold's line: "Worked 55 s: ran a command, read a file, 2 more".
+    /// The fold's line, what the work was: "Edited notes.txt · Read 3 files · 2 more"; the
+    /// lead alone for a turn that called nothing.
     #[must_use]
     pub fn line(&self) -> String {
         let what = self.what();
-        if what.is_empty() { self.lead() } else { format!("{}: {}", self.lead(), what.join(", ")) }
+        if what.is_empty() { self.lead() } else { what.join(" \u{b7} ") }
+    }
+
+    /// The fold as one sentence, for whoever reads it aloud: "Worked 55 s: Edited b.rs · Ran 2
+    /// commands".
+    #[must_use]
+    pub fn label(&self) -> String {
+        let what = self.what();
+        if what.is_empty() {
+            self.lead()
+        } else {
+            format!("{}: {}", self.lead(), what.join(" \u{b7} "))
+        }
+    }
+
+    /// What stands at the fold's right, apart from its line: how long the turn took ("55 s"),
+    /// or how it ended short ("Stopped after 12 s"); nothing when the line says it already.
+    #[must_use]
+    pub fn when(&self) -> Option<String> {
+        if self.what().is_empty() {
+            return None;
+        }
+        match (self.ended, self.took) {
+            (Ended::Complete, took) => took.map(crate::kit::duration),
+            _ => Some(self.lead()),
+        }
     }
 }
 
@@ -495,7 +597,8 @@ mod tests {
             vec![user("u", 1), exec("x", 1), text("mid", 1), read("r", 1), text("end", 1)],
         );
         let mut open = HashSet::new();
-        let rows = build(Input { state: &state, unshown: &[], open: &open });
+        let rows =
+            build(Input { state: &state, unshown: &[], open: &open, groups: &HashSet::new() });
         let id = |s: &str| ItemId(s.to_owned());
         assert_eq!(
             rows,
@@ -506,7 +609,8 @@ mod tests {
             ]
         );
         open.insert(TurnId(1));
-        let rows = build(Input { state: &state, unshown: &[], open: &open });
+        let rows =
+            build(Input { state: &state, unshown: &[], open: &open, groups: &HashSet::new() });
         assert_eq!(
             rows,
             [
@@ -530,7 +634,12 @@ mod tests {
             vec![user("u1", 1), text("a1", 1), user("u2", 2), exec("x", 2), text("a2", 2)],
         );
         state.status.phase = Phase::Working;
-        let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         let id = |s: &str| ItemId(s.to_owned());
         assert_eq!(
             rows,
@@ -545,7 +654,12 @@ mod tests {
             "a turn with nothing but its answer has no fold"
         );
         state.status.phase = Phase::Idle;
-        let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         assert!(
             !rows.iter().any(|r| matches!(r, Row::Working { .. })),
             "an agent that says it is idle is not working on a turn it never ended"
@@ -566,7 +680,12 @@ mod tests {
         let queued = sent(Delivery::Queue, None);
         let refused = sent(Delivery::Queue, Some(Outcome::Refused { reason: "No".to_owned() }));
         let unshown = [&now, &queued, &refused];
-        let rows = build(Input { state: &state, unshown: &unshown, open: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &unshown,
+            open: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         assert_eq!(rows, [Row::Sending { intent: now.id }, Row::Sending { intent: refused.id }]);
     }
 
@@ -576,23 +695,93 @@ mod tests {
         let items =
             [exec("x", 1), read("r", 1), read("r2", 1), edit("e", 1, "a/b.rs"), exec("y", 1)];
         let fold = Fold::of(&t, &items);
-        assert_eq!(fold.line(), "Worked 55 s: edited b.rs, ran 2 commands, 2 more");
+        assert_eq!(fold.line(), "Edited b.rs \u{b7} Ran 2 commands \u{b7} 2 more");
+        assert_eq!(fold.when().as_deref(), Some("55 s"));
+        assert_eq!(fold.label(), "Worked 55 s: Edited b.rs \u{b7} Ran 2 commands \u{b7} 2 more");
         let fold = Fold::of(&t, &[exec("x", 1), read("r", 1), tool("m", 1, kind::MCP, None)]);
-        assert_eq!(fold.line(), "Worked 55 s: ran a command, read a file, 1 more");
-        let stopped = turn(1, TurnState::Interrupted, 12);
-        assert_eq!(
-            Fold::of(&stopped, &[tool("m", 1, "other", None)]).line(),
-            "Stopped after 12 s: 1 step"
-        );
+        assert_eq!(fold.line(), "Ran a command \u{b7} Read a file \u{b7} 1 more");
+        let stopped =
+            Fold::of(&turn(1, TurnState::Interrupted, 12), &[tool("m", 1, "other", None)]);
+        assert_eq!(stopped.line(), "1 step");
+        assert_eq!(stopped.when().as_deref(), Some("Stopped after 12 s"));
         let mut untimed = turn(1, TurnState::Complete, 0);
         untimed.ended_ms = None;
-        assert_eq!(Fold::of(&untimed, &[]).line(), "Worked");
+        let quiet = Fold::of(&untimed, &[]);
+        assert_eq!((quiet.line().as_str(), quiet.when()), ("Worked", None));
+    }
+
+    /// A turn whose end never came folds once a newer turn began.
+    #[test]
+    fn a_turn_left_open_folds_once_the_next_begins() {
+        let state = state(
+            vec![turn(1, TurnState::Active, 0), turn(2, TurnState::Active, 0)],
+            vec![user("u1", 1), exec("x", 1), text("a1", 1), user("u2", 2), read("r", 2)],
+        );
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
+        let id = |s: &str| ItemId(s.to_owned());
+        assert_eq!(
+            rows,
+            [
+                Row::User { item: id("u1") },
+                Row::Fold { turn: TurnId(1), open: false },
+                Row::Text { item: id("a1") },
+                Row::User { item: id("u2") },
+                Row::Tool { item: id("r") },
+            ]
+        );
+    }
+
+    /// In the live turn, quiet calls done one after another are one line, which opens to
+    /// show them; a lone one, and a call that acts, stay rows of their own.
+    #[test]
+    fn quiet_calls_in_a_row_are_one_line_in_the_live_turn() {
+        let state = state(
+            vec![turn(1, TurnState::Active, 0)],
+            vec![user("u", 1), read("r1", 1), read("r2", 1), exec("x", 1), read("r3", 1)],
+        );
+        let id = |s: &str| ItemId(s.to_owned());
+        let mut groups = HashSet::new();
+        let built = |groups: &HashSet<ItemId>| {
+            build(Input { state: &state, unshown: &[], open: &HashSet::new(), groups })
+        };
+        assert_eq!(
+            built(&groups),
+            [
+                Row::User { item: id("u") },
+                Row::Group { first: id("r1"), open: false },
+                Row::Tool { item: id("x") },
+                Row::Tool { item: id("r3") },
+            ]
+        );
+        groups.insert(id("r1"));
+        assert_eq!(
+            built(&groups).get(1..4),
+            Some(
+                &[
+                    Row::Group { first: id("r1"), open: true },
+                    Row::Tool { item: id("r1") },
+                    Row::Tool { item: id("r2") },
+                ][..]
+            )
+        );
+        let items = state.items.get(1..3).unwrap_or_default();
+        assert_eq!(Fold::of_calls(items).line(), "Read 2 files");
     }
 
     #[test]
     fn a_recorded_session_builds_its_rows_with_every_settled_turn_folded() {
         let state = fixtures::thread("tools");
-        let rows = build(Input { state: &state, unshown: &[], open: &HashSet::new() });
+        let rows = build(Input {
+            state: &state,
+            unshown: &[],
+            open: &HashSet::new(),
+            groups: &HashSet::new(),
+        });
         assert!(rows.iter().any(|r| matches!(r, Row::Fold { .. })), "{rows:?}");
         assert!(!rows.iter().any(|r| matches!(r, Row::Tool { .. })), "every call is folded");
         let keys: HashSet<u64> = rows.iter().map(Row::key).collect();

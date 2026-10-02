@@ -588,15 +588,40 @@ impl ReviewView {
 
     fn render_row(&self, ix: usize, cx: &Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(ix).copied() else { return div().into_any_element() };
-        match row {
-            Row::File(at) => self.file_head(at, cx),
+        let inner = match row {
+            Row::File(at) => return self.file_head(at, cx),
             Row::Bare(at) => self.bare(at),
             Row::Hunk(at, hunk) => self.hunk_head(at, hunk, cx),
             Row::Line(at, hunk, line) => self.line_row(at, hunk, line, cx),
             Row::Pair(at, hunk, pair) => self.pair_row(at, hunk, pair, cx),
             Row::Comment(c) => self.comment_row(c, cx),
             Row::Draft => self.draft_row(),
-        }
+        };
+        // Each file is a card: its head row draws the top edge, its rows the sides, its last
+        // row the foot.
+        let last =
+            !matches!(self.rows.get(ix.saturating_add(1)), Some(r) if !matches!(r, Row::File(_)));
+        let theme = &self.theme;
+        let radius = self.z(theme.radii.sm);
+        div()
+            .w_full()
+            .px(self.z(theme.spacing.md))
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(hsla(theme.surfaces.border_subtle))
+                    .when(last, |el| {
+                        el.border_b_1()
+                            .rounded_bl(radius)
+                            .rounded_br(radius)
+                            .pb(self.z(theme.spacing.xs))
+                    })
+                    .child(inner),
+            )
+            .into_any_element()
     }
 
     /// Keep and put back, or what is on its way.
@@ -627,32 +652,44 @@ impl ReviewView {
             .into_any_element()
     }
 
+    /// A file's head: its name, then its folder muted, how it changed, keep and put back;
+    /// under it the top edge of the file's card.
     fn file_head(&self, at: usize, cx: &Context<Self>) -> AnyElement {
         let Some(file) = self.model.file(at) else { return div().into_any_element() };
         let theme = &self.theme;
         let s = theme.surfaces;
-        let dir = file.path.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
-        let name = file.path.rsplit('/').next().unwrap_or(&file.path).to_owned();
+        let (name, dir) = lines::name_first(&file.path);
         let status = match (&file.from, &file.to) {
             (None, Some(_)) => Some("Added"),
             (Some(_), None) => Some("Removed"),
             _ => None,
         };
+        let radius = self.z(theme.radii.sm);
         div()
             .debug_selector(move || format!("review-head-{at}"))
             .w_full()
+            .px(self.z(theme.spacing.md))
             .pt(self.z(theme.spacing.lg))
             .child(
                 div()
                     .w_full()
                     .flex()
                     .items_center()
-                    .gap(self.z(theme.spacing.xs))
-                    .px(self.z(theme.spacing.md))
+                    .gap(self.z(theme.spacing.sm))
+                    .px(self.z(theme.spacing.xs))
                     .min_h(self.z(kit::Row::One.height(theme)))
-                    .border_b_1()
-                    .border_color(hsla(s.border_subtle))
                     .text_size(self.z(theme.typography.small()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(gpui::relative(0.6))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(hsla(s.text))
+                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            .child(SharedString::from(name.to_owned())),
+                    )
                     .child(
                         div()
                             .min_w_0()
@@ -660,14 +697,7 @@ impl ReviewView {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(dir)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(hsla(s.text))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                            .child(SharedString::from(name)),
+                            .child(SharedString::from(dir.to_owned())),
                     )
                     .children(
                         status.map(|st| div().flex_none().text_color(hsla(s.text_muted)).child(st)),
@@ -680,6 +710,17 @@ impl ReviewView {
                     ))
                     .child(div().flex_1())
                     .child(self.picks(at, None, "file", cx)),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .h(self.z(theme.spacing.xs))
+                    .rounded_tl(radius)
+                    .rounded_tr(radius)
+                    .border_t_1()
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(hsla(s.border_subtle)),
             )
             .into_any_element()
     }

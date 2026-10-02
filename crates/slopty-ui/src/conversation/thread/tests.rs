@@ -289,11 +289,13 @@ fn timing_of_the_thread_path() {
     });
     let mirrored = threads.mirror(thread).and_then(slopty_client::threads::Mirror::state).unwrap();
     let open = std::collections::HashSet::new();
+    let groups = std::collections::HashSet::new();
     let built = median(|| {
         drop(std::hint::black_box(rows::build(Input {
             state: mirrored,
             unshown: &[],
             open: &open,
+            groups: &groups,
         })));
     });
     let mut all: std::collections::HashSet<TurnId> = mirrored.turns.iter().map(|t| t.id).collect();
@@ -303,6 +305,7 @@ fn timing_of_the_thread_path() {
             state: mirrored,
             unshown: &[],
             open: &all,
+            groups: &groups,
         })));
     });
     let bar = median(|| drop(std::hint::black_box(Activity::of(&threads, thread, mirrored))));
@@ -386,5 +389,6 @@ fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
 }
 
 mod composing;
+mod face;
 mod questions;
 mod steps;

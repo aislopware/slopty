@@ -5,7 +5,12 @@
 //! removed lines, the new side its context and added lines), so a removed line that opens a
 //! block comment does not colour the lines that replaced it. A hunk is parsed apart from the
 //! next, which sits elsewhere in the file.
+//!
+//! Two levels of change, as git-delta and Zed's Delta draw them: a changed line's wash says
+//! where, and within a removed line and the added line that replaced it, the words that differ
+//! are emphasised ([`Line::emph`]), so a one-word rename in a long line is found at a glance.
 
+use std::ops::Range;
 use std::rc::Rc;
 
 use slopty_proto::conversation::{Hunk, Patch};
@@ -39,6 +44,9 @@ pub struct Line {
     /// The file ends here without a newline (git's "\ No newline at end of file", which
     /// follows the line it is about).
     pub no_newline: bool,
+    /// The bytes of its text that differ from the line it pairs with, a removed line with the
+    /// added line that replaced it; none for a line that pairs with none.
+    pub emph: Vec<Range<usize>>,
 }
 
 /// A hunk's lines.
@@ -127,13 +135,157 @@ fn block_of(
             new_no = new_no.saturating_add(1);
             new_at = new_at.saturating_add(1);
         }
-        lines.push(Line { kind, old, new, text: text.to_owned(), spans: coloured, no_newline });
+        lines.push(Line {
+            kind,
+            old,
+            new,
+            text: text.to_owned(),
+            spans: coloured,
+            no_newline,
+            emph: Vec::new(),
+        });
     }
+    emphasise(&mut lines);
     Block { new_start, lines }
 }
 
+/// The bytes of a line that changed.
+type Emph = Vec<Range<usize>>;
+
+/// The furthest apart two lines may be and still pair, as git-delta's `max-line-distance`.
+const PAIR_DISTANCE: f64 = 0.6;
+
+/// A run longer than this many lines on a side is left unpaired: pairing tries every
+/// removal against every addition after the last pair.
+const PAIR_RUN: usize = 64;
+
+/// A line longer than this many bytes is not compared word by word.
+const PAIR_BYTES: usize = 1_000;
+
+/// Mark the words that differ in each run of removals and the additions after it.
+///
+/// Each removed line pairs with the first added line after the last pair that is near
+/// enough ([`PAIR_DISTANCE`]); an added line passed over, and a removed line near none, stay
+/// unpaired, all wash and no emphasis.
+fn emphasise(lines: &mut [Line]) {
+    let mut at = 0_usize;
+    while at < lines.len() {
+        let removed = run(lines, at, Kind::Removed);
+        let added = run(lines, removed.end, Kind::Added);
+        if !removed.is_empty() && !added.is_empty() && removed.len().max(added.len()) <= PAIR_RUN {
+            let mut from = added.start;
+            for minus in removed.clone() {
+                for plus in from..added.end {
+                    let (Some(old), Some(new)) = (lines.get(minus), lines.get(plus)) else {
+                        break;
+                    };
+                    if let Some((old_emph, new_emph)) = words(&old.text, &new.text) {
+                        if let Some(line) = lines.get_mut(minus) {
+                            line.emph = old_emph;
+                        }
+                        if let Some(line) = lines.get_mut(plus) {
+                            line.emph = new_emph;
+                        }
+                        from = plus.saturating_add(1);
+                        break;
+                    }
+                }
+            }
+        }
+        at = added.end.max(at.saturating_add(1));
+    }
+}
+
+/// The lines of `kind` from `start` on.
+fn run(lines: &[Line], start: usize, kind: Kind) -> Range<usize> {
+    let len = lines.get(start..).unwrap_or_default().iter().take_while(|l| l.kind == kind).count();
+    start..start.saturating_add(len)
+}
+
+/// A line's tokens: each run of word characters, and every other character on its own.
+fn tokens(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut word: Option<usize> = None;
+    for (at, c) in text.char_indices() {
+        let wordy = c.is_alphanumeric() || c == '_';
+        match (word, wordy) {
+            (None, true) => word = Some(at),
+            (Some(start), false) => {
+                out.extend(text.get(start..at));
+                word = None;
+            }
+            _ => {}
+        }
+        if !wordy {
+            out.extend(text.get(at..at.saturating_add(c.len_utf8())));
+        }
+    }
+    if let Some(start) = word {
+        out.extend(text.get(start..));
+    }
+    out
+}
+
+/// The bytes that differ between `old` and `new`, when they are near enough to pair: the
+/// changed width over the whole, unchanged words counted on both sides, whitespace not at all.
+fn words(old: &str, new: &str) -> Option<(Emph, Emph)> {
+    if old.len() > PAIR_BYTES || new.len() > PAIR_BYTES {
+        return None;
+    }
+    let (a, b) = (tokens(old), tokens(new));
+    let ops = similar::capture_diff_slices(similar::Algorithm::Myers, &a, &b);
+    let width = |toks: &[&str]| -> usize {
+        toks.iter().filter(|t| !t.trim().is_empty()).map(|t| t.chars().count()).sum()
+    };
+    let (mut changed, mut kept) = (0_usize, 0_usize);
+    let (mut old_changed, mut new_changed) = (Vec::new(), Vec::new());
+    for op in &ops {
+        let (old_span, new_span) = (op.old_range(), op.new_range());
+        let old_toks = a.get(old_span.clone()).unwrap_or_default();
+        let new_toks = b.get(new_span.clone()).unwrap_or_default();
+        if matches!(op, similar::DiffOp::Equal { .. }) {
+            kept = kept.saturating_add(width(old_toks).saturating_mul(2));
+        } else {
+            changed = changed.saturating_add(width(old_toks)).saturating_add(width(new_toks));
+            old_changed.push(old_span);
+            new_changed.push(new_span);
+        }
+    }
+    let total = changed.saturating_add(kept);
+    #[expect(clippy::cast_precision_loss, reason = "a share of a line's width")]
+    let distance = if total == 0 { 0.0 } else { changed as f64 / total as f64 };
+    (distance <= PAIR_DISTANCE && changed > 0)
+        .then(|| (bytes(&a, &old_changed), bytes(&b, &new_changed)))
+}
+
+/// Token spans as byte ranges of the line, a run that is only whitespace dropped, and two runs
+/// apart by whitespace alone joined, so the emphasis does not stutter across a space.
+fn bytes(toks: &[&str], spans: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut starts = Vec::with_capacity(toks.len().saturating_add(1));
+    let mut at = 0_usize;
+    for tok in toks {
+        starts.push(at);
+        at = at.saturating_add(tok.len());
+    }
+    starts.push(at);
+    let byte = |ix: usize| starts.get(ix).copied().unwrap_or(at);
+    let blank = |r: &Range<usize>| {
+        toks.get(r.clone()).unwrap_or_default().iter().all(|t| t.trim().is_empty())
+    };
+    let mut out: Vec<Range<usize>> = Vec::new();
+    let mut last: Option<usize> = None;
+    for span in spans.iter().filter(|r| !r.is_empty() && !blank(r)) {
+        match (out.last_mut(), last) {
+            (Some(prev), Some(end)) if blank(&(end..span.start)) => prev.end = byte(span.end),
+            _ => out.push(byte(span.start)..byte(span.end)),
+        }
+        last = Some(span.end);
+    }
+    out
+}
+
 /// How a tab is drawn in a diff.
-const TAB_SPACES: &str = "    ";
+pub(crate) const TAB_SPACES: &str = "    ";
 
 /// `text` with its tabs as spaces, and `spans` stretched to match.
 #[must_use]
@@ -324,6 +476,7 @@ mod tests {
             text: text.to_owned(),
             spans: None,
             no_newline: false,
+            emph: Vec::new(),
         };
         let context = line(Kind::Context, Some(11), Some(12), "fn main() {");
         let gone = line(Kind::Removed, Some(12), None, "    old();");
@@ -333,6 +486,30 @@ mod tests {
             "In `src/x.rs` lines 12\u{2013}13:\n```diff\n fn main() {\n-    old();\n+    new();\n```\n"
         );
         assert_eq!(quote("a.rs", &[&gone]), "In `a.rs` line 12:\n```diff\n-    old();\n```\n");
+    }
+
+    /// Within a removal and the addition that replaced it, only the words that differ are
+    /// emphasised, a space between two of them joined; a line rewritten whole pairs with
+    /// nothing and is all wash.
+    #[test]
+    fn the_words_that_differ_are_emphasised() {
+        let patch = hunk(&[
+            "-use collections::{Bias, HashSet};",
+            "-fn old_name() {}",
+            "+use collections::{HashMap};",
+            "+// something else entirely",
+            "+fn new_name() {}",
+        ]);
+        let blocks = blocks("lib.rs", &patch);
+        let emph = |ix: usize| {
+            let line = &blocks[0].lines[ix];
+            line.emph.iter().filter_map(|r| line.text.get(r.clone())).collect::<Vec<_>>()
+        };
+        assert_eq!(emph(0), ["Bias, HashSet"], "two changed words and the space between, one run");
+        assert_eq!(emph(2), ["HashMap"]);
+        assert_eq!(emph(1), ["old_name"], "it pairs past the line rewritten whole");
+        assert_eq!(emph(4), ["new_name"]);
+        assert!(emph(3).is_empty(), "a line that pairs with none is all wash");
     }
 
     /// A tab widens to spaces, and the colours after it move with the text.
