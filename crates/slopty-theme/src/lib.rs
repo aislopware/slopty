@@ -566,8 +566,8 @@ const AA: f32 = 4.5;
 /// WCAG AAA for body text: the least contrast chrome text has under Increase Contrast.
 const AAA: f32 = 7.0;
 
-/// WCAG's least contrast for what is seen but not read (1.4.11): a dividing hairline reaches
-/// it under Increase Contrast, and the quieter one stays a [`LEVEL`] under it.
+/// WCAG's least contrast for what is seen but not read (1.4.11): a control's outline always
+/// reaches it, a dividing hairline under Increase Contrast, the quieter one a [`LEVEL`] under.
 const NON_TEXT: f32 = 3.0;
 
 /// How far apart two text levels stay: each reads at least a quarter again the contrast of the
@@ -610,6 +610,10 @@ pub struct Surfaces {
     /// The quieter hairline inside one region: between rows or groups of a list, under a
     /// tab row, between a panel's sections.
     pub border_subtle: Hairline,
+    /// The outline of a control that is nothing without it, an unticked box: it reads 3:1 on
+    /// every surface it can sit on, WCAG's least for a control's edge (1.4.11), where a
+    /// dividing hairline is only seen.
+    pub control: Hairline,
     /// Primary text.
     pub text: Rgb,
     /// Labels, tool summaries, counts.
@@ -866,6 +870,14 @@ impl Surfaces {
             band: at(t.band),
             border: hairline(t.border, NON_TEXT),
             border_subtle: hairline(t.border_subtle, NON_TEXT / LEVEL),
+            control: thicken(
+                Hairline::of(t.text, t.border.share),
+                &crossed,
+                match contrast {
+                    Contrast::Standard => NON_TEXT,
+                    Contrast::Increased => NON_TEXT * LEVEL,
+                },
+            ),
             text,
             text_secondary,
             text_muted,
@@ -1701,6 +1713,32 @@ mod tests {
             );
             assert!(line(more.border_subtle) > line(plain.border_subtle), "{name}: raised");
             assert_eq!(more.accent_fill, plain.accent_fill, "{name}: the fills stay");
+        }
+    }
+
+    /// An unticked box's outline reads 3:1 on every surface it can sit on, for every supported
+    /// background, and a level more under Increase Contrast, where the dividing hairline takes
+    /// 3:1 itself. It sat at about 1.3 as a dividing hairline did.
+    #[test]
+    fn a_control_s_outline_reads_three_to_one_everywhere() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            for (contrast, least) in
+                [(Contrast::Standard, NON_TEXT), (Contrast::Increased, NON_TEXT * LEVEL)]
+            {
+                let s = Surfaces::derive(content, contrast);
+                let crossed = &under_text(&s, content).map(|(_, c)| c)[..5];
+                let reads = crossed
+                    .iter()
+                    .map(|&bg| s.control.over(bg).contrast(bg))
+                    .fold(f32::INFINITY, f32::min);
+                assert!(reads >= least, "{name} {contrast:?}: {reads:.2}");
+                let border = crossed
+                    .iter()
+                    .map(|&bg| s.border.over(bg).contrast(bg))
+                    .fold(f32::INFINITY, f32::min);
+                assert!(reads > border, "{name} {contrast:?}: louder than a divider");
+            }
         }
     }
 

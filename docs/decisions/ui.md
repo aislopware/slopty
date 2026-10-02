@@ -4625,6 +4625,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `attention::tests::led_by_the_server_only_its_notices_post_for_agents` and
     `a_server_notice_leads_to_its_tile_and_names_the_subagent`.
 
+- ✅ **A control's outline reads 3:1** (2026-10-02, the Increase Contrast golden's review). An
+  unticked task box was drawn in the dividing hairline, which reads about 1.3:1 on the default
+  backgrounds (1.26 on white, 1.30 on the dark one): the box all but vanished, and WCAG asks
+  3:1 of a control's edge (1.4.11). `Surfaces::control` is its own token, the chrome's ink laid
+  on until it reads 3:1 on every surface it can sit on (3.75 under Increase Contrast, a level
+  over the dividing hairline's 3:1 there), derived like the rest, so a custom background moves
+  it too. A ticked box keeps the accent fill.
+  - Tests: `slopty_theme::tests::a_control_s_outline_reads_three_to_one_everywhere`,
+    `markdown::tests::a_task_box_is_drawn_not_typed`.
+
 - ✅ **An agent's subagents fold into its row as a count** (2026-10-02, GUI-first plan §4.3).
   The fleet rail lists each agent once. Its subagents at work (working, waiting on their own
   work, or on the person) join its words as a count: "Editing parser.rs, 2 subagents", or the

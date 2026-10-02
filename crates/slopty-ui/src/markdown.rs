@@ -270,7 +270,7 @@ pub fn task_row(
     let s = &theme.surfaces;
     let spacing = theme.spacing;
     // Linear's and Things' box: a notch under an icon's size beside the text, the small
-    // radius and a hairline, on the first line's middle. The font's tick at caption size, in
+    // radius and an outline, on the first line's middle. The font's tick at caption size, in
     // a 12 pt box with a sharp corner, read as an unstyled browser form.
     let side = theme.typography.icon() * TASK_BOX * scale;
     let line = theme.typography.ui_size * theme.typography.markdown_line_height * scale;
@@ -292,7 +292,7 @@ pub fn task_row(
         .items_center()
         .justify_center()
         .border_1()
-        .border_color(if done { hsla(s.accent_fill) } else { hsla(s.border) })
+        .border_color(if done { hsla(s.accent_fill) } else { hsla(s.control) })
         // A ticked box is the accent fill with a drawn check in it, as a native checkbox is.
         .when(done, |b| {
             b.bg(hsla(s.accent_fill)).child(
@@ -475,8 +475,8 @@ mod tests {
     }
 
     /// A task's box is Linear's and Things': a notch under the prose's size, the small radius
-    /// and a hairline, the done one the accent fill with a drawn check, not the font's tick in
-    /// a 12 pt box with a sharp corner.
+    /// and a control's outline, the done one the accent fill with a drawn check, not the font's
+    /// tick in a 12 pt box with a sharp corner.
     #[gpui::test]
     fn a_task_box_is_drawn_not_typed(cx: &mut gpui::TestAppContext) {
         struct Rows;
@@ -519,7 +519,7 @@ mod tests {
         };
         let (open_q, done_q) = (at(open), at(done));
         let s = &theme.surfaces;
-        assert_eq!(open_q.border_color, hsla(s.border), "a hairline");
+        assert_eq!(open_q.border_color, hsla(s.control), "a control's outline, read at 3:1");
         assert!((open_q.corner_radii.top_left.0 / scale - theme.radii.xs).abs() < 0.01);
         assert_eq!(done_q.background, gpui::Background::from(hsla(s.accent_fill)));
     }
