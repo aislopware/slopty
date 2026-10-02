@@ -74,14 +74,7 @@ pub fn gone(state: &ThreadState, now: WallMs) -> Vec<Action> {
 /// made, so the thread is named by the start.
 #[must_use]
 pub fn thread_of(intent: IntentId) -> ThreadId {
-    let mut hasher = blake3::Hasher::new();
-    for part in ["acp thread", &intent.to_string()] {
-        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(part.as_bytes());
-    }
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
-    ThreadId::from_uuid(uuid::Builder::from_custom_bytes(bytes).into_uuid())
+    ThreadId::derived(&["acp thread", &intent.to_string()])
 }
 
 /// Slopty's `initialize`: protocol v1, and no file system or terminal offered, so the agent

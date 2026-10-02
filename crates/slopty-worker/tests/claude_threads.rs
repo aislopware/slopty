@@ -12,7 +12,7 @@ mod claude_threads {
 
     use slopty_agent::conversation::{Conversation, ThreadId as ConvThread};
     use slopty_agent::live::{Batch, Board, ModEvent};
-    use slopty_agent::observed::{subagent_of, terminal_thread, thread_of};
+    use slopty_agent::observed::{terminal_thread, thread_of};
     use slopty_agent::transcript::Tail;
     use slopty_core::{SessionId, WallMs};
     use slopty_proto::WorkerMsg;
@@ -238,7 +238,7 @@ mod claude_threads {
             .expect("an Agent call names its thread");
         let sub = until(&host, child, |s| !s.items.is_empty()).await;
         assert_eq!(sub.meta.parent.map(|p| p.thread), Some(thread));
-        assert_eq!(child, subagent_of(thread, &sub.meta.native));
+        assert_eq!(child, thread.subagent(&sub.meta.native));
 
         let prompt = PermissionPrompt {
             session: rig.terminal,

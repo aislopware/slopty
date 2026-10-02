@@ -101,6 +101,31 @@ uuid_id!(
     /// A thread, minted by the worker that hosts it. A subagent's thread has its own.
     ThreadId
 );
+impl ThreadId {
+    /// The thread named by `parts` alone, the same on every host that knows them: BLAKE3 over
+    /// each part behind its length, its first 16 bytes as a UUID. An adapter names a thread by
+    /// its agent's own session this way, so a worker that rebuilds its log from the session, or
+    /// a client that knows the session, comes to the same thread.
+    #[must_use]
+    pub fn derived(parts: &[&str]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        for part in parts {
+            hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+            hasher.update(part.as_bytes());
+        }
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
+        Self(uuid::Builder::from_custom_bytes(bytes).into_uuid())
+    }
+
+    /// The thread of Claude Code subagent `agent` in the session whose thread is `self`: the
+    /// one the worker's adapter keeps for it, and the one a client opens it by.
+    #[must_use]
+    pub fn subagent(self, agent: &str) -> Self {
+        Self::derived(&["claude-code subagent", &self.to_string(), agent])
+    }
+}
+
 uuid_id!(
     /// One thing a client asked of a thread, minted by the client.
     ///

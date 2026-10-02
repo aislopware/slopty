@@ -93,14 +93,7 @@ const ABORTED: &str = "This operation was aborted";
 /// The thread of pi session `session`.
 #[must_use]
 pub fn thread_of(session: &str) -> ThreadId {
-    let mut hasher = blake3::Hasher::new();
-    for part in ["pi session", session] {
-        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(part.as_bytes());
-    }
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
-    ThreadId::from_uuid(uuid::Builder::from_custom_bytes(bytes).into_uuid())
+    ThreadId::derived(&["pi session", session])
 }
 
 /// Messages sent and not yet heard back that are kept; past it the oldest is given up. One pi

@@ -7909,6 +7909,7 @@ name = "slopty-proto"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
+ "blake3",
  "bytes",
  "insta",
  "postcard",
@@ -8104,7 +8105,6 @@ name = "slopty-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "blake3",
  "bytes",
  "core-foundation 0.10.1",
  "core-video",
@@ -8139,7 +8139,6 @@ dependencies = [
  "tokio",
  "tracing",
  "two-face",
- "uuid",
 ]
 
 [[package]]

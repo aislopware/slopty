@@ -94,38 +94,21 @@ fn terminal_ask(since: WallMs) -> AskId {
 /// The thread of Claude Code session `native`.
 #[must_use]
 pub fn thread_of(native: &str) -> ThreadId {
-    derived(&["claude-code session", native])
+    ThreadId::derived(&["claude-code session", native])
 }
 
 /// The thread of Claude Code session `native` as terminal `terminal` runs it while another
 /// terminal's Claude Code runs the same session: each terminal keeps a thread of its own.
 #[must_use]
 pub fn thread_in(native: &str, terminal: SessionId) -> ThreadId {
-    derived(&["claude-code session", native, "in terminal", &terminal.to_string()])
-}
-
-/// The thread of subagent `agent` in the session whose thread is `main`.
-#[must_use]
-pub fn subagent_of(main: ThreadId, agent: &str) -> ThreadId {
-    derived(&["claude-code subagent", &main.to_string(), agent])
+    ThreadId::derived(&["claude-code session", native, "in terminal", &terminal.to_string()])
 }
 
 /// The provisional thread of the Claude Code in terminal `terminal`, before its session id is
 /// known.
 #[must_use]
 pub fn terminal_thread(terminal: SessionId) -> ThreadId {
-    derived(&["claude-code terminal", &terminal.to_string()])
-}
-
-fn derived(parts: &[&str]) -> ThreadId {
-    let mut hasher = blake3::Hasher::new();
-    for part in parts {
-        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(part.as_bytes());
-    }
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
-    ThreadId::from_uuid(uuid::Builder::from_custom_bytes(bytes).into_uuid())
+    ThreadId::derived(&["claude-code terminal", &terminal.to_string()])
 }
 
 /// Where the whole of a clipped text is: the decoder's thread and reference, as JSON.
@@ -711,7 +694,7 @@ impl Observed {
             conv::ThreadId::Agent(agent) => agent.clone(),
             conv::ThreadId::Main => return self.meta.id,
         };
-        let id = subagent_of(self.meta.id, &agent);
+        let id = self.meta.id.subagent(&agent);
         self.out.push(Out::Begin(Box::new(self.subagent_meta(id, &agent))));
         self.threads.insert(thread.clone(), Mapped::new(id));
         id
@@ -1163,7 +1146,7 @@ impl Observed {
                 })),
             ),
             conv::ToolDetail::Agent(a) => {
-                child = a.agent_id.as_ref().map(|agent| subagent_of(self.meta.id, agent));
+                child = a.agent_id.as_ref().map(|agent| self.meta.id.subagent(agent));
                 (
                     kind::AGENT,
                     a.description.clone().unwrap_or_else(|| "Run a subagent".to_owned()),

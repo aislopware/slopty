@@ -5091,10 +5091,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     subagents in the tree opens its agent's tile, shows that tile's face, and opens the
     subagent's thread in it: in the thread view, its own way into a subagent (the bar that
     leads back, Esc too); before the session's thread is known, the conversation face's
-    thread of that agent id. The subagent's thread id is the one the worker's adapter derives
-    from the session's thread and the agent id; the client does not link the adapter, so it
-    derives the same, and a test holds the two together. A thread the worker has not begun
-    is said in a notice.
+    thread of that agent id. The subagent's thread id is derived from the session's thread
+    and the agent id by one function in `slopty-proto` (`ThreadId::subagent`), which the
+    worker's adapter and the client both call; a proto test pins its value. A thread the
+    worker has not begun is said in a notice.
   - **Verifier and review on the board.** The header's checks toggle (and "Verifier and
     review…" in the palette, on a board) opens a panel under the header: the verifier
     command, a switch for a fresh-context reviewer before each merge, and the reviewer's
@@ -5106,7 +5106,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`c`, `m`, `a`) while it has the keyboard; the panel's fields, like the line to the
     orchestrator, sit outside that context, so a letter typed there is a letter.
   - Tests: `workspace::tests::projects::a_click_on_a_subagent_opens_its_thread`,
-    `a_subagents_thread_is_named_as_the_worker_names_it`,
+    `a_subagents_thread_is_named_by_its_session_and_agent` (proto),
     `a_board_sets_its_verifier_and_review`, `a_project_starts_in_the_focused_terminal` (its
     board opens on the panel).
 

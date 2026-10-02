@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 bitflags.workspace = true
+# A thread named by its agent's own session, alike on every host (`thread::ThreadId::derived`).
+blake3.workspace = true
 bytes.workspace = true
 postcard.workspace = true
 serde_bytes.workspace = true

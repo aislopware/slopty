@@ -83,20 +83,6 @@ pub(super) struct SubagentAsked {
     pub waits: u8,
 }
 
-/// The thread Claude Code's adapter on the worker gives subagent `agent` of the session whose
-/// thread is `main`. The worker derives it (`slopty_agent::observed::subagent_of`, which the
-/// client does not link) and a test holds the two together.
-pub(super) fn subagent_thread(main: ThreadId, agent: &str) -> ThreadId {
-    let mut hasher = blake3::Hasher::new();
-    for part in ["claude-code subagent", main.to_string().as_str(), agent] {
-        hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(part.as_bytes());
-    }
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(hasher.finalize().as_bytes().get(..16).unwrap_or(&[0; 16]));
-    ThreadId::from_uuid(uuid::Builder::from_custom_bytes(bytes).into_uuid())
-}
-
 /// Each worker's threads, and the thread view of each agent tile that shows one.
 #[derive(Default)]
 pub(super) struct ThreadFaces {
@@ -719,7 +705,7 @@ impl WorkspaceView {
         let Some(mut asked) = self.faces.subagent.take() else { return };
         let session = asked.session;
         if let Some(view) = self.thread_face(session).cloned() {
-            let child = subagent_thread(view.read(cx).thread(), &asked.agent);
+            let child = view.read(cx).thread().subagent(&asked.agent);
             let known =
                 self.worker_of_session(session).and_then(|k| self.faces.threads.hubs.get(&k));
             if known.is_some_and(|hub| hub.read(cx).threads().rows().rows.contains_key(&child)) {

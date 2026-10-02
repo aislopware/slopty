@@ -1494,17 +1494,6 @@ fn native(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, seq: u64, id
     cx.run_until_parked();
 }
 
-/// The client names a subagent's thread as the worker's Claude Code adapter does, so the
-/// board's subagent opens the thread the worker keeps for it.
-#[test]
-fn a_subagents_thread_is_named_as_the_worker_names_it() {
-    let main = slopty_proto::thread::ThreadId::new();
-    assert_eq!(
-        crate::workspace::faces::subagent_thread(main, "a1b2"),
-        slopty_agent::observed::subagent_of(main, "a1b2")
-    );
-}
-
 /// A click on one of Claude Code's own subagents in the tree opens it as its task's row opens
 /// the task: the agent's tile, showing its face, on the subagent's thread. Where the tile shows
 /// the thread view that is its way into a subagent (the bar that leads back); before the
@@ -1543,7 +1532,7 @@ fn a_click_on_a_subagent_opens_its_thread(cx: &mut TestAppContext) {
     state.meta.terminal = Some(agent);
     let root = state.row(WallMs::ZERO);
     let mut sub = root.clone();
-    sub.id = crate::workspace::faces::subagent_thread(root.id, "a1");
+    sub.id = root.id.subagent("a1");
     sub.terminal = None;
     sub.parent = Some(Link { thread: root.id, item: slopty_proto::thread::ItemId("call".into()) });
     let table =

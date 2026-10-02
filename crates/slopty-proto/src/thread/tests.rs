@@ -399,3 +399,21 @@ fn a_unified_header_gives_its_heading() {
     assert_eq!(detail::header_heading("@@ -1,2 +1,2 @@   "), None);
     assert_eq!(detail::header_heading(" keep"), None);
 }
+
+/// A subagent's thread is named by its session's thread and its agent id alone, so the worker's
+/// adapter that keeps it and the client that opens it from the board name the same thread. The
+/// value is pinned: a change here renames every subagent thread a worker's log holds.
+#[test]
+fn a_subagents_thread_is_named_by_its_session_and_agent() {
+    let main = ThreadId::from_uuid(Uuid::from_u128(1));
+    assert_eq!(main.subagent("a1b2"), main.subagent("a1b2"));
+    assert_ne!(main.subagent("a1b2"), main.subagent("a1b3"));
+    assert_ne!(main.subagent("a1b2"), ThreadId::from_uuid(Uuid::from_u128(2)).subagent("a1b2"));
+    assert_eq!(
+        main.subagent("x"),
+        ThreadId::derived(&["claude-code subagent", &main.to_string(), "x"])
+    );
+    // Each part goes behind its length, so parts that join alike name different threads.
+    assert_ne!(ThreadId::derived(&["ab", "c"]), ThreadId::derived(&["a", "bc"]));
+    assert_eq!(main.subagent("a1b2").to_string(), "1fc1bce5-1343-8f7f-9a36-75875446afad");
+}

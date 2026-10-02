@@ -81,7 +81,7 @@ fn every_entry_is_an_item_in_its_prompts_turn() {
         for thread in conversation.threads() {
             let id = match thread {
                 conv::ThreadId::Main => observed.main(),
-                conv::ThreadId::Agent(agent) => subagent_of(observed.main(), agent),
+                conv::ThreadId::Agent(agent) => observed.main().subagent(agent),
             };
             let state = host.thread(id);
             let entries = conversation.entries(thread);
@@ -464,7 +464,7 @@ fn a_block_with_no_prompt_held_asks_in_the_terminal() {
 fn ids_and_references_are_stable() {
     assert_eq!(observed().main(), observed().main());
     assert_ne!(thread_of("a"), thread_of("b"));
-    assert_ne!(subagent_of(thread_of("a"), "x"), subagent_of(thread_of("b"), "x"));
+    assert_ne!(thread_of("a").subagent("x"), thread_of("b").subagent("x"));
     let at = TextRef { record: "r1".to_owned(), part: conv::Part::Block { index: 2 } };
     let thread = conv::ThreadId::Agent("a1".to_owned());
     assert_eq!(text_ref(&content_ref(&thread, &at)), Some((thread, at)));
