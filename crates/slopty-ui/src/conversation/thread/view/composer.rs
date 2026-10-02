@@ -1,7 +1,7 @@
 //! The composer: a card at the foot of the column.
 //!
 //! Its top row says where the agent works (the checkout, its branch, what the thread changed
-//! there, which opens the review) and whether it is at work; then the menu, the chips, the
+//! there, which opens the review); then the menu, the chips, the
 //! field; then a row with the way to attach, the model with the agent's mark, the mode, and at
 //! the right the one solid: send, or stop while a turn runs and nothing is typed. While the
 //! agent's own TUI holds the session, a strip saying so stands in its place.
@@ -45,14 +45,30 @@ const SANDBOX: &str = "sandbox";
 /// "Five hour 41%".
 pub(super) fn meter_words(meters: &slopty_proto::thread::Meters) -> Vec<String> {
     let context = super::context_used(meters).map(|u| match meters.context_window {
-        Some(window) => format!("Context {u:.0}% of {}", super::tokens(window)),
-        None => format!("Context {u:.0}%"),
+        Some(window) => format!("Context {} of {}", share(u), super::tokens(window)),
+        None => format!("Context {}", share(u)),
     });
     let limits = meters.limits.iter().map(|l| {
         let used = f64::from(l.used_bp) / 100.0;
         format!("{} {used:.0}%", sentence(&l.name))
     });
     context.into_iter().chain(limits).collect()
+}
+
+/// A share of the context in whole percent; under one, "<1%", since a few tokens in use
+/// are not none.
+pub(super) fn share(percent: f64) -> String {
+    if percent < 0.5 { "<1%".to_owned() } else { format!("{percent:.0}%") }
+}
+
+/// The model the thread runs as the chip says it: one name, as people say it, from the
+/// agent's name for it or else its id ("Canned", never "Canned/Canned").
+pub(super) fn model_said(meters: &slopty_proto::thread::Meters) -> Option<String> {
+    [meters.model.as_deref(), meters.model_id.as_deref()]
+        .into_iter()
+        .flatten()
+        .find(|m| !m.trim().is_empty())
+        .map(|m| crate::conversation::figures::spoken_model(m).0)
 }
 
 /// The fact that names a thread's branch, as the workers set it.
@@ -216,14 +232,16 @@ impl ThreadView {
             )
     }
 
-    /// The composer's top row: the checkout, its branch, what the thread changed (which opens
-    /// the review), and a spinner while the agent works.
+    /// The composer's top row: the checkout, its branch, and what the thread changed (which
+    /// opens the review).
+    ///
+    /// No mark of the agent at work: the thread's own working line says it in words, with
+    /// how long, and an unlabelled ring in the card's corner said nothing more.
     fn context_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let here = self.where_it_works(cx);
-        let working = self.working(cx);
-        if here.checkout.is_none() && here.branch.is_none() && !working {
+        if here.checkout.is_none() && here.branch.is_none() {
             return None;
         }
         let thread = self.thread;
@@ -257,8 +275,6 @@ impl ThreadView {
                 .children(here.checkout.map(|c| self.fact(IconName::Folder, c)))
                 .children(here.branch.map(|b| self.fact(IconName::GitBranch, b)))
                 .children(changes)
-                .child(div().flex_1())
-                .when(working, |el| el.child(self.spinner(true)))
                 .into_any_element(),
         )
     }
@@ -290,7 +306,7 @@ impl ThreadView {
         let state = self.state(cx)?;
         let switch = state.meta.can(Cap::SET_MODEL) && !state.meta.models.is_empty();
         let name =
-            state.meters.model.clone().unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
+            model_said(&state.meters).unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
         let mark = self.agent_mark(Some(&state.meta.agent), false, s.text_secondary);
         let chip = self.chip("thread-model", format!("Model, {name}")).child(mark).child(
             div()
@@ -430,7 +446,7 @@ impl ThreadView {
                         theme.typography.small() * self.zoom,
                     )
                 }))
-                .children(used.map(|u| SharedString::from(format!("{u:.0}%"))))
+                .children(used.map(|u| SharedString::from(share(u))))
                 .tooltip(move |_window, cx| {
                     let theme = std::rc::Rc::new(hint_theme.clone());
                     cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()

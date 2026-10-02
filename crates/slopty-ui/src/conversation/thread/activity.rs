@@ -7,7 +7,7 @@ use slopty_proto::thread::detail::{ExecDetail, ExecStatus};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
     BackgroundTask, Cap, Delivery, IntentId, ItemBody, ItemId, PendingState, Plan, Request,
-    ThreadId, ThreadState, ToolDetail,
+    ThreadId, ThreadState, ToolDetail, ToolState,
 };
 
 /// A request as the bar shows it.
@@ -220,11 +220,17 @@ fn background(state: &ThreadState) -> Vec<Background<'_>> {
 }
 
 /// The files the last turn's edits and writes changed, each once, with what it did to them.
+///
+/// Only an edit that was made counts: one still asked for, refused, failed or running has
+/// changed nothing yet, so the tray's "Review" would open on nothing.
 fn edited(state: &ThreadState) -> Vec<Edited> {
     let Some(turn) = state.last_turn() else { return Vec::new() };
     let mut out: Vec<Edited> = Vec::new();
     for item in state.items.iter().rev().take_while(|i| i.turn == turn.id) {
         let ItemBody::Tool(call) = &item.body else { continue };
+        if call.state != ToolState::Completed {
+            continue;
+        }
         let (path, patch) = match &call.detail {
             Some(ToolDetail::Edit(d)) => (&d.path, &d.patch),
             Some(ToolDetail::Write(d)) => (&d.path, &d.patch),
@@ -390,5 +396,28 @@ mod tests {
         let mut paths: Vec<&str> = bar.edited.iter().map(|e| e.path.as_str()).collect();
         paths.dedup();
         assert_eq!(paths.len(), bar.edited.len());
+    }
+
+    /// An edit still asked for, or refused, changed nothing: the tray counts only those made.
+    #[test]
+    fn an_edit_counts_only_once_it_is_made() {
+        let edited = |state: ToolState| {
+            let mut thread = fixtures::thread("edit");
+            for item in &mut thread.items {
+                if let ItemBody::Tool(call) = &mut item.body
+                    && matches!(call.detail, Some(ToolDetail::Edit(_) | ToolDetail::Write(_)))
+                {
+                    call.state = state.clone();
+                }
+            }
+            let (threads, thread) = threads_over(thread);
+            let state = threads.mirror(thread).unwrap().state().unwrap();
+            Activity::of(&threads, thread, state).edited.len()
+        };
+        assert!(edited(ToolState::Completed) > 0, "the recorded session edits a file");
+        let asked = ToolState::Pending { ask: AskId("a".to_owned()) };
+        for state in [asked, ToolState::Running, ToolState::Rejected, ToolState::Failed] {
+            assert_eq!(edited(state.clone()), 0, "{state:?}");
+        }
     }
 }

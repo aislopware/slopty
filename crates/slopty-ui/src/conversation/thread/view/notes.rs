@@ -14,7 +14,7 @@ use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Retry, Turn, Us
 
 use super::{TOOL_ROW, ThreadView, composer, tokens};
 use crate::colors::hsla;
-use crate::conversation::figures::model_name;
+use crate::conversation::figures::{model_name, spoken_model};
 use crate::icons::IconName;
 use crate::kit;
 
@@ -45,11 +45,14 @@ pub(super) fn retrying(retry: &Retry) -> String {
 /// thread's own (a reroute, a switch), and what the turn spent, for its hint ("12k tokens ·
 /// $0.0123").
 pub(super) fn turn_footer(turn: &Turn, meters: &Meters) -> (Option<String>, Option<String>) {
+    // The thread's own model, by every name the agent gives it: pi's `canned/canned-1` is
+    // the turn's `canned-1`.
     let own = |m: &str| {
-        [meters.model.as_deref(), meters.model_id.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|o| o.eq_ignore_ascii_case(m) || model_name(o).eq_ignore_ascii_case(m))
+        [meters.model.as_deref(), meters.model_id.as_deref()].into_iter().flatten().any(|o| {
+            [o.to_owned(), model_name(o), spoken_model(o).0]
+                .iter()
+                .any(|o| o.eq_ignore_ascii_case(m))
+        })
     };
     let model = turn
         .models
@@ -195,6 +198,12 @@ mod tests {
             "named as a person says it"
         );
         assert_eq!(turn_footer(&turn(&["claude-opus-5-5"]), &claude).0, None);
+        let pi = Meters {
+            model: Some("Canned".to_owned()),
+            model_id: Some("canned/canned-1".to_owned()),
+            ..Meters::default()
+        };
+        assert_eq!(turn_footer(&turn(&["canned-1"]), &pi).0, None, "one model, said once");
         assert_eq!(dollars(1_240_000), "$1.24");
     }
 

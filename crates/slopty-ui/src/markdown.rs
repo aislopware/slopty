@@ -396,15 +396,48 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
 /// since those are not emphasis.
 #[must_use]
 pub fn plain_line(line: &str) -> String {
+    marked_line(line).into_iter().map(|(c, _)| c).collect()
+}
+
+/// [`plain_line`], with where its code spans are in the words, in bytes: a line that sets its
+/// code apart (a thought's first line) draws them in the code face.
+#[must_use]
+pub fn plain_line_with_code(line: &str) -> (String, Vec<std::ops::Range<usize>>) {
+    let mut words = String::new();
+    let mut code: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut in_code = false;
+    for (c, mark) in marked_line(line) {
+        let at = words.len();
+        words.push(c);
+        match (mark == Mark::Code, in_code, code.last_mut()) {
+            (true, true, Some(span)) => span.end = words.len(),
+            (true, ..) => code.push(at..words.len()),
+            _ => {}
+        }
+        in_code = mark == Mark::Code;
+    }
+    (words, code)
+}
+
+/// What a character of a line is to [`plain_line`]: the line's own, which may be a mark of
+/// emphasis; one a backslash or an address made literal; or one inside a code span.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Mark {
+    Own,
+    Literal,
+    Code,
+}
+
+/// The line's characters, each with what it is, its marks taken off.
+fn marked_line(line: &str) -> Vec<(char, Mark)> {
     let chars: Vec<char> = without_leads(line.trim()).chars().collect();
-    // Each character, and whether it is the line's own: code's and an escape's are not marks.
-    let mut out: Vec<(char, bool)> = Vec::with_capacity(chars.len());
+    let mut out: Vec<(char, Mark)> = Vec::with_capacity(chars.len());
     let mut i = 0_usize;
     while let Some(&c) = chars.get(i) {
         let next = chars.get(i.saturating_add(1)).copied();
         i = match c {
             '\\' if next.is_some_and(|n| n.is_ascii_punctuation()) => {
-                out.extend(next.map(|n| (n, false)));
+                out.extend(next.map(|n| (n, Mark::Literal)));
                 i.saturating_add(2)
             }
             '`' => code_at(&chars, i, &mut out),
@@ -412,7 +445,7 @@ pub fn plain_line(line: &str) -> String {
             '[' => link_or(&chars, i, i, &mut out),
             '<' => autolink_at(&chars, i, &mut out),
             _ => {
-                out.push((c, true));
+                out.push((c, Mark::Own));
                 i.saturating_add(1)
             }
         };
@@ -458,7 +491,7 @@ fn run_of(chars: &[char], at: usize, c: char) -> usize {
 
 /// A code span at `at` (its backticks): its words, not the line's own, and where it ends; an
 /// unclosed run of backticks is itself.
-fn code_at(chars: &[char], at: usize, out: &mut Vec<(char, bool)>) -> usize {
+fn code_at(chars: &[char], at: usize, out: &mut Vec<(char, Mark)>) -> usize {
     let run = run_of(chars, at, '`');
     let body = at.saturating_add(run);
     let mut j = body;
@@ -467,7 +500,7 @@ fn code_at(chars: &[char], at: usize, out: &mut Vec<(char, bool)>) -> usize {
             let closing = run_of(chars, j, '`');
             if closing == run {
                 let inner: String = chars.get(body..j).unwrap_or_default().iter().collect();
-                out.extend(inner.trim().chars().map(|ch| (ch, false)));
+                out.extend(inner.trim().chars().map(|ch| (ch, Mark::Code)));
                 return j.saturating_add(run);
             }
             j = j.saturating_add(closing);
@@ -475,18 +508,18 @@ fn code_at(chars: &[char], at: usize, out: &mut Vec<(char, bool)>) -> usize {
             j = j.saturating_add(1);
         }
     }
-    out.extend(std::iter::repeat_n(('`', false), run));
+    out.extend(std::iter::repeat_n(('`', Mark::Literal), run));
     body
 }
 
 /// A link or an image whose `[` is at `open` (`at` being its `!` for an image): its words,
 /// and where it ends; brackets that are no link are themselves.
-fn link_or(chars: &[char], at: usize, open: usize, out: &mut Vec<(char, bool)>) -> usize {
+fn link_or(chars: &[char], at: usize, open: usize, out: &mut Vec<(char, Mark)>) -> usize {
     if let Some((words, end)) = link_at(chars, open) {
-        out.extend(words.into_iter().map(|ch| (ch, true)));
+        out.extend(words.into_iter().map(|ch| (ch, Mark::Own)));
         return end;
     }
-    out.extend(chars.get(at).map(|ch| (*ch, true)));
+    out.extend(chars.get(at).map(|ch| (*ch, Mark::Own)));
     at.saturating_add(1)
 }
 
@@ -523,7 +556,7 @@ fn link_at(chars: &[char], open: usize) -> Option<(Vec<char>, usize)> {
 
 /// An autolink at `at` (its `<`): its address, and where it ends; a `<` that opens none is
 /// itself.
-fn autolink_at(chars: &[char], at: usize, out: &mut Vec<(char, bool)>) -> usize {
+fn autolink_at(chars: &[char], at: usize, out: &mut Vec<(char, Mark)>) -> usize {
     let from = at.saturating_add(1);
     let inner = chars.get(from..).and_then(|rest| {
         let len = rest.iter().position(|c| *c == '>')?;
@@ -532,27 +565,28 @@ fn autolink_at(chars: &[char], at: usize, out: &mut Vec<(char, bool)>) -> usize 
         address.then_some((inner, len))
     });
     if let Some((inner, len)) = inner {
-        out.extend(inner.iter().map(|ch| (*ch, false)));
+        out.extend(inner.iter().map(|ch| (*ch, Mark::Literal)));
         return from.saturating_add(len).saturating_add(1);
     }
-    out.push(('<', true));
+    out.push(('<', Mark::Own));
     from
 }
 
 /// The line with its emphasis, strong and struck marks taken off where they pair: an opening
 /// run touches a word on its right, a closing one on its left, and an underscore's run stands
 /// outside a word (`snake_case` keeps its own). Only the line's own characters are marks.
-fn unemphasise(mut out: Vec<(char, bool)>) -> String {
+fn unemphasise(mut out: Vec<(char, Mark)>) -> Vec<(char, Mark)> {
     for mark in ["**", "__", "~~", "*", "_"] {
         let mark: Vec<char> = mark.chars().collect();
         let (len, first) = (mark.len(), mark.first().copied().unwrap_or_default());
         let word = first == '_';
-        let at = |out: &[(char, bool)], i: usize| {
+        let at = |out: &[(char, Mark)], i: usize| {
             out.get(i..i.saturating_add(len)).is_some_and(|run| {
-                run.len() == len && run.iter().zip(&mark).all(|(c, m)| c.1 && c.0 == *m)
+                run.len() == len
+                    && run.iter().zip(&mark).all(|(c, m)| c.1 == Mark::Own && c.0 == *m)
             })
         };
-        let ch = |out: &[(char, bool)], i: Option<usize>| i.and_then(|i| out.get(i)).map(|c| c.0);
+        let ch = |out: &[(char, Mark)], i: Option<usize>| i.and_then(|i| out.get(i)).map(|c| c.0);
         let mut i = 0_usize;
         while i.saturating_add(len) <= out.len() {
             let before = ch(&out, i.checked_sub(1));
@@ -583,7 +617,7 @@ fn unemphasise(mut out: Vec<(char, bool)>) -> String {
             }
         }
     }
-    out.into_iter().map(|(c, _)| c).collect()
+    out
 }
 
 #[cfg(test)]
@@ -612,6 +646,29 @@ mod tests {
         for (line, words) in cases {
             assert_eq!(plain_line(line), words, "{line}");
         }
+    }
+
+    /// A line's code spans are found in its plain words, so a line can set them in the code
+    /// face; a backtick that opens none, and an escaped one, are words.
+    #[test]
+    fn a_line_says_where_its_code_is() {
+        let code = |line| {
+            let (words, spans) = plain_line_with_code(line);
+            let code: Vec<String> =
+                spans.iter().map(|r| words.get(r.clone()).unwrap_or_default().to_owned()).collect();
+            (words, code)
+        };
+        assert_eq!(
+            code("If `refresh` reads with a plain SELECT, then read `session.rs`"),
+            (
+                "If refresh reads with a plain SELECT, then read session.rs".to_owned(),
+                vec!["refresh".to_owned(), "session.rs".to_owned()]
+            )
+        );
+        assert_eq!(code("**`a` b**"), ("a b".to_owned(), vec!["a".to_owned()]));
+        assert_eq!(code("a lone ` tick"), ("a lone ` tick".to_owned(), Vec::new()));
+        assert_eq!(code(r"a \`b\` c"), ("a `b` c".to_owned(), Vec::new()));
+        assert_eq!(code("`é` ü"), ("é ü".to_owned(), vec!["é".to_owned()]));
     }
 
     use std::cell::Cell;

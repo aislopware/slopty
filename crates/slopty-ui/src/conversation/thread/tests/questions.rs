@@ -1,7 +1,7 @@
 //! An agent's questions answered in the bar, the way back to the agent's own prompt, and the
 //! session's move to and from the agent's own TUI.
 
-use gpui::{Modifiers, TestAppContext};
+use gpui::{Modifiers, TestAppContext, VisualTestContext, px};
 use slopty_core::SessionId;
 use slopty_proto::thread::detail::{Offered, Question};
 use slopty_proto::thread::wire::Intent;
@@ -166,4 +166,66 @@ fn a_session_goes_to_the_agents_tui_and_is_taken_back(cx: &mut TestAppContext) {
     let take = cx.debug_bounds("thread-take-back").expect("the way back");
     cx.simulate_click(take.center(), Modifiers::none());
     assert_eq!(intents(&sent), [Intent::Handoff, Intent::TakeBack]);
+}
+
+/// However much waits in the tray, it stands below the rows and never over them. A request
+/// stands whole, what the person must answer; the plan under it keeps to a line or two and
+/// scrolls; the composer stands whole under the tray. A click above the tray's edge is the
+/// rows', not the tray's.
+#[gpui::test]
+fn a_request_stands_whole_and_the_rest_of_the_tray_gives_way(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Clipped, Item, ItemBody, ItemId, Plan, Step, TurnId};
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.items = vec![Item {
+        id: ItemId("t".to_owned()),
+        turn: TurnId(1),
+        at_ms: slopty_core::WallMs::ZERO,
+        body: ItemBody::Text(Clipped::whole(&"An answer to read.\n\n".repeat(60))),
+    }];
+    let step =
+        |n: usize| Step { id: None, text: format!("Step {n}"), status: "pending".to_owned() };
+    state.plan = Some(Plan { text: None, steps: (1..=12).map(step).collect() });
+    let options: Vec<(&str, &str)> = vec![
+        ("Request extensions", "Kept on the request, never on the wire twice"),
+        ("A header copy", "Copied header by header"),
+    ];
+    state.requests = vec![asking(
+        "q",
+        Vec::new(),
+        vec![question("Where should the key live?", Some("Key"), &options, false)],
+    )];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let plan = cx.debug_bounds("thread-plan").expect("the plan in the tray").center();
+    cx.simulate_click(plan, Modifiers::none());
+    cx.run_until_parked();
+
+    let bounds = |cx: &mut VisualTestContext, s: &'static str| {
+        cx.debug_bounds(s).unwrap_or_else(|| panic!("{s} is drawn"))
+    };
+    let (whole, rows) = (bounds(cx, "thread"), bounds(cx, "thread-rows"));
+    let (tray, composer) = (bounds(cx, "thread-tray"), bounds(cx, "thread-composer"));
+    let (request, rest) = (bounds(cx, "request-q"), bounds(cx, "thread-activity-rest"));
+    assert!(rows.size.height > px(0.0), "the rows keep what is left: {rows:?}");
+    assert!(rows.bottom() <= tray.top() + px(0.5), "the tray is under the rows: {tray:?}");
+    assert!(
+        tray.top() <= request.top() + px(0.5) && request.bottom() <= rest.top() + px(0.5),
+        "the request stands whole: {request:?} in {tray:?}"
+    );
+    assert!(
+        rest.size.height <= whole.size.height * 0.12 + px(1.0),
+        "the open plan under it keeps to a line or two: {rest:?}"
+    );
+    assert!(tray.bottom() <= composer.top() + px(0.5), "the tray is over the composer");
+    assert!(composer.bottom() <= whole.bottom() + px(0.5), "which stands whole");
+
+    let above = gpui::point(tray.center().x, tray.top() - px(2.0));
+    cx.simulate_click(above, Modifiers::none());
+    assert!(intents(&sent).is_empty(), "the rows' click: {:?}", intents(&sent));
+    assert!(cx.debug_bounds("request-q").is_some(), "the request still waits");
 }

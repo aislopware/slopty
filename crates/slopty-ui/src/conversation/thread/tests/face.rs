@@ -101,6 +101,52 @@ fn a_request_is_answered_on_its_call_while_the_call_shows(cx: &mut TestAppContex
     );
 }
 
+/// A call that asks as it arrives at the foot of the thread is answered on its card in the
+/// very frame that first shows it: no frame carries a copy in the tray that the list's layout
+/// then takes back, so nothing jumps.
+#[gpui::test]
+fn a_call_that_asks_as_it_arrives_is_answered_on_its_card_at_once(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.phase = Phase::Working;
+    state.turns = vec![live_turn()];
+    state.items = vec![item("t", ItemBody::Text(Clipped::whole("Let me run it.")))];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+
+    state.status.phase = Phase::NeedsYou;
+    let mut asked = approval("a");
+    asked.item = Some(ItemId("x".to_owned()));
+    state.requests = vec![asked];
+    state.items.push(item(
+        "x",
+        ItemBody::Tool(Box::new(ToolCall {
+            name: "Bash".to_owned(),
+            kind: kind::EXEC.to_owned(),
+            title: "cargo test".to_owned(),
+            input: Clipped::default(),
+            state: ToolState::Pending { ask: AskId("a".to_owned()) },
+            output: None,
+            images: Vec::new(),
+            detail: None,
+            child: None,
+            ended_ms: None,
+        })),
+    ));
+    let moved = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.marks_moved());
+    let before = moved(cx);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert_eq!(moved(cx), before, "the first frame put the answers on the card");
+    assert!(cx.debug_bounds("request-a").is_none(), "no copy in the tray");
+    let card = cx.debug_bounds("call-card-x").expect("the call is a card");
+    let allow = cx.debug_bounds("answer-a-allow").expect("answered on the card");
+    assert!(card.contains(&allow.center()), "the answers sit on the call's card");
+}
+
 /// The model chip opens the agent's models, and picking one asks the agent to switch.
 #[gpui::test]
 fn the_model_chip_switches_the_agent_s_model(cx: &mut TestAppContext) {

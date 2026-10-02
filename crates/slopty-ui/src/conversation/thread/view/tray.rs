@@ -60,11 +60,17 @@ impl ThreadView {
     }
 
     /// Where the call in row `row` stands against the viewport, as the last layout left it.
+    /// A row the list has not laid out yet, past its top while it follows the newest row, is
+    /// the row that just came in at its foot: on screen. Else a call that asks as it arrives
+    /// would be answered in the tray for one frame and jump onto its card in the next.
     fn placement_of(&self, row: usize) -> Placement {
         match (self.list.item_is_above_viewport(row), self.list.item_is_below_viewport(row)) {
             (Some(true), _) => Placement::Above,
             (_, Some(true)) => Placement::Below,
             (Some(false), Some(false)) => Placement::Inline,
+            _ if self.list.is_following_tail() && row >= self.list.logical_scroll_top().item_ix => {
+                Placement::Inline
+            }
             _ => Placement::Tray,
         }
     }
@@ -101,6 +107,8 @@ impl ThreadView {
             down: self.list.is_scrolled_to_end() == Some(false),
         };
         if now != was {
+            #[cfg(test)]
+            self.marks_moved.set(self.marks_moved.get().saturating_add(1));
             cx.notify();
         }
     }
@@ -150,12 +158,13 @@ impl ThreadView {
     /// The tray, when anything waits in it: tucked behind the composer's top edge, or a card
     /// of its own where there is no composer (a subagent's thread).
     ///
-    /// A request on show stands whole; what else waits stands at most `max` tall and scrolls
+    /// A request on show stands whole; what else waits stands at most a share of the window's
+    /// height `window_h` ([`super::TRAY`], [`super::TRAY_ASKING`] under a request) and scrolls
     /// past that, so the thread above keeps its share of the tile however much waits.
     pub(super) fn activity_bar(
         &self,
         tucked: bool,
-        max: gpui::Pixels,
+        window_h: gpui::Pixels,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
         let hub = self.hub.read(cx);
@@ -196,9 +205,11 @@ impl ThreadView {
             return None;
         }
         let parted = request.is_some();
+        let max = window_h * if parted { super::TRAY_ASKING } else { super::TRAY };
         let rest = (!sections.is_empty()).then(|| {
             div()
                 .id("thread-activity-rest")
+                .debug_selector(|| "thread-activity-rest".to_owned())
                 .w_full()
                 .flex()
                 .flex_col()
@@ -539,6 +550,7 @@ impl ThreadView {
         let head =
             self.section()
                 .id("thread-plan")
+                .debug_selector(|| "thread-plan".to_owned())
                 .role(Role::Button)
                 .aria_label(SharedString::from(format!("Plan, {done} of {total} done")))
                 .aria_expanded(open)

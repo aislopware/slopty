@@ -474,7 +474,19 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let current = now == Some(model.id.as_str());
-        self.menu_row(ix, model.label.clone(), cx)
+        let label = if model.label.trim().is_empty() { &model.id } else { &model.label };
+        let (name, provider) = crate::conversation::figures::spoken_model(label);
+        self.menu_row(ix, label.clone(), cx)
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(gpui::relative(0.7))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(self.z(theme.typography.small()))
+                    .child(SharedString::from(name)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -482,8 +494,9 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.small()))
-                    .child(SharedString::from(model.label.clone())),
+                    .text_size(self.z(theme.typography.meta()))
+                    .text_color(hsla(s.text_muted))
+                    .children(provider.map(SharedString::from)),
             )
             .when(current, |el| el.child(self.icon(IconName::Check, s.text_secondary)))
             .into_any_element()

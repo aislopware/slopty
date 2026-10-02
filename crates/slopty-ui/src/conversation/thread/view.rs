@@ -47,8 +47,13 @@ use crate::kit::{self, ButtonKind};
 /// The widest the reading column's text runs, in points at zoom 1 (`design.md` §3).
 pub const COLUMN: f32 = 736.0;
 
-/// The most of the window's height the tray over the composer takes before it scrolls.
+/// The most of the window's height what else waits in the tray (the plan, the edits, the
+/// queue) takes before it scrolls.
 const TRAY: f32 = 0.3;
+
+/// The same while a request stands whole above it: what the person must answer and the
+/// conversation it is about come first, so the rest keeps to a line or two and scrolls.
+const TRAY_ASKING: f32 = 0.12;
 
 /// From this tile width on, the column stands off the tile's edges by the wide gutter.
 const WIDE: f32 = 560.0;
@@ -176,6 +181,9 @@ pub struct ThreadView {
     /// What the last frame drew from the list's scroll: where the request on show was
     /// answered and whether the way down showed.
     marks: Cell<tray::Marks>,
+    /// How many frames drew the marks wrong, found so once the list laid out.
+    #[cfg(test)]
+    marks_moved: Cell<usize>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -273,6 +281,8 @@ impl ThreadView {
             pictures: RefCell::default(),
             asking: None,
             marks: Cell::default(),
+            #[cfg(test)]
+            marks_moved: Cell::default(),
             focus: cx.focus_handle(),
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -299,6 +309,13 @@ impl ThreadView {
     #[must_use]
     pub fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// How many frames drew where a request is answered, or the way down, wrong, and were
+    /// drawn again once the list's layout said so.
+    #[cfg(test)]
+    pub(super) const fn marks_moved(&self) -> usize {
+        self.marks_moved.get()
     }
 
     /// Each row's key and revision, as the list holds them.
@@ -475,7 +492,10 @@ impl ThreadView {
         }
         self.clock = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                // On the turn's own second, so the time the working row says is never a
+                // second behind a frame drawn from scratch.
+                let Ok(wait) = this.update(cx, |this, cx| this.until_tick(cx)) else { return };
+                cx.background_executor().timer(wait).await;
                 let going = this
                     .update(cx, |this, cx| {
                         cx.notify();
@@ -488,6 +508,13 @@ impl ThreadView {
                 }
             }
         }));
+    }
+
+    /// How long until the turn under way has run another whole second.
+    fn until_tick(&self, cx: &App) -> Duration {
+        let started = self.state(cx).and_then(rows::under_way).map(|t| t.started_ms);
+        let ran = started.filter(|t| !t.is_zero()).map_or(0, |t| WallMs::now().millis_since(t));
+        crate::icons::until_next_second(Duration::from_millis(ran))
     }
 
     fn older(&self, cx: &mut Context<Self>) {
@@ -957,7 +984,7 @@ impl ThreadView {
         };
         let open = self.items_open.contains(id);
         let s = self.theme.surfaces;
-        let line = kit::first_line(&text.text).to_owned();
+        let line = self.thought_line(kit::first_line(&text.text));
         let toggle = id.clone();
         div()
             .w_full()
@@ -986,7 +1013,7 @@ impl ThreadView {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .child(SharedString::from(line)),
+                                .child(line),
                         )
                     })
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -994,16 +1021,57 @@ impl ThreadView {
                     })),
             )
             .when(open, |el| {
+                let theme = &self.theme;
+                let mut style = crate::markdown::style(theme, &self.mono(), self.zoom);
+                style.paragraph_gap = gpui::rems(theme.spacing.xs / theme.typography.ui_size);
                 el.child(
                     div()
-                        .pl(self.z(TOOL_ROW + self.theme.spacing.xs))
-                        .text_size(self.z(self.theme.typography.small()))
+                        .pl(self.z(TOOL_ROW + theme.spacing.xs))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .whitespace_normal()
-                        .child(SharedString::from(text.text.clone())),
+                        .child(
+                            TextView::markdown(
+                                ElementId::Name(format!("thought-{}", id.0).into()),
+                                SharedString::from(text.text.clone()),
+                            )
+                            .style(style)
+                            .selectable(true),
+                        ),
                 )
             })
             .into_any_element()
+    }
+
+    /// A thought's first line as one line of words, its code spans in the code face on the
+    /// raised fill as the prose sets them, the rest of its Markdown taken off.
+    fn thought_line(&self, line: &str) -> gpui::StyledText {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let (words, code) = crate::markdown::plain_line_with_code(line);
+        let run = |len: usize, family: &str, fill: Option<gpui::Hsla>, tone| gpui::TextRun {
+            len,
+            font: gpui::font(family.to_owned()),
+            color: hsla(tone),
+            background_color: fill,
+            underline: None,
+            strikethrough: None,
+        };
+        let mono = self.mono();
+        let ui = theme.typography.ui_family.as_str();
+        let mut runs = Vec::with_capacity(code.len().saturating_mul(2).saturating_add(1));
+        let mut at = 0;
+        for span in code {
+            if span.start > at {
+                runs.push(run(span.start.saturating_sub(at), ui, None, s.text_muted));
+            }
+            runs.push(run(span.len(), &mono, Some(hsla(s.raised)), s.text_secondary));
+            at = span.end;
+        }
+        if words.len() > at {
+            runs.push(run(words.len().saturating_sub(at), ui, None, s.text_muted));
+        }
+        gpui::StyledText::new(words).with_runs(runs)
     }
 
     fn fold_row(&self, ix: usize, turn: TurnId, open: bool, cx: &Context<Self>) -> AnyElement {
@@ -1318,7 +1386,7 @@ impl ThreadView {
                             u,
                             theme.typography.small() * k,
                         ))
-                        .child(SharedString::from(format!("{u:.0}%")))
+                        .child(SharedString::from(composer::share(u)))
                 }))
                 .into_any_element(),
         )
@@ -1327,7 +1395,7 @@ impl ThreadView {
     fn list_region(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let region = div().relative().flex_1().min_h_0().w_full();
+        let region = div().relative().flex_1().min_h_0().w_full().overflow_hidden();
         if self.rows.is_empty() {
             let linked = self.hub.read(cx).threads().linked();
             let words = if self.state(cx).is_some() {
@@ -1355,6 +1423,7 @@ impl ThreadView {
                 .into_any_element();
         }
         region
+            .debug_selector(|| "thread-rows".to_owned())
             .child(
                 list(
                     self.list.clone(),
@@ -1382,7 +1451,7 @@ impl Render for ThreadView {
         let rows = self.list_region(cx);
         // A subagent takes no messages: its thread is read, and answered from the bar.
         let composer = (!self.in_subagent()).then(|| self.composer_box(cx));
-        let bar = self.activity_bar(composer.is_some(), window.viewport_size().height * TRAY, cx);
+        let bar = self.activity_bar(composer.is_some(), window.viewport_size().height, cx);
         div()
             .id("thread")
             .debug_selector(|| "thread".to_owned())
@@ -1432,17 +1501,46 @@ impl Render for ThreadView {
             .children(header)
             .children(trail)
             .child(rows)
+            .child(self.foot(bar, composer))
+    }
+}
+
+impl ThreadView {
+    /// The tray over the composer, on the reading column. Below the rows, never over them,
+    /// so a click above its edge is the rows'. When what waits is taller than the thread, the
+    /// tray gives way and scrolls while the composer stands whole.
+    fn foot(&self, bar: Option<AnyElement>, composer: Option<AnyElement>) -> AnyElement {
+        let theme = &self.theme;
+        let spacing = theme.spacing;
+        let gutter = if self.width >= WIDE { spacing.xxxl } else { spacing.lg };
+        let bar = bar.map(|bar| {
+            div()
+                .id("thread-tray")
+                .debug_selector(|| "thread-tray".to_owned())
+                .w_full()
+                .min_h_0()
+                .overflow_y_scroll()
+                .child(bar)
+        });
+        div()
+            .w_full()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .items_center()
             .child(
-                self.column(
-                    div()
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .pb(self.z(theme.spacing.md))
-                        .children(bar)
-                        .children(composer),
-                ),
+                div()
+                    .w_full()
+                    .max_w(self.z(2.0_f32.mul_add(gutter, COLUMN)))
+                    .px(self.z(gutter))
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .pb(self.z(spacing.md))
+                    .children(bar)
+                    .children(composer.map(|c| div().w_full().flex_none().child(c))),
             )
+            .into_any_element()
     }
 }
 
@@ -1522,7 +1620,9 @@ const fn status_of(phase: Phase) -> Option<Status> {
 
 /// The share of the context window in use, in percent.
 fn context_used(meters: &slopty_proto::thread::Meters) -> Option<f64> {
-    let (used, window) = (meters.context_tokens?, meters.context_window?);
+    // Nothing in use is no usage reported yet: an agent says its window before its first
+    // turn, and a ring at 0 % would read as a measurement.
+    let (used, window) = (meters.context_tokens.filter(|t| *t > 0)?, meters.context_window?);
     #[expect(clippy::cast_precision_loss, reason = "a share on screen")]
     let share = used as f64 / window.max(1) as f64;
     Some(share * 100.0)

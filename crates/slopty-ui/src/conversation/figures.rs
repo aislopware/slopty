@@ -43,6 +43,25 @@ pub fn model_name(id: &str) -> String {
     name
 }
 
+/// A model as people say it, and the provider it is reached through.
+///
+/// The provider is the name's part before a `/`, when it is not the model's own:
+/// `Anthropic/Claude Sonnet 4.5` is "Claude Sonnet 4.5" through Anthropic, `canned/canned-1` is
+/// "canned-1" through canned, `Canned/Canned` is "Canned" alone, and `claude-opus-5-5` is
+/// "Opus 5.5" ([`model_name`]).
+#[must_use]
+pub fn spoken_model(name: &str) -> (String, Option<String>) {
+    let name = name.trim();
+    let (provider, model) = name
+        .rsplit_once('/')
+        .map(|(p, m)| (p.trim(), m.trim()))
+        .filter(|(p, m)| !p.is_empty() && !m.is_empty())
+        .map_or((None, name), |(p, m)| (Some(p), m));
+    let spoken = model_name(model);
+    let provider = provider.filter(|p| !p.eq_ignore_ascii_case(&spoken)).map(str::to_owned);
+    (spoken, provider)
+}
+
 /// The right edge of a turn's fold: the model and the tokens it wrote.
 ///
 /// "Opus 5.5 · 3.1k tokens". `session_model` is the one the composer names; a turn answered by
@@ -429,6 +448,22 @@ mod tests {
         assert_eq!(model_name("claude-3-5-sonnet-20241022"), "Sonnet 3.5");
         assert_eq!(model_name("gpt-x"), "gpt-x");
         assert_eq!(model_name("<synthetic>"), "<synthetic>");
+    }
+
+    /// A model is one name, as people say it, whatever shape the agent gives it in: a
+    /// provider's prefix goes beside it, and a provider named as its model says nothing.
+    #[test]
+    fn a_model_is_one_name_with_its_provider_beside_it() {
+        let spoken = |name| spoken_model(name);
+        assert_eq!(spoken("Canned/Canned"), ("Canned".to_owned(), None));
+        assert_eq!(spoken("canned/canned-1"), ("canned-1".to_owned(), Some("canned".to_owned())));
+        assert_eq!(
+            spoken("Anthropic/Claude Sonnet 4.5"),
+            ("Claude Sonnet 4.5".to_owned(), Some("Anthropic".to_owned()))
+        );
+        assert_eq!(spoken("claude-opus-5-5"), ("Opus 5.5".to_owned(), None));
+        assert_eq!(spoken(" Canned "), ("Canned".to_owned(), None));
+        assert_eq!(spoken("/odd/"), ("/odd/".to_owned(), None));
     }
 
     /// A turn's edge names its model only when it is not the session's, and always says what it
