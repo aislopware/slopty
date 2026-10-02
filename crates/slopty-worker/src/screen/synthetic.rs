@@ -986,6 +986,23 @@ mod tests {
         }
     }
 
+    /// Geometry ticks, each build waited for and put in, until the stream codes `chroma` or a
+    /// tick starts none: the switch the rate's decisions asked for, behind any replacement of
+    /// sessions given up on inside VideoToolbox, which a tick builds first and at the chroma in
+    /// force. How many builds went in.
+    async fn tick_to<P: Platform>(stream: &mut Pipeline<P>, chroma: Chroma) -> usize {
+        let mut built = 0;
+        while stream.chroma() != chroma {
+            assert!(built < 4, "{built} builds and still not {chroma:?}: {:?}", stream.stats());
+            let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+            let Some(mut rebuild) = stream.check_geometry(&probe) else { break };
+            let encoder = rebuild.built().await.unwrap();
+            assert_eq!(stream.finish_rebuild(rebuild, encoder), None, "the size stays");
+            built += 1;
+        }
+        built
+    }
+
     /// Wait for the client's next picture, on the stream and not on the clock: a slow machine
     /// only takes longer. Meanwhile the geometry is followed whenever the stream wakes it, as
     /// the app's loop follows it ([`follow`]), which is where a session the system took away
@@ -1063,23 +1080,30 @@ mod tests {
     }
 
     /// The pixel format of the next picture the client decodes whose format `wanted` accepts,
-    /// and whether its input strip read back; `None` when none comes within 30 s.
-    async fn next_picture(
+    /// and whether its input strip read back; `None` once the client's stream has ended.
+    ///
+    /// Waited for on the stream, not on the clock ([`next_or_stopped`]): the geometry is
+    /// followed meanwhile, as the app's loop follows it, so an encode the beat gives up on
+    /// inside VideoToolbox is replaced by sessions of the chroma in force, and a stream that
+    /// has stopped fails with what both ends saw.
+    async fn next_picture<P: Platform>(
         frames: &mut tokio::sync::watch::Receiver<Option<Arc<slopty_client::screen::Presentable>>>,
+        stream: &mut Pipeline<P>,
+        handle: &slopty_client::screen::ScreenHandle,
         wanted: impl Fn(u32) -> bool,
+        what: &str,
     ) -> Option<(u32, bool)> {
-        let wait = async {
-            while frames.changed().await.is_ok() {
-                let Some(frame) = frames.borrow_and_update().clone() else { continue };
-                let image = frame.frame.image.as_cv();
-                let format = objc2_core_video::CVPixelBufferGetPixelFormatType(image);
-                if wanted(format) {
-                    return Some((format, inputs_shown(image).is_some()));
-                }
+        loop {
+            if !next_or_stopped(frames, stream, handle, || what.to_owned()).await {
+                return None;
             }
-            None
-        };
-        tokio::time::timeout(Duration::from_secs(30), wait).await.ok().flatten()
+            let Some(frame) = frames.borrow_and_update().clone() else { continue };
+            let image = frame.frame.image.as_cv();
+            let format = objc2_core_video::CVPixelBufferGetPixelFormatType(image);
+            if wanted(format) {
+                return Some((format, inputs_shown(image).is_some()));
+            }
+        }
     }
 
     /// A stream that asks for 4:4:4 is drawn as `xf44`, encoded as HEVC 4:4:4 and handed to the
@@ -1087,6 +1111,12 @@ mod tests {
     /// cut the rate under the leave line, the geometry tick moves it to a 4:2:0 session and the
     /// client's pictures are NV12 again, and clean windows bring it back to 4:4:4 after the
     /// hold. Drawn, never captured.
+    ///
+    /// Its waits run the geometry tick as the app's loop does ([`next_picture`]): a hosted
+    /// virtual Mac's VideoToolbox can keep an encode past its patience (MEASUREMENTS.md, "an
+    /// encode that never returned"), and the sessions that replace it are built by that tick, at
+    /// the chroma in force. Waited out on the clock alone, the switch back to 4:4:4 never got a
+    /// picture (CI run 37049458626).
     #[test]
     fn a_full_chroma_stream_arrives_as_444_and_follows_the_rate() {
         use objc2_core_video::{
@@ -1135,7 +1165,7 @@ mod tests {
             let mut frames = handle.frames();
 
             let full = kCVPixelFormatType_444YpCbCr10BiPlanarFullRange;
-            let got = next_picture(&mut frames, |_any| true).await;
+            let got = next_picture(&mut frames, &mut stream, &handle, |_any| true, "first").await;
             assert_eq!(got, Some((full, true)), "the first picture is 4:4:4 and reads back");
 
             // Eight decisions of heavy loss, each a cut to 75 %.
@@ -1145,16 +1175,13 @@ mod tests {
                 .filter_map(|_| control.report(&lossy, None))
                 .map(|decision| decision.target_bps)
                 .collect();
-            let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
             let down = Instant::now();
-            let mut rebuild =
-                stream.check_geometry(&probe).expect("the geometry tick rebuilds for the chroma");
-            let encoder = rebuild.built().await.unwrap();
-            assert_eq!(stream.finish_rebuild(rebuild, encoder), None, "the size stays");
-            assert_eq!(stream.chroma(), Chroma::Subsampled, "after cuts to {targets:?}");
+            let ticks = tick_to(&mut stream, Chroma::Subsampled).await;
+            assert_eq!(stream.chroma(), Chroma::Subsampled, "after cuts to {targets:?}, {ticks}");
 
             let nv12 = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-            let got = next_picture(&mut frames, |format| format != full).await;
+            let got =
+                next_picture(&mut frames, &mut stream, &handle, |f| f != full, "on 4:2:0").await;
             assert_eq!(got, Some((nv12, true)), "back on 4:2:0");
             let down = down.elapsed();
 
@@ -1162,27 +1189,27 @@ mod tests {
             // geometry tick moves the stream to a 4:4:4 session again, the capture ahead of it.
             let clean = ReceiverReport { frames_ok: 3, ..ReceiverReport::default() };
             let mut decisions = 0;
-            let rebuild = loop {
+            let (target, up) = loop {
                 assert!(decisions < 60, "never back on 4:4:4");
                 decisions += 1;
                 let target = (0..10).find_map(|_| control.report(&clean, None));
-                let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
                 let up = Instant::now();
-                if let Some(rebuild) = stream.check_geometry(&probe) {
-                    break (rebuild, target, up);
+                tick_to(&mut stream, Chroma::Full).await;
+                if stream.chroma() == Chroma::Full {
+                    break (target, up);
                 }
             };
-            let (mut rebuild, target, up) = rebuild;
-            let encoder = rebuild.built().await.unwrap();
-            assert_eq!(stream.finish_rebuild(rebuild, encoder), None);
-            assert_eq!(stream.chroma(), Chroma::Full, "after {decisions} decisions, {target:?}");
-            let got = next_picture(&mut frames, |format| format == full).await;
+            let got =
+                next_picture(&mut frames, &mut stream, &handle, |f| f == full, "on 4:4:4").await;
             assert_eq!(got, Some((full, true)), "4:4:4 again");
             eprintln!(
                 "MEASURE chroma switch at {width}×{height}, rebuild → first decoded picture: \
-                 4:4:4 → 4:2:0 {:.1} ms, 4:2:0 → 4:4:4 {:.1} ms",
+                 4:4:4 → 4:2:0 {:.1} ms, 4:2:0 → 4:4:4 {:.1} ms (after {decisions} decisions, at \
+                 {:?} bit/s), {} encodes given up on",
                 ms(down),
-                ms(up.elapsed())
+                ms(up.elapsed()),
+                target.map(|decision| decision.target_bps),
+                stream.stats().encoders_replaced
             );
             drop(handle);
             drain.abort();
@@ -1870,7 +1897,7 @@ mod tests {
             let router = ScreenRouter::new();
             let wire = Arc::new(Wire::new(router.clone(), None, None));
             let quality = Quality { scale, ..Quality::default() };
-            let (stream, opened) = Pipeline::<Synthetic>::open(
+            let (mut stream, opened) = Pipeline::<Synthetic>::open(
                 STREAM,
                 CaptureTarget::Window(editor),
                 quality,
@@ -1897,7 +1924,7 @@ mod tests {
             let handle =
                 spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
             let mut frames = handle.frames();
-            let got = next_picture(&mut frames, |_any| true).await;
+            let got = next_picture(&mut frames, &mut stream, &handle, |_any| true, "first").await;
             assert!(got.is_some_and(|(_format, strip)| strip), "a readable picture: {got:?}");
             let picture = frames.borrow().clone().expect("the picture");
             let image = picture.frame.image.as_cv();
@@ -2150,7 +2177,8 @@ mod tests {
             let handle =
                 spawn_screen(&tokio::runtime::Handle::current(), &router, STREAM, codec, uplink);
             let mut frames = handle.frames();
-            assert!(next_picture(&mut frames, |_any| true).await.is_some(), "a first picture");
+            let first = next_picture(&mut frames, &mut stream, &handle, |_any| true, "first").await;
+            assert!(first.is_some(), "a first picture");
             // Counted from the first picture on: before it, a session slow to open (a loaded
             // machine) rightly asks again for the keyframe it waits for.
             let before = handle.stats();
