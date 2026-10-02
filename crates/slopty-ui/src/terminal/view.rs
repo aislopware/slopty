@@ -9,12 +9,12 @@ use std::time::{Duration, Instant};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Autocapitalize, Bounds, Context, CursorStyle, Entity, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
-    KeyDownEvent, Keystroke, LongPressEvent, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, TextInputAction,
-    TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored, deferred, div, point, px,
-    relative, size,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    KeyBinding, KeyDownEvent, KeyUpEvent, Keystroke, LongPressEvent, ModifiersChangedEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Render,
+    ScrollDelta, ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _,
+    TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored,
+    deferred, div, point, px, relative, size,
 };
 use gpui_kit::component::input::{self, Input, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
@@ -24,7 +24,7 @@ use slopty_grid::{CellWidth, Cursor, LineFlags, LineIndex, TermModes};
 use slopty_predict::{Policy, Prediction, Predictor};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
-use slopty_proto::input::{MouseAction, MouseButton as ProtoButton, MouseEvent};
+use slopty_proto::input::{KeyAction, MouseAction, MouseButton as ProtoButton, MouseEvent};
 use slopty_proto::terminal::{
     PasteChord, Placement, PointerShape, ProgressState, SearchMatch, TermEvent, TermRequest,
     TermSize,
@@ -323,6 +323,11 @@ pub struct TerminalView {
     focus: FocusHandle,
     theme: Theme,
     key_seq: u64,
+    /// The keys whose press went to the program and whose release has not come: only their
+    /// releases may go to it (a ⌘ chord the app took, say, has none).
+    keys_down: Vec<String>,
+    /// A drag of files over the grid of a program that asks for drops.
+    file_drag: Option<file_drag::FileDrag>,
     metrics: Option<CellMetrics>,
     pending_size: Option<TermSize>,
     font_family: Option<SharedString>,
@@ -528,6 +533,8 @@ impl TerminalView {
             focus: cx.focus_handle(),
             theme,
             key_seq: 0,
+            keys_down: Vec::new(),
+            file_drag: None,
             metrics: None,
             pending_size: None,
             font_family: None,
@@ -3054,6 +3061,9 @@ impl TerminalView {
         let deselected = self.selection.take().is_some();
         let unblinked = !self.blink_on;
         self.pin_blink();
+        if !self.keys_down.contains(&event.keystroke.key) {
+            self.keys_down.push(event.keystroke.key.clone());
+        }
         let shown = self.type_key(event.keystroke.clone(), event.is_held, cx);
         // After the key is on its way: the AppKit call costs the echo nothing there, and a
         // pointer already hidden by the last key is not hidden again.
@@ -3065,6 +3075,25 @@ impl TerminalView {
         if deselected || unblinked || shown {
             cx.notify();
         }
+    }
+
+    /// A key's release goes to a program that asks for releases (Kitty keyboard flag 2), for a
+    /// key whose press went to it. It types nothing, so it neither predicts nor scrolls.
+    fn key_up(&mut self, event: &KeyUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.keys_down.iter().position(|k| *k == event.keystroke.key) else {
+            return;
+        };
+        self.keys_down.swap_remove(at);
+        if !self.state.modes().contains(TermModes::KEY_RELEASES) {
+            return;
+        }
+        self.key_seq = self.key_seq.wrapping_add(1);
+        let mut key = keys::key_event(self.key_seq, &event.keystroke, false, self.alt_is_alt());
+        key.action = KeyAction::Release;
+        key.text = None;
+        key.consumed_mods = slopty_proto::input::Mods::empty();
+        self.send(TermRequest::Key(key), cx);
+        cx.stop_propagation();
     }
 
     fn scroll_wheel(
@@ -3524,6 +3553,14 @@ impl TerminalView {
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // A drag of files let go over a program that asks for drops is its drop. The tile's own
+        // drop handling uploads the files next, unless the program refused them.
+        if event.button == MouseButton::Left && cx.has_active_drag() && self.file_drag.is_some() {
+            if self.files_dropped(cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         // The release of a button whose press the program heard goes to it too.
         if let Some(button) = proto_button(event.button)
             && self.program_buttons & button.bit() != 0
@@ -3831,6 +3868,10 @@ impl TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A drag of files that left the window ends without a move off the grid.
+        if self.file_drag.is_some() && !cx.has_active_drag() {
+            self.file_drag_left(cx);
+        }
         let focused = self.focus.is_focused(window);
         let zooming = self.zooming;
         #[cfg(test)]
@@ -3880,6 +3921,10 @@ impl Render for TerminalView {
                 this.select_all(&SelectAll, window, cx);
             }))
             .on_key_down(cx.listener(Self::key_down))
+            .on_key_up(cx.listener(Self::key_up))
+            .on_drag_move::<ExternalPaths>(cx.listener(|this, event, _window, cx| {
+                this.files_dragged(event, cx);
+            }))
             .on_scroll_wheel(cx.listener(Self::scroll_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
@@ -4143,6 +4188,7 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
     Some(Arc::new(gpui::RenderImage::new([image::Frame::new(buffer)])))
 }
 
+mod file_drag;
 #[cfg(test)]
 mod paint_oracle;
 
@@ -7414,6 +7460,160 @@ mod tests {
             view.apply(TermEvent::Frame(frame), cx);
         });
         cx.run_until_parked();
+    }
+
+    /// The drag requests `rx` holds, by name, and the data of each `DropData`.
+    fn drag_requests(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            let ClientMsg::Term { req, .. } = msg else { continue };
+            out.push(match req {
+                TermRequest::DragOver { at, mimes } => {
+                    format!("over {},{} {}", at.col, at.row, mimes.join(","))
+                }
+                TermRequest::DragLeave => "leave".to_owned(),
+                TermRequest::Drop { at, reps } => {
+                    let reps: Vec<String> = reps
+                        .iter()
+                        .map(|r| format!("{}{}", r.mime, if r.data.is_some() { "+" } else { "" }))
+                        .collect();
+                    format!("drop {},{} {}", at.col, at.row, reps.join(","))
+                }
+                TermRequest::DropData { mime, data } => match data {
+                    Some(d) => format!("data {mime} {}", String::from_utf8_lossy(&d)),
+                    None => format!("data {mime} gone"),
+                },
+                TermRequest::Paste { text, .. } => format!("paste {text}"),
+                _ => continue,
+            });
+        }
+        out
+    }
+
+    /// A drag of files over a program that asks for drops (Kitty drag and drop) goes to it cell
+    /// by cell, and its drop gets the worker's copies as `file://` URLs once they land. A
+    /// program not asking has the paths typed, a refused drag drops nothing, and a drag that
+    /// leaves the window leaves the program.
+    #[gpui::test]
+    fn a_file_drag_goes_to_a_program_that_asks_for_drops(cx: &mut TestAppContext) {
+        use gpui::{ExternalPaths, FileDropEvent};
+        use slopty_proto::terminal::DropOperation;
+
+        let (view, mut rx, cx) = terminal(cx);
+        view.update(cx, |view, cx| view.apply(history_frame(0, &["$"]), cx));
+        let _resized = drag_requests(&mut rx);
+        let cell = |cx: &mut VisualTestContext, col, row| {
+            view.read_with(cx, |view, _| at_cell(view, col, row))
+        };
+        let paths = || ExternalPaths(std::iter::once("/here/a b.txt".into()).collect());
+        let drag = |cx: &mut VisualTestContext, moves: &[gpui::Point<Pixels>]| {
+            let (first, rest) = moves.split_first().expect("a move");
+            cx.simulate_event(FileDropEvent::Entered { position: *first, paths: paths() });
+            for &position in rest {
+                cx.simulate_event(FileDropEvent::Pending { position });
+            }
+        };
+        let landed = |cx: &mut VisualTestContext| {
+            view.update(cx, |view, cx| view.files_landed(&["/w/a b.txt".to_owned()], cx));
+        };
+
+        // Not asking: the drag is the tile's, and the paths are typed.
+        let (a, b) = (cell(cx, 2, 1), cell(cx, 4, 1));
+        drag(cx, &[a, b]);
+        cx.simulate_event(FileDropEvent::Submit { position: b });
+        landed(cx);
+        assert_eq!(drag_requests(&mut rx), ["paste '/w/a b.txt' "]);
+
+        // Asking: told per cell, then the drop, then the URLs.
+        view.update(cx, |view, cx| view.apply(TermEvent::DropTarget { accepts: true }, cx));
+        drag(cx, &[a, a, b]);
+        cx.simulate_event(FileDropEvent::Submit { position: b });
+        assert_eq!(
+            drag_requests(&mut rx),
+            ["over 2,1 text/uri-list", "over 4,1 text/uri-list", "drop 4,1 text/uri-list"]
+        );
+        landed(cx);
+        assert_eq!(drag_requests(&mut rx), ["data text/uri-list file:///w/a%20b.txt\r\n"]);
+
+        // An upload that fails is told as not coming.
+        drag(cx, &[a]);
+        cx.simulate_event(FileDropEvent::Submit { position: a });
+        view.update(cx, |view, cx| view.files_failed(cx));
+        assert_eq!(
+            drag_requests(&mut rx),
+            ["over 2,1 text/uri-list", "drop 2,1 text/uri-list", "data text/uri-list gone"]
+        );
+
+        // Refused: no drop, the drag just leaves.
+        drag(cx, &[b]);
+        let refused = TermEvent::DropAccepted { operation: DropOperation::None, mimes: vec![] };
+        view.update(cx, |view, cx| view.apply(refused, cx));
+        cx.simulate_event(FileDropEvent::Submit { position: b });
+        assert_eq!(drag_requests(&mut rx), ["over 4,1 text/uri-list", "leave"]);
+
+        // A new drag is not held to the last one's refusal.
+        drag(cx, &[a]);
+        cx.simulate_event(FileDropEvent::Submit { position: a });
+        view.update(cx, |view, cx| view.files_failed(cx));
+        assert_eq!(
+            drag_requests(&mut rx),
+            ["over 2,1 text/uri-list", "drop 2,1 text/uri-list", "data text/uri-list gone"]
+        );
+
+        // A drag that leaves the window leaves the program.
+        drag(cx, &[b]);
+        cx.simulate_event(FileDropEvent::Exited);
+        cx.run_until_parked();
+        assert_eq!(drag_requests(&mut rx), ["over 4,1 text/uri-list", "leave"]);
+    }
+
+    /// A key's release goes to the program only while it asks for releases (Kitty keyboard
+    /// flag 2), and only for a key whose press went to it: a ⌘ chord the app took sends none.
+    #[gpui::test]
+    fn a_key_release_goes_only_to_a_program_that_asks_for_it(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let with_modes = |modes| match history_frame(0, &["$"]) {
+            TermEvent::Frame(mut f) => {
+                f.modes = modes;
+                TermEvent::Frame(f)
+            }
+            other => other,
+        };
+        let a = Keystroke { key: "a".into(), key_char: Some("a".into()), ..Keystroke::default() };
+        let press_and_release = |cx: &mut VisualTestContext, keystroke: &Keystroke| {
+            cx.simulate_event(KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            cx.simulate_event(KeyUpEvent { keystroke: keystroke.clone() });
+        };
+        press_and_release(cx, &a);
+        assert_eq!(drain_words(&mut rx), ["key"], "nobody asked for the release");
+
+        view.update(cx, |view, cx| view.apply(with_modes(TermModes::KEY_RELEASES), cx));
+        let _resent = drain_words(&mut rx);
+        press_and_release(cx, &a);
+        let mut sent = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ClientMsg::Term { req: TermRequest::Key(key), .. } = msg {
+                sent.push(key);
+            }
+        }
+        let [press, release] = sent.as_slice() else { panic!("a press and a release: {sent:?}") };
+        assert_eq!(press.action, KeyAction::Press);
+        assert_eq!(release.action, KeyAction::Release);
+        assert_eq!(release.code, press.code);
+        assert_eq!(release.text, None, "a release types nothing");
+        assert!(release.seq > press.seq);
+
+        let cmd_y = Keystroke {
+            key: "y".into(),
+            modifiers: gpui::Modifiers { platform: true, ..gpui::Modifiers::default() },
+            ..Keystroke::default()
+        };
+        press_and_release(cx, &cmd_y);
+        assert_eq!(drain_words(&mut rx), Vec::<String>::new(), "the app's chord");
     }
 
     /// An auto-repeated key goes the way a first press does: to the predictor (it echoes

@@ -389,6 +389,11 @@ impl TermState {
         self.drop_target
     }
 
+    /// Forget what the program said of this client's last drag, as a new one begins.
+    pub fn forget_drag_answer(&mut self) {
+        self.drag = None;
+    }
+
     /// What the program last said of this client's drag: whether it would take a drop, and
     /// once dropped, that it is done. Changes arrive with no [`Effect`] of their own.
     #[must_use]

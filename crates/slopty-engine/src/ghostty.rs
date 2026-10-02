@@ -1006,7 +1006,9 @@ impl GhosttyEngine {
         m.set(TermModes::ALT_SCROLL, t.mode(Mode::ALT_SCROLL)?);
         m.set(TermModes::BRACKETED_PASTE, t.mode(Mode::BRACKETED_PASTE)?);
         m.set(TermModes::FOCUS_EVENTS, t.mode(Mode::FOCUS_EVENT)?);
-        m.set(TermModes::KITTY_KEYBOARD, !t.kitty_keyboard_flags()?.is_empty());
+        let kitty = t.kitty_keyboard_flags()?;
+        m.set(TermModes::KITTY_KEYBOARD, !kitty.is_empty());
+        m.set(TermModes::KEY_RELEASES, kitty.contains(key::KittyKeyFlags::REPORT_EVENTS));
         m.set(TermModes::SYNC_OUTPUT, t.mode(Mode::SYNC_OUTPUT)?);
         m.set(TermModes::CURSOR_HIDDEN, !t.mode(Mode::CURSOR_VISIBLE)?);
         m.set(TermModes::APP_CURSOR_KEYS, t.mode(Mode::DECCKM)?);
@@ -3418,6 +3420,10 @@ mod tests {
         assert!(!e.modes().unwrap().contains(TermModes::KITTY_KEYBOARD));
         e.write(b"\x1b[>1u");
         assert!(e.modes().unwrap().contains(TermModes::KITTY_KEYBOARD));
+        assert!(!e.modes().unwrap().contains(TermModes::KEY_RELEASES), "disambiguate alone");
+        e.write(b"\x1b[>3u");
+        assert!(e.modes().unwrap().contains(TermModes::KEY_RELEASES), "event types");
+        e.write(b"\x1b[<u");
         e.write(b"\x1b[<u");
         assert!(!e.modes().unwrap().contains(TermModes::KITTY_KEYBOARD));
     }

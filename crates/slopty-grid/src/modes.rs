@@ -42,6 +42,9 @@ bitflags! {
         const MOUSE_DRAG = 1 << 11;
         /// DEC 1003: the program wants every move of the pointer, buttons down or not.
         const MOUSE_MOTION = 1 << 12;
+        /// The program asks for key repeats and releases (Kitty keyboard flag 2, report event
+        /// types): the client sends a key's release only while this is on.
+        const KEY_RELEASES = 1 << 13;
     }
 }
 

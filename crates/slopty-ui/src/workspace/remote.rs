@@ -581,6 +581,14 @@ impl WorkspaceView {
         let _started = self.upload(tile, paths, Upload { scratch: landing, ..upload }, cx);
     }
 
+    /// An upload for a shell will not land: a program waiting for the files of its drop is
+    /// told they will not come.
+    fn terminal_upload_failed(&self, upload: &Upload, cx: &mut Context<Self>) {
+        if let Some(view) = upload.session.and_then(|s| self.terminals.get(&s)).cloned() {
+            view.update(cx, |view, cx| view.files_failed(cx));
+        }
+    }
+
     /// Delete a drop's landing that nothing will upload from, off the main thread.
     fn discard_landing(landing: Option<PathBuf>, cx: &Context<Self>) {
         if let Some(landing) = landing {
@@ -657,6 +665,7 @@ impl WorkspaceView {
     /// Stop an upload; what the worker holds of it stays there.
     pub fn cancel_upload(&mut self, xfer: XferId, cx: &mut Context<Self>) {
         let Some(upload) = self.uploads.remove(&xfer) else { return };
+        self.terminal_upload_failed(&upload, cx);
         if let Some(remote) = self.remote(upload.tile.worker) {
             remote.cancel(xfer);
         }
@@ -681,15 +690,9 @@ impl WorkspaceView {
             XferMsg::Finished { xfer, paths } => {
                 let Some(upload) = self.uploads.remove(&xfer) else { return };
                 match upload.session {
-                    Some(session) if self.terminals.contains_key(&session) => {
-                        let text = paste_paths(&paths);
-                        self.send_session(
-                            session,
-                            ClientMsg::Term {
-                                session,
-                                req: TermRequest::Paste { text, confirmed: false },
-                            },
-                        );
+                    // The shell types their paths, or a program that took the drop reads them.
+                    Some(session) if let Some(view) = self.terminals.get(&session).cloned() => {
+                        view.update(cx, |view, cx| view.files_landed(&paths, cx));
                     }
                     Some(_) => {}
                     None if let Some((composer, id)) = upload.attach.clone() => {
@@ -711,6 +714,7 @@ impl WorkspaceView {
             XferMsg::Failed { xfer, error, .. } => self.xfer_failed(xfer, &error, cx),
             XferMsg::Cancel { xfer } => {
                 if let Some(upload) = self.uploads.remove(&xfer) {
+                    self.terminal_upload_failed(&upload, cx);
                     Self::upload_ended(upload, cx);
                     cx.notify();
                 }
@@ -726,6 +730,7 @@ impl WorkspaceView {
     /// An upload failed, here or on the worker.
     pub fn xfer_failed(&mut self, xfer: XferId, error: &str, cx: &mut Context<Self>) {
         if let Some(upload) = self.uploads.remove(&xfer) {
+            self.terminal_upload_failed(&upload, cx);
             self.show_notice(format!("Upload failed: {error}"), cx);
             Self::upload_ended(upload, cx);
             cx.notify();

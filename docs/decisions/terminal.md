@@ -3349,3 +3349,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (shown to hang without the fix), `an uncompressed image reads only its own size from a
     file`, `a file larger than the limit is refused before it is read` (a sparse file), and
     `shared memory is read and unlinked`, run on macOS and in an aarch64 Linux container.
+
+- ✅ **A key's release reaches a program that asks for it** (2026-10-02). The Kitty keyboard
+  protocol's flag 2 (report event types) asks for repeats and releases. The worker's encoder
+  already reported them, but the tile never sent a release. The engine now mirrors the flag as
+  `TermModes::KEY_RELEASES`, and the tile sends a key's release (`KeyAction::Release`, no text)
+  only while that bit is on and only for a key whose press went to the program. A ⌘ chord the
+  app took, or a key typed into the find field, sends none. Without the flag a release would
+  be one more message per keystroke that the encoder turns into nothing, so the bit keeps the
+  input path as it was for every program that does not ask. A release types nothing, so it
+  neither predicts, scrolls nor times.
+  - Tests: engine `the_kitty_keyboard_mode_is_on_when_any_flag_is_pushed` (the bit follows
+    flag 2 alone) and `key_releases_reach_a_program_that_asks_for_event_types` (a text key's
+    press and repeat stay text, its release is `CSI 97;1:3u`); ui
+    `a_key_release_goes_only_to_a_program_that_asks_for_it`.
+
+- ✅ **The tile carries a file drag to a program that asks for drops** (2026-10-02). With the
+  wire in place, the terminal tile now speaks it (`terminal/view/file_drag.rs`). While the
+  program asks (`TermState::drop_target`), a drag of files over the grid is sent as
+  `DragOver` once per cell, with `text/uri-list` and copy (files from this device are copied
+  up, never moved). Leaving the grid, or the window, sends `DragLeave`. A drop sends `Drop`
+  at once with the list still to come, and the tile's own drop handling uploads the files to
+  the shell's directory, as for any drop on a terminal. When they land, the program gets the
+  worker copies' `file://` URLs (`slopty_client::term::uri_list`) as `DropData`. An upload
+  that fails or is cancelled is sent as data that will not come.
+  - **The program's answer counts.** A drag the program refused (`DropAccepted` with no
+    operation) drops nothing: the tile stops the drop, so nothing is uploaded or typed. A new
+    drag forgets the last one's answer (`TermState::forget_drag_answer`).
+  - **The fallback stays.** A program not asking, or one that stopped asking before the
+    files landed (the worker tells it back as `DropTarget { accepts: false }`), has the paths
+    typed as before. The landing goes through the view (`TerminalView::files_landed`), which
+    makes that choice, so the paste is ordered with the keys and interrupts the predictor.
+  - **What is left.** A drop of promised files (Mail, Photos) is replayed only once they are
+    written here, so the program hears the drag and the drop together, with no time to answer
+    before the drop. No layer-3 test can drive a Finder drag, so the view test is the
+    proving layer.
+  - Test: ui `a_file_drag_goes_to_a_program_that_asks_for_drops` covers a program not asking,
+    per-cell moves, the drop and its URLs, a failed upload, a refusal, a new drag after one,
+    and leaving the window.
