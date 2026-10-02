@@ -1468,12 +1468,52 @@ mod tests {
     static UNWEDGED: Mutex<bool> = Mutex::new(false);
     static UNWEDGE: parking_lot::Condvar = parking_lot::Condvar::new();
 
+    /// Each turn the replacement sessions took inside VideoToolbox: when its first call went
+    /// in, and when its submit came back, if it has. A turn calls a session's settings and then
+    /// submits, so the span covers every call of the turn, as the beat's watch does.
+    static TURNS: Mutex<Vec<(Instant, Option<Instant>)>> = Mutex::new(Vec::new());
+
+    /// The replacement sessions' turns that stayed inside VideoToolbox `at_least`, counting
+    /// those still inside by how long they have been there.
+    fn slow_turns(at_least: Duration) -> usize {
+        let now = Instant::now();
+        let turns = TURNS.lock();
+        turns
+            .iter()
+            .filter(|(start, end)| end.unwrap_or(now).saturating_duration_since(*start) >= at_least)
+            .count()
+    }
+
     /// VideoToolbox, the first session of which waits inside its [`WEDGED_AT`]th submit until
-    /// [`UNWEDGED`].
+    /// [`UNWEDGED`]. The others time their turns into [`TURNS`].
     struct Wedged {
         session: slopty_codec::VideoToolbox,
         wedges: bool,
         frames: std::sync::atomic::AtomicU32,
+        /// The turn under way: its place in [`TURNS`].
+        turn: Mutex<Option<usize>>,
+    }
+
+    impl Wedged {
+        /// `call` into the session, as part of the turn under way, or of a new one.
+        fn timed<T>(&self, call: impl FnOnce() -> T) -> T {
+            if !self.wedges {
+                self.turn.lock().get_or_insert_with(|| {
+                    let mut turns = TURNS.lock();
+                    turns.push((Instant::now(), None));
+                    turns.len().saturating_sub(1)
+                });
+            }
+            call()
+        }
+
+        /// The turn's submit came back.
+        fn turn_ended(&self) {
+            let Some(at) = self.turn.lock().take() else { return };
+            if let Some((_, end)) = TURNS.lock().get_mut(at) {
+                *end = Some(Instant::now());
+            }
+        }
     }
 
     impl slopty_codec::VideoEncoder for Wedged {
@@ -1485,7 +1525,7 @@ mod tests {
         ) -> Result<Self, slopty_codec::CodecError> {
             let session = slopty_codec::VideoToolbox::new(config, sink)?;
             let built = WEDGED_BUILT.fetch_add(1, Ordering::Relaxed);
-            Ok(Self { session, wedges: built == 0, frames: 0.into() })
+            Ok(Self { session, wedges: built == 0, frames: 0.into(), turn: Mutex::new(None) })
         }
 
         fn encode(
@@ -1501,19 +1541,21 @@ mod tests {
                     UNWEDGE.wait(&mut unwedged);
                 }
             }
-            self.session.encode(image, pts_us, options)
+            let encoded = self.timed(|| self.session.encode(image, pts_us, options));
+            self.turn_ended();
+            encoded
         }
 
         fn set_bitrate(&self, bps: u32) -> Result<(), slopty_codec::CodecError> {
-            self.session.set_bitrate(bps)
+            self.timed(|| self.session.set_bitrate(bps))
         }
 
         fn set_frame_rate(&self, fps: u16) -> Result<(), slopty_codec::CodecError> {
-            self.session.set_frame_rate(fps)
+            self.timed(|| self.session.set_frame_rate(fps))
         }
 
         fn set_temporal_layers(&self, on: bool) -> Result<bool, slopty_codec::CodecError> {
-            self.session.set_temporal_layers(on)
+            self.timed(|| self.session.set_temporal_layers(on))
         }
 
         fn frames_dropped(&self) -> u64 {
@@ -1527,7 +1569,9 @@ mod tests {
     /// [`ENCODE_STUCK`](crate::screen::ENCODE_STUCK) of the worker's own time, not before;
     /// the geometry tick builds new sessions, whose keyframe answers the client, and a hundred
     /// pictures come after it. [`next_or_stopped`] fails the test if the beat ever charges the
-    /// encode past its patience without giving it up.
+    /// encode past its patience without giving it up. A replacement's turn is given up on too
+    /// only when it stayed inside VideoToolbox a second or more ([`slow_turns`]), as on a
+    /// starved runner, and each give-up builds one replacement.
     #[test]
     fn a_submit_that_never_comes_back_is_given_up_and_the_pictures_go_on() {
         use crate::screen::{ENCODE_STUCK, STUCK_CREDIT};
@@ -1583,17 +1627,33 @@ mod tests {
             let resumed = resumed.unwrap_or_default();
             let built = WEDGED_BUILT.load(Ordering::Relaxed);
             let worker = stream.stats();
+            let patience = ENCODE_STUCK.saturating_sub(STUCK_CREDIT);
+            // Half the patience: a healthy turn takes milliseconds, and a thread held off the
+            // cores between taking its turn and its first call is charged for that wait too.
+            let held = ENCODE_STUCK.checked_div(2).unwrap();
+            let slow = u64::try_from(slow_turns(held)).unwrap();
             eprintln!(
-                "MEASURE a submit that never came back: {before} pictures, then the first after it {:.0} ms on, {after} on {built} sessions; worker {worker:?}",
-                ms(resumed)
+                "MEASURE a submit that never came back: {before} pictures, then the first after it {:.0} ms on, {after} on {built} sessions, {slow} of the replacements' turns inside VideoToolbox {} ms or more; worker {worker:?}",
+                ms(resumed),
+                ms(held)
             );
             assert!(before <= WEDGED_AT + 1, "the first session's pictures: {before}");
-            assert_eq!(worker.encoders_replaced, 1, "given up on once");
-            assert_eq!(built, 2, "one replacement, built once");
+            assert!(worker.encoders_replaced >= 1, "given up on");
+            // On a hosted virtual Mac VideoToolbox itself can hold a turn past the patience
+            // (MEASUREMENTS.md, "an encode that never returned"), and the beat then gives the
+            // replacement up too, as it should. Each such turn must have stayed long inside:
+            // the watch charges no more than the time it saw pass.
             assert!(
-                resumed >= ENCODE_STUCK.saturating_sub(STUCK_CREDIT),
-                "given up on after its patience, not {resumed:?}"
+                worker.encoders_replaced.saturating_sub(1) <= slow,
+                "given up on once, and again only for the {slow} of the replacements' turns that stayed {held:?}: {} given up on",
+                worker.encoders_replaced
             );
+            assert_eq!(
+                u64::from(built),
+                worker.encoders_replaced.saturating_add(1),
+                "one replacement for each given up on, built once"
+            );
+            assert!(resumed >= patience, "given up on after its patience, not {resumed:?}");
             let picture = frames.borrow().clone().expect("a picture");
             assert_eq!(
                 picture.size(),

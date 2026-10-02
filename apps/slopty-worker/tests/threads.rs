@@ -4,6 +4,10 @@
 //! answered as the first time and acts on nothing. The agent is played by its captured
 //! transcript, written here, and by `slopty hook` run as Claude Code runs it, as the test's own
 //! child; nothing is typed into the shell.
+//!
+//! Each step waits for what it means to arrive, on no clock of its own: a runner that held their
+//! processes for 40 s only made these tests slower, and a test that never gets there is ended by
+//! nextest's slow-timeout (docs/decisions/testing.md, "A test waits on the event it means").
 
 #![cfg(target_vendor = "apple")]
 
@@ -31,9 +35,6 @@ mod threads {
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
     use tokio::sync::mpsc;
-
-    /// Long enough for any step on a loaded machine; the test judges what arrives, not when.
-    const STEP: Duration = Duration::from_secs(20);
 
     /// A binary of this build (`slopty_testkit::bins`).
     fn bin(name: &str) -> PathBuf {
@@ -82,10 +83,8 @@ mod threads {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
         while tokio::net::UnixStream::connect(&ptyd_sock).await.is_err() {
             assert!(ptyd.try_wait().unwrap().is_none(), "ptyd exited");
-            assert!(tokio::time::Instant::now() < deadline, "ptyd never listened");
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         let leaf = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -108,10 +107,8 @@ mod threads {
             .unwrap();
         let mut line = String::new();
         let stdout = worker.stdout.take().unwrap();
-        tokio::time::timeout(STEP, BufReader::new(stdout).read_line(&mut line))
-            .await
-            .unwrap()
-            .unwrap();
+        BufReader::new(stdout).read_line(&mut line).await.unwrap();
+        assert!(!line.is_empty(), "the worker exited before it printed its address");
         let bound: SocketAddr = line.trim().parse().unwrap();
         let addr = if bound.ip().is_unspecified() {
             SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, bound.port()))
@@ -154,7 +151,7 @@ mod threads {
 
     /// What a relay printed for Claude Code, once it exits successfully.
     async fn printed(child: Child) -> String {
-        let out = tokio::time::timeout(STEP, child.wait_with_output()).await.unwrap().unwrap();
+        let out = child.wait_with_output().await.unwrap();
         assert!(out.status.success(), "the relay exits 0: {:?}", out.status);
         String::from_utf8(out.stdout).unwrap()
     }
@@ -206,7 +203,7 @@ mod threads {
                     }
                 }
             };
-            let conn = tokio::time::timeout(STEP, dialing).await.unwrap().unwrap();
+            let conn = dialing.await.unwrap();
             let mut link = WorkerLink::start(conn);
             let events = link.events().unwrap();
             Self {
@@ -234,7 +231,7 @@ mod threads {
         /// The next event, its thread and table frames taken into the copies; a control
         /// message is handed back.
         async fn step(&mut self) -> Option<WorkerMsg> {
-            let event = tokio::time::timeout(STEP, self.events.recv()).await.unwrap().unwrap();
+            let event = self.events.recv().await.expect("the link's events go on");
             match event {
                 LinkEvent::Thread { frame, .. } => self.take(frame),
                 LinkEvent::Control(WorkerMsg::Threads(frame)) => {
@@ -459,11 +456,15 @@ mod threads {
         let command = ["/bin/sh", "-c", script, &record.to_string_lossy()].map(str::to_owned);
         let session = open(&mut a, dir.path(), command.to_vec()).await;
         let read = || std::fs::read_to_string(&record).unwrap_or_default();
-        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
         let recorded = async |want: &str| {
-            while read() != want {
-                assert!(tokio::time::Instant::now() < deadline, "{:?}", read());
+            let mut seen = read();
+            while seen != want {
                 tokio::time::sleep(Duration::from_millis(10)).await;
+                let now = read();
+                if now != seen {
+                    eprintln!("recorded {now:?}, waiting for {want:?}");
+                }
+                seen = now;
             }
         };
         recorded("ready").await;
@@ -621,18 +622,14 @@ mod threads {
 
     /// What the stand-in recorded of how it was started, once it has.
     async fn recorded(record: &Path) -> serde_json::Value {
-        tokio::time::timeout(STEP, async {
-            loop {
-                if let Some(seen) =
-                    std::fs::read(record).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
-                {
-                    return seen;
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
+        loop {
+            if let Some(seen) =
+                std::fs::read(record).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            {
+                return seen;
             }
-        })
-        .await
-        .expect("the stand-in started")
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     /// The person's `claude` and the stand-in's record of how it started, first on the

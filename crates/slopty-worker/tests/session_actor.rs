@@ -214,9 +214,15 @@ mod actor {
     /// A diff built while a viewer's input is still being answered is an echo, which the
     /// connection copies into a datagram; the attach's whole frame and output long after the
     /// input are not.
+    ///
+    /// The Enter judged goes in once the shell has said it is reading, so what answers it is
+    /// the tty's own echo, which the kernel writes back inside the write. The first diff after
+    /// an attach carries every row, so an Enter at the attach answers the shell's first `read`
+    /// and takes that diff; typed then and judged, it raced the shell's start, which on a
+    /// loaded runner came past the echo's window.
     #[tokio::test]
     async fn only_the_diffs_that_answer_input_are_echoes() {
-        let script = "read x; echo typed; sleep 0.3; echo later; sleep 30";
+        let script = "read x; printf ready; read x; echo typed; sleep 0.3; echo later; sleep 30";
         let (session, mut child) = start(&["/bin/sh", "-c", script]);
         let me = ClientId::new();
         let (tx, mut rx) = mpsc::channel::<Outbound>(64);
@@ -224,7 +230,8 @@ mod actor {
         let mut state = TermState::new(size(40, 6));
         // Every frame, as (echo, whole, the screen after it).
         let mut frames: Vec<(bool, bool, String)> = Vec::new();
-        let mut typed = false;
+        // How many frames had come when each Enter went in.
+        let mut entered: Vec<usize> = Vec::new();
         while !frames.last().is_some_and(|(_, _, shown)| shown.contains("later")) {
             let out = tokio::time::timeout(Duration::from_secs(10), rx.recv())
                 .await
@@ -236,15 +243,17 @@ mod actor {
                 let _effects = state.apply(ev.clone());
                 frames.push((out.is_echo(), whole, text(state.screen())));
             }
-            if !typed && !frames.is_empty() {
-                typed = true;
+            let reading = frames.last().is_some_and(|(_, _, shown)| shown.contains("ready"));
+            if (entered.is_empty() && !frames.is_empty()) || (entered.len() == 1 && reading) {
+                entered.push(frames.len());
                 session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
             }
         }
         let (first, last) = (frames.first().unwrap(), frames.last().unwrap());
         assert!(first.1 && !first.0, "the attach's whole frame is no echo: {frames:?}");
         assert!(!last.0, "output 300 ms after the input is no echo: {frames:?}");
-        assert!(frames.iter().any(|(echo, ..)| *echo), "the input's echo is: {frames:?}");
+        let answer = entered.get(1).and_then(|&at| frames.get(at));
+        assert!(answer.is_some_and(|(echo, ..)| *echo), "the Enter's echo is: {frames:?}");
         session.close();
         let _killed = child.kill().await;
     }

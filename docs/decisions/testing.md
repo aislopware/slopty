@@ -1061,3 +1061,38 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     and a plain build of the workspace's tests never touches it.
   - Timeouts were not raised: 30 s already covers a cold start on a loaded machine many times.
   - Test: `harness::tests::a_run_keeps_the_binaries_its_first_test_pinned`.
+
+- ✅ **A test waits on the event it means, and a hang is the runner's to time out**
+  (2026-10-02). CI run 37019453215, on a change to the client's icons alone, failed six worker
+  and server tests that pass here. None was a product fault; each waited on a clock where it
+  meant an event, or held the machine to a number only a quiet machine keeps.
+  - The processes the four thread tests started stalled for about 40 s together: a ptyd's
+    `tic`, a shell's `stty`, a worker that never printed its address. Two of them failed their
+    20 s step and the two that passed ended within 0.2 s of each other once the stall cleared,
+    20 and 35 times their usual second. A per-step wall budget only moves where such a stall
+    fails, so `apps/slopty-worker/tests/threads.rs` has none: each step waits for its message
+    or file, a child that exits fails at once, and a test that never gets there is ended by
+    nextest's slow-timeout (`.config/nextest.toml`), as `next_or_stopped` already leaves
+    waiting on the machine to the runner. Holding a test's ptyd stopped for 25 s failed the
+    old file at 20 s; the new one passes at 26 s.
+  - A worker registers before it has looked for its agents, and placement reads that silence
+    as "has not said yet whether claude is installed". The clone test placed its task on a
+    worker that was merely online; it now waits for Claude Code in that worker's
+    capabilities, as `fleet` did for the first. A `claude --version` one second slower
+    reproduced the failure exactly.
+  - The echo test typed at the attach, before the shell had started: the tty's own echo went
+    into the first diff after the attach, which carries every row and so is never an echo, and
+    the shell's reply came past the 50 ms window on a loaded runner. It now answers the
+    shell's first `read`, waits for the shell to say it is reading again, and judges the frame
+    after that Enter, the kernel's echo. A shell that starts 200 ms late reproduced the old
+    failure.
+  - The dropped search was judged by wall time against a walk timed earlier in another load.
+    It is now judged by the process's CPU time, the work done, with the future dropped where
+    it is polled: under 1 ms after the drop against 0.7–1.6 s for a whole walk here, and a
+    search whose drop stopped nothing fails at once.
+  - The stuck-submit test held the stream to exactly one give-up. A hosted virtual Mac's
+    VideoToolbox can hold a replacement's turn past the patience too, and the beat rightly
+    gives that up as well. The test now times each turn of the replacement sessions and allows
+    one more give-up for each that stayed inside at least half the patience (a healthy turn
+    takes milliseconds), with one session built for each. A replacement turn made to wait 2.6 s
+    passes with three sessions; the same wait hidden from the timing fails.

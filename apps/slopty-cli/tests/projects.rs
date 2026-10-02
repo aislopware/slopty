@@ -130,6 +130,23 @@ mod tests {
         waited.unwrap_or_else(|_| panic!("{what}"))
     }
 
+    /// Wait until the worker `name` is online and has said Claude Code is installed there. A
+    /// worker registers before it has looked for its agents, and until it says, placement
+    /// counts it as having none: a task put on it then is refused as unplaced.
+    async fn registered_with_claude(hub: &Hub, name: &str) {
+        until(&format!("{name} registers with Claude Code installed"), async || {
+            hub.directory()
+                .iter()
+                .any(|w| {
+                    w.name == name
+                        && w.liveness == Liveness::Online
+                        && w.caps.agents.iter().any(|a| a.kind == AgentKind::ClaudeCode)
+                })
+                .then_some(())
+        })
+        .await;
+    }
+
     async fn status(hub: &Hub, project: &ProjectId) -> ProjectStatus {
         let verb = Verb::ProjectStatus { project: project.clone(), since: Some(0), timeout_ms: 0 };
         match hub.dispatch(verb).await {
@@ -719,11 +736,7 @@ mod tests {
         let programs = root.join("programs");
         let _linux_daemons =
             worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
-        until("the second worker registers", async || {
-            (hub.directory().iter().filter(|w| w.liveness == Liveness::Online).count() == 2)
-                .then_some(())
-        })
-        .await;
+        registered_with_claude(&hub, "linux-box").await;
 
         let shell = Verb::OpenTerminal {
             worker: studio,
@@ -963,11 +976,7 @@ mod tests {
         std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
         let programs = root.join("programs");
         let linux = worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
-        until("the second worker registers", async || {
-            (hub.directory().iter().filter(|w| w.liveness == Liveness::Online).count() == 2)
-                .then_some(())
-        })
-        .await;
+        registered_with_claude(&hub, "linux-box").await;
 
         let shell = Verb::OpenTerminal {
             worker: studio,

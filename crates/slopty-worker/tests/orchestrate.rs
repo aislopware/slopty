@@ -403,9 +403,33 @@ mod orchestrate {
         assert_ne!(found.pid, root.1, "a child of the shell, not the shell");
         send_input(h, &Input::Keys(vec!["ctrl+c".to_owned()])).await.unwrap();
     }
+
+    /// The CPU time this process has spent, all its threads together: what a walk costs. A
+    /// loaded machine stretches a walk's wall time by however long it is held off the cores,
+    /// and not the work it does. nextest runs each test in a process of its own, so the count
+    /// is this test's alone.
+    fn cpu() -> Duration {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // SAFETY: getrusage(2) (<sys/resource.h>) writes one `struct rusage` through its second
+        // argument, which points at one.
+        let got = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        assert_eq!(got, 0, "getrusage");
+        // SAFETY: a zeroed `rusage` is valid (plain integers), and the call filled it.
+        let usage = unsafe { usage.assume_init() };
+        let time = |t: libc::timeval| {
+            Duration::from_secs(u64::try_from(t.tv_sec).unwrap())
+                .saturating_add(Duration::from_micros(u64::try_from(t.tv_usec).unwrap()))
+        };
+        time(usage.ru_utime).saturating_add(time(usage.ru_stime))
+    }
+
     /// A `Search` whose request is dropped (the server's link went, or the task answering it
     /// was aborted) stops walking at once, rather than walking the rest of the tree for nobody:
     /// the one blocking thread it ran on is free again long before a whole walk would end.
+    ///
+    /// Judged in CPU time, the work done, against a whole walk's in the same run. In wall time
+    /// the walk and the drop are each stretched by whatever else holds the cores at that
+    /// moment, and a loaded runner once timed a drop at half a whole walk.
     #[test]
     fn dropping_a_search_stops_its_walk() {
         use slopty_proto::search::{MAX_LINES, SearchQuery};
@@ -429,21 +453,32 @@ mod orchestrate {
             .unwrap();
         runtime.block_on(async {
             let root = dir.path().to_path_buf();
-            let started = std::time::Instant::now();
+            let started = cpu();
             let (_, summary) =
                 search(root.clone(), query.clone(), MAX_LINES, forever).await.unwrap();
-            let whole = started.elapsed();
+            let whole = cpu().saturating_sub(started);
+            let (tenth, third) = (whole.checked_div(10).unwrap(), whole.checked_div(3).unwrap());
             assert_eq!(summary.searched, 64 * 200);
 
-            let task = tokio::spawn(search(root, query, MAX_LINES, forever));
-            tokio::time::sleep(whole / 10).await;
-            task.abort();
-            let dropped = std::time::Instant::now();
+            // Dropped where it is polled, a tenth of the way through by the work done: the drop
+            // is the request's end, with no scheduler between it and the stop.
+            let mut walk = Box::pin(search(root, query, MAX_LINES, forever));
+            let begun = cpu();
+            while cpu().saturating_sub(begun) < tenth {
+                tokio::select! {
+                    ended = walk.as_mut() => panic!("the walk ended within a tenth: {ended:?}"),
+                    () = tokio::time::sleep(Duration::from_millis(1)) => {}
+                }
+            }
+            drop(walk);
+            let dropped = cpu();
             // Queued behind the search on the pool's only thread: it runs once the walk ends.
             tokio::task::spawn_blocking(|| ()).await.unwrap();
-            let freed = dropped.elapsed();
-            eprintln!("a whole walk {whole:?}; the dropped one ended {freed:?} after its drop");
-            assert!(freed < whole / 3, "{freed:?} against {whole:?}");
+            let after = cpu().saturating_sub(dropped);
+            eprintln!(
+                "a whole walk took {whole:?} of CPU; the dropped one {after:?} after its drop"
+            );
+            assert!(after < third, "{after:?} against {whole:?}");
         });
     }
 
