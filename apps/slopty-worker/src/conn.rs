@@ -1313,10 +1313,18 @@ impl Peer<'_> {
                     Dest::SessionCwd(session) => Some(*session),
                     Dest::Staging | Dest::Path(_) | Dest::Attachment | Dest::Drag(_) => None,
                 };
-                let (daemon, client) = (self.daemon.clone(), self.client);
+                let (daemon, client, out) = (self.daemon.clone(), self.client, self.out.clone());
                 let begin = move |cwd: Option<String>| {
                     tracing::info!(%client, %xfer, ?dest, ?cwd, files, bytes, "upload begins");
-                    daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
+                    let begun = daemon.transfers.begin(xfer, &dest, cwd.as_deref(), files);
+                    // Begun again from a link after the one that heard it end: told again.
+                    if let Begun::Finished(finished) = begun {
+                        let paths = finished.paths.iter().map(|p| p.to_string_lossy().into_owned());
+                        let msg = XferMsg::Finished { xfer, paths: paths.collect() };
+                        if let Err(e) = out.try_send(WorkerMsg::Xfer(msg)) {
+                            tracing::debug!(%client, %xfer, error = %e, "an upload's end not told");
+                        }
+                    }
                 };
                 // The directory is a question for the session's actor and then ptyd; the
                 // upload's files wait for the `Begin` (`xfer::BEGIN_WAIT`), nothing else does.
@@ -1336,6 +1344,9 @@ impl Peer<'_> {
                 let transfers = Arc::clone(&self.daemon.transfers);
                 let out = self.out.clone();
                 self.tasks.spawn(async move {
+                    // Asked from the client's next link, it may come ahead of the transfer's
+                    // `Begin` there, which waits on the session's directory.
+                    let _begun = transfers.begun(xfer, crate::xfer::BEGIN_WAIT).await;
                     let asked = name.clone();
                     let durable =
                         tokio::task::spawn_blocking(move || transfers.durable(xfer, &asked)).await;

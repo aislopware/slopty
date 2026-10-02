@@ -14,6 +14,15 @@
 //! [`STALE_PARTIAL`]: an upload cut for good leaves nothing behind in the directory it went to.
 //! A drag's landing that nothing landed from goes at once ([`Transfers::discard_drag`]).
 //!
+//! An upload outlives the link it began on: the client begins it again on its next link under
+//! the same id and sends each file it has not heard landed from what [`Transfers::durable`]
+//! says is held. A transfer is the daemon's, not a connection's, so the next link finds it as
+//! it was; a restarted worker finds the places its entries went in the ledger. A file's later
+//! stream takes it over from an earlier one still open on a link that went
+//! ([`Transfers::claim`]), and one that already landed is said again rather than written
+//! twice; a transfer that finished is remembered for a while ([`FINISHED_KEPT`]), so a client
+//! that never heard its end hears it again.
+//!
 //! A download goes the other way, and resumes the same way: a retried fetch names the bytes the
 //! client holds of each file and the version they are of, and [`resume_points`] sends a file from
 //! there while it is still that version, from the start otherwise.
@@ -22,6 +31,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
@@ -43,6 +53,10 @@ const LEDGER: &str = ".partials";
 /// Discarded drags remembered, so an upload into one that comes late is not begun: a drag's
 /// uploads begin on the control stream, which nothing orders against its end on the stream's.
 const DISCARDED: usize = 32;
+
+/// Finished transfers remembered, newest last: a client whose link went before it heard the
+/// end begins the transfer again on its next link and is told the end again.
+pub const FINISHED_KEPT: usize = 64;
 
 /// Why a transfer or one of its files failed.
 #[derive(Debug, thiserror::Error)]
@@ -117,6 +131,67 @@ struct Transfer {
     received: u64,
     reported: Option<Instant>,
     cancel: watch::Sender<bool>,
+    /// The stream writing each file, one at a time ([`Transfers::claim`]).
+    writers: HashMap<String, Slot>,
+}
+
+/// Who writes one file of a transfer: the lock its stream holds while it writes, and the turn
+/// of the latest stream to claim it, which tells an earlier one to stop.
+#[derive(Debug)]
+struct Slot {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    turn: watch::Sender<u64>,
+}
+
+/// One file of a transfer held by the stream writing it, until it drops.
+#[derive(Debug)]
+pub struct Claim {
+    _held: tokio::sync::OwnedMutexGuard<()>,
+    mine: u64,
+    turn: watch::Receiver<u64>,
+}
+
+impl Claim {
+    /// Resolves once a later stream claims the file: this one is to stop, keeping what it
+    /// wrote. Never, once the transfer is gone.
+    pub async fn superseded(&mut self) {
+        let mine = self.mine;
+        if self.turn.wait_for(|turn| *turn != mine).await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+/// A finished transfer, remembered ([`FINISHED_KEPT`]).
+#[derive(Debug)]
+struct Past {
+    xfer: XferId,
+    finished: Finished,
+    landed: HashMap<String, Landed>,
+}
+
+/// What [`Transfers::begin`] made of a begin.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Begun {
+    /// A transfer this worker did not know: new, or one a restart forgot, whose entries go
+    /// where the ledger says they went.
+    New,
+    /// One in flight, begun again from the client's next link: it keeps what it has.
+    Again,
+    /// One that finished, its end not heard: it is told again.
+    Finished(Finished),
+    /// One into a discarded drag's landing: its files are refused.
+    Refused,
+}
+
+/// A file that landed before its stream came: the stream writes nothing and the client is told
+/// again.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Again {
+    /// The file as it landed.
+    pub landed: Landed,
+    /// The transfer's end, when it has ended.
+    pub finished: Option<Finished>,
 }
 
 impl Transfer {
@@ -189,6 +264,8 @@ pub struct Transfers {
     ledger: Mutex<()>,
     /// The drags whose landing was discarded, newest last, up to [`DISCARDED`].
     discarded: Mutex<VecDeque<DragId>>,
+    /// The transfers that finished, newest last, up to [`FINISHED_KEPT`].
+    past: Mutex<VecDeque<Past>>,
 }
 
 /// `name` as a path under its transfer's root ([`relative_path`]).
@@ -259,6 +336,7 @@ impl Transfers {
             begun: Notify::new(),
             ledger: Mutex::default(),
             discarded: Mutex::default(),
+            past: Mutex::default(),
         }
     }
 
@@ -270,14 +348,26 @@ impl Transfers {
 
     /// A client begins transfer `xfer` of `files` files to `dest`. `cwd` is the session's
     /// directory for [`Dest::SessionCwd`] (`None` when it never said: the drop directory).
-    /// Beginning a transfer that is known already (a retry) keeps what it has and re-arms it.
-    /// One into a discarded drag's landing is not begun, so its files are refused.
-    pub fn begin(&self, xfer: XferId, dest: &Dest, cwd: Option<&str>, files: u32) {
+    ///
+    /// A transfer known already (the client's next link begins it again) keeps what it has and
+    /// is re-armed. One that finished is told again ([`Begun::Finished`]). One this worker
+    /// does not know, but whose entries the ledger lists, was forgotten by a restart: its
+    /// entries keep the places they went, so its partial files resume. One into a discarded
+    /// drag's landing is not begun, so its files are refused.
+    pub fn begin(&self, xfer: XferId, dest: &Dest, cwd: Option<&str>, files: u32) -> Begun {
         if let Dest::Drag(drag) = dest
             && self.discarded.lock().contains(drag)
         {
             tracing::debug!(%xfer, %drag, "an upload into a discarded drag");
-            return;
+            return Begun::Refused;
+        }
+        if let Some(past) = self.past.lock().iter().find(|p| p.xfer == xfer) {
+            return Begun::Finished(past.finished.clone());
+        }
+        let known = self.inner.lock().get(&xfer).map(|t| t.cancel.send_replace(false)).is_some();
+        if known {
+            self.begun.notify_waiters();
+            return Begun::Again;
         }
         let fallback = self.drop_root.join(xfer.to_string());
         let (base, staging) = match dest {
@@ -291,27 +381,50 @@ impl Transfers {
             Dest::Drag(drag) => Some(*drag),
             Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Path(_) => None,
         };
+        let roots = self.ledger_roots(xfer);
         let transfer = Transfer {
             base: base.unwrap_or_else(|| fallback.clone()),
             fallback,
             staging,
             drag,
             files,
-            roots: Vec::new(),
+            roots,
             landed: HashMap::new(),
             received: 0,
             reported: None,
             cancel: watch::Sender::new(false),
+            writers: HashMap::new(),
         };
-        match self.inner.lock().entry(xfer) {
+        let begun = match self.inner.lock().entry(xfer) {
             std::collections::hash_map::Entry::Occupied(known) => {
                 known.get().cancel.send_replace(false);
+                Begun::Again
             }
             std::collections::hash_map::Entry::Vacant(new) => {
                 new.insert(transfer);
+                Begun::New
+            }
+        };
+        self.begun.notify_waiters();
+        begun
+    }
+
+    /// The top-level entries the ledger says `xfer` placed, each with the directory it went
+    /// to, in the order they were placed: what a restart forgot of a transfer in flight.
+    fn ledger_roots(&self, xfer: XferId) -> Vec<(String, PathBuf)> {
+        let listed = {
+            let _held = self.ledger.lock();
+            self.read_ledger()
+        };
+        let mut roots: Vec<(String, PathBuf)> = Vec::new();
+        for (_xfer, entry) in listed.into_iter().filter(|(x, _entry)| *x == xfer) {
+            let (Some(top), Some(root)) = (entry.file_name(), entry.parent()) else { continue };
+            let Some(top) = top.to_str().map(str::to_owned) else { continue };
+            if !roots.iter().any(|(known, _root)| *known == top) {
+                roots.push((top, root.to_path_buf()));
             }
         }
-        self.begun.notify_waiters();
+        roots
     }
 
     /// Where the files of a drop from the client's drag `drag` land: `drop_root/<drag>/`.
@@ -356,14 +469,15 @@ impl Transfers {
         self.inner.lock().get(&xfer)?.drag
     }
 
-    /// Wait up to `wait` for `xfer` to begin; `false` when it did not.
+    /// Wait up to `wait` for `xfer` to begin; `false` when it did not. One that finished has
+    /// begun.
     pub async fn begun(&self, xfer: XferId, wait: Duration) -> bool {
         let deadline = tokio::time::Instant::now().checked_add(wait);
         loop {
             let notified = self.begun.notified();
             let mut notified = std::pin::pin!(notified);
             notified.as_mut().enable();
-            if self.inner.lock().contains_key(&xfer) {
+            if self.inner.lock().contains_key(&xfer) || self.past(xfer).is_some() {
                 return true;
             }
             let Some(deadline) = deadline else { return false };
@@ -392,17 +506,61 @@ impl Transfers {
         Ok(root.join(rel))
     }
 
-    /// Bytes of `name` the worker holds durably: all of them once it landed, else what its
-    /// partial file holds.
+    /// Bytes of `name` the worker holds durably: all of them once it landed (in a transfer
+    /// that finished too), else what its partial file holds.
     pub fn durable(&self, xfer: XferId, name: &str) -> Result<u64, XferError> {
-        if let Some(landed) = self.inner.lock().get(&xfer).and_then(|t| t.landed.get(name)) {
-            return Ok(landed.size);
+        if let Some(again) = self.landed_before(xfer, name) {
+            return Ok(again.landed.size);
         }
         Ok(durable(&self.target(xfer, name)?))
     }
 
-    /// `name` of `xfer` is whole and in place; once every file is, the transfer is done and
-    /// forgotten.
+    /// `name` of `xfer`, when it landed already: in the transfer in flight, or in one that
+    /// finished, with its end.
+    #[must_use]
+    pub fn landed_before(&self, xfer: XferId, name: &str) -> Option<Again> {
+        if let Some(landed) = self.inner.lock().get(&xfer).and_then(|t| t.landed.get(name)) {
+            return Some(Again { landed: landed.clone(), finished: None });
+        }
+        self.past.lock().iter().find(|p| p.xfer == xfer).and_then(|past| {
+            let landed = past.landed.get(name)?.clone();
+            Some(Again { landed, finished: Some(past.finished.clone()) })
+        })
+    }
+
+    /// The end of `xfer`, when it finished and is remembered.
+    fn past(&self, xfer: XferId) -> Option<Finished> {
+        self.past.lock().iter().find(|p| p.xfer == xfer).map(|p| p.finished.clone())
+    }
+
+    /// Take file `name` of `xfer` for a stream to write: a stream still writing it (on a link
+    /// the client has since left) is told to stop ([`Claim::superseded`]), and this one waits
+    /// until it has, so two never write one partial file. The latest claim wins.
+    ///
+    /// # Errors
+    ///
+    /// [`XferError::Unknown`] when no such transfer is in flight.
+    pub async fn claim(&self, xfer: XferId, name: &str) -> Result<Claim, XferError> {
+        let (lock, turn, mine) = {
+            let mut inner = self.inner.lock();
+            let transfer = inner.get_mut(&xfer).ok_or(XferError::Unknown)?;
+            let slot = transfer
+                .writers
+                .entry(name.to_owned())
+                .or_insert_with(|| Slot { lock: Arc::default(), turn: watch::Sender::new(0) });
+            let mut mine = 0;
+            slot.turn.send_modify(|turn| {
+                *turn = turn.wrapping_add(1);
+                mine = *turn;
+            });
+            (Arc::clone(&slot.lock), slot.turn.subscribe(), mine)
+        };
+        let held = lock.lock_owned().await;
+        Ok(Claim { _held: held, mine, turn })
+    }
+
+    /// `name` of `xfer` is whole and in place; once every file is, the transfer is done: it
+    /// leaves the transfers in flight and is remembered as finished ([`FINISHED_KEPT`]).
     pub fn landed(&self, xfer: XferId, name: &str, landed: Landed) -> Option<Finished> {
         if !self.inner.lock().get_mut(&xfer)?.land(name, landed) {
             return None;
@@ -410,7 +568,14 @@ impl Transfers {
         let t = self.inner.lock().remove(&xfer)?;
         self.unrecord(xfer);
         let paths = t.roots.iter().map(|(top, root)| root.join(top)).collect();
-        Some(Finished { paths, staging: t.staging, drag: t.drag })
+        let finished = Finished { paths, staging: t.staging, drag: t.drag };
+        let mut past = self.past.lock();
+        if past.len() >= FINISHED_KEPT {
+            past.pop_front();
+        }
+        past.push_back(Past { xfer, finished: finished.clone(), landed: t.landed });
+        drop(past);
+        Some(finished)
     }
 
     /// Remove the partial files of unfinished transfers that nothing wrote to for `stale`, and
@@ -924,14 +1089,98 @@ mod tests {
         t.discard_drag(drag);
     }
 
+    /// A transfer begun again from the client's next link keeps what it has; one that finished
+    /// is remembered, so a client that never heard the end is told it again, and what it asks
+    /// of a landed file is that it is all there.
+    #[test]
+    fn a_transfer_begun_again_keeps_what_it_has_and_one_finished_is_told_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let t = transfers(dir.path());
+        let xfer = XferId::new();
+        let dest = Dest::SessionCwd(SessionId::new());
+        assert_eq!(t.begin(xfer, &dest, cwd.to_str(), 2), Begun::New);
+        let land = |name: &str| Landed { path: cwd.join(name), size: 3, hash: [1; 32] };
+        assert_eq!(t.target(xfer, "a.txt").unwrap(), cwd.join("a.txt"));
+        assert_eq!(t.landed(xfer, "a.txt", land("a.txt")), None);
+        assert_eq!(t.begin(xfer, &dest, cwd.to_str(), 1), Begun::Again, "the next link's begin");
+        assert_eq!(t.durable(xfer, "a.txt").unwrap(), 3, "landed: all there");
+        let again = t.landed_before(xfer, "a.txt").expect("landed before");
+        assert_eq!((again.landed, again.finished), (land("a.txt"), None));
+        assert_eq!(t.target(xfer, "b.txt").unwrap(), cwd.join("b.txt"));
+        let finished = t.landed(xfer, "b.txt", land("b.txt")).expect("both in: finished");
+        assert_eq!(finished.paths, [cwd.join("a.txt"), cwd.join("b.txt")]);
+
+        assert_eq!(t.begin(xfer, &dest, cwd.to_str(), 0), Begun::Finished(finished.clone()));
+        assert_eq!(t.durable(xfer, "b.txt").unwrap(), 3);
+        let again = t.landed_before(xfer, "b.txt").expect("remembered");
+        assert_eq!(again.finished, Some(finished), "with the transfer's end");
+        assert!(t.landed_before(xfer, "c.txt").is_none());
+    }
+
+    /// A restarted worker forgot a transfer in flight; begun again, its entries go where the
+    /// ledger says they went, though the directory is there now, so its partial file resumes
+    /// rather than starting over in the drop directory.
+    #[test]
+    fn a_restart_finds_where_a_transfers_entries_went() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let xfer = XferId::new();
+        let dest = Dest::SessionCwd(SessionId::new());
+        let before = transfers(dir.path());
+        before.begin(xfer, &dest, cwd.to_str(), 2);
+        let first = before.target(xfer, "proj/a.bin").unwrap();
+        assert_eq!(first, cwd.join("proj/a.bin"));
+        let mut rx = Receiving::open(&first, 0, 100_000).unwrap();
+        rx.write(&vec![9; 40_000]).unwrap();
+        assert_eq!(rx.keep(), 40_000);
+        drop(before);
+
+        let after = transfers(dir.path());
+        assert!(cwd.join("proj").is_dir(), "its directory is there now");
+        assert_eq!(after.begin(xfer, &dest, cwd.to_str(), 2), Begun::New);
+        assert_eq!(after.target(xfer, "proj/a.bin").unwrap(), first, "where it went");
+        assert_eq!(after.target(xfer, "proj/b.bin").unwrap(), cwd.join("proj/b.bin"));
+        assert_eq!(after.durable(xfer, "proj/a.bin").unwrap(), 40_000, "what it held");
+        let other = XferId::new();
+        after.begin(other, &dest, cwd.to_str(), 1);
+        let clash = dir.path().join("drop").join(other.to_string()).join("proj/a.bin");
+        assert_eq!(after.target(other, "proj/a.bin").unwrap(), clash, "another drop's is apart");
+    }
+
+    /// A later stream of a file takes it over: the earlier one is told to stop and the later
+    /// one waits until it has let go, so the two never write one partial file.
+    #[tokio::test]
+    async fn a_later_stream_of_a_file_takes_it_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Arc::new(transfers(dir.path()));
+        let xfer = XferId::new();
+        t.begin(xfer, &Dest::Staging, None, 1);
+        let mut earlier = t.claim(xfer, "a").await.unwrap();
+        let other = t.claim(xfer, "b").await.unwrap();
+        let later = tokio::spawn({
+            let t = Arc::clone(&t);
+            async move { t.claim(xfer, "a").await.map(|_claim| ()) }
+        });
+        tokio::time::timeout(Duration::from_secs(5), earlier.superseded())
+            .await
+            .expect("the earlier stream is told");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!later.is_finished(), "the later one waits for the earlier to let go");
+        drop(earlier);
+        tokio::time::timeout(Duration::from_secs(5), later).await.unwrap().unwrap().unwrap();
+        drop(other);
+        assert!(matches!(t.claim(XferId::new(), "a").await, Err(XferError::Unknown)));
+    }
+
     #[tokio::test]
     async fn a_stream_that_overtakes_its_begin_waits_for_it() {
         let dir = tempfile::tempdir().unwrap();
-        let t = std::sync::Arc::new(transfers(dir.path()));
+        let t = Arc::new(transfers(dir.path()));
         let xfer = XferId::new();
         assert!(!t.begun(xfer, Duration::from_millis(20)).await, "never begun");
         let waiter = tokio::spawn({
-            let t = std::sync::Arc::clone(&t);
+            let t = Arc::clone(&t);
             async move { t.begun(xfer, Duration::from_secs(5)).await }
         });
         tokio::task::yield_now().await;

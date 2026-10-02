@@ -830,6 +830,87 @@ fn a_drop_on_a_shell_uploads_shows_progress_and_types_the_quoted_paths(cx: &mut 
     assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_none()));
 }
 
+/// An upload outlives its worker's link. While the worker is away the tile keeps its progress
+/// and its cancel, which reaches the upload through the remote it went by; on the next link the
+/// worker's word on it types the paths into the shell. One whose worker stays away past the
+/// wait for a link ends, said in a notice.
+#[gpui::test]
+fn an_upload_outlives_its_workers_link(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    let key = studio.key;
+    let shell = SessionId::new();
+    let tile = opens(&view, cx, &studio, shell, studio.me, 1);
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"x").unwrap();
+        path
+    };
+    let away = |cx: &mut VisualTestContext| {
+        view.update_in(cx, |v, _window, cx| {
+            v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+        });
+        cx.run_until_parked();
+    };
+    let relink = |cx: &mut VisualTestContext| {
+        let (tx, rx) = mpsc::channel(256);
+        let (calls, recorded) = mpsc::unbounded_channel();
+        let remote: Arc<dyn Remote> = Arc::new(Recorder(calls, 0));
+        let factory: ScreenFactory =
+            Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+        let link =
+            WorkerLink { me: studio.me, out: tx, open_screen: factory, remote: Some(remote) };
+        let ack = hello("studio", vec![summary(shell, None)]);
+        view.update_in(cx, |v, _window, cx| v.connect_worker(key, link, ack, cx));
+        cx.run_until_parked();
+        (rx, recorded)
+    };
+
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, &[file("a.txt")], cx));
+    let Call::Upload(first, ..) = calls.try_recv().expect("an upload") else { panic!("upload") };
+    away(cx);
+    let held = view.read_with(cx, |v, _| v.upload_on(tile).map(|(x, u)| (x, u.label())));
+    assert_eq!(held, Some((first, "\u{2191} 0%".to_owned())), "kept while the worker is away");
+    assert!(cx.debug_bounds(selector("upload", tile.item)).is_some(), "the tile still shows it");
+
+    let (mut out, mut calls) = relink(cx);
+    let paths = vec!["/Users/me/a.txt".to_owned()];
+    view.update_in(cx, |v, _window, cx| {
+        v.xfer_message(XferMsg::Progress { xfer: first, done: 1 }, cx);
+        v.xfer_message(XferMsg::Finished { xfer: first, paths }, cx);
+    });
+    cx.run_until_parked();
+    let sent: Vec<ClientMsg> = std::iter::from_fn(|| out.try_recv().ok()).collect();
+    assert_eq!(pasted(sent, shell), ["/Users/me/a.txt "], "typed over the next link");
+    assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_none()));
+
+    // Cancelled from its pill while the worker is away: the remote it went by hears it.
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, &[file("b.txt")], cx));
+    let Call::Upload(second, ..) = calls.try_recv().expect("an upload") else { panic!("upload") };
+    away(cx);
+    let pill = cx.debug_bounds(selector("upload", tile.item)).expect("the pill");
+    cx.simulate_click(pill.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(calls.try_recv(), Ok(Call::Cancel(x)) if x == second), "the upload stops");
+    assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_none()));
+
+    // A worker that stays away past the wait: the upload has ended on its link too.
+    let (_out, mut calls) = relink(cx);
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, &[file("c.txt")], cx));
+    let Call::Upload(..) = calls.try_recv().expect("an upload") else { panic!("upload") };
+    away(cx);
+    let short = slopty_client::xfer::RELINK_WAIT.checked_sub(Duration::from_secs(1)).unwrap();
+    cx.executor().advance_clock(short);
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_some()), "still waiting");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_none()), "ended");
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some("Upload failed: the worker went away"));
+}
+
 /// A drop on a note sends nothing; a drop on a remote window goes to the worker's staging.
 #[gpui::test]
 fn a_drop_goes_where_the_tile_can_take_it(cx: &mut TestAppContext) {

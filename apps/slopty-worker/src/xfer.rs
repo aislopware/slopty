@@ -14,7 +14,7 @@ use slopty_proto::transfer::{
 };
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::screen::drag::Heard;
-use slopty_worker::xfer::{Landed, Receiving, XferError, outgoing, resume_points};
+use slopty_worker::xfer::{Again, Claim, Landed, Receiving, XferError, outgoing, resume_points};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
 
@@ -25,7 +25,7 @@ const CHUNK: usize = 256 << 10;
 /// Chunks queued between a stream and the thread writing its file.
 const QUEUED: usize = 16;
 /// How long a file's stream waits for its transfer's `Begin`, which rides another stream.
-const BEGIN_WAIT: Duration = Duration::from_secs(5);
+pub const BEGIN_WAIT: Duration = Duration::from_secs(5);
 
 /// Clipboard bytes a client sent up as a bulk stream, for the connection's loop.
 #[derive(Debug)]
@@ -167,7 +167,8 @@ async fn read_whole(header: &BulkHeader, rx: &mut RawRecv, max: u64) -> Option<V
 
 /// Receive one file of an upload and report it: `Done` once it is in place, then `Finished`
 /// when it was the transfer's last; `Failed` when it could not land (its partial stays for a
-/// resume).
+/// resume). A file that landed before (the client's next link sends what it did not hear
+/// landed) is reported again, with the transfer's end once it has ended.
 async fn receive(
     daemon: Daemon,
     header: BulkHeader,
@@ -177,9 +178,21 @@ async fn receive(
     let xfer = header.xfer;
     let name = header.name.clone();
     let landed = match write(&daemon, &header, &mut rx, &out).await {
-        Ok(Some(landed)) => landed,
+        Ok(Some(Got::Landed(landed, claim))) => (landed, claim),
+        Ok(Some(Got::Again(Again { landed, finished }))) => {
+            tracing::debug!(%xfer, %name, "landed before; said again");
+            let path = landed.path.to_string_lossy().into_owned();
+            let done = XferMsg::Done { xfer, name, path, hash: landed.hash };
+            let _sent = out.send(WorkerMsg::Xfer(done)).await;
+            if let Some(finished) = finished {
+                let paths = finished.paths.iter().map(|p| p.to_string_lossy().into_owned());
+                let finished = XferMsg::Finished { xfer, paths: paths.collect() };
+                let _sent = out.send(WorkerMsg::Xfer(finished)).await;
+            }
+            return;
+        }
         Ok(None) => {
-            tracing::debug!(%xfer, %name, "upload cancelled");
+            tracing::debug!(%xfer, %name, "upload cancelled, or taken over by a later stream");
             return;
         }
         Err(e) => {
@@ -192,11 +205,15 @@ async fn receive(
             return;
         }
     };
+    let (landed, claim) = landed;
     tracing::info!(%xfer, %name, path = %landed.path.display(), bytes = landed.size, "file landed");
     let path = landed.path.to_string_lossy().into_owned();
     let done = XferMsg::Done { xfer, name: name.clone(), path, hash: landed.hash };
     let _sent = out.send(WorkerMsg::Xfer(done)).await;
-    let Some(finished) = daemon.transfers.landed(xfer, &name, landed) else { return };
+    // Held until the landing is recorded, so a later stream of the file finds it landed.
+    let finished = daemon.transfers.landed(xfer, &name, landed);
+    drop(claim);
+    let Some(finished) = finished else { return };
     if let Some(drag) = finished.drag {
         for path in &finished.paths {
             let top = path.file_name().map(|n| n.to_string_lossy().into_owned());
@@ -215,18 +232,40 @@ async fn receive(
     let _sent = out.send(WorkerMsg::Xfer(XferMsg::Finished { xfer, paths })).await;
 }
 
+/// What one stream of an upload came to.
+enum Got {
+    /// Its file landed; the claim is held until the landing is recorded.
+    Landed(Landed, Claim),
+    /// Its file had landed before it came.
+    Again(Again),
+}
+
+/// The stream of a file that landed before it came: whatever it carries is not written.
+async fn landed_before(rx: &mut RawRecv, again: Again) -> Result<Option<Got>, XferError> {
+    while rx.chunk(CHUNK).await.map_err(|e| XferError::Io(std::io::Error::other(e)))?.is_some() {}
+    Ok(Some(Got::Again(again)))
+}
+
 /// Write the stream into its file on a blocking thread, reporting progress. `Ok(None)` when
-/// the transfer was cancelled.
+/// the transfer was cancelled or a later stream of the same file took it over.
 async fn write(
     daemon: &Daemon,
     header: &BulkHeader,
     rx: &mut RawRecv,
     out: &mpsc::Sender<WorkerMsg>,
-) -> Result<Option<Landed>, XferError> {
+) -> Result<Option<Got>, XferError> {
     let xfer = header.xfer;
     if !daemon.transfers.begun(xfer, BEGIN_WAIT).await {
         rx.stop();
         return Err(XferError::Unknown);
+    }
+    if let Some(again) = daemon.transfers.landed_before(xfer, &header.name) {
+        return landed_before(rx, again).await;
+    }
+    let mut claim = daemon.transfers.claim(xfer, &header.name).await.inspect_err(|_e| rx.stop())?;
+    // The stream this one took over from may have landed the file meanwhile.
+    if let Some(again) = daemon.transfers.landed_before(xfer, &header.name) {
+        return landed_before(rx, again).await;
     }
     let target = daemon.transfers.target(xfer, &header.name).inspect_err(|_e| rx.stop())?;
     let mut cancel = daemon.transfers.cancelled(xfer).ok_or(XferError::Unknown)?;
@@ -247,15 +286,20 @@ async fn write(
             Err(XferError::Incomplete { got, size })
         }
     });
-    let mut cancelled = false;
+    let mut stopped = false;
     let mut ended = false;
     loop {
         tokio::select! {
             changed = cancel.changed() => {
                 if changed.is_err() || *cancel.borrow_and_update() {
-                    cancelled = true;
+                    stopped = true;
                     break;
                 }
+            }
+            () = claim.superseded() => {
+                tracing::debug!(%xfer, name = %header.name, "a later stream takes the file over");
+                stopped = true;
+                break;
             }
             chunk = rx.chunk(CHUNK) => match chunk {
                 Ok(Some(bytes)) => {
@@ -285,8 +329,8 @@ async fn write(
     drop(tx);
     let written = writer.await.map_err(|e| XferError::Io(std::io::Error::other(e)))?;
     match written {
-        Err(_e) if cancelled => Ok(None),
-        other => other.map(Some),
+        Err(_e) if stopped => Ok(None),
+        other => other.map(|landed| Some(Got::Landed(landed, claim))),
     }
 }
 

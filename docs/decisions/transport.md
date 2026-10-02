@@ -1495,8 +1495,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     connection is closed, not only once its events say so.
   - Number: the next link's fetch leaves 5 to 7 ms after the link is up, most of it the sync
     of the partial it claims (`docs/MEASUREMENTS.md`, "a download across a relink").
-  - Uploads still end with their link: their tile and its typed paths live with the link's
-    events, which a relink starts over.
+  - Uploads go on the same way: the next entry.
   - Tests: `a_download_cut_by_a_lost_link_goes_on_over_the_next_link` (the scripted worker
     closes the link 1.5 MB into 4 MB; the next link's fetch claims the durable bytes of that
     version, and the file lands with the same BLAKE3 digest),
@@ -1505,6 +1504,74 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_download_resumes_what_the_client_holds_unless_the_file_changed` (the worker daemon),
     `a_fetch_goes_on_once_the_worker_is_back` (the File Provider domain against a real worker
     restarted on its port). Golden: `client_xfer_fetch_resumed`.
+- ✅ **An upload outlives its link** (2026-10-03, lane U2). A drop on a remote tile, files
+  pasted into a shell or a window, and the Files picker's uploads ended with `LinkClosed` when
+  the link went, and the UI dropped them from their tiles at once (`reset_remote`), though the
+  worker kept the partial file and its transfer.
+  - **On the line, like a download.** An upload follows its worker's `Line` from the first
+    link. When the link goes (its connection closed, or its control stream gone), it waits for
+    the next link, up to `RELINK_WAIT`, and goes on over it: it sends `Begin` again under the
+    same transfer, counting the files the worker has not said landed, and sends each of them.
+    A file a stream was opened for asks the worker what it holds (`Resume` → `Offset`) and
+    goes from there; one never started goes from 0. A relink costs no attempt.
+  - **The upload ends on the worker's word.** It used to end once its last stream was
+    acknowledged, with the `Finished` that the UI waits on still to come. A link lost in
+    between left the UI waiting with nobody to ask again. Now the task waits for `Finished`,
+    hearing the worker's `Done`s on whichever link it is on (`Table::track_upload`), and
+    skips a file the worker said landed. Its failure is said on the link it ended on
+    (`Uplink::events`), whose events the UI still reads.
+  - **The worker's transfer is the daemon's, not a connection's.** A `Begin` of a transfer in
+    flight keeps what it has (`Begun::Again`). One that finished is remembered (the last
+    `FINISHED_KEPT`, 64), so a client whose link went before the end reached it is told
+    `Finished` again (`Begun::Finished`), and a stream of a file that landed already is
+    drained and answered with its `Done` again rather than written twice. A restarted
+    worker that forgot a transfer finds where its entries went in the ledger of unfinished
+    entries (`Transfers::ledger_roots`), so a partial file resumes where it is, not again
+    in the drop directory because the entry's directory now exists. A `Resume` waits for its
+    transfer's `Begin`, which on the next link may still be asking the session for its
+    directory.
+  - **One writer per file.** The first link's stream can still be open on the worker when
+    the next link's stream of the same file arrives: the worker learns of a lost link only
+    at its idle timeout, and a shaper or a network change tells it nothing. The later stream
+    claims the file (`Transfers::claim`). The earlier one is told to stop, keeps what it
+    wrote, and lets go, and only then does the later one open the partial file at its
+    offset. The claim is held until a landing is recorded, so a stream that waited finds
+    the file landed rather than an empty partial. The latest claim wins.
+  - **The version travels with the claim, from this side.** Before sending a started file
+    again, the upload reads its size and modification time. A file that changed here while
+    the link was down goes again from its start, as the new version.
+  - **Only the transfer's failure ends it.** The worker reports a file it could not write as
+    `Failed` with the file's name, and it also cuts the stream. The upload sends a cut
+    stream again from what the worker holds and says it failed only once it gives up, so
+    neither the upload nor the UI ends on a named `Failed`. A `Failed` in answer to a
+    `Resume` answers that resume at once.
+  - **The UI keeps the upload.** While the worker is away the tile keeps its progress and
+    its cancel. The cancel reaches the upload through the remote it went by
+    (`Upload::via`): the line stops it, waiting or not, and the worker hears the cancel if a
+    link is up. On the next link the worker's `Finished` types the paths into the shell as
+    before. A shell that closed meanwhile is said in a notice rather than dropped silently.
+    An upload whose worker stays away for `RELINK_WAIT` ends with "the worker went away",
+    as its task has. A paste into a window waiting on files lets its keys go when the link
+    goes, rather than minutes later, and the files still reach the worker's pasteboard. The
+    drop of a drag ends with its link, since the drag on the worker ends with it.
+  - **The system's progress cancels through the line** too, so Finder's and the Live
+    Activity's cancel reach an upload waiting for its worker.
+  - Rejected: a fresh transfer per link, as a download does. A download names what it holds
+    in each fetch, so a new id costs nothing. An upload's id is where the worker keeps its
+    roots, its landed files and its count, and a new id would land a second copy in the
+    drop directory.
+  - Number: `docs/MEASUREMENTS.md`, "an upload across a relink".
+  - Tests: `an_upload_cut_by_a_lost_link_goes_on_over_the_next_link` (scripted worker: the
+    same transfer begun again, the resume asked, the rest from the worker's offset, the
+    same BLAKE3, and the end on `Finished`), `an_upload_waiting_for_its_worker_is_cancelled`
+    (`slopty-client`);
+    `a_transfer_begun_again_keeps_what_it_has_and_one_finished_is_told_again`,
+    `a_restart_finds_where_a_transfers_entries_went` and
+    `a_later_stream_of_a_file_takes_it_over` (`slopty-worker`);
+    `an_upload_goes_on_over_the_next_link_from_what_the_worker_holds` (the real client and
+    worker, the first link through a 4 MB/s shaper cut mid-file, the worker not told);
+    `an_upload_outlives_its_workers_link` (`slopty-ui` workspace: progress and cancel kept,
+    paths typed over the next link, the end after `RELINK_WAIT`).
 - ✅ **Wall-clock times are `WallMs`** (2026-09-28, audit finding 10). A newtype in
   `slopty-core` over milliseconds since the Unix epoch, serialized transparently so no golden
   moved. It covers every wall time on the wire: session starts, file modification times, agent

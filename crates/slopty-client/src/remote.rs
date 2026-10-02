@@ -11,9 +11,7 @@ use parking_lot::Mutex;
 use slopty_core::{WallMs, XferId};
 use slopty_net::{ClientMsg, Connection};
 use slopty_proto::transfer::{BulkHeader, ClipMsg, Dest, Purpose, RepRef, TunnelRefusal, XferMsg};
-use tokio::sync::mpsc;
 
-use crate::LinkEvent;
 use crate::clip::{ClipCache, Fetched, fits_inline};
 #[cfg(target_vendor = "apple")]
 use crate::dnd::out::{DragOuts, Shared};
@@ -24,10 +22,13 @@ use crate::xfer::{self, Line, Uplink, XferError};
 pub trait Remote: Send + Sync + std::fmt::Debug {
     /// Send `files` (files or directories here) to `dest` on the worker as transfer `xfer`.
     /// Returns at once; the worker's `Progress`, `Done` and `Finished` arrive on the link, and a
-    /// failure here as [`LinkEvent::XferFailed`].
+    /// failure here as [`crate::LinkEvent::XferFailed`]. A link that goes meanwhile does not end
+    /// it: it goes on over the worker's next link from what the worker holds
+    /// ([`crate::xfer::upload`]), and its end arrives there.
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest);
 
-    /// Stop transfer `xfer`; what the worker holds of it stays for a resume.
+    /// Stop transfer `xfer`, on whichever link it is by then or while it waits for one; what
+    /// the worker holds of it stays for a resume.
     fn cancel(&self, xfer: XferId);
 
     /// Bring the worker's `path` (a file, or a directory as its files) into the directory
@@ -83,7 +84,6 @@ pub struct LinkRemote {
     /// The worker's links in this process: a download follows them past this one.
     line: Arc<Line>,
     clips: Arc<ClipCache>,
-    events: mpsc::Sender<LinkEvent>,
     runtime: tokio::runtime::Handle,
     /// The link's port forwards, shared with its control reader; `None` when it forwards none.
     forwards: Option<Arc<Mutex<Forwards>>>,
@@ -93,22 +93,14 @@ pub struct LinkRemote {
 }
 
 impl LinkRemote {
-    /// The remote of a link: its uplink, its worker's line and its clipboard cache, where its
-    /// failures are reported, the runtime its tasks run on, its port forwards if it has any,
-    /// and the drags out its control reader tells.
+    /// The remote of a link: its uplink, its worker's line and its clipboard cache, the
+    /// runtime its tasks run on, its port forwards if it has any, and the drags out its control
+    /// reader tells.
     #[must_use]
-    #[cfg_attr(
-        target_vendor = "apple",
-        expect(
-            clippy::too_many_arguments,
-            reason = "a link's parts, gathered once where it starts"
-        )
-    )]
     pub const fn new(
         up: Uplink,
         line: Arc<Line>,
         clips: Arc<ClipCache>,
-        events: mpsc::Sender<LinkEvent>,
         runtime: tokio::runtime::Handle,
         forwards: Option<Arc<Mutex<Forwards>>>,
         #[cfg(target_vendor = "apple")] drag_outs: Arc<DragOuts>,
@@ -117,7 +109,6 @@ impl LinkRemote {
             up,
             line,
             clips,
-            events,
             runtime,
             forwards,
             #[cfg(target_vendor = "apple")]
@@ -132,13 +123,8 @@ impl LinkRemote {
 
 impl Remote for LinkRemote {
     fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest) {
-        let up = self.up.clone();
-        let events = self.events.clone();
-        self.runtime.spawn(async move {
-            if let Err(error) = xfer::upload(&up, xfer, &files, dest).await {
-                let _gone = events.send(LinkEvent::XferFailed { xfer, error }).await;
-            }
-        });
+        let (up, line) = (self.up.clone(), Arc::clone(&self.line));
+        self.runtime.spawn(async move { xfer::upload(&up, &line, xfer, &files, dest).await });
     }
 
     fn cancel(&self, xfer: XferId) {

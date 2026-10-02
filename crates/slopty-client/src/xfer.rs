@@ -7,14 +7,14 @@
 //! A download is the worker's bulk streams landing in a directory as `name.partial`, synced as
 //! they go, checked against the digest in the worker's [`XferMsg::Done`] and renamed when whole.
 //! A cut download fetches again, naming what it holds of each file and the version it is of,
-//! and each file resumes from there ([`download`]). A download outlives its link: when the link
+//! and each file resumes from there ([`download`]). Either outlives its link: when the link
 //! goes, it waits on its worker's [`Line`] for the next one and goes on over it, from what it
-//! holds.
+//! holds (a download) or what the worker holds (an upload).
 //!
 //! Either keeps running while the app is off screen, with the system's progress UI
 //! (`offscreen`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
@@ -28,6 +28,8 @@ use slopty_proto::transfer::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
+
+use crate::LinkEvent;
 
 mod offscreen;
 
@@ -70,8 +72,8 @@ pub enum XferError {
     /// Somebody cancelled it.
     #[error("cancelled")]
     Cancelled,
-    /// The link to the worker is gone, and for a download no other came within
-    /// [`RELINK_WAIT`].
+    /// The link to the worker is gone, and no other came within [`RELINK_WAIT`] (or, for the
+    /// drop of a drag, which ends with the link it was dragged over, none is waited for).
     #[error("the worker went away")]
     LinkClosed,
 }
@@ -181,14 +183,60 @@ struct Tables {
     /// Uploads waiting for the worker's [`XferMsg::Offset`], by transfer and file.
     offsets: HashMap<(XferId, String), oneshot::Sender<u64>>,
     /// Uploads that were cancelled; their tasks stop at the next chunk.
-    cancelled: std::collections::HashSet<XferId>,
+    cancelled: HashSet<XferId>,
     /// Uploads wait before their next chunk ([`Table::hold_uploads`]).
     held: bool,
     /// Download attempts being received, by the transfer each fetch named.
     downloads: HashMap<XferId, Attempt>,
-    /// Uploads being sent, shown off screen as the worker reports them received, of how many
-    /// bytes.
-    uploads: HashMap<XferId, (Arc<slopty_platform::continued::Work>, u64)>,
+    /// Uploads being sent on this link.
+    uploads: HashMap<XferId, Sent>,
+}
+
+/// An upload on a link: its work off screen, which the worker's reports of bytes received move,
+/// of how many bytes, and what the worker says of its files.
+#[derive(Debug)]
+struct Sent {
+    work: Arc<slopty_platform::continued::Work>,
+    total: u64,
+    sending: Arc<Sending>,
+}
+
+/// An upload across its links: which files a stream was opened for, which the worker said
+/// landed, and whether it said the transfer ended.
+#[derive(Debug, Default)]
+struct Sending {
+    state: Mutex<SendingState>,
+    /// Woken on each word of the worker's.
+    changed: Notify,
+}
+
+#[derive(Debug, Default)]
+struct SendingState {
+    started: HashSet<String>,
+    landed: HashSet<String>,
+    finished: bool,
+    failed: Option<String>,
+}
+
+impl Sending {
+    fn update(&self, change: impl FnOnce(&mut SendingState)) {
+        change(&mut self.state.lock());
+        self.changed.notify_waiters();
+    }
+
+    fn started(&self, name: &str) -> bool {
+        self.state.lock().started.contains(name)
+    }
+
+    fn landed(&self, name: &str) -> bool {
+        self.state.lock().landed.contains(name)
+    }
+
+    /// The worker said the transfer finished or failed: nothing more is sent.
+    fn over(&self) -> bool {
+        let state = self.state.lock();
+        state.finished || state.failed.is_some()
+    }
 }
 
 /// One fetch of a download: a first one, or a retry after a cut.
@@ -293,6 +341,21 @@ impl Table {
         self.unheld.notify_waiters();
     }
 
+    /// Upload `xfer` is on this link: the worker's word on it goes to `sent`.
+    fn track_upload(&self, xfer: XferId, sent: Sent) {
+        self.inner.lock().uploads.insert(xfer, sent);
+    }
+
+    /// Upload `xfer` left this link: it ended, or it goes on over the next.
+    fn untrack_upload(&self, xfer: XferId) {
+        self.inner.lock().uploads.remove(&xfer);
+    }
+
+    /// What the worker says of upload `xfer`, when it is on this link.
+    fn sending(&self, xfer: XferId) -> Option<Arc<Sending>> {
+        self.inner.lock().uploads.get(&xfer).map(|sent| Arc::clone(&sent.sending))
+    }
+
     /// Wait until `xfer` may send its next chunk: at once unless uploads are held, and an error
     /// once it is cancelled.
     async fn may_send(&self, xfer: XferId) -> Result<(), XferError> {
@@ -380,18 +443,52 @@ impl Table {
             }
             XferMsg::Done { xfer, name, hash, .. } => {
                 let mut inner = self.inner.lock();
-                let Some(d) = inner.downloads.get_mut(xfer) else { return false };
+                let Some(d) = inner.downloads.get_mut(xfer) else {
+                    drop(inner);
+                    if let Some(sending) = self.sending(*xfer) {
+                        sending.update(|s| {
+                            s.landed.insert(name.clone());
+                        });
+                    }
+                    return false;
+                };
                 d.digests.insert(name.clone(), *hash);
                 let fetch = Arc::clone(&d.fetch);
                 drop(inner);
                 fetch.changed.notify_waiters();
                 true
             }
-            XferMsg::Failed { xfer, error, .. } => {
-                self.fail_download(*xfer, XferError::Worker(error.clone()))
+            XferMsg::Finished { xfer, .. } => {
+                if let Some(sending) = self.sending(*xfer) {
+                    sending.update(|s| s.finished = true);
+                }
+                false
+            }
+            XferMsg::Failed { xfer, name, error } => {
+                if self.fail_download(*xfer, XferError::Worker(error.clone())) {
+                    return true;
+                }
+                // A file the worker could not write cuts its stream, which the upload sends again
+                // from what the worker holds and gives up on itself; only the whole transfer's
+                // failure ends it here.
+                match name {
+                    // Its answer to a resume, when it cannot say what it holds.
+                    Some(name) => drop(self.inner.lock().offsets.remove(&(*xfer, name.clone()))),
+                    None => {
+                        if let Some(sending) = self.sending(*xfer) {
+                            sending.update(|s| s.failed = Some(error.clone()));
+                        }
+                    }
+                }
+                false
             }
             XferMsg::Progress { xfer, done } => {
-                let shown = self.inner.lock().uploads.get(xfer).map(|(w, t)| (Arc::clone(w), *t));
+                let shown = self
+                    .inner
+                    .lock()
+                    .uploads
+                    .get(xfer)
+                    .map(|sent| (Arc::clone(&sent.work), sent.total));
                 if let Some((work, total)) = shown {
                     work.progress(*done, total);
                 }
@@ -454,9 +551,11 @@ pub struct Uplink {
     pub out: mpsc::Sender<ClientMsg>,
     /// The link's transfers.
     pub table: Arc<Table>,
+    /// The link's events, where an upload that fails on it says so.
+    pub events: mpsc::Sender<LinkEvent>,
 }
 
-/// How long a download whose link went waits for the next link to its worker.
+/// How long a transfer whose link went waits for the next link to its worker.
 ///
 /// Long enough for a network change, a Mac waking or the worker restarting for an update.
 /// Finder's progress and its cancel stay up meanwhile.
@@ -464,19 +563,19 @@ pub const RELINK_WAIT: Duration = Duration::from_mins(5);
 
 /// One worker's links in this process, one after another.
 ///
-/// It holds the link up now, which a download cut by a relink goes on over, and the downloads on
-/// it, which a cancel reaches on whichever link they are, or while they wait for one.
+/// It holds the link up now, which a transfer cut by a relink goes on over, and the transfers
+/// on it, which a cancel reaches on whichever link they are, or while they wait for one.
 ///
 /// Kept per worker for the process ([`Line::of`]), since whoever dials the next link (the app's
 /// redial, the File Provider's domain) knows nothing of the transfers the last one carried.
 #[derive(Debug)]
 pub struct Line {
     now: watch::Sender<Option<Uplink>>,
-    /// The downloads following the line, by the transfer each began as, with its stop.
+    /// The transfers following the line, by the transfer each began as, with its stop.
     following: Mutex<HashMap<XferId, watch::Sender<bool>>>,
 }
 
-/// The lines of this process, by worker. Weak: a line lives while a link or a download holds it.
+/// The lines of this process, by worker. Weak: a line lives while a link or a transfer holds it.
 static LINES: LazyLock<Mutex<HashMap<WorkerId, Weak<Line>>>> = LazyLock::new(Mutex::default);
 
 impl Line {
@@ -493,18 +592,25 @@ impl Line {
         line
     }
 
-    /// `up` is the link to the worker now: a download waiting for one goes on over it.
+    /// `up` is the link to the worker now: a transfer waiting for one goes on over it.
     pub fn linked(&self, up: Uplink) {
         self.now.send_replace(Some(up));
     }
 
-    /// Stop the download that began as `xfer`, on whichever link it is or while it waits for
-    /// one. `false` when none on this line did.
+    /// Stop the transfer that began as `xfer`, on whichever link it is or while it waits for
+    /// one. `false` when none on this line did, or it has ended.
     pub fn cancel(&self, xfer: XferId) -> bool {
         self.following.lock().get(&xfer).map(|stop| stop.send_replace(true)).is_some()
     }
 
-    /// Follow the download that begins as `xfer` until the guard drops.
+    /// Whether the transfer that began as `xfer` is still on this line: sending, fetching or
+    /// waiting for a link.
+    #[must_use]
+    pub fn carries(&self, xfer: XferId) -> bool {
+        self.following.lock().contains_key(&xfer)
+    }
+
+    /// Follow the transfer that begins as `xfer` until the guard drops.
     fn follow(self: &Arc<Self>, xfer: XferId) -> Following {
         let (tx, stop) = watch::channel(false);
         self.following.lock().insert(xfer, tx);
@@ -537,7 +643,7 @@ impl Line {
     }
 }
 
-/// A download on a [`Line`]: its stop, and its place in the line's list until it drops.
+/// A transfer on a [`Line`]: its stop, and its place in the line's list until it drops.
 struct Following {
     line: Arc<Line>,
     xfer: XferId,
@@ -557,49 +663,181 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
     }
 }
 
-/// Send `files` up as transfer `xfer`, to `dest`.
+/// Send `files` up as transfer `xfer`, to `dest`, until the worker says it finished.
 ///
-/// Every file is sent before this returns; the worker's `Done`, `Progress` and `Finished` arrive
-/// on the control stream. An error is the reason the transfer stopped, already reported to the
-/// worker as [`XferMsg::Failed`].
+/// The worker's `Done`, `Progress` and `Finished` arrive on the control stream, where the UI
+/// hears them too. A failure is reported to the worker as [`XferMsg::Failed`] and here as
+/// [`LinkEvent::XferFailed`], on the link it ended on.
 ///
 /// A file's bytes follow the last one's at once: up to 16 finished streams wait for
 /// the worker's acknowledgement together, where waiting on each would cost a round trip per
 /// file. A stream that fails is sent again from what the worker holds.
-pub async fn upload(
-    up: &Uplink,
+///
+/// A link that goes does not end it: it waits on `line` for the next link to the worker, up to
+/// [`RELINK_WAIT`], begins the transfer again there under the same id and sends each file the
+/// worker has not said landed, from what the worker holds of it. A local file that changed
+/// meanwhile is sent from its start. [`Line::cancel`] with `xfer` stops it, waiting or not. The
+/// drop of a drag ends with its link, since the drag on the worker does.
+pub async fn upload(up: &Uplink, line: &Arc<Line>, xfer: XferId, files: &[PathBuf], dest: Dest) {
+    let mut following = line.follow(xfer);
+    let (now, ended) = carry(up.clone(), line, &mut following.stop, xfer, files, dest).await;
+    if let Err(error) = ended {
+        let _gone = now.events.send(LinkEvent::XferFailed { xfer, error }).await;
+    }
+}
+
+/// An upload's sending, the first link `up`: the link it ended on, and how.
+async fn carry(
+    mut up: Uplink,
+    line: &Arc<Line>,
+    stop: &mut watch::Receiver<bool>,
     xfer: XferId,
     files: &[PathBuf],
     dest: Dest,
-) -> Result<(), XferError> {
+) -> (Uplink, Result<(), XferError>) {
     // The walk of a dropped tree is blocking I/O: off the runtime that carries the keystrokes.
     let walked = files.to_vec();
     let found = tokio::task::spawn_blocking(move || entries(&walked))
         .await
         .map_err(|e| XferError::local("the dropped files", std::io::Error::other(e)))
         .and_then(|walked| walked.map_err(|e| XferError::local("the dropped files", e)));
-    let list = match found {
+    let mut list = match found {
         Ok(list) => list,
         Err(error) => {
-            fail(up, xfer, None, &error).await;
-            return Err(error);
+            fail(&up, xfer, None, &error).await;
+            return (up, Err(error));
         }
     };
     let bytes = list.iter().fold(0_u64, |sum, e| sum.saturating_add(e.size));
     let count = u32::try_from(list.len()).unwrap_or(u32::MAX);
-    send(up, XferMsg::Begin { xfer, dest: Some(dest), files: count, bytes }).await?;
-    let shown = offscreen::upload(&up.table, &up.out, xfer, &list);
+    let shown = offscreen::upload(line, xfer, &list);
     shown.work().progress(0, bytes);
-    up.table.inner.lock().uploads.insert(xfer, (Arc::clone(shown.work()), bytes));
-    let sent = send_all(up, xfer, &list).await;
-    up.table.inner.lock().uploads.remove(&xfer);
-    shown.work().end(sent.is_ok());
-    if let Err((entry, error)) = &sent
-        && !up.table.cancelled(xfer)
-    {
-        fail(up, xfer, entry.map(|e| e.name.clone()), error).await;
+    let sending = Arc::new(Sending::default());
+    let mut relinked = false;
+    loop {
+        let sent =
+            Sent { work: Arc::clone(shown.work()), total: bytes, sending: Arc::clone(&sending) };
+        up.table.track_upload(xfer, sent);
+        let begin = Begin { xfer, dest: &dest, files: count, bytes, relinked };
+        let ran = tokio::select! {
+            ran = over_link(&up, &begin, &mut list, &sending) => ran,
+            () = stopped(stop) => Err((None, XferError::Cancelled)),
+        };
+        up.table.untrack_upload(xfer);
+        let (name, error) = match ran {
+            Ok(()) => {
+                shown.work().end(true);
+                return (up, Ok(()));
+            }
+            Err(failed) => failed,
+        };
+        if matches!(error, XferError::Cancelled) || *stop.borrow() || up.table.cancelled(xfer) {
+            // The streams stop here, and the worker hears it while the link is up.
+            up.table.cancel(xfer);
+            let _gone = up.out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer }));
+            shown.work().end(false);
+            return (up, Err(XferError::Cancelled));
+        }
+        let gone = up.conn.close_reason().is_some() || matches!(error, XferError::LinkClosed);
+        if gone && !matches!(dest, Dest::Drag(_)) {
+            tracing::info!(%xfer, %error, "upload's link went; waiting for the next");
+            match line.next_after(&up.conn, stop).await {
+                Ok(next) => {
+                    up = next;
+                    relinked = true;
+                    continue;
+                }
+                Err(error) => {
+                    shown.work().end(false);
+                    return (up, Err(error));
+                }
+            }
+        }
+        if !gone && !matches!(error, XferError::Worker(_)) {
+            fail(&up, xfer, name, &error).await;
+        }
+        shown.work().end(false);
+        return (up, Err(error));
     }
-    sent.map_err(|(_, error)| error)
+}
+
+/// How an upload begins on a link: on its first, with every file; on a later one, again under
+/// the same id, counting the files the worker has not said landed.
+struct Begin<'a> {
+    xfer: XferId,
+    dest: &'a Dest,
+    files: u32,
+    bytes: u64,
+    relinked: bool,
+}
+
+/// The upload over the link `up`, until the worker says it finished. A failure names the file
+/// it was about, when it was about one.
+async fn over_link(
+    up: &Uplink,
+    begin: &Begin<'_>,
+    list: &mut [Entry],
+    sending: &Sending,
+) -> Result<(), (Option<String>, XferError)> {
+    let Begin { xfer, dest, files, bytes, relinked } = *begin;
+    let files = if relinked {
+        let left = list.iter().filter(|e| !sending.landed(&e.name)).count();
+        u32::try_from(left).unwrap_or(u32::MAX)
+    } else {
+        files
+    };
+    let msg = XferMsg::Begin { xfer, dest: Some(dest.clone()), files, bytes };
+    send(up, msg).await.map_err(|e| (None, e))?;
+    if relinked {
+        changed_since(list, sending).await;
+    }
+    send_all(up, xfer, list, sending, relinked).await?;
+    finished(up, sending, list.len()).await.map_err(|e| (None, e))
+}
+
+/// Every started file that is no longer the version it was read as (its size or modification
+/// time changed here while the link was down) takes its new version and goes again from its
+/// start: what the worker holds of it is of the old one.
+async fn changed_since(list: &mut [Entry], sending: &Sending) {
+    for entry in list.iter_mut().filter(|e| sending.started(&e.name) && !sending.landed(&e.name)) {
+        let Ok(meta) = tokio::fs::metadata(&entry.path).await else { continue };
+        let mtime_ms = meta.modified().map_or(WallMs::ZERO, WallMs::of);
+        if (meta.len(), mtime_ms) != (entry.size, entry.mtime_ms) {
+            tracing::info!(name = %entry.name, "changed while its link was down; sent again whole");
+            (entry.size, entry.mtime_ms) = (meta.len(), mtime_ms);
+            sending.update(|s| {
+                s.started.remove(&entry.name);
+            });
+        }
+    }
+}
+
+/// Wait for the worker's `Finished`; its `Failed` ends the wait. Once every file is said to
+/// have landed, the end follows at once, so a worker that does not say it is not waited on
+/// past [`OFFSET_WAIT`].
+async fn finished(up: &Uplink, sending: &Sending, files: usize) -> Result<(), XferError> {
+    loop {
+        let changed = sending.changed.notified();
+        let mut changed = std::pin::pin!(changed);
+        changed.as_mut().enable();
+        let all = {
+            let state = sending.state.lock();
+            if state.finished {
+                return Ok(());
+            }
+            if let Some(failed) = &state.failed {
+                return Err(XferError::Worker(failed.clone()));
+            }
+            state.landed.len() >= files
+        };
+        tokio::select! {
+            () = changed => {}
+            _closed = up.conn.closed() => return Err(XferError::LinkClosed),
+            () = tokio::time::sleep(OFFSET_WAIT), if all => {
+                return Err(XferError::Unanswered("the end of the transfer"));
+            }
+        }
+    }
 }
 
 /// Finished streams waiting for the worker's acknowledgement at once.
@@ -609,20 +847,38 @@ const IN_FLIGHT: usize = 16;
 /// list, and whether the worker took every byte.
 type Acked = Option<Result<(usize, Result<(), XferError>), tokio::task::JoinError>>;
 
-/// Every file of `list`, the next one's bytes following the last's; the file that could not be
-/// sent and why.
-async fn send_all<'a>(
+/// Every file of `list` the worker has not said landed, the next one's bytes following the
+/// last's; the file that could not be sent and why. On a later link (`relinked`), a file a
+/// stream was opened for goes from what the worker holds of it.
+async fn send_all(
     up: &Uplink,
     xfer: XferId,
-    list: &'a [Entry],
-) -> Result<(), (Option<&'a Entry>, XferError)> {
+    list: &[Entry],
+    sending: &Sending,
+    relinked: bool,
+) -> Result<(), (Option<String>, XferError)> {
     let mut confirming = tokio::task::JoinSet::new();
     for (ix, entry) in list.iter().enumerate() {
-        match send_file(up, xfer, entry, 0).await {
+        if sending.over() {
+            break;
+        }
+        if sending.landed(&entry.name) {
+            continue;
+        }
+        let failed = |e| (Some(entry.name.clone()), e);
+        let offset = if relinked && sending.started(&entry.name) {
+            worker_holds(up, xfer, entry).await.map_err(failed)?
+        } else {
+            0
+        };
+        sending.update(|s| {
+            s.started.insert(entry.name.clone());
+        });
+        match send_file(up, xfer, entry, offset).await {
             Ok(acked) => {
                 confirming.spawn(async move { (ix, acked.await) });
             }
-            Err(error) => resume(up, xfer, entry, error).await.map_err(|e| (Some(entry), e))?,
+            Err(error) => resume(up, xfer, entry, error).await.map_err(failed)?,
         }
         while confirming.len() >= IN_FLIGHT {
             acknowledged(up, xfer, list, confirming.join_next().await).await?;
@@ -635,19 +891,19 @@ async fn send_all<'a>(
 }
 
 /// One acknowledgement: a file the worker stopped or lost is sent again from what it holds.
-async fn acknowledged<'a>(
+async fn acknowledged(
     up: &Uplink,
     xfer: XferId,
-    list: &'a [Entry],
+    list: &[Entry],
     done: Acked,
-) -> Result<(), (Option<&'a Entry>, XferError)> {
+) -> Result<(), (Option<String>, XferError)> {
     match done {
         None | Some(Ok((_, Ok(())))) => Ok(()),
         Some(Ok((ix, Err(error)))) => {
             let entry = list
                 .get(ix)
                 .ok_or_else(|| (None, XferError::Mismatch("a file out of the list".to_owned())))?;
-            resume(up, xfer, entry, error).await.map_err(|e| (Some(entry), e))
+            resume(up, xfer, entry, error).await.map_err(|e| (Some(entry.name.clone()), e))
         }
         Some(Err(e)) => Err((None, XferError::Cut(e.to_string()))),
     }
@@ -660,6 +916,21 @@ async fn send(up: &Uplink, msg: XferMsg) -> Result<(), XferError> {
 async fn fail(up: &Uplink, xfer: XferId, name: Option<String>, error: &XferError) {
     tracing::warn!(%xfer, ?name, %error, "upload failed");
     let _closed = send(up, XferMsg::Failed { xfer, name, error: error.to_string() }).await;
+}
+
+/// Bytes of `entry` the worker holds durably ([`XferMsg::Resume`] → [`XferMsg::Offset`]),
+/// at most its size.
+async fn worker_holds(up: &Uplink, xfer: XferId, entry: &Entry) -> Result<u64, XferError> {
+    let answer = up.table.wait_offset(xfer, entry.name.clone());
+    send(up, XferMsg::Resume { xfer, name: entry.name.clone() }).await?;
+    let answered = tokio::select! {
+        answered = tokio::time::timeout(OFFSET_WAIT, answer) => answered,
+        _closed = up.conn.closed() => return Err(XferError::LinkClosed),
+    };
+    Ok(answered
+        .map_err(|_elapsed| XferError::Unanswered("how much of the file it holds"))?
+        .map_err(|_failed| XferError::Worker(format!("{}: nothing to resume", entry.name)))?
+        .min(entry.size))
 }
 
 /// `entry` again after its stream failed with `error`, from what the worker holds, until it
@@ -676,17 +947,15 @@ async fn resume(
         if up.table.cancelled(xfer) {
             return Err(XferError::Cancelled);
         }
+        // A link that went: the upload goes on over the next one, not this one.
+        if up.conn.close_reason().is_some() {
+            return Err(XferError::LinkClosed);
+        }
         if !matches!(error, XferError::Cut(_)) {
             return Err(error);
         }
         tracing::debug!(%xfer, name = %entry.name, %error, "stream cut; resuming");
-        let answer = up.table.wait_offset(xfer, entry.name.clone());
-        send(up, XferMsg::Resume { xfer, name: entry.name.clone() }).await?;
-        let offset = tokio::time::timeout(OFFSET_WAIT, answer)
-            .await
-            .map_err(|_elapsed| XferError::Unanswered("how much of the file it holds"))?
-            .map_err(|_dropped| XferError::LinkClosed)?
-            .min(entry.size);
+        let offset = worker_holds(up, xfer, entry).await?;
         let sent = match send_file(up, xfer, entry, offset).await {
             Ok(acked) => acked.await,
             Err(e) => Err(e),
@@ -697,6 +966,30 @@ async fn resume(
         }
     }
     if up.table.cancelled(xfer) { Err(XferError::Cancelled) } else { Err(error) }
+}
+
+/// An upload's bulk stream until it is finished: one let go of before (a cancel, a file here
+/// that stopped reading, the upload's future dropped as it is stopped) is reset, so the worker
+/// never takes a stream cut short here for one that ended.
+struct Unfinished(Option<slopty_net::SendStream>);
+
+impl Unfinished {
+    fn stream(&mut self) -> Result<&mut slopty_net::SendStream, XferError> {
+        self.0.as_mut().ok_or_else(|| XferError::Cut("the stream was let go of".to_owned()))
+    }
+
+    /// The stream, to finish: no longer reset when it is let go of.
+    fn release(mut self) -> Result<slopty_net::SendStream, XferError> {
+        self.0.take().ok_or_else(|| XferError::Cut("the stream was let go of".to_owned()))
+    }
+}
+
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if let Some(stream) = &mut self.0 {
+            let _reset = stream.reset(0_u32.into());
+        }
+    }
 }
 
 /// Send `entry` from `offset` on a bulk stream of its own and finish it; what is returned
@@ -721,17 +1014,17 @@ async fn send_file(
     let mut file = tokio::fs::File::open(&entry.path).await.map_err(local)?;
     file.seek(std::io::SeekFrom::Start(offset)).await.map_err(local)?;
     let cut = |e: NetError| XferError::Cut(e.to_string());
-    let mut stream = slopty_net::streams::open_bulk(&up.conn, header).await.map_err(cut)?;
+    let opened = slopty_net::streams::open_bulk(&up.conn, header).await.map_err(cut)?;
+    let mut writing = Unfinished(Some(opened));
     let mut buf = vec![0_u8; CHUNK];
     loop {
-        if let Err(stopped) = up.table.may_send(xfer).await {
-            let _reset = stream.reset(0_u32.into());
-            return Err(stopped);
-        }
+        up.table.may_send(xfer).await?;
         let n = file.read(&mut buf).await.map_err(local)?;
         let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else { break };
+        let stream = writing.stream()?;
         stream.write_all(chunk).await.map_err(|e| XferError::Cut(e.to_string()))?;
     }
+    let mut stream = writing.release()?;
     stream.finish().map_err(|e| XferError::Cut(e.to_string()))?;
     // A stream the worker stopped after the last write surfaces here rather than in a write.
     Ok(async move {

@@ -340,14 +340,13 @@ impl WorkerLink {
         ));
 
         let xfers = Arc::clone(&table);
-        let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table };
+        let up = Uplink { conn: quic.clone(), out: out_tx.clone(), table, events: events_tx };
         let line = Line::of(ack.worker);
         line.linked(up.clone());
         let remote = Arc::new(LinkRemote::new(
             up.clone(),
             Arc::clone(&line),
             Arc::clone(&clips),
-            events_tx,
             tokio::runtime::Handle::current(),
             shared_forwards,
             #[cfg(target_vendor = "apple")]

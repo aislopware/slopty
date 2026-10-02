@@ -1,5 +1,6 @@
 //! The client's link against a scripted worker in-process, over UDP on loopback: an upload
-//! resumed after the worker cut its stream, a download and one resumed after a cut, a clipboard
+//! resumed after the worker cut its stream and one carried over to the next link, a download
+//! and one resumed after a cut, a clipboard
 //! representation fetched on paste, a port forwarded to a real local connection, and one port of
 //! the worker served by two clients on this machine at two local ports, and a dial the worker
 //! closes because the tailnet grants this device no client role.
@@ -136,6 +137,130 @@ mod tests {
         assert_eq!(header.offset, durable, "sent again from what the worker holds");
         held.extend_from_slice(&drain(&mut rx).await);
         assert!(held == content, "the file arrives whole across the cut");
+    }
+
+    /// The next `Begin` of `xfer` the client sends: where to, how many files and bytes.
+    async fn begun(client: &mut AcceptedClient, xfer: XferId) -> (Option<Dest>, u32, u64) {
+        expect(client, |m| match m {
+            ClientMsg::Xfer(XferMsg::Begin { xfer: x, dest, files, bytes }) if x == xfer => {
+                Some((dest, files, bytes))
+            }
+            _ => None,
+        })
+        .await
+    }
+
+    /// An upload whose link goes part way through a file waits for the next link to its worker,
+    /// begins again there under the same transfer, asks what the worker holds of the file it
+    /// was sending and sends the rest: the worker ends up with the file byte for byte. The
+    /// worker's word that it finished ends the upload, with no failure said.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_upload_cut_by_a_lost_link_goes_on_over_the_next_link() {
+        let worker = WorkerId::new();
+        let (mut client, link, _events) = pair_as(worker).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let content: Vec<u8> = (0..4_000_000_u32).map(|i| (i % 239) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+        let xfer = XferId::new();
+        let dest = Dest::Path("~/in".to_owned());
+        link.remote().upload(xfer, vec![path], dest.clone());
+        assert_eq!(begun(&mut client, xfer).await, (Some(dest.clone()), 1, 4_000_000));
+        let (header, mut rx) = bulk(&client).await;
+        assert_eq!((header.name.as_str(), header.offset), ("big.bin", 0));
+        let mut held = Vec::new();
+        while held.len() < 1_500_000 {
+            held.extend_from_slice(&rx.chunk(64 << 10).await.unwrap().unwrap());
+        }
+        // The worker goes away mid-file, as one restarting for an update does.
+        client.conn.close(0_u32.into(), b"restarting");
+        drop(rx);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let (mut client, _next, mut events) = pair_as(worker).await;
+        let linked = std::time::Instant::now();
+        assert_eq!(
+            begun(&mut client, xfer).await,
+            (Some(dest), 1, 4_000_000),
+            "begun again under the same transfer, its one file not yet landed"
+        );
+        let name = expect(&mut client, |m| match m {
+            ClientMsg::Xfer(XferMsg::Resume { xfer: x, name }) if x == xfer => Some(name),
+            _ => None,
+        })
+        .await;
+        assert_eq!(name, "big.bin");
+        let durable = held.len() as u64;
+        client.tx.send(&WorkerMsg::Xfer(XferMsg::Offset { xfer, name, durable })).await.unwrap();
+        let (header, mut rx) = bulk(&client).await;
+        println!("an upload's rest on the next link, from the link up: {:?}", linked.elapsed());
+        assert_eq!((header.xfer, header.offset), (xfer, durable), "from what the worker holds");
+        held.extend_from_slice(&drain(&mut rx).await);
+        assert_eq!(blake3::hash(&held), blake3::hash(&content), "the same bytes across the relink");
+
+        let path = "/w/in/big.bin".to_owned();
+        let landed = XferMsg::Done {
+            xfer,
+            name: "big.bin".to_owned(),
+            path: path.clone(),
+            hash: *blake3::hash(&content).as_bytes(),
+        };
+        client.tx.send(&WorkerMsg::Xfer(landed)).await.unwrap();
+        let finished = XferMsg::Finished { xfer, paths: vec![path] };
+        client.tx.send(&WorkerMsg::Xfer(finished)).await.unwrap();
+        tokio::time::timeout(WAIT, async {
+            while slopty_client::xfer::Line::of(worker).carries(xfer) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the upload ends on the worker's word");
+        let failed = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                if let Some(LinkEvent::XferFailed { xfer: x, error }) = events.recv().await
+                    && x == xfer
+                {
+                    return error;
+                }
+            }
+        })
+        .await;
+        assert!(failed.is_err(), "no failure said: {failed:?}");
+    }
+
+    /// A cancel while an upload waits for its worker ends it at once, said on the link it was
+    /// on, through that link's remote though the link is gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_upload_waiting_for_its_worker_is_cancelled() {
+        let worker = WorkerId::new();
+        let (mut client, link, mut events) = pair_as(worker).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, vec![5_u8; 2_000_000]).unwrap();
+        let xfer = XferId::new();
+        link.remote().upload(xfer, vec![path], Dest::Staging);
+        begun(&mut client, xfer).await;
+        let (_header, mut rx) = bulk(&client).await;
+        rx.chunk(64 << 10).await.unwrap().unwrap();
+        client.conn.close(0_u32.into(), b"gone");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(slopty_client::xfer::Line::of(worker).carries(xfer), "waiting for the worker");
+        let cancelled = std::time::Instant::now();
+        link.remote().cancel(xfer);
+        let error = tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(LinkEvent::XferFailed { xfer: x, error }) = events.recv().await
+                    && x == xfer
+                {
+                    return error;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(error, slopty_client::xfer::XferError::Cancelled), "{error:?}");
+        assert!(cancelled.elapsed() < Duration::from_secs(2), "at once: {:?}", cancelled.elapsed());
+        assert!(!slopty_client::xfer::Line::of(worker).carries(xfer), "it is on the line no more");
     }
 
     #[tokio::test(flavor = "multi_thread")]

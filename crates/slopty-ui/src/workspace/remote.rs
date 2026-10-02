@@ -12,7 +12,7 @@ use slopty_client::clip::{Answer, Fetched, Place, relay};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
-use slopty_client::xfer::paste_paths;
+use slopty_client::xfer::{RELINK_WAIT, paste_paths};
 use slopty_core::{SessionId, XferId};
 use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
@@ -69,6 +69,11 @@ pub struct Upload {
     pub attach: Option<(Target, u64)>,
     /// The drag from this device whose drop the files are, into its landing on the worker.
     pub drag: Option<DragId>,
+    /// The worker's remote it was sent through, which reaches it while the worker is away.
+    pub via: Option<Arc<dyn Remote>>,
+    /// Since when its worker is away, while it is; the upload waits for the next link
+    /// ([`RELINK_WAIT`]).
+    pub away_since: Option<std::time::Instant>,
 }
 
 impl Upload {
@@ -85,6 +90,8 @@ impl Upload {
             scratch: None,
             attach: None,
             drag: None,
+            via: None,
+            away_since: None,
         }
     }
 
@@ -101,6 +108,8 @@ impl Upload {
             scratch: None,
             attach: None,
             drag: None,
+            via: None,
+            away_since: None,
         }
     }
 
@@ -647,6 +656,7 @@ impl WorkspaceView {
         };
         let xfer = XferId::new();
         tracing::info!(%xfer, files = paths.len(), total = upload.total, "upload");
+        upload.via = Some(Arc::clone(&remote));
         self.uploads.insert(xfer, upload);
         remote.upload(xfer, paths.to_vec(), dest);
         cx.notify();
@@ -680,11 +690,11 @@ impl WorkspaceView {
         self.uploads.iter().find(|(_, u)| u.tile == tile).map(|(x, u)| (*x, u))
     }
 
-    /// Stop an upload; what the worker holds of it stays there.
+    /// Stop an upload, while its worker is away too; what the worker holds of it stays there.
     pub fn cancel_upload(&mut self, xfer: XferId, cx: &mut Context<Self>) {
         let Some(upload) = self.uploads.remove(&xfer) else { return };
         self.terminal_upload_failed(&upload, cx);
-        if let Some(remote) = self.remote(upload.tile.worker) {
+        if let Some(remote) = self.remote(upload.tile.worker).or_else(|| upload.via.clone()) {
             remote.cancel(xfer);
         }
         Self::upload_ended(upload, cx);
@@ -712,7 +722,13 @@ impl WorkspaceView {
                     Some(session) if let Some(view) = self.terminals.get(&session).cloned() => {
                         view.update(cx, |view, cx| view.files_landed(&paths, cx));
                     }
-                    Some(_) => {}
+                    // The shell closed while they went up (across a relink, say): said, so the
+                    // files are not lost track of.
+                    Some(_) => {
+                        let what = if paths.len() == 1 { "file" } else { "files" };
+                        let gone = "landed, but the shell they were for has closed";
+                        self.show_notice(format!("{} {what} {gone}", paths.len()), cx);
+                    }
                     None if let Some((composer, id)) = upload.attach.clone() => {
                         composer.landed(id, &paths, cx);
                     }
@@ -729,7 +745,10 @@ impl WorkspaceView {
                 Self::upload_ended(upload, cx);
                 cx.notify();
             }
-            XferMsg::Failed { xfer, error, .. } => self.xfer_failed(xfer, &error, cx),
+            // A file the worker could not write cuts its stream, which the upload sends again
+            // from what the worker holds; it says so here itself (`LinkEvent::XferFailed`) once
+            // it gives up. Only the whole transfer's failure ends it from the worker's word.
+            XferMsg::Failed { xfer, name: None, error } => self.xfer_failed(xfer, &error, cx),
             XferMsg::Cancel { xfer } => {
                 if let Some(upload) = self.uploads.remove(&xfer) {
                     self.terminal_upload_failed(&upload, cx);
@@ -737,7 +756,8 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
-            XferMsg::Begin { .. }
+            XferMsg::Failed { name: Some(_), .. }
+            | XferMsg::Begin { .. }
             | XferMsg::Resume { .. }
             | XferMsg::Offset { .. }
             | XferMsg::Done { .. }
@@ -925,8 +945,14 @@ impl WorkspaceView {
         self.drag_sink = Some(sink);
     }
 
-    /// A worker's link came up or went, as `workers` holds it now: its watch, its uploads and
-    /// its ports start over, and its clipboard promises fetch over the new link.
+    /// A worker's link came up or went, as `workers` holds it now: its watch and its ports
+    /// start over, and its clipboard promises fetch over the new link.
+    ///
+    /// Its uploads outlive the link: each goes on over the next one from what the worker holds
+    /// (`slopty_client::xfer::upload`), its progress and its cancel kept on its tile meanwhile.
+    /// A paste waiting on one lets its keys go now rather than minutes later (the files still
+    /// reach the worker's pasteboard), and the drop of a drag ends, as the drag on the worker
+    /// did. An upload whose worker stays away past [`RELINK_WAIT`] has ended on its link too.
     pub(super) fn reset_remote(
         &mut self,
         key: WorkerKey,
@@ -937,15 +963,53 @@ impl WorkspaceView {
         if let Some(clip) = &self.clip {
             clip.borrow_mut().relink(key, self.remote(key));
         }
-        let gone: Vec<XferId> =
-            self.uploads.iter().filter(|(_, u)| u.tile.worker == key).map(|(x, _)| *x).collect();
-        for xfer in gone {
+        let linked = self.remote(key).is_some();
+        let now = cx.background_executor().now();
+        let mut dragged = Vec::new();
+        let mut waiting = false;
+        for (xfer, upload) in self.uploads.iter_mut().filter(|(_, u)| u.tile.worker == key) {
+            if upload.drag.is_some() {
+                dragged.push(*xfer);
+                continue;
+            }
+            if let Some(view) = upload.paste.take() {
+                let _gone = view.update(cx, |v, _cx| v.release_paste());
+            }
+            upload.away_since = (!linked).then(|| upload.away_since.unwrap_or(now));
+            waiting |= !linked;
+        }
+        for xfer in dragged {
             if let Some(upload) = self.uploads.remove(&xfer) {
                 Self::upload_ended(upload, cx);
             }
         }
+        if waiting {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(RELINK_WAIT).await;
+                let _gone = this.update(cx, Self::end_outlived_uploads);
+            })
+            .detach();
+        }
         for session in sessions {
             self.ports.remove(session);
+        }
+    }
+
+    /// The uploads whose worker has been away for [`RELINK_WAIT`] end: no next link came for
+    /// them to go on over, and their tasks have given up.
+    fn end_outlived_uploads(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let outlived: Vec<XferId> = self
+            .uploads
+            .iter()
+            .filter(|(_, u)| {
+                u.away_since
+                    .is_some_and(|since| now.saturating_duration_since(since) >= RELINK_WAIT)
+            })
+            .map(|(xfer, _)| *xfer)
+            .collect();
+        for xfer in outlived {
+            self.xfer_failed(xfer, "the worker went away", cx);
         }
     }
 }

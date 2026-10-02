@@ -4128,6 +4128,89 @@ mod tests {
         worker.tx.send(&close).await.unwrap();
     }
 
+    /// An upload whose link goes part way through a file goes on over the next link to the
+    /// same worker from what the worker holds: the real client and the real worker, the first
+    /// link through a shaper slow enough that the cut lands mid-file. The worker's side of the
+    /// first link is not told (the shaper simply stops), so its stream is still open when the
+    /// next link's takes the file over. The file lands whole, digest for digest.
+    #[tokio::test]
+    async fn an_upload_goes_on_over_the_next_link_from_what_the_worker_holds() {
+        use std::sync::Arc;
+
+        use slopty_core::XferId;
+        use slopty_proto::transfer::{Dest, XferMsg};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, addr) = daemons(dir.path()).await;
+        let into = dir.path().join("in");
+        let big: Vec<u8> = (0..8_000_000_u32).map(|i| (i % 247) as u8).collect();
+        let local = dir.path().join("big.bin");
+        std::fs::write(&local, &big).unwrap();
+
+        let shaped =
+            slopty_shape::Link { rate: 4_000_000, queue: 256 << 10, ..slopty_shape::Link::CLEAR };
+        let relay = Arc::new(
+            slopty_shape::relay::Relay::bind(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                addr,
+                shaped,
+                1,
+            )
+            .await
+            .unwrap(),
+        );
+        let relayed = {
+            let relay = Arc::clone(&relay);
+            tokio::spawn(async move { relay.run().await })
+        };
+        let (_first_end, first) = dial(relay.addr().unwrap()).await;
+        let link = slopty_client::WorkerLink::start(first);
+        let xfer = XferId::new();
+        let dest = Dest::Path(into.to_string_lossy().into_owned());
+        link.remote().upload(xfer, vec![local], dest);
+        let partial = into.join("big.bin.partial");
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        while std::fs::metadata(&partial).map_or(0, |m| m.len()) < 1_000_000 {
+            assert!(tokio::time::Instant::now() < deadline, "the first bytes land");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        relayed.abort();
+        link.abandon("the network changed");
+        let cut = std::fs::metadata(&partial).map_or(0, |m| m.len());
+        assert!(cut < big.len() as u64, "cut mid-file, at {cut}");
+
+        let (_next_end, second) = dial(addr).await;
+        let linked = std::time::Instant::now();
+        let mut next = slopty_client::WorkerLink::start(second);
+        let mut events = next.events().unwrap();
+        let paths = tokio::time::timeout(STEP, async {
+            loop {
+                match events.recv().await.expect("the link's events") {
+                    LinkEvent::Control(WorkerMsg::Xfer(XferMsg::Finished { xfer: x, paths }))
+                        if x == xfer =>
+                    {
+                        return paths;
+                    }
+                    LinkEvent::XferFailed { xfer: x, error } if x == xfer => {
+                        panic!("the upload failed: {error}")
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the upload finishes over the next link");
+        println!(
+            "an upload cut at {cut} of {} B finished over the next link {:?} after it was up",
+            big.len(),
+            linked.elapsed()
+        );
+        let landed = into.join("big.bin");
+        assert_eq!(paths, [landed.to_string_lossy().into_owned()]);
+        assert_eq!(digest(&std::fs::read(&landed).unwrap()), digest(&big), "the same bytes");
+        assert!(!partial.exists());
+    }
+
     /// A fetched directory comes down as its files, each followed by the digest of all of it.
     /// A retry that holds part of a file gets the rest from there and a file it holds whole as
     /// an empty stream; a file that changed since comes again from the start.

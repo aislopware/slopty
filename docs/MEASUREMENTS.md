@@ -13786,6 +13786,28 @@ cargo test -p slopty-client --test remote_link -- \
   a_download_cut_by_a_lost_link_goes_on_over_the_next_link --nocapture
 ```
 
+## 2026-10-03 — an upload across a relink
+
+An upload whose link goes waits on its worker's line for the next link, begins again there
+under the same transfer, asks what the worker holds of the file it was sending and sends the rest
+(`docs/decisions/transport.md`, "An upload outlives its link"). From the next link being up to
+the worker's side accepting the stream of the rest, in the scripted worker's test (the link
+closed 1.5 MB into a 4 MB file), three runs: 0.50, 3.5 and 0.62 ms: one `Begin`, one
+`Resume` round trip and the stream's open. Nothing is synced on this side, unlike a download's
+claim; the worker syncs the partial it answers for.
+
+Against the real worker, the first link through a 4 MB/s shaper and cut 1.04 MB into an 8 MB
+file without the worker being told, the upload finished 88 and 85 ms (two runs) after the next
+link was up: the rest of the file over loopback, the earlier stream taken over, the landing and
+the worker's `Finished`.
+
+```sh
+cargo test -p slopty-client --test remote_link -- \
+  an_upload_cut_by_a_lost_link_goes_on_over_the_next_link --nocapture
+cargo test -p slopty-workerd --test e2e -- \
+  an_upload_goes_on_over_the_next_link_from_what_the_worker_holds --nocapture
+```
+
 ## 2026-10-03 — the app's deploy into a fresh guest, the Linux e2e's new cases, a Linux lane in CI
 
 On mac-studio (M1 Max, 10 cores, 32 GB) while other sessions built, every cargo command under

@@ -4,18 +4,16 @@
 //!
 //! The work begins where [`super::upload`] or [`super::download`] starts and ends where it
 //! returns, across every relink in between. A person cancelling it from the Live Activity or
-//! Finder cancels the transfer as the UI's cancel does: its tasks stop at their next chunk and
-//! the worker is told.
+//! Finder cancels the transfer as the UI's cancel does, through its worker's line, on whichever
+//! link it is by then or while it waits for one: its tasks stop and the worker is told while a
+//! link is up.
 
 use std::sync::{Arc, Weak};
 
 use slopty_core::XferId;
-use slopty_net::ClientMsg;
 use slopty_platform::continued::Work;
-use slopty_proto::transfer::XferMsg;
-use tokio::sync::mpsc;
 
-use super::{Entry, Table};
+use super::{Entry, Line};
 
 /// A transfer's work, ended as failed if the transfer's future is dropped before it ends it.
 #[derive(Debug)]
@@ -34,15 +32,10 @@ impl Drop for Offscreen {
     }
 }
 
-/// Begin the work of an upload of `list` as `xfer`.
-pub(super) fn upload(
-    table: &Arc<Table>,
-    out: &mpsc::Sender<ClientMsg>,
-    xfer: XferId,
-    list: &[Entry],
-) -> Offscreen {
+/// Begin the work of an upload of `list` as `xfer`, following `line`.
+pub(super) fn upload(line: &Arc<Line>, xfer: XferId, list: &[Entry]) -> Offscreen {
     let (title, subtitle) = upload_titles(list);
-    Offscreen(Arc::new(Work::begin(&title, &subtitle, None, cancel(table, out, xfer))))
+    Offscreen(Arc::new(Work::begin(&title, &subtitle, None, cancel(line, xfer))))
 }
 
 /// Begin the work of a download of `path`, shown on the file `shown_at` when it lands as one;
@@ -57,21 +50,13 @@ pub(super) fn download(
     Offscreen(Arc::new(Work::begin(&title, "From the worker", shown_at, cancel)))
 }
 
-/// Cancel upload `xfer`, as the UI's cancel does.
-fn cancel(
-    table: &Arc<Table>,
-    out: &mpsc::Sender<ClientMsg>,
-    xfer: XferId,
-) -> impl Fn() + Send + Sync + 'static {
-    let table: Weak<Table> = Arc::downgrade(table);
-    let out = out.clone();
+/// Cancel upload `xfer` on `line`, as the UI's cancel does.
+fn cancel(line: &Arc<Line>, xfer: XferId) -> impl Fn() + Send + Sync + 'static {
+    let line: Weak<Line> = Arc::downgrade(line);
     move || {
-        let Some(table) = table.upgrade() else { return };
+        let Some(line) = line.upgrade() else { return };
         tracing::info!(%xfer, "transfer cancelled from the system's progress");
-        table.cancel(xfer);
-        if let Err(e) = out.try_send(ClientMsg::Xfer(XferMsg::Cancel { xfer })) {
-            tracing::debug!(%xfer, error = %e, "cancel not sent");
-        }
+        line.cancel(xfer);
     }
 }
 
@@ -123,21 +108,17 @@ mod tests {
         assert_eq!(many, ("Uploading 4 files".to_owned(), "a, b and 2 more".to_owned()));
     }
 
-    /// Cancelling an upload from the system's progress stops it and tells the worker, as the
-    /// UI's cancel does; once the link's table is gone it does nothing.
+    /// Cancelling an upload from the system's progress stops it through its worker's line,
+    /// waiting for a link or not; once the line is gone it does nothing.
     #[test]
     fn a_cancel_from_the_system_stops_an_upload() {
-        let table = Arc::new(Table::default());
-        let (out, mut sent) = mpsc::channel(4);
+        let line = Line::of(slopty_core::WorkerId::new());
         let xfer = XferId::new();
-        let cancel = cancel(&table, &out, xfer);
+        let following = line.follow(xfer);
+        let cancel = cancel(&line, xfer);
         cancel();
-        assert!(table.cancelled(xfer));
-        assert!(
-            matches!(sent.try_recv(), Ok(ClientMsg::Xfer(XferMsg::Cancel { xfer: x })) if x == xfer)
-        );
-        drop(table);
+        assert!(*following.stop.borrow(), "the upload is told to stop");
+        drop((following, line));
         cancel();
-        assert!(sent.try_recv().is_err(), "nothing once the link is gone");
     }
 }
