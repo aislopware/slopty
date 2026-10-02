@@ -11,10 +11,12 @@ use slopty_proto::input::{KeyAction, KeyCode, Mods};
 use slopty_proto::screen::{DisplayKey, ScreenInput, VideoCodec, VirtualDisplay};
 
 use super::*;
+use crate::workspace::actions::ToggleOwnWindow;
 use crate::workspace::desktop::{
     BACK_TO_PHYSICAL, Chord, KeyPort, ONLY_CHORDS, OPEN_SIZED, SEND_SYSTEM_KEYS, TYPE_CLIPBOARD,
     Taking,
 };
+use crate::workspace::popout::PopOutView;
 
 /// `target` streams as `stream` on `fake`'s worker, `width` × `height`.
 fn opened(
@@ -413,4 +415,31 @@ fn a_notice_says_when_only_the_chord_list_goes(cx: &mut TestAppContext) {
     assert_eq!(armed.borrow().as_slice(), [true]);
     let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some(ONLY_CHORDS));
+}
+
+/// A remote window shown in a window of its own takes the system's shortcuts while that
+/// window has the keyboard, as it does in its tile, and lets them be the moment it gives the
+/// keyboard up, though the workspace's window draws nothing meanwhile.
+#[gpui::test]
+fn a_window_of_its_own_takes_the_shortcuts_while_it_is_in_front(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (_tile, armed) = armed_window(&view, cx, Keys::default());
+    assert_eq!(armed.borrow().as_slice(), [true]);
+    view.update_in(cx, |v, window, cx| v.toggle_own_window(&ToggleOwnWindow, window, cx));
+    cx.run_until_parked();
+    let popped = cx
+        .update(|_, cx| cx.windows())
+        .iter()
+        .find_map(gpui::AnyWindowHandle::downcast::<PopOutView>)
+        .expect("the tile's own window");
+    popped.update(cx, |_, window, _| window.activate_window()).expect("open");
+    cx.run_until_parked();
+    let active = popped.update(cx, |_, window, _| window.is_window_active()).expect("open");
+    assert!(active, "its own window is in front");
+    assert_eq!(armed.borrow().last(), Some(&true), "taken there: {:?}", armed.borrow());
+
+    // Another app comes to the front: nothing of Slopty's is the key window.
+    VisualTestContext::from_window(popped.into(), cx).deactivate_window();
+    cx.run_until_parked();
+    assert_eq!(armed.borrow().last(), Some(&false), "let be with it: {:?}", armed.borrow());
 }

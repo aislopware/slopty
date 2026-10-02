@@ -274,6 +274,9 @@ impl WorkspaceView {
         } else if self.popouts.active == Some(item) {
             self.popouts.active = None;
         }
+        // The system's shortcuts follow the keyboard into the window and out of it now: the
+        // workspace's own window, inactive, may draw no frame to arm them from.
+        self.rearm_system_keys(cx);
         cx.notify();
     }
 

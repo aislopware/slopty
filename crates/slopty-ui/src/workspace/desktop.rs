@@ -147,6 +147,9 @@ pub(super) struct Desktop {
     tapping: Option<Task<()>>,
     /// The tap takes chords now.
     armed: bool,
+    /// The workspace's window is the key window with a remote picture holding its keyboard, as
+    /// its last frame or its activation found.
+    in_main: bool,
     /// Disarms the tap the moment the workspace's window stops being the key window, rather than
     /// at its next frame, which an inactive window may never draw.
     deactivated: Option<gpui::Subscription>,
@@ -166,6 +169,7 @@ impl Default for Desktop {
             keys,
             tapping: None,
             armed: false,
+            in_main: false,
             deactivated: None,
             refocus: None,
         }
@@ -362,12 +366,27 @@ impl WorkspaceView {
             });
             self.desktop.deactivated = Some(observed);
         }
-        let armed = window.is_window_active()
-            && self.palette.is_none()
-            && self.active_screen().is_some_and(|view| {
-                let view = view.read(cx);
-                view.system_keys() && view.focus_handle(cx).is_focused(window)
-            });
+        self.desktop.in_main = window.is_window_active()
+            && self
+                .active_screen()
+                .is_some_and(|view| view.read(cx).focus_handle(cx).is_focused(window));
+        self.rearm_system_keys(cx);
+    }
+
+    /// Arm the tap for whichever window has the remote picture's keyboard: the workspace's, as
+    /// [`Self::arm_system_keys`] last found it, or the tile's own window while that is the key
+    /// window ([`super::popout`]), which holds nothing but the picture. Called as either
+    /// window's activation changes, since an inactive window may draw no frame to call it from.
+    pub(super) fn rearm_system_keys(&mut self, cx: &mut Context<Self>) {
+        if self.desktop.tapping.is_none() {
+            return;
+        }
+        let wants = self.active_screen().is_some_and(|view| view.read(cx).system_keys());
+        let in_own = self
+            .popouts
+            .active()
+            .is_some_and(|item| self.focused().is_some_and(|tile| tile.item == item));
+        let armed = wants && self.palette.is_none() && (self.desktop.in_main || in_own);
         if armed == self.desktop.armed {
             return;
         }
