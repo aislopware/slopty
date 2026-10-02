@@ -1578,44 +1578,8 @@ impl WorkspaceView {
         }
     }
 
-    /// Focus asked for since the last frame, now that there is a window to give it in.
-    ///
-    /// Given here, so the views drawn after this one show it in this frame. GPUI builds again
-    /// the views whose answer to a focus question changed, asking each question again before a
-    /// frame, but asks for no frame when the focus moves while the window draws, as here: a view
-    /// replayed in this frame would keep the old focus (a field without its caret). So when
-    /// focus was asked for, the next frame is asked for by notifying the strip, whose tiles the
-    /// focus moves between. Whether it moved is not read: reading the focus as a whole here
-    /// would build the workspace again on every focus move anywhere.
-    ///
-    /// `given` says a face or a board already took the keyboard in this frame.
-    fn apply_pending_focus(&mut self, given: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let asked = given || self.focus_asked();
-        self.give_pending_focus(window, cx);
-        if asked {
-            let strip = self.strip_host.entity_id();
-            window.defer(cx, move |_window, cx| App::notify(cx, strip));
-        }
-    }
-
-    /// Whether [`Self::give_pending_focus`] has any focus to give in this frame; a find and a
-    /// menu's run take theirs after it, when a focus move asks for its own frame.
-    const fn focus_asked(&self) -> bool {
-        self.pending_focus.is_some()
-            || self.pending_focus_picker
-            || self.pending_focus_self
-            || self.pending_focus_palette
-            || self.pending_focus_rename
-            || (self.rename.is_none() && self.rename_return.is_some())
-            || (self.palette.is_none() && self.palette_return.is_some())
-            || self.search.focus_asked()
-            || self.pending_focus_note.is_some()
-            || self.pending_focus_file.is_some()
-            || self.pending_focus_folder.is_some()
-            || self.pending_focus_review.is_some()
-    }
-
-    /// [`Self::apply_pending_focus`]'s work.
+    /// Focus asked for since the last frame, now that there is a window to give it in. Given
+    /// here, so the views drawn after this one show it in this frame.
     fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pending_focus.take() {
             // A tile showing its project's board takes the keyboard in the board, one showing
@@ -1736,10 +1700,12 @@ impl gpui::Render for WorkspaceView {
             self.reconcile_browsers(cx);
             self.reconcile_reviews();
         }
-        let face_focused = std::mem::take(&mut self.faces_dirty) && self.sync_faces(window, cx);
+        if std::mem::take(&mut self.faces_dirty) {
+            self.sync_faces(window, cx);
+        }
         self.settle_reviews(cx);
-        let board_focused = self.sync_projects(window, cx);
-        self.apply_pending_focus(face_focused || board_focused, window, cx);
+        self.sync_projects(window, cx);
+        self.give_pending_focus(window, cx);
         // One clock for everything this frame draws: the bar's column marks and the strip,
         // which the strip's own view builds from the layout as it stands now.
         if self.advance(window) {

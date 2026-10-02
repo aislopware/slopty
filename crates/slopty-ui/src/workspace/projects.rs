@@ -398,11 +398,9 @@ impl WorkspaceView {
     /// Bring the boards in step, once a frame after a change: make the board a tile shows,
     /// hand every board what it shows now, drop the boards of projects gone, and give the
     /// keyboard to a board just turned to.
-    ///
-    /// Returns whether it gave a board the keyboard.
-    pub(super) fn sync_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn sync_projects(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !std::mem::take(&mut self.projects.dirty) {
-            return false;
+            return;
         }
         // A board goes with its project; while its project lives it keeps its lens and row.
         let live = &self.projects.mirror;
@@ -411,7 +409,7 @@ impl WorkspaceView {
         self.look_at_boards(cx);
         if self.projects.shown.is_empty() {
             self.projects.focus.clear();
-            return false;
+            return;
         }
         let tiled: HashSet<SessionId> = self
             .layout
@@ -479,14 +477,11 @@ impl WorkspaceView {
             };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
-        let mut gave = false;
         for project in std::mem::take(&mut self.projects.focus) {
             if let Some(view) = self.projects.views.get(&project).cloned() {
                 view.update(cx, |v, cx| v.focus(window, cx));
-                gave = true;
             }
         }
-        gave
     }
 
     /// The boards on show now against those at the last hand-over: a board that hid read its

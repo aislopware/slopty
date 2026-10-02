@@ -484,7 +484,7 @@ impl WorkspaceView {
 
     /// Make the thread view of each thread tile, and let go of those whose tile is gone. A view
     /// made for the focused tile takes the keyboard.
-    fn sync_thread_items(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn sync_thread_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tiled: Vec<(ItemId, WorkerKey, ThreadId)> = self
             .layout
             .tiles()
@@ -511,11 +511,9 @@ impl WorkspaceView {
         let items = &threads.items;
         threads.item_asks.retain(|item, _| items.contains_key(item));
         let focus = threads.focus_item.take().and_then(|item| threads.items.get(&item)).cloned();
-        let gave = focus.is_some();
         if let Some(view) = focus {
             view.update(cx, |v, cx| v.focus(window, cx));
         }
-        gave
     }
 
     /// The thread tile `item` took the focus: its view takes the keyboard in the next frame,
@@ -710,8 +708,7 @@ impl WorkspaceView {
     /// Bring faces in step with the tiles, once a frame: make the face a tile shows, follow
     /// what shows and unfollow what no longer does (hidden, its tile closed, its agent gone,
     /// its link new).
-    /// Returns whether it gave a face the keyboard.
-    pub(super) fn sync_faces(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    pub(super) fn sync_faces(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.restore_faces();
         let tiled: HashSet<SessionId> = self
             .layout
@@ -735,7 +732,7 @@ impl WorkspaceView {
             }
         }
         self.sync_thread_faces(&wanted, window, cx);
-        let mut gave = self.sync_thread_items(window, cx);
+        self.sync_thread_items(window, cx);
         // Unfollow what no longer shows; a link that changed lost its follow already.
         let followed: Vec<(SessionId, ClientId)> =
             self.faces.following.iter().map(|(s, c)| (*s, *c)).collect();
@@ -821,13 +818,10 @@ impl WorkspaceView {
             }
             if let Some(view) = self.faces.threads.views.get(&session) {
                 view.clone().update(cx, |v, cx| v.focus(window, cx));
-                gave = true;
             } else if let Some(view) = self.faces.views.get(&session) {
                 view.clone().update(cx, |v, cx| v.focus(window, cx));
-                gave = true;
             }
         }
-        gave
     }
 
     fn make_face(&mut self, session: SessionId, window: &mut Window, cx: &mut Context<Self>) {

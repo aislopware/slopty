@@ -27,13 +27,6 @@ pub(super) struct Surface {
     focus_pending: bool,
 }
 
-impl Surface {
-    /// Whether [`WorkspaceView::settle_search_focus`] has any focus to give.
-    pub(super) const fn focus_asked(&self) -> bool {
-        self.focus_pending || (!self.shown && self.back_to.is_some())
-    }
-}
-
 /// The palette's name for [`super::actions::SearchInFiles`].
 pub(super) const SEARCH_IN_FILES: &str = "Search in files";
 

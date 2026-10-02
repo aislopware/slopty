@@ -4113,18 +4113,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     which bodies are laid out by). A shell the keyboard leaves for its header's rename field
     asks for its focus in its input handler, so the fork builds it again without the handler
     and the typed name goes to the field (`a_tile_is_named_from_its_header`). The workspace
-    notifies the strip for the next frame only when it gave focus that was asked for
-    (`focus_asked`), since the fork asks for no frame when the focus moves while a window
-    draws and a view replayed in that frame would keep the old focus. Whether the focus moved
-    is not read.
+    gives the focus asked for as it draws and reads nothing back: whether the focus moved is
+    not read.
   - **Cost.** The keyboard moved by a view of its own (a click in a body, a find bar giving it
     back) over 60 shells and 60 notes: 0.28–0.33 ms p50 to 0.13–0.14 ms, and the workspace and
     strip built for none of 420 moves, against every one before (`docs/MEASUREMENTS.md`). A
     move the workspace asks for is unchanged (1.07–1.13 ms to 1.02–1.07 ms): the layout moves
     with it, which builds both anyway.
-  - **Left for the fork.** A focus given while the window draws could ask for its own frame
-    (`Window::draw` compares the focus only across its focus listeners); then the strip's
-    notify goes too.
+  - **The fork shows a focus given while drawing** (amended 2026-10-03, gpui-fast PR #17,
+    pin `448d3dac`). A focus move made while a frame draws asks the focus questions again, so
+    the views still to be drawn in that frame show it, and the window asks for one more frame
+    when the focus ended a frame elsewhere than it began, which builds those laid out before
+    the move. The workspace's notify of the strip after giving focus went with the plumbing
+    that fed it (`focus_asked`, and the faces' and boards' "gave the keyboard" answers).
   - **No frame of motion draws the chrome** (2026-10-03). A frame that changed which tiles
     were on screen still told the status bar to draw in the next, for a count of agents at
     work off screen the bar stopped showing long ago (`7ecf8ad7`). The layout's springs run
