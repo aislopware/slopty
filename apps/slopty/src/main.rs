@@ -35,6 +35,9 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 /// The application menu. Items name the same actions the key bindings do, so the shortcuts
 /// shown next to them come from the keymap in effect whenever the menu is built.
 ///
+/// The File menu opens and saves what the palette does, by the same actions: Save is the file
+/// tile's own, so it is greyed unless a file has the keyboard.
+///
 /// The Edit menu names the text fields' own actions (gpui-kit's), which every field answers:
 /// the editors, the composer and the settings' search, and the terminal as its own. Cut, Copy,
 /// Paste and Select All also go down the responder chain as AppKit's selectors, so a web
@@ -42,13 +45,14 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 fn menus() -> Vec<Menu> {
     use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
     use slopty_app::{Minimize, OpenHelp, ShowWindow, Zoom};
+    use slopty_ui::file::SaveFile;
     use slopty_ui::terminal::{Find, FindNext, FindPrev};
     use slopty_ui::workspace::{
         AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
         FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FontLarger, FontReset, FontSmaller,
         FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveDown, MoveUp,
-        NewAgent, NewNote, NewTerminal, NextAttention, OpenPalette, ToggleMute, ToggleOverview,
-        ToggleStats, ToggleTabbed, UndoClose,
+        NewAgent, NewNote, NewTerminal, NextAttention, OpenFile, OpenFolder, OpenPalette, OpenUrl,
+        SaveCopy, ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed, UndoClose,
     };
     vec![
         Menu::new("Slopty").items([
@@ -69,6 +73,13 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("New Agent", NewAgent),
             MenuItem::action("New Note", NewNote),
             MenuItem::action("Add Window…", AddWindow),
+            MenuItem::separator(),
+            MenuItem::action("Open File…", OpenFile),
+            MenuItem::action("Open Folder…", OpenFolder),
+            MenuItem::action("Open URL…", OpenUrl),
+            MenuItem::separator(),
+            MenuItem::action("Save", SaveFile),
+            MenuItem::action("Save a Copy…", SaveCopy),
             MenuItem::separator(),
             MenuItem::action("Close Tile", CloseItem),
             MenuItem::action("Undo Close", UndoClose),
@@ -195,4 +206,43 @@ pub fn main() -> Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use slopty_ui::palette::PaletteRun;
+
+    use super::*;
+
+    /// The File menu opens a file, a folder and a page, and saves, by the very actions the
+    /// palette's lines run, so the menu and the palette never drift apart.
+    #[test]
+    fn the_file_menu_opens_and_saves_as_the_palette_does() {
+        let menus = menus();
+        let file = menus.iter().find(|m| m.name == "File").expect("a File menu");
+        let actions: Vec<&dyn gpui::Action> = file
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                MenuItem::Action { action, .. } => Some(action.as_ref()),
+                _ => None,
+            })
+            .collect();
+        let palette = slopty_ui::workspace::palette_items();
+        let labels = [
+            "Open file…",
+            "Open folder…",
+            "Open URL…",
+            "Save file",
+            slopty_ui::workspace::SAVE_A_COPY,
+        ];
+        for label in labels {
+            let line = palette.iter().find(|l| l.label == label).expect(label);
+            let PaletteRun::Action(wanted) = &line.run else { panic!("{label} runs an action") };
+            assert!(
+                actions.iter().any(|a| a.partial_eq(wanted.as_ref())),
+                "the File menu runs {label}"
+            );
+        }
+    }
 }
