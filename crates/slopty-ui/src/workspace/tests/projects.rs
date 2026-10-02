@@ -1153,7 +1153,7 @@ fn a_next_step_is_said_to_the_task_s_agent(cx: &mut TestAppContext) {
     click(cx, "project-row-fix-ci-1");
     let verbs = sent(&mut queue, cx, done);
     let [Verb::TaskTell { project, task, text }] = verbs.as_slice() else { panic!("{verbs:?}") };
-    assert_eq!((project, *task), (&fixtures::id("board"), TaskId(1)));
+    assert_eq!((project, *task), (&fixtures::id("board"), Some(TaskId(1))));
     assert!(text.starts_with("Fix CI. `cargo gate` failed on your work at 9c1e2f3"), "{text}");
     let notice = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(notice.as_deref(), Some("Asked #1's agent to fix CI"));
@@ -1166,7 +1166,10 @@ fn a_next_step_is_said_to_the_task_s_agent(cx: &mut TestAppContext) {
     assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))));
     cx.dispatch_action(FixCi);
     let verbs = sent(&mut queue, cx, done);
-    assert!(matches!(verbs.as_slice(), [Verb::TaskTell { task: TaskId(1), .. }]), "{verbs:?}");
+    assert!(
+        matches!(verbs.as_slice(), [Verb::TaskTell { task: Some(TaskId(1)), .. }]),
+        "{verbs:?}"
+    );
 }
 
 /// A card whose work is on its way draws its pipeline under it, one chip a stage, and says
@@ -1212,11 +1215,70 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     let b = board(&view, cx, orchestrator);
     b.update(cx, |b, cx| b.show(Lens::Board, cx));
     cx.run_until_parked();
-    for part in ["project-card-1-branch", "project-card-1-pull", "project-card-1-todos"] {
+    for part in [
+        "project-card-1-branch",
+        "project-card-1-pull",
+        "project-card-1-checks",
+        "project-card-1-todos",
+    ] {
         assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
     }
     assert!(cx.debug_bounds("project-card-2-branch").is_none(), "nothing on its way yet");
     let said = labels(&view, cx);
-    assert!(said.iter().any(|l| l == "PR #42, 2 of 6 checks running"), "{said:?}");
+    assert!(said.iter().any(|l| l == "2 of 6 checks running"), "{said:?}");
     assert!(said.iter().any(|l| l == "1 to-do open"), "{said:?}");
+}
+
+/// The board's foot is a line to the orchestrator: `c` puts the keyboard on it, a letter typed
+/// there is a letter and not the board's key, and Enter sends the person's words as
+/// `TaskTell` with no task, clearing the line. Words the server refuses come back on it, and
+/// Escape gives the board its keys back.
+#[gpui::test]
+fn the_board_talks_to_its_orchestrator(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (_, agent) = setup.agent;
+    let worker = fixtures_worker(&view, cx, orchestrator);
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let finished = on(card(1, "Wire the board", TaskState::Done, None), worker, agent);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", finished, None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-composer").is_some(), "the line is drawn");
+    let b = board(&view, cx, orchestrator);
+    let line = |cx: &mut VisualTestContext| b.read_with(cx, ProjectView::composing);
+
+    cx.simulate_keystrokes("c");
+    cx.simulate_input("merge #1 after the golden lands");
+    assert_eq!(line(cx).as_deref(), Some("merge #1 after the golden lands"));
+    assert!(sent(&mut queue, cx, done).is_empty(), "no letter was the board's key");
+    cx.simulate_keystrokes("enter");
+    let verbs = sent(&mut queue, cx, done);
+    let [Verb::TaskTell { project, task: None, text }] = verbs.as_slice() else {
+        panic!("{verbs:?}")
+    };
+    assert_eq!(
+        (project, text.as_str()),
+        (&fixtures::id("board"), "merge #1 after the golden lands")
+    );
+    assert_eq!(line(cx).as_deref(), Some(""), "the line is cleared");
+
+    cx.simulate_input("Split it in two");
+    cx.simulate_keystrokes("enter");
+    let refused = |_: &Verb| Outcome::Error {
+        code: slopty_proto::orchestration::ErrorCode::Invalid,
+        message: "board has no orchestrator running to hear it".to_owned(),
+    };
+    assert_eq!(sent(&mut queue, cx, refused).len(), 1);
+    assert_eq!(line(cx).as_deref(), Some("Split it in two"), "refused words come back");
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some("board has no orchestrator running to hear it"));
+
+    cx.simulate_keystrokes("escape 3");
+    let lens = b.read_with(cx, |b, _| b.lens());
+    assert_eq!(lens, Lens::Timeline, "the board has its keys back");
 }

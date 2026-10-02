@@ -770,16 +770,17 @@ pub enum Verb {
         /// This worker, over the proposal's and the task's placement.
         pin: Option<WorkerId>,
     },
-    /// Tell a task's agent something, as the person: their own words, which reach the agent
-    /// through its hooks as reports do, never typed into its terminal. The board's next steps
-    /// (fix CI, address the review's comments, resolve conflicts) are said this way. Answered
-    /// with [`Outcome::Done`]; a task with no agent running is [`ErrorCode::Invalid`], and an
-    /// agent is [`ErrorCode::Forbidden`].
+    /// Tell a task's agent, or the project's orchestrator, something as the person: their own
+    /// words, which reach the agent through its hooks as reports do (its inbox wakes it when
+    /// idle), never typed into its terminal. The board's next steps (fix CI, address the
+    /// review's comments, resolve conflicts) and its line to the orchestrator are said this
+    /// way. Answered with [`Outcome::Done`]; a node with no agent running is
+    /// [`ErrorCode::Invalid`], and an agent is [`ErrorCode::Forbidden`].
     TaskTell {
         /// In which project.
         project: ProjectId,
-        /// Which.
-        task: TaskId,
+        /// Which task's agent; the orchestrator when absent.
+        task: Option<TaskId>,
         /// What the person says, at most [`crate::project::NOTE_MAX`] bytes.
         text: String,
     },

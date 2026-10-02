@@ -261,8 +261,13 @@ pub struct TaskView<'a> {
     worktree: Option<&'a str>,
     base: Option<&'a str>,
     pr: Option<PrView<'a>>,
+    /// Its pull request's own checks, as its forge last said.
+    checks: Option<ChecksView<'a>>,
     verified: Option<VerifiedView<'a>>,
     reviewed: Option<ReviewedView<'a>>,
+    /// Its time at work, as on its card.
+    active_ms: u64,
+    at_work_since_ms: Option<WallMs>,
     /// Its start is proposed and waits for the person, who starts it from the board.
     proposed: bool,
     created_ms: WallMs,
@@ -286,8 +291,14 @@ pub struct CardView<'a> {
     branch: Option<&'a str>,
     worktree: Option<&'a str>,
     pr: Option<PrView<'a>>,
+    /// Its pull request's own checks, as its forge last said.
+    checks: Option<ChecksView<'a>>,
     verified: Option<VerifiedView<'a>>,
     reviewed: Option<ReviewedView<'a>>,
+    /// Its time at work, idle waits left out: the stretches that ended, and when the one under
+    /// way began.
+    active_ms: u64,
+    at_work_since_ms: Option<WallMs>,
     /// Its start is proposed and waits for the person.
     proposed: bool,
     natives: NativeCounts,
@@ -313,8 +324,11 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         branch: t.branch.as_deref(),
         worktree: t.worktree.as_deref(),
         pr: t.pr.as_ref().map(pr),
+        checks: t.checks.as_ref().map(checks),
         verified: t.verified.as_ref().map(verified),
         reviewed: t.reviewed.as_ref().map(reviewed),
+        active_ms: t.spent.active_ms,
+        at_work_since_ms: t.spent.since_ms,
         proposed: t.proposed.is_some(),
         natives: t.natives,
         created_ms: t.created_ms,
@@ -359,8 +373,11 @@ pub fn task(t: &Task) -> TaskView<'_> {
         worktree: t.worktree.as_deref(),
         base: t.base.as_deref(),
         pr: t.pr.as_ref().map(pr),
+        checks: t.checks.as_ref().map(checks),
         verified: t.verified.as_ref().map(verified),
         reviewed: t.reviewed.as_ref().map(reviewed),
+        active_ms: t.spent.active_ms,
+        at_work_since_ms: t.spent.since_ms,
         proposed: t.proposal.is_some(),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
@@ -438,6 +455,39 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
             ("delivered", format!("{reports} report(s) handed to its agent"))
         }
         Moment::Step(step) => ("step", step_text(step)),
+    }
+}
+
+/// A pull request's own checks, for JSON.
+#[derive(Debug, Serialize)]
+pub struct ChecksView<'a> {
+    /// `none`, `pending`, `passing` or `failing`.
+    state: &'static str,
+    passed: u16,
+    failed: u16,
+    pending: u16,
+    skipped: u16,
+    /// The first failing checks, by name.
+    failing: &'a [String],
+    at_ms: WallMs,
+}
+
+fn checks(c: &slopty_proto::project::Checks) -> ChecksView<'_> {
+    use slopty_proto::project::ChecksState;
+    let state = match c.state {
+        ChecksState::None => "none",
+        ChecksState::Pending => "pending",
+        ChecksState::Passing => "passing",
+        ChecksState::Failing => "failing",
+    };
+    ChecksView {
+        state,
+        passed: c.passed,
+        failed: c.failed,
+        pending: c.pending,
+        skipped: c.skipped,
+        failing: &c.failing,
+        at_ms: c.at_ms,
     }
 }
 
@@ -775,6 +825,9 @@ pub fn node_text(n: &NodeDetail) -> String {
         }
         if let Some(base) = &t.base {
             let _infallible = writeln!(out, "base {base}");
+        }
+        if let (Some(pr), Some(checks)) = (&t.pr, &t.checks) {
+            let _infallible = writeln!(out, "PR #{}: {}", pr.number, checks_text(checks));
         }
     }
     natives_text(&mut out, &n.natives, 1);

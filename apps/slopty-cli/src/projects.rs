@@ -110,6 +110,15 @@ pub enum ProjectCmd {
         #[arg(long)]
         metadata: Option<String>,
     },
+    /// Tell a project's orchestrator something, as the person: the words reach it through its
+    /// hooks, and wake it when it is idle.
+    Tell {
+        /// The project.
+        project: String,
+        /// What to say.
+        #[arg(required = true, num_args = 1..)]
+        words: Vec<String>,
+    },
     /// Let a project go: its tasks, queue and timeline. The terminals that worked in it stay.
     Delete {
         /// The project.
@@ -502,6 +511,11 @@ pub async fn project(
             };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
+        }
+        ProjectCmd::Tell { project, words } => {
+            ops::orchestrator_tell(link, &project, words.join(" "), key).await?;
+            println!("Told {project}'s orchestrator");
+            Ok(())
         }
         ProjectCmd::Delete { project } => {
             ops::project_delete(link, &project, key).await?;

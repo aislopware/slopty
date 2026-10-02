@@ -65,6 +65,8 @@ gpui::actions!(
         ShowTerminal,
         /// Let the project go: its tasks, its queue, its timeline.
         DeleteProject,
+        /// Put the keyboard on the line to the orchestrator.
+        TellOrchestrator,
         /// Make a project of the focused terminal's directory, with that terminal as its
         /// orchestrator.
         StartProject,
@@ -90,6 +92,7 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
         Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
+        Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
         Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
         Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
         Command::new(Scope::Project, "start_task", StartTask, &["s"], BOARD),
@@ -130,6 +133,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Show the machines", IconName::Server, Box::new(ShowMachines)),
         line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
         line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
+        line("Tell the orchestrator\u{2026}", IconName::MessageSquare, Box::new(TellOrchestrator)),
         line("Delete the project", IconName::X, Box::new(DeleteProject)),
     ]
 }

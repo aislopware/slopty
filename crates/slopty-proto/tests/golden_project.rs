@@ -487,7 +487,7 @@ mod golden_project {
             "task_tell",
             &request(Verb::TaskTell {
                 project: project_id(),
-                task: TaskId(3),
+                task: Some(TaskId(3)),
                 text: "Resolve the conflicts with main, then report done again.".to_owned(),
             }),
         );

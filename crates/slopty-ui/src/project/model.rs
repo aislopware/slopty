@@ -29,29 +29,29 @@ use slopty_proto::project::{
 pub fn pull_words(card: &TaskCard) -> Option<(String, bool)> {
     let pr = card.pr.as_ref()?;
     let asked = pr.review == Some(Review::ChangesRequested);
-    let (checks, failing) = card.checks.as_ref().map_or((None, false), checks_words);
+    let checks = card.checks.as_ref().and_then(checks_words);
     let mut words = format!("PR #{}", pr.number);
-    if let Some(checks) = checks {
+    if let Some((checks, _)) = &checks {
         words.push_str(", ");
-        words.push_str(&checks);
+        words.push_str(checks);
     }
     if asked {
         words.push_str(", changes requested");
     }
+    let failing = checks.is_some_and(|(_, failing)| failing);
     Some((words, failing || asked))
 }
 
-/// A pull request's checks as its row says them, in neutral words, and whether one failed.
-fn checks_words(checks: &Checks) -> (Option<String>, bool) {
+/// A pull request's checks as its row says them, in neutral words, and whether one failed;
+/// none when it has none.
+fn checks_words(checks: &Checks) -> Option<(String, bool)> {
     let all = checks.passed.saturating_add(checks.failed).saturating_add(checks.pending);
-    match checks.state {
-        ChecksState::None => (None, false),
-        ChecksState::Pending => {
-            (Some(format!("{} of {all} checks running", checks.pending)), false)
-        }
-        ChecksState::Passing => (Some("checks pass".to_owned()), false),
-        ChecksState::Failing => (Some(format!("{} of {all} checks fail", checks.failed)), true),
-    }
+    Some(match checks.state {
+        ChecksState::None => return None,
+        ChecksState::Pending => (format!("{} of {all} checks running", checks.pending), false),
+        ChecksState::Passing => ("checks pass".to_owned(), false),
+        ChecksState::Failing => (format!("{} of {all} checks fail", checks.failed), true),
+    })
 }
 
 /// How many of a review's findings the person's "Address comments" names; the agent reads
@@ -295,8 +295,12 @@ pub enum StageKind {
     Reviewer,
     /// The merge queue.
     Queue,
-    /// The pull request and its own checks.
+    /// The pull request.
     Pull,
+    /// Its own checks, as its forge says them.
+    Checks,
+    /// Its review on the forge, when it asks for changes.
+    PullReview,
     /// The agent's own task list.
     ToDos,
 }
@@ -311,6 +315,8 @@ impl StageKind {
             Self::Reviewer => "reviewer",
             Self::Queue => "queue",
             Self::Pull => "pull",
+            Self::Checks => "checks",
+            Self::PullReview => "pull-review",
             Self::ToDos => "todos",
         }
     }
@@ -913,8 +919,16 @@ impl Board {
         } else if let Some((place, _)) = self.queue_place(task) {
             out.push(stage(StageKind::Queue, queue_words(place), false));
         }
-        if let Some((words, holds)) = pull_words(card) {
-            out.push(stage(StageKind::Pull, words, holds));
+        // The pull request, its checks and its review apart, so a narrow lane wraps them
+        // rather than cutting one long chip.
+        if let Some(pr) = &card.pr {
+            out.push(stage(StageKind::Pull, format!("PR #{}", pr.number), false));
+            if let Some((words, failing)) = card.checks.as_ref().and_then(checks_words) {
+                out.push(stage(StageKind::Checks, words, failing));
+            }
+            if pr.review == Some(Review::ChangesRequested) {
+                out.push(stage(StageKind::PullReview, "Changes requested".to_owned(), true));
+            }
         }
         match self.open_todos(task) {
             0 => {}

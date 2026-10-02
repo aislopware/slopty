@@ -53,7 +53,7 @@ enum By {
     /// The server: standing instructions when the task is absent, or a notice about the task
     /// (its verifier failed, it merged), read as they are.
     Server,
-    /// The person, to the task's own agent: their words, which go at once.
+    /// The person, to the node's own agent: their words, which go at once and are all kept.
     Person,
 }
 
@@ -184,9 +184,16 @@ impl Deliveries {
         self.push(node, Item { task: Some(task), report, at, by: By::Server });
     }
 
-    /// The person's `words` to the agent of `task` itself: they go at once, replace what the
-    /// person said before that has not been read, and stand beside the server's notices.
-    pub(crate) fn person(&mut self, project: ProjectId, task: TaskId, words: &str, at: Instant) {
+    /// The person's `words` to the agent of `task` itself, or to the orchestrator when it is
+    /// absent: they go at once, after what the person said before that has not been read, and
+    /// stand beside the server's notices.
+    pub(crate) fn person(
+        &mut self,
+        project: ProjectId,
+        task: Option<TaskId>,
+        words: &str,
+        at: Instant,
+    ) {
         let note = plain(words);
         let report = Report {
             kind: ReportKind::NeedsInput,
@@ -195,7 +202,7 @@ impl Deliveries {
             branch: None,
             pr: None,
         };
-        self.push((project, Some(task)), Item { task: Some(task), report, at, by: By::Person });
+        self.push((project, task), Item { task, report, at, by: By::Person });
     }
 
     fn push(&mut self, node: Node, item: Item) {
@@ -203,8 +210,10 @@ impl Deliveries {
         let (task, kind) = (item.task, item.report.kind);
         queue.waiting.retain(|i| {
             let settles = matches!(i.report.kind, ReportKind::Checkpoint | ReportKind::Done);
+            // Every word the person says is kept: a second message is not a newer first.
             let replaced = match item.by {
-                By::Server | By::Person => i.by == item.by,
+                By::Person => false,
+                By::Server => i.by == item.by,
                 By::Agent => {
                     i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind))
                 }

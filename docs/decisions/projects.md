@@ -1348,8 +1348,9 @@ Tests:
   - its branch;
   - what the verifier and the reviewer said;
   - its place in the queue;
-  - "PR #n" with its checks in words ("1 of 6 checks fail", "2 of 6 checks running", "checks
-    pass") and "changes requested";
+  - "PR #n", its checks in words ("1 of 6 checks fail", "2 of 6 checks running", "checks
+    pass") and "Changes requested", each a chip of its own so a narrow lane wraps them rather
+    than cutting one long chip;
   - the to-dos still open.
 
   The chips use neutral text. A stage that holds the merge back is drawn in the stronger ink,
@@ -1357,6 +1358,15 @@ Tests:
   until someone has to act. The stage that the card's own check block already says, with its
   detail, is left off the row, and the card's meta line drops what the row says. A tree row
   says the pull request with its checks in its meta line.
+- **Agents see it too.** `project_status` and `task_get` carry each task's `checks` (state,
+  counts, failing names) and its time at work (`active_ms`, `at_work_since_ms`), so an
+  orchestrator reads the same pipeline the person does. `slopty task get` prints the checks
+  in a line.
+- A card's buttons (Fix CI, Merge, Retry, ...) sit on a line of their own at its foot: a lane
+  is too narrow for a title and two buttons, and the title was cut to a word.
+- While agents work, the tree and the board move their time on every 10 s, so a readout
+  that crosses a minute is never more than a moment late. Before, it moved once a minute and
+  could be a minute behind.
 - **To-dos block merge.** Claude Code's own task list is the agent's word for what is left.
   The merge queue gives back work whose list still has items open, naming up to five of them,
   before it rebases anything. The board hides Merge while they are open and shows "N to-dos
@@ -1369,6 +1379,33 @@ Tests:
     `open_to_dos_keep_work_from_merging` (`slopty-server`, through a worker's link);
   - `a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge` (`slopty-ui::project`);
   - `a_card_draws_its_pipeline_once_its_work_is_on_its_way` (`slopty-ui::workspace`).
+
+## The board talks to the orchestrator (2026-10-02)
+
+**The board's foot is a line to the orchestrator.** ✅ 2026-10-02
+- Before: the board took the orchestrator's place in its tile, so directing it meant turning
+  the tile back to the terminal and losing the board. The person mostly directs and watches,
+  so the two belong together.
+- Now every board with an orchestrator ends in one line ("Tell the orchestrator what to do
+  next"). `c`, or the palette's "Tell the orchestrator…", puts the keyboard on it, and Escape
+  gives the board its keys back. Enter sends the words and clears the line.
+- The words go as `TaskTell` with no task: the server logs `Moment::Told` on the project's
+  timeline and hands them to the orchestrator through its hooks, as it hands it reports. Its
+  inbox wakes it when it is idle. Nothing is typed into its terminal, so a prompt the person
+  has half-written in the TUI is left alone, and the words are on the timeline for anyone
+  following the project.
+- A board whose orchestrator is not running is refused in the server's words, and the words
+  go back on the line unless the person has started another.
+- The person's words are now all kept on their way. Before, a second message to a task's
+  agent replaced the first one still unread. That fitted a next-step button pressed twice,
+  but not a line the person writes on.
+- The board's bare keys (`m`, `r`, `1`, ...) hold only while the board has the keyboard. The
+  line sits beside the board's key context, not inside it, so a letter typed on the line is a
+  letter.
+- `slopty project tell <project> <words>` does the same from a shell.
+- Tests: `the_person_s_words_go_at_once_beside_the_server_s` (`slopty-server::deliver`, now
+  with the orchestrator's node) and `the_board_talks_to_its_orchestrator`
+  (`slopty-ui::workspace`).
 
 ## Phases
 

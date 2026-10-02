@@ -13,11 +13,12 @@ use std::sync::Arc;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, Context, Div, ElementId, EventEmitter, FocusHandle, Focusable,
-    FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Task,
-    Window, div, px, relative,
+    AnyElement, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, div, px, relative,
 };
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
@@ -36,7 +37,8 @@ use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_l
 use super::{
     AddressComments, ApproveTask, DeleteProject, FixCi, Lens, MergeTask, OpenNode,
     ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard, ShowMachines,
-    ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, ToggleAskToStart, TogglePush,
+    ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, TellOrchestrator,
+    ToggleAskToStart, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
@@ -85,6 +87,10 @@ const INDENT: f32 = 16.0;
 const ARRIVE: f32 = 4.0;
 /// How often the timeline's ages move on: they say minutes at the finest.
 const AGE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
+/// How often the tree and the board move their time at work on while agents work: often
+/// enough that a minute's readout is never more than a moment late, sums of several stretches
+/// included, which cross their minutes at no one stretch's.
+const AT_WORK_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 /// The most facts a row's or a card's second line holds: two separators.
 const META_PARTS: usize = 3;
 /// The progress bar's height, at zoom 1.
@@ -117,6 +123,8 @@ pub enum ProjectEvent {
     Pin(TaskId, RunOn),
     /// Close the "Run on" picker.
     CloseRunOn,
+    /// Tell the orchestrator this, as the person.
+    Tell(String),
     /// Start every task whose start is proposed.
     StartAll,
     /// Hold each task's start for the person, or let the orchestrator start them.
@@ -124,6 +132,11 @@ pub enum ProjectEvent {
     /// The person read the recap: close it.
     CloseRecap,
 }
+
+/// What the line to the orchestrator says while it is empty.
+const COMPOSE_PLACEHOLDER: &str = "Tell the orchestrator what to do next";
+/// What it is called to a screen reader.
+const COMPOSE_LABEL: &str = "Tell the orchestrator";
 
 /// How long a first "Delete the project" waits for the second that does it.
 const DELETE_CONFIRM: std::time::Duration = std::time::Duration::from_secs(5);
@@ -233,6 +246,11 @@ pub struct ProjectView {
     tick: Option<(Lens, Task<()>)>,
     /// When "Delete the project" was asked once, waiting for the second ask that does it.
     delete_asked: Option<std::time::Instant>,
+    /// The line to the orchestrator, made with the first frame (it needs the window), and
+    /// what watches it.
+    composer: Option<(Entity<InputState>, [Subscription; 2])>,
+    /// Words the server refused, to put back on the line once it is empty.
+    refused: Option<String>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -273,6 +291,8 @@ impl ProjectView {
             plate: Plate::default(),
             tick: None,
             delete_asked: None,
+            composer: None,
+            refused: None,
             #[cfg(test)]
             renders: 0,
         }
@@ -372,7 +392,7 @@ impl ProjectView {
         let every = match self.lens {
             Lens::Timeline => AGE_TICK,
             Lens::Machines => MACHINES_TICK,
-            Lens::Tree | Lens::Board if at_work => AGE_TICK,
+            Lens::Tree | Lens::Board if at_work => AT_WORK_TICK,
             Lens::Tree | Lens::Board => {
                 self.tick = None;
                 return;
@@ -2036,8 +2056,7 @@ impl ProjectView {
                             .text_ellipsis()
                             .text_color(hsla(s.text))
                             .child(SharedString::from(card.title.clone())),
-                    )
-                    .children(self.actions(board, card.id, "project-card", cx)),
+                    ),
             )
             .children((!meta.is_empty()).then(|| {
                 div()
@@ -2057,13 +2076,94 @@ impl ProjectView {
                     .text_size(self.z(theme.typography.meta()))
                     .text_color(hsla(lane_tone(theme, lane)))
                     .child(SharedString::from(why))
-            }));
+            }))
+            // Last, on a line of their own: a lane is too narrow for a title and its buttons.
+            .children(
+                self.actions(board, card.id, "project-card", cx)
+                    .map(|actions| actions.pt(self.z(sp.xxs))),
+            );
         let el = tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
             this.picked = Some(Pick::Node(node));
             cx.emit(ProjectEvent::Open(node));
             cx.notify();
         }));
         crate::kit::slide_fade(el, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
+    }
+
+    /// Make the line to the orchestrator once there is a window, and put refused words back
+    /// on it while it is empty.
+    fn composer_in(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(COMPOSE_PLACEHOLDER));
+            let sending = cx.subscribe_in(&input, window, |this, _input, event, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.send_composed(window, cx);
+                }
+            });
+            let watching = cx.observe(&input, |_, _, cx| cx.notify());
+            self.composer = Some((input, [sending, watching]));
+        }
+        if let Some(text) = self.refused.take()
+            && let Some((input, _)) = &self.composer
+        {
+            input.update(cx, |input, cx| {
+                if input.value().trim().is_empty() {
+                    input.set_value(text, window, cx);
+                }
+            });
+        }
+    }
+
+    /// The keyboard goes to the line to the orchestrator.
+    fn compose(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((input, _)) = &self.composer {
+            input.update(cx, |input, cx| input.focus(window, cx));
+        }
+    }
+
+    /// Send what is on the line to the orchestrator, and clear it: the timeline shows it once
+    /// the server has it.
+    fn send_composed(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((input, _)) = &self.composer else { return };
+        let text = input.read(cx).value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        input.update(cx, |input, cx| input.set_value("", window, cx));
+        cx.emit(ProjectEvent::Tell(text));
+    }
+
+    /// The server refused `text`: it goes back on the line, unless the person has started
+    /// another.
+    pub fn refused(&mut self, text: String, cx: &mut Context<Self>) {
+        self.refused = Some(text);
+        cx.notify();
+    }
+
+    /// What is on the line to the orchestrator now.
+    #[must_use]
+    pub fn composing(&self, cx: &gpui::App) -> Option<String> {
+        self.composer.as_ref().map(|(input, _)| input.read(cx).value().to_string())
+    }
+
+    /// The line at the board's foot that talks to the orchestrator, while it has one.
+    fn composer_row(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
+        board.project.orchestrator?;
+        let (input, _) = self.composer.as_ref()?;
+        let sp = self.theme.spacing;
+        let row = div()
+            .id("project-composer")
+            .debug_selector(|| "project-composer".to_owned())
+            .flex_none()
+            .px(self.z(sp.inset() - sp.xs))
+            .pt(self.z(sp.xs))
+            .pb(self.z(sp.sm))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| {
+                window.focus(&this.focus, cx);
+                cx.notify();
+            }))
+            .child(Input::new(input).aria_label(COMPOSE_LABEL));
+        Some(row)
     }
 
     /// A task's way to its target on one row of quiet chips, a stage holding the merge back in
@@ -2637,21 +2737,20 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
 }
 
 impl Render for ProjectView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
         {
             self.renders = self.renders.saturating_add(1);
         }
         self.keep_time(cx);
+        self.composer_in(window, cx);
         let theme = &self.theme;
-        let root = div()
-            .id("project")
-            .debug_selector(|| "project".to_owned())
+        // The board's bare keys hold only while the board has the keyboard: the line to the
+        // orchestrator is beside them, so a letter typed there is a letter.
+        let keys = div()
+            .id("project-keys")
             .key_context(CTX)
             .track_focus(&self.focus)
-            .role(Role::Group)
-            .aria_label(SharedString::from(format!("Project {}", self.id)))
-            .aria_value(SharedString::from(self.summary()))
             .on_action(cx.listener(|this, _: &SelectNext, _w, cx| this.select_by(1, cx)))
             .on_action(cx.listener(|this, _: &SelectPrevious, _w, cx| this.select_by(-1, cx)))
             .on_action(cx.listener(|this, _: &OpenNode, _w, cx| this.open_picked(cx)))
@@ -2690,6 +2789,20 @@ impl Render for ProjectView {
                 cx.emit(ProjectEvent::Open(None));
             }))
             .on_action(cx.listener(|this, _: &DeleteProject, _w, cx| this.delete(cx)))
+            .on_action(cx.listener(|this, _: &TellOrchestrator, window, cx| {
+                this.compose(window, cx);
+            }))
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .overflow_hidden();
+        let root = div()
+            .id("project")
+            .debug_selector(|| "project".to_owned())
+            .role(Role::Group)
+            .aria_label(SharedString::from(format!("Project {}", self.id)))
+            .aria_value(SharedString::from(self.summary()))
             .size_full()
             .flex()
             .flex_col()
@@ -2698,8 +2811,9 @@ impl Render for ProjectView {
             .text_size(self.z(theme.typography.ui_size))
             .text_color(hsla(theme.surfaces.text));
         let Some(board) = self.seen.board.clone() else {
-            return root
-                .child(self.empty(PROJECT_GONE, "Its tasks and agents are as they were left."));
+            return root.child(
+                keys.child(self.empty(PROJECT_GONE, "Its tasks and agents are as they were left.")),
+            );
         };
         let body = match self.lens {
             Lens::Tree => self.tree(&board, cx),
@@ -2707,7 +2821,9 @@ impl Render for ProjectView {
             Lens::Timeline => self.timeline(&board, cx),
             Lens::Machines => self.machines(&board, cx),
         };
-        root.child(self.header(&board, cx))
+        let composer = self.composer_row(&board, cx);
+        let keys = keys
+            .child(self.header(&board, cx))
             .children(self.recap(&board, cx))
             .children(self.needs_you(&board, cx))
             .children(self.plan(&board, cx))
@@ -2730,6 +2846,7 @@ impl Render for ProjectView {
                             .pb(self.z(theme.spacing.md))
                             .children(body),
                     ),
-            )
+            );
+        root.child(keys).children(composer)
     }
 }

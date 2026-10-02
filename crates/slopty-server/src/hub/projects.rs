@@ -1000,7 +1000,7 @@ impl Hub {
                 state.projects.claim(&project, id, &paths, now).map(|(t, u)| (task(t), u))
             }
             Verb::TaskTell { project, task: id, text } => {
-                state.projects.tell(&project, id, &text, now).map(|(words, u)| {
+                state.projects.tell(&project, id, &text, &terminals, now).map(|(words, u)| {
                     told = Some((project, id, words));
                     (Outcome::Done, u)
                 })

@@ -846,7 +846,8 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
             (StageKind::Verifier, "Verified".to_owned(), false),
             (StageKind::Reviewer, "Approved".to_owned(), false),
             (StageKind::Queue, "2nd to merge".to_owned(), false),
-            (StageKind::Pull, "PR #42, 1 of 6 checks fail".to_owned(), true),
+            (StageKind::Pull, "PR #42".to_owned(), false),
+            (StageKind::Checks, "1 of 6 checks fail".to_owned(), true),
         ]
     );
     let todo = (StageKind::ToDos, "2 to-dos open".to_owned(), true);

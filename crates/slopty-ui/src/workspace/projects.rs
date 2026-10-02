@@ -549,6 +549,7 @@ impl WorkspaceView {
                     );
                 }
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
+                ProjectEvent::Tell(text) => this.tell_orchestrator(&asked, text.clone(), cx),
                 ProjectEvent::Machines => this.ask_machines(cx),
                 ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
                 ProjectEvent::CloseRecap => {
@@ -599,11 +600,41 @@ impl WorkspaceView {
                     _ => "resolve the conflicts",
                 };
                 let said = format!("Asked #{task}'s agent to {asked}");
-                let verb = Verb::TaskTell { project, task, text };
+                let verb = Verb::TaskTell { project, task: Some(task), text };
                 return self.send_to_server(verb, move |this, cx| this.show_notice(said, cx), cx);
             }
         };
         self.send_to_server(verb, |_, _| (), cx);
+    }
+
+    /// The person's words from a board's line to its orchestrator. The server keeps them on
+    /// the timeline and hands them to the orchestrator through its hooks; words it refuses go
+    /// back on the line.
+    fn tell_orchestrator(&mut self, project: &ProjectId, text: String, cx: &mut Context<Self>) {
+        let Some(caller) = self.projects.caller.clone() else {
+            self.show_notice(NO_SERVER.to_owned(), cx);
+            self.give_back_words(project, text, cx);
+            return;
+        };
+        let verb = Verb::TaskTell { project: project.clone(), task: None, text: text.clone() };
+        let project = project.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = caller.call(verb).await;
+            this.update(cx, |this, cx| {
+                if let Outcome::Error { message, .. } = outcome {
+                    this.show_notice(message, cx);
+                    this.give_back_words(&project, text, cx);
+                }
+            })
+        })
+        .detach();
+    }
+
+    /// Put words the server refused back on `project`'s line to its orchestrator.
+    fn give_back_words(&self, project: &ProjectId, text: String, cx: &mut Context<Self>) {
+        if let Some(view) = self.projects.views.get(project) {
+            view.update(cx, |view, cx| view.refused(text, cx));
+        }
     }
 
     /// Open the "Run on" picker on `task`, and ask the server to rank the workers for it.

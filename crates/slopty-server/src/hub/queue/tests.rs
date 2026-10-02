@@ -407,7 +407,8 @@ async fn a_conflict_goes_back_to_the_agent_with_its_paths() {
 }
 
 /// The person's next step reaches the task's own agent through its hooks, at once and in
-/// their words, and the timeline keeps it. An agent may not speak as the person, and a task
+/// their words, and the timeline keeps it; their words to the orchestrator reach it the same
+/// way. An agent may not speak as the person, and a task
 /// with no agent running has nobody to tell.
 #[tokio::test]
 async fn the_person_s_words_reach_the_task_s_agent() {
@@ -416,7 +417,8 @@ async fn the_person_s_words_reach_the_task_s_agent() {
     let refused = |o: &Outcome, want: ErrorCode| {
         assert!(matches!(o, Outcome::Error { code, .. } if *code == want), "{o:?}");
     };
-    let tell = |text: &str| Verb::TaskTell { project: project(), task, text: text.to_owned() };
+    let tell =
+        |text: &str| Verb::TaskTell { project: project(), task: Some(task), text: text.to_owned() };
     let words = "Resolve the conflicts with main, then report done again.";
     assert_eq!(hub.dispatch(tell(words)).await, Outcome::Done);
     let told = studio.told(agent.session, "The person says:").await;
@@ -424,6 +426,21 @@ async fn the_person_s_words_reach_the_task_s_agent() {
     let s = status(&hub).await;
     assert!(
         s.timeline.iter().any(|e| e.what == Moment::Told { text: words.to_owned() }),
+        "{:?}",
+        s.timeline
+    );
+
+    let to_orchestrator = Verb::TaskTell {
+        project: project(),
+        task: None,
+        text: "Split the board work in two.".to_owned(),
+    };
+    assert_eq!(hub.dispatch(to_orchestrator).await, Outcome::Done);
+    let told = studio.told(orchestrator.session, "The person says:").await;
+    assert!(told.contains("Split the board work in two."), "{told}");
+    let s = status(&hub).await;
+    assert!(
+        s.timeline.iter().any(|e| e.task.is_none() && matches!(e.what, Moment::Told { .. })),
         "{:?}",
         s.timeline
     );

@@ -1756,23 +1756,30 @@ impl Projects {
     pub(crate) fn tell(
         &mut self,
         id: &ProjectId,
-        task: TaskId,
+        task: Option<TaskId>,
         text: &str,
+        terminals: &HashSet<TermRef>,
         now: WallMs,
     ) -> Result<(String, Vec<Change>), Refused> {
         let text = text.trim();
         if text.is_empty() {
-            return Err(invalid("say something to the task's agent"));
+            return Err(invalid("say something to the agent"));
         }
         within("what the person says", Some(text), NOTE_MAX)?;
         let record = self.record(id)?;
-        let t = record.task_mut(task)?;
-        if open_term(t).is_none() {
-            return Err(invalid(format!(
-                "task {task} has no agent running to hear it; start one for it first"
-            )));
+        if let Some(task) = task {
+            record.task_mut(task)?;
         }
-        let entry = record.log(Some(task), Moment::Told { text: text.to_owned() }, now);
+        if self.node_term(id, task, terminals).is_none() {
+            return Err(invalid(match task {
+                Some(task) => {
+                    format!("task {task} has no agent running to hear it; start one for it first")
+                }
+                None => format!("{id} has no orchestrator running to hear it"),
+            }));
+        }
+        let record = self.record(id)?;
+        let entry = record.log(task, Moment::Told { text: text.to_owned() }, now);
         let kept = Kept { entry: Some(entry), ..record.kept() };
         Ok((text.to_owned(), vec![Change { kept, durable: true }]))
     }

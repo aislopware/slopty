@@ -998,7 +998,26 @@ pub async fn task_tell<D: Dispatch>(
     key: Option<IdempotencyKey>,
 ) -> Result<(), ToolError> {
     let (project, task) = project_task(dispatch, project, task).await?;
-    match dispatch.send(key, Verb::TaskTell { project, task, text }).await {
+    match dispatch.send(key, Verb::TaskTell { project, task: Some(task), text }).await {
+        Outcome::Done => Ok(()),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
+/// Tell a project's orchestrator something, as the person: their words reach it through its
+/// hooks, and its inbox wakes it when it is idle.
+///
+/// # Errors
+/// The project is not named or not known, it has no orchestrator running, or the caller is an
+/// agent.
+pub async fn orchestrator_tell<D: Dispatch>(
+    dispatch: &D,
+    project: &str,
+    text: String,
+    key: Option<IdempotencyKey>,
+) -> Result<(), ToolError> {
+    let project = project_named(Some(project), &Own::default())?;
+    match dispatch.send(key, Verb::TaskTell { project, task: None, text }).await {
         Outcome::Done => Ok(()),
         other => Err(ToolError::unexpected(other)),
     }

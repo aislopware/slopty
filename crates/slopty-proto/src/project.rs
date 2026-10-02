@@ -1461,7 +1461,8 @@ pub enum Moment {
         /// The terminal.
         term: TermRef,
     },
-    /// The person told the task's agent something ([`crate::orchestration::Verb::TaskTell`]).
+    /// The person told the task's agent, or the orchestrator when the entry names no task,
+    /// something ([`crate::orchestration::Verb::TaskTell`]).
     Told {
         /// What they said.
         text: String,
