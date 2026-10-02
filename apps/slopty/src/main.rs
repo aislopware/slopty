@@ -5,8 +5,7 @@
 
 use anyhow::Result;
 use gpui::{
-    Bounds, KeyBinding, Menu, MenuItem, OsAction, SystemMenuType, WindowBounds, WindowOptions, px,
-    size,
+    Bounds, Menu, MenuItem, OsAction, SystemMenuType, WindowBounds, WindowOptions, px, size,
 };
 
 mod actions {
@@ -188,11 +187,7 @@ pub fn main() -> Result<()> {
         cx.on_action(|_: &Hide, cx| cx.hide());
         cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
         cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-h", Hide, None),
-            KeyBinding::new("cmd-alt-h", HideOthers, None),
-        ]);
+        cx.bind_keys(slopty_ui::keymap::app_chords(Quit, Hide, HideOthers));
         if let Err(e) = slopty_app::open_workspace(cx, handle, window_options) {
             tracing::error!(error = %e, "open window");
             cx.quit();

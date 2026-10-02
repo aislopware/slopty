@@ -171,6 +171,22 @@ fn asking_again_moves_to_the_front() {
     assert_eq!(claims.release(a).select.as_deref(), Some("us"));
 }
 
+/// A worker whose person turned syncing off selects nothing for a client: an ask for another
+/// source is refused, so that client composes, and one for the source the worker is under
+/// anyway is answered as typing under it. Its release moves nothing.
+#[tokio::test]
+async fn a_worker_that_refuses_claims_keeps_its_own_source() {
+    let fake = Fake::on(US);
+    let sources = Sources::new(fake.clone());
+    sources.refuse_claims();
+    let claim = sources.claimant();
+    assert!(!claim.ask(TELEX.to_owned()).await, "another source is refused");
+    assert!(claim.ask(US.to_owned()).await, "the worker's own is typed under");
+    drop(claim);
+    assert!(fake.calls().is_empty(), "nothing selected or turned off");
+    assert_eq!(fake.selected().as_deref(), Some(US));
+}
+
 /// A source the worker already has is answered at once, with nothing selected and no wait for
 /// a switch that will never be heard.
 #[tokio::test(start_paused = true)]

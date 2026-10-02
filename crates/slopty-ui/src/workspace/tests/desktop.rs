@@ -443,3 +443,96 @@ fn a_window_of_its_own_takes_the_shortcuts_while_it_is_in_front(cx: &mut TestApp
     cx.run_until_parked();
     assert_eq!(armed.borrow().last(), Some(&false), "let be with it: {:?}", armed.borrow());
 }
+
+mod app_actions {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    gpui::actions!(app_under_test, [Quit, Hide, HideOthers]);
+}
+use app_actions::{Hide, HideOthers, Quit};
+
+/// A remote window with the keyboard keeps its app's chords, so the few of the workspace's it
+/// needs take ⌃ on top: ⌃⌘⇧P opens the palette while ⌘⇧P goes to the remote app. Sending system
+/// shortcuts also sends ⌘Q and ⌘H, which otherwise quit and hide this app.
+#[gpui::test]
+fn a_remote_window_keeps_its_chords_and_reaches_ours_with_control(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let quits = Rc::new(std::cell::Cell::new(0_u32));
+    cx.update(|_, cx| {
+        cx.bind_keys(crate::keymap::app_chords(Quit, Hide, HideOthers));
+        let counted = Rc::clone(&quits);
+        cx.on_action(move |_: &Quit, _| counted.set(counted.get().saturating_add(1)));
+    });
+    cx.update(|window, _| window.activate_window());
+    let mut fake = connect(&view, cx, 1, "studio");
+    let one = WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window: one }, 1);
+    opened(&view, cx, &fake, 1, CaptureTarget::Window(one), (1280, 800));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.update(|window, cx| {
+        let screen = view.read(cx).screen(tile.item).cloned().expect("streaming");
+        window.focus(&screen.read(cx).focus_handle(cx), cx);
+    });
+    view.update(cx, |v, _| v.set_key_port(Box::new(Keys::default())));
+    view.update_in(cx, |v, window, cx| v.toggle_system_keys(&ToggleSystemKeys, window, cx));
+    cx.run_until_parked();
+    sent(&mut fake, cx);
+    let pressed = |fake: &mut Fake, cx: &mut VisualTestContext| -> Vec<(KeyCode, Mods)> {
+        sent(fake, cx)
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Screen(ScreenRequest::Input {
+                    input: ScreenInput::Key { code, action: KeyAction::Press, mods },
+                    ..
+                }) => Some((code, mods)),
+                _ => None,
+            })
+            .collect()
+    };
+    cx.simulate_keystrokes("cmd-shift-p");
+    assert!(!view.read_with(cx, |v, _| v.palette_open()), "⌘⇧P is the remote app's");
+    assert_eq!(pressed(&mut fake, cx), [(KeyCode::P, Mods::SUPER | Mods::SHIFT)]);
+    cx.simulate_keystrokes("cmd-q");
+    assert_eq!(quits.get(), 0, "⌘Q quits the remote app, not this one");
+    assert_eq!(pressed(&mut fake, cx), [(KeyCode::Q, Mods::SUPER)]);
+    cx.simulate_keystrokes("ctrl-cmd-shift-p");
+    assert!(view.read_with(cx, |v, _| v.palette_open()), "⌃⌘⇧P opens ours");
+    assert!(pressed(&mut fake, cx).is_empty(), "and nothing goes");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.palette_open()));
+
+    // System shortcuts back on this Mac: ⌘Q is the app's again.
+    view.update_in(cx, |v, window, cx| v.toggle_system_keys(&ToggleSystemKeys, window, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-q");
+    assert_eq!(quits.get(), 1, "⌘Q is this app's");
+}
+
+/// A remote password field with the keyboard holds secure keyboard entry here, as a shell's
+/// password prompt does, and lets go once the worker says another field has it.
+#[gpui::test]
+fn a_remote_password_field_holds_secure_entry(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.update(|window, _| window.activate_window());
+    let fake = connect(&view, cx, 1, "studio");
+    let one = WindowId(7);
+    let tile = arrives(&view, cx, &fake, ItemKind::Window { window: one }, 1);
+    opened(&view, cx, &fake, 1, CaptureTarget::Window(one), (1280, 800));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
+    cx.run_until_parked();
+    let on = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.secure_input_on());
+    let field = |secure| ScreenEvent::Field {
+        stream: StreamId(1),
+        field: Some(slopty_proto::screen::TextField { caret: None, secure }),
+    };
+    let key = fake.key;
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, field(true), cx));
+    cx.run_until_parked();
+    assert!(on(cx), "a password field has the keyboard");
+    view.update_in(cx, |v, _w, cx| v.screen_event(key, field(false), cx));
+    cx.run_until_parked();
+    assert!(!on(cx), "a plain field");
+}

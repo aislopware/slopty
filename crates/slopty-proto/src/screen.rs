@@ -369,6 +369,18 @@ pub enum ScreenInput {
     /// A drag from the client over the tile, or the client taking the worker's own drag out of
     /// it (`docs/decisions/audio.md`, "Drag and drop lands at the point, both ways").
     Drag(DragInput),
+    /// The press of the chord the client reads as paste (⌘V or ⇧⌘V under the person's own
+    /// layout), as a [`Self::Key`] press of `code` with `mods`. The client decides it by the
+    /// character it typed, so a Dvorak ⌘V is one and a Dvorak ⌘K at the US V is not; the
+    /// worker, which cannot know the client's layout, posts it only once the client's
+    /// clipboard, offered on the control stream just ahead of it, is on its pasteboard. Its
+    /// release goes as a [`Self::Key`].
+    PasteChord {
+        /// Physical key, as a [`Self::Key`]'s.
+        code: KeyCode,
+        /// Modifiers, as a [`Self::Key`]'s.
+        mods: Mods,
+    },
 }
 
 /// Which way a [`ScreenInput::Swipe`] went.
@@ -430,16 +442,12 @@ impl ScreenInput {
         }
     }
 
-    /// Whether this is ⌘V, the chord a paste into a streamed window is: it must find the
-    /// client's clipboard on the worker's pasteboard, so nothing may carry it ahead of the offer
-    /// the control stream sent before it.
+    /// Whether this is the paste chord ([`Self::PasteChord`]): it must find the client's
+    /// clipboard on the worker's pasteboard, so nothing may carry it ahead of the offer the
+    /// control stream sent before it.
     #[must_use]
-    pub fn is_paste_chord(&self) -> bool {
-        matches!(
-            self,
-            Self::Key { code: KeyCode::V, action: KeyAction::Press, mods, .. }
-                if mods.contains(Mods::SUPER) && !mods.intersects(Mods::CTRL | Mods::ALT)
-        )
+    pub const fn is_paste_chord(&self) -> bool {
+        matches!(self, Self::PasteChord { .. })
     }
 }
 
@@ -809,4 +817,38 @@ pub enum ScreenEvent {
         /// What happened.
         event: DragEvent,
     },
+    /// The text field that has the keyboard in the stream's target, read after the client's
+    /// typing and clicks; sent when it changes. `None` when no text field has it, or the
+    /// worker cannot read one.
+    Field {
+        /// Stream.
+        stream: StreamId,
+        /// The field.
+        field: Option<TextField>,
+    },
+}
+
+/// A text field that has the keyboard on the worker ([`ScreenEvent::Field`]).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct TextField {
+    /// Where its caret is, in stream pixels: what a client's input method hangs its candidate
+    /// window under while the client composes. `None` when the field does not say.
+    pub caret: Option<Caret>,
+    /// It is a password field (`AXSecureTextField`): a client keeps what is typed from other
+    /// programs on its own machine (secure keyboard entry) while it has the keyboard.
+    pub secure: bool,
+}
+
+/// A caret's box in stream pixels: its top left corner and its size (a thin bar as tall as the
+/// line).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Caret {
+    /// Left edge.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Width; 0 for an insertion point.
+    pub width: f32,
+    /// Height, the line's.
+    pub height: f32,
 }

@@ -83,6 +83,12 @@ ListItem │ Focus previous │ ⌃⇧⇥
 Button │ Keys for Focus previous │ ⌃⇧⇥
 ListItem │ Open palette │ ⇧⌘P
 Button │ Keys for Open palette │ ⇧⌘P
+ListItem │ Open palette in remote window │ ⌃⇧⌘P
+Button │ Keys for Open palette in remote window │ ⌃⇧⌘P
+ListItem │ Mute sound in remote window │ ⌃⇧⌘M
+Button │ Keys for Mute sound in remote window │ ⌃⇧⌘M
+ListItem │ Stream stats in remote window │ ⌃⇧⌘I
+Button │ Keys for Stream stats in remote window │ ⌃⇧⌘I
 ListItem │ List workers
 Button │ Keys for List workers
 ListItem │ Forwarded ports

@@ -41,6 +41,8 @@ pub mod bounds {
     pub const FPS: RangeInclusive<u16> = 15..=120;
     /// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
     pub const MBPS: RangeInclusive<u16> = 1..=200;
+    /// Minutes a display made for a client waits for it: none, up to a day.
+    pub const DISPLAY_LINGER_MINS: RangeInclusive<u16> = 0..=1440;
 }
 
 /// File name inside the data directory.
@@ -155,6 +157,41 @@ pub enum OptionAsAlt {
     /// Only the right key is Alt.
     #[schemars(title = "Right")]
     Right,
+}
+
+/// When typing into Slopty is kept from other programs on this Mac (macOS secure event input,
+/// Terminal's "Secure Keyboard Entry").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SecureEntry {
+    /// While a terminal waits for a password, or a remote window's password field has the
+    /// keyboard.
+    #[default]
+    #[schemars(title = "At passwords")]
+    Passwords,
+    /// Whenever a Slopty window is in front.
+    #[schemars(title = "Always")]
+    Always,
+    /// Never.
+    #[schemars(title = "Never")]
+    Never,
+}
+
+/// What keeps a worker Mac out of idle sleep. A display that streams is kept on unless it is
+/// [`Self::Never`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum KeepAwake {
+    /// A client attached, or an agent at work with nobody attached.
+    #[default]
+    #[schemars(title = "While working")]
+    Working,
+    /// Only a client attached: an agent left working sleeps with the Mac.
+    #[schemars(title = "While attached")]
+    Attached,
+    /// Nothing: the Mac sleeps as its own settings say, a stream's display too.
+    #[schemars(title = "Never")]
+    Never,
 }
 
 /// A colour as `"#rrggbb"` (or `"rrggbb"`), or `""` for the theme's own.
@@ -395,6 +432,14 @@ pub struct TerminalSettings {
     /// keybinds): ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ sent as readline's bytes.
     #[schemars(title = "Natural text editing")]
     pub natural_editing: bool,
+    /// At passwords keeps them from other apps here, as Terminal's Secure Keyboard Entry.
+    ///
+    /// When macOS keeps what is typed into Slopty from other programs on this Mac (secure
+    /// event input): while a terminal waits for a password or a remote window's password
+    /// field has the keyboard, whenever a Slopty window is in front, or never. While it holds,
+    /// other apps' shortcuts and "Send system shortcuts" do not see the keys.
+    #[schemars(title = "Secure keyboard entry")]
+    pub secure_keyboard_entry: SecureEntry,
 }
 
 impl Default for TerminalSettings {
@@ -413,6 +458,7 @@ impl Default for TerminalSettings {
             option_as_alt: OptionAsAlt::False,
             confirm_close: true,
             natural_editing: true,
+            secure_keyboard_entry: SecureEntry::Passwords,
         }
     }
 }
@@ -604,7 +650,7 @@ impl JsonSchema for Chords {
 }
 
 /// `[worker]`: what `slopty-worker` reads from the same file when it starts.
-#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "This Mac as a worker")]
 pub struct WorkerSettings {
@@ -651,6 +697,61 @@ pub struct WorkerSettings {
         example = serde_json::json!({ "mine": ["/opt/mine/bin/agent", "--acp"], "goose": [] })
     )]
     pub acp: BTreeMap<String, Vec<String>>,
+    /// Off, the worker keeps its own source and each client composes its text itself.
+    ///
+    /// While a remote window has the keyboard, the worker selects the client's keyboard input
+    /// source, so keys go by their place and the remote app's own input methods compose. Off,
+    /// the worker keeps its own source for the person at it, and each client composes on its
+    /// side and sends the text. Read when the worker starts.
+    #[schemars(title = "Follow the client's input source")]
+    pub input_source_sync: bool,
+    /// While working also counts an agent at work with nobody attached.
+    ///
+    /// What keeps this Mac out of idle sleep: a client attached or an agent at work, a client
+    /// attached only, or nothing (the Mac sleeps as its own settings say, a streamed display
+    /// too). Read when the worker starts.
+    #[schemars(title = "Keep awake")]
+    pub keep_awake: KeepAwake,
+    /// How long a display made for a client waits for it to come back; 0 lets it go at once.
+    ///
+    /// A display the worker made in a client's shape stays this many minutes after its last
+    /// stream ends, windows in place, for the same client to take back. Read when the worker
+    /// starts.
+    #[schemars(
+        title = "Keep a client's display",
+        range(min = *bounds::DISPLAY_LINGER_MINS.start(), max = *bounds::DISPLAY_LINGER_MINS.end()),
+        extend("x-step" = 5, "x-unit" = "min")
+    )]
+    pub display_linger_mins: u16,
+}
+
+impl Default for WorkerSettings {
+    fn default() -> Self {
+        Self {
+            allow: Vec::new(),
+            server: None,
+            labels: BTreeMap::new(),
+            probes: BTreeMap::new(),
+            acp: BTreeMap::new(),
+            input_source_sync: true,
+            keep_awake: KeepAwake::Working,
+            display_linger_mins: 10,
+        }
+    }
+}
+
+impl WorkerSettings {
+    /// How long a client's display waits for it: [`Self::display_linger_mins`], or its
+    /// default outside [`bounds::DISPLAY_LINGER_MINS`].
+    #[must_use]
+    pub fn display_linger(&self) -> std::time::Duration {
+        let mins = if bounds::DISPLAY_LINGER_MINS.contains(&self.display_linger_mins) {
+            self.display_linger_mins
+        } else {
+            Self::default().display_linger_mins
+        };
+        std::time::Duration::from_secs(u64::from(mins) * 60)
+    }
 }
 
 /// One of `[worker.labels]`: a flag, a number, a word or a list of them.
@@ -1341,6 +1442,31 @@ mod tests {
         );
         assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
         assert!(!Settings::default().remote.sharp_text, "4:2:0 unless asked: fewer bits");
+    }
+
+    /// `[worker]`'s own choices: syncing the input source, what keeps the Mac awake, how long a
+    /// client's display waits. A linger outside its bounds is the default's, and 0 is at once.
+    #[test]
+    fn worker_choices() {
+        let d = WorkerSettings::default();
+        assert!(d.input_source_sync, "on: keys go by their place");
+        assert_eq!(d.keep_awake, KeepAwake::Working);
+        assert_eq!(d.display_linger(), std::time::Duration::from_mins(10));
+        assert_eq!(Settings::default().terminal.secure_keyboard_entry, SecureEntry::Passwords);
+
+        let loaded = Settings::parse(
+            "[worker]\ninput_source_sync = false\nkeep_awake = \"never\"\n\
+             display_linger_mins = 0\n[terminal]\nsecure_keyboard_entry = \"always\"\n",
+        );
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        let worker = &loaded.settings.worker;
+        assert!(!worker.input_source_sync);
+        assert_eq!(worker.keep_awake, KeepAwake::Never);
+        assert_eq!(worker.display_linger(), std::time::Duration::ZERO, "let go at once");
+        assert_eq!(loaded.settings.terminal.secure_keyboard_entry, SecureEntry::Always);
+
+        let far = WorkerSettings { display_linger_mins: 5000, ..WorkerSettings::default() };
+        assert_eq!(far.display_linger(), std::time::Duration::from_mins(10), "out of bounds");
     }
 
     /// `[keys]` holds a table per context of action names and their chords: one, a list, or

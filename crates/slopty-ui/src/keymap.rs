@@ -204,6 +204,9 @@ impl Command {
 const CTX: Option<&str> = Some("Workspace && !Screen");
 /// ⌃Tab alone stays with a remote window: the keyboard's way back out of it.
 const RING: Option<&str> = Some("Workspace");
+/// A remote window or display that has the keyboard: its app takes every chord, so the few of
+/// ours a remote view needs (the palette, the sound, the stats) take ⌃ on top of their own.
+const REMOTE: Option<&str> = Some("Workspace > Screen");
 /// Any focused field (a find bar, the palette, a note): a gpui-kit input, whose own ⌘⇧F is
 /// replace; ours is bound after it, so it wins there too.
 const INPUT: Option<&str> = Some("Input");
@@ -301,6 +304,28 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "focus_next", ws::FocusNext, &["ctrl-tab"], &[RING]),
         c(Workspace, "focus_previous", ws::FocusPrev, &["ctrl-shift-tab"], &[RING]),
         c(Workspace, "open_palette", ws::OpenPalette, &["cmd-shift-p"], W),
+        // A remote VS Code's ⌘⇧P is its own; ⌃⌘⇧P is nobody's there.
+        c(
+            Workspace,
+            "open_palette_in_remote_window",
+            ws::OpenPalette,
+            &["ctrl-cmd-shift-p"],
+            &[REMOTE],
+        ),
+        c(
+            Workspace,
+            "toggle_mute_in_remote_window",
+            ws::ToggleMute,
+            &["ctrl-cmd-shift-m"],
+            &[REMOTE],
+        ),
+        c(
+            Workspace,
+            "toggle_stats_in_remote_window",
+            ws::ToggleStats,
+            &["ctrl-cmd-shift-i"],
+            &[REMOTE],
+        ),
         c(Workspace, "list_workers", ws::ListWorkers, &[], W),
         c(Workspace, "list_ports", ws::ListPorts, &[], W),
         c(Workspace, "rename_tile", ws::RenameItem, &["cmd-e"], W),
@@ -814,6 +839,24 @@ fn encloses(outer: Option<&str>, inner: Option<&str>) -> bool {
             outer == inner || ([CTX, RING].contains(&Some(outer)) && Some(inner) != POP_OUT)
         }
     }
+}
+
+/// The app's own ⌘Q, ⌘H and ⌘⌥H for `quit`, `hide` and `hide_others`.
+///
+/// They are bound everywhere but in a remote view sending system shortcuts to its worker,
+/// where they quit or hide the remote app ([`crate::screen::SYSTEM_KEYS_CTX`]). A click or ⌃Tab
+/// out of the view gives them back.
+pub fn app_chords(
+    quit: impl Action,
+    hide: impl Action,
+    hide_others: impl Action,
+) -> [KeyBinding; 3] {
+    let here = format!("!{}", crate::screen::SYSTEM_KEYS_CTX);
+    [
+        KeyBinding::new("cmd-q", quit, Some(&here)),
+        KeyBinding::new("cmd-h", hide, Some(&here)),
+        KeyBinding::new("cmd-alt-h", hide_others, Some(&here)),
+    ]
 }
 
 /// A chord as the palette shows it (`⇧⌘T`), else as written.

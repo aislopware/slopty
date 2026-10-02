@@ -1,6 +1,7 @@
 //! [`CaptureSource`] on macOS: ScreenCaptureKit for the frames, the window list for where
-//! windows are, the accessibility API for resizing and hearing them go, and `NSCursor` for the
-//! pointer's picture. Each function is the free function of the same job in this crate.
+//! windows are, the accessibility API for resizing and hearing them go and for the focused
+//! field, and `NSCursor` for the pointer's picture. Each function is the free function of the same
+//! job in this crate.
 
 use std::sync::Arc;
 
@@ -9,7 +10,7 @@ use slopty_proto::screen::{CaptureTarget, CursorShape, DisplayInfo, WindowInfo};
 
 use crate::source::{
     AudioSink, AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
-    Heard, Rect, TargetWindow, Went, WindowState,
+    FocusedField, Heard, Rect, TargetWindow, Went, WindowState,
 };
 use crate::{Capture, HideWatch, Shareable, Target, geometry};
 
@@ -144,6 +145,10 @@ impl CaptureSource for ScreenCaptureKit {
 
     fn console() -> Option<Console> {
         crate::console()
+    }
+
+    fn focused_field() -> Option<FocusedField> {
+        crate::ax::focused_field()
     }
 
     fn target_bounds(target: CaptureTarget) -> Option<Rect> {

@@ -13808,6 +13808,30 @@ cargo test -p slopty-workerd --test e2e -- \
   an_upload_goes_on_over_the_next_link_from_what_the_worker_holds --nocapture
 ```
 
+## 2026-10-03 — the paste chord and the worker's caret on the input path
+
+The paste goes as `ScreenInput::PasteChord` (`docs/decisions/input.md`, "A paste is the
+layout's V, on both sides"): 10 bytes framed (golden `client_screen_paste_chord`:
+`06 00 00 00 04 04 07 0f 2f 08`), against a `Key`'s 12. The view knows it by the event's own
+`key_char`, so no work is added per key, and the worker holds it behind the clipboard offer as
+it held the V position before.
+
+The caret (`ScreenEvent::Field`, 26 bytes framed with a caret, golden `worker_screen_field`)
+is read off the key path by construction. The stream's loop only sets a deadline when a command
+can move the caret (a `const fn` match). The read starts once 60 ms (`FIELD_AFTER`) pass with
+no such command, on a blocking thread, and never while one is still running. Each
+accessibility call waits at most 100 ms (`FIELD_TIMEOUT_SECS`, set per element, since the
+system-wide element's timeout is global). A burst of typing costs one read after it, and
+nothing reaches the client unless the field changed. Not measured: the read's own time
+against a real app. A test can only read the app in front of this Mac, and that is the
+person's, so the bound above stands in for it.
+
+```sh
+cargo test -p slopty-proto --test golden -- screen_keyboard
+cargo test -p slopty-workerd --lib -- \
+  screens::fields::the_field_with_the_keyboard_is_told_after_typing_and_only_as_it_changes
+```
+
 ## 2026-10-03 — the app's deploy into a fresh guest, the Linux e2e's new cases, a Linux lane in CI
 
 On mac-studio (M1 Max, 10 cores, 32 GB) while other sessions built, every cargo command under

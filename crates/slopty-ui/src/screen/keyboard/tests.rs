@@ -535,6 +535,48 @@ fn a_chord_the_worker_reads_under_its_own_source_goes_by_character(cx: &mut gpui
     );
 }
 
+/// Paste is the character the person's layout types, wherever its key sits. On Dvorak ⌘V is
+/// the key a US layout calls "." and goes as the paste chord at that place, so the worker puts
+/// this Mac's clipboard on its pasteboard first; Dvorak's ⌘K sits at the US V and goes as a
+/// plain chord, which the worker holds for nothing. Under the worker's own source the chord
+/// goes by its character's US place, and is still the paste chord.
+#[gpui::test]
+fn a_paste_is_the_layouts_v_wherever_its_key_sits(cx: &mut gpui::TestAppContext) {
+    const DVORAK: &str = "com.apple.keylayout.Dvorak";
+    let fake = Fake::on(DVORAK);
+    let (view, mut rx, cx) = focused(cx, &fake);
+    took(&view, cx, DVORAK);
+    inputs(&mut rx);
+    let cmd = Modifiers { platform: true, ..Modifiers::default() };
+    let press = |vk: u16, typed: &str, cx: &mut gpui::VisualTestContext| {
+        fake.native.set(Some(NativeKey { vk, kind: KeyKind::Down, mods: Mods::SUPER }));
+        assert!(view.update(cx, |v, cx| v.key_pressed(&stroke(typed, cmd, None), false, cx)));
+        fake.native.set(Some(NativeKey { vk, kind: KeyKind::Up, mods: Mods::SUPER }));
+        assert!(view.update(cx, |v, _| v.key_released(&stroke(typed, cmd, None))));
+    };
+    // kVK_ANSI_Period, where Dvorak puts V.
+    press(0x2f, "v", cx);
+    // kVK_ANSI_V, where Dvorak puts K.
+    press(0x09, "k", cx);
+    let paste = |code| ScreenInput::PasteChord { code, mods: Mods::SUPER };
+    assert_eq!(
+        inputs(&mut rx),
+        [
+            paste(KeyCode::Period),
+            key(KeyCode::Period, KeyAction::Release, Mods::SUPER),
+            key(KeyCode::V, KeyAction::Press, Mods::SUPER),
+            key(KeyCode::V, KeyAction::Release, Mods::SUPER),
+        ]
+    );
+    view.update(cx, |v, _| v.set_keyboard_source(DVORAK, false));
+    press(0x2f, "v", cx);
+    assert_eq!(
+        inputs(&mut rx),
+        [paste(KeyCode::V), key(KeyCode::V, KeyAction::Release, Mods::SUPER)],
+        "under the worker's own source, by the character's US place"
+    );
+}
+
 /// A tile without the keyboard for a while lets the worker's source go; one that takes the
 /// keyboard back sooner keeps its claim, so hopping between tiles costs no switch.
 #[gpui::test]

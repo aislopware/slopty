@@ -12,7 +12,6 @@
 
 use std::sync::LazyLock;
 
-use gpui::Action;
 use slopty_settings::schema::{self, Field};
 
 use crate::keymap::{Command, Keymap, Scope};
@@ -97,7 +96,11 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Behaviour",
         &["terminal.confirm_close", "terminal.bell_alert", "terminal.agent_alert"],
     ),
-    (Section::Input, "Keys", &["terminal.option_as_alt", "terminal.natural_editing"]),
+    (
+        Section::Input,
+        "Keys",
+        &["terminal.option_as_alt", "terminal.natural_editing", "terminal.secure_keyboard_entry"],
+    ),
     (
         Section::Input,
         "Clipboard",
@@ -115,7 +118,17 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     ),
     (Section::Streams, "Web pages", &["web.inspector"]),
     (Section::Network, "This app", &["client.server"]),
-    (Section::Network, "This Mac as a worker", &["worker.server", "worker.allow"]),
+    (
+        Section::Network,
+        "This Mac as a worker",
+        &[
+            "worker.server",
+            "worker.allow",
+            "worker.keep_awake",
+            "worker.display_linger_mins",
+            "worker.input_source_sync",
+        ],
+    ),
     (Section::Network, "This Mac as a server", &["server.allow"]),
 ];
 
@@ -298,19 +311,36 @@ fn words(name: &str) -> String {
 /// A command is worded as the palette words it (`palette`) when the palette lists its action
 /// and no other scope runs the same action, so a line reads the same in both; an action run in
 /// several scopes (find, in a terminal, a file and a face) is worded by its name, under its
-/// scope's group.
+/// scope's group. A variant of a command in its scope, named after it with more words
+/// (`toggle_mute_in_remote_window`), is its wording and those words.
 #[must_use]
 pub fn key_rows(keymap: &Keymap, palette: &[PaletteItem]) -> Vec<KeyRow> {
     let commands = keymap.commands();
-    let said = |action: &dyn Action| {
-        let shared = commands.iter().filter(|c| c.action().partial_eq(action)).count() > 1;
-        if shared {
+    let said = |command: &Command| {
+        let action = command.action();
+        let elsewhere =
+            commands.iter().any(|c| c.scope() != command.scope() && c.action().partial_eq(action));
+        if elsewhere {
             return None;
         }
         palette.iter().find_map(|item| match &item.run {
             PaletteRun::Action(listed) if listed.partial_eq(action) => Some(item.label.clone()),
             _ => None,
         })
+    };
+    let worded = |command: &Command| {
+        let variant = commands.iter().find_map(|base| {
+            let more = command.name().strip_prefix(base.name())?.strip_prefix('_')?;
+            (base.scope() == command.scope() && base.action().partial_eq(command.action()))
+                .then_some((base, more))
+        });
+        let said = match variant {
+            Some((base, more)) => {
+                said(base).map(|base| format!("{base} {}", more.replace('_', " ")))
+            }
+            None => said(command),
+        };
+        said.unwrap_or_else(|| words(command.name()))
     };
     let spelled = |chords: &[String]| -> Vec<String> {
         chords.iter().map(|chord| crate::keymap::label(chord)).collect()
@@ -321,7 +351,7 @@ pub fn key_rows(keymap: &Keymap, palette: &[PaletteItem]) -> Vec<KeyRow> {
         .map(|(ix, command)| KeyRow {
             command: ix,
             group: key_group(command),
-            label: said(command.action()).unwrap_or_else(|| words(command.name())),
+            label: worded(command),
             key: command.key(),
             keys: spelled(keymap.chords(ix)),
             defaults: spelled(&keymap.default_chords(ix)),
@@ -478,7 +508,8 @@ mod tests {
 
     /// The Keyboard page is the keymap: a line a command, its chords in effect beside its
     /// defaults, the palette's words for an action only one scope runs and its name's words for
-    /// one several do, its name in the file, and the groups in their order.
+    /// one several do, a variant's after its command's, its name in the file, and the groups in
+    /// their order.
     #[test]
     fn the_keyboard_page_reads_the_keymap() {
         let keys: slopty_settings::KeySettings =
@@ -505,6 +536,12 @@ mod tests {
         assert_eq!(line("workspace.focus_column_3").group, "Layout");
         assert_eq!(line("terminal.scroll_page_up").label, "Scroll page up", "the name's words");
         assert_eq!(line("conversation.interrupt").label, "Stop the agent");
+        assert_eq!(line("workspace.toggle_mute").label, "Mute sound", "its variant is no scope");
+        assert_eq!(
+            line("workspace.toggle_mute_in_remote_window").label,
+            "Mute sound in remote window",
+            "a variant is its command's words and more"
+        );
         assert_eq!(line("file.save").group, "Files");
         assert!(line("workspace.open_url").keys.is_empty(), "none by default, still listed");
         let order: Vec<usize> = listed

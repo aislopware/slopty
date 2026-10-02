@@ -61,8 +61,8 @@ use parking_lot::Mutex;
 #[cfg(all(test, target_vendor = "apple"))]
 use slopty_capture::host_now_us;
 use slopty_capture::{
-    AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop, Heard,
-    PixelFormat, Rect, TargetWindow, Went, WindowState, crop_for,
+    AxError, CaptureConfig, CaptureError, CaptureSource, CapturedFrame, Console, Crop,
+    FocusedField, Heard, PixelFormat, Rect, TargetWindow, Went, WindowState, crop_for,
 };
 use slopty_codec::{
     CodecError, EncodedPacket, EncoderConfig, FrameOptions, VideoEncoder as _, conformance,
@@ -78,8 +78,8 @@ use slopty_media::{
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::{ClockEcho, MAX_DATAGRAM};
 use slopty_proto::screen::{
-    CaptureTarget, Chroma, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput,
-    SourceState, Stripe, VideoCodec,
+    CaptureTarget, Caret, Chroma, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput,
+    SourceState, Stripe, TextField, VideoCodec,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -4498,6 +4498,25 @@ impl<P: Platform> Pipeline<P> {
         move || probe::<P>(target, point_scale, crop, &shared)
     }
 
+    /// A read of the text field that has the keyboard on the worker, for the client
+    /// ([`ScreenEvent::Field`]); blocking, for the blocking pool. A window stream reports only
+    /// its window's application's field; the caret is in stream pixels, and only while it is
+    /// over the target.
+    pub fn field_reader(&self) -> impl FnOnce() -> Option<TextField> + Send + 'static {
+        let (target, point_scale, shared) =
+            (self.target, self.point_scale, Arc::clone(&self.shared));
+        move || {
+            let field = Source::<P>::focused_field()?;
+            if let CaptureTarget::Window(id) = target
+                && Source::<P>::window_owner(id) != Some(field.pid)
+            {
+                return None;
+            }
+            let bounds = *shared.bounds.lock();
+            Some(stream_field(field, bounds, point_scale * shared.zoom()))
+        }
+    }
+
     /// Whether the target has drawn anything, when that answer changed since the client was
     /// last told. Polled beside [`Self::check_geometry`].
     ///
@@ -5187,6 +5206,21 @@ async fn cursor_event(placed: &mut PointerChanges, wake: &tokio::sync::Notify) {
     }
 }
 
+/// `field` as the client is told it: its caret in stream pixels at `pixels_per_point` from the
+/// target's `bounds`, while the caret is over the target.
+#[expect(clippy::cast_possible_truncation, reason = "stream pixels are well within f32")]
+fn stream_field(field: FocusedField, bounds: Option<Rect>, pixels_per_point: f64) -> TextField {
+    let caret = field.caret.zip(bounds).and_then(|(caret, rect)| {
+        rect.contains(caret.x, caret.y).then_some(Caret {
+            x: ((caret.x - rect.x) * pixels_per_point) as f32,
+            y: ((caret.y - rect.y) * pixels_per_point) as f32,
+            width: (caret.w * pixels_per_point) as f32,
+            height: (caret.h * pixels_per_point) as f32,
+        })
+    });
+    TextField { caret, secure: field.secure }
+}
+
 /// The pointer at `at` (global points) as a cursor sample for a target with bounds `rect`: its
 /// place in stream pixels at `pixels_per_point`, and whether it is over the target.
 fn cursor_sample(rect: Rect, at: (f64, f64), pixels_per_point: f64) -> (i32, i32, bool) {
@@ -5334,6 +5368,34 @@ mod tests {
     use super::*;
 
     const CROP: Crop = Crop { x: 10.0, y: 20.0, w: 300.0, h: 200.0 };
+
+    /// The focused field's caret goes to the client in stream pixels from the target's corner,
+    /// at the stream's scale, and only while it is over the target; a password field says so
+    /// with or without one.
+    #[test]
+    fn a_fields_caret_is_told_in_stream_pixels_over_the_target() {
+        let bounds = Some(Rect { x: 100.0, y: 50.0, w: 800.0, h: 600.0 });
+        let caret = Rect { x: 300.0, y: 150.0, w: 1.0, h: 17.0 };
+        let field = |caret, secure| FocusedField { pid: 7, caret, secure };
+        assert_eq!(
+            stream_field(field(Some(caret), false), bounds, 2.0),
+            TextField {
+                caret: Some(Caret { x: 400.0, y: 200.0, width: 2.0, height: 34.0 }),
+                secure: false,
+            }
+        );
+        let off = Rect { x: 20.0, ..caret };
+        assert_eq!(
+            stream_field(field(Some(off), true), bounds, 2.0),
+            TextField { caret: None, secure: true },
+            "off the target"
+        );
+        assert_eq!(
+            stream_field(field(Some(caret), false), None, 2.0),
+            TextField { caret: None, secure: false },
+            "no bounds yet"
+        );
+    }
 
     /// A transport that keeps what it is sent: it holds what a test says it holds, carries
     /// datagrams up to `max` bytes, and can be closed.

@@ -114,6 +114,18 @@ pub struct WindowState {
     pub owner_pid: i32,
 }
 
+/// The text field that has the keyboard on the Mac, as accessibility reads it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct FocusedField {
+    /// The process whose field it is.
+    pub pid: i32,
+    /// The caret's box (the selection's start when text is selected), in global points;
+    /// `None` when the field does not say.
+    pub caret: Option<Rect>,
+    /// A password field (`kAXSecureTextFieldSubrole`).
+    pub secure: bool,
+}
+
 /// Pixel layout of captured frames.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PixelFormat {
@@ -430,6 +442,13 @@ pub trait CaptureSource: 'static {
     /// told, as on a platform with no screens of its own. Blocking: one window-server round
     /// trip.
     fn console() -> Option<Console> {
+        None
+    }
+
+    /// The text field that has the keyboard on this Mac, in the frontmost application;
+    /// `None` when no text field has it, the platform cannot tell, or accessibility is not
+    /// granted. Blocking: a few accessibility round trips to that application, each bounded.
+    fn focused_field() -> Option<FocusedField> {
         None
     }
 

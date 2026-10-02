@@ -46,7 +46,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   no `key_char` for ⌘ chords; the injector's virtual keycode carries it). Verified: ⌘K from the
   app reached hostd as `Key { K, Press, SUPER }` and cleared the streamed Ghostty. The view
   tracks pressed keys so a release whose press was eaten by a canvas binding is not forwarded.
-  ⌘Q/⌘H/⌘M stay with the app (menu bar). Modifier-only presses are not forwarded (GPUI has no
+  ⌘Q/⌘H/⌘M stay with the app (menu bar; for ⌘Q and ⌘H, superseded below on 2026-10-03 in a
+  tile sending system shortcuts). Modifier-only presses are not forwarded (GPUI has no
   key-down for them); the injector sets flags per event instead.
 
 - ✅ **A focused remote window gets every chord** (2026-09-13). ⌘W in a remote VS Code closed
@@ -616,10 +617,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     modifier key whose modifier is off at the next change is let go.
   - *Terminals are untouched.* Their keys go through `keys::key_event` and the engine's
     encoder as before. `Mods::FN` is set only on screen input.
-  - *Not yet.* The remote caret for the candidate window (`ScreenEvent::Caret`), the iPad's
-    `lang:` sources, a worker setting to turn syncing off, the HID-usage table, and the stage 5
-    virtual keyboard. `ScreenInput::is_paste_chord` still reads the V position, which misses
-    ⌘V on a Dvorak client.
+  - *Not yet.* The iPad's `lang:` sources, the HID-usage table, and the stage 5 virtual
+    keyboard. The remote caret, the opt-out and the paste by character landed on 2026-10-03
+    (the three entries at the end).
   - Tests: proto `every_mac_vk_round_trips`, `every_key_has_a_mac_position_or_is_listed`,
     goldens `client_screen_{key,text,lock,media,keyboard_source}` and
     `worker_screen_keyboard_source`. UI (`screen::keyboard::tests`):
@@ -998,3 +998,69 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_window_streams_pointer_is_the_system_pointer_in_the_workers_picture`,
     `the_system_pointer_takes_the_workers_scale_so_the_hotspot_stays_on_its_point`;
     `slopty-worker` `the_shape_loop_reads_the_picture_only_when_the_seed_moves`.
+
+- ✅ **A paste is the layout's V, on both sides** (2026-10-03, readiness C10). The client
+  read ⌘V by the V *position*, so on a Dvorak Mac (V where US has a period) ⌘V went out as an
+  ordinary chord the worker did not hold behind the clipboard, and its pasteboard offer could
+  land after the paste. Now the view knows a paste by its character (`key_char` "v" under ⌘,
+  whatever key carries it) and sends `ScreenInput::PasteChord { code, mods }`: the key that
+  was pressed, so the worker posts that same key under the client's source, and the word that
+  it is the paste, so the worker holds it behind the clipboard offer and nothing else. The
+  release goes as an ordinary `Key`. "Press" in the palette sends the same pair for ⌘V.
+  `PasteChord` is a new wire variant at the end of `ScreenInput` (golden
+  `client_screen_paste_chord`, 10 bytes framed, two fewer than a `Key`'s 12), and `is_paste_chord` is now a
+  match on it. Nothing new runs per key: the character is already in the event. Tests:
+  `screen::keyboard::tests::a_paste_is_the_layouts_v_wherever_its_key_sits` (Dvorak),
+  `slopty-workerd` `conn::a_paste_holds_its_own_window_and_no_other` (⌘ at the V position is
+  not a paste), `slopty-client` `window_input_is_numbered_per_stream_with_its_in_order_count`.
+
+- ✅ **The input method's candidates sit under the worker's caret** (2026-10-03, readiness
+  C10). The candidate window of a composition on the client hung at the pointer, since the
+  view had no idea where the worker's text caret was. The worker now tells it: 60 ms after
+  input that can move the caret (a focus, a key, a paste, text, a button up; `FIELD_AFTER`), it
+  reads the focused element through the accessibility API (`AXFocusedApplication` →
+  `AXFocusedUIElement` → `AXBoundsForRange` of `AXSelectedTextRange`, 100 ms per-element
+  messaging timeout, off the runtime on a blocking thread) and sends
+  `ScreenEvent::Field { stream, field }` only when it changed. The field carries the caret in
+  stream pixels, only when it is inside the streamed window or display and, for a window, only
+  when the focused app owns it, and `secure` for an `AXSecureTextField`. The view's
+  `bounds_for_range` answers with the caret, so AppKit places the candidates below it; with
+  no caret it falls back to the pointer as before. The read is never on the key path: it
+  waits for the keys to stop for 60 ms, and a read still running is not started again.
+  Tests: `slopty-worker` `a_fields_caret_is_told_in_stream_pixels_over_the_target`,
+  `slopty-workerd` `the_field_with_the_keyboard_is_told_after_typing_and_only_as_it_changes`,
+  `slopty-ui` `the_input_method_hangs_its_candidates_under_the_workers_caret`, golden
+  `worker_screen_field`.
+
+- ✅ **A worker can keep its own input source** (2026-10-03, readiness C10). `[worker]
+  input_source_sync = false` makes the worker refuse every claim (`Sources::refuse_claims`):
+  a client whose source is already the worker's is answered `applied: true`, any other
+  `applied: false` and composes on its side, as for a source the worker cannot select. For a
+  worker whose person types at it too and wants their source left alone. Read at start, like
+  the rest of `[worker]`. Test: `sources::tests::a_worker_that_refuses_claims_keeps_its_own_source`.
+
+- ✅ **A remote window keeps its chords and reaches ours with ⌃** (2026-10-03, readiness
+  A22). With a remote window focused, ⌘⇧P, ⌘⇧M and ⌘⇧I are the remote app's (VS Code's
+  palette), so the palette, the mute and the stats could not be reached without leaving the
+  tile. They take ⌃ on top there: ⌃⌘⇧P, ⌃⌘⇧M and ⌃⌘⇧I, bound in `Workspace > Screen` (Zed's
+  predicates read a plain `Workspace && Screen` against the last context only, so it never
+  matched), and rebindable like every command. In a tile sending system shortcuts to its
+  worker, ⌘Q, ⌘H and ⌘⌥H go there too (`keymap::app_chords`, bound in `!SystemKeys`): they
+  quit or hide the remote app, as on the worker's own keyboard. A click or ⌃Tab out of the
+  tile gives them back, and ⌃⌘Q stays on this Mac. Test: `slopty-ui`
+  `desktop::a_remote_window_keeps_its_chords_and_reaches_ours_with_control`.
+
+- ✅ **Secure keyboard entry, balanced** (2026-10-03, readiness A24). Terminal and Ghostty
+  keep a password from other programs' event taps with secure event input. Slopty turns it on
+  while the focused tile takes a password and an app window is in front: a terminal whose
+  program has turned echo off in canonical mode (`TerminalView::at_password_prompt`), or a
+  remote window whose focused field the worker reports `secure`. `[terminal]
+  secure_keyboard_entry` makes it "At passwords" (the default), "Always" (while a window is
+  in front) or "Never". `EnableSecureEventInput` is counted per process, and one left over
+  keeps every other app's shortcuts dead, so `slopty_platform::secure_input::SecureInput`
+  owns it: it reaches the system only on a change, never enables twice, and turns off as it
+  drops. The workspace follows it from its render (focus, the window coming forward or going
+  back), a terminal's change and a stream's. Tests:
+  `secure_input::tests::secure_input_is_balanced_whatever_is_asked` (a counting switch),
+  `workspace::tests::secure_entry_holds_while_the_focused_shell_reads_a_password`,
+  `desktop::a_remote_password_field_holds_secure_entry`.

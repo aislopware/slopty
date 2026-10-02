@@ -417,13 +417,17 @@ impl ScreenView {
             }
             return false;
         }
-        if is_paste_chord(keystroke) {
-            self.push_clipboard(cx);
-        }
         if code == KeyCode::Unidentified {
             return false;
         }
         let code = self.chord_code(code, keystroke);
+        // Paste is the character this device's layout typed, wherever its key sits.
+        if !repeat && is_paste_chord(keystroke) {
+            self.push_clipboard(cx);
+            self.hold_key(code);
+            self.send_input(ScreenInput::PasteChord { code, mods });
+            return true;
+        }
         self.press_key(code, repeat, mods);
         true
     }
@@ -450,11 +454,16 @@ impl ScreenView {
 
     /// A key went down (or repeats) on the worker: remember it as held and send it.
     fn press_key(&mut self, code: KeyCode, repeat: bool, mods: Mods) {
+        self.hold_key(code);
+        let action = if repeat { KeyAction::Repeat } else { KeyAction::Press };
+        self.send_input(ScreenInput::Key { code, action, mods });
+    }
+
+    /// `code` is down on the worker until its release goes.
+    fn hold_key(&mut self, code: KeyCode) {
         if !self.held.contains(&code) {
             self.held.push(code);
         }
-        let action = if repeat { KeyAction::Repeat } else { KeyAction::Press };
-        self.send_input(ScreenInput::Key { code, action, mods });
     }
 
     /// A key whose press went to the worker was let go; one whose press did not is not sent.
@@ -546,12 +555,16 @@ impl ScreenView {
         let armed = std::mem::take(&mut self.sticky);
         keystroke.modifiers.control |= armed.control;
         keystroke.modifiers.platform |= armed.platform;
-        if is_paste_chord(&keystroke) {
+        let paste = is_paste_chord(&keystroke);
+        if paste {
             self.push_clipboard(cx);
         }
         let code = keys::key_code(&keystroke.key);
         let mods = keys::screen_mods(keystroke.modifiers);
-        if code == KeyCode::Unidentified {
+        if paste && code != KeyCode::Unidentified {
+            self.send_input(ScreenInput::PasteChord { code, mods });
+            self.send_input(ScreenInput::Key { code, action: KeyAction::Release, mods });
+        } else if code == KeyCode::Unidentified {
             let text = keystroke.key_char.filter(|t| !t.is_empty());
             if let Some(text) = text.filter(|_| !mods.intersects(Mods::CTRL | Mods::SUPER)) {
                 self.send_input(ScreenInput::Text { text });

@@ -487,8 +487,14 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let id = paths::worker_id(&data_dir)?;
+    let own = slopty_settings::Settings::load(&slopty_settings::path_in(&data_dir)).settings.worker;
     // A run that ended with a client's source still selected puts the worker's own back first.
     sources.keep_at(data_dir.join("input-source"));
+    if !own.input_source_sync {
+        tracing::info!("input-source sync off: clients compose, the worker keeps its own source");
+        sources.refuse_claims();
+    }
+    let displays = displays.map(|d| d.lingering(own.display_linger()));
     // And the Caps Lock such a run left set, unless it was changed since.
     #[cfg(target_os = "macos")]
     slopty_input::keep_caps(data_dir.join("caps-lock"), &mut slopty_input::System);
@@ -510,8 +516,14 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     let slopty_worker::manager::Reports { mut exits, port_hints, mut moves } = reports;
     let (events, _keep) = broadcast::channel(EVENT_BUFFER);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
-    let wake =
-        Arc::new(parking_lot::Mutex::new(slopty_worker::wake::Wake::new(Assertions::default())));
+    let keeping = match own.keep_awake {
+        slopty_settings::KeepAwake::Working => slopty_worker::wake::Policy::Working,
+        slopty_settings::KeepAwake::Attached => slopty_worker::wake::Policy::Attached,
+        slopty_settings::KeepAwake::Never => slopty_worker::wake::Policy::Never,
+    };
+    let wake = Arc::new(parking_lot::Mutex::new(
+        slopty_worker::wake::Wake::new(Assertions::default()).keeping(keeping),
+    ));
     let screens = slopty_worker::screen::Registry::default();
     screens.observe({
         let wake = Arc::clone(&wake);

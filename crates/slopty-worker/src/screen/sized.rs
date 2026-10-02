@@ -5,8 +5,9 @@
 //! [`DisplayKey`], and a stream's task hands its asks over as jobs ([`Main`]) and waits for the
 //! answer. One key has one display; a second stream with the same key shares it.
 //!
-//! The last stream letting go keeps the display for [`LINGER`] ([`Displays::lingering`]), and
-//! the same key asking again within it takes the display back, windows where they were. A phone
+//! The last stream letting go keeps the display for its linger ([`Displays::lingering`],
+//! `[worker] display_linger_mins`, 10 minutes unless the person sets it), and the same key
+//! asking again within it takes the display back, windows where they were. A phone
 //! that roams between networks, or a laptop whose lid closes, would otherwise have macOS move
 //! every window on it to a physical display and leave them there.
 //!
@@ -40,9 +41,6 @@ pub const ENFORCE_EVERY: Duration = Duration::from_millis(100);
 
 /// How long a new or changed display has to settle in its mode before the stream gives up on it.
 pub const SETTLE_WITHIN: Duration = Duration::from_secs(5);
-
-/// How long a worker keeps a display its client let go of, for the client to take it back.
-pub const LINGER: Duration = Duration::from_mins(10);
 
 /// What makes, changes and checks displays: CoreGraphics on a worker ([`Cg`]), a fake in tests.
 /// Called on the main thread only.
@@ -574,7 +572,7 @@ impl<S: 'static> Main<S> for MainQueue<S> {
 }
 
 /// The worker's displays: CoreGraphics' on the main queue, enforced again on every display
-/// reconfiguration.
+/// reconfiguration, with no linger until the worker gives them its own.
 ///
 /// `None` off the main thread or where no display can be made, and the worker then answers
 /// every `OpenDisplay` with a physical display.
@@ -585,7 +583,7 @@ pub fn on_main_queue() -> Option<Displays<Cg>> {
         return None;
     }
     let main = MainQueue::new(Registry::new(Cg))?;
-    let displays = Displays::new(Arc::new(main), SETTLE_WITHIN).lingering(LINGER);
+    let displays = Displays::new(Arc::new(main), SETTLE_WITHIN);
     let notified = displays.clone();
     if let Err(e) = slopty_vdisplay::on_reconfiguration(move || notified.reconfigured()) {
         tracing::warn!(error = %e, "no display reconfiguration notices; enforcing on changes only");

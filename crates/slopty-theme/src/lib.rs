@@ -1285,6 +1285,8 @@ pub struct Behaviour {
     pub confirm_close: bool,
     /// ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ edit the shell's line as the Mac's text fields do.
     pub natural_editing: bool,
+    /// When typing is kept from other programs on this Mac (secure event input).
+    pub secure_entry: SecureEntry,
     /// What a remote window or display stream asks the worker for.
     pub stream: StreamPrefs,
     /// Web Inspector opens on a browser tile's page (`[web] inspector`).
@@ -1303,6 +1305,7 @@ impl Default for Behaviour {
             option_as_alt: OptionAsAlt::False,
             confirm_close: true,
             natural_editing: true,
+            secure_entry: SecureEntry::Passwords,
             stream: StreamPrefs::default(),
             web_inspector: true,
         }
@@ -1335,6 +1338,19 @@ impl OptionAsAlt {
             Self::Right => right,
         }
     }
+}
+
+/// When typing into the app is kept from other programs on this Mac (macOS secure event
+/// input, Terminal's "Secure Keyboard Entry").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum SecureEntry {
+    /// While a terminal waits for a password or a remote password field has the keyboard.
+    #[default]
+    Passwords,
+    /// Whenever an app window is in front.
+    Always,
+    /// Never.
+    Never,
 }
 
 /// Whether the cursor blinks (ghostty's `cursor-style-blink`: unset, true, false).

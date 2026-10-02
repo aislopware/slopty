@@ -52,6 +52,8 @@ pub mod privacy;
 #[cfg(target_os = "macos")]
 pub mod proc_files;
 pub mod resume;
+#[cfg(target_vendor = "apple")]
+pub mod secure_input;
 pub mod service;
 #[cfg(target_vendor = "apple")]
 pub mod system_keys;

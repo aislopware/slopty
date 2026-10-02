@@ -190,8 +190,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   policy has unit tests on edges and underflow. The canvas also holds the device awake while
   any agent is `Working` or in a `Tool` (the human is waiting on it, as zed does for its agent
   panel) and lets go when every agent is idle, blocked on the human, or gone
-  (`a_working_agent_keeps_the_device_awake`). Not done, ⏸ until asked: a host setting to opt
-  out (`pmset` still wins over an activity for a forced sleep).
+  (`a_working_agent_keeps_the_device_awake`). The host setting to opt out landed on
+  2026-10-03 (below; `pmset` still wins over an activity for a forced sleep).
   - Amended 2026-09-30: **a working agent keeps the host awake with nobody attached, while it
     shows signs of work.** A person starts a long turn from the phone and pockets it, or closes
     the laptop that was the client. The host used to idle to sleep there, stalling the turn
@@ -225,6 +225,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
         control socket, and the test checks the real assertion in the power manager's table
         (`pmset -g assertions`: `PreventUserIdleSystemSleep` held by the worker's pid under
         its reason), not only the policy's flag.
+  - Amended 2026-10-03 (readiness C15): **the person decides what may keep the worker awake.**
+    `[worker] keep_awake` is `working` (the default: all of the above), `attached` (a client
+    attached and a live stream's display; a working agent with nobody attached lets the
+    machine sleep) or `never` (nothing is held, the display of a live stream included, so the
+    machine sleeps as its owner set it even mid-stream). `wake::Policy` decides it inside
+    `Wake`, so only a change of what is held reaches an assertion, and the agents' tick stops
+    sampling processor time when agents cannot hold (`Wake::counts_agents`). Read at start,
+    like the rest of `[worker]`. Test: `wake::tests::the_policy_decides_what_keeps_the_machine_awake`.
 
 - ✅ **Hosts are added by address and keyed by their `WorkerId`** (2026-09-24, with the transport
   ruling **Plaintext QUIC on noq, standalone; iroh removed**). A host is typed as `host[:port]` —
@@ -512,7 +520,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   last stream letting go of a display made for a client removed it, and macOS then moved
   every window on it to a physical display and left them there. A phone roaming between
   networks or a lid closing did that each time. Now the worker keeps a display its client let
-  go of for `sized::LINGER` (10 min), and an `OpenDisplay` with the same key within that time
+  go of for `[worker] display_linger_mins` (10 min unless set; 0 to 1440, `0` lets it go at
+  once; it was the constant `sized::LINGER` until 2026-10-03, readiness C15), and an
+  `OpenDisplay` with the same key within that time
   takes the same display back, windows in place, resized to the new shape. Each linger is
   numbered, so a timer outlived by a take-back and a later let-go releases nothing. A display
   the stream found unusable (it never settled, ScreenCaptureKit never listed it, a resize
@@ -522,7 +532,6 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Not done yet: Jump ends a linger early on local keyboard or mouse input, and the
     research proposed the same (a `CGEventSource` counter). The counter counts the input
     Slopty itself posts for other clients too, so it needs a way to tell the two apart first.
-    The linger is a constant until `[worker] display_linger` lands in `slopty-settings`.
   - Tests: `a_display_let_go_lingers_for_its_client_and_goes_when_the_linger_runs_out` (on
     paused time, with an outlived timer) and
     `a_lost_display_is_released_at_once_and_a_linger_is_its_own_keys`, both over the fake

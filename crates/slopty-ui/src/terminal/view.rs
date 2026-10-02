@@ -2138,6 +2138,14 @@ impl TerminalView {
         matches!(self.pending, Some(Pending::Close(_)))
     }
 
+    /// Whether the program waits for a password: the tty buffers the line and does not echo
+    /// it (`ECHO` off, `ICANON` on), as `sudo`, `ssh` and `read -s` leave it.
+    #[must_use]
+    pub fn at_password_prompt(&self) -> bool {
+        self.state.exited().is_none()
+            && self.state.modes().contains(TermModes::ECHO_OFF | TermModes::CANONICAL)
+    }
+
     /// Session id.
     #[must_use]
     pub const fn session(&self) -> SessionId {

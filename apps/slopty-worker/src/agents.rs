@@ -124,7 +124,11 @@ pub async fn watch(daemon: Daemon) -> ! {
 /// Tell the sleep policy how many agents are working (a turn, a tool, or background work out)
 /// that showed signs of work within its cap: their terminals printing, and for a paused turn
 /// the processor time of the commands it left running (read off the runtime's blocking pool).
+/// Nothing is sampled while the person's policy lets no agent hold the machine.
 async fn keep_awake(daemon: &Daemon, quiet: &mut slopty_worker::wake::Quiet) {
+    if !daemon.wake.lock().counts_agents() {
+        return;
+    }
     let working: Vec<(AgentEvent, Option<i32>)> = {
         let agents = daemon.agents.lock();
         agents

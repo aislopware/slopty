@@ -1075,6 +1075,11 @@ impl WorkspaceView {
                     view.update(cx, |v, cx| v.set_cursor_shape(shape.clone(), cx));
                 }
             }
+            ScreenEvent::Field { stream, field } => {
+                for (_, view) in self.stream_views(key, stream, cx) {
+                    view.update(cx, |v, cx| v.set_field(field, cx));
+                }
+            }
             ScreenEvent::Drag { stream, event } => {
                 for (id, view) in self.stream_views(key, stream, cx) {
                     if let Some((drag, outcome)) = view.update(cx, |v, cx| v.drag_heard(&event, cx))

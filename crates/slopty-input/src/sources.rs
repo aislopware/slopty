@@ -251,6 +251,8 @@ struct Inner {
     /// The platform reports every switch ([`Sources::hearing`]); without, a selection made here
     /// counts as heard at once.
     hearing: AtomicBool,
+    /// No source is selected for a client ([`Sources::refuse_claims`]).
+    refusing: AtomicBool,
     /// Where the worker's own source is kept while a claim holds, and what was written there.
     kept: parking_lot::Mutex<(Option<PathBuf>, Option<Kept>)>,
 }
@@ -302,6 +304,7 @@ impl Sources {
             claims: parking_lot::Mutex::new(Claims::new()),
             heard: watch::Sender::new(None),
             hearing: AtomicBool::new(false),
+            refusing: AtomicBool::new(false),
             kept: parking_lot::Mutex::new((None, None)),
         }))
     }
@@ -336,6 +339,13 @@ impl Sources {
             }
             *inner.kept.lock() = (Some(path), None);
         }));
+    }
+
+    /// Select no client's source from now on (`[worker] input_source_sync = false`): the
+    /// person at the worker keeps theirs. A claim is answered as typing under the client's
+    /// source only while the worker is under it anyway, and every other client composes.
+    pub fn refuse_claims(&self) {
+        self.0.refusing.store(true, Ordering::Relaxed);
     }
 
     /// The platform reports every switch through [`Self::heard`] from now on.
@@ -422,6 +432,13 @@ impl Inner {
     /// Run `who`'s ask, on the main queue.
     fn claim(&self, who: Claimant, source: String) -> Claimed {
         let current = self.tis.current();
+        if self.refusing.load(Ordering::Relaxed) {
+            return if current.as_deref() == Some(source.as_str()) {
+                Claimed::Current
+            } else {
+                Claimed::Refused
+            };
+        }
         let mut claims = self.claims.lock();
         let want = claims.claim(who, source, current.clone());
         if current.as_deref() == Some(want.as_str()) {

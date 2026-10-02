@@ -53,6 +53,7 @@ pub mod remote;
 mod restore;
 mod reviews;
 mod rollup;
+mod secure;
 mod statusbar;
 mod strip;
 mod tile;
@@ -855,6 +856,8 @@ pub struct WorkspaceView {
     drags_out: remote::DragsOut,
     /// Forwarded ports, by session.
     ports: HashMap<SessionId, Vec<slopty_client::tunnel::Forward>>,
+    /// Secure keyboard entry, held while the focused tile takes a password.
+    secure: secure::Secure,
     focus: FocusHandle,
 }
 
@@ -1040,6 +1043,7 @@ impl WorkspaceView {
             #[cfg(target_os = "macos")]
             drags_out: remote::DragsOut::default(),
             ports: HashMap::new(),
+            secure: secure::secure(),
             focus: cx.focus_handle(),
         }
     }
@@ -1546,6 +1550,7 @@ impl WorkspaceView {
     /// tile's title follows it; how the last command ended marks the tile, its row and its tab;
     /// who sizes the PTY is its header's.
     fn terminal_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
+        self.follow_secure_input(cx);
         let Some((was, now)) = self.copy_shell(session, cx) else { return };
         let (navigator, strip) = (self.chrome.nav_rows.entity_id(), self.strip_host.entity_id());
         if was.running != now.running {
@@ -1757,6 +1762,7 @@ impl gpui::Render for WorkspaceView {
         self.settle_reviews(cx);
         self.sync_projects(window, cx);
         self.give_pending_focus(window, cx);
+        self.follow_secure_input(cx);
         // One clock for everything this frame draws: the bar's column marks and the strip,
         // which the strip's own view builds from the layout as it stands now.
         if self.advance(window) {

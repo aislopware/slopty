@@ -32,6 +32,7 @@ use slopty_worker::WorkerError;
 use slopty_worker::clip::{Paste, PasteKind};
 use slopty_worker::screen::{StreamControl, listing};
 use slopty_worker::session::{ClientSink, Outbound, SessionHandle};
+use slopty_worker::xfer::Begun;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -1855,11 +1856,14 @@ mod tests {
 
     /// A paste holds only the window it went to, in order; another window's input goes on, and a
     /// second paste joins the hold behind the first. The release hands the held input back in the
-    /// order it came.
+    /// order it came. A paste is the chord the client named one, wherever its key sits: ⌘ at the
+    /// V position is a Dvorak ⌘K, and holds nothing.
     #[test]
     fn a_paste_holds_its_own_window_and_no_other() {
         let (a, b, c) = (StreamId(1), StreamId(2), StreamId(3));
-        let paste = |s| Input::Window(s, key(KeyCode::V, Mods::SUPER));
+        let paste = |s| {
+            Input::Window(s, ScreenInput::PasteChord { code: KeyCode::Period, mods: Mods::SUPER })
+        };
         let typed = |s, code| Input::Window(s, key(code, Mods::empty()));
         let mut held = None;
 
@@ -1873,8 +1877,8 @@ mod tests {
         assert_eq!(route(&mut held, paste(c)), Route::Held, "a second paste waits too");
         assert_eq!(route(&mut held, typed(c, KeyCode::D)), Route::Held);
         assert_eq!(route(&mut held, typed(b, KeyCode::E)), Route::Now(typed(b, KeyCode::E)));
-        let with_ctrl = || Input::Window(b, key(KeyCode::V, Mods::SUPER | Mods::CTRL));
-        assert_eq!(route(&mut held, with_ctrl()), Route::Now(with_ctrl()), "not a paste");
+        let at_v = || Input::Window(b, key(KeyCode::V, Mods::SUPER));
+        assert_eq!(route(&mut held, at_v()), Route::Now(at_v()), "a key at V is not a paste");
 
         let released = held.take().map(|h| h.inputs).unwrap_or_default();
         assert_eq!(released, [paste(a), typed(a, KeyCode::B), paste(c), typed(c, KeyCode::D)],);

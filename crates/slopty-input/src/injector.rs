@@ -527,6 +527,13 @@ impl<B: Backend> Injector<B> {
                 self.flags = flags_for(*mods);
                 self.post_key(*code, *action)
             }
+            // Held by the connection until the client's clipboard is on the pasteboard; here it
+            // is the press it stands for.
+            ScreenInput::PasteChord { code, mods } => {
+                self.ensure_active();
+                self.flags = flags_for(*mods);
+                self.post_key(*code, KeyAction::Press)
+            }
             ScreenInput::Text { text } => {
                 self.ensure_active();
                 self.post_text(text)

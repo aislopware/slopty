@@ -13,7 +13,7 @@ use slopty_core::{ClientId, StreamId};
 use slopty_input::sources::Claim;
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::drag::{DragEvent, DragInput};
-use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput};
+use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput, TextField};
 use slopty_worker::platform::{Native, Platform};
 use slopty_worker::screen::drag::Heard;
 use slopty_worker::screen::sound::{Listen, Sound};
@@ -38,6 +38,26 @@ const HOLD_MOST: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_millis(150)
 };
+
+/// How long after the client's typing, click or focus the stream reads which text field has
+/// the keyboard ([`ScreenEvent::Field`]): long enough for the app to have moved its caret for
+/// the last of a burst of keys, so a burst costs one read.
+const FIELD_AFTER: std::time::Duration = std::time::Duration::from_millis(60);
+
+/// Whether `command` may move the worker's caret or its keyboard focus: a key, text, a click's
+/// release, the tile taking the keyboard.
+const fn moves_field(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Focus
+            | Command::Input(
+                ScreenInput::Key { .. }
+                    | ScreenInput::PasteChord { .. }
+                    | ScreenInput::Text { .. }
+                    | ScreenInput::Button { down: false, .. }
+            )
+    )
+}
 
 /// Whether the worker types under the source a stream asked for, once it is known.
 type Answer = std::pin::Pin<Box<dyn Future<Output = bool> + Send>>;
@@ -324,6 +344,11 @@ pub async fn serve<P: Platform>(
     let mut carrying: Option<Carrying> = None;
     // Drags out of the apps the stream shows, under the client's own press.
     let mut outward = Outward::new(dnd);
+    // When the field that has the keyboard is next read, the read under way, and what the
+    // client was last told of it (nothing, to begin with).
+    let mut field_due: Option<tokio::time::Instant> = None;
+    let mut reading: Option<tokio::task::JoinHandle<Option<TextField>>> = None;
+    let mut field_told: Option<TextField> = None;
     let by_client = loop {
         tokio::select! {
             command = commands.recv() => match command {
@@ -371,6 +396,9 @@ pub async fn serve<P: Platform>(
                     sourcing = None;
                     claimed = None;
                     hold_until = None;
+                    if held.iter().any(moves_field) {
+                        field_due = Some(field_after());
+                    }
                     for command in std::mem::take(&mut held) {
                         feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                     }
@@ -390,9 +418,29 @@ pub async fn serve<P: Platform>(
                     held.push_back(command);
                 }
                 Some(command) => {
+                    if moves_field(&command) {
+                        field_due = Some(field_after());
+                    }
                     feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                 }
             },
+            () = async {
+                match field_due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            }, if field_due.is_some() && reading.is_none() => {
+                field_due = None;
+                reading = Some(tokio::task::spawn_blocking(stream.field_reader()));
+            }
+            field = async { reading.as_mut()?.await.ok() }, if reading.is_some() => {
+                reading = None;
+                let field = field.flatten();
+                if field != field_told {
+                    field_told = field;
+                    telling.push(ScreenEvent::Field { stream: stream.id(), field });
+                }
+            }
             applied = async {
                 match sourcing.as_mut() {
                     Some((_, answer)) => answer.await,
@@ -409,6 +457,9 @@ pub async fn serve<P: Platform>(
                     claimed = Some((source, applied));
                 }
                 hold_until = None;
+                if held.iter().any(moves_field) {
+                    field_due = Some(field_after());
+                }
                 for command in std::mem::take(&mut held) {
                     feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                 }
@@ -421,6 +472,9 @@ pub async fn serve<P: Platform>(
             }, if hold_until.is_some() => {
                 tracing::debug!(stream = %stream.id(), "input source switch unanswered; typing on");
                 hold_until = None;
+                if held.iter().any(moves_field) {
+                    field_due = Some(field_after());
+                }
                 for command in std::mem::take(&mut held) {
                     feed(stream, client, command, (&mut input_at, &mut next_probe), (&mut outward, dnd), &mut telling);
                 }
@@ -525,6 +579,9 @@ pub async fn serve<P: Platform>(
     if let Some(probe) = probing {
         probe.abort();
     }
+    if let Some(read) = reading {
+        read.abort();
+    }
     // A client gone mid-drag, or its stream closed, leaves: nothing is dropped.
     if let Some(mut on) = carrying {
         let acts = on.hear(Heard::Input(DragInput::Leave { drag: on.drag() }));
@@ -533,6 +590,12 @@ pub async fn serve<P: Platform>(
     outward.end(dnd);
     // What is still untold is moot: the stream is ending, and `Closed` says so.
     by_client
+}
+
+/// When a field read asked for now is due: [`FIELD_AFTER`] on.
+fn field_after() -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(FIELD_AFTER).unwrap_or(now)
 }
 
 /// When the probe after the one just checked is due: a period on while the stream has
@@ -592,9 +655,14 @@ impl Telling {
 /// Apply `command`; input also keeps the geometry probe at its period. Input maps through the
 /// probe's bounds, which the injector reads again itself, in front of the event, once they are
 /// older than its `BOUNDS_TTL`: a stream that takes input follows at the period.
-/// Whether `command` is read under the worker's input source: a key or text.
+/// Whether `command` is read under the worker's input source: a key, the paste chord or text.
 const fn typed(command: &Command) -> bool {
-    matches!(command, Command::Input(ScreenInput::Key { .. } | ScreenInput::Text { .. }))
+    matches!(
+        command,
+        Command::Input(
+            ScreenInput::Key { .. } | ScreenInput::PasteChord { .. } | ScreenInput::Text { .. }
+        )
+    )
 }
 
 /// When input is taken and when the geometry is next probed ([`take_command`]).
@@ -968,6 +1036,9 @@ pub mod fake {
         *LISTED.lock() = displays.to_vec();
         held
     }
+    /// The text field the fake Mac says has the keyboard.
+    pub static FIELD: Mutex<Option<slopty_capture::FocusedField>> = Mutex::new(None);
+
     /// Geometry reads of each display so far.
     static PROBED: LazyLock<Mutex<HashMap<u32, u64>>> = LazyLock::new(Mutex::default);
 
@@ -1116,6 +1187,10 @@ pub mod fake {
             Some(60.0)
         }
 
+        fn focused_field() -> Option<slopty_capture::FocusedField> {
+            *FIELD.lock()
+        }
+
         fn window_state(_id: WindowId) -> Option<WindowState> {
             None
         }
@@ -1199,7 +1274,8 @@ pub mod fake {
     static NOTED: LazyLock<Mutex<HashMap<u32, mpsc::UnboundedSender<Queued>>>> =
         LazyLock::new(Mutex::default);
 
-    /// What the sink of display `display` queues from now on.
+    /// What the sink of display `display` queues from now on. The map is the process's, so each
+    /// test notes its own display numbers: a second `note` of one cuts the first one off.
     pub fn note(display: u32) -> mpsc::UnboundedReceiver<Queued> {
         let (tx, rx) = mpsc::unbounded_channel();
         NOTED.lock().insert(display, tx);
@@ -1991,6 +2067,94 @@ mod made {
     }
 }
 
+/// The text field that has the keyboard, told to the client after its typing and clicks, and
+/// only when it changed.
+#[cfg(test)]
+#[cfg(target_vendor = "apple")]
+mod fields {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use slopty_capture::{FocusedField, Rect};
+    use slopty_core::{ClientId, DisplayId, StreamId};
+    use slopty_input::sources::{Sources, Unsupported};
+    use slopty_net::WorkerMsg;
+    use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton};
+    use slopty_proto::screen::{
+        CaptureTarget, Caret, Quality, ScreenEvent, ScreenInput, TextField,
+    };
+    use slopty_worker::screen::Pipeline;
+    use tokio::sync::mpsc;
+
+    use super::fake::{FIELD, Fake, Nowhere, Plain};
+    use super::{Command, serve};
+
+    /// The next field the stream tells its client.
+    async fn told(events: &mut mpsc::Receiver<WorkerMsg>) -> Option<TextField> {
+        let wait = async {
+            loop {
+                if let Some(WorkerMsg::Screen(ScreenEvent::Field { field, .. })) =
+                    events.recv().await
+                {
+                    break field;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(5), wait).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_field_with_the_keyboard_is_told_after_typing_and_only_as_it_changes() {
+        let target = CaptureTarget::Display(DisplayId(41));
+        let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
+        let (mut pipeline, _opened) =
+            Pipeline::<Fake<Plain>>::open(StreamId(1), target, Quality::default(), sink, |_| {})
+                .await
+                .unwrap();
+        let (commands, mut commanded) = mpsc::unbounded_channel();
+        let (out, mut events) = mpsc::channel(64);
+        let claim = Sources::new(Unsupported).claimant();
+        let task = tokio::spawn(async move {
+            serve(&mut pipeline, ClientId::new(), &mut commanded, &out, None, &claim, None).await;
+            pipeline.close().await;
+        });
+        let key = |code| {
+            Command::Input(ScreenInput::Key { code, action: KeyAction::Press, mods: Mods::empty() })
+        };
+        // The fake display is 800 × 500 points at the origin.
+        let caret = Rect { x: 100.0, y: 50.0, w: 1.0, h: 17.0 };
+        *FIELD.lock() = Some(FocusedField { pid: 9, caret: Some(caret), secure: true });
+        for code in [KeyCode::A, KeyCode::B, KeyCode::C] {
+            commands.send(key(code)).unwrap();
+        }
+        let first = told(&mut events).await.expect("a field");
+        assert!(first.secure, "a password field");
+        let at = first.caret.expect("its caret");
+        let scale = at.x / 100.0;
+        assert!(scale > 0.0, "{at:?}");
+        assert_eq!(
+            at,
+            Caret { x: 100.0 * scale, y: 50.0 * scale, width: scale, height: 17.0 * scale }
+        );
+        // The same field again tells nothing; a click elsewhere tells the change.
+        commands.send(key(KeyCode::D)).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        *FIELD.lock() = None;
+        let up = ScreenInput::Button {
+            button: MouseButton::Left,
+            down: false,
+            x: 4.0,
+            y: 4.0,
+            clicks: 1,
+            mods: Mods::empty(),
+        };
+        commands.send(Command::Input(up)).unwrap();
+        assert_eq!(told(&mut events).await, None, "the next told is the change, not a repeat");
+        commands.send(Command::Close).unwrap();
+        task.await.unwrap();
+    }
+}
+
 /// A stream's keyboard input source: the ask queued in order, the input after it held until
 /// the switch is heard, and a client told when another client's ask took its source.
 #[cfg(test)]
@@ -2396,12 +2560,12 @@ mod dragging {
     /// refused: the worker has one pointer.
     #[tokio::test]
     async fn a_drop_is_carried_from_entry_to_end_and_a_second_waits_its_turn() {
-        let _queued = note(31);
-        let mut steps = note_drags(31);
-        let target = CaptureTarget::Display(slopty_core::DisplayId(31));
+        let _queued = note(71);
+        let mut steps = note_drags(71);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(71));
         let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
         let (mut pipeline, _opened) =
-            Pipeline::<Fake<Plain>>::open(StreamId(31), target, Quality::default(), sink, |_e| {})
+            Pipeline::<Fake<Plain>>::open(StreamId(71), target, Quality::default(), sink, |_e| {})
                 .await
                 .unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -2456,10 +2620,10 @@ mod dragging {
             items: Vec::new(),
         };
         let mut busy_events = {
-            let (_queued, target) = (note(32), CaptureTarget::Display(slopty_core::DisplayId(32)));
+            let (_queued, target) = (note(72), CaptureTarget::Display(slopty_core::DisplayId(72)));
             let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
             let (mut pipeline, _opened) = Pipeline::<Fake<Plain>>::open(
-                StreamId(32),
+                StreamId(72),
                 target,
                 Quality::default(),
                 sink,
@@ -2522,11 +2686,11 @@ mod dragging {
         use slopty_proto::dnd::CaughtData;
         use slopty_proto::input::{Mods, MouseButton};
 
-        let mut queued = note(33);
-        let target = CaptureTarget::Display(slopty_core::DisplayId(33));
+        let mut queued = note(73);
+        let target = CaptureTarget::Display(slopty_core::DisplayId(73));
         let sink: Arc<dyn slopty_worker::DatagramSink> = Arc::new(Nowhere);
         let (mut pipeline, _opened) =
-            Pipeline::<Fake<Plain>>::open(StreamId(33), target, Quality::default(), sink, |_e| {})
+            Pipeline::<Fake<Plain>>::open(StreamId(73), target, Quality::default(), sink, |_e| {})
                 .await
                 .unwrap();
         let dir = tempfile::tempdir().unwrap();

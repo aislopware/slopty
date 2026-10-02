@@ -1687,3 +1687,55 @@ fn the_empty_workspace_is_placed_by_this_frames_layout(cx: &mut TestAppContext) 
     let moved = first.iter().filter(|line| !settled.contains(line)).count();
     assert_eq!(moved, 0, "painted from the last frame's measure");
 }
+
+/// Secure keyboard entry holds while the focused shell reads a password, and lets go when
+/// another tile has the focus, the program echoes again, or the person turns it off; set to
+/// always, it holds while the window is in front.
+#[gpui::test]
+fn secure_entry_holds_while_the_focused_shell_reads_a_password(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.update(|window, _| window.activate_window());
+    let fake = connect(&view, cx, 1, "studio");
+    let [(_, left), (asking, right), _] = three_shells(&view, cx, &fake);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(right, cx));
+    cx.run_until_parked();
+    let on = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.secure_input_on());
+    let prompt = |seq: u64, modes: TermModes| {
+        let TermEvent::Frame(mut f) = frame(&["Password:", ""]) else { panic!("a frame") };
+        f.seq = seq;
+        f.modes = modes;
+        TermEvent::Frame(f)
+    };
+    assert!(!on(cx));
+    let password = TermModes::ECHO_OFF | TermModes::CANONICAL;
+    view.update_in(cx, |v, _w, cx| v.term_event(asking, prompt(2, password), cx));
+    cx.run_until_parked();
+    assert!(on(cx), "the focused shell reads a password");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(left, cx));
+    cx.run_until_parked();
+    assert!(!on(cx), "another tile has the focus");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(right, cx));
+    cx.run_until_parked();
+    assert!(on(cx), "back on the prompt");
+    // A line editor turns echo off too, but reads key by key: no password.
+    view.update_in(cx, |v, _w, cx| v.term_event(asking, prompt(3, TermModes::ECHO_OFF), cx));
+    cx.run_until_parked();
+    assert!(!on(cx), "the shell's own prompt again");
+
+    let with = |entry, cx: &mut VisualTestContext| {
+        let mut theme = view.read_with(cx, |v, _| v.theme.clone());
+        theme.behaviour.secure_entry = entry;
+        view.update(cx, |v, cx| v.set_theme(theme, cx));
+        cx.run_until_parked();
+    };
+    with(slopty_theme::SecureEntry::Always, cx);
+    assert!(on(cx), "always, while the window is in front");
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(!on(cx), "the app behind other windows");
+    cx.update(|window, _| window.activate_window());
+    with(slopty_theme::SecureEntry::Never, cx);
+    view.update_in(cx, |v, _w, cx| v.term_event(asking, prompt(4, password), cx));
+    cx.run_until_parked();
+    assert!(!on(cx), "never, even at a password");
+}

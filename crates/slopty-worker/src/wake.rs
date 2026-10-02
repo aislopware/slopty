@@ -11,9 +11,10 @@
 //! also the processor time of the agent's descendant processes, the commands it left running:
 //! a build computes, a dev server waiting for requests does not. A paused turn holds the
 //! machine for [`PAUSED_CEILING`] at most, whatever it does, since a watcher that polls never
-//! ends. Otherwise an unattended worker sleeps as its owner set it to. The policy is pure and
-//! counts; the assertions behind [`Holds`] are the daemon's (`NSProcessInfo` activities through
-//! `slopty_platform::Activity`).
+//! ends. Otherwise an unattended worker sleeps as its owner set it to. The person may narrow it
+//! ([`Policy`], `[worker] keep_awake`): to attached clients only, or to nothing at all. The
+//! policy is pure and counts; the assertions behind [`Holds`] are the daemon's (`NSProcessInfo`
+//! activities through `slopty_platform::Activity`).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -36,12 +37,26 @@ pub trait Holds: Send {
     fn display(&mut self, hold: bool);
 }
 
+/// What the person lets keep the machine awake (`[worker] keep_awake`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Policy {
+    /// A client attached, or an agent at work with nobody attached; a live stream's display.
+    #[default]
+    Working,
+    /// A client attached only; a live stream's display.
+    Attached,
+    /// Nothing: the machine and its displays sleep as their owner set them to.
+    Never,
+}
+
 /// Attached clients, working agents and live streams, and the holds they imply.
 pub struct Wake<H> {
     clients: usize,
     streams: usize,
     agents: usize,
     system: bool,
+    display: bool,
+    policy: Policy,
     holds: H,
 }
 
@@ -56,9 +71,23 @@ impl<H> std::fmt::Debug for Wake<H> {
 }
 
 impl<H: Holds> Wake<H> {
-    /// Nobody attached, nothing held.
+    /// Nobody attached, nothing held, under [`Policy::Working`].
     pub const fn new(holds: H) -> Self {
-        Self { clients: 0, streams: 0, agents: 0, system: false, holds }
+        Self {
+            clients: 0,
+            streams: 0,
+            agents: 0,
+            system: false,
+            display: false,
+            policy: Policy::Working,
+            holds,
+        }
+    }
+
+    /// Hold only what `policy` lets hold.
+    #[must_use]
+    pub fn keeping(self, policy: Policy) -> Self {
+        Self { policy, ..self }
     }
 
     /// A client connected: the first one holds the machine awake.
@@ -80,25 +109,36 @@ impl<H: Holds> Wake<H> {
         self.hold_system();
     }
 
-    /// Hold the machine exactly while a client is attached or an agent works; only a change
-    /// reaches the assertion.
+    /// Hold the machine exactly while a client is attached or an agent works, as far as the
+    /// policy lets them; only a change reaches the assertion.
     fn hold_system(&mut self) {
-        let hold = self.clients > 0 || self.agents > 0;
+        let hold = match self.policy {
+            Policy::Working => self.clients > 0 || self.agents > 0,
+            Policy::Attached => self.clients > 0,
+            Policy::Never => false,
+        };
         if hold != self.system {
             self.system = hold;
             self.holds.system(hold);
         }
     }
 
-    /// How many streams are live now; the display is held while it is not zero.
+    /// How many streams are live now; the display is held while it is not zero, unless the
+    /// policy holds nothing.
     pub fn streams(&mut self, live: usize) {
-        let was = self.streams;
         self.streams = live;
-        match (was, live) {
-            (0, 1..) => self.holds.display(true),
-            (1.., 0) => self.holds.display(false),
-            _ => {}
+        let hold = live > 0 && self.policy != Policy::Never;
+        if hold != self.display {
+            self.display = hold;
+            self.holds.display(hold);
         }
+    }
+
+    /// Whether working agents can hold the machine under the policy: when not, nobody need
+    /// sample them.
+    #[must_use]
+    pub fn counts_agents(&self) -> bool {
+        self.policy == Policy::Working
     }
 
     /// `(clients, streams)` right now.
@@ -115,7 +155,7 @@ impl<H: Holds> Wake<H> {
             streams: self.streams,
             agents: self.agents,
             system: self.system,
-            display: self.streams > 0,
+            display: self.display,
         }
     }
 }
@@ -234,6 +274,28 @@ mod tests {
         wake.agents(0);
         assert_eq!(wake.holds.0, ["system on", "system off", "system on", "system off"]);
         assert_eq!(wake.awake().agents, 0);
+    }
+
+    /// The person's policy decides what may hold: attached only lets a working agent sleep
+    /// with the machine, and never holds nothing, a live stream's display included.
+    #[test]
+    fn the_policy_decides_what_keeps_the_machine_awake() {
+        let mut attached = Wake::new(Log::default()).keeping(Policy::Attached);
+        attached.agents(1);
+        assert!(attached.holds.0.is_empty(), "an agent alone holds nothing");
+        attached.client_joined();
+        attached.streams(1);
+        assert_eq!(attached.holds.0, ["system on", "display on"]);
+        attached.client_left();
+        assert_eq!(attached.holds.0, ["system on", "display on", "system off"]);
+
+        let mut never = Wake::new(Log::default()).keeping(Policy::Never);
+        never.client_joined();
+        never.agents(2);
+        never.streams(1);
+        assert!(never.holds.0.is_empty(), "nothing held: {:?}", never.holds.0);
+        let awake = never.awake();
+        assert!(!awake.system && !awake.display && awake.clients == 1 && awake.streams == 1);
     }
 
     /// An agent whose terminal prints keeps counting; one silent for the cap stops, and

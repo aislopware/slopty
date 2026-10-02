@@ -209,6 +209,7 @@ impl WorkspaceView {
     /// Copy item `id`'s stream again. When it changed, everything that shows it is drawn again:
     /// a stream's facts change a few times in its life, not with its frames.
     pub(super) fn stream_changed(&mut self, id: ItemId, cx: &mut Context<Self>) {
+        self.follow_secure_input(cx);
         let Some(view) = self.screens.get(&id) else { return };
         let now = ScreenFacts::of(view.read(cx));
         if self.facts.screens.insert(id, now) != Some(now) {

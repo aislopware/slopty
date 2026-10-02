@@ -1013,7 +1013,8 @@ mod golden {
     }
 
     /// The keyboard of a remote window: a key by its position with its side, committed text,
-    /// Caps Lock's state, a media key, the client's input source and the worker's answer.
+    /// Caps Lock's state, a media key, the client's input source and the worker's answer, the
+    /// paste chord, and the worker's focused field.
     #[test]
     fn screen_keyboard() {
         use slopty_proto::screen::MediaKey;
@@ -1042,6 +1043,26 @@ mod golden {
             }),
         );
         snap("client_screen_keyboard_released", &input(ScreenInput::KeyboardReleased));
+        // ⌘V on a Dvorak client: the paste chord by its character, at the key's own place.
+        snap(
+            "client_screen_paste_chord",
+            &input(ScreenInput::PasteChord { code: KeyCode::Period, mods: Mods::SUPER }),
+        );
+        snap(
+            "worker_screen_field",
+            &WorkerMsg::Screen(ScreenEvent::Field {
+                stream: StreamId(7),
+                field: Some(slopty_proto::screen::TextField {
+                    caret: Some(slopty_proto::screen::Caret {
+                        x: 412.0,
+                        y: 96.5,
+                        width: 0.0,
+                        height: 17.0,
+                    }),
+                    secure: true,
+                }),
+            }),
+        );
         snap(
             "worker_screen_keyboard_source",
             &WorkerMsg::Screen(ScreenEvent::KeyboardSource {

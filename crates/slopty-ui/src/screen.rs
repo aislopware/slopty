@@ -49,7 +49,7 @@ use slopty_proto::drag::DragInput;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
     CaptureTarget, Chroma, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest,
-    ScrollPhase, SourceState, VideoCodec,
+    ScrollPhase, SourceState, TextField, VideoCodec,
 };
 use slopty_theme::Theme;
 use tokio::sync::{Notify, mpsc, watch};
@@ -392,6 +392,10 @@ pub struct ScreenView {
     screen: Option<(Option<u32>, u16)>,
     /// Input-method composition in progress (nothing is sent until it commits).
     marked: Option<String>,
+    /// The worker's text field that has the keyboard
+    /// ([`slopty_proto::screen::ScreenEvent::Field`]): where a composition's candidate window
+    /// hangs, and whether it is a password field.
+    field: Option<TextField>,
     /// The stats overlay (⌘⇧I).
     hud: Option<Hud>,
     /// The overlay shows its engineering lines under the plain one.
@@ -989,6 +993,7 @@ impl ScreenView {
             sticky: Modifiers::default(),
             keyboard: keyboard::Keyboard::new(cx),
             marked: None,
+            field: None,
             hud: None,
             hud_details: false,
             probe: health::Probe::default(),
@@ -1388,6 +1393,32 @@ impl ScreenView {
                 cx.notify();
             }
         }
+    }
+
+    /// The worker said which text field has the keyboard (`ScreenEvent::Field`), or none.
+    pub fn set_field(&mut self, field: Option<TextField>, cx: &mut Context<Self>) {
+        if self.field != field {
+            self.field = field;
+            cx.notify();
+        }
+    }
+
+    /// Whether the worker's field that has the keyboard is a password field.
+    #[must_use]
+    pub fn in_password_field(&self) -> bool {
+        self.field.is_some_and(|f| f.secure)
+    }
+
+    /// Where the worker's caret is drawn, from the view's window origin, in points: the
+    /// stream pixels it was read in scale by the size input maps with, as the pointer's do.
+    fn caret_bounds(&self) -> Option<Bounds<Pixels>> {
+        let caret = self.field?.caret?;
+        let (w, h) = self.mapped_f32();
+        let (w, h) = (w.max(1.0), h.max(1.0));
+        let (x, y) = self.frame_to_body(self.zoom.to_frame((caret.x / w, caret.y / h)));
+        let tall = caret.height / h * self.frame().size.1 * self.zoom.scale();
+        let origin = point(self.bounds.origin.x + x, self.bounds.origin.y + y);
+        Some(Bounds::new(origin, size(px(caret.width.max(1.0)), px(tall.max(1.0)))))
     }
 
     /// The worker said which cursor it shows (`ScreenEvent::Cursor`): draw that picture at the
@@ -2726,8 +2757,8 @@ fn same_move(last: &ScreenInput, next: &ScreenInput) -> bool {
 
 /// Whether `msg` may not be dropped: anything but input, and input that ends something — a key
 /// or button release, a scroll gesture's or momentum's end, a drag's every step but its moves —
-/// or that a letter would be missing without: text, Caps Lock's state, the input source the
-/// keys are read under and its release.
+/// or that a letter would be missing without: text, the paste chord, Caps Lock's state, the
+/// input source the keys are read under and its release.
 const fn must_arrive(msg: &ClientMsg) -> bool {
     let ClientMsg::Screen(ScreenRequest::Input { input, .. }) = msg else { return true };
     matches!(
@@ -2738,6 +2769,7 @@ const fn must_arrive(msg: &ClientMsg) -> bool {
                 | DragInput::Drop { .. }
                 | DragInput::Catch { .. }
         ) | ScreenInput::Key { action: KeyAction::Release, .. }
+            | ScreenInput::PasteChord { .. }
             | ScreenInput::Text { .. }
             | ScreenInput::Lock { .. }
             | ScreenInput::KeyboardSource { .. }
@@ -2994,10 +3026,16 @@ impl Render for ScreenView {
 
         let hud = self.hud_text().map(|(summary, text)| self.hud_panel(&summary, &text, cx));
         let console = self.console_overlay();
+        // While the view has the keys, the workspace's own chords stand back (`!Screen`); with
+        // system shortcuts sent, so do the app's ⌘Q and ⌘H (`!SystemKeys`).
+        let mut key_context = gpui::KeyContext::new_with_defaults();
+        key_context.add("Screen");
+        if self.system_keys {
+            key_context.add(SYSTEM_KEYS_CTX);
+        }
         div()
             .id("screen")
-            // While the view has the keys, the workspace's own chords stand back (`!Screen`).
-            .key_context("Screen")
+            .key_context(key_context)
             .role(gpui::accesskit::Role::Image)
             .aria_label(self.a11y_label().clone())
             .track_focus(&self.focus)
@@ -3299,10 +3337,13 @@ impl EntityInputHandler for ScreenView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // The pointer stands in for a caret: candidate windows hang there.
-        let (dx, dy) = self.cursor_offset(cx.background_executor().now());
-        let origin = point(self.bounds.origin.x + dx, self.bounds.origin.y + dy);
-        Some(Bounds::new(origin, size(px(1.0), px(16.0))))
+        // The worker's caret, once it has said where it is; till then the pointer stands in
+        // for it: candidate windows hang there.
+        self.caret_bounds().or_else(|| {
+            let (dx, dy) = self.cursor_offset(cx.background_executor().now());
+            let origin = point(self.bounds.origin.x + dx, self.bounds.origin.y + dy);
+            Some(Bounds::new(origin, size(px(1.0), px(16.0))))
+        })
     }
 
     fn character_index_for_point(
@@ -3344,7 +3385,13 @@ const fn is_modifier(code: KeyCode) -> bool {
     )
 }
 
-/// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the worker read its pasteboard.
+/// The key context a remote view adds while it sends system shortcuts to its worker: the app
+/// binds ⌘Q, ⌘H and ⌘⌥H outside it ([`crate::keymap::app_chords`]), so there they quit or hide
+/// the remote app.
+pub const SYSTEM_KEYS_CTX: &str = "SystemKeys";
+
+/// ⌘V (and ⇧⌘V, "paste and match style"): the chords that make the worker read its pasteboard,
+/// by the character this device's layout typed (a Dvorak ⌘V is the key a US layout calls ".").
 fn is_paste_chord(keystroke: &Keystroke) -> bool {
     let m = keystroke.modifiers;
     m.platform && !m.control && !m.alt && keystroke.key == "v"
@@ -3968,7 +4015,9 @@ mod tests {
             std::iter::from_fn(|| rx.try_recv().ok())
                 .filter_map(|m| match m {
                     ClientMsg::Screen(ScreenRequest::Input {
-                        input: ScreenInput::Key { code, action: KeyAction::Press, .. },
+                        input:
+                            ScreenInput::Key { code, action: KeyAction::Press, .. }
+                            | ScreenInput::PasteChord { code, .. },
                         ..
                     }) => Some(code),
                     _ => None,
@@ -4600,6 +4649,41 @@ mod tests {
         assert_eq!(caret(&view, cx), Some(half_quarter), "the sample sent before the ask");
         view.update(cx, |v, _| v.cursor = CursorState { x: 200, y: 75, visible: true });
         assert_eq!(caret(&view, cx), Some(half_quarter), "the first at the 400×300 asked for");
+    }
+
+    /// While this Mac composes for a remote field, the candidate window hangs under the
+    /// worker's caret once the worker says where it is, scaled as the pointer is; with no field
+    /// (or one that gives no caret) the pointer stands in. A password field is told apart.
+    #[gpui::test]
+    fn the_input_method_hangs_its_candidates_under_the_workers_caret(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use slopty_proto::screen::Caret;
+        let (view, _rx, cx) = windowed(cx);
+        let caret = |view: &gpui::Entity<ScreenView>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                view.update(cx, |v, cx| v.bounds_for_range(0..0, Bounds::default(), window, cx))
+            })
+        };
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        view.update(cx, |v, _| v.cursor = CursorState { x: 400, y: 150, visible: true });
+        let pointer = caret(&view, cx).map(|b| b.origin);
+        let field = |caret, secure| Some(TextField { caret, secure });
+        let at = Caret { x: 200.0, y: 300.0, width: 0.0, height: 30.0 };
+        view.update(cx, |v, cx| v.set_field(field(Some(at), false), cx));
+        let got = caret(&view, cx).expect("a caret");
+        let quarter_half = point(
+            bounds.origin.x + bounds.size.width * 0.25,
+            bounds.origin.y + bounds.size.height * 0.5,
+        );
+        assert_eq!(got.origin, quarter_half, "at the caret, a quarter across and half down");
+        assert_eq!(got.size.height, bounds.size.height * (30.0 / 600.0), "the line's height");
+        assert!(!view.read_with(cx, |v, _| v.in_password_field()));
+        view.update(cx, |v, cx| v.set_field(field(None, true), cx));
+        assert_eq!(caret(&view, cx).map(|b| b.origin), pointer, "no caret: the pointer");
+        assert!(view.read_with(cx, |v, _| v.in_password_field()));
+        view.update(cx, |v, cx| v.set_field(None, cx));
+        assert!(!view.read_with(cx, |v, _| v.in_password_field()));
     }
 
     /// The button presses among `got`: button, down, and where.

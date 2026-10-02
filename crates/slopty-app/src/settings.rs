@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime};
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Settings,
-    SettingsError, bounds,
+    Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, SecureEntry,
+    Settings, SettingsError, bounds,
 };
 use slopty_theme::{Contrast, Density, Rgb, TerminalPalette, Theme, Variant};
 
@@ -126,6 +126,11 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     theme.behaviour.confirm_close = settings.terminal.confirm_close;
     theme.behaviour.web_inspector = settings.web.inspector;
     theme.behaviour.natural_editing = settings.terminal.natural_editing;
+    theme.behaviour.secure_entry = match settings.terminal.secure_keyboard_entry {
+        SecureEntry::Passwords => slopty_theme::SecureEntry::Passwords,
+        SecureEntry::Always => slopty_theme::SecureEntry::Always,
+        SecureEntry::Never => slopty_theme::SecureEntry::Never,
+    };
     theme.behaviour.hide_pointer_while_typing = settings.terminal.hide_pointer_while_typing;
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
@@ -415,6 +420,10 @@ mod tests {
         assert!(t.behaviour.natural_editing);
         s.terminal.natural_editing = false;
         assert!(!theme_for(&s, true, Contrast::Standard).behaviour.natural_editing);
+        assert_eq!(t.behaviour.secure_entry, slopty_theme::SecureEntry::Passwords);
+        s.terminal.secure_keyboard_entry = SecureEntry::Always;
+        let secure = theme_for(&s, true, Contrast::Standard).behaviour.secure_entry;
+        assert_eq!(secure, slopty_theme::SecureEntry::Always);
         assert!(t.behaviour.hide_pointer_while_typing && !t.terminal.bold_is_bright);
         s.terminal.hide_pointer_while_typing = false;
         s.terminal.bold_is_bright = true;

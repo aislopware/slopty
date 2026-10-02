@@ -1064,7 +1064,7 @@ mod tests {
             quality(a),
             ClientMsg::Screen(ScreenRequest::Focus(a)),
             moved(a),
-            key(a, KeyCode::V, Mods::SUPER),
+            input(a, ScreenInput::PasteChord { code: KeyCode::Period, mods: Mods::SUPER }),
             key(a, KeyCode::B, Mods::empty()),
             ClientMsg::Screen(ScreenRequest::Close(a)),
             moved(a),
