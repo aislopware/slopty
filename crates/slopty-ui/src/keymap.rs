@@ -841,10 +841,53 @@ pub fn current() -> Rc<Keymap> {
 pub fn install(keymap: Keymap, cx: &mut App) {
     let others: Vec<KeyBinding> =
         cx.key_bindings().borrow().bindings().filter(|b| b.meta() != Some(OURS)).cloned().collect();
+    let released = released(&others);
     cx.clear_key_bindings();
     cx.bind_keys(others);
     cx.bind_keys(keymap.bindings(|_| true));
+    cx.bind_keys(released);
     CURRENT.with(|current| *current.borrow_mut() = Some(Rc::new(keymap)));
+}
+
+/// gpui-kit's window root (`gpui_base::Root`), the context around every view. The kit binds
+/// Tab and ⇧Tab there to walk the focus, and ⌃C to copy a selection on every target but macOS,
+/// the iPhone and iPad among them.
+const KIT_ROOT: &str = "Root";
+
+/// The views that take every key the table leaves them: a terminal's program and a remote
+/// window's worker.
+const KEY_TAKERS: [&str; 2] = ["Terminal", "Screen"];
+
+/// What gives the chords without ⌘ that `others` bind around every view back to the views
+/// that take every key. GPUI runs a key's binding before any view hears the key, so gpui-kit's
+/// Tab would walk the focus out of a shell and its ⌃C would copy instead of interrupting the
+/// program. Each is unbound by its action's name inside [`KEY_TAKERS`] alone, so the kit's
+/// fields and menus, and every chord with ⌘, keep theirs.
+fn released(others: &[KeyBinding]) -> Vec<KeyBinding> {
+    let Ok(root) = gpui::KeyContext::parse(KIT_ROOT) else { return Vec::new() };
+    let around = [root];
+    let mut out = Vec::new();
+    for other in others {
+        let [stroke] = other.keystrokes() else { continue };
+        let stroke = stroke.inner();
+        let action = other.action();
+        if stroke.modifiers.platform
+            || gpui::is_no_action(action)
+            || gpui::is_unbind(action)
+            || !other.predicate().is_none_or(|p| p.eval(&around))
+        {
+            continue;
+        }
+        let chord = stroke.unparse();
+        let unbind = gpui::Unbind(action.name().into());
+        for context in KEY_TAKERS {
+            match binding(&chord, &unbind, Some(context)) {
+                Ok(binding) => out.push(binding.with_meta(OURS)),
+                Err(e) => tracing::error!(chord, context, error = %e, "release"),
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

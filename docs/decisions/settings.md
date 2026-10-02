@@ -160,6 +160,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_folders_command_takes_a_key_alone` (the form), `the_menu_bar_follows_a_rebinding`,
   `a_broken_file_keeps_the_keys` (slopty-app).
 
+- ✅ **gpui-kit's keys around every view stand aside in a shell and a remote window**
+  (2026-10-03). GPUI runs a key's binding before any view hears the key, and gpui-kit binds
+  chords in its window root, around every view: Tab and ⇧Tab walk the focus, and ⌃C copies a
+  selection on every target but macOS, the iPhone and iPad among them. So Tab and ⇧Tab never
+  reached a shell or a remote window, and once the terminal answered the Edit menu's Copy
+  (`09cba6b3`), ⌃C on the simulator copied nothing and interrupted nothing. `keymap::install`
+  now unbinds, by its action's name, every binding outside the table that holds around every
+  view on a chord without ⌘, inside `Terminal` and `Screen` alone, where the program and the
+  worker take every key the table leaves them. The kit's fields, menus and ⌘ chords keep
+  theirs, and the list follows the kit rather than naming its chords. Ruled out: a `NoAction`
+  binding, which in gpui-fast masks only bindings of a source as weak as its own (the
+  keymap's meta is weaker than the kit's untagged bindings); and making the terminal's Copy
+  pass when nothing is selected, which would still copy over ⌃C with a selection. gpui-kit's
+  root should bind ⌘C on iOS as its text fields already do; that is the fork's to change.
+  Tests: `the_kits_keys_around_a_shell_go_to_the_program` (terminal),
+  `the_kits_tab_around_a_remote_window_goes_to_the_worker` (screen),
+  `a_hardware_keyboard_on_the_simulator_arrives_through_presses` and
+  `the_soft_keyboard_on_the_simulator_types_through_insert_text` (`cargo xtask e2e ios`).
+
 - ✅ **`[terminal] agent_alert`: an agent's alert sounds only from the background** (2026-10-01).
   An agent that needs the human (a permission, a question, done) sounds the alert sound and
   bounces the Dock icon only while no Slopty window is active, as Mail and Messages behave. In

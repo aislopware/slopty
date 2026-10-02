@@ -9181,6 +9181,51 @@ mod tests {
         assert!(cx.debug_bounds("terminal-restored").is_none(), "the chip goes");
     }
 
+    /// Under gpui-kit's window root, the keys the kit binds around every view are the
+    /// program's: Tab and ⇧Tab type rather than walk the focus, and ⌃C, which the kit binds to
+    /// copy on the iPhone and iPad (bound here as it binds it there), interrupts rather than
+    /// copies. The shell keeps the focus.
+    #[gpui::test]
+    fn the_kits_keys_around_a_shell_go_to_the_program(cx: &mut TestAppContext) {
+        use slopty_proto::input::{KeyCode, Mods};
+
+        let (tx, mut rx) = mpsc::channel(64);
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.bind_keys([KeyBinding::new("ctrl-c", input::Copy, Some("Root"))]);
+            crate::keymap::install(crate::keymap::Keymap::default(), cx);
+        });
+        let grid = TermSize { cols: 10, rows: 3, ..TermSize::default() };
+        let view = cx.new(|cx| TerminalView::new(SessionId::new(), grid, tx, Theme::default(), cx));
+        let held = view.clone();
+        let (_root, cx) = cx.add_window_view(|window, cx| {
+            let focus = held.read(cx).focus.clone();
+            window.focus(&focus, cx);
+            gpui_kit::component::Root::new(held, window, cx)
+        });
+        cx.simulate_resize(size(px(400.0), px(300.0)));
+        cx.run_until_parked();
+        let keys = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter_map(|msg| match msg {
+                    ClientMsg::Term { req: TermRequest::Key(key), .. } => {
+                        Some((key.code, key.mods))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        keys(&mut rx);
+        cx.simulate_keystrokes("tab shift-tab ctrl-c");
+        cx.run_until_parked();
+        assert_eq!(
+            keys(&mut rx),
+            [(KeyCode::Tab, Mods::empty()), (KeyCode::Tab, Mods::SHIFT), (KeyCode::C, Mods::CTRL)]
+        );
+        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+        assert!(focused, "the shell kept the focus");
+    }
+
     /// A login shell restored has nothing to run again: the chip says so and can be put away.
     #[gpui::test]
     fn a_restored_login_shell_has_nothing_to_run_and_is_dismissed(cx: &mut TestAppContext) {

@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gpui::{EntityInputHandler as _, Keystroke, Modifiers};
+use gpui::{AppContext as _, EntityInputHandler as _, Keystroke, Modifiers};
 use slopty_client::ScreenHandle;
 use slopty_core::{DisplayId, StreamId};
 use slopty_platform::keyboard::{KeyKind, NativeKey, Taken};
@@ -562,4 +562,53 @@ fn a_tile_left_a_while_lets_the_source_go(cx: &mut gpui::TestAppContext) {
             ScreenInput::Lock { caps: false }
         ]
     );
+}
+
+/// Under gpui-kit's window root, Tab and ⇧Tab, which the kit binds there to walk the focus, go
+/// to the worker as keys, and the remote window keeps the keyboard.
+#[gpui::test]
+fn the_kits_tab_around_a_remote_window_goes_to_the_worker(cx: &mut gpui::TestAppContext) {
+    let (out, mut rx) = mpsc::channel(256);
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::keymap::install(crate::keymap::Keymap::default(), cx);
+    });
+    let opened = Opened {
+        stream: StreamId(4),
+        target: CaptureTarget::Display(DisplayId(2)),
+        size: (800, 600),
+        quality: Quality { scale: 1.0, ..Quality::default() },
+    };
+    let fake = Fake::on(US);
+    let platform: Rc<dyn KeyPlatform> = Rc::<Fake>::clone(&fake);
+    let view = cx.new(|cx| {
+        let mut view =
+            ScreenView::new(opened, ScreenHandle::detached(StreamId(4)), out, Theme::default(), cx);
+        view.set_key_platform(platform, cx);
+        view
+    });
+    let held = view.clone();
+    let (_root, cx) = cx.add_window_view(|window, cx| {
+        let focus = held.read(cx).focus.clone();
+        window.focus(&focus, cx);
+        gpui_kit::component::Root::new(held, window, cx)
+    });
+    cx.run_until_parked();
+    view.update(cx, |v, _| v.keyboard_focused());
+    inputs(&mut rx);
+    cx.simulate_keystrokes("tab shift-tab");
+    cx.run_until_parked();
+    let presses: Vec<ScreenInput> = inputs(&mut rx)
+        .into_iter()
+        .filter(|i| matches!(i, ScreenInput::Key { action: KeyAction::Press, .. }))
+        .collect();
+    assert_eq!(
+        presses,
+        [
+            key(KeyCode::Tab, KeyAction::Press, Mods::empty()),
+            key(KeyCode::Tab, KeyAction::Press, Mods::SHIFT)
+        ]
+    );
+    let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+    assert!(focused, "the remote window kept the keyboard");
 }
