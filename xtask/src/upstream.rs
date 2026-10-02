@@ -923,7 +923,7 @@ fn build_checks(name: &str) -> &'static [(&'static str, &'static str)] {
             ),
         ],
         // `take` points `GHOSTTY_SOURCE_DIR` at the ghostty tree it pins, so these build the
-        // ghostty the pin names, and they are ghostty's check too: the rebased terminal must
+        // ghostty the pin names, and they are ghostty's check too: the merged terminal must
         // build under the binding and pass the binding's tests before either is pushed.
         LIBGHOSTTY_RS => &[
             ("check libghostty-vt", "cargo check --locked -p libghostty-vt --all-targets"),
@@ -1301,7 +1301,11 @@ mod tests {
             "what the gate asks"
         );
         let ghostty = &config.ghostty;
-        assert_eq!(ghostty.strategy, Strategy::Rebase, "our ghostty commits replay onto main");
+        assert_eq!(
+            ghostty.strategy,
+            Strategy::Merge,
+            "upstream merges into our ghostty, never a force-push"
+        );
         assert_eq!(ghostty.checkout, "vendor/ghostty", "the submodule is the checkout");
         assert!(ghostty.tracking.paths.iter().any(|p| p == "src/terminal/"), "filtered");
         assert!(config.gpui_kit.tracking.paths.is_empty(), "every gpui-kit move counts");

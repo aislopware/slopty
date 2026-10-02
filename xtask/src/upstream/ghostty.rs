@@ -1,7 +1,7 @@
 //! The ghostty fork, `vendor/ghostty`, and the pin libghostty-rs carries for it.
 //!
-//! `vendor/ghostty` is what every build compiles (`GHOSTTY_SOURCE_DIR`), so a sync never rebases
-//! in it: a conflict would leave markers in the tree every session builds from. The rebase runs
+//! `vendor/ghostty` is what every build compiles (`GHOSTTY_SOURCE_DIR`), so a sync never merges
+//! in it: a conflict would leave markers in the tree every session builds from. The merge runs
 //! in a linked worktree of the same repository ([`WORKTREE`], holding the fork's branch), and
 //! `vendor/ghostty` itself only ever moves, detached, to a head the fork already has.
 //!
@@ -16,7 +16,7 @@ use xshell::{Shell, cmd};
 use super::{Fork, same_repo, short};
 use crate::tools::step;
 
-/// Where the fork's branch is checked out for a rebase, relative to the main checkout.
+/// Where the fork's branch is checked out for a merge, relative to the main checkout.
 pub const WORKTREE: &str = ".research/ghostty";
 /// libghostty-vt-sys's build script, relative to the libghostty-rs checkout.
 const BUILD_RS: &str = "crates/libghostty-vt-sys/build.rs";
@@ -52,9 +52,9 @@ fn repinned(script: &str, commit: &str, fork: &str) -> Result<String> {
     Ok(script.replacen(&format!("{COMMIT_LINE}{old}\""), &format!("{COMMIT_LINE}{commit}\""), 1))
 }
 
-/// Make [`WORKTREE`] ready to rebase the fork's branch in, returning its path. `vendor/ghostty`
-/// is initialised when missing and detached where it stands (no file changes), since a branch is
-/// checked out in one worktree at a time.
+/// Make [`WORKTREE`] ready to merge upstream into the fork's branch, returning its path.
+/// `vendor/ghostty` is initialised when missing and detached where it stands (no file changes),
+/// since a branch is checked out in one worktree at a time.
 pub fn prepare(sh: &Shell, main: &Utf8Path, fork: &Fork) -> Result<Utf8PathBuf> {
     let vendor = main.join(&fork.checkout);
     if !vendor.join(".git").exists() {

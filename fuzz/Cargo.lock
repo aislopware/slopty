@@ -429,7 +429,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#cdc4bb0b9cad9cf67a97a386d59e35da13e836f7"
+source = "git+https://github.com/aislopware/libghostty-rs.git#abf9c38a8626cf466427594606baa3fa12d5188b"
 dependencies = [
  "bitflags",
  "int-enum",
@@ -440,7 +440,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#cdc4bb0b9cad9cf67a97a386d59e35da13e836f7"
+source = "git+https://github.com/aislopware/libghostty-rs.git#abf9c38a8626cf466427594606baa3fa12d5188b"
 
 [[package]]
 name = "linux-raw-sys"

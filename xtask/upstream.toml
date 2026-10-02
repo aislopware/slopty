@@ -50,9 +50,10 @@ checked = "2026-10-01"
 check_every_days = 0
 
 # The terminal. `vendor/ghostty` is a submodule on the fork, whose `main` carries our commits on
-# ghostty-org's `main`. `sync` rebases in the worktree `.research/ghostty`, never in
-# `vendor/ghostty`, re-pins libghostty-rs (`GHOSTTY_COMMIT`, bindings) and builds and tests the
-# binding against the rebased tree before pushing anything; `vendor/ghostty` then moves to the
+# ghostty-org's `main`. `sync` merges upstream in the worktree `.research/ghostty`, never in
+# `vendor/ghostty`, so the fork only moves forward and a pinned commit is never rewritten. It
+# re-pins libghostty-rs (`GHOSTTY_COMMIT`, bindings) and builds and tests the binding against the
+# merged tree before pushing anything; `vendor/ghostty` then moves to the
 # pushed head. Upstream lands a dozen or more commits a day, about a third of them in what
 # libghostty-vt builds from: `paths` is that part (the terminal, its C API and headers, the SIMD
 # and Unicode code the parser and grid call, the key and mouse encoders we use, the lib-vt build
@@ -64,8 +65,8 @@ upstream_branch = "main"
 fork = "https://github.com/aislopware/ghostty.git"
 branch = "main"
 checkout = "vendor/ghostty"
-strategy = "rebase"
-base = "33da6848d63b3bba2b4f31ab1531d618f2795192"
+strategy = "merge"
+base = "83edd491e3024ae5e50393d62877b8897da1cccd"
 base_date = "2026-10-01"
 checked = "2026-10-02"
 check_every_days = 1
