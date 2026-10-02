@@ -2331,26 +2331,18 @@ impl Workspace {
         // resized fades right on its first frame.
         let scrolled = -f32::from(self.key_bar_scroll.offset().x);
         let (leading, trailing) = key_bar_fades(scrolled, overflow);
-        let (surface, depth) = (self.theme.content(), px(self.theme.spacing.lg));
+        let ends = gpui::EdgeFade::x(px(self.theme.spacing.lg)).depth(gpui::Edges {
+            left: f32::from(leading),
+            right: f32::from(trailing),
+            ..gpui::Edges::default()
+        });
+        // The caps fade per pixel; the bar's surface is outside the fade.
         div()
-            .relative()
             .w_full()
-            .bg(hsla(surface))
+            .bg(hsla(self.theme.content()))
             .border_t_1()
             .border_color(hsla(self.theme.surfaces.border))
-            .child(row)
-            .when(leading, |el| {
-                el.child(
-                    kit::edge_fade(kit::Edge::Leading, surface, depth)
-                        .debug_selector(|| "key-bar-fade-leading".to_owned()),
-                )
-            })
-            .when(trailing, |el| {
-                el.child(
-                    kit::edge_fade(kit::Edge::Trailing, surface, depth)
-                        .debug_selector(|| "key-bar-fade-trailing".to_owned()),
-                )
-            })
+            .child(gpui::edge_fade(row, ends))
             .into_any_element()
     }
 

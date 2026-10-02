@@ -231,9 +231,16 @@ fn a_board_taller_than_its_tile_says_more_lies_below(cx: &mut TestAppContext) {
     cx.run_until_parked();
     board(&view, cx, orchestrator).update(cx, |b, cx| b.show(Lens::Board, cx));
     cx.run_until_parked();
-    let drawn = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).is_some();
-    assert!(drawn(cx, "project-fade-bottom"), "lanes run on below");
-    assert!(!drawn(cx, "project-fade-top"), "nothing above yet");
+    let faded = |cx: &mut VisualTestContext| {
+        // The fade reads the body's extent as it lays out, so it lands a frame later.
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        let body = cx.debug_bounds("project-body").expect("drawn");
+        cx.update(|window, _| crate::retained::faded_edges(window, body))
+    };
+    let edges = faded(cx);
+    assert!(edges.bottom, "lanes run on below");
+    assert!(!edges.top, "nothing above yet");
 
     let merge = cx.debug_bounds("project-card-merge-25").expect("Ship it can merge");
     assert!(
@@ -252,8 +259,9 @@ fn a_board_taller_than_its_tile_says_more_lies_below(cx: &mut TestAppContext) {
     cx.run_until_parked();
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    assert!(drawn(cx, "project-fade-top"), "scrolled: what is above fades");
-    assert!(!drawn(cx, "project-fade-bottom"), "at the end nothing lies below");
+    let edges = faded(cx);
+    assert!(edges.top, "scrolled: what is above fades");
+    assert!(!edges.bottom, "at the end nothing lies below");
     drop(fake);
 }
 

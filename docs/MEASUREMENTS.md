@@ -13723,3 +13723,31 @@ cargo xtask e2e app                                   # twice; 55 passed each
 cargo xtask e2e app --filter 'test(/^stream::/)'
 cargo nextest run -p slopty-worker --lib -E 'test(/^screen::/)'
 ```
+
+## 2026-10-03 — per-pixel edge fades on the thread's frames (gpui-fast decee29f)
+
+The transcript, the palette, the project board, the settings page and the key bar now fade their
+content per pixel (`gpui::edge_fade`, aislopware/gpui-fast#18) where they laid a gradient quad
+over it in the surface's colour (`kit::edge_fade`). A primitive carries its fade in padding it
+already had, so a fade adds no byte to the scene; the renderer reads one small table a frame. The
+thread's frame test (`frame_time::the_thread_draws_a_streaming_answer_within_a_frame`, scenarios
+(h) to (k) as above) scrolls a transcript that fades at its top and, while panning, its foot. It ran
+four times, alternating the tree before the change (A: gpui-fast 448d3dac with the gradient
+overlays) and after it (B), at load averages of 11 to 16 from other work on this Mac. Draw time
+p50 / p95 / p99 / max:
+
+| Scenario | A1 | B1 | A2 | B2 |
+| --- | --- | --- | --- | --- |
+| (h) following | 2.1 / 4.7 / 5.2 / 5.3 ms | 1.7 / 2.0 / 2.7 / 4.4 ms | 2.5 / 5.2 / 7.7 / 8.6 ms | 2.4 / 4.5 / 6.4 / 7.4 ms |
+| (i) panning, streaming | 2.6 / 5.6 / 8.7 / 8.8 ms | 1.6 / 2.2 / 3.3 / 3.5 ms | 2.2 / 6.3 / 8.3 / 8.7 ms | 2.8 / 5.5 / 6.9 / 7.9 ms |
+| (j) every step open | 2.5 / 5.5 / 6.4 / 7.4 ms | 1.3 / 2.1 / 2.6 / 4.9 ms | 2.5 / 5.1 / 8.5 / 11.1 ms | 2.1 / 4.7 / 7.5 / 8.2 ms |
+| (k) word to its frame p50 / p95 | 35.1 / 47.3 ms | 37.1 / 51.7 ms | 32.6 / 49.7 ms | 32.8 / 49.7 ms |
+
+No frame ran over 16.7 ms or was dropped in any run. B1 drew in this Mac's faster state (the
+section above); A2 and B2, in the same state, overlap in every scenario. The fades cost nothing
+measurable on the frame path.
+
+```sh
+# A: the tree at 9434a068 (Cargo.lock pinning gpui-fast 448d3dac); B: this change
+cargo xtask e2e smooth --filter 'test(/frame_time::the_thread/)'
+```

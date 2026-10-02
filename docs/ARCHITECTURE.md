@@ -1371,8 +1371,9 @@ stream's painted bounds) is compared in prepaint and, when it moved, sent as a n
 frame (`cx.defer`, or `Window::on_next_frame` on a weak handle), because a notify raised in the
 middle of a draw only marks the view. For the same reason what a view shows is a function of
 what it holds, never of the clock read while building: a loading grace is a mark its timer
-sets (`screen::past_grace`), and the transcript's top fade is judged in prepaint, after the
-list has followed its tail (`kit::painted_while`). What a view keeps but does not show is not
+sets (`screen::past_grace`), and the transcript's edge fades read the list's scroll in prepaint
+(`gpui::edge_fade` with `hidden_by_list`), asking for the next frame when the list's layout moved
+it. What a view keeps but does not show is not
 written through the view after a frame: a typed key is timed when its frame reaches the display,
 into a record the terminal shares with its element (`TerminalView::latency_record`), since an
 update of the view there would count as a change and build it again with the strip's next

@@ -3058,7 +3058,6 @@ impl Render for ProjectView {
             Lens::Machines => self.machines(&board, cx),
         };
         let composer = self.composer_row(&board, cx);
-        let fades = self.scroll_fades();
         let keys = keys
             .child(self.header(&board, cx))
             .children(self.recap(&board, cx))
@@ -3066,49 +3065,41 @@ impl Render for ProjectView {
             .children(self.plan(&board, cx))
             .child(self.lenses(cx))
             .child(
-                div()
-                    .id("project-body")
-                    .debug_selector(|| "project-body".to_owned())
-                    .relative()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.plate.under(theme))
-                    .child(
-                        div()
-                            .id("project-scroll")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .pt(self.z(theme.spacing.xs))
-                            .pb(self.z(theme.spacing.md))
-                            .children(body),
-                    )
-                    .children(fades),
+                self.scroll_fade(
+                    div()
+                        .id("project-body")
+                        .debug_selector(|| "project-body".to_owned())
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.plate.under(theme))
+                        .child(
+                            div()
+                                .id("project-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.scroll)
+                                .pt(self.z(theme.spacing.xs))
+                                .pb(self.z(theme.spacing.md))
+                                .children(body),
+                        ),
+                ),
             );
         root.child(keys).children(composer)
     }
 }
 
 impl ProjectView {
-    /// The body's edges fading into the tile's surface while more lies past them, so a lane
-    /// cut at the foot (the board's second row) reads as more below, not as the end. Judged
-    /// once the body has laid out, so they follow the scroll of the frame they are drawn in.
-    fn scroll_fades(&self) -> [AnyElement; 2] {
-        let theme = &self.theme;
-        let surface = theme.content();
-        let (above, below) = (self.scroll.clone(), self.scroll.clone());
-        let top = crate::kit::edge_fade(crate::kit::Edge::Top, surface, self.z(theme.spacing.md))
-            .debug_selector(|| "project-fade-top".to_owned());
-        let bottom =
-            crate::kit::edge_fade(crate::kit::Edge::Bottom, surface, self.z(theme.spacing.xl))
-                .debug_selector(|| "project-fade-bottom".to_owned());
-        [
-            crate::kit::painted_while(move |_| above.offset().y < px(0.0), top).into_any_element(),
-            crate::kit::painted_while(
-                move |_| below.max_offset().y + below.offset().y > px(0.5),
-                bottom,
-            )
-            .into_any_element(),
-        ]
+    /// `body` fading out at its edges while more lies past them, so a lane cut at the foot (the
+    /// board's second row) reads as more below, not as the end. The body fades per pixel; the
+    /// tile's surface is outside the fade.
+    fn scroll_fade(&self, body: impl IntoElement) -> gpui::EdgeFadeElement {
+        let spacing = self.theme.spacing;
+        let edges = gpui::Edges {
+            top: self.z(spacing.md),
+            bottom: self.z(spacing.xl),
+            ..gpui::Edges::default()
+        };
+        gpui::edge_fade(body, gpui::EdgeFade::new(edges)).hidden_by_scroll(&self.scroll)
     }
 }

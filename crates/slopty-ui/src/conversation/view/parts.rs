@@ -241,20 +241,18 @@ impl ConversationView {
         )
     }
 
-    /// The list's lower edge fading into the body's surface over the composer, so rows slide under
-    /// it rather than stop at a line, and its top edge once the list is scrolled off its start,
-    /// so a row is not sliced by the header: the one gradient the face draws, as a mask. The
-    /// top one is judged after the list has laid out, since following its tail scrolls it then.
-    pub(super) fn list_fade(&self) -> [AnyElement; 2] {
-        let surface = self.theme.content();
-        let bottom = kit::edge_fade(kit::Edge::Bottom, surface, self.z(self.theme.spacing.xl));
-        let list = self.list.clone();
-        let scrolled = move |_: &gpui::App| {
-            let top = list.logical_scroll_top();
-            top.item_ix > 0 || top.offset_in_item > px(0.0)
+    /// `items`, the list, fading out at its lower edge over the composer while rows run on
+    /// below, so they slide under it rather than stop at a line, and at its top once scrolled
+    /// off its start, so a row is not sliced by the header. The rows fade per pixel; the body's
+    /// surface is outside the fade, so a scroll layer still bakes it.
+    pub(super) fn list_fade(&self, items: impl gpui::IntoElement) -> gpui::EdgeFadeElement {
+        let spacing = self.theme.spacing;
+        let edges = gpui::Edges {
+            top: self.z(spacing.md),
+            bottom: self.z(spacing.xl),
+            ..gpui::Edges::default()
         };
-        let top = kit::edge_fade(kit::Edge::Top, surface, self.z(self.theme.spacing.md));
-        [bottom.into_any_element(), kit::painted_while(scrolled, top).into_any_element()]
+        gpui::edge_fade(items, gpui::EdgeFade::new(edges)).hidden_by_list(&self.list)
     }
 
     /// The held permission prompt, in the composer's shell: a statement of what Claude wants,

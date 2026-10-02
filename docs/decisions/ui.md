@@ -4992,3 +4992,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::view::tests::the_working_clock_says_what_it_ticks`,
     `kit::tests::a_clock_ticks_in_whole_seconds`; e2e gallery `agent-needs-you` and `inbox` wait
     for the thread's request to arrive before their goldens.
+
+- ✅ **Fades are per pixel, with the surface outside them** (2026-10-03, gpui-fast `decee29f`,
+  aislopware/gpui-fast#18). Where content runs past an edge it fades out pixel by pixel
+  (`gpui::edge_fade` around the scrolling element), and the surface behind it is painted outside
+  the fade. `kit::edge_fade` laid a gradient from clear to the surface's colour over the content,
+  which fades only over that one opaque colour: over the window's glass, a video or a frosted
+  floating object it would draw a band of the wrong colour. It also needed `painted_while` to
+  judge after layout whether anything lay past the edge, and it was one more quad over every
+  scrolled frame.
+  - **What fades.** The palette's rows at their foot (`lg`); the transcript's rows at the top
+    (`md`) and the foot (`xl`); the project board's body at the top (`md`) and the foot (`xl`);
+    the settings page at both (`lg`); the key bar's caps at either end (`lg`). Each list or
+    scroll container is wrapped as it is, with `hidden_by_list` / `hidden_by_scroll`, so an
+    edge fades only as deep as content lies hidden past it: none at the end, in full once a
+    whole width is. The key bar keeps `key_bar_fades`, read from the caps rather than the last
+    layout, so a bar just shown fades on its first frame.
+  - **The surface stays outside.** A fade covers everything inside it, its own background
+    included, and a scroll layer bakes the background under it only when that is one opaque
+    quad without a fade. So the background (the face's, the sheet's, the bar's) is painted by
+    an element around the fade, never by the element it wraps.
+  - **A list's fade lands a frame late.** The fade reads the list's extent before the list lays
+    out in the same frame, so a list just opened or narrowed draws one frame with the fade it
+    had and gpui-fast asks for the next, which is right. The palette's old overlay was judged
+    after layout to be right in the first frame. The self-test's `render` and `dump` now draw
+    the frames the app asks for before they judge (`retained::settle`, at most four): the
+    frame between is not where the app settles, and it failed the stale check as the palette
+    narrowed to the folder it offers. A view changed without a notify asks for no frame, so
+    the check still catches it.
+  - **Chrome draws no gradient.** The lint `a_gradient_is_an_edge_fade` is now
+    `chrome_draws_no_gradient`, over `kit` too, with no exception.
+  - Tests: `retained::tests::a_fade_is_told_by_its_edges` (the helper `retained::faded_edges`
+    reads which edges of a region the last frame faded, from `Window::painted_primitives`),
+    `palette::tests::a_long_list_fades_at_its_foot_until_its_end`,
+    `conversation::view::tests::the_rows_fade_where_more_lies_past_an_edge`,
+    `settings_form::tests::a_long_page_fades_where_more_lies_past`,
+    `workspace::tests::projects::a_board_taller_than_its_tile_says_more_lies_below`,
+    `workspace::tests::palette::the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`,
+    `kit::tests::chrome_draws_no_gradient`, app `the_key_row_fades_where_keys_run_past_the_edge`.

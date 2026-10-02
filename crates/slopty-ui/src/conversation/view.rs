@@ -1569,6 +1569,7 @@ impl ConversationView {
             }),
         )
         .size_full();
+        let items = self.list_fade(items);
         let conversation = self.pane == Pane::Conversation;
         let rail = (conversation && self.rail.read(cx).shown()).then(|| {
             let z = |v: f32| px(v * self.zoom);
@@ -1585,8 +1586,8 @@ impl ConversationView {
         let latest = (conversation && !self.list.is_following_tail()).then(|| self.latest_pill(cx));
         let find = self.find_bar(cx);
         region
+            .debug_selector(|| "conversation-rows".to_owned())
             .child(items)
-            .children(self.list_fade())
             .children(rail)
             .children(latest)
             .children(find)

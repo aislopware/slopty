@@ -1170,38 +1170,23 @@ impl SettingsForm {
             children.push(quiet(&theme, "settings-empty", NO_MATCHES).into_any_element());
         }
         self.placed = placed;
-        // What scrolls past an edge fades into the dialog's surface, so a row cut at the edge
-        // reads as more to come.
-        let (offset, most) = (self.scroll.offset().y, self.scroll.max_offset().y);
-        let depth = px(theme.spacing.lg);
-        let surface = theme.surfaces.elevated;
-        div()
-            .relative()
+        // What scrolls past an edge fades out per pixel, so a row cut at the edge reads as more
+        // to come; the dialog's surface is outside the fade.
+        let page = div()
+            .id("settings-page")
+            .debug_selector(|| "settings-page".to_owned())
+            .role(gpui::accesskit::Role::TabPanel)
+            .aria_label(if by_section { "Settings" } else { self.section.label() })
             .flex_1()
             .min_w_0()
             .h_full()
-            .flex()
-            .child(
-                div()
-                    .id("settings-page")
-                    .debug_selector(|| "settings-page".to_owned())
-                    .role(gpui::accesskit::Role::TabPanel)
-                    .aria_label(if by_section { "Settings" } else { self.section.label() })
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .px(px(theme.spacing.inset()))
-                    .pb(px(theme.spacing.md))
-                    .children(children),
-            )
-            .when(offset < px(0.0), |el| {
-                el.child(crate::kit::edge_fade(crate::kit::Edge::Top, surface, depth))
-            })
-            .when(-offset < most, |el| {
-                el.child(crate::kit::edge_fade(crate::kit::Edge::Bottom, surface, depth))
-            })
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .px(px(theme.spacing.inset()))
+            .pb(px(theme.spacing.md))
+            .children(children);
+        gpui::edge_fade(page, gpui::EdgeFade::y(px(theme.spacing.lg)))
+            .hidden_by_scroll(&self.scroll)
             .into_any_element()
     }
 
@@ -1870,5 +1855,35 @@ mod tests {
         let top = top.expect("the card's first part, in the hover step");
         assert!((top.corner_radii.top_left.0 / scale - theme.radii.lg).abs() < 0.5, "rounded");
         assert!(top.corner_radii.bottom_left.0.abs() < 0.5, "and open below");
+    }
+
+    /// A page taller than the form fades per pixel at the edge more lies past: at its foot from
+    /// the start, at its top once scrolled to the end.
+    #[gpui::test]
+    fn a_long_page_fades_where_more_lies_past(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let (_form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(360.0)));
+        cx.run_until_parked();
+        let faded = |cx: &mut VisualTestContext| {
+            // The fade reads the page's extent as it lays out, so it lands a frame later.
+            cx.update(Window::simulate_next_frame);
+            cx.run_until_parked();
+            let page = cx.debug_bounds("settings-page").expect("the page");
+            let edges = cx.update(|window, _| crate::retained::faded_edges(window, page));
+            (edges.top, edges.bottom)
+        };
+        assert_eq!(faded(cx), (false, true), "more below the start");
+        let at = cx.debug_bounds("settings-page").expect("the page").center();
+        cx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-100_000.0))),
+            modifiers: gpui::Modifiers::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+            momentum_phase: None,
+        });
+        cx.run_until_parked();
+        assert_eq!(faded(cx), (true, false), "at the end, only what is above");
     }
 }

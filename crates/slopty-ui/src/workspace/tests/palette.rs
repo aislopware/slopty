@@ -423,7 +423,7 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
     // The row the ceiling cuts fades out above the foot rather than ending on its hairline.
     cx.update(Window::simulate_next_frame);
     cx.run_until_parked();
-    assert!(cx.debug_bounds("palette-more").is_some(), "a cut row fades on a desktop too");
+    assert!(more_below(cx), "a cut row fades on a desktop too");
     assert!(w > 700.0, "a desktop window");
 
     // The fade reads the list's extent a frame late: the tests have no frame loop to run it.
@@ -447,12 +447,18 @@ fn the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone(cx: &mut TestAppContex
         foot.bottom() <= palette.bottom() && foot.top() >= palette.top(),
         "the foot is inside: {foot:?} in {palette:?}"
     );
-    assert!(cx.debug_bounds("palette-more").is_some(), "more below: the fade says so");
+    assert!(more_below(cx), "more below: the fade says so");
     // ↑ from the first line wraps to the last, and the list scrolls to its end.
     cx.simulate_keystrokes("up");
     cx.run_until_parked();
     next_frame(cx);
-    assert!(cx.debug_bounds("palette-more").is_none(), "nothing more below");
+    assert!(!more_below(cx), "nothing more below");
+}
+
+/// Whether the palette's rows fade out at their foot.
+fn more_below(cx: &mut VisualTestContext) -> bool {
+    let rows = cx.debug_bounds("palette-rows").expect("the palette's rows");
+    cx.update(|window, _| crate::retained::faded_edges(window, rows)).bottom
 }
 
 /// ↓ past the lines in view scrolls the palette's list with the selection, and a query that

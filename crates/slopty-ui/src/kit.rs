@@ -166,133 +166,6 @@ where
 /// while the field's text sat this much further in, so the morph from one to the other jumped.
 pub const FIELD_INSET: f32 = 10.0;
 
-/// The edge of a region a fade runs along.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Edge {
-    /// Above: a list scrolled off its top, under a header.
-    Top,
-    /// Below: a list that runs on under a foot or a composer.
-    Bottom,
-    /// The left: a row scrolled off its start.
-    Leading,
-    /// The right: a row that runs on past the edge.
-    Trailing,
-}
-
-/// A band `depth` deep along `edge` of a scrolling region, from clear to `surface` at the edge,
-/// so what scrolls past the edge fades into the surface rather than stopping on a cut line.
-///
-/// The one gradient chrome draws: a functional mask saying there is more that way, never a
-/// wash on a surface. The palette's foot, the transcript's top and bottom and the key bar's
-/// ends draw it. The caller lays it last over the region (which is `relative`) and only while
-/// something lies past that edge. It takes no pointer, so the rows under it stay live.
-#[must_use]
-pub fn edge_fade(edge: Edge, surface: Rgb, depth: gpui::Pixels) -> Div {
-    let solid = hsla(surface);
-    let clear = Hsla { a: 0.0, ..solid };
-    let across = |el: Div| el.left_0().right_0().h(depth);
-    let along = |el: Div| el.top_0().bottom_0().w(depth);
-    // A CSS angle: the direction the gradient runs, from clear toward the edge.
-    let (angle, band) = match edge {
-        Edge::Top => (0.0, across(div().top_0())),
-        Edge::Bottom => (180.0, across(div().bottom_0())),
-        Edge::Leading => (270.0, along(div().left_0())),
-        Edge::Trailing => (90.0, along(div().right_0())),
-    };
-    band.absolute().bg(gpui::linear_gradient(
-        angle,
-        gpui::linear_color_stop(clear, 0.0),
-        gpui::linear_color_stop(solid, 1.0),
-    ))
-}
-
-/// `child`, painted only while `shown` holds as the frame is prepainted.
-///
-/// It is judged after the elements before it have laid out. For a mark that follows what another
-/// element settles while it lays out, such as a list's scroll once it has followed its tail:
-/// decided while building, it would show the scroll of the frame before, and a view drawn from the
-/// last frame would keep it.
-pub fn painted_while(
-    shown: impl Fn(&App) -> bool + 'static,
-    child: impl IntoElement,
-) -> PaintedWhile {
-    PaintedWhile { shown: Box::new(shown), child: child.into_any_element() }
-}
-
-/// [`painted_while`]'s element.
-pub struct PaintedWhile {
-    shown: Box<dyn Fn(&App) -> bool>,
-    child: gpui::AnyElement,
-}
-
-impl std::fmt::Debug for PaintedWhile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PaintedWhile").finish_non_exhaustive()
-    }
-}
-
-impl IntoElement for PaintedWhile {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
-impl gpui::Element for PaintedWhile {
-    type PrepaintState = bool;
-    type RequestLayoutState = ();
-
-    fn id(&self) -> Option<gpui::ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&gpui::GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
-        (self.child.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&gpui::GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
-        _bounds: gpui::Bounds<gpui::Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Self::PrepaintState {
-        let shown = (self.shown)(cx);
-        if shown {
-            self.child.prepaint(window, cx);
-        }
-        shown
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&gpui::GlobalElementId>,
-        _inspector_id: Option<&gpui::InspectorElementId>,
-        _bounds: gpui::Bounds<gpui::Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        prepaint: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        if *prepaint {
-            self.child.paint(window, cx);
-        }
-    }
-}
-
 /// The sign of lines taken away: the figure dash, as wide as a digit, so a column of sizes
 /// keeps its figures on one grid, as `MonoCode` sets `+25 ‒15`.
 pub const REMOVED_SIGN: &str = "\u{2012}";
@@ -1645,17 +1518,20 @@ mod tests {
         assert_eq!(clock(ms(3_720_000)), "1h 2m");
     }
 
-    /// The one gradient chrome draws is the [`edge_fade`] mask: a gradient anywhere else is a
-    /// wash, the first tell of generated UI.
+    /// Chrome draws no gradient, `kit` included: a gradient is a wash, the first tell of
+    /// generated UI. Where something scrolls past an edge, the content itself fades per pixel
+    /// (`gpui::edge_fade`), over whatever lies behind it.
     #[test]
-    fn a_gradient_is_an_edge_fade() {
-        const AWAITING: [&str; 0] = [];
-        let gradient = |line: &str| {
-            let code = !line.trim_start().starts_with("//");
-            (code && line.contains("linear_gradient("))
-                .then_some("a gradient, not `kit::edge_fade`")
-        };
-        let wrong = flagged(&AWAITING, gradient);
+    fn chrome_draws_no_gradient() {
+        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
+            .into_iter()
+            .flat_map(chrome_lines)
+            .filter(|(.., line)| {
+                let code = !line.trim_start().starts_with("//");
+                code && ["linear_gradient(", "linear_color_stop("].iter().any(|g| line.contains(g))
+            })
+            .map(|(file, line_no, line)| format!("{file}:{line_no}: a gradient: {}", line.trim()))
+            .collect();
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 

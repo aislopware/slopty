@@ -23,7 +23,7 @@ use slopty_theme::Theme;
 
 use crate::colors::hsla;
 use crate::icons::{self, Glyph, IconName, IconSize, Status};
-use crate::kit::{Edge, Pace};
+use crate::kit::Pace;
 
 /// What the list says when the query leaves nothing.
 pub(crate) const NO_COMMAND_MATCHES: &str = "No command matches";
@@ -419,20 +419,15 @@ fn foot_key(theme: &Theme, key: &'static str, what: &'static str) -> gpui::Div {
         .child(what)
 }
 
-/// Whether `list`, as laid out, runs on below what it shows: more than its own padding under
-/// the last row is still to come.
-fn runs_on(list: &ListState) -> bool {
-    let left = list.max_offset_for_scrollbar().y + list.scroll_px_offset_for_scrollbar().y;
-    left > px(0.5)
-}
-
-/// The fade over the list's foot while there is more below. With no legend under it (glass),
-/// it meets the sheet's rounded foot and follows its corners, where a square band cut them off.
-fn more_fade(theme: &Theme, legend: bool) -> gpui::Div {
-    let inner = theme.radii.lg - 1.0;
-    crate::kit::edge_fade(Edge::Bottom, theme.surfaces.elevated, px(theme.spacing.lg))
-        .debug_selector(|| "palette-more".to_owned())
-        .when(!legend, |el| el.rounded_b(px(inner)))
+/// `rows` (the list and the plate under it) fading out at their foot while more runs on below:
+/// a touch list has no scrollbar, and on a desktop the row the list's height cuts would
+/// otherwise end on the foot's band, read as a row that lost its bottom. The rows fade per
+/// pixel and the sheet's surface stays outside the fade, so it fades over glass as over the
+/// desktop's plate.
+fn more_below(theme: &Theme, list: &ListState, rows: gpui::Div) -> gpui::EdgeFadeElement {
+    let foot = gpui::Edges { bottom: px(theme.spacing.lg), ..gpui::Edges::default() };
+    gpui::edge_fade(rows.debug_selector(|| "palette-rows".to_owned()), gpui::EdgeFade::new(foot))
+        .hidden_by_list(list)
 }
 
 /// The palette's foot: a quiet band across the sheet's bottom, what ↩ does with the selected
@@ -1890,13 +1885,6 @@ impl Render for CommandPalette {
             let ceiling = crate::kit::Overlay::List.bounds().1;
             dialog.max_h(px(ceiling.min(height * SHARE)))
         };
-        // A fade over the list's foot says there is more below: a touch list has no scrollbar,
-        // and on a desktop the row the list's height cuts would otherwise end on the foot's
-        // band, read as a row that lost its bottom. It is judged once the list has laid out in
-        // the same frame, so a list just opened or narrowed by a query fades on its first.
-        let list = self.list.clone();
-        let fade =
-            crate::kit::painted_while(move |_| runs_on(&list), more_fade(&theme, self.chords));
         // Glass has no Esc: the field ends in Cancel, as iOS search does.
         let cancel = (!self.chords).then(|| {
             crate::kit::button(&theme, "palette-cancel", "Cancel", crate::kit::ButtonKind::Link)
@@ -1913,7 +1901,9 @@ impl Render for CommandPalette {
                     .gap(px(theme.spacing.md))
                     .children(cancel),
             )
-            .child(
+            .child(more_below(
+                &theme,
+                &self.list,
                 div()
                     .relative()
                     .flex_1()
@@ -1950,9 +1940,8 @@ impl Render for CommandPalette {
                                     NO_COMMAND_MATCHES,
                                 ))
                             }),
-                    )
-                    .child(fade),
-            )
+                    ),
+            ))
             .when(self.chords, |el| el.child(legend(&theme, verb)));
         // The phone's sheet dims what it came down over; on glass anywhere the dim is also what a
         // finger taps to close it, where a desktop's Esc would.
@@ -2103,20 +2092,6 @@ mod tests {
         Marked { key, bounds: line(y), seated }
     }
 
-    /// On glass the fade over the list's foot keeps the sheet's rounded corners; over the
-    /// legend's band it is square, the band being what meets the corners.
-    #[test]
-    fn the_fade_follows_the_sheets_corners_where_it_meets_them() {
-        let theme = Theme::default();
-        let inner = px(theme.radii.lg - 1.0);
-        let mut glass = more_fade(&theme, false);
-        let corners = glass.style().corner_radii.clone();
-        assert_eq!(corners.bottom_left, Some(inner.into()));
-        assert_eq!(corners.bottom_right, Some(inner.into()));
-        let mut desk = more_fade(&theme, true);
-        assert_eq!(desk.style().corner_radii.bottom_left, None, "the legend meets them");
-    }
-
     /// `ms` past `t0`.
     fn after(t0: Instant, ms: u64) -> Instant {
         t0.checked_add(Duration::from_millis(ms)).expect("a test's instant")
@@ -2219,12 +2194,11 @@ mod tests {
         (palette, cx)
     }
 
-    /// A list that runs past the sheet's foot fades there in the frame that first draws it,
-    /// judged once the list has laid out. Judged from the frame before, the first frame had no
-    /// fade, and a capture taken before the next one (a phone's simulator may draw none while
-    /// idle) did not match the same state drawn from scratch.
+    /// A list that runs past the sheet's foot fades there, per pixel, once it has laid out, and
+    /// the fade goes as the list reaches its end. The sheet's surface is outside the fade, and
+    /// the frame shown is what a frame from scratch paints.
     #[gpui::test]
-    fn a_long_list_fades_at_its_foot_in_its_first_frame(cx: &mut TestAppContext) {
+    fn a_long_list_fades_at_its_foot_until_its_end(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             cx.set_reduce_motion(true);
@@ -2232,11 +2206,29 @@ mod tests {
         let items: Vec<PaletteItem> = (0..300)
             .map(|i| PaletteItem::session(&format!("tile {i}"), SessionId::new()))
             .collect();
-        let (_palette, cx) = cx
+        let (palette, cx) = cx
             .add_window_view(|window, cx| CommandPalette::new(items, Theme::default(), window, cx));
-        assert!(cx.debug_bounds("palette-more").is_some(), "the fade, in the first frame");
+        // The fade reads the list's extent as the list lays out, so it lands in the frame the
+        // first one asks for.
+        cx.update(crate::retained::settle);
+        let rows = cx.debug_bounds("palette-rows").expect("the rows");
+        let faded = |cx: &mut VisualTestContext| {
+            cx.update(|window, _| crate::retained::faded_edges(window, rows))
+        };
+        assert_eq!(faded(cx), gpui::Edges { bottom: true, ..gpui::Edges::default() }, "more below");
+        let sheet = cx.debug_bounds("palette").expect("the sheet");
+        assert_eq!(
+            cx.update(|window, _| crate::retained::faded_edges(window, sheet)),
+            gpui::Edges::default(),
+            "the sheet's surface does not fade"
+        );
         let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));
-        assert_eq!(stale, None, "the first frame is what a frame from scratch paints");
+        assert_eq!(stale, None, "the frame shown is what a frame from scratch paints");
+        palette.update(cx, |p, cx| p.step(-1, cx));
+        cx.run_until_parked();
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        assert_eq!(faded(cx), gpui::Edges::default(), "at the end nothing lies below");
     }
 
     fn plate(palette: &Entity<CommandPalette>, cx: &VisualTestContext) -> Bounds<Pixels> {

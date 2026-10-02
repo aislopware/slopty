@@ -91,6 +91,28 @@ fn the_list_follows_the_tail_and_holds_its_place_through_a_replay(cx: &mut TestA
     assert!(view.read_with(cx, |v, _| v.following()), "following again");
 }
 
+/// The rows fade per pixel at an edge only while more lies past it: scrolled to the start at the
+/// foot alone, scrolled in from there at both. (Text paints nothing headless, so each place is
+/// one where the prompt's bubble shows.)
+#[gpui::test]
+fn the_rows_fade_where_more_lies_past_an_edge(cx: &mut TestAppContext) {
+    let (_view, cx) = face(cx, "tools");
+    cx.simulate_keystrokes("ctrl-o ctrl-o");
+    cx.run_until_parked();
+    let faded = |cx: &mut VisualTestContext| {
+        // The fade reads the list's extent as it lays out, so it lands a frame later.
+        cx.update(gpui::Window::simulate_next_frame);
+        cx.run_until_parked();
+        let rows = cx.debug_bounds("conversation-rows").expect("the rows");
+        let edges = cx.update(|window, _| crate::retained::faded_edges(window, rows));
+        (edges.top, edges.bottom)
+    };
+    scroll(cx, 100_000.0);
+    assert_eq!(faded(cx), (false, true), "at the start only what is below fades");
+    scroll(cx, -100.0);
+    assert_eq!(faded(cx), (true, true), "scrolled in: rows run on both ways");
+}
+
 /// ⌃O steps through the densities, each showing more of the work: Thinking adds the model's
 /// thinking inside the turns that are open, Verbose opens every settled turn.
 #[gpui::test]
