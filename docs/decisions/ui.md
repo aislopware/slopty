@@ -3293,8 +3293,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     tile header's pill as a sliver, and the shadow already lifts it.
   - **A way out on glass.** With no keyboard attached the palette's field row ends in a Cancel
     link, as iOS search does, and the scrim dims under it on an iPad as well as on a phone, so
-    the tap outside that closes it is visible. The window picker has no Cancel yet. The
-    workspace does not tell it whether a keyboard is attached.
+    the tap outside that closes it is visible. The window picker does the same since
+    2026-10-03 (below, "The palette offers what the focus can do").
   - **The first run** leads with the app's own icon at 40 pt, `radii.lg`, with "Slopty" at
     `title()` in the strong weight beside it. The icon is `assets/icon.svg`, embedded and
     declared at 120 px: GPUI rasterises an SVG image at its declared size and samples it down
@@ -3698,7 +3698,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the focused one, and the worker's clipboard is watched for it even though the workspace
     window is not frontmost. Closing the window, the command again, or the tile going away
     returns the picture to its tile.
-  - **Not done.** The system-shortcut tap arms only in the workspace window. A relaunch puts a
+  - **Not done.** A relaunch puts a
     popped tile back in its window (below, "A relaunch opens the app as it was left"). iPad is
     skipped: a second window there is a second `UIWindowScene`, which the gpui iOS fork does
     not make, so the command is not offered on iOS.
@@ -5030,3 +5030,92 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `workspace::tests::projects::a_board_taller_than_its_tile_says_more_lies_below`,
     `workspace::tests::palette::the_palette_hangs_at_a_fifth_and_is_a_sheet_on_a_phone`,
     `kit::tests::chrome_draws_no_gradient`, app `the_key_row_fades_where_keys_run_past_the_edge`.
+
+- ✅ **The palette offers what the focus can do, and a pick is never dropped** (2026-10-03,
+  readiness A13).
+  - **The dispatch tree says what applies.** The workspace listens for an action bound to the
+    focus only while it applies (`workspace::actions::Applies`, read once a frame): a tile's
+    actions while a tile has the focus, a page's while a page does, a remote picture's, a
+    file's, an agent's, a project's, "Undo close" while a closing can be taken back, "Open last
+    offered page" while one was held back. What the workspace does whatever has the focus (new
+    tiles, the palettes, the inbox, the workspaces, the text size) it always listens for. The
+    tiles' own actions (a terminal's, a file's, a board's) are their views' and live where the
+    keyboard is. So GPUI's own question, whether anything on the way from the focused element
+    up answers an action (`Window::is_action_available_in`), is the whole test: the palette
+    keeps a command line only when it is answered from where the keyboard was, and the menu
+    bar greys an item the same way, as macOS greys what nothing answers. A hand list of which
+    command suits which tile would drift from the handlers; the tree cannot. A chord whose
+    action is not answered falls through to the focused element, as an unbound chord does: a
+    terminal passes ⌘ chords up, and a remote window takes them.
+  - **Never silently.** A pick runs from the element that had the keyboard, or from the
+    workspace when that is gone or nothing had it. If nothing there answers it by then (its
+    tile went while the palette was open), a notice says "<command> does not apply here". The
+    lines given again while the palette is open leave out what it left out when it opened.
+  - "New `agent` thread" runs through the tree like any other line (the workspace answers
+    `StartThread`), with no special case in the palette's handler.
+  - **The window picker ends in Cancel on glass**, as the palette does: with no keyboard
+    attached its field row ends in a Cancel link and a dim under the sheet shows where a tap
+    closes it.
+  - Tests: `workspace::tests::palette::the_palette_offers_what_the_focus_can_do`,
+    `workspace::tests::palette::without_a_keyboard_the_picker_ends_in_cancel`.
+
+- ✅ **The File menu opens and saves** (2026-10-03, readiness A15). Open File…, Open
+  Folder…, Open URL…, Save and Save a Copy… run the very actions the palette's lines run
+  (`OpenFile`, `OpenFolder`, `OpenUrl`, the file tile's `SaveFile`, `SaveCopy`), so their
+  chords and their greying come from the same keymap and dispatch tree. Save is the file
+  tile's own action, so it is greyed unless a file has the keyboard. Test:
+  `slopty-app`'s `tests::the_file_menu_opens_and_saves_as_the_palette_does`.
+
+- ✅ **A popped-out remote window takes the system's shortcuts while it is in front**
+  (2026-10-03, readiness C11). The tap arms for whichever window holds the remote picture's
+  keyboard: the workspace's, as its frames and its activation find it, or the tile's own
+  window while that is the key window, which holds nothing but the picture. The own window's
+  activation re-arms the tap at once (`rearm_system_keys`), since the workspace's window, then
+  inactive, may draw no frame to do it from. The tap still lets the shortcuts be as soon as
+  another app is in front. Test:
+  `workspace::tests::desktop::a_window_of_its_own_takes_the_shortcuts_while_it_is_in_front`.
+
+- ✅ **The repository lens groups clones by what they are** (2026-10-03, readiness C13). The
+  navigator's "By repository" lens goes through `repo_groups::group`: each tile's clone is its
+  path and the identity its worker read (`SessionSummary::repo_id`; a file's or a folder's,
+  the shell's whose repository holds it), so one repository cloned at two paths on two
+  workers is one block, and a clone whose identity has not come yet joins the others at its
+  path. A block is kept, and folded, by the group's key (its least origin, else its first
+  commit, else its path), named by the origin's last part or the directory's. Two blocks of
+  one name say where each is: the origin's owner, else the least path's parent. Test:
+  `workspace::tests::nav_rows::the_repository_lens_groups_clones_by_their_identity`.
+
+- ✅ **The board opens a subagent and sets the project's checks** (2026-10-03, readiness B6,
+  A6).
+  - **A subagent opens as a task opens.** A click on one of Claude Code's own
+    subagents in the tree opens its agent's tile, shows that tile's face, and opens the
+    subagent's thread in it: in the thread view, its own way into a subagent (the bar that
+    leads back, Esc too); before the session's thread is known, the conversation face's
+    thread of that agent id. The subagent's thread id is the one the worker's adapter derives
+    from the session's thread and the agent id; the client does not link the adapter, so it
+    derives the same, and a test holds the two together. A thread the worker has not begun
+    is said in a notice.
+  - **Verifier and review on the board.** The header's checks toggle (and "Verifier and
+    review…" in the palette, on a board) opens a panel under the header: the verifier
+    command, a switch for a fresh-context reviewer before each merge, and the reviewer's
+    brief. ↩ or Save sends `ProjectSet` with both (empty for none; a reviewer turned on with
+    no brief gets a default one); Esc or Cancel closes it unsaved. A project started from a
+    terminal opens its board with this panel open, so the checks are set where the project
+    is started. Only the person sets them, as the server requires.
+  - **The header and the panel sit over the board's keys.** The board binds bare letters
+    (`c`, `m`, `a`) while it has the keyboard; the panel's fields, like the line to the
+    orchestrator, sit outside that context, so a letter typed there is a letter.
+  - Tests: `workspace::tests::projects::a_click_on_a_subagent_opens_its_thread`,
+    `a_subagents_thread_is_named_as_the_worker_names_it`,
+    `a_board_sets_its_verifier_and_review`, `a_project_starts_in_the_focused_terminal` (its
+    board opens on the panel).
+
+- ✅ **A failed command is barred, its head washed, its output left alone** (2026-10-03,
+  design). A failed block had a faint wash of the error fill over every row of it, so a long
+  failure turned the tile into one pink slab, louder than anything that needs the person, with
+  red text on red. Now the bar of the error fill runs down the block's left edge over every
+  row, and the wash covers only its head: the prompt and the command, or the sticky header
+  that stands for them once they scroll away. The output keeps the program's own background.
+  The tile's header keeps its failed glyph and "Exit n". Test:
+  `terminal::view::tests::a_failed_blocks_output_keeps_its_background`; goldens retaken.
+

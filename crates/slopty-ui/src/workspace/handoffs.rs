@@ -236,6 +236,11 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Whether a page was held back, for "Open last offered page" to open.
+    pub(super) const fn has_offer(&self) -> bool {
+        self.handoff.last_offer.is_some()
+    }
+
     /// The palette's "Open last offered page".
     pub fn open_last_offer(
         &mut self,

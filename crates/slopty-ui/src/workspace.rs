@@ -61,7 +61,7 @@ mod toast;
 mod unsaved;
 mod workers;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -401,7 +401,7 @@ struct Worker {
     pending_opens: HashMap<CaptureTarget, ItemId>,
     /// Remote tiles whose view came over a link that has gone: it shows its last picture, set
     /// back, until a stream opened on the next link has one of its own.
-    stale_screens: std::collections::HashSet<ItemId>,
+    stale_screens: HashSet<ItemId>,
     /// Streams opened on this link for a stale tile, waiting for their first picture to take
     /// its place, so the tile never shows an empty frame between the two.
     fresh_screens: HashMap<ItemId, Entity<ScreenView>>,
@@ -443,7 +443,7 @@ impl Worker {
             picker_wanted: false,
             display_wanted: false,
             pending_opens: HashMap::new(),
-            stale_screens: std::collections::HashSet::new(),
+            stale_screens: HashSet::new(),
             fresh_screens: HashMap::new(),
             sized: None,
             awaiting_snapshot: false,
@@ -695,7 +695,7 @@ pub struct WorkspaceView {
     /// How long a remote tile may be off screen before its stream goes ([`STREAM_GRACE`]).
     stream_grace: Duration,
     /// Remote tiles whose streams were let go for being off screen.
-    parked: std::collections::HashSet<ItemId>,
+    parked: HashSet<ItemId>,
     picker: Option<(WorkerKey, Entity<WindowPicker>)>,
     palette: Option<Entity<CommandPalette>>,
     /// A dismissed palette still drawing its way out, dropped once that has played.
@@ -712,6 +712,8 @@ pub struct WorkspaceView {
     pending_focus_rename: bool,
     palette_return: Option<FocusHandle>,
     palette_action: Option<Box<dyn gpui::Action>>,
+    /// The actions the open palette leaves out: nothing where the keyboard was answers them.
+    palette_hidden: HashSet<std::any::TypeId>,
     /// What the app does for a line or a button of ours (wake a worker, dial it now), run on
     /// the next frame, where there is a window to run it in.
     pending_runs: Vec<MenuRun>,
@@ -782,7 +784,7 @@ pub struct WorkspaceView {
     restore: restore::Restore,
     save_pending: bool,
     /// Workers whose empty registry was given a shell this run.
-    given_shell: std::collections::HashSet<WorkerKey>,
+    given_shell: HashSet<WorkerKey>,
     /// Workers whose given shell has not arrived yet, and the tile that had the focus when it
     /// was asked for: it goes back there when the shell lands.
     given_pending: HashMap<WorkerKey, Option<TileRef>>,
@@ -793,12 +795,12 @@ pub struct WorkspaceView {
     /// Remote tiles shown in windows of their own.
     popouts: popout::PopOuts,
     /// Workers told this client wants their clipboard.
-    watching: std::collections::HashSet<WorkerKey>,
+    watching: HashSet<WorkerKey>,
     /// Which workers the clipboard is shared with, as the settings say.
     clip_sharing: slopty_settings::ClipboardSettings,
     /// The workers it is not shared with, by key: read by the paste hooks as they run, so a
     /// change holds for the views made before it.
-    clip_unshared: Rc<std::cell::RefCell<std::collections::HashSet<WorkerKey>>>,
+    clip_unshared: Rc<std::cell::RefCell<HashSet<WorkerKey>>>,
     /// Agents' pull requests, programs waiting on file tiles, and the shell told it has the
     /// focus.
     handoff: handoffs::HandoffState,
@@ -926,7 +928,7 @@ impl WorkspaceView {
             awake: None,
             unseen: HashMap::new(),
             stream_grace: STREAM_GRACE,
-            parked: std::collections::HashSet::new(),
+            parked: HashSet::new(),
             picker: None,
             palette: None,
             palette_leaving: None,
@@ -941,6 +943,7 @@ impl WorkspaceView {
             pending_focus_rename: false,
             palette_return: None,
             palette_action: None,
+            palette_hidden: HashSet::new(),
             pending_runs: Vec::new(),
             palette_extra: Vec::new(),
             hardware_keyboard: true,
@@ -988,12 +991,12 @@ impl WorkspaceView {
             restore: restore::Restore::of(saved.as_ref()),
             layout_saved: saved,
             save_pending: false,
-            given_shell: std::collections::HashSet::new(),
+            given_shell: HashSet::new(),
             given_pending: HashMap::new(),
             clip: None,
             app_active: true,
             popouts: popout::PopOuts::default(),
-            watching: std::collections::HashSet::new(),
+            watching: HashSet::new(),
             clip_sharing: slopty_settings::ClipboardSettings::default(),
             clip_unshared: Rc::default(),
             handoff: handoffs::HandoffState::default(),
@@ -1597,6 +1600,8 @@ impl WorkspaceView {
                 window.focus(&handle, cx);
             }
         }
+        // After the face took the keyboard: the subagent's thread takes it from its composer.
+        self.open_asked_subagent(window, cx);
         if let Some((session, needle)) = self.pending_find.take()
             && let Some(view) = self.terminals.get(&session).cloned()
         {
@@ -1645,12 +1650,26 @@ impl WorkspaceView {
             window.focus(&handle, cx);
         }
         if self.palette.is_none()
-            && let Some(handle) = self.palette_return.take()
+            && (self.palette_return.is_some() || self.palette_action.is_some())
         {
+            // Nothing had the keyboard, or what had it is gone: the workspace takes it, so a
+            // pick still runs from where its own actions are answered.
+            let handle = self
+                .palette_return
+                .take()
+                .filter(|h| self.focus.contains(h, window))
+                .unwrap_or_else(|| self.focus.clone());
             window.focus(&handle, cx);
             if let Some(action) = self.palette_action.take() {
-                // Once this frame is done, from the element that had the keyboard.
-                cx.defer_in(window, move |_this, window, cx| window.dispatch_action(action, cx));
+                // Once this frame is done, from the element that had the keyboard. A pick that
+                // nothing there answers any more says so, rather than doing nothing.
+                cx.defer_in(window, move |this, window, cx| {
+                    if window.is_action_available(action.as_ref(), cx) {
+                        window.dispatch_action(action, cx);
+                    } else {
+                        this.say_unavailable(action.as_ref(), cx);
+                    }
+                });
             }
         }
         self.settle_search_focus(window, cx);
@@ -1755,46 +1774,61 @@ impl gpui::Render for WorkspaceView {
             .flex_col()
             .overflow_hidden()
             .bg(crate::colors::hsla(self.theme.surfaces.canvas));
-        let root = Self::register_layout_actions(root, cx);
-        root.on_action(cx.listener(Self::new_terminal))
-            .on_action(cx.listener(Self::toggle_conversation))
-            .on_action(cx.listener(Self::toggle_project_board))
-            .on_action(cx.listener(Self::start_project))
+        let applies = self.applies();
+        let root = Self::register_layout_actions(root, applies, cx);
+        // Global: whatever has the focus.
+        let root = root
+            .on_action(cx.listener(Self::new_terminal))
             .on_action(cx.listener(Self::new_agent))
             .on_action(cx.listener(Self::new_note))
             .on_action(cx.listener(Self::add_window))
             .on_action(cx.listener(Self::open_file_palette))
             .on_action(cx.listener(Self::open_folder_palette))
             .on_action(cx.listener(Self::open_url_palette))
-            .on_action(cx.listener(Self::open_last_offer))
-            .on_action(cx.listener(Self::discard_old_unsaved))
             .on_action(cx.listener(Self::about))
             .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::list_ports))
-            .on_action(cx.listener(Self::close_item))
-            .on_action(cx.listener(Self::undo_close))
             .on_action(cx.listener(Self::next_attention))
             .on_action(cx.listener(Self::toggle_inbox))
             .on_action(cx.listener(Self::filter_navigator))
-            .on_action(cx.listener(Self::toggle_mute))
-            .on_action(cx.listener(Self::toggle_stats))
-            .on_action(cx.listener(Self::type_clipboard))
-            .on_action(cx.listener(Self::toggle_sized_display))
-            .on_action(cx.listener(Self::toggle_system_keys))
-            .on_action(cx.listener(Self::toggle_trackpad))
-            .on_action(cx.listener(Self::toggle_remote_gestures))
-            .on_action(cx.listener(Self::find_in_active))
             .on_action(cx.listener(Self::open_palette))
-            .on_action(cx.listener(Self::rename_item))
             .on_action(cx.listener(Self::edit_address))
-            .on_action(cx.listener(Self::page_back))
-            .on_action(cx.listener(Self::page_forward))
-            .on_action(cx.listener(Self::reload_page))
-            .on_action(cx.listener(Self::point_others))
             .on_action(cx.listener(Self::find_everywhere))
             .on_action(cx.listener(Self::search_in_files))
-            .on_action(cx.listener(Self::upload_from_files))
-            .on_action(cx.listener(Self::save_copy))
+            .on_action(cx.listener(Self::start_thread_action));
+        // Only while they apply to the focus ([`actions::Applies`]).
+        let root = root
+            .when(applies.tile, |el| {
+                el.on_action(cx.listener(Self::close_item))
+                    .on_action(cx.listener(Self::rename_item))
+                    .on_action(cx.listener(Self::point_others))
+            })
+            .when(applies.terminal, |el| el.on_action(cx.listener(Self::start_project)))
+            .when(applies.agent, |el| el.on_action(cx.listener(Self::toggle_conversation)))
+            .when(applies.project, |el| el.on_action(cx.listener(Self::toggle_project_board)))
+            .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
+            .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))
+            .when(applies.old_unsaved, |el| el.on_action(cx.listener(Self::discard_old_unsaved)))
+            .when(applies.streams, |el| el.on_action(cx.listener(Self::toggle_stats)))
+            .when(applies.screen, |el| {
+                el.on_action(cx.listener(Self::toggle_mute))
+                    .on_action(cx.listener(Self::type_clipboard))
+                    .on_action(cx.listener(Self::toggle_system_keys))
+                    .on_action(cx.listener(Self::toggle_trackpad))
+                    .on_action(cx.listener(Self::toggle_remote_gestures))
+            })
+            .when(applies.display, |el| el.on_action(cx.listener(Self::toggle_sized_display)))
+            .when(applies.terminal || applies.file || applies.page, |el| {
+                el.on_action(cx.listener(Self::find_in_active))
+            })
+            .when(applies.page, |el| {
+                el.on_action(cx.listener(Self::page_back))
+                    .on_action(cx.listener(Self::page_forward))
+                    .on_action(cx.listener(Self::reload_page))
+            })
+            .when(applies.upload, |el| el.on_action(cx.listener(Self::upload_from_files)))
+            .when(applies.file, |el| el.on_action(cx.listener(Self::save_copy)));
+        root
             // Esc in the name field: the input's own action, taken here so the field closes
             // without a change and the workspace has the keyboard.
             .capture_action(cx.listener(

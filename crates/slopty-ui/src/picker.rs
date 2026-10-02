@@ -166,6 +166,9 @@ pub struct WindowPicker {
     reveal: bool,
     /// The fill under the chosen row.
     plate: Plate,
+    /// A keyboard is there to press Esc on. On glass without one the field ends in Cancel and
+    /// a dim under the sheet shows where a tap closes it, as the palette does.
+    chords: bool,
 }
 
 impl std::fmt::Debug for WindowPicker {
@@ -221,7 +224,13 @@ impl WindowPicker {
             scroll: ScrollHandle::new(),
             reveal: false,
             plate: Plate::default(),
+            chords: true,
         }
+    }
+
+    /// Whether a keyboard is attached: without one the field ends in Cancel.
+    pub const fn set_chords(&mut self, attached: bool) {
+        self.chords = attached;
     }
 
     /// A picker over the workspace's sessions, shown at once while the worker is asked for its
@@ -531,7 +540,14 @@ impl Render for WindowPicker {
             .aria_label(title)
             // The field heads the sheet, its text on the rows' edge; its placeholder says what
             // the picker is for, as the palette's does.
-            .children(self.input.as_ref().map(|input| field_row(&theme, input, "Filter")))
+            .children(self.input.as_ref().map(|input| {
+                // Glass has no Esc: the field ends in Cancel, as iOS search does.
+                let cancel = (!self.chords).then(|| {
+                    crate::kit::button(&theme, "picker-cancel", "Cancel", crate::kit::ButtonKind::Link)
+                        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(PickerEvent::Dismiss)))
+                });
+                field_row(&theme, input, "Filter").gap(px(theme.spacing.md)).children(cancel)
+            }))
             .child(
                 div().relative().flex_1().min_h_0().flex().flex_col().child(self.plate.under(&theme)).child(
                     div()
@@ -572,6 +588,14 @@ impl Render for WindowPicker {
                     cx.stop_propagation();
                 }),
             )
+            // On glass the dim is what a finger taps to close it, where a desktop's Esc would.
+            .children((!self.chords).then(|| {
+                div()
+                    .debug_selector(|| "picker-scrim".to_owned())
+                    .absolute()
+                    .inset_0()
+                    .bg(crate::kit::scrim(&theme))
+            }))
             .child(crate::kit::slide_fade(
                 panel,
                 "picker-rise",

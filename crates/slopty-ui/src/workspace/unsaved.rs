@@ -373,6 +373,14 @@ impl WorkspaceView {
         self.keep_unsaved(cx);
     }
 
+    /// Whether an edit kept here has waited over a week for its tile.
+    pub(super) fn has_old_unsaved(&self) -> bool {
+        let now = WallMs::now();
+        self.kept
+            .as_ref()
+            .is_some_and(|k| k.pending.values().any(|p| now.since(p.kept_ms) > OLD_AFTER))
+    }
+
     /// The palette's "Discard unsaved edits over a week old": the kept edits no tile has
     /// taken for a week go, on the person's word.
     pub fn discard_old_unsaved(

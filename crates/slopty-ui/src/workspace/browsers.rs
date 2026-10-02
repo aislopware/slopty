@@ -106,7 +106,7 @@ impl WorkspaceView {
     }
 
     /// The focused tile's page, when the focused tile is one.
-    fn focused_page(&self) -> Option<&Entity<BrowserView>> {
+    pub(super) fn focused_page(&self) -> Option<&Entity<BrowserView>> {
         self.browsers.get(&self.focused()?.item)
     }
 

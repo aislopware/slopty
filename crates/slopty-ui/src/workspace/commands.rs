@@ -12,7 +12,7 @@ use slopty_proto::server::Os;
 use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
-    AddWindow, CenterColumn, CenterVisibleColumns, CloseItem, ConsumeOrExpelLeft,
+    AddWindow, Applies, CenterColumn, CenterVisibleColumns, CloseItem, ConsumeOrExpelLeft,
     ConsumeOrExpelRight, CycleWidth, CycleWidthBack, ExpandColumn, FocusColumn, FocusColumnFirst,
     FocusColumnLast, FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FocusWorkspace,
     FocusWorkspaceDown, FocusWorkspacePrevious, FocusWorkspaceUp, FontLarger, FontReset,
@@ -153,123 +153,43 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    pub(super) fn register_layout_actions<T: gpui::InteractiveElement>(
-        el: T,
+    /// The layout's actions: those about the focused column or tile only while a tile has the
+    /// focus ([`Applies`]), the workspaces' and the text size's always.
+    pub(super) fn register_layout_actions(
+        el: gpui::Stateful<gpui::Div>,
+        applies: Applies,
         cx: &Context<Self>,
-    ) -> T {
-        el.on_action(cx.listener(|this, _: &FocusColumnLeft, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_column_left);
-        }))
-        .on_action(cx.listener(|this, _: &FocusColumnRight, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_column_right);
-        }))
-        .on_action(cx.listener(|this, _: &FocusColumnFirst, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_column_first);
-        }))
-        .on_action(cx.listener(|this, _: &FocusColumnLast, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_column_last);
-        }))
-        .on_action(cx.listener(|this, a: &FocusColumn, _w, cx| {
-            let index = a.index;
-            this.layout_action(cx, |l| l.focus_column(index));
-        }))
-        .on_action(cx.listener(|this, _: &FocusUp, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_window_or_workspace_up);
+    ) -> gpui::Stateful<gpui::Div> {
+        use gpui::InteractiveElement as _;
+        use gpui::prelude::FluentBuilder as _;
+        use slopty_client::layout::Layout;
+        el.on_action(cx.listener(|this, _: &FocusUp, _w, cx| {
+            this.layout_action(cx, Layout::focus_window_or_workspace_up);
         }))
         .on_action(cx.listener(|this, _: &FocusDown, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_window_or_workspace_down);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnLeft, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_column_left);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnRight, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_column_right);
-        }))
-        .on_action(cx.listener(|this, _: &MoveUp, _w, cx| {
-            this.layout_action(
-                cx,
-                slopty_client::layout::Layout::move_window_up_or_to_workspace_up,
-            );
-        }))
-        .on_action(cx.listener(|this, _: &MoveDown, _w, cx| {
-            this.layout_action(
-                cx,
-                slopty_client::layout::Layout::move_window_down_or_to_workspace_down,
-            );
-        }))
-        .on_action(cx.listener(|this, _: &ConsumeOrExpelLeft, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::consume_or_expel_window_left);
-        }))
-        .on_action(cx.listener(|this, _: &ConsumeOrExpelRight, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::consume_or_expel_window_right);
-        }))
-        .on_action(cx.listener(|this, _: &CycleWidth, _w, cx| {
-            this.width_action(cx, |l| l.switch_preset_width(true));
-        }))
-        .on_action(cx.listener(|this, _: &CycleWidthBack, _w, cx| {
-            this.width_action(cx, |l| l.switch_preset_width(false));
-        }))
-        .on_action(cx.listener(|this, _: &NarrowColumn, _w, cx| {
-            this.width_action(cx, |l| l.set_width_delta(-10.0));
-        }))
-        .on_action(cx.listener(|this, _: &WidenColumn, _w, cx| {
-            this.width_action(cx, |l| l.set_width_delta(10.0));
-        }))
-        .on_action(cx.listener(|this, _: &MaximizeColumn, _w, cx| {
-            this.width_action(cx, slopty_client::layout::Layout::toggle_full_width);
-        }))
-        .on_action(cx.listener(|this, _: &FullscreenTile, _w, cx| {
-            this.width_action(cx, slopty_client::layout::Layout::toggle_fullscreen);
-        }))
-        .on_action(cx.listener(|this, _: &CenterColumn, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::center_column);
-        }))
-        .on_action(cx.listener(|this, _: &CenterVisibleColumns, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::center_visible_columns);
-        }))
-        .on_action(cx.listener(|this, _: &ExpandColumn, _w, cx| {
-            this.width_action(cx, slopty_client::layout::Layout::expand_to_available_width);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToFirst, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_first);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToLast, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_last);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceUp, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_workspace_up);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceDown, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_column_to_workspace_down);
-        }))
-        .on_action(cx.listener(|this, a: &MoveColumnToWorkspace, _w, cx| {
-            let index = a.index;
-            this.layout_action(cx, |l| l.move_column_to_workspace(index));
+            this.layout_action(cx, Layout::focus_window_or_workspace_down);
         }))
         .on_action(cx.listener(|this, _: &MoveWorkspaceUp, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_workspace_up);
+            this.layout_action(cx, Layout::move_workspace_up);
         }))
         .on_action(cx.listener(|this, _: &MoveWorkspaceDown, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::move_workspace_down);
+            this.layout_action(cx, Layout::move_workspace_down);
         }))
         .on_action(cx.listener(|this, _: &FocusWorkspaceUp, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_workspace_up);
+            this.layout_action(cx, Layout::focus_workspace_up);
         }))
         .on_action(cx.listener(|this, _: &FocusWorkspaceDown, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_workspace_down);
+            this.layout_action(cx, Layout::focus_workspace_down);
         }))
         .on_action(cx.listener(|this, _: &FocusWorkspacePrevious, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::focus_workspace_previous);
+            this.layout_action(cx, Layout::focus_workspace_previous);
         }))
         .on_action(cx.listener(|this, a: &FocusWorkspace, _w, cx| {
             let index = a.index;
             this.layout_action(cx, |l| l.focus_workspace(index));
         }))
-        .on_action(cx.listener(|this, _: &ToggleTabbed, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::toggle_tabbed);
-        }))
         .on_action(cx.listener(|this, _: &ToggleOverview, _w, cx| {
-            this.layout_action(cx, slopty_client::layout::Layout::toggle_overview);
+            this.layout_action(cx, Layout::toggle_overview);
         }))
         // A focused page zooms; everywhere else the text size moves.
         .on_action(cx.listener(|this, _: &FontLarger, _w, cx| {
@@ -288,8 +208,98 @@ impl WorkspaceView {
                 this.apply_font(cx);
             }
         }))
-        .on_action(cx.listener(Self::inspect_page))
-        .on_action(cx.listener(Self::toggle_own_window))
+        .when(applies.tile, |el| Self::register_column_actions(el, cx))
+        .when(applies.page, |el| el.on_action(cx.listener(Self::inspect_page)))
+        .when(applies.own_window, |el| el.on_action(cx.listener(Self::toggle_own_window)))
+    }
+
+    /// The actions on the focused column and tile.
+    fn register_column_actions(
+        el: gpui::Stateful<gpui::Div>,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        use gpui::InteractiveElement as _;
+        use slopty_client::layout::Layout;
+        el.on_action(cx.listener(|this, _: &FocusColumnLeft, _w, cx| {
+            this.layout_action(cx, Layout::focus_column_left);
+        }))
+        .on_action(cx.listener(|this, _: &FocusColumnRight, _w, cx| {
+            this.layout_action(cx, Layout::focus_column_right);
+        }))
+        .on_action(cx.listener(|this, _: &FocusColumnFirst, _w, cx| {
+            this.layout_action(cx, Layout::focus_column_first);
+        }))
+        .on_action(cx.listener(|this, _: &FocusColumnLast, _w, cx| {
+            this.layout_action(cx, Layout::focus_column_last);
+        }))
+        .on_action(cx.listener(|this, a: &FocusColumn, _w, cx| {
+            let index = a.index;
+            this.layout_action(cx, |l| l.focus_column(index));
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnLeft, _w, cx| {
+            this.layout_action(cx, Layout::move_column_left);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnRight, _w, cx| {
+            this.layout_action(cx, Layout::move_column_right);
+        }))
+        .on_action(cx.listener(|this, _: &MoveUp, _w, cx| {
+            this.layout_action(cx, Layout::move_window_up_or_to_workspace_up);
+        }))
+        .on_action(cx.listener(|this, _: &MoveDown, _w, cx| {
+            this.layout_action(cx, Layout::move_window_down_or_to_workspace_down);
+        }))
+        .on_action(cx.listener(|this, _: &ConsumeOrExpelLeft, _w, cx| {
+            this.layout_action(cx, Layout::consume_or_expel_window_left);
+        }))
+        .on_action(cx.listener(|this, _: &ConsumeOrExpelRight, _w, cx| {
+            this.layout_action(cx, Layout::consume_or_expel_window_right);
+        }))
+        .on_action(cx.listener(|this, _: &CycleWidth, _w, cx| {
+            this.width_action(cx, |l| l.switch_preset_width(true));
+        }))
+        .on_action(cx.listener(|this, _: &CycleWidthBack, _w, cx| {
+            this.width_action(cx, |l| l.switch_preset_width(false));
+        }))
+        .on_action(cx.listener(|this, _: &NarrowColumn, _w, cx| {
+            this.width_action(cx, |l| l.set_width_delta(-10.0));
+        }))
+        .on_action(cx.listener(|this, _: &WidenColumn, _w, cx| {
+            this.width_action(cx, |l| l.set_width_delta(10.0));
+        }))
+        .on_action(cx.listener(|this, _: &MaximizeColumn, _w, cx| {
+            this.width_action(cx, Layout::toggle_full_width);
+        }))
+        .on_action(cx.listener(|this, _: &FullscreenTile, _w, cx| {
+            this.width_action(cx, Layout::toggle_fullscreen);
+        }))
+        .on_action(cx.listener(|this, _: &CenterColumn, _w, cx| {
+            this.layout_action(cx, Layout::center_column);
+        }))
+        .on_action(cx.listener(|this, _: &CenterVisibleColumns, _w, cx| {
+            this.layout_action(cx, Layout::center_visible_columns);
+        }))
+        .on_action(cx.listener(|this, _: &ExpandColumn, _w, cx| {
+            this.width_action(cx, Layout::expand_to_available_width);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToFirst, _w, cx| {
+            this.layout_action(cx, Layout::move_column_to_first);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToLast, _w, cx| {
+            this.layout_action(cx, Layout::move_column_to_last);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceUp, _w, cx| {
+            this.layout_action(cx, Layout::move_column_to_workspace_up);
+        }))
+        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceDown, _w, cx| {
+            this.layout_action(cx, Layout::move_column_to_workspace_down);
+        }))
+        .on_action(cx.listener(|this, a: &MoveColumnToWorkspace, _w, cx| {
+            let index = a.index;
+            this.layout_action(cx, |l| l.move_column_to_workspace(index));
+        }))
+        .on_action(cx.listener(|this, _: &ToggleTabbed, _w, cx| {
+            this.layout_action(cx, Layout::toggle_tabbed);
+        }))
     }
 
     /// A width change: the layout's, then the remote windows of the column asked to take the

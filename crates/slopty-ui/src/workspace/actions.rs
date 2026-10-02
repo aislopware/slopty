@@ -397,3 +397,79 @@ impl super::WorkspaceView {
         Some(PaletteItem::new("Attach block to agent", IconName::Paperclip, attach, &terminal))
     }
 }
+
+/// Which of the workspace's focus-bound actions apply now, read once a frame. The workspace
+/// listens for one only while it applies, so the dispatch tree says what the focus can do: the
+/// palette offers only those ([`super::WorkspaceView::offered_lines`]), and the menu bar greys
+/// the rest, as macOS greys an item nothing answers.
+#[derive(Clone, Copy, Debug, Default)]
+#[expect(clippy::struct_excessive_bools, reason = "one flag per kind of focus, read together")]
+pub(super) struct Applies {
+    /// A tile has the focus.
+    pub tile: bool,
+    /// A page.
+    pub page: bool,
+    /// A remote window or display that streams.
+    pub screen: bool,
+    /// A display.
+    pub display: bool,
+    /// A file.
+    pub file: bool,
+    /// A terminal.
+    pub terminal: bool,
+    /// A terminal an agent runs in.
+    pub agent: bool,
+    /// A terminal that is a project's orchestrator or one of its agents.
+    pub project: bool,
+    /// A tile that takes files from this device: a shell, a folder or a remote picture.
+    pub upload: bool,
+    /// A remote tile with a window of its own on this Mac, or one that can have one.
+    pub own_window: bool,
+    /// Any tile streams a remote picture.
+    pub streams: bool,
+    /// A tile closed a moment ago can be taken back.
+    pub undo: bool,
+    /// A page was held back in a notice.
+    pub offer: bool,
+    /// An edit kept here has waited over a week for its tile.
+    pub old_unsaved: bool,
+}
+
+impl super::WorkspaceView {
+    /// What applies to the focus now ([`Applies`]).
+    pub(super) fn applies(&self) -> Applies {
+        use slopty_proto::items::ItemKind;
+        let focused = self.focused();
+        let kind = focused.and_then(|t| self.item(t)).map(|i| &i.kind);
+        let session = self.focused_session();
+        let agent = session.and_then(|s| self.agent_state(s));
+        let mirror = &self.projects.mirror;
+        Applies {
+            tile: focused.is_some(),
+            page: self.focused_page().is_some(),
+            screen: self.active_screen().is_some(),
+            display: matches!(kind, Some(ItemKind::Display { .. })),
+            file: matches!(kind, Some(ItemKind::File { .. })),
+            terminal: self.active_terminal().is_some(),
+            agent: agent.is_some_and(|a| a.status != slopty_proto::agent::AgentStatus::None),
+            project: session.is_some_and(|s| {
+                mirror.of_orchestrator(s).is_some() || mirror.of_agent(s).is_some()
+            }),
+            upload: matches!(
+                kind,
+                Some(
+                    ItemKind::Terminal { .. }
+                        | ItemKind::Folder { .. }
+                        | ItemKind::Window { .. }
+                        | ItemKind::Display { .. }
+                )
+            ),
+            own_window: focused
+                .is_some_and(|t| self.popouts.holds(t.item) || self.can_pop_out(t.item)),
+            streams: !self.screens.is_empty(),
+            undo: !self.closed.is_empty(),
+            offer: self.has_offer(),
+            old_unsaved: self.has_old_unsaved(),
+        }
+    }
+}

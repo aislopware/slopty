@@ -1,6 +1,8 @@
 //! The overlays over the strip: the command palette (and its find in every tile), and the
 //! picker of a worker's windows.
 
+use std::collections::HashSet;
+
 use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::SessionId;
@@ -176,6 +178,56 @@ impl WorkspaceView {
         (!about.is_empty()).then(|| about.join("\n"))
     }
 
+    /// The palette's lines that apply where the keyboard is ([`Self::palette_lines`]): an
+    /// action goes unless something on the way from the focused element up to the window
+    /// answers it, as the dispatch tree last drawn says. What it leaves out is kept, so the
+    /// lines given again while the palette is open leave out the same.
+    pub fn offered_lines(&mut self, window: &Window, cx: &Context<Self>) -> Vec<PaletteItem> {
+        let from = window
+            .focused(cx)
+            .filter(|h| self.focus.contains(h, window))
+            .unwrap_or_else(|| self.focus.clone());
+        let mut hidden = HashSet::new();
+        let lines = self
+            .palette_lines(cx)
+            .into_iter()
+            .filter(|line| {
+                let Some(action) = run_action(line) else { return true };
+                let answered = window.is_action_available_in(action, &from);
+                if !answered {
+                    hidden.insert(action.as_any().type_id());
+                }
+                answered
+            })
+            .collect();
+        self.palette_hidden = hidden;
+        lines
+    }
+
+    /// A pick that nothing where the keyboard went back to answers any more (what had it
+    /// changed while the palette was open): said in a notice, never dropped without a word.
+    pub(super) fn say_unavailable(&mut self, action: &dyn gpui::Action, cx: &mut Context<Self>) {
+        let label = self
+            .palette_lines(cx)
+            .into_iter()
+            .find(|line| run_action(line).is_some_and(|a| a.partial_eq(action)))
+            .map_or_else(|| "That command".to_owned(), |line| line.label);
+        tracing::info!(action = action.name(), "a palette pick nothing answers");
+        self.show_notice(format!("{label} does not apply here"), cx);
+    }
+
+    /// "New `agent` thread" from the palette: the keyboard stays where it was until the
+    /// thread's tile opens.
+    pub(super) fn start_thread_action(
+        &mut self,
+        start: &StartThread,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let StartThread { worker, agent, cwd } = start.clone();
+        self.start_thread(worker, agent, cwd, cx);
+    }
+
     /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is
     /// gone and the focus is back.
     pub fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
@@ -185,7 +237,7 @@ impl WorkspaceView {
         // The agents a worker offers come with its facts, which change as it installs or
         // loses one: the next palette shows what this asks.
         self.ask_agents(cx);
-        let items = self.palette_lines(cx);
+        let items = self.offered_lines(window, cx);
         let theme = self.theme.clone();
         let palette = cx.new(|cx| {
             let mut p = CommandPalette::new(items, theme, window, cx);
@@ -228,7 +280,7 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
-        let items = self.palette_lines(cx);
+        let items = self.offered_lines(window, cx);
         let theme = self.theme.clone();
         let seed = self.active_cwd().map_or_else(|| "~/".to_owned(), |cwd| format!("{cwd}/"));
         let palette = cx.new(|cx| {
@@ -355,13 +407,8 @@ impl WorkspaceView {
             this.find_hits.clear();
             match event {
                 PaletteEvent::Run(PaletteRun::Action(action)) => {
-                    // The keyboard goes back where it was until the thread's tile opens.
-                    if let Some(start) = action.as_any().downcast_ref::<StartThread>() {
-                        let StartThread { worker, agent, cwd } = start.clone();
-                        this.start_thread(worker, agent, cwd, cx);
-                    } else {
-                        this.palette_action = Some(action.boxed_clone());
-                    }
+                    // Run from where the keyboard was, once it is back there.
+                    this.palette_action = Some(action.boxed_clone());
                 }
                 PaletteEvent::Run(PaletteRun::Session(session)) => {
                     // The terminal takes the keyboard, not whoever had it before.
@@ -453,7 +500,12 @@ impl WorkspaceView {
         if !palette.read(cx).is_live() {
             return;
         }
-        let items = self.palette_lines(cx);
+        let hidden = &self.palette_hidden;
+        let items = self
+            .palette_lines(cx)
+            .into_iter()
+            .filter(|line| run_action(line).is_none_or(|a| !hidden.contains(&a.as_any().type_id())))
+            .collect();
         palette.update(cx, |p, cx| p.set_items(items, cx));
     }
 
@@ -629,6 +681,8 @@ impl WorkspaceView {
             cx.notify();
         })
         .detach();
+        let chords = self.hardware_keyboard;
+        picker.update(cx, |p, _| p.set_chords(chords));
         self.pending_focus_picker = true;
         self.picker = Some((key, picker.clone()));
         cx.notify();
@@ -679,5 +733,13 @@ impl WorkspaceView {
         // Stable: tiles never focused keep their reading order.
         rows.sort_by_key(|(rank, _)| *rank);
         rows.into_iter().map(|(_, row)| row).collect()
+    }
+}
+
+/// The action a palette line dispatches, when it is one.
+fn run_action(line: &PaletteItem) -> Option<&dyn gpui::Action> {
+    match &line.run {
+        PaletteRun::Action(action) => Some(action.as_ref()),
+        _ => None,
     }
 }

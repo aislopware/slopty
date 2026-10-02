@@ -369,6 +369,35 @@ fn cmd_o_shows_the_picker_while_the_worker_lists_its_windows(cx: &mut TestAppCon
     assert!(cx.debug_bounds("picker").is_none(), "a late listing opens nothing");
 }
 
+/// The picker is left the way the palette is: Esc with a keyboard, and on glass without one a
+/// Cancel at the end of its field and a dim to tap around it.
+#[gpui::test]
+fn without_a_keyboard_the_picker_ends_in_cancel(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("picker").is_some(), "the picker is up");
+    assert!(cx.debug_bounds("picker-cancel").is_none(), "Esc closes it: no Cancel");
+    assert!(cx.debug_bounds("picker-scrim").is_none(), "and it floats undimmed");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("picker").is_none());
+
+    view.update(cx, |v, cx| v.set_hardware_keyboard(false, cx));
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("picker-scrim").is_some(), "a dim to tap");
+    let field = cx.debug_bounds("picker").expect("the picker");
+    let cancel = cx.debug_bounds("picker-cancel").expect("Cancel on glass");
+    assert!(cancel.top() - field.top() < px(60.0), "on the field's row: {cancel:?} {field:?}");
+    assert!(cancel.center().x > field.center().x, "at its trailing end: {cancel:?} {field:?}");
+    click(cx, "picker-cancel");
+    assert!(view.read_with(cx, |v, _| v.picker.is_none()), "Cancel closes it");
+    assert!(cx.debug_bounds("picker").is_none());
+}
+
 /// The overview's names are chrome: the same size however far the overview zooms out to fit
 /// the workspaces, and so are the words on the place for a new workspace.
 #[gpui::test]
@@ -466,7 +495,9 @@ fn more_below(cx: &mut VisualTestContext) -> bool {
 #[gpui::test]
 fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    let _studio = connect(&view, cx, 1, "studio");
+    let studio = connect(&view, cx, 1, "studio");
+    // A shell has the keyboard, so the list holds its commands too and runs long.
+    opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     // Where the lines land, not the sheet rising into place under them.
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     open_palette(cx);
@@ -549,4 +580,76 @@ fn the_lens_is_an_option_named_for_what_it_does(cx: &mut TestAppContext) {
     let lens = view.read_with(cx, |v, _| v.layout.navigator().lens);
     assert_eq!(lens, slopty_client::layout::NavLens::Repositories, "chosen, it turns");
     option(cx, navigator::BY_WORKER);
+}
+
+/// The palette offers what the focus can do, as the dispatch tree last drawn says: nothing
+/// about a tile while none has the focus, a shell's own commands while its terminal has the
+/// keyboard, and never a page's, a file's, a remote window's or an agent's there. What the
+/// workspace does whatever has the focus is always there. A pick nothing answers once it
+/// runs (its tile went while the palette was open) is said, never dropped without a word.
+#[gpui::test]
+fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let fake = connect(&view, cx, 1, "studio");
+    let offered = |cx: &mut VisualTestContext| -> Vec<String> {
+        let lines = view.update_in(cx, |v, window, cx| v.offered_lines(window, cx));
+        lines.into_iter().map(|l| l.label).collect()
+    };
+    let has = |labels: &[String], label: &str| labels.iter().any(|l| l == label);
+    let always = ["New terminal", "New note", "About Slopty", "Overview", "Find in every tile"];
+    let of_a_tile = ["Close tile", "Name this tile", "Maximize column", "Move column left"];
+    let elsewhere = [
+        "Page back",
+        "Reload page",
+        "Save file",
+        SAVE_A_COPY,
+        "Mute sound",
+        "Stop the agent",
+        "Show conversation or terminal",
+        "Show project board or terminal",
+        "Enclosing folder",
+        "Undo close",
+        "Open last offered page",
+    ];
+
+    let empty = offered(cx);
+    for label in always {
+        assert!(has(&empty, label), "{label} is always offered: {empty:?}");
+    }
+    for label in of_a_tile.iter().chain(&elsewhere).chain(&["Clear the screen and history"]) {
+        assert!(!has(&empty, label), "{label} with no tile: {empty:?}");
+    }
+
+    let session = SessionId::new();
+    let tile = opens(&view, cx, &fake, session, fake.me, 1);
+    assert!(terminal_focused(&view, cx, session));
+    let shell = offered(cx);
+    for label in always.iter().chain(&of_a_tile) {
+        assert!(has(&shell, label), "{label} with a shell: {shell:?}");
+    }
+    for label in ["Clear the screen and history", "Find in terminal, file or conversation"] {
+        assert!(has(&shell, label), "the terminal's own {label}: {shell:?}");
+    }
+    for label in elsewhere {
+        assert!(!has(&shell, label), "{label} is not a shell's: {shell:?}");
+    }
+
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    view.update_in(cx, |v, _w, cx| {
+        let by = ClientId::new();
+        let gone = ItemSync::Delta { version: 2, by, op: ItemOp::Remove(tile.item) };
+        v.apply_sync(fake.key, gone, cx);
+    });
+    cx.run_until_parked();
+    // The line as the palette picks it, its tile gone meanwhile.
+    let palette = view.read_with(cx, |v, _| v.palette.clone()).expect("open");
+    palette.update(cx, |_p, cx| {
+        let rename = Box::new(RenameItem);
+        cx.emit(crate::palette::PaletteEvent::Run(PaletteRun::Action(rename)));
+    });
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.palette_open()));
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("Name this tile does not apply here"));
 }

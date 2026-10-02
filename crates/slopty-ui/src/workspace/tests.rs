@@ -1112,10 +1112,10 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
     // The empty field lists a few commands; typing reaches the rest.
-    cx.simulate_keystrokes("m a x");
+    cx.simulate_keystrokes("o v e r");
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Maximize column ⇧⌘↩"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Overview ⌥⌘O"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.palette_open()), "Esc closes it");
