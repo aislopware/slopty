@@ -128,10 +128,12 @@ impl WorkspaceView {
     }
 
     /// "New `agent` thread", for each agent the worker the palette is about can start, in the
-    /// folder the focused tile is about there (its home when none is).
+    /// folder the focused tile is about there (its home when none is). The line says that
+    /// folder short, as the navigator does (`~/code/atlas`, `code/atlas`), not its whole path.
     fn start_lines(&self) -> Vec<PaletteItem> {
         let Some(worker) = self.context_worker() else { return Vec::new() };
         let cwd = self.search_root(worker);
+        let shown = super::tile::cwd_tail(&cwd, self.home_of(worker));
         self.agents_on(worker)
             .iter()
             .map(|agent| {
@@ -140,7 +142,7 @@ impl WorkspaceView {
                 PaletteItem::new(&label, crate::icons::IconName::Sparkles, Box::new(action), &[])
                     .with_icon(crate::icons::Glyph::agent(&agent.0))
                     .on_worker(self.worker_label(worker))
-                    .in_dir(Some(cwd.clone()))
+                    .in_dir(Some(shown.clone()))
             })
             .collect()
     }

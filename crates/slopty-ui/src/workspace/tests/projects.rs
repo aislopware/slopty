@@ -156,6 +156,107 @@ fn the_orchestrators_tile_turns_to_its_board_and_opens_its_agents(cx: &mut TestA
     drop(setup.fake);
 }
 
+/// A project's agents are named by what they are to it, not "Claude Code" and "Claude Code 2":
+/// the orchestrator, and each task's agent by its task's number and title.
+#[gpui::test]
+fn a_project_s_agents_are_named_by_their_part_in_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, _) = setup.orchestrator;
+    let (agent_tile, _) = setup.agent;
+    let title = |cx: &mut VisualTestContext, tile: TileRef| {
+        view.read_with(cx, |v, _| v.tile_title(v.item(tile).expect("a tile")))
+    };
+    assert_eq!(title(cx, orchestrator_tile), "Orchestrator");
+    assert_eq!(title(cx, agent_tile), "#1 Wire the board");
+    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
+    assert!(lines.iter().any(|(t, ..)| t == "#1 Wire the board"), "{lines:?}");
+    assert!(!lines.iter().any(|(t, ..)| t.starts_with("Claude Code")), "{lines:?}");
+    drop(setup.fake);
+}
+
+/// An agent opened from a board that fills the view comes in beside it: the board's column
+/// gives up its full width, so neither is left cut off at the window's edge.
+#[gpui::test]
+fn an_agent_opened_from_a_full_width_board_shows_beside_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (orchestrator_tile, orchestrator) = setup.orchestrator;
+    let (agent_tile, _) = setup.agent;
+    cx.simulate_keystrokes("cmd-shift-enter");
+    cx.run_until_parked();
+    let full = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| {
+            let pos = v.layout.position(orchestrator_tile).expect("placed");
+            v.layout.workspaces()[pos.workspace].columns()[pos.column].is_full_width()
+        })
+    };
+    assert!(full(&view, cx), "the board fills the view");
+    view.update_in(cx, |v, _w, cx| v.show_board(orchestrator, true, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down down enter");
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(agent_tile), "↩ went to task 1's agent");
+    assert!(!full(&view, cx), "the board gave up its full width");
+    let (board, agent, strip) = view.read_with(cx, |v, _| {
+        (v.tile_bounds(orchestrator_tile), v.tile_bounds(agent_tile), v.drawn.viewport.get())
+    });
+    let (board, agent) = (board.expect("the board shows"), agent.expect("the agent shows"));
+    assert!(board.left() >= strip.left() - px(0.5), "the board is whole: {board:?} in {strip:?}");
+    assert!(agent.right() <= strip.right() + px(0.5), "{agent:?} in {strip:?}");
+    drop(setup.fake);
+}
+
+/// A board taller than its tile says so: its foot fades into the tile while lanes run on
+/// below, and its top once it is scrolled; at the end the foot is clear. A card's action is a
+/// button a click can find, as tall as the least a click needs.
+#[gpui::test]
+fn a_board_taller_than_its_tile_says_more_lies_below(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let worker = WorkerId::new();
+    let fake = connect_as(&view, cx, worker, "studio");
+    let orchestrator = SessionId::new();
+    let _tile = opens(&view, cx, &fake, orchestrator, fake.me, 1);
+    let mut tasks: Vec<_> =
+        (1..=24).map(|n| card(n, "Planned work", TaskState::Planned, None)).collect();
+    tasks.push(card(25, "Ship it", TaskState::Done, None));
+    let term = TermRef { worker, session: orchestrator };
+    view.update_in(cx, |v, _w, cx| {
+        v.projects_part(
+            snapshot(10, vec![status(project("board", Some(term)), tasks, vec![])]),
+            cx,
+        );
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    board(&view, cx, orchestrator).update(cx, |b, cx| b.show(Lens::Board, cx));
+    cx.run_until_parked();
+    let drawn = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).is_some();
+    assert!(drawn(cx, "project-fade-bottom"), "lanes run on below");
+    assert!(!drawn(cx, "project-fade-top"), "nothing above yet");
+
+    let merge = cx.debug_bounds("project-card-merge-25").expect("Ship it can merge");
+    assert!(
+        merge.size.height >= px(Theme::default().density.hit) - px(0.5),
+        "a button's height, not a line of text's: {merge:?}"
+    );
+
+    let at = cx.debug_bounds("project-body").expect("drawn").center();
+    cx.simulate_event(ScrollWheelEvent {
+        position: at,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-100_000.0))),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::Moved,
+        momentum_phase: None,
+    });
+    cx.run_until_parked();
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(drawn(cx, "project-fade-top"), "scrolled: what is above fades");
+    assert!(!drawn(cx, "project-fade-bottom"), "at the end nothing lies below");
+    drop(fake);
+}
+
 /// A click on a row opens its agent; a row whose agent has no tile here says so rather than
 /// going nowhere, and the orchestrator's own row turns the tile back to its terminal.
 #[gpui::test]

@@ -1049,6 +1049,32 @@ fn the_overview_centres_a_strip_that_fits() {
     near(rect(&l, t(3)).right(), 1280.0);
 }
 
+/// A strip wider than the zoomed-out window fills it from the strip's start: the block starts
+/// a margin in from the window's left edge and runs past its right, where the columns that do
+/// not fit go on; from the last column it ends a margin in from the right instead. The view
+/// itself does not move.
+#[test]
+fn the_overview_fills_the_window_with_a_strip_wider_than_it() {
+    let mut l = columns(9);
+    l.focus_column_first();
+    let before = view_pos(&l);
+    l.set_overview(true);
+    let panel = l.frame().workspaces[0].1;
+    let (first, last) = (rect(&l, t(1)), rect(&l, t(9)));
+    assert!(first.x >= 0.0 && first.x < 0.05 * 1280.0, "the strip starts at the edge: {first:?}");
+    near(panel.x, first.x);
+    near(panel.right(), last.right());
+    assert!(panel.right() > 1280.0, "the rest runs past the window's edge: {panel:?}");
+    near(view_pos(&l), before);
+
+    l.set_overview(false);
+    l.focus_column_last();
+    l.set_overview(true);
+    let (first, last) = (rect(&l, t(1)), rect(&l, t(9)));
+    assert!(last.right() <= 1280.0 && last.right() > 0.95 * 1280.0, "{last:?}");
+    assert!(first.x < 0.0, "the start runs past the left edge: {first:?}");
+}
+
 #[test]
 fn overview_drops_land_in_columns_between_columns_and_between_workspaces() {
     let mut l = columns(2);

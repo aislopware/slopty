@@ -23,7 +23,11 @@ use crate::screen::ScreenFactory;
 use crate::workspace::{WorkerLink, WorkspaceEvent};
 
 fn route(seed: u128) -> Route {
-    Route { worker: WorkerKey::new(seed), item: Some(ItemId::new()), session: SessionId::new() }
+    Route {
+        worker: WorkerKey::new(seed),
+        item: Some(ItemId::new()),
+        about: About::Session(SessionId::new()),
+    }
 }
 
 fn asking(route: Route, body: &str) -> Asking {
@@ -65,7 +69,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
     let posted = memory.posted();
     assert_eq!(posted.len(), 1, "only the agent that started to wait: {posted:?}");
     let note = &posted[0];
-    assert_eq!(note.id, b.session.to_string(), "one note per tile, named by its session");
+    assert_eq!(note.id, b.about.note_id(), "one note per tile, named by its session");
     assert_eq!(
         (note.title.as_str(), note.body.as_str()),
         ("api", "Asks: which one?"),
@@ -93,7 +97,7 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
     assert_eq!(memory.posted().len(), 1, "away from every device: the phone says it");
 
     attention.set_present_elsewhere(true);
-    assert_eq!(memory.withdrawn(), [a.session.to_string()], "at the Mac, the phone's note goes");
+    assert_eq!(memory.withdrawn(), [a.about.note_id()], "at the Mac, the phone's note goes");
     let both = vec![asking(a, "Run cargo test"), asking(b, "Asks: which one?")];
     attention.look(&Look { asking: both.clone(), turns: Vec::new(), unread: 2 });
     let done =
@@ -108,7 +112,7 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
     attention.look(&Look { asking: three, turns: Vec::new(), unread: 3 });
     let posted = memory.posted();
     assert_eq!(posted.len(), 2, "gone from the Mac, a new wait notifies: {posted:?}");
-    assert_eq!(posted[1].id, c.session.to_string());
+    assert_eq!(posted[1].id, c.about.note_id());
 }
 
 /// Led by the server, the look posts no agent moment of its own: only what the server sends
@@ -147,7 +151,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
     assert!(posted[1].silent, "replaced without a second sound");
 
     attention.look(&Look::default());
-    assert_eq!(memory.withdrawn(), [a.session.to_string()], "answered, its note goes");
+    assert_eq!(memory.withdrawn(), [a.about.note_id()], "answered, its note goes");
 
     let done =
         Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
@@ -163,7 +167,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
 fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
     let (mut attention, memory) = attention();
     let a = route(1);
-    let id = a.session.to_string();
+    let id = a.about.note_id();
     attention.set_active(false);
     attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
     attention.look(&Look::default());
@@ -336,7 +340,7 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
         assert_eq!(
             asks.route,
-            Route { worker: key, item: Some(tiles[0].item), session },
+            Route { worker: key, item: Some(tiles[0].item), about: About::Session(session) },
             "its tile"
         );
         assert_eq!(Some(asks.title.clone()), title, "titled as its tile's header");
@@ -367,7 +371,10 @@ fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppCont
     };
     view.update(cx, |v, _| {
         let heard = v.heard(&notice).expect("a note");
-        assert_eq!(heard.route, Route { worker: key, item: Some(tiles[0].item), session });
+        assert_eq!(
+            heard.route,
+            Route { worker: key, item: Some(tiles[0].item), about: About::Session(session) }
+        );
         assert_eq!(heard.title, "Fix the build");
         assert_eq!(heard.body, "Explore the tests: Run cargo test", "the subagent named");
     });
@@ -376,6 +383,21 @@ fn a_server_notice_leads_to_its_tile_and_names_the_subagent(cx: &mut TestAppCont
     assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_none(), "a short turn says nothing");
     notice.worked_ms = Some(600_000);
     assert!(view.read_with(cx, |v, _| v.heard(&notice)).is_some(), "a long one does");
+
+    // A thread driven over a protocol has no terminal: its note is its own, and a tap on it
+    // opens the thread.
+    notice.tile = None;
+    let heard = view.read_with(cx, |v, _| v.heard(&notice)).expect("a thread's note");
+    let thread = notice.thread.thread;
+    assert_eq!(heard.route, Route { worker: key, item: None, about: About::Thread(thread) });
+    let (mut attention, memory) = attention();
+    attention.set_active(false);
+    attention.notice(&heard);
+    let posted = memory.posted();
+    let [note] = posted.as_slice() else { panic!("one note: {posted:?}") };
+    assert_eq!(note.id, About::Thread(thread).note_id(), "not a session's");
+    let tap = Tap { id: note.id.clone(), info: note.info.clone(), action: None };
+    assert_eq!(Route::of_tap(&tap), Some(heard.route), "the tap leads back to it");
 }
 
 #[gpui::test]
@@ -422,7 +444,7 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
         "the first sounds; the buttons come and go without a sound"
     );
     let ids: Vec<String> = memory.posted().into_iter().map(|n| n.id).collect();
-    assert!(ids.iter().all(|id| *id == a.session.to_string()), "the same note, replaced");
+    assert!(ids.iter().all(|id| *id == a.about.note_id()), "the same note, replaced");
     assert!(memory.withdrawn().is_empty(), "{:?}", memory.withdrawn());
 
     memory.clear();
@@ -444,7 +466,7 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
     attention.look(&answered);
     attention.look(&asks());
     assert_eq!(memory.posted().len(), 1, "its buttons, then nothing");
-    assert_eq!(memory.withdrawn(), [b.session.to_string()], "answered here, the note goes");
+    assert_eq!(memory.withdrawn(), [b.about.note_id()], "answered here, the note goes");
 }
 
 fn press(cx: &mut VisualTestContext, selector: &'static str) {
@@ -585,11 +607,11 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
     let key = WorkerKey::new(7);
     let (tiles, mut link) = worker(&view, cx, key, "mini", &[session]);
     assert_eq!(conversation(&mut link), [ConversationRequest::Approvals { on: true }]);
-    let route = Route { worker: key, item: Some(tiles[0].item), session };
+    let route = Route { worker: key, item: Some(tiles[0].item), about: About::Session(session) };
     let tap = |route: Route, ask: u64, action: &str| {
         let mut info = route.info();
         info.insert(ASK.to_owned(), ask.to_string());
-        Tap { id: route.session.to_string(), info, action: Some(action.to_owned()) }
+        Tap { id: route.about.note_id(), info, action: Some(action.to_owned()) }
     };
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
     let heard = Rc::clone(&events);
@@ -629,7 +651,8 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
         events.borrow()
     );
 
-    let far = Route { worker: WorkerKey::new(99), item: None, session: SessionId::new() };
+    let far =
+        Route { worker: WorkerKey::new(99), item: None, about: About::Session(SessionId::new()) };
     events.borrow_mut().clear();
     view.update_in(cx, |v, _window, cx| v.open_notification(&tap(far, 1, notify::ALLOW), cx));
     cx.executor().advance_clock(SYNCED);
@@ -666,7 +689,7 @@ fn a_finished_turn_notifies_once_while_the_app_is_away() {
     let posted = memory.posted();
     assert_eq!(posted.len(), 1, "once: {posted:?}");
     assert_eq!((posted[0].title.as_str(), posted[0].body.as_str()), ("api", turn.body.as_str()));
-    assert_eq!(posted[0].id, a.session.to_string(), "the tile's one note");
+    assert_eq!(posted[0].id, a.about.note_id(), "the tile's one note");
 }
 
 fn agent(
@@ -710,7 +733,7 @@ fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
         assert_eq!(v.inbox_count(), 1, "the one out of sight");
         let look = v.attention_look();
         let [turn] = look.turns.as_slice() else { panic!("one turn: {look:?}") };
-        assert_eq!(turn.route.session, away);
+        assert_eq!(turn.route.about, About::Session(away));
         assert_eq!(turn.body, "Fixed the test \u{b7} Done \u{b7} 2m 0s");
     });
     let bell = cx.debug_bounds("bell").expect("the bell").center();

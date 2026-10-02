@@ -31,6 +31,7 @@ use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::conversation::Verdict;
+use slopty_proto::thread::ThreadId;
 use slopty_theme::{Theme, alpha};
 
 use super::agents::{agent_ask_line, agent_status_word};
@@ -133,6 +134,8 @@ pub(super) struct Row {
 pub(super) enum Go {
     Waiting(super::agents::Waiting),
     Session(SessionId),
+    /// A thread whose row says it waits, to its tile.
+    Thread(WorkerKey, ThreadId),
 }
 
 /// Now, in milliseconds since the Unix epoch: the clock a worker stamps its times with.
@@ -164,8 +167,10 @@ impl WorkspaceView {
     /// unless `all`.
     fn inbox_rows(&self, all: bool) -> (Vec<Row>, Vec<Row>) {
         let now_ms = wall_ms();
-        let waiting =
-            self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms)).collect();
+        let sessions = self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms));
+        let threads =
+            self.drawn_thread_waits.iter().filter_map(|w| self.thread_inbox_row(*w, now_ms));
+        let waiting = sessions.chain(threads).collect();
         (waiting, self.finished_rows(all))
     }
 
@@ -286,7 +291,7 @@ impl WorkspaceView {
             Some(0) | None => (Status::Done, None),
             Some(code) => (Status::Failed, Some(format!("Exit {code}"))),
         };
-        let command = done.command.lines().next().unwrap_or_default().trim();
+        let command = super::tile::command_words(&done.command);
         let what = if command.is_empty() { "Command".to_owned() } else { command.to_owned() };
         let worker = logged.worker.and_then(|k| self.inbox_worker(k));
         // An unread row is its session's one; the history may hold several of a session.
@@ -351,6 +356,38 @@ impl WorkspaceView {
             go: Go::Waiting(waiting),
             approval: self.approval(session).map(|prompt| (session, prompt.ask)),
         }
+    }
+
+    /// A thread waiting on the human, driven over a protocol with no terminal to say it: what
+    /// it asks, then its tile or its title, and its worker, and how long it has waited.
+    fn thread_inbox_row(&self, wait: super::faces::ThreadWait, now_ms: u64) -> Option<Row> {
+        let stand = self.thread_stand(wait.thread)?;
+        // What it asks, under the heading that already says it waits.
+        let what = stand
+            .asks
+            .as_ref()
+            .map(|a| crate::markdown::plain_line(&a.title))
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| Status::NeedsYou.label().to_owned());
+        let title = match wait.tile.and_then(|t| self.item(t)) {
+            Some(item) => self.tile_title(item),
+            None => self.thread_title(wait.thread),
+        };
+        let since = stand.asks.as_ref().map_or(stand.since, |a| a.opened_ms);
+        let age = (!since.is_zero())
+            .then(|| Duration::from_millis(now_ms.saturating_sub(since.as_millis())));
+        Some(Row {
+            id: format!("inbox-thread-{}", wait.thread),
+            status: Status::NeedsYou,
+            what,
+            word: None,
+            facts: facts([Some(title), self.inbox_worker(wait.worker)]),
+            age,
+            unread: true,
+            logged: None,
+            go: Go::Thread(wait.worker, wait.thread),
+            approval: None,
+        })
     }
 
     /// The popover's panel, dropping the base unit from the bell as it fades in; opened by a
@@ -525,7 +562,7 @@ impl WorkspaceView {
             .when(!row.unread, |el| el.opacity(alpha::STRONG));
         let unread_session = match row.go {
             Go::Session(session) if row.unread => Some(session),
-            Go::Session(_) | Go::Waiting(_) => None,
+            Go::Session(_) | Go::Waiting(_) | Go::Thread(..) => None,
         };
         let mark_read = unread_session.map(|session| {
             let id = format!("{}-read", row.id);

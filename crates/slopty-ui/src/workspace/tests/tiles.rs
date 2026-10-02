@@ -8,7 +8,8 @@ use slopty_theme::alpha;
 
 use super::*;
 use crate::workspace::tile::{
-    CLOSE_TILE, COPY_COMMAND, HOOKS, HOOKS_GIVE, INSTALL_HOOKS, RECONNECTING, cwd_tail,
+    CLOSE_TILE, COPY_COMMAND, HOOKS, HOOKS_GIVE, INSTALL_HOOKS, RECONNECTING, command_words,
+    cwd_tail, only_moves,
 };
 use crate::workspace::toast::{SAY_FOR, SHOWN};
 
@@ -21,6 +22,28 @@ fn click(cx: &mut VisualTestContext, selector: &'static str) {
     let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn")).center();
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
+}
+
+/// A command names its shell without the `cd` it leads with, which the place already says;
+/// a `cd` alone, or one that leads nowhere, is the command.
+#[test]
+fn a_command_is_named_without_the_cd_before_it() {
+    assert_eq!(command_words("cd ~/srv/atlas && docker compose pull"), "docker compose pull");
+    assert_eq!(command_words("  cd /a; cd b &&  make\nsecond line"), "make");
+    assert_eq!(command_words("cd 'my dir' && ls"), "ls");
+    assert_eq!(command_words(r"cd my\ dir && ls"), "ls");
+    assert_eq!(command_words("cd \"a && b\" && ls"), "ls");
+    assert_eq!(command_words("cd ~/srv"), "cd ~/srv");
+    assert_eq!(command_words("cd ~/srv &&"), "cd ~/srv &&");
+    assert_eq!(command_words("cdk deploy"), "cdk deploy");
+    assert_eq!(command_words("make && cd out"), "make && cd out");
+    // A `cd` alone only moves the shell: its row's place already says where.
+    for moves in ["cd ~/code/atlas", "cd", "  cd 'my dir'  ", "cd /a && cd b"] {
+        assert!(only_moves(moves), "{moves}");
+    }
+    for runs in ["cd a && ls", "cdk deploy", "cd a b", "make"] {
+        assert!(!only_moves(runs), "{runs}");
+    }
 }
 
 #[test]
@@ -1051,8 +1074,9 @@ fn an_opening_window_turns_its_mark_in_the_body(cx: &mut TestAppContext) {
 }
 
 /// Shells of one worker that would read alike are told apart by the command each last ran
-/// before a number is needed: "make", "cargo test" and the one that ran nothing, which needs
-/// no number once it is alone. The second line does not say the command again.
+/// before a number is needed: "make", "cargo test" (its `cd` dropped) and the one that ran
+/// nothing, which needs no number once it is alone. The second line does not say the command
+/// again.
 #[gpui::test]
 fn shells_that_read_alike_are_named_by_their_last_command(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1063,7 +1087,7 @@ fn shells_that_read_alike_are_named_by_their_last_command(cx: &mut TestAppContex
         opens(&view, cx, &studio, sessions[1], studio.me, 2),
         opens(&view, cx, &studio, sessions[2], studio.me, 3),
     ];
-    for (session, command) in [(sessions[0], "make"), (sessions[1], "cargo test")] {
+    for (session, command) in [(sessions[0], "make"), (sessions[1], "cd ~/srv && cargo test")] {
         let done =
             Finished { command: command.into(), exit: Some(0), elapsed: Duration::from_secs(40) };
         view.update_in(cx, |v, _w, cx| v.command_finished(session, done, cx));

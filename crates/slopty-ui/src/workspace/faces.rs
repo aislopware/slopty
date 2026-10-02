@@ -23,15 +23,16 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Keystroke, Window};
-use slopty_client::layout::WorkerKey;
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::TermRequest;
+use slopty_proto::thread::attention::Rung;
 use slopty_proto::thread::wire::{
-    IntentDone, Outcome, Start, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
+    IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
 };
 use slopty_proto::thread::{AgentId, IntentId, Meters, ThreadId};
 
@@ -95,6 +96,9 @@ pub(super) struct ThreadFaces {
     agents: HashMap<ThreadId, AgentId>,
     /// Each thread's terminal as its worker's table last said, for its tile's way to it.
     terminals: HashMap<ThreadId, SessionId>,
+    /// Where each thread stands as its worker's table last said, its subagents folded in, for
+    /// the chrome outside its tile.
+    stands: HashMap<ThreadId, ThreadStand>,
     /// Starts sent and not yet answered, and the worker each went to.
     starts: HashMap<IntentId, WorkerKey>,
     /// The thread tile whose view takes the keyboard once it is made.
@@ -329,12 +333,8 @@ impl WorkspaceView {
 
     /// Go to `thread`'s tile, or add one on `key`.
     pub(super) fn open_thread(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
-        let shown = self.items().find_map(|(_, item)| match item.kind {
-            ItemKind::Thread { thread: t } if t == thread => Some(item.id),
-            _ => None,
-        });
-        if let Some(id) = shown {
-            self.go_to(id, cx);
+        if let Some(tile) = self.tile_of_thread(thread) {
+            self.go_to(tile.item, cx);
             return;
         }
         let item = Item {
@@ -346,6 +346,16 @@ impl WorkspaceView {
         tracing::info!(id = %item.id, %thread, "open thread");
         self.propose(key, ItemOp::Add(item), cx);
         cx.notify();
+    }
+
+    /// The tile that shows `thread`, on any worker.
+    pub(super) fn tile_of_thread(&self, thread: ThreadId) -> Option<TileRef> {
+        self.items().find_map(|(worker, item)| match item.kind {
+            ItemKind::Thread { thread: t } if t == thread => {
+                Some(TileRef { worker, item: item.id })
+            }
+            _ => None,
+        })
     }
 
     /// Go to the tile of `thread`'s terminal on `key`, or add one beside the thread's.
@@ -387,6 +397,12 @@ impl WorkspaceView {
         let of = &mut self.faces.threads.of_session;
         of.retain(|session, _| !sessions.contains(session));
         of.extend(found);
+        let stands = stands_of(key, rows.values());
+        let old = &self.faces.threads.stands;
+        let moved = old.values().filter(|s| s.worker == key).count() != stands.len()
+            || stands.iter().any(|(id, stand)| old.get(id) != Some(stand));
+        self.faces.threads.stands.retain(|_, stand| stand.worker != key);
+        self.faces.threads.stands.extend(stands);
         for row in rows.values() {
             self.faces.threads.titles.insert(row.id, row.title.clone());
             self.faces.threads.agents.insert(row.id, row.agent.clone());
@@ -394,6 +410,9 @@ impl WorkspaceView {
                 Some(session) => self.faces.threads.terminals.insert(row.id, session),
                 None => self.faces.threads.terminals.remove(&row.id),
             };
+        }
+        if moved {
+            self.agents_moved(cx);
         }
         cx.notify();
     }
@@ -962,11 +981,108 @@ impl WorkspaceView {
         }
     }
 
+    /// Where `thread` stands, when its row speaks for it: not while its terminal's agent
+    /// status already does (Claude Code observed in its TUI), which would count it twice.
+    pub(super) fn thread_stand(&self, thread: ThreadId) -> Option<&ThreadStand> {
+        let stand = self.faces.threads.stands.get(&thread)?;
+        let spoken = stand
+            .terminal
+            .and_then(|s| self.agent_state(s))
+            .is_some_and(|a| a.status != AgentStatus::None);
+        (!spoken).then_some(stand)
+    }
+
+    /// Every thread whose row speaks for it ([`Self::thread_stand`]), on every worker.
+    pub(super) fn thread_stands(&self) -> impl Iterator<Item = (ThreadId, &ThreadStand)> {
+        self.faces.threads.stands.keys().filter_map(|t| Some((*t, self.thread_stand(*t)?)))
+    }
+
+    /// The threads waiting on the person whose rows speak for them, after the sessions of
+    /// [`Self::needs_you`]: those with a tile in reading order, then the rest by worker.
+    pub(super) fn threads_waiting(&self) -> Vec<ThreadWait> {
+        let tiles: HashMap<ThreadId, TileRef> = self
+            .items()
+            .filter_map(|(worker, i)| match i.kind {
+                ItemKind::Thread { thread } => Some((thread, TileRef { worker, item: i.id })),
+                _ => None,
+            })
+            .collect();
+        let mut out: Vec<(Option<slopty_client::layout::Pos>, ThreadWait)> = self
+            .thread_stands()
+            .filter(|(_, stand)| stand.rung == Rung::NeedsYou)
+            .map(|(thread, stand)| {
+                let tile = tiles.get(&thread).copied();
+                let pos = tile.and_then(|t| self.layout.position(t));
+                (pos, ThreadWait { worker: stand.worker, thread, tile })
+            })
+            .collect();
+        out.sort_by_key(|(pos, w)| {
+            (pos.is_none(), pos.map(|p| (p.workspace, p.column, p.tile)), w.worker, w.thread)
+        });
+        out.into_iter().map(|(_, w)| w).collect()
+    }
+
     /// The face's one line of what the agent does, for the navigator and the overview: the
     /// agent's words are Markdown, and the line says them as plain words.
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
         self.face(session)?.summary.as_deref().map(crate::markdown::plain_line)
     }
+}
+
+/// Where a thread stands as its worker's table row says it, for the navigator's glyph, the
+/// header's pill, the bell and the status bar: a thread driven over a protocol has no
+/// terminal whose agent status could say it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct ThreadStand {
+    /// The worker whose agent runs it.
+    pub worker: WorkerKey,
+    /// Its rung on the attention ladder, its subagents' folded in.
+    pub rung: Rung,
+    /// What it asks while it waits on the person: its first open request.
+    pub asks: Option<RequestCard>,
+    /// Its terminal, whose agent status speaks for it where it has one.
+    pub terminal: Option<SessionId>,
+    /// When its row last changed, by its worker's clock.
+    pub since: slopty_core::WallMs,
+}
+
+impl ThreadStand {
+    /// The one vocabulary's mark for its rung; none at rest.
+    pub(super) const fn status(&self) -> Option<Status> {
+        match self.rung {
+            Rung::NeedsYou => Some(Status::NeedsYou),
+            Rung::Failed => Some(Status::Failed),
+            Rung::Working => Some(Status::Working),
+            Rung::Waiting => Some(Status::Running),
+            Rung::ToReview => Some(Status::Done),
+            Rung::Idle => None,
+        }
+    }
+
+    /// Its state in a word or two, as a terminal agent's pill says it ("Needs approval",
+    /// "Has a question"); none at rest.
+    pub(super) fn word(&self) -> Option<&'static str> {
+        if self.rung != Rung::NeedsYou {
+            return self.rung.word();
+        }
+        Some(match self.asks.as_ref().map(|a| a.kind.as_str()) {
+            Some(slopty_proto::thread::Request::APPROVAL) => "Needs approval",
+            Some(slopty_proto::thread::Request::QUESTION) => "Has a question",
+            Some(slopty_proto::thread::Request::ELICITATION) => "Needs input",
+            _ => "Needs you",
+        })
+    }
+}
+
+/// A thread that waits on the person, for the bell, the inbox and the Dock's count.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) struct ThreadWait {
+    /// The worker whose agent runs it.
+    pub worker: WorkerKey,
+    /// The thread.
+    pub thread: ThreadId,
+    /// Its tile here, if one shows it.
+    pub tile: Option<TileRef>,
 }
 
 /// What a thread tile's header says before its worker's table names the thread.
@@ -982,4 +1098,52 @@ fn root_meters(hub: &Entity<ThreadHub>, cx: &App) -> HashMap<SessionId, Meters> 
         .filter(|row| row.parent.is_none())
         .filter_map(|row| Some((row.terminal?, row.meters.clone())))
         .collect()
+}
+
+/// Where each of `key`'s threads stands, from its table: a subagent's rung folded into the
+/// thread it hangs from, as the server's ladder folds it, and no row of its own.
+fn stands_of<'a>(
+    key: WorkerKey,
+    rows: impl Iterator<Item = &'a ThreadRow> + Clone,
+) -> HashMap<ThreadId, ThreadStand> {
+    let parents: HashMap<ThreadId, ThreadId> =
+        rows.clone().filter_map(|r| Some((r.id, r.parent.as_ref()?.thread))).collect();
+    let top = |mut thread: ThreadId| {
+        let mut hops = 0_usize;
+        while let Some(parent) = parents.get(&thread).copied() {
+            thread = parent;
+            hops = hops.saturating_add(1);
+            if hops > parents.len() {
+                break;
+            }
+        }
+        thread
+    };
+    let mut out: HashMap<ThreadId, ThreadStand> = rows
+        .clone()
+        .filter(|r| r.parent.is_none())
+        .map(|r| {
+            let stand = ThreadStand {
+                worker: key,
+                rung: Rung::of(r),
+                asks: r.requests.first().cloned(),
+                terminal: r.terminal,
+                since: r.updated_ms,
+            };
+            (r.id, stand)
+        })
+        .collect();
+    for row in rows.filter(|r| r.parent.is_some()) {
+        if let Some(stand) = out.get_mut(&top(row.id)) {
+            let rung = Rung::of(row);
+            if rung > stand.rung {
+                stand.rung = rung;
+                stand.since = row.updated_ms;
+            }
+            if stand.asks.is_none() {
+                stand.asks = row.requests.first().cloned();
+            }
+        }
+    }
+    out
 }

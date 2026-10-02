@@ -99,6 +99,16 @@ fn the_palette_starts_each_agent_the_worker_offers(cx: &mut TestAppContext) {
         ["New Claude Code thread", "New Codex thread", "New gemini thread"],
         "the studio's agents, for the studio's tile"
     );
+    let dirs: Vec<Option<String>> = view
+        .update(cx, |v, cx| v.palette_lines(cx))
+        .into_iter()
+        .filter(|l| l.label.starts_with("New ") && l.label.ends_with(" thread"))
+        .map(|l| l.cwd)
+        .collect();
+    assert!(
+        dirs.iter().all(|d| d.as_deref() == Some("src/app")),
+        "the folder said short, as the navigator says it: {dirs:?}"
+    );
     studio.drain();
 
     cx.simulate_keystrokes("cmd-shift-p");
@@ -183,6 +193,16 @@ fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
         v.threads_linked(studio_key, cx);
     });
     cx.run_until_parked();
+    let dirs: Vec<Option<String>> = view
+        .update(cx, |v, cx| v.palette_lines(cx))
+        .into_iter()
+        .filter(|l| l.label.starts_with("New ") && l.label.ends_with(" thread"))
+        .map(|l| l.cwd)
+        .collect();
+    assert!(
+        dirs.iter().all(|d| d.as_deref() == Some("src/app")),
+        "the folder said short, as the navigator says it: {dirs:?}"
+    );
     studio.drain();
 
     cx.simulate_keystrokes("cmd-shift-p");

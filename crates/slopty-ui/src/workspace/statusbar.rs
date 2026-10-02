@@ -208,8 +208,8 @@ impl WorkspaceView {
     }
 
     /// Each worker's agents, as their tiles mark them, in the workers' order: the ones this
-    /// client follows and the ones only the server reports. A worker with none at work is left
-    /// out.
+    /// client follows, the ones only the server reports, and the threads no terminal speaks
+    /// for. A worker with none at work is left out.
     pub(super) fn agent_counts(&self) -> Vec<(String, AgentCounts)> {
         let mut by_worker: BTreeMap<WorkerKey, AgentCounts> = BTreeMap::new();
         let followed = self.agents.keys().filter_map(|s| Some((*s, self.worker_of_session(*s)?)));
@@ -225,6 +225,18 @@ impl WorkspaceView {
         }
         for ended in self.to_review() {
             by_worker.entry(ended.worker).or_default().add_review();
+        }
+        // Threads no terminal speaks for (Codex, pi, an ACP agent), as their rows say.
+        for (_, stand) in self.thread_stands() {
+            let counts = by_worker.entry(stand.worker).or_default();
+            match stand.rung {
+                slopty_proto::thread::attention::Rung::ToReview => counts.add_review(),
+                _ => {
+                    if let Some(status) = stand.status() {
+                        counts.add(status);
+                    }
+                }
+            }
         }
         by_worker
             .into_iter()

@@ -6,9 +6,9 @@ Button │ studio
 Button │ New shell on studio
 Button │ Terminal
 Button │ Close tile
-Button │ Claude Code
+Button │ Orchestrator
 Button │ Close tile
-Button │ Claude Code 2
+Button │ #1 Mirror the server's projects
 Button │ Close tile
 Button │ Navigator
 Group │ Where
@@ -23,8 +23,8 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
-Group │ Claude Code
-Heading │ terminal Claude Code
+Group │ Orchestrator
+Heading │ terminal Orchestrator
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -58,8 +58,8 @@ Button │ Retry #7
 Button │ Approve #7
 List
 TextInput │ Tell the orchestrator
-Group │ Claude Code 2
-Heading │ terminal Claude Code 2
+Group │ #1 Mirror the server's projects
+Heading │ terminal #1 Mirror the server's projects
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

@@ -282,7 +282,7 @@ impl WorkspaceView {
 
         // Right: the inbox and "…". Who needs you is counted once, on the bell; its rows go to
         // them.
-        let total = self.drawn_waiting.len();
+        let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
         let unread = total.saturating_add(self.unread_finishes());
         let bell = has_workers.then(|| {
             // Each fill with its own ink: a near-black on the green and on a state's fill.

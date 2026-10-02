@@ -1082,18 +1082,20 @@ impl ProjectView {
                 .debug_selector(move || selector)
                 .role(Role::Button)
                 .aria_label(SharedString::from(format!("{} #{task}", action.label())))
-                // A ghost, as a tile header's actions are: its words in the text's tone and a
-                // fill only under the pointer. Boxed, a row's Retry and Approve read as two
-                // more chips beside its state.
+                // A secondary button at the meta size: on a card's raised fill a ghost's words
+                // read as plain text ("Merge" looked like a label), so it carries the
+                // hairline that makes it a button there, at the least height a click needs.
                 .flex_none()
-                .px(self.z(sp.xs))
+                .flex()
+                .items_center()
+                .h(self.z(theme.density.hit))
+                .px(self.z(sp.sm))
                 .rounded(self.z(theme.radii.sm))
                 .text_size(self.z(theme.typography.meta()))
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                .text_color(hsla(s.text))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.overlay)))
                 .child(action.label());
+            let el = crate::kit::secondary(el, theme);
             tab_stop(el, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
                 cx.emit(ProjectEvent::Act(task, action));
@@ -3056,6 +3058,7 @@ impl Render for ProjectView {
             Lens::Machines => self.machines(&board, cx),
         };
         let composer = self.composer_row(&board, cx);
+        let fades = self.scroll_fades();
         let keys = keys
             .child(self.header(&board, cx))
             .children(self.recap(&board, cx))
@@ -3079,8 +3082,33 @@ impl Render for ProjectView {
                             .pt(self.z(theme.spacing.xs))
                             .pb(self.z(theme.spacing.md))
                             .children(body),
-                    ),
+                    )
+                    .children(fades),
             );
         root.child(keys).children(composer)
+    }
+}
+
+impl ProjectView {
+    /// The body's edges fading into the tile's surface while more lies past them, so a lane
+    /// cut at the foot (the board's second row) reads as more below, not as the end. Judged
+    /// once the body has laid out, so they follow the scroll of the frame they are drawn in.
+    fn scroll_fades(&self) -> [AnyElement; 2] {
+        let theme = &self.theme;
+        let surface = theme.content();
+        let (above, below) = (self.scroll.clone(), self.scroll.clone());
+        let top = crate::kit::edge_fade(crate::kit::Edge::Top, surface, self.z(theme.spacing.md))
+            .debug_selector(|| "project-fade-top".to_owned());
+        let bottom =
+            crate::kit::edge_fade(crate::kit::Edge::Bottom, surface, self.z(theme.spacing.xl))
+                .debug_selector(|| "project-fade-bottom".to_owned());
+        [
+            crate::kit::painted_while(move |_| above.offset().y < px(0.0), top).into_any_element(),
+            crate::kit::painted_while(
+                move |_| below.max_offset().y + below.offset().y > px(0.5),
+                bottom,
+            )
+            .into_any_element(),
+        ]
     }
 }

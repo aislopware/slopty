@@ -625,6 +625,20 @@ fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
     (solid.mix(content, alpha::FAINT), solid.mix(content, alpha::DIM))
 }
 
+/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): the raised fill with a
+/// hairline just inside its edge, the text's own ink, and the hover step under the pointer.
+///
+/// The hairline is what makes it a button on a raised card (a board's card, this Mac's
+/// checklist): there the fill alone is the card's own tone and the button read as words.
+pub fn secondary(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
+    let s = theme.surfaces;
+    el.bg(hsla(s.raised))
+        .shadow(vec![ring_inside(theme)])
+        .text_color(hsla(s.text))
+        .hover(move |el| el.bg(hsla(s.overlay)))
+        .active(move |el| el.bg(hsla(s.overlay)))
+}
+
 /// `el` drawn as the selected row: the selected fill with a hairline ring just inside its edge.
 ///
 /// The ring lets a selection read on a surface whose tone sits near the fill (a menu, a
@@ -678,15 +692,7 @@ pub fn button(
         .child(label);
     let el = match kind {
         ButtonKind::Primary => solid_pressable(el, theme),
-        // A hairline just inside its edge, as a selected row has: on a raised card (this Mac's
-        // checklist, a settings card) the fill alone is the card's own tone, and the button
-        // read as words.
-        ButtonKind::Secondary => el
-            .bg(hsla(s.raised))
-            .shadow(vec![ring_inside(theme)])
-            .text_color(hsla(s.text))
-            .hover(move |el| el.bg(hsla(s.overlay)))
-            .active(move |el| el.bg(hsla(s.overlay))),
+        ButtonKind::Secondary => secondary(el, theme),
         ButtonKind::Ghost => el
             .text_color(hsla(s.text_secondary))
             .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))

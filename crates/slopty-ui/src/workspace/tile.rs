@@ -23,6 +23,7 @@ use slopty_theme::{Theme, Typography};
 
 use super::actions::{CloseItem, FullscreenTile};
 use super::browsers::ADDRESS;
+use super::faces::ThreadStand;
 use super::strip::Handed;
 use super::{Field, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
@@ -288,6 +289,60 @@ pub fn cwd_tail(path: &str, home: Option<&str>) -> String {
     }
 }
 
+/// A typed command as it names its shell: its first line, without the `cd <dir> &&` (or
+/// `cd <dir>;`) it may lead with, since the shell's place already says where it runs.
+/// `cd ~/srv/atlas && docker compose pull` is "docker compose pull"; a bare `cd ~/srv` stays.
+#[must_use]
+pub fn command_words(command: &str) -> &str {
+    let mut rest = command.lines().next().unwrap_or_default().trim();
+    while let Some(after) = rest.strip_prefix("cd").filter(|a| a.starts_with([' ', '\t'])) {
+        let after = after.trim_start();
+        let dir = shell_word(after);
+        let tail = after.get(dir..).unwrap_or_default().trim_start();
+        let Some(next) = tail.strip_prefix("&&").or_else(|| tail.strip_prefix(';')) else {
+            break;
+        };
+        let next = next.trim_start();
+        if next.is_empty() || dir == 0 {
+            break;
+        }
+        rest = next;
+    }
+    rest
+}
+
+/// Whether `command` only moves the shell (`cd ~/srv`, a bare `cd`): its place says where to.
+#[must_use]
+pub fn only_moves(command: &str) -> bool {
+    let words = command_words(command);
+    match words.strip_prefix("cd") {
+        Some("") => true,
+        Some(after) if after.starts_with([' ', '\t']) => {
+            let dir = after.trim_start();
+            shell_word(dir) == dir.len()
+        }
+        _ => false,
+    }
+}
+
+/// How many bytes the shell word at the start of `text` takes: quoted runs and a backslash's
+/// character are part of it, and it ends at an unquoted blank, `;` or `&`.
+fn shell_word(text: &str) -> usize {
+    let mut quote = None;
+    let mut escaped = false;
+    for (at, c) in text.char_indices() {
+        match (quote, c) {
+            _ if escaped => escaped = false,
+            (None | Some('"'), '\\') => escaped = true,
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(q), c) if c == q => quote = None,
+            (None, ' ' | '\t' | ';' | '&') => return at,
+            _ => {}
+        }
+    }
+    text.len()
+}
+
 /// What a shell is called with nothing better to say: no command, no title of its program's, no
 /// place but home.
 pub const TERMINAL: &str = "Terminal";
@@ -453,7 +508,7 @@ pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
     }
     match &item.kind {
         ItemKind::Terminal { .. } => Glyph::Icon(IconName::SquareTerminal),
-        ItemKind::Thread { .. } => Glyph::Agent(AgentMark::Neutral),
+        ItemKind::Thread { .. } => Glyph::Agent(AgentMark::Other),
         ItemKind::Window { .. } => Glyph::Icon(IconName::AppWindow),
         ItemKind::Display { .. } => Glyph::Icon(IconName::Monitor),
         ItemKind::Note { .. } => Glyph::Icon(IconName::StickyNote),
@@ -637,8 +692,8 @@ impl WorkspaceView {
 
     /// A terminal's title, the first that says something: the command it runs, a title its
     /// program set (not the shell's own name, a path or a prompt), the repository or
-    /// directory it stands in, else "Terminal". An agent's shell takes the agent's own title, else
-    /// the agent's name.
+    /// directory it stands in, else "Terminal". An agent's shell takes its part in a project
+    /// (the orchestrator, a task), else the agent's own title, else the agent's name.
     #[must_use]
     pub fn terminal_title(&self, session: SessionId) -> String {
         let shell = self.shell(session);
@@ -649,19 +704,18 @@ impl WorkspaceView {
             .or_else(|| summary.map(|(_, s)| s.title.as_str()))
             .map(str::trim)
             .filter(|t| own_title(t, program));
-        // An agent that has not titled itself is named by its task, its session's first
-        // prompt, once its face has read it: the kind's glyph already says "Claude".
+        // An agent on a project is named by what it is there: the orchestrator, or its task.
+        // Any other that has not titled itself is named by its session's first prompt, once
+        // its face has read it: the kind's glyph already says "Claude".
         if let Some(agent) = self.agent_state(session).filter(|a| a.status != AgentStatus::None) {
-            return set
-                .map(str::to_owned)
+            return self
+                .project_role(session)
+                .or_else(|| set.map(str::to_owned))
                 .or_else(|| self.face(session)?.first_prompt.clone())
                 .unwrap_or_else(|| agent_name(agent.kind).to_owned());
         }
-        let running = shell
-            .and_then(|s| s.running.as_deref())
-            .and_then(|c| c.lines().next())
-            .map(str::trim)
-            .filter(|c| !c.is_empty());
+        let running =
+            shell.and_then(|s| s.running.as_deref()).map(command_words).filter(|c| !c.is_empty());
         running
             .or(set)
             .map(str::to_owned)
@@ -988,7 +1042,13 @@ impl WorkspaceView {
         // say the same thing a few hundred points higher.
         let badge = agent
             .filter(|(session, _)| !self.face_asks(*session))
-            .and_then(|(session, a)| self.agent_badge(tile, session, a, chrome, cx));
+            .and_then(|(session, a)| self.agent_badge(tile, session, a, chrome, cx))
+            .or_else(|| match item.kind {
+                ItemKind::Thread { thread } => {
+                    self.thread_stand(thread).and_then(|st| self.thread_badge(tile, st, chrome))
+                }
+                _ => None,
+            });
         let unwatched = match &item.kind {
             ItemKind::Terminal { session } => self.finished.get(session).map(|f| (*session, f)),
             _ => None,
@@ -1504,6 +1564,13 @@ impl WorkspaceView {
             _ => None,
         };
         if let Some(status) = session.and_then(|s| self.agent_mark(s)) {
+            return Some(status);
+        }
+        // A thread tile says where its thread stands as its worker's table row has it: a
+        // thread driven over a protocol has no terminal whose agent could say it.
+        if let ItemKind::Thread { thread } = item.kind
+            && let Some(status) = self.thread_stand(thread).and_then(ThreadStand::status)
+        {
             return Some(status);
         }
         if self.workers.get(&tile.worker).is_none_or(|w| w.link.is_none()) {

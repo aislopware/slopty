@@ -179,12 +179,14 @@ drawn![
     "x",
 ];
 
-/// The agents' own marks, where their licences allow one: pi's, drawn from the layout its MIT
-/// source spells out (`assets/agents/LICENSE-pi`), and `OpenCode`'s, from its MIT repository
-/// (`assets/agents/LICENSE-opencode`) without the tile behind it.
+/// The agents' marks: pi's own, drawn from the layout its MIT source spells out
+/// (`assets/agents/LICENSE-pi`); `OpenCode`'s own, from its MIT repository
+/// (`assets/agents/LICENSE-opencode`) without the tile behind it; and Codex's stand-in,
+/// Hugeicons' `code-circle` (MIT, `assets/icons/LICENSE`) at this set's stroke.
 const AGENT_MARKS: &[(&str, &[u8])] = &[
     ("agents/pi.svg", include_bytes!("../assets/agents/pi.svg")),
     ("agents/opencode.svg", include_bytes!("../assets/agents/opencode.svg")),
+    (CODEX_MARK, include_bytes!("../assets/agents/code-circle.svg")),
 ];
 
 /// The stroke gpui-kit's Lucide icons are drawn at, and the one this set's are.
@@ -287,7 +289,8 @@ impl Glyph {
             Self::File(kind) => kind.path(),
             Self::Agent(AgentMark::Pi) => SharedString::new_static(PI_MARK),
             Self::Agent(AgentMark::OpenCode) => SharedString::new_static(OPENCODE_MARK),
-            Self::Agent(AgentMark::Neutral) => IconName::Sparkles.path(),
+            Self::Agent(AgentMark::Codex) => SharedString::new_static(CODEX_MARK),
+            Self::Agent(AgentMark::ClaudeCode | AgentMark::Other) => IconName::Sparkles.path(),
         }
     }
 
@@ -305,18 +308,25 @@ impl Glyph {
     }
 }
 
-/// An agent's mark: its own where its licence allows one, else the neutral one.
+/// An agent's mark: its own where its licence allows one, else one of Slopty's that tells it
+/// apart from every other agent's.
 ///
-/// Claude Code's and Codex's owners allow their marks only with their approval, so they and
-/// any agent without a mark of its own take the neutral sparkles, in the theme's agent orange.
+/// Claude Code's and Codex's owners allow their marks only with their approval, so each takes
+/// a drawing of its own from the icon set: Claude Code the sparkles in the theme's agent
+/// orange, Codex a code mark in the ink beside it. Any other agent without a mark takes the
+/// sparkles in that ink, so the orange names one agent and no two agents share a mark.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AgentMark {
     /// pi's four-by-four mark, in its own colours.
     Pi,
     /// `OpenCode`'s mark, in the ink beside it as its light and dark variants are.
     OpenCode,
-    /// The sparkles, in [`slopty_theme::Surfaces::agent`].
-    Neutral,
+    /// Claude Code's: the sparkles, in [`slopty_theme::Surfaces::agent`].
+    ClaudeCode,
+    /// Codex's: a code mark in a circle, in the ink beside it.
+    Codex,
+    /// Any other agent's: the sparkles, in the ink beside it.
+    Other,
 }
 
 impl AgentMark {
@@ -326,13 +336,16 @@ impl AgentMark {
         match agent.strip_prefix(AgentId::ACP_PREFIX).unwrap_or(agent) {
             AgentId::PI => Self::Pi,
             "opencode" => Self::OpenCode,
-            _ => Self::Neutral,
+            AgentId::CLAUDE_CODE => Self::ClaudeCode,
+            AgentId::CODEX => Self::Codex,
+            _ => Self::Other,
         }
     }
 }
 
-/// `glyph`, `side` square. An icon and `OpenCode`'s mark take `ink`; a file type and pi's mark
-/// keep their own colours; the neutral agent mark takes the theme's agent orange.
+/// `glyph`, `side` square. An icon and the marks of `OpenCode`, Codex and any other agent take
+/// `ink`; a file type and pi's mark keep their own colours; Claude Code's takes the theme's
+/// agent orange.
 #[must_use]
 pub fn glyph(theme: &Theme, glyph: Glyph, side: Pixels, ink: Hsla) -> AnyElement {
     let mask = |path: SharedString, color: Hsla| {
@@ -340,16 +353,20 @@ pub fn glyph(theme: &Theme, glyph: Glyph, side: Pixels, ink: Hsla) -> AnyElement
     };
     let path = glyph.path();
     match glyph {
-        Glyph::Icon(_) | Glyph::Agent(AgentMark::OpenCode) => mask(path, ink),
+        Glyph::Icon(_)
+        | Glyph::Agent(AgentMark::OpenCode | AgentMark::Codex | AgentMark::Other) => {
+            mask(path, ink)
+        }
         Glyph::File(_) | Glyph::Agent(AgentMark::Pi) => {
             Picture { path, side, inner: None }.into_any_element()
         }
-        Glyph::Agent(AgentMark::Neutral) => mask(path, hsla(theme.surfaces.agent)),
+        Glyph::Agent(AgentMark::ClaudeCode) => mask(path, hsla(theme.surfaces.agent)),
     }
 }
 
 const PI_MARK: &str = "agents/pi.svg";
 const OPENCODE_MARK: &str = "agents/opencode.svg";
+const CODEX_MARK: &str = "agents/code-circle.svg";
 
 /// A drawing in its own colours, rasterised once for each size it shows at in the window's
 /// device pixels: as sharp as an icon, and there on the first frame, with no load to wait for.
@@ -948,16 +965,25 @@ mod tests {
         }
     }
 
-    /// Each agent is known by its name, directly or over ACP; Claude Code and Codex, whose
-    /// owners allow their marks only with approval, and any agent without one take the
-    /// neutral mark.
+    /// Each agent is known by its name, directly or over ACP. Claude Code and Codex, whose
+    /// owners allow their marks only with approval, take drawings of Slopty's, one each, and
+    /// no other agent shares either: a Codex thread never wears Claude Code's orange.
     #[test]
     fn an_agent_shows_its_own_mark_only_where_its_licence_allows() {
         assert_eq!(AgentMark::of(AgentId::PI), AgentMark::Pi);
         assert_eq!(AgentMark::of("acp:opencode"), AgentMark::OpenCode);
-        assert_eq!(AgentMark::of(AgentId::CLAUDE_CODE), AgentMark::Neutral);
-        assert_eq!(AgentMark::of(AgentId::CODEX), AgentMark::Neutral);
-        assert_eq!(AgentMark::of("acp:gemini"), AgentMark::Neutral);
+        assert_eq!(AgentMark::of(AgentId::CLAUDE_CODE), AgentMark::ClaudeCode);
+        assert_eq!(AgentMark::of(AgentId::CODEX), AgentMark::Codex);
+        assert_eq!(AgentMark::of("acp:gemini"), AgentMark::Other);
+        let agents = [AgentId::CLAUDE_CODE, AgentId::CODEX, AgentId::PI, "acp:opencode", "gemini"];
+        let looks: std::collections::HashSet<(SharedString, bool)> = agents
+            .iter()
+            .map(|a| {
+                let glyph = Glyph::agent(a);
+                (glyph.path(), glyph == Glyph::Agent(AgentMark::ClaudeCode))
+            })
+            .collect();
+        assert_eq!(looks.len(), agents.len(), "no two agents look alike: {looks:?}");
         assert_eq!(Glyph::file("/w/main.rs").path().as_ref(), "file-types/rust.svg");
         assert_eq!(Glyph::file("/w/notes"), Glyph::Icon(IconName::File));
         for glyph in [Glyph::agent("pi"), Glyph::agent("opencode"), Glyph::agent("codex")] {

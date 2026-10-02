@@ -357,6 +357,8 @@ pub struct TerminalView {
     /// Times this view was rendered rather than replayed from the view cache (tests).
     #[cfg(test)]
     renders: u32,
+    #[cfg(test)]
+    drawn_focused: Option<bool>,
     predictor: Predictor,
     /// Keystroke → paint, predicted and echoed (see [`latency`]). Shared with the element,
     /// which times a key when its frame reaches the display: after the frame, where an update
@@ -560,6 +562,8 @@ impl TerminalView {
             motion_frames: 0,
             #[cfg(test)]
             renders: 0,
+            #[cfg(test)]
+            drawn_focused: None,
             predictor: predictor(),
             latency: Rc::default(),
             marked: None,
@@ -2234,6 +2238,12 @@ impl TerminalView {
     #[cfg(test)]
     pub const fn renders(&self) -> u32 {
         self.renders
+    }
+
+    /// Whether its last drawing was of a view with the keyboard (`None`: not drawn yet).
+    #[cfg(test)]
+    pub const fn drawn_focused(&self) -> Option<bool> {
+        self.drawn_focused
     }
 
     /// Link RTT, for the prediction policy.
@@ -4043,6 +4053,7 @@ impl Render for TerminalView {
         #[cfg(test)]
         {
             self.renders = self.renders.saturating_add(1);
+            self.drawn_focused = Some(focused);
             if zooming {
                 self.motion_frames = self.motion_frames.saturating_add(1);
             }

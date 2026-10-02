@@ -146,6 +146,28 @@ fn summary(session: SessionId, cwd: Option<&str>) -> SessionSummary {
     }
 }
 
+/// The keyboard handed from a shell to a file tile as the workspace draws reaches the shell's
+/// drawing too: its view is drawn again without the keyboard (its caret a hollow block, not the
+/// focused bar) in the frames that follow, though the move itself asks for no frame.
+#[gpui::test]
+fn a_shell_left_for_a_file_is_drawn_without_the_keyboard(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let shell = opens(&view, cx, &studio, session, studio.me, 1);
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.md".to_owned() }, 2);
+    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
+    cx.run_until_parked();
+    assert!(terminal_focused(&view, cx, session));
+    let term = view.read_with(cx, |v, _| v.terminals.get(&session).cloned()).expect("a view");
+    let drawn = |cx: &mut VisualTestContext| term.read_with(cx, |t, _| t.drawn_focused());
+    assert_eq!(drawn(cx), Some(true), "drawn with the keyboard");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
+    cx.run_until_parked();
+    assert!(!terminal_focused(&view, cx, session), "the file has the keyboard");
+    assert_eq!(drawn(cx), Some(false), "and the shell is drawn without it");
+}
+
 /// The worker opened `session` for `by` (this client when it is `fake.me`) and made its item.
 fn opens(
     view: &Entity<WorkspaceView>,
@@ -1534,6 +1556,7 @@ mod strip_marks;
 mod tab_strip;
 mod thread_face;
 mod thread_start;
+mod thread_waits;
 mod tiles;
 mod toasts;
 mod touch;

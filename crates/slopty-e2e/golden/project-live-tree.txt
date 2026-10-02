@@ -4,12 +4,12 @@ Navigation │ Navigator
 TextInput │ Filter
 Button │ studio
 Button │ New shell on studio
-Button │ Claude Code 2, Working
+Button │ #1 Read a pull request's checks, Working
 Image │ Working
 Button │ Close tile
 Button │ Terminal
 Button │ Close tile
-Button │ Claude Code
+Button │ Orchestrator
 Button │ Close tile
 Button │ Navigator
 Group │ Where
@@ -24,8 +24,8 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group
 Terminal │ shell │ ~ %
-Group │ Claude Code
-Heading │ terminal Claude Code
+Group │ Orchestrator
+Heading │ terminal Orchestrator
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
@@ -49,8 +49,8 @@ Button │ Address comments #1
 Button │ Runs on studio, macOS. Worktree $SCRATCH/repo/.claude/worktrees/slopty-board-1. Branch worktree-slopty-board-1. Why: Apple work. Click to see the machines
 TreeItem │ Draw the pipeline row, Planned
 TextInput │ Tell the orchestrator
-Group │ Claude Code 2
-Heading │ terminal Claude Code 2
+Group │ #1 Read a pull request's checks
+Heading │ terminal #1 Read a pull request's checks
 Image │ Working
 Link │ Pull request 42, changes requested
 Label │ Worktree slopty-board-1 on worktree-slopty-board-1

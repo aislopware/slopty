@@ -477,13 +477,15 @@ impl WorkspaceView {
     /// How many agents are waiting on the human, on every worker.
     #[must_use]
     pub fn needs_you_count(&self) -> usize {
-        self.needs_you().len()
+        self.needs_you().len().saturating_add(self.threads_waiting().len())
     }
 
     /// Agents waiting on the human on one worker.
     #[must_use]
     pub fn needs_you_on(&self, worker: WorkerKey) -> usize {
-        self.needs_you().iter().filter(|w| w.worker == worker).count()
+        let sessions = self.needs_you().iter().filter(|w| w.worker == worker).count();
+        let threads = self.threads_waiting().iter().filter(|w| w.worker == worker).count();
+        sessions.saturating_add(threads)
     }
 
     /// What some agent is doing changed: tell the app the count (the Dock badge), and hand the
@@ -682,6 +684,61 @@ impl WorkspaceView {
         } else {
             pill
         };
+        Some(
+            div()
+                .id("badge")
+                .debug_selector(move || format!("badge-{}", item.as_uuid()))
+                .flex()
+                .min_w_0()
+                .items_center()
+                .child(pill)
+                .into_any_element(),
+        )
+    }
+
+    /// The pill in a thread tile's header: where its thread stands, in the word and the tone a
+    /// terminal agent's pill would have ("Needs approval", "Working"), what it asks in its
+    /// hint. A thread driven over a protocol has no terminal to say it; at rest, or once done,
+    /// it wears none, as a terminal agent's tile does.
+    pub(super) fn thread_badge(
+        &self,
+        tile: TileRef,
+        stand: &super::faces::ThreadStand,
+        chrome: Chrome,
+    ) -> Option<gpui::AnyElement> {
+        let theme = &self.theme;
+        let k = chrome.k;
+        let status = stand.status().filter(|s| !matches!(s, Status::Idle | Status::Done))?;
+        let label = stand.word()?;
+        let item = tile.item;
+        let ask = stand
+            .asks
+            .as_ref()
+            .map(|a| crate::markdown::plain_line(&a.title))
+            .filter(|t| !t.trim().is_empty());
+        let full = ask.as_ref().map_or_else(|| label.to_owned(), |ask| format!("{label}: {ask}"));
+        let ui_size = theme.typography.small() * k;
+        let pill = crate::kit::pill(theme, status.tone(theme), k)
+            .id("agent")
+            .debug_selector(move || format!("agent-{}", item.as_uuid()))
+            .role(Role::Status)
+            .aria_label(SharedString::from(full))
+            .when_some(ask, |el, ask| {
+                let theme = std::rc::Rc::new(theme.clone());
+                el.tooltip(move |_window, cx| {
+                    let (ask, theme) = (ask.clone(), std::rc::Rc::clone(&theme));
+                    cx.new(|_| crate::kit::Hint::new(ask, "", theme)).into()
+                })
+            })
+            .min_w_0()
+            .max_w(px(ui_size * 22.0))
+            .child(
+                div().min_w_0().overflow_hidden().child(
+                    ChromeText::new(label, px(theme.typography.small()), k)
+                        .fill()
+                        .zooming(chrome.zooming),
+                ),
+            );
         Some(
             div()
                 .id("badge")

@@ -181,7 +181,7 @@ impl WorkspaceView {
         let now = cx.background_executor().now();
         let mut due: Option<Duration> = None;
         for tap in std::mem::take(&mut self.inbox.approvals.tapped) {
-            let session = tap.route.session;
+            let Some(session) = tap.route.session() else { continue };
             if self.approval(session).is_some_and(|p| p.ask == tap.ask) {
                 self.answer_approval(session, tap.ask, tap.verdict, cx);
                 continue;
@@ -218,7 +218,7 @@ impl WorkspaceView {
     /// A note's verdict found no prompt to answer: a toast with the app in front, else the app
     /// says it in a note of its own.
     fn unanswered(&mut self, route: Route, why: &'static str, cx: &mut Context<Self>) {
-        tracing::info!(session = %route.session, why, "a note's answer found no prompt");
+        tracing::info!(about = ?route.about, why, "a note's answer found no prompt");
         if self.app_active {
             self.show_notice(why.to_owned(), cx);
         } else {

@@ -630,6 +630,9 @@ pub struct WorkspaceView {
     /// Who needs the human, worked out when the workspace changes, for everything drawn until
     /// the next change.
     drawn_waiting: Vec<agents::Waiting>,
+    /// The threads that need the human whose rows speak for them, worked out with
+    /// `drawn_waiting`.
+    drawn_thread_waits: Vec<faces::ThreadWait>,
     /// Where ⌘⇧A's last step stood on the attention ladder.
     attention_at: Option<usize>,
     /// The empty workspace's question.
@@ -890,6 +893,7 @@ impl WorkspaceView {
             file_focus: HashMap::new(),
             items_dirty: true,
             drawn_waiting: Vec::new(),
+            drawn_thread_waits: Vec::new(),
             attention_at: None,
             ask: ask::Ask::default(),
             faces_dirty: true,
@@ -1422,6 +1426,7 @@ impl WorkspaceView {
         self.projects.dirty = true;
         self.prune_facts();
         self.drawn_waiting = self.needs_you();
+        self.drawn_thread_waits = self.threads_waiting();
         self.sync_clipboard_watch();
         self.sync_focus_report();
         self.sync_approvals(cx);
@@ -1481,6 +1486,7 @@ impl WorkspaceView {
             ("browser_links", self.browser_links.len()),
             ("file_focus", self.file_focus.len()),
             ("drawn_waiting", self.drawn_waiting.len()),
+            ("drawn_thread_waits", self.drawn_thread_waits.len()),
             ("twins", self.twins.len()),
             ("derived", self.derived.len()),
             ("places", self.places.len()),

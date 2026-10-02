@@ -2738,6 +2738,11 @@ impl Layout {
     /// Where `ws`'s view sits as drawn: its own position, moved in the overview (by the
     /// overview's progress) to centre the whole strip when it fits the zoomed-out window. The
     /// view scrolled to its focus would otherwise hang the strip off to one side of the panel.
+    ///
+    /// A strip wider than the zoomed-out window fills it instead: the view moves the least that
+    /// brings the strip's start (or end) to the window's edge, a margin in, so the window shows
+    /// as many columns as it holds and the rest run off the far edge. Left where it rests, the
+    /// view at the strip's start sat in the window's middle, half the window bare.
     fn shown_view_pos(&self, ws: &Workspace, ctx: &Ctx) -> f32 {
         let pos = ws.view_pos(ctx);
         let progress = self.overview_progress();
@@ -2746,11 +2751,16 @@ impl Layout {
         }
         let g = &ctx.g;
         let strip_w = ws.column_x(ws.columns.len(), g);
-        if strip_w > g.view_w / self.overview_zoom() {
-            return pos;
-        }
-        let centred = (strip_w - g.view_w) / 2.0;
-        (centred - pos).mul_add(progress, pos)
+        let zoomed = g.view_w / self.overview_zoom();
+        let shown = if strip_w > zoomed {
+            // How far the zoomed-out window reaches past the view on either side.
+            let spare = (zoomed - g.view_w) / 2.0;
+            let (first, last) = (spare - g.strut, strip_w + g.strut - g.view_w - spare);
+            pos.clamp(first, last.max(first))
+        } else {
+            (strip_w - g.view_w) / 2.0
+        };
+        (shown - pos).mul_add(progress, pos)
     }
 
     // ----- gestures --------------------------------------------------------------------------
@@ -3175,13 +3185,14 @@ impl Layout {
         for (wi, (ws, panel)) in self.workspaces.iter().zip(&rects).enumerate() {
             let shown = panel.intersects(&viewport);
             let view_pos = self.shown_view_pos(ws, &ctx);
-            // A centred strip wider than the view gets a panel as wide as it is.
+            // In the overview a strip wider than the view gets a panel as wide as it is, so the
+            // block holds every column and runs past the window's edge where they do.
             if let Some(out) = panels.get_mut(wi)
                 && !ws.columns.is_empty()
             {
                 let strip_w = ws.column_x(ws.columns.len(), &g);
                 let left = (-view_pos).mul_add(zoom, panel.x);
-                if (view_pos - ws.view_pos(&ctx)).abs() > f32::EPSILON && strip_w * zoom > out.w {
+                if self.overview_progress() > 0.0 && strip_w * zoom > out.w {
                     *out = Rect { x: left, w: strip_w * zoom, ..*out };
                 }
             }

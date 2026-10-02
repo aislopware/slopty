@@ -156,6 +156,7 @@ impl WorkspaceView {
         match go {
             Go::Waiting(waiting) => self.go_to_waiting(waiting, cx),
             Go::Session(session) => self.reveal_session(session, cx),
+            Go::Thread(worker, thread) => self.open_thread(worker, thread, cx),
         }
     }
 

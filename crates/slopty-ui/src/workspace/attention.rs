@@ -42,6 +42,7 @@ use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::{self, APPROVAL, Note, Notifier, Tap};
 use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
+use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::{Notice, NoticeKind};
 
 use super::agents::{agent_ask_line, agent_status_word};
@@ -54,6 +55,8 @@ const WORKER: &str = "worker";
 const ITEM: &str = "item";
 /// The `userInfo` key of the session.
 const SESSION: &str = "session";
+/// The `userInfo` key of the thread, for a note about one with no terminal.
+const THREAD: &str = "thread";
 /// The `userInfo` key of the permission prompt an approval note answers.
 const ASK: &str = "ask";
 
@@ -61,24 +64,56 @@ const ASK: &str = "ask";
 /// terminal asks by now.
 pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 
-/// Where a notification leads: the worker, its tile when it has one here, and the session.
+/// What a note is about: a terminal, whose agent or shell it speaks of, or a thread driven
+/// over a protocol with no terminal.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum About {
+    /// A terminal's session.
+    Session(SessionId),
+    /// A thread with no terminal.
+    Thread(ThreadId),
+}
+
+impl About {
+    /// The note's identifier: a terminal's is its session's, so a note another part of the app
+    /// posted for it is the same note.
+    fn note_id(self) -> String {
+        match self {
+            Self::Session(session) => session.to_string(),
+            Self::Thread(thread) => format!("{THREAD}-{thread}"),
+        }
+    }
+}
+
+/// Where a notification leads: the worker, its tile when it has one here, and what it is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Route {
-    /// The worker the session runs on.
+    /// The worker it runs on.
     pub worker: WorkerKey,
     /// The tile's item; `None` for an agent the server reported with no tile here.
     pub item: Option<ItemId>,
-    /// The session.
-    pub session: SessionId,
+    /// The terminal or thread.
+    pub about: About,
 }
 
 impl Route {
+    /// The terminal it is about; `None` for a thread with none.
+    #[must_use]
+    pub const fn session(self) -> Option<SessionId> {
+        match self.about {
+            About::Session(session) => Some(session),
+            About::Thread(_) => None,
+        }
+    }
+
     /// The route as a note's `userInfo` carries it.
     fn info(self) -> BTreeMap<String, String> {
-        let mut info = BTreeMap::from([
-            (WORKER.to_owned(), self.worker.value().to_string()),
-            (SESSION.to_owned(), self.session.to_string()),
-        ]);
+        let about = match self.about {
+            About::Session(session) => (SESSION.to_owned(), session.to_string()),
+            About::Thread(thread) => (THREAD.to_owned(), thread.to_string()),
+        };
+        let mut info =
+            BTreeMap::from([(WORKER.to_owned(), self.worker.value().to_string()), about]);
         if let Some(item) = self.item {
             info.insert(ITEM.to_owned(), item.to_string());
         }
@@ -90,9 +125,12 @@ impl Route {
     #[must_use]
     pub fn of_tap(tap: &Tap) -> Option<Self> {
         let worker = WorkerKey::new(tap.info.get(WORKER)?.parse().ok()?);
-        let session = tap.info.get(SESSION)?.parse().ok()?;
+        let about = match tap.info.get(SESSION) {
+            Some(session) => About::Session(session.parse().ok()?),
+            None => About::Thread(tap.info.get(THREAD)?.parse().ok()?),
+        };
         let item = tap.info.get(ITEM).and_then(|i| i.parse().ok());
-        Some(Self { worker, item, session })
+        Some(Self { worker, item, about })
     }
 }
 
@@ -119,7 +157,7 @@ impl Asking {
             info.insert(ASK.to_owned(), ask.to_string());
         }
         Note {
-            id: self.route.session.to_string(),
+            id: self.route.about.note_id(),
             title: self.title.clone(),
             body: self.body.clone(),
             info,
@@ -182,14 +220,14 @@ pub struct Attention {
     elsewhere: bool,
     /// The server's notices decide which agent moments post.
     server_led: bool,
-    /// The sessions whose agent was waiting at the last look.
-    asking: HashSet<SessionId>,
-    /// The sessions whose agent's finished turn was unread at the last look.
-    turns: HashSet<SessionId>,
-    /// The notes up, by session.
-    posted: HashMap<SessionId, Why>,
-    /// The prompt each agent's note up answers, by session.
-    answers: HashMap<SessionId, Option<u64>>,
+    /// The agents waiting at the last look.
+    asking: HashSet<About>,
+    /// The agents whose finished turn was unread at the last look.
+    turns: HashSet<About>,
+    /// The notes up.
+    posted: HashMap<About, Why>,
+    /// The prompt each agent's note up answers.
+    answers: HashMap<About, Option<u64>>,
     /// The badge last set.
     badge: Option<usize>,
 }
@@ -264,9 +302,9 @@ impl Attention {
         if self.active {
             return;
         }
-        let session = heard.route.session;
+        let session = heard.route.about;
         let note = Note {
-            id: session.to_string(),
+            id: session.note_id(),
             title: heard.title.clone(),
             body: heard.body.clone(),
             info: heard.route.info(),
@@ -289,8 +327,8 @@ impl Attention {
     }
 
     fn withdraw_all(&mut self) {
-        for (session, _) in self.posted.drain() {
-            self.notifier.withdraw(&session.to_string());
+        for (about, _) in self.posted.drain() {
+            self.notifier.withdraw(&about.note_id());
         }
         self.answers.clear();
     }
@@ -298,10 +336,10 @@ impl Attention {
     /// The workspace changed: an agent that has just started to wait notifies while the app is
     /// away, one that stopped takes its note back, and the badge follows the inbox.
     pub fn look(&mut self, look: &Look) {
-        let now: HashSet<SessionId> = look.asking.iter().map(|a| a.route.session).collect();
+        let now: HashSet<About> = look.asking.iter().map(|a| a.route.about).collect();
         if self.away() {
             for asking in &look.asking {
-                let session = asking.route.session;
+                let session = asking.route.about;
                 let up = self.posted.get(&session) == Some(&Why::Asks);
                 let was = self.answers.get(&session).copied().flatten();
                 if !self.asking.contains(&session) && !self.server_led {
@@ -309,7 +347,7 @@ impl Attention {
                 } else if up && asking.approval.is_none() && was.is_some() && was == asking.answered
                 {
                     self.posted.remove(&session);
-                    self.notifier.withdraw(&session.to_string());
+                    self.notifier.withdraw(&session.note_id());
                     self.answers.insert(session, None);
                     continue;
                 } else if up && self.answers.get(&session) != Some(&asking.approval) {
@@ -320,28 +358,28 @@ impl Attention {
                 self.answers.insert(session, asking.approval);
             }
         }
-        let stopped: Vec<SessionId> = self.asking.difference(&now).copied().collect();
+        let stopped: Vec<About> = self.asking.difference(&now).copied().collect();
         for session in stopped {
             if self.posted.get(&session) == Some(&Why::Asks) {
                 self.posted.remove(&session);
-                self.notifier.withdraw(&session.to_string());
+                self.notifier.withdraw(&session.note_id());
             }
             self.answers.remove(&session);
         }
         self.asking = now;
-        let turns: HashSet<SessionId> = look.turns.iter().map(|t| t.route.session).collect();
+        let turns: HashSet<About> = look.turns.iter().map(|t| t.route.about).collect();
         if self.away() && !self.server_led {
             let fresh: Vec<&Turn> =
-                look.turns.iter().filter(|t| !self.turns.contains(&t.route.session)).collect();
+                look.turns.iter().filter(|t| !self.turns.contains(&t.route.about)).collect();
             for turn in fresh {
                 let note = Note {
-                    id: turn.route.session.to_string(),
+                    id: turn.route.about.note_id(),
                     title: turn.title.clone(),
                     body: turn.body.clone(),
                     info: turn.route.info(),
                     ..Note::default()
                 };
-                self.post(turn.route.session, Why::Finished, note);
+                self.post(turn.route.about, Why::Finished, note);
             }
         }
         self.turns = turns;
@@ -363,20 +401,15 @@ impl Attention {
         if !self.away() || done.elapsed < slow {
             return;
         }
-        let command = done.command.trim();
+        let command = super::tile::command_words(&done.command);
         let body = if command.is_empty() {
             done.label()
         } else {
             format!("{command} \u{b7} {}", done.label())
         };
-        let note = Note {
-            id: route.session.to_string(),
-            title,
-            body,
-            info: route.info(),
-            ..Note::default()
-        };
-        self.post(route.session, Why::Finished, note);
+        let note =
+            Note { id: route.about.note_id(), title, body, info: route.info(), ..Note::default() };
+        self.post(route.about, Why::Finished, note);
     }
 
     /// A program in `route`'s session asked for a desktop notification: it notifies while the
@@ -385,14 +418,9 @@ impl Attention {
         if !self.away() {
             return;
         }
-        let note = Note {
-            id: route.session.to_string(),
-            title,
-            body,
-            info: route.info(),
-            ..Note::default()
-        };
-        self.post(route.session, Why::Program, note);
+        let note =
+            Note { id: route.about.note_id(), title, body, info: route.info(), ..Note::default() };
+        self.post(route.about, Why::Program, note);
     }
 
     /// A note's "Allow" or "Deny" for `route`'s agent found no prompt to answer (`why`): said
@@ -402,21 +430,21 @@ impl Attention {
             return;
         }
         let note = Note {
-            id: route.session.to_string(),
+            id: route.about.note_id(),
             title,
             body: why.to_owned(),
             info: route.info(),
             ..Note::default()
         };
-        self.post(route.session, Why::Unanswered, note);
+        self.post(route.about, Why::Unanswered, note);
     }
 
-    fn post(&mut self, session: SessionId, why: Why, note: Note) {
-        tracing::debug!(%session, ?why, "attention note");
+    fn post(&mut self, about: About, why: Why, note: Note) {
+        tracing::debug!(?about, ?why, "attention note");
         if why != Why::Asks {
-            self.answers.remove(&session);
+            self.answers.remove(&about);
         }
-        self.posted.insert(session, why);
+        self.posted.insert(about, why);
         self.notifier.post(note);
     }
 }
@@ -432,20 +460,33 @@ impl WorkspaceView {
             .filter_map(|w| {
                 let agent = self.agent_state(w.session)?;
                 let body = agent_ask_line(agent).unwrap_or_else(|| agent_status_word(agent));
-                let route =
-                    Route { worker: w.worker, item: w.tile.map(|t| t.item), session: w.session };
+                let item = w.tile.map(|t| t.item);
+                let route = Route { worker: w.worker, item, about: About::Session(w.session) };
                 let approval = self.approval(w.session).map(|prompt| prompt.ask);
                 let answered = self.answered_here(w.session);
                 let title = self.route_title(route);
                 Some(Asking { route, title, body, approval, answered })
             })
+            .chain(self.threads_waiting().into_iter().filter_map(|w| {
+                let stand = self.thread_stand(w.thread)?;
+                let asks = stand.asks.as_ref().map(|a| crate::markdown::plain_line(&a.title));
+                let body = asks
+                    .filter(|a| !a.trim().is_empty())
+                    .or_else(|| stand.word().map(str::to_owned))
+                    .unwrap_or_default();
+                let item = w.tile.map(|t| t.item);
+                let route = Route { worker: w.worker, item, about: About::Thread(w.thread) };
+                let title = self.thread_title(w.thread);
+                Some(Asking { route, title, body, approval: None, answered: None })
+            }))
             .collect();
         let turns = self
             .agent_turns()
             .filter_map(|session| {
                 let (route, title) = self.attention_route(session)?;
                 let done = self.finished.get(&session)?;
-                let body = format!("{} \u{b7} {}", done.command.trim(), done.label());
+                let command = super::tile::command_words(&done.command);
+                let body = format!("{command} \u{b7} {}", done.label());
                 Some(Turn { route, title, body })
             })
             .collect();
@@ -453,7 +494,7 @@ impl WorkspaceView {
     }
 
     /// The note the server's `notice` makes here; `None` for a finished turn shorter than the
-    /// slow-command time, and for a thread with no terminal to lead to.
+    /// slow-command time. A thread with no terminal leads to its own tile.
     #[must_use]
     pub fn heard(&self, notice: &Notice) -> Option<Heard> {
         if notice.kind == NoticeKind::Finished
@@ -461,10 +502,14 @@ impl WorkspaceView {
         {
             return None;
         }
-        let session = notice.tile?;
         let worker = super::projects::worker_key(notice.thread.worker);
-        let item = self.tile_of_session(session).map(|t| t.item);
-        let route = Route { worker, item, session };
+        let (about, item) = if let Some(session) = notice.tile {
+            (About::Session(session), self.tile_of_session(session).map(|t| t.item))
+        } else {
+            let thread = notice.thread.thread;
+            (About::Thread(thread), self.tile_of_thread(thread).map(|t| t.item))
+        };
+        let route = Route { worker, item, about };
         let title = Some(notice.title.trim())
             .filter(|t| !t.is_empty())
             .map_or_else(|| self.route_title(route), str::to_owned);
@@ -481,7 +526,8 @@ impl WorkspaceView {
     #[must_use]
     pub fn attention_route(&self, session: SessionId) -> Option<(Route, String)> {
         let tile = self.tile_of_session(session)?;
-        let route = Route { worker: tile.worker, item: Some(tile.item), session };
+        let route =
+            Route { worker: tile.worker, item: Some(tile.item), about: About::Session(session) };
         Some((route, self.route_title(route)))
     }
 
@@ -523,8 +569,8 @@ impl WorkspaceView {
             return;
         };
         let tile = route.item.map(|item| TileRef { worker: route.worker, item });
-        match tile.and_then(|t| self.item(t)).map(|i| i.kind.clone()) {
-            Some(kind) => {
+        match (tile.and_then(|t| self.item(t)).map(|i| i.kind.clone()), route.about) {
+            (Some(kind), _) => {
                 if let Some(item) = route.item {
                     self.go_to(item, cx);
                 }
@@ -532,10 +578,11 @@ impl WorkspaceView {
                     self.pending_focus = Some(session);
                 }
             }
-            None if self.tile_of_session(route.session).is_some() => {
-                self.reveal_session(route.session, cx);
+            (None, About::Thread(thread)) => self.open_thread(route.worker, thread, cx),
+            (None, About::Session(session)) if self.tile_of_session(session).is_some() => {
+                self.reveal_session(session, cx);
             }
-            None => self.show_untiled(route.worker, route.session, cx),
+            (None, About::Session(session)) => self.show_untiled(route.worker, session, cx),
         }
     }
 

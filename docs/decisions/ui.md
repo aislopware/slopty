@@ -4842,8 +4842,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   is on screen, its answers sit on that call's card. Once it scrolls away, a tray on the
   composer's top edge carries the request with the way back to the call (Scroll ↑/↓), so the
   person never answers blind and never hunts for the question. The request stays whole in the
-  tray; the plan and edits above it scroll past 30 % of the window, so the conversation keeps
-  its rows. The plain allow is the one white button; "always" and rules are quiet buttons of
+  tray; the plan and edits beside it scroll past 30 % of the window (12 % under a request),
+  so the conversation keeps its rows. The plain allow is the one white button; "always" and rules are quiet buttons of
   their own that never lead.
 
 - ✅ **One icon set at one weight; files and agents by their own marks** (2026-10-02, design
@@ -4860,9 +4860,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     means something else, its nearer drawing is taken: the arrows are its `-02` shafts (its
     `-01` are chevrons), the plain file `file-empty-02`, the terminal `command-line` (its
     `square-terminal` is a squircle with a dot of a prompt), activity `pulse-01`, maximize
-    `arrow-expand-01` (its `maximize` are hands).     icon keeps the weight. A lint-as-test fails on any `IconName` the chrome names that
-    Hugeicons does not draw, which is how case-sensitive, eye, git-merge, layout-dashboard
-    and minus were found falling back.
+    `arrow-expand-01` (its `maximize` are hands). A lint-as-test fails on any `IconName` the
+    chrome names that Hugeicons does not draw, which is how case-sensitive, eye, git-merge,
+    layout-dashboard and minus were found falling back.
   - **A file shows its type.** Material Icon Theme's drawings (MIT, `assets/file-types/
     LICENSE`), 55 of them, in their own colours: by the whole name first (Dockerfile,
     README, Cargo.lock, .gitignore), then the extension. A type the set does not draw keeps
@@ -4878,9 +4878,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     light and dark variants are. Anthropic allows its marks only in materials it approves
     and forbids visuals that mimic Claude Code; OpenAI's permission is non-transferable, so
     forks of an open repository would not hold it (Simple Icons removed its OpenAI icon for
-    that reason); Google's needs approved artwork. Those agents, and any without a mark, take
-    the neutral sparkles in the theme's agent orange (`Surfaces::agent`). No robot: the
-    Lucide `Bot` is gone from the chrome.
+    that reason); Google's needs approved artwork. Claude Code takes the neutral sparkles in
+    the theme's agent orange (`Surfaces::agent`). Codex takes Hugeicons' code-circle in ink,
+    and any other agent the sparkles in ink, so no two agents look alike and none borrows
+    another's colour (Codex wore Claude Code's orange sparkles before, and read as it). No
+    robot: the Lucide `Bot` is gone from the chrome.
   - **A picture's tile says what it is and can show it whole.** Transparent pixels show over
     a checkerboard of two neutral steps of the content plane; a foot under the picture or
     PDF says its type, pixels or pages, and size (`PNG · 1200 × 800 · 240 KB`); a picture
@@ -4895,3 +4897,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `file_types::tests::every_type_is_drawn_and_served`,
     `file::preview::tests::a_picture_at_its_own_size_is_decoded_whole`,
     `palette::tests::every_line_icon_is_embedded`.
+
+- ✅ **The showcase's defects, settled** (2026-10-02, design round 2, `crates/slopty-ui`,
+  `crates/slopty-client/src/layout.rs`).
+  - **A thread's figures say each thing once and only once it is so.** The Edits tray counts
+    a file once its edit is made, never while the edit is only asked for. A model is named
+    once, by the name its agent speaks, with its provider muted after it (pi's
+    `canned/canned-1` is `canned-1 · canned`), and a turn's footer leaves out the model the
+    thread already runs. The context ring waits for the first usage instead of showing 0 %, and
+    a share under one half says `<1%`. The composer's corner carries no spinner of its own,
+    since the thread's rows already show that it works. A thought's collapsed line renders
+    its inline code as code, not as backticks.
+  - **A waiting request comes first, then the conversation.** The tray sits under the rows,
+    never over them, so a click above its edge is the rows'. A request in it stands whole;
+    what else waits (the plan, the edits, the queue) scrolls past 30 % of the window, and
+    past 12 % while a request stands above it, so the conversation the question is about
+    keeps the room. A first try that kept 35 % of the tile for the rows cut the
+    questionnaire's own buttons off instead. A call that asks as it arrives at the foot of
+    the thread is answered on its card in the first frame that shows it, not in the tray for
+    one frame first.
+  - **Names read as a person says them.** The palette's "New … thread" lines show a folder as
+    the navigator does (`src/app`, under the worker's home), not as an absolute path. A
+    terminal named after its command drops the `cd <dir> &&` before it, in the tile title, the
+    navigator, the inbox and its notes, and the navigator says nothing of a `cd` alone, whose
+    place its row already shows. A project's agents are named by their part in it,
+    "Orchestrator" or the task's `#N title`, not "Claude Code 2".
+  - **A board makes room and says when there is more.** An agent opened from a full-width
+    board gives up the full width so the board and the agent sit side by side. A board taller
+    than its tile fades at the edge that has more, and its card actions are secondary buttons
+    of the hit height, not text.
+  - **The overview fills the window.** When the strip is wider than the zoomed-out window, it
+    is clamped so neither end leaves a gap past the strut, and the panel behind it spans the
+    window.
+  - **A thread with no terminal says it waits everywhere a terminal agent does.** Codex, pi
+    and ACP threads have no terminal whose agent status could say it, so the thread's row in
+    its worker's table does, ranked by the ladder's own `Rung::of` with its subagents folded
+    in: the navigator's glyph, the tile header's pill with what it asks, the bell and the
+    inbox (a row that opens the thread), the Dock's count, the status bar, and a note while
+    the app is away. A note is about a terminal or a thread (`attention::About`), so the
+    server's notice for a thread with no terminal leads to its tile instead of being dropped.
+    A thread whose terminal's agent already speaks (Claude Code through its hooks) is counted
+    once, by the terminal.
+  - Tests: `thread::activity::tests::an_edit_counts_only_once_it_is_made`,
+    `figures::tests::a_model_is_one_name_with_its_provider_beside_it`,
+    `markdown::tests::a_line_says_where_its_code_is`,
+    `thread::tests::questions::a_request_stands_whole_and_the_rest_of_the_tray_gives_way`,
+    `thread::tests::face::a_call_that_asks_as_it_arrives_is_answered_on_its_card_at_once`,
+    `workspace::tests::thread_start` (the folder said short),
+    `workspace::tests::tiles::a_command_is_named_without_the_cd_before_it`,
+    `workspace::tests::projects::a_project_s_agents_are_named_by_their_part_in_it`,
+    `workspace::tests::projects::an_agent_opened_from_a_full_width_board_shows_beside_it`,
+    `workspace::tests::projects::a_board_taller_than_its_tile_says_more_lies_below`,
+    `layout::tests::the_overview_fills_the_window_with_a_strip_wider_than_it`,
+    `workspace::tests::thread_waits::*`,
+    `workspace::attention::tests::a_server_notice_leads_to_its_tile_and_names_the_subagent`.

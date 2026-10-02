@@ -81,7 +81,7 @@ use super::{WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{Glyph, IconName, IconSize, Status, icon, status_icon, status_mark};
+use crate::icons::{AgentMark, Glyph, IconName, IconSize, Status, icon, status_icon, status_mark};
 use crate::kit::{self, meta, tabular};
 use crate::palette::{PaletteItem, Plate};
 
@@ -1133,12 +1133,13 @@ impl WorkspaceView {
     }
 
     /// The command a shell runs now, else the last one it ran, else the one that finished
-    /// unwatched: its first line.
+    /// unwatched: its first line. A `cd` alone says nothing the row's place does not.
     pub(super) fn last_command(&self, session: slopty_core::SessionId) -> Option<String> {
         let shell = self.shell(session);
         let typed = shell.and_then(|s| s.running.clone().or_else(|| s.last.clone()));
         let typed = typed.or_else(|| self.finished.get(&session).map(|f| f.command.clone()))?;
-        typed.lines().next().map(str::to_owned).filter(|l| !l.trim().is_empty())
+        let words = super::tile::command_words(&typed);
+        (!words.is_empty() && !super::tile::only_moves(words)).then(|| words.to_owned())
     }
 
     /// Every worker's block as the filter leaves it: a worker whose name matches keeps every
@@ -1965,7 +1966,7 @@ impl WorkspaceView {
         .pt(px(theme.spacing.xs))
         .child(lead_slot(theme, {
             let mark =
-                self.session_agent(session).map_or(Glyph::Icon(IconName::Sparkles), Glyph::agent);
+                self.session_agent(session).map_or(Glyph::Agent(AgentMark::Other), Glyph::agent);
             crate::icons::glyph(theme, mark, px(theme.typography.icon()), hsla(s.text_muted))
         }))
         .child(div().flex_1().min_w_0().flex().flex_col().child(line1).child(line2))

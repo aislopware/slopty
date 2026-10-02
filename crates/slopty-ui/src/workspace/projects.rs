@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::{AppContext as _, Context, Entity, Window};
-use slopty_client::layout::WorkerKey;
+use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::server::ServerCaller;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentStatus;
@@ -42,6 +42,8 @@ pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project the
 /// How many pages of the timeline a recap reads back from the server, past what the board
 /// holds: far enough for a night away from a busy project.
 const RECAP_PAGES: usize = 8;
+/// What a project's orchestrator's terminal is called.
+pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
 /// What the person says approving a task's work from the board.
 pub(crate) const APPROVED_HERE: &str = "Approved by the person";
 
@@ -315,9 +317,52 @@ impl WorkspaceView {
             self.show_notice(why, cx);
             return;
         }
+        let board_tile =
+            board.project.orchestrator.and_then(|term| self.tile_of_session(term.session));
         // A task agent that is itself an orchestrator's session opens on its terminal.
         self.projects.shown.remove(&session);
+        if let (Some(from), Some(to)) = (board_tile, self.tile_of_session(session)) {
+            self.keep_beside(from, to);
+        }
         self.reveal_session(session, cx);
+    }
+
+    /// `to` is about to be focused from `from` and should show beside it: when `from`'s column
+    /// fills the view, it gives up its full width first, as a column does for a tile opened
+    /// beside it. Following the focus would otherwise leave the board cut off at the window's
+    /// edge, a sliver with no gutter.
+    fn keep_beside(&mut self, from: TileRef, to: TileRef) {
+        let (Some(a), Some(b)) = (self.layout.position(from), self.layout.position(to)) else {
+            return;
+        };
+        if a.workspace != b.workspace || a.column == b.column {
+            return;
+        }
+        let full = self
+            .layout
+            .workspaces()
+            .get(a.workspace)
+            .and_then(|ws| ws.columns().get(a.column))
+            .is_some_and(slopty_client::layout::Column::is_full_width);
+        if full {
+            self.tick();
+            self.layout.focus(from);
+            self.layout.toggle_full_width();
+        }
+    }
+
+    /// What an agent's terminal is to a project, as it is named: "Orchestrator" for the one the
+    /// person talks to, and a task's number and title ("#1 Lock the refresh row") for the
+    /// agent on that task. Four terminals of one agent read alike otherwise.
+    pub(super) fn project_role(&self, session: SessionId) -> Option<String> {
+        let mirror = &self.projects.mirror;
+        if mirror.of_orchestrator(session).is_some() {
+            return Some(ORCHESTRATOR.to_owned());
+        }
+        let (board, task) = mirror.of_agent(session)?;
+        let card = board.tasks.get(&task)?;
+        let title = card.title.trim();
+        Some(if title.is_empty() { format!("#{task}") } else { format!("#{task} {title}") })
     }
 
     /// The palette's line for each project: its title, how it stands, and ↩ for its board.
