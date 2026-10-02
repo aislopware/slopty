@@ -859,3 +859,29 @@ more full-window layer.
   - Tests: `dist::tests` (when notarisation runs, where its credentials come from, and reading a
     binary's CPU and newest glibc). Run here on 2026-10-01 with `--no-notarize`: see the
     workers entry of the same day for the Linux builds' smoke runs.
+
+- ✅ **Tests build the workspace's own crates at opt-level 0** (2026-10-02). The tests lane
+  bounded every CI run (27–48 minutes over 22 runs), and 27 minutes of it was the build. That
+  build is CPU-bound on a three-core runner, although sccache served 99 % of what it can cache:
+  test harnesses, binaries, proc macros and build scripts compile on every run, about 4 100 of
+  its 4 830 CPU-seconds. `[profile.test]` now sets opt-level 0, and dependencies stay at 3
+  (dev's `package."*"`, which `test` inherits). Numbers in MEASUREMENTS, "the tests lane's
+  build, and the test profile at opt-level 0".
+  - **What it saves.** `slopty-agent`'s library and test harness took 3.8 times less CPU (110–116
+    user-seconds at 1, 28–30 at 0).
+  - **What it costs.** The suites of the UI, the worker, the daemon, the client and the shaper
+    ran no slower, twice each at both levels on this Mac, and every timing-sensitive test named
+    in `.config/nextest.toml` passed at 0. Code that computes runs about twice as slowly at 0
+    (`slopty-proto`'s property tests, 1.7 s against 3.1 s), so the crates whose tests compute
+    keep the dev level: `slopty-engine` (VT diffing, 37–48 s a test on CI), `slopty-grid`,
+    `slopty-predict` (its random-editing test, 21.5 s), `slopty-codec`, `slopty-media` (FEC),
+    `slopty-shape` and `slopty-net` (the link and rate simulations). The grid and the shaper sit
+    under every terminal and network test. `slopty-e2e` stays at 1 too: its harness compares
+    every golden pixel by pixel, in loops that opt-level 0 leaves as calls.
+  - **The spawned binaries follow.** `cargo build` is `dev`, which no longer shares a workspace
+    unit with the tests, so the daemons and stand-ins tests spawn are built with
+    `--profile test` (the tests lane, `xtask spawned-bins`, and `slopty_testkit::bins`' own
+    build). What runs for its own sake (the app, `xtask e2e`, the daemons, the benches) keeps
+    dev's opt-level 1, so frame times and the e2e suites measure what they did.
+  - **Accept** on the next land against run 36963072630: the tests lane's `nextest build` (1 613.7
+    s) drops by at least 35 % and nextest's run (435.9 s) grows by less than 15 %.

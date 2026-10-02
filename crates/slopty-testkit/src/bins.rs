@@ -63,9 +63,9 @@ fn build(anchor: &Path) {
     for name in NAMES {
         build.args(["--bin", name]);
     }
-    if release {
-        build.arg("--release");
-    }
+    // The test's own profile, whose units its build already holds: plain `cargo build` is
+    // `dev`, which optimises the workspace crates `test` leaves unoptimised.
+    build.args(if release { ["--release"].as_slice() } else { ["--profile", "test"].as_slice() });
     let status = build.status();
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),

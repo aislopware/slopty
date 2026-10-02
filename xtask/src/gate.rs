@@ -497,7 +497,7 @@ pub fn spawned_bins(sh: &Shell) -> Result<()> {
     }
     let env =
         std::env::var_os("NEXTEST_ENV").context("nextest runs this and names $NEXTEST_ENV")?;
-    cmd!(sh, "cargo build --workspace --tests {SPAWNED_BINS...}").run()?;
+    cmd!(sh, "cargo build --profile test --workspace --tests {SPAWNED_BINS...}").run()?;
     let built = crate::tools::target_dir(sh)?.join("debug");
     std::fs::write(&env, format!("{BINS_BUILT}={built}\n"))
         .with_context(|| format!("write {}", std::path::Path::new(&env).display()))?;
@@ -519,7 +519,12 @@ fn test_lane(sh: &Shell, doc_sh: Shell, profile: &str, only: Option<&[String]>) 
     // just now, cargo resolves features with every member's dev-dependencies as that build did
     // (`slopty-tailnet/fake`, `slopty-codec/experiments`), so each crate is the unit the tests
     // already have. Without them a dozen workspace crates compiled a second time, differently.
-    quiet_step("spawned binaries", cmd!(sh, "cargo build --workspace --tests {SPAWNED_BINS...}"))?;
+    // In the tests' own profile too: plain `cargo build` is `dev`, which optimises the workspace
+    // crates that `test` leaves at opt-level 0, and would compile all of them again.
+    quiet_step(
+        "spawned binaries",
+        cmd!(sh, "cargo build --profile test --workspace --tests {SPAWNED_BINS...}"),
+    )?;
     let _fresh = sh.push_env(BINS_FRESH, "1");
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;

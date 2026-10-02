@@ -623,8 +623,42 @@ incremental = true
 opt-level = 3
 debug = false
 
+# Tests build the workspace's own crates unoptimised. The tests lane's build is CPU-bound, and a
+# crate's library and test harness took 3.8 times less CPU at opt-level 0 than at 1, while the
+# tests of the UI, the worker, the daemon and the client ran no slower (MEASUREMENTS 2026-10-02,
+# "the test profile at opt-level 0"). The crates whose tests compute stay at the dev level, where
+# those tests run about twice as fast: VT diffing, the grid, prediction, the codecs and FEC, link
+# shaping and the network simulations; so does the e2e harness, which compares every golden pixel
+# by pixel. Dependencies stay at 3 (`package."*"` above is inherited). The daemons a test spawns
+# are built in this profile too (`cargo build --profile test`, `xtask/src/gate.rs`), so they
+# share its units.
 [profile.test]
 inherits = "dev"
+opt-level = 0
+
+[profile.test.package.slopty-engine]
+opt-level = 1
+
+[profile.test.package.slopty-grid]
+opt-level = 1
+
+[profile.test.package.slopty-predict]
+opt-level = 1
+
+[profile.test.package.slopty-codec]
+opt-level = 1
+
+[profile.test.package.slopty-media]
+opt-level = 1
+
+[profile.test.package.slopty-shape]
+opt-level = 1
+
+[profile.test.package.slopty-net]
+opt-level = 1
+
+[profile.test.package.slopty-e2e]
+opt-level = 1
 
 [profile.release]
 opt-level = 3

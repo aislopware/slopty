@@ -13386,3 +13386,94 @@ cargo nextest run --binaries-metadata target/r-ab/smooth.json --cargo-metadata \
   target/r-ab/metadata.json --run-ignored only --test-threads 1 \
   -E 'test(~on_the_mac) & (test(twenty_streaming_shells) | test(typing_draws_only_the_echo))'
 ```
+
+## 2026-10-02 — the tests lane's build, and the test profile at opt-level 0
+
+What bounds a CI run, and the first change against it (`docs/decisions/tooling.md`, "Tests
+build the workspace's own crates at opt-level 0"). The CI figures are from the gate runs on the
+`gate` branch; the local ones from mac-studio (10 cores) while five other sessions built and
+tested, at a load average of 20 to 30, every command under `nice`.
+
+**CI, before.** Over the last 22 gate runs the tests lane took 27–48 min, clippy-ios 12–25,
+clippy-host 7–16, rustdoc 7–12 and tools about 3. In the tests lane of run 36963072630:
+
+| Step | Time |
+| --- | --- |
+| `cargo xtask setup` (mostly compiling xtask) | 2 min |
+| `nextest build` | 1 626.7 s |
+| nextest's run (JUnit `time`, 3 629 tests) | 435.9 s |
+| doctests, beside the run | 158.6 s |
+
+Its `cargo-timing.html`: 899 units whose durations sum to 4 830 s over 1 613.7 s on 3 cores,
+so the build is CPU-bound with no chain to shorten. sccache hit 99.4 % of what it could cache,
+and 298 compiles it could not (274 by crate type: binaries, test harnesses, proc macros).
+Workspace test harnesses took 2 902 s, workspace libraries and binaries 767, build scripts 354
+and dependencies 807. The largest units were `slopty-ui`'s test harness (653 s) and
+`slopty-workerd`'s binary (332 s) and its test harness (219 s). Of the last 41 runs, 14 passed,
+16 failed and 10 were cancelled by a newer push, two of them at 47.6 and 48.3 min. The run
+after (36969382434) ran 3 629 tests in 444.3 s; the most per package: xtask 213 s (the icon
+test 157), `slopty-engine` 183, `slopty-ui` 149, `slopty-worker` 139, `slopty-workerd` 137,
+`slopty-client` 115.
+
+**Build CPU, opt-level 1 against 0.** One crate's library and test harness, rebuilt alone in a
+target dir of its own after both levels had built everything under it, A then B, twice.
+`RUSTC_WRAPPER` was empty so that rustc's CPU shows in `time`.
+
+| `slopty-agent`, `nextest run --no-run` | User CPU | Wall |
+| --- | --- | --- |
+| A, opt-level 1 | 109.7 s, 115.8 s | 31.3 s, 104.9 s |
+| B, opt-level 0 (the compute crates at 1) | 30.4 s, 28.5 s | 25.8 s, 20.3 s |
+
+3.8 times less CPU. The wall time of one crate barely moves, since its two units compile one
+after the other; a build of the workspace is throughput-bound, where CPU is what counts.
+`cargo build -p slopty-agent` after the A build found `slopty-core`, `-grid`, `-proto` and
+`-platform` fresh: `dev` and `test` shared their units while their settings matched, which is
+why the spawned binaries are now built with `--profile test`.
+
+**Test time, opt-level 1 against 0.** The suites of `slopty-ui`, `slopty-client`,
+`slopty-worker`, `slopty-workerd` and `slopty-shape` (about 1 900 tests), run twice at each
+level, nextest's `gate` profile. The sum over the tests of each one's faster run:
+
+| Package | Opt-level 1 | Opt-level 0 |
+| --- | --- | --- |
+| `slopty-ui` | 139.9 s | 74.7 s |
+| `slopty-worker` | 225.0 s | 131.0 s |
+| `slopty-workerd` | 113.7 s | 85.5 s |
+| `slopty-client` | 27.5 s | 21.8 s |
+| `slopty-shape` | 1.1 s | 1.0 s |
+
+The level-1 runs came later, under more load, so the table says only that opt-level 0 was not
+slower; the load decides the rest. The test slowed most by 0 was
+`screen::synthetic::tests::two_stripes_meet_at_the_seam_row_for_row` (3.8 s to 7.2 s). At
+level 0 every timing-sensitive test named in `.config/nextest.toml` passed in both runs (the
+session actor's echo, checkpoint and slow-viewer tests, the daemon's echo behind slow requests,
+the relay's short wait), while one level-1 run failed the actor's checkpoint test.
+The failures in both columns were other sessions' unfinished work in the UI and the ACP
+adapter.
+
+**What the next land should show.** In its tests shards' `timings-<shard>` artifacts: each
+shard's `nextest build` and the sum of its `cargo-timing.html` unit times against the 1 613.7 s
+and 4 830 s above (accept: at least 35 % less), nextest's JUnit `time` against 435.9 s (less
+than 15 % more), and `slopty-workerd`'s and `slopty-cli`'s binaries as links of about a second
+once unchanged. In `gh run view <id> --json jobs`: the `cargo xtask setup` step against its 3.2
+min average, and the slowest job, which should be clippy-ios at about 19 min.
+
+```sh
+# CI
+gh run list --branch gate -L 22 --json databaseId,conclusion
+gh run view <id> --json jobs
+gh run download <id> -R aislopware/slopty -n timings-<shard>   # `timings` before the shards
+# build CPU, in a target dir of its own: B is the profile in Cargo.toml; A adds
+# `--config profile.test.opt-level=1` to each cargo command. Build everything once, then:
+export CARGO_TARGET_DIR=target/v-probe RUSTC_WRAPPER= CARGO_INCREMENTAL=0
+cargo clean -p slopty-agent
+/usr/bin/time -l nice cargo nextest run -p slopty-agent --no-run
+# test time: build the daemons the tests spawn, then run with them marked fresh
+CARGO_TARGET_DIR=target/v-probe nice cargo build --profile test -p workspace-hack \
+  -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli -p slopty-testkit --examples \
+  --bin slopty-ptyd --bin slopty-worker --bin slopty-server --bin slopty \
+  --bin slopty-stub-claude --bin slopty-stub-pi
+CARGO_TARGET_DIR=target/v-probe SLOPTY_BINS_FRESH=1 nice cargo nextest run -p workspace-hack \
+  -p slopty-ui -p slopty-client -p slopty-worker -p slopty-workerd -p slopty-shape \
+  --profile gate --no-fail-fast --status-level all
+```
