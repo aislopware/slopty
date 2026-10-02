@@ -228,16 +228,16 @@ fn archives(out: &Utf8Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// What each archive must hold, read back from it: the app's signature, every Mac binary
-/// arm64, every Linux one for its CPU and, for the glibc workers, no symbol newer than
-/// [`linux::GLIBC`].
+/// What each archive must hold, read back from it: the app's signature, every Mac binary (the
+/// File Provider extension's too) arm64, every Linux one for its CPU and, for the glibc
+/// workers, no symbol newer than [`linux::GLIBC`].
 fn verify(sh: &Shell, built: &bundle::Bundle, out: &Utf8Path) -> Result<()> {
     println!("▶ verify the archives");
     let app = &built.app;
     cmd!(sh, "codesign --verify --strict --deep {app}").quiet().run()?;
     let macos = app.join("Contents").join("MacOS");
-    for bin in bundle::BINARIES {
-        let path = macos.join(bin);
+    let appex = bundle::appex_executable(app);
+    for path in bundle::BINARIES.iter().map(|bin| macos.join(bin)).chain([appex]) {
         let archs = cmd!(sh, "lipo -archs {path}").quiet().read()?;
         ensure!(archs.trim() == "arm64", "{path} is built for {archs}");
     }

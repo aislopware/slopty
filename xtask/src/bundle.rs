@@ -263,6 +263,11 @@ pub fn run(sh: &Shell, opts: &BundleOpts) -> Result<Bundle> {
     Ok(Bundle { app, signing, linux, dsyms })
 }
 
+/// The File Provider extension's executable in the bundle `app`.
+pub fn appex_executable(app: &Utf8Path) -> Utf8PathBuf {
+    Appex::under(&app.join("Contents")).executable
+}
+
 /// Where the File Provider extension sits in the app's `Contents`.
 struct Appex {
     /// `PlugIns/SloptyFiles.appex`, which the system finds the extension in.
