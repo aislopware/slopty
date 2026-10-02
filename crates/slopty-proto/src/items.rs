@@ -58,6 +58,13 @@ pub enum ItemKind {
         /// The thread.
         thread: crate::thread::ThreadId,
     },
+    /// An agent's thread, shown as the thread view: what is in it comes from the thread's own
+    /// frames (`crate::thread::wire::ThreadRequest::Follow`), not the registry. A thread whose
+    /// agent runs in a terminal names it, and the terminal's tile is one action away.
+    Thread {
+        /// The thread.
+        thread: crate::thread::ThreadId,
+    },
 }
 
 /// One item on a worker.

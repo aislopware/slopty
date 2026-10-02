@@ -42,6 +42,10 @@ mod settings;
 mod stream;
 
 #[cfg(test)]
+#[path = "app/threads_start.rs"]
+mod threads_start;
+
+#[cfg(test)]
 #[path = "app/tiles.rs"]
 mod tiles;
 

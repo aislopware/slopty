@@ -199,6 +199,19 @@ pub struct FocusColumn {
     pub index: usize,
 }
 
+/// "New `agent` thread": start a thread of `agent` on `worker`, in `cwd`. The palette offers a
+/// line for each agent the worker can start, as the worker's facts list them.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct StartThread {
+    /// Where it runs.
+    pub worker: slopty_client::layout::WorkerKey,
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+    /// In which folder, as the worker spells it (`~` its home).
+    pub cwd: String,
+}
+
 /// ⌘⌥1…⌘⌥9: focus workspace `index` (0-based; past the last, the trailing empty one).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]

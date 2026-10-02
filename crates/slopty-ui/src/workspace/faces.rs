@@ -13,20 +13,27 @@
 //! [`WorkspaceView::thread_table`], [`WorkspaceView::thread_frame`],
 //! [`WorkspaceView::thread_done`]), and a view for each shown agent tile whose terminal the
 //! worker's thread table names. Such a tile opens on its face on every device.
+//!
+//! A thread is a tile of its own too (`ItemKind::Thread`): the thread view, on the worker whose
+//! agent runs it, started from the palette ([`WorkspaceView::start_thread`]) or kept from before.
+//! A thread whose agent runs in a terminal (Claude Code, pi's TUI) keeps that terminal one action
+//! away: the view's "show the terminal" opens its tile beside the thread's, or goes to it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Keystroke, Window};
 use slopty_client::layout::WorkerKey;
-use slopty_core::{ClientId, SessionId};
+use slopty_core::{ClientId, ItemId, SessionId};
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
-use slopty_proto::items::ItemKind;
+use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::TermRequest;
-use slopty_proto::thread::wire::{IntentDone, TableFrame, ThreadFrame, ThreadRow};
-use slopty_proto::thread::{Meters, ThreadId};
+use slopty_proto::thread::wire::{
+    IntentDone, Outcome, Start, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
+};
+use slopty_proto::thread::{AgentId, IntentId, Meters, ThreadId};
 
 use super::WorkspaceView;
 use super::actions::ToggleConversation;
@@ -79,6 +86,17 @@ pub(super) struct ThreadFaces {
     review_asked: Option<(WorkerKey, ThreadId)>,
     /// A review tile made and not yet opened, and the worker whose agent runs its thread.
     review_made: Option<(WorkerKey, ThreadId)>,
+    /// The thread view of each thread tile, kept while its tile is there.
+    items: HashMap<ItemId, Entity<ThreadView>>,
+    item_asks: HashMap<ItemId, gpui::Subscription>,
+    /// Each thread's title as its worker's table last said, for its tile's header.
+    titles: HashMap<ThreadId, String>,
+    /// Each thread's terminal as its worker's table last said, for its tile's way to it.
+    terminals: HashMap<ThreadId, SessionId>,
+    /// Starts sent and not yet answered, and the worker each went to.
+    starts: HashMap<IntentId, WorkerKey>,
+    /// The thread tile whose view takes the keyboard once it is made.
+    focus_item: Option<ItemId>,
 }
 
 impl WorkspaceView {
@@ -147,6 +165,44 @@ impl WorkspaceView {
         for view in self.faces.threads.reviews.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
+        for view in self.faces.threads.items.values() {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+        }
+    }
+
+    /// Start a thread of `agent` on `key`, in `cwd`, with nothing said yet: the worker answers
+    /// with the thread, which opens as a tile ([`Self::thread_done`]), or in words why not.
+    pub fn start_thread(
+        &mut self,
+        key: WorkerKey,
+        agent: AgentId,
+        cwd: String,
+        cx: &mut Context<Self>,
+    ) {
+        let id = IntentId::new();
+        let start = Start { agent, cwd, drive: None, prompt: None, model: None, args: Vec::new() };
+        tracing::info!(%key, %id, agent = %start.agent.0, cwd = start.cwd, "start thread");
+        self.faces.threads.starts.insert(id, key);
+        self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }));
+        cx.notify();
+    }
+
+    /// The thread view a thread tile shows, once made.
+    #[must_use]
+    pub fn thread_item(&self, item: ItemId) -> Option<&Entity<ThreadView>> {
+        self.faces.threads.items.get(&item)
+    }
+
+    /// What a thread tile's header says: the thread's title as its worker's table says it.
+    #[must_use]
+    pub fn thread_title(&self, thread: ThreadId) -> String {
+        self.faces
+            .threads
+            .titles
+            .get(&thread)
+            .filter(|t| !t.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| THREAD.to_owned())
     }
 
     /// Keep each worker's threads in `dir`, a directory per worker.
@@ -185,6 +241,7 @@ impl WorkspaceView {
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
+        self.ask_agents(cx);
     }
 
     /// The link to `key` went: its thread views show what they last knew.
@@ -221,11 +278,63 @@ impl WorkspaceView {
         hub.update(cx, |hub, cx| hub.frame(thread, frame, cx));
     }
 
-    /// `key`'s answer to one of this client's intents.
-    pub fn thread_done(&self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
+    /// `key`'s answer to one of this client's intents. A start answered with its thread
+    /// opens the thread as a tile there; one refused says why.
+    pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
+        if self.faces.threads.starts.get(&done.id) == Some(&key) {
+            self.faces.threads.starts.remove(&done.id);
+            match &done.outcome {
+                Outcome::Started { thread } => self.open_thread(key, *thread, cx),
+                Outcome::Refused { reason } => self.show_notice(reason.clone(), cx),
+                other => tracing::debug!(?other, "a start answered with no thread"),
+            }
+            return;
+        }
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, |hub, cx| hub.done(done, cx));
         }
+    }
+
+    /// Go to `thread`'s tile, or add one on `key`.
+    pub(super) fn open_thread(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
+        let shown = self.items().find_map(|(_, item)| match item.kind {
+            ItemKind::Thread { thread: t } if t == thread => Some(item.id),
+            _ => None,
+        });
+        if let Some(id) = shown {
+            self.go_to(id, cx);
+            return;
+        }
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Thread { thread },
+            sleeping: false,
+            name: None,
+        };
+        tracing::info!(id = %item.id, %thread, "open thread");
+        self.propose(key, ItemOp::Add(item), cx);
+        cx.notify();
+    }
+
+    /// Go to the tile of `thread`'s terminal on `key`, or add one beside the thread's.
+    fn open_thread_terminal(&mut self, key: WorkerKey, thread: ThreadId, cx: &mut Context<Self>) {
+        let Some(session) = self.faces.threads.terminals.get(&thread).copied() else {
+            self.show_notice("This thread runs in no terminal".to_owned(), cx);
+            return;
+        };
+        if self.tile_of_session(session).is_some() {
+            self.reveal_session(session, cx);
+            return;
+        }
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Terminal { session },
+            sleeping: false,
+            name: None,
+        };
+        self.propose(key, ItemOp::Add(item), cx);
+        self.pending_focus = Some(session);
+        cx.notify();
     }
 
     /// Which thread each of `key`'s terminals runs, from its table: a subagent's thread is
@@ -246,6 +355,13 @@ impl WorkspaceView {
         let of = &mut self.faces.threads.of_session;
         of.retain(|session, _| !sessions.contains(session));
         of.extend(found);
+        for row in rows.values() {
+            self.faces.threads.titles.insert(row.id, row.title.clone());
+            match row.terminal {
+                Some(session) => self.faces.threads.terminals.insert(row.id, session),
+                None => self.faces.threads.terminals.remove(&row.id),
+            };
+        }
         cx.notify();
     }
 
@@ -305,6 +421,86 @@ impl WorkspaceView {
         threads.views.retain(|s, _| wanted.contains(s) && threads.of_session.contains_key(s));
         let views = &threads.views;
         threads.asks.retain(|s, _| views.contains_key(s));
+    }
+
+    /// Make the thread view of each thread tile, and let go of those whose tile is gone. A view
+    /// made for the focused tile takes the keyboard.
+    fn sync_thread_items(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let tiled: Vec<(ItemId, WorkerKey, ThreadId)> = self
+            .layout
+            .tiles()
+            .filter_map(|t| match self.item(t)?.kind {
+                ItemKind::Thread { thread } => Some((t.item, t.worker, thread)),
+                _ => None,
+            })
+            .collect();
+        for &(item, key, thread) in &tiled {
+            if self.faces.threads.items.contains_key(&item) {
+                continue;
+            }
+            let hub = self.thread_hub(key, cx);
+            let theme = self.theme.clone();
+            let view = cx.new(|cx| ThreadView::new(hub, thread, theme, window, cx));
+            let asks = cx.subscribe(&view, move |this, view, event: &ThreadViewEvent, cx| {
+                this.thread_item_event(key, &view, event.clone(), cx);
+            });
+            self.faces.threads.item_asks.insert(item, asks);
+            self.faces.threads.items.insert(item, view);
+        }
+        let threads = &mut self.faces.threads;
+        threads.items.retain(|item, _| tiled.iter().any(|(i, ..)| i == item));
+        let items = &threads.items;
+        threads.item_asks.retain(|item, _| items.contains_key(item));
+        let focus = threads.focus_item.take().and_then(|item| threads.items.get(&item)).cloned();
+        let gave = focus.is_some();
+        if let Some(view) = focus {
+            view.update(cx, |v, cx| v.focus(window, cx));
+        }
+        gave
+    }
+
+    /// The thread tile `item` took the focus: its view takes the keyboard in the next frame,
+    /// made first when it is new.
+    pub(super) fn focus_thread_item(&mut self, item: ItemId, cx: &mut Context<Self>) {
+        self.faces.threads.focus_item = Some(item);
+        self.faces_dirty = true;
+        cx.notify();
+    }
+
+    /// What a thread tile's view asks for. Files go up through the thread's terminal, when it
+    /// runs in one.
+    fn thread_item_event(
+        &mut self,
+        key: WorkerKey,
+        view: &Entity<ThreadView>,
+        event: ThreadViewEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let thread = view.read(cx).thread();
+        let terminal = self.faces.threads.terminals.get(&thread).copied();
+        match event {
+            ThreadViewEvent::ShowTerminal => self.open_thread_terminal(key, thread, cx),
+            ThreadViewEvent::Review { thread } => {
+                self.faces.threads.review_asked = Some((key, thread));
+                cx.notify();
+            }
+            ThreadViewEvent::Attach { id, what } => {
+                if let Some(session) = terminal {
+                    self.attach_to_face(session, Target::Thread(view.downgrade()), id, what, cx);
+                }
+            }
+            ThreadViewEvent::Detach { id } => {
+                self.detach_from_face(&Target::Thread(view.downgrade()), id, cx);
+            }
+            ThreadViewEvent::PickFiles => {
+                if let Some(tile) = terminal.and_then(|s| self.tile_of_session(s)) {
+                    self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
+                }
+            }
+            ThreadViewEvent::FindFiles { root, query } => {
+                self.send(key, ClientMsg::FindFiles { root, query });
+            }
+        }
     }
 
     /// The subagent threads under `session`'s own thread, however deep: each row whose chain
@@ -381,6 +577,11 @@ impl WorkspaceView {
     ) {
         for (session, view) in &self.faces.threads.views {
             if self.worker_of_session(*session) == Some(key) {
+                view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
+            }
+        }
+        for (item, view) in &self.faces.threads.items {
+            if self.tile_of(*item).is_some_and(|t| t.worker == key) {
                 view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
             }
         }
@@ -475,6 +676,7 @@ impl WorkspaceView {
             }
         }
         self.sync_thread_faces(&wanted, window, cx);
+        let mut gave = self.sync_thread_items(window, cx);
         // Unfollow what no longer shows; a link that changed lost its follow already.
         let followed: Vec<(SessionId, ClientId)> =
             self.faces.following.iter().map(|(s, c)| (*s, *c)).collect();
@@ -554,7 +756,6 @@ impl WorkspaceView {
         self.faces.chosen.retain(|s, _| live.contains(s));
         self.faces.following.retain(|s, _| live.contains(s));
         let focus: Vec<SessionId> = self.faces.focus.drain().collect();
-        let mut gave = false;
         for session in focus {
             if !wanted.contains(&session) {
                 continue;
@@ -728,11 +929,15 @@ impl WorkspaceView {
         }
     }
 
-    /// The face's one line of what the agent does, for the navigator and the overview.
+    /// The face's one line of what the agent does, for the navigator and the overview: the
+    /// agent's words are Markdown, and the line says them as plain words.
     pub(super) fn face_summary(&self, session: SessionId) -> Option<String> {
-        self.face(session)?.summary.clone()
+        self.face(session)?.summary.as_deref().map(crate::markdown::plain_line)
     }
 }
+
+/// What a thread tile's header says before its worker's table names the thread.
+const THREAD: &str = "Thread";
 
 /// The meters of each terminal's own thread in `hub`'s table: a subagent's are its parent's.
 fn root_meters(hub: &Entity<ThreadHub>, cx: &App) -> HashMap<SessionId, Meters> {

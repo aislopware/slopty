@@ -66,6 +66,8 @@ impl WorkspaceView {
             }
             // A review walks its files and hunks by key.
             Some(ItemKind::Review { thread }) => self.pending_focus_review = Some(thread),
+            // A thread's keyboard is its composer's.
+            Some(ItemKind::Thread { .. }) => self.focus_thread_item(tile.item, cx),
             // A remote window takes the keyboard only when clicked: its chords are the
             // worker's, and a key walk through the strip must not land in one by accident.
             Some(_) | None => self.pending_focus_self = true,
@@ -103,6 +105,11 @@ impl WorkspaceView {
             }
             Some((_, ItemKind::Review { thread })) if self.review_of(thread).is_some() => {
                 self.focus_review(thread, window, cx);
+            }
+            Some((tile, ItemKind::Thread { .. }))
+                if let Some(view) = self.thread_item(tile.item).cloned() =>
+            {
+                view.update(cx, |v, cx| v.focus(window, cx));
             }
             _ => window.focus(&self.focus, cx),
         }
@@ -821,7 +828,8 @@ impl WorkspaceView {
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
             | ItemKind::Folder { .. }
-            | ItemKind::Review { .. } => {
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => {
                 self.remember_closed(tile, item, None, cx);
             }
             // A file's edit lives in its editor, not in the registry: the editor waits with the

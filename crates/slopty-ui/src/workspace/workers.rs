@@ -900,7 +900,8 @@ impl WorkspaceView {
                     | ItemKind::File { .. }
                     | ItemKind::Folder { .. }
                     | ItemKind::Browser { .. }
-                    | ItemKind::Review { .. } => None,
+                    | ItemKind::Review { .. }
+                    | ItemKind::Thread { .. } => None,
                 })
                 .collect();
             for &(id, target) in &wanted {

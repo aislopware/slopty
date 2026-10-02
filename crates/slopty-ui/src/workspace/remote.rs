@@ -571,7 +571,8 @@ impl WorkspaceView {
                 ItemKind::Note { .. }
                 | ItemKind::File { .. }
                 | ItemKind::Browser { .. }
-                | ItemKind::Review { .. },
+                | ItemKind::Review { .. }
+                | ItemKind::Thread { .. },
             )
             | None => {
                 Self::discard_landing(landing, cx);

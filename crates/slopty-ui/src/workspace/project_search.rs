@@ -139,7 +139,7 @@ impl WorkspaceView {
 
     /// The directory a search from here looks in: what the focused tile is about, else the
     /// shell a "run" would go to, else `key`'s home.
-    fn search_root(&self, key: WorkerKey) -> String {
+    pub(super) fn search_root(&self, key: WorkerKey) -> String {
         let about = |session| {
             let summary = self.summary(session)?;
             summary.repo.clone().or_else(|| summary.cwd.clone())
@@ -156,7 +156,8 @@ impl WorkspaceView {
             | ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
-            | ItemKind::Review { .. } => None,
+            | ItemKind::Review { .. }
+            | ItemKind::Thread { .. } => None,
         });
         from_tile
             .or_else(|| {

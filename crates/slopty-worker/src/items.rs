@@ -268,7 +268,8 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
         | ItemKind::File { .. }
         | ItemKind::Folder { .. }
         | ItemKind::Browser { .. }
-        | ItemKind::Review { .. } => Ok(()),
+        | ItemKind::Review { .. }
+        | ItemKind::Thread { .. } => Ok(()),
     }
 }
 
@@ -510,23 +511,24 @@ mod tests {
         assert_eq!(reopened.get(folder.id).map(|i| i.kind), Some(ItemKind::Folder { path }));
     }
 
-    /// A thread's review is an item like any other: added, and reopened as it was.
+    /// A thread's review, and a thread itself, are items like any other: added, and reopened
+    /// as they were.
     #[test]
-    fn a_review_is_kept_and_reopened() {
+    fn a_review_and_a_thread_are_kept_and_reopened() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("items.json");
         let store = ItemStore::open(&file).unwrap();
         let thread = slopty_proto::thread::ThreadId::new();
-        let review = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Review { thread },
-            sleeping: false,
-            name: None,
-        };
-        let _added = store.apply(ItemOp::Add(review.clone()), ClientId::new()).unwrap();
+        let item = |kind| Item { id: ItemId::new(), kind, sleeping: false, name: None };
+        let review = item(ItemKind::Review { thread });
+        let shown = item(ItemKind::Thread { thread });
+        for added in [&review, &shown] {
+            let _added = store.apply(ItemOp::Add(added.clone()), ClientId::new()).unwrap();
+        }
         drop(store);
         let reopened = ItemStore::open(&file).unwrap();
         assert_eq!(reopened.get(review.id), Some(review));
+        assert_eq!(reopened.get(shown.id), Some(shown));
     }
 
     /// A note's text is set only on a note, is bounded like a new note's, and an unknown item

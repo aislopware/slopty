@@ -1533,6 +1533,7 @@ mod soak;
 mod strip_marks;
 mod tab_strip;
 mod thread_face;
+mod thread_start;
 mod tiles;
 mod toasts;
 mod touch;

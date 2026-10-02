@@ -1118,6 +1118,7 @@ impl Workspace {
                 ItemKind::Folder { .. } => ("folder", None),
                 ItemKind::Browser { .. } => ("browser", None),
                 ItemKind::Review { .. } => ("review", None),
+                ItemKind::Thread { .. } => ("thread", None),
             };
             let note = match &item.kind {
                 ItemKind::Note { text } => Some(text.clone()),
