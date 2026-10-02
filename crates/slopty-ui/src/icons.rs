@@ -385,8 +385,6 @@ pub fn until_next_step(since: Duration) -> Duration {
 struct SpinClock {
     /// The executor's clock when the first mark was drawn; the test executor's is simulated.
     epoch: Instant,
-    /// Reduce Motion, read from the system once, when the clock is made.
-    reduce_motion: bool,
     /// The views that painted a turning mark since the last step.
     wake: Vec<EntityId>,
     /// The timer that is out, if one is, and its number: a timer whose number is not the
@@ -422,7 +420,6 @@ impl SpinClock {
         if !cx.has_global::<Self>() {
             let clock = Self {
                 epoch: cx.background_executor().now(),
-                reduce_motion: system_reduce_motion(),
                 wake: Vec::new(),
                 armed: None,
                 timers: 0,
@@ -532,16 +529,16 @@ pub fn release_steps(cx: &mut App) {
     }
 }
 
-/// The system's Reduce Motion setting changed: the marks step as it now says.
+/// GPUI's Reduce Motion flag changed: every view showing a mark draws again.
+///
+/// A mark that was turning stands still at once and one that stood starts its steps. The
+/// marks read the flag itself as they are drawn, so nothing here keeps a copy of it.
 pub fn motion_setting_changed(cx: &mut App) {
-    SpinClock::get(cx).reduce_motion = system_reduce_motion();
-}
-
-/// Whether the system asks for motion to be reduced. Always false under test, so a test that
-/// counts frames does not depend on the machine's setting; `App::set_reduce_motion` is how a
-/// test asks for it.
-fn system_reduce_motion() -> bool {
-    !cfg!(test) && slopty_platform::reduce_motion()
+    SpinClock::wake(cx);
+    let calm = std::mem::take(&mut SpinClock::get(cx).calm_wake);
+    for view in calm {
+        cx.notify(view);
+    }
 }
 
 /// The working mark: [`Status::Working`]'s icon, turned to the spin clock's step when laid out;
@@ -585,11 +582,10 @@ impl Element for Spinner {
         let now = cx.background_executor().now();
         let clock = SpinClock::get(cx);
         let since = now.saturating_duration_since(clock.epoch);
-        let still = reduce || clock.reduce_motion;
         let (step, status) = if self.calm {
-            (calm_step(since, still), Status::Running)
+            (calm_step(since, reduce), Status::Running)
         } else {
-            (spin_step(since, still), Status::Working)
+            (spin_step(since, reduce), Status::Working)
         };
         #[expect(clippy::cast_precision_loss, reason = "a step under twelve")]
         let turn = step as f32 / SPIN_STEPS as f32;
@@ -646,7 +642,7 @@ impl Element for Spinner {
             }
             return;
         }
-        if reduce || clock.reduce_motion {
+        if reduce {
             return;
         }
         if !clock.wake.contains(&view) {

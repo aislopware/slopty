@@ -478,9 +478,7 @@ impl ReviewView {
             .cursor_pointer()
             .child(label);
         let el = if primary {
-            el.border_color(hsla(s.accent_fill))
-                .bg(hsla(s.accent_fill))
-                .text_color(hsla(s.accent_ink))
+            kit::solid_pressable(el.border_color(hsla(s.solid)), theme)
         } else {
             el.border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
@@ -858,8 +856,7 @@ impl ReviewView {
                         .px(self.z(theme.spacing.md))
                         .py(self.z(theme.spacing.xs))
                         .rounded(self.z(theme.radii.sm))
-                        .bg(hsla(s.accent_fill))
-                        .text_color(hsla(s.accent_ink))
+                        .map(|el| kit::solid_pressable(el, theme))
                         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                         .cursor_pointer()
                         .child(SharedString::from(send_words))

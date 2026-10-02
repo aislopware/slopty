@@ -1086,15 +1086,16 @@ impl SettingsForm {
                 .items_center()
                 .gap(px(spacing.xs))
                 .text_size(px(theme.typography.ui_size))
-                .text_color(hsla(s.accent))
+                .text_color(hsla(s.text))
                 .cursor_pointer()
+                .hover(gpui::Styled::underline)
                 .on_click(move |_ev, _window, _cx| slopty_platform::open_url(url))
                 .child(words)
                 .child(crate::icons::icon(
                     theme,
                     IconName::ExternalLink,
                     IconSize::Inline,
-                    hsla(s.accent),
+                    hsla(s.text_muted),
                 ));
             children.push(crate::a11y::tab_stop(link, s.accent).into_any_element());
         }
@@ -1117,33 +1118,36 @@ impl SettingsForm {
             (Vec::new(), Vec::new())
         };
         let about = !searching && (self.narrow || self.section == Section::About);
-        let mut children: Vec<AnyElement> = Vec::new();
+        // Each child with what it is in a group's card: a row (and whether a hairline parts it
+        // from the one before), else not part of a card.
+        let mut parts: Vec<(Part, AnyElement)> = Vec::new();
         let mut placed = Vec::new();
         let mut last: Option<&'static str> = None;
         for &ix in shown {
             let Some(row) = rows().get(ix) else { continue };
             let heading = if by_section { row.section.label() } else { row.group };
             if last != Some(heading) {
-                children.push(self.heading(heading, children.len(), last.is_none()));
+                parts.push((Part::Apart, self.heading(heading, parts.len(), last.is_none())));
                 last = Some(heading);
             }
-            placed.push((ix, children.len()));
-            children.push(self.row(ix, row, cx));
+            placed.push((ix, parts.len()));
+            parts.push((Part::Row { parted: true }, self.row(ix, row, cx)));
             if self.font_open && row.field.kind == Kind::Font {
-                children.push(self.font_list(ix, row, cx));
+                parts.push((Part::Row { parted: false }, self.font_list(ix, row, cx)));
             }
         }
         if let Some(said) = self.keys_said(&said) {
-            children.push(said);
+            parts.push((Part::Apart, said));
         }
         for row in &keyboard {
             let heading = if by_section { Section::Keyboard.label() } else { row.group };
             if last != Some(heading) {
-                children.push(self.heading(heading, children.len(), last.is_none()));
+                parts.push((Part::Apart, self.heading(heading, parts.len(), last.is_none())));
                 last = Some(heading);
             }
-            children.push(self.key_line(row, cx));
+            parts.push((Part::Row { parted: true }, self.key_line(row, cx)));
         }
+        let mut children = carded(&theme, parts);
         if about {
             if by_section {
                 children.push(self.heading(Section::About.label(), children.len(), last.is_none()));
@@ -1274,7 +1278,7 @@ impl SettingsForm {
         crate::a11y::tab_stop(el, self.theme.surfaces.accent)
     }
 
-    /// A switch: the accent track with the knob at its end when on, a quiet one when off. The
+    /// A switch: the neutral solid with its knob at its end when on, a quiet track when off. The
     /// knob slides when it is turned, unless motion is reduced.
     fn switch(&self, ix: usize, row: &Row, on: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
@@ -1282,8 +1286,7 @@ impl SettingsForm {
         let (height, knob) = (spacing.lg, 2.0_f32.mul_add(-spacing.xxs, spacing.lg));
         let width = spacing.xl + spacing.xs;
         let travel = 2.0_f32.mul_add(-spacing.xxs, width - knob);
-        let (track, ink) =
-            if on { (s.accent_fill, s.accent_ink) } else { (s.overlay, s.text_secondary) };
+        let (track, ink) = if on { (s.solid, s.solid_ink) } else { (s.overlay, s.text_secondary) };
         let to = if on { travel } else { 0.0 };
         let dot = div()
             .debug_selector(move || format!("settings-knob-{ix}"))
@@ -1521,7 +1524,7 @@ impl SettingsForm {
                         theme,
                         IconName::Check,
                         IconSize::Inline,
-                        hsla(s.accent),
+                        hsla(s.text),
                     ))
                 })
         });
@@ -1609,6 +1612,60 @@ fn well(theme: &Theme) -> Div {
         .items_center()
         .rounded(px(theme.radii.sm))
         .bg(hsla(theme.surfaces.raised))
+}
+
+/// What a child of the page is in a group's card.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Part {
+    /// A row of a group; `parted` when a hairline sets it off from the row before (a font's
+    /// list hangs from its row with none).
+    Row { parted: bool },
+    /// A heading, a notice: not in a card.
+    Apart,
+}
+
+/// The page's children with each run of rows set in a card, as System Settings and Zed's
+/// settings group them: the hover step's fill in dark and the floating surface with a hairline
+/// round it in light, rounded at the floating radius, its rows parted by the quiet hairline
+/// inset from the card's edges. Each row stays a child of the page, so scrolling to one still
+/// finds it.
+fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
+    let s = theme.surfaces;
+    let dark = theme.variant() == slopty_theme::Variant::Dark;
+    let fill = if dark { s.raised } else { s.elevated };
+    let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
+    let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
+    let radius = px(theme.radii.lg);
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(i, (part, child))| {
+            let Part::Row { parted } = part else { return child };
+            let first = !row_at(i.checked_sub(1));
+            let last = !row_at(i.checked_add(1));
+            div()
+                .debug_selector(move || format!("settings-card-{i}"))
+                .bg(hsla(fill))
+                .px(px(theme.spacing.inset()))
+                .when(first, |el| el.rounded_t(radius))
+                .when(last, |el| el.rounded_b(radius))
+                .when(!dark, |el| {
+                    el.border_l_1()
+                        .border_r_1()
+                        .when(first, gpui::Styled::border_t_1)
+                        .when(last, gpui::Styled::border_b_1)
+                        .border_color(hsla(s.border))
+                })
+                .child(
+                    div()
+                        .when(parted && !first, |el| {
+                            el.border_t_1().border_color(hsla(s.border_subtle))
+                        })
+                        .child(child),
+                )
+                .into_any_element()
+        })
+        .collect()
 }
 
 /// A line said in passing on the page: nothing matched, the fonts are being looked for. On the
@@ -1759,5 +1816,47 @@ impl Render for SettingsForm {
         } else {
             root.child(self.sidebar(cx)).child(page)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::{TestAppContext, VisualTestContext, size};
+
+    use super::*;
+
+    /// A group's rows are one card under its label: the label stands apart, the rows' parts
+    /// meet edge to edge on one column, the first rounded at the top and the last at the
+    /// bottom, filled with the hover step in dark.
+    #[gpui::test]
+    fn a_groups_rows_are_one_card_under_its_label(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let theme = Theme::default();
+        let (_form, cx): (_, &mut VisualTestContext) =
+            cx.add_window_view(|window, cx| SettingsForm::new("", Theme::default(), window, cx));
+        cx.simulate_resize(size(px(900.0), px(1400.0)));
+        cx.run_until_parked();
+        let card = |cx: &mut VisualTestContext, i: usize| {
+            cx.debug_bounds(Box::leak(format!("settings-card-{i}").into_boxed_str()))
+        };
+        assert!(card(cx, 0).is_none(), "the label stands apart");
+        let parts: Vec<_> = (1..).map_while(|i| card(cx, i)).collect();
+        assert!(parts.len() > 1, "a group of rows: {parts:?}");
+        for pair in parts.windows(2) {
+            let [a, b] = pair else { continue };
+            assert!((a.bottom() - b.top()).abs() < px(0.5), "edge to edge: {a:?} {b:?}");
+            assert_eq!((a.left(), a.right()), (b.left(), b.right()), "one column");
+        }
+        let first = parts.first().copied().expect("a part");
+        let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+        let fill = gpui::Background::from(hsla(theme.surfaces.raised));
+        let top = quads.iter().find(|q| {
+            (q.bounds.origin.y.0 / scale - f32::from(first.top())).abs() < 0.5
+                && (q.bounds.origin.x.0 / scale - f32::from(first.left())).abs() < 0.5
+                && q.background == fill
+        });
+        let top = top.expect("the card's first part, in the hover step");
+        assert!((top.corner_radii.top_left.0 / scale - theme.radii.lg).abs() < 0.5, "rounded");
+        assert!(top.corner_radii.bottom_left.0.abs() < 0.5, "and open below");
     }
 }

@@ -292,11 +292,12 @@ pub fn task_row(
         .items_center()
         .justify_center()
         .border_1()
-        .border_color(if done { hsla(s.accent_fill) } else { hsla(s.control) })
-        // A ticked box is the accent fill with a drawn check in it, as a native checkbox is.
+        .border_color(if done { hsla(s.solid) } else { hsla(s.control) })
+        // A ticked box is the neutral solid with a drawn check in it, as `MonoCode`'s and
+        // zeron's are: green would make a done task read as a status, not a choice.
         .when(done, |b| {
-            b.bg(hsla(s.accent_fill)).child(
-                crate::icons::icon(theme, IconName::Check, IconSize::Inline, hsla(s.accent_ink))
+            crate::kit::solid(b, theme).child(
+                crate::icons::icon(theme, IconName::Check, IconSize::Inline, hsla(s.solid_ink))
                     .size(px((side - TASK_CHECK_INSET).max(1.0))),
             )
         });
@@ -521,7 +522,7 @@ mod tests {
         let s = &theme.surfaces;
         assert_eq!(open_q.border_color, hsla(s.control), "a control's outline, read at 3:1");
         assert!((open_q.corner_radii.top_left.0 / scale - theme.radii.xs).abs() < 0.01);
-        assert_eq!(done_q.background, gpui::Background::from(hsla(s.accent_fill)));
+        assert_eq!(done_q.background, gpui::Background::from(hsla(s.solid)), "the solid");
     }
 
     #[test]

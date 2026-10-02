@@ -81,6 +81,74 @@ impl Rgb {
     }
 }
 
+/// A colour in OKLCH: perceived lightness (0 to 1), chroma, and hue in degrees.
+///
+/// The brand is set in it (`docs/decisions/brand.md`), so the roles that carry the brand's
+/// meaning are derived in it too: a lighter or darker green keeps the brand's hue and only
+/// gives up chroma where sRGB runs out.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Oklch {
+    /// Perceived lightness, 0 (black) to 1 (white).
+    pub l: f32,
+    /// Chroma: 0 is grey; sRGB greens reach about 0.3.
+    pub c: f32,
+    /// Hue, in degrees.
+    pub h: f32,
+}
+
+impl Oklch {
+    /// The colour in sRGB. Past sRGB's gamut the chroma is cut, never the lightness or the
+    /// hue, until it fits.
+    #[must_use]
+    pub fn rgb(self) -> Rgb {
+        let fits =
+            |c: f32| linear_srgb(self.l, c, self.h).iter().all(|v| (-1e-4..=1.0001).contains(v));
+        let chroma = if fits(self.c) {
+            self.c
+        } else {
+            // Inside the gamut at no chroma, outside at the asked one: bisect for the edge.
+            let (mut lo, mut hi) = (0.0_f32, self.c);
+            for _ in 0..20 {
+                let mid = f32::midpoint(lo, hi);
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
+        };
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "0 to 255")]
+        let encode = |v: f32| {
+            let v = v.clamp(0.0, 1.0);
+            let e = if v <= 0.003_130_8 {
+                12.92 * v
+            } else {
+                1.055_f32.mul_add(v.powf(1.0 / 2.4), -0.055)
+            };
+            (e * 255.0).round() as u8
+        };
+        let [r, g, b] = linear_srgb(self.l, chroma, self.h);
+        Rgb { r: encode(r), g: encode(g), b: encode(b) }
+    }
+}
+
+/// OKLCH to linear sRGB (Björn Ottosson's matrices), channels unclamped.
+#[expect(clippy::many_single_char_names, reason = "Ottosson's own names: L, C, h, a and b")]
+fn linear_srgb(l: f32, c: f32, h: f32) -> [f32; 3] {
+    let (sin, cos) = h.to_radians().sin_cos();
+    let (a, b) = (c * cos, c * sin);
+    let l_ = 0.215_803_76_f32.mul_add(b, 0.396_337_78_f32.mul_add(a, l));
+    let m_ = (-0.063_854_17_f32).mul_add(b, (-0.105_561_35_f32).mul_add(a, l));
+    let s_ = (-1.291_485_5_f32).mul_add(b, (-0.089_484_18_f32).mul_add(a, l));
+    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    [
+        0.230_969_93_f32.mul_add(s3, 4.076_741_7_f32.mul_add(l3, -3.307_711_6 * m3)),
+        (-0.341_319_4_f32).mul_add(s3, (-1.268_438_f32).mul_add(l3, 2.609_757_4 * m3)),
+        1.707_614_7_f32.mul_add(s3, (-0.004_196_086_f32).mul_add(l3, -0.703_418_6 * m3)),
+    ]
+}
+
 /// A hairline: the chrome's text at a few hundredths of its strength.
 ///
 /// Laid over whatever it crosses, it sits the same step off every surface. A grey mixed for
@@ -160,10 +228,13 @@ impl TerminalPalette {
     pub const DARK: Self = Self {
         fg: Rgb::hex(0xe6e6e6),
         bg: DARK_BG,
-        cursor: Rgb::hex(0x8ab4f8),
+        // The text's own colour, as Ghostty's and Warp's are: blue left the controls, and a
+        // cursor is the one control a terminal draws.
+        cursor: Rgb::hex(0xe6e6e6),
         // A block cursor cuts its cell out of the background, as ghostty draws it.
         cursor_text: DARK_BG,
-        selection: Rgb::hex(0x2b3a55),
+        // A neutral wash: colour is kept for meaning, and a selection means nothing but "this".
+        selection: Rgb::hex(0x3a3a3a),
         search_match: Rgb::hex(0x4a4020),
         search_current: Rgb::hex(0x8c6a1f),
         ansi: [
@@ -192,9 +263,9 @@ impl TerminalPalette {
     pub const LIGHT: Self = Self {
         fg: Rgb::hex(0x1f2328),
         bg: LIGHT_BG,
-        cursor: Rgb::hex(0x2f6fdb),
+        cursor: Rgb::hex(0x1f2328),
         cursor_text: LIGHT_BG,
-        selection: Rgb::hex(0xc9ddfb),
+        selection: Rgb::hex(0xd6d6d6),
         search_match: Rgb::hex(0xffe9a8),
         search_current: Rgb::hex(0xf5b942),
         ansi: [
@@ -397,17 +468,19 @@ impl Typography {
     /// no bold.
     pub const STRONG_WEIGHT: f32 = 600.0;
 
-    /// The smallest chrome size: HUD readouts, timestamps, chevrons (base − 3).
+    /// The smallest chrome size: HUD readouts, timestamps, counts, chevrons (base − 2). At 10 it
+    /// blurred under the dark theme's glyph thickening and read as a footnote.
     #[must_use]
     pub fn caption(&self) -> f32 {
-        (self.ui_size - 3.0).max(6.0)
+        (self.ui_size - 2.0).max(6.0)
     }
 
-    /// Meta text: a row's second line, a bar's readouts, a status word (base − 2). It sits
-    /// between `small()` and `caption()` so a two-line row reads as a title over its facts.
+    /// Meta text: a row's second line, a bar's readouts, a status word (base − 1). `MonoCode`'s
+    /// most used size: 12 is the chrome's workhorse, told from `small()` by its tone, not its
+    /// size, so a two-line row reads as a title over its facts without the facts shrinking.
     #[must_use]
     pub fn meta(&self) -> f32 {
-        (self.ui_size - 2.0).max(6.0)
+        (self.ui_size - 1.0).max(6.0)
     }
 
     /// Secondary chrome: bar labels, pills, folds, tool summaries, section labels (base − 1).
@@ -441,11 +514,18 @@ impl Typography {
         self.ui_size + 3.0
     }
 
-    /// The heading of a page that is the whole window, the first run (base + 9). At 22 the
+    /// The heading of a page inside the window: the settings' page title, a note's title
+    /// (base + 7). The step between a dialog's title and the first run's.
+    #[must_use]
+    pub fn heading(&self) -> f32 {
+        self.ui_size + 7.0
+    }
+
+    /// The heading of a page that is the whole window, the first run (base + 13). Past 20 the
     /// system face switches to its Display cut on its own.
     #[must_use]
     pub fn display(&self) -> f32 {
-        self.ui_size + 9.0
+        self.ui_size + 13.0
     }
 }
 
@@ -468,25 +548,39 @@ impl Default for Typography {
     }
 }
 
-/// Corner radii, in points.
+/// Corner radii, in points: `MonoCode`'s, 6 the most used, then 8, 12, full and 4.
 ///
 /// Two families: 6 at rest and 12 for what floats. A floating shell is its rows' radius plus
-/// the pad round them (6 + 6), so the corners nest.
+/// the pad round them (6 + 6), so the corners nest ([`Radii::nested`]).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Radii {
     /// Key caps, chips, inline code.
     pub xs: f32,
-    /// Buttons, fields, rows (their hover and selected fills), tabs.
+    /// The default: buttons, fields, rows (their hover and selected fills), tabs, a file's card
+    /// in a diff.
     pub sm: f32,
-    /// Framed blocks inside content: a diff, a code block.
+    /// Framed blocks inside content: a code block, a command's output.
     pub md: f32,
     /// Everything that floats: the palette, menus, dialogs, the inbox, a toast, the composer.
     pub lg: f32,
+    /// A capsule: a dot, a send or stop disc, a scroll pill. Larger than any side it rounds,
+    /// so the ends are half circles.
+    pub full: f32,
+}
+
+impl Radii {
+    /// The radius of what sits `inset` inside a `card` of radius `card` whose border is
+    /// `border` wide, so the two corners share a centre and the gap between them is even: a
+    /// menu's rows inside the menu, a field inside the composer. Never under zero.
+    #[must_use]
+    pub fn nested(card: f32, border: f32, inset: f32) -> f32 {
+        (card - border - inset).max(0.0)
+    }
 }
 
 impl Default for Radii {
     fn default() -> Self {
-        Self { xs: 4.0, sm: 6.0, md: 8.0, lg: 12.0 }
+        Self { xs: 4.0, sm: 6.0, md: 8.0, lg: 12.0, full: 9_999.0 }
     }
 }
 
@@ -505,6 +599,10 @@ pub struct Spacing {
     pub lg: f32,
     /// 24: dialog padding.
     pub xl: f32,
+    /// 32: a page's margins, an empty state's room.
+    pub xxl: f32,
+    /// 48: a page's top, a reading column's gutters.
+    pub xxxl: f32,
 }
 
 impl Spacing {
@@ -516,11 +614,19 @@ impl Spacing {
     pub const fn inset(&self) -> f32 {
         self.md
     }
+
+    /// How far a row's trailing edge sits in (6): half the leading inset, as `MonoCode`'s rows
+    /// are padded 12 and 6. What ends a row is usually an icon button, whose own square adds
+    /// the rest, so its glyph lands near the leading inset from the edge.
+    #[must_use]
+    pub const fn inset_trailing(&self) -> f32 {
+        self.md / 2.0
+    }
 }
 
 impl Default for Spacing {
     fn default() -> Self {
-        Self { xxs: 2.0, xs: 4.0, sm: 8.0, md: 12.0, lg: 16.0, xl: 24.0 }
+        Self { xxs: 2.0, xs: 4.0, sm: 8.0, md: 12.0, lg: 16.0, xl: 24.0, xxl: 32.0, xxxl: 48.0 }
     }
 }
 
@@ -538,8 +644,13 @@ pub mod alpha {
     /// surface.
     pub const EDGE: f32 = 0.06;
     /// Barely there: a selected row, the faint fill of a quiet pill, the hover wash over a
-    /// bare button, a wash across the terminal grid (a block separator, the visual bell).
+    /// bare button, a wash across the terminal grid (a block separator, the visual bell), a
+    /// changed line's wash in a diff.
     pub const FAINT: f32 = 0.12;
+    /// The words that changed inside a changed line of a diff, over the line's own
+    /// [`FAINT`] wash: Zed's Delta measures about 0.34, git-delta's emphasis sits about 2.5
+    /// times its line's luminance off it.
+    pub const EMPH: f32 = 0.34;
     /// The window under a light modal or sheet: dimmed about as far as an iOS sheet dims it,
     /// so the sheet leads without the whole screen turning grey.
     pub const DIM: f32 = 0.16;
@@ -620,19 +731,21 @@ pub struct Surfaces {
     pub text_secondary: Rgb,
     /// Hints, timestamps, folds, inactive titles, second lines.
     pub text_muted: Rgb,
-    /// Focus ring, active border, links: the accent as text and hairlines. A primary action
-    /// is a fill, so it takes [`Self::accent_fill`].
+    /// The interaction accent, the brand's green as text and lines: the focus ring, a link in
+    /// prose, a mark that says "live" or "chosen". Spent sparingly: the primary action is
+    /// [`Self::solid`], not this.
     pub accent: Rgb,
-    /// Connected, agent done: as text.
+    /// Connected, agent done, lines added: as text. The brand's green, as the accent is, so
+    /// green means one thing (live, chosen, good) wherever it shows.
     pub success: Rgb,
     /// Agent waiting, "N need you", muted, reconnecting: as text.
     pub warn: Rgb,
     /// A failed result or command, a pairing error: as text.
     pub error: Rgb,
-    /// The accent as a mark or a fill: an unseen dot, a busy bar, a drop wash, the primary
-    /// action, a ticked box, a key that is on.
+    /// The accent as a mark: an unseen dot, a busy bar, a progress line, a drop wash. Never a
+    /// control's fill: a control that is on or primary takes [`Self::solid`].
     pub accent_fill: Rgb,
-    /// Success as a mark: a dot, a bar, a badge, a wash.
+    /// Success as a mark: a dot, a bar, a badge, an added line's wash.
     pub success_fill: Rgb,
     /// Warn as a mark: the attention bar, the bell's badge, a dot, a wash. Amber in both
     /// variants, where the `warn` text tone is a dark ochre in the light one.
@@ -641,9 +754,15 @@ pub struct Surfaces {
     pub error_fill: Rgb,
     /// Text on the success, warn and error fills: a badge's count.
     pub fill_fg: Rgb,
-    /// Text on the accent fill: a primary button's label, a tick, a key that is on. White on a
-    /// saturated blue in both variants, as a native primary button is.
+    /// Text on the accent fill: a badge's count on the green. A near-black green in both
+    /// variants, since white does not read on a green this light.
     pub accent_ink: Rgb,
+    /// The neutral solid: the one primary action of a surface, the send and stop disc, a ticked
+    /// box, a switch that is on, a key that is armed. The chrome's text as a fill, white on
+    /// dark and near-black on light, as `MonoCode`'s stop and Commit buttons are.
+    pub solid: Rgb,
+    /// Text and glyphs on [`Self::solid`]: the darkest chrome step in dark, white in light.
+    pub solid_ink: Rgb,
     /// Slopty's green, the mark's lit dots: the same in both variants, as a brand colour is
     /// (`docs/decisions/brand.md`, OKLCH 0.72 0.16 150).
     pub brand: Rgb,
@@ -685,19 +804,29 @@ struct Tones {
     /// Where text moves when it has to read better: the pole away from the surfaces.
     pole: Rgb,
     text: Rgb,
-    text_secondary: Rgb,
-    text_muted: Rgb,
-    accent: Rgb,
-    success: Rgb,
+    /// The text tiers as shares of the text over the content (`MonoCode`'s `content/70`),
+    /// before they are lifted.
+    text_secondary: f32,
+    text_muted: f32,
+    /// The brand's green as text (the accent and success), and as a mark.
+    accent: Oklch,
+    accent_fill: Oklch,
+    /// Text on the green mark.
+    accent_ink: Oklch,
     warn: Rgb,
     error: Rgb,
-    accent_fill: Rgb,
-    success_fill: Rgb,
     warn_fill: Rgb,
     error_fill: Rgb,
     fill_fg: Rgb,
-    accent_ink: Rgb,
+    /// The solid's ink: the far end of the ladder from the text.
+    solid_ink: Step,
 }
+
+/// Slopty's green in OKLCH (`docs/decisions/brand.md`): [`BRAND`] is its sRGB.
+pub const BRAND_OKLCH: Oklch = Oklch { l: 0.72, c: 0.16, h: 150.0 };
+
+/// A near-black of the brand's hue: words on a green mark, in both variants.
+const ON_GREEN: Oklch = Oklch { l: 0.22, c: 0.04, h: BRAND_OKLCH.h };
 
 /// Dark: the bars and the navigator sink toward black, everything above the content climbs
 /// toward the text.
@@ -709,27 +838,30 @@ const DARK_TONES: Tones = Tones {
     // 0.82 L* over the bars, under the one unit that shows; 0.30 clears it.
     canvas: Step { toward: Toward::Black, share: 0.30 },
     panel: Step { toward: Toward::Black, share: 0.16 },
-    elevated: ink(0.045),
-    raised: ink(0.065),
-    border_subtle: ink(0.06),
+    // `MonoCode`'s ladder: hover at about 5 % of the text, selection at 8 to 10 %, hairlines
+    // at 7 %. What floats sits under the hover step, so a row's hover shows on a menu too, and
+    // parts from the content by its hairline and lit edge more than by its tone.
+    elevated: ink(0.035),
+    raised: ink(0.055),
+    border_subtle: ink(0.045),
     overlay: ink(0.085),
     band: ink(0.035),
-    border: ink(0.105),
+    border: ink(0.07),
     pole: Rgb::hex(0xffffff),
-    text: Rgb::hex(0xe6e6e6),
-    // Grey with no hue, as the content is; lifted to AA like every text tone.
-    text_secondary: Rgb::hex(0xb8b8b8),
-    text_muted: Rgb::hex(0x8f8f8f),
-    accent: Rgb::hex(0x8ab4f8),
-    success: Rgb::hex(0x98c379),
+    text: Rgb::hex(0xebebeb),
+    // `content/70` and `content/57`: the least share over `MonoCode`'s `/55` at which muted
+    // text still reads AA on the selected fill, so the lift has nothing to do.
+    text_secondary: 0.70,
+    text_muted: 0.57,
+    accent: BRAND_OKLCH,
+    accent_fill: BRAND_OKLCH,
+    accent_ink: ON_GREEN,
     warn: Rgb::hex(0xe5c07b),
     error: Rgb::hex(0xf06c75),
-    accent_fill: Rgb::hex(0x346bf1),
-    success_fill: Rgb::hex(0x34c759),
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
-    accent_ink: Rgb::hex(0xffffff),
+    solid_ink: Step { toward: Toward::Black, share: 0.30 },
 };
 
 /// Light: every step below the content darkens toward the text; what floats goes to white.
@@ -740,25 +872,27 @@ const LIGHT_TONES: Tones = Tones {
     canvas: ink(0.04),
     panel: ink(0.025),
     elevated: Step { toward: Toward::White, share: 0.6 },
-    raised: ink(0.055),
-    border_subtle: ink(0.065),
-    overlay: ink(0.085),
+    // The dark ladder's steps a third again as strong, as `MonoCode`'s light hairlines are:
+    // on white the same share reads fainter than on near-black.
+    raised: ink(0.05),
+    border_subtle: ink(0.06),
+    overlay: ink(0.08),
     band: ink(0.045),
-    border: ink(0.115),
+    border: ink(0.095),
     pole: Rgb::hex(0x000000),
     text: Rgb::hex(0x1d1d1f),
-    text_secondary: Rgb::hex(0x4b4f58),
-    text_muted: Rgb::hex(0x66666b),
-    accent: Rgb::hex(0x2a63c4),
-    success: Rgb::hex(0x187633),
+    text_secondary: 0.78,
+    text_muted: 0.66,
+    // The brand's hue at the lightness that reads AA on white as text, and 3:1 as a mark.
+    accent: Oklch { l: 0.5, c: 0.13, h: BRAND_OKLCH.h },
+    accent_fill: Oklch { l: 0.65, c: 0.16, h: BRAND_OKLCH.h },
+    accent_ink: ON_GREEN,
     warn: Rgb::hex(0x8b5d00),
     error: Rgb::hex(0xc7212c),
-    accent_fill: Rgb::hex(0x1b4ed8),
-    success_fill: Rgb::hex(0x2da44e),
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
     fill_fg: Rgb::hex(0x0a0b0e),
-    accent_ink: Rgb::hex(0xffffff),
+    solid_ink: Step { toward: Toward::White, share: 1.0 },
 };
 
 /// The least contrast `fg` has on any of `surfaces`.
@@ -857,10 +991,17 @@ impl Surfaces {
             Contrast::Standard => AA,
             Contrast::Increased => AAA,
         };
-        let text_muted = lift(t.text_muted, &under, t.pole, floor);
-        let text_secondary =
-            lift(t.text_secondary, &under, t.pole, floor.max(worst(text_muted, &under) * LEVEL));
+        let tier = |share: f32| content.mix(t.text, share);
+        let text_muted = lift(tier(t.text_muted), &under, t.pole, floor);
+        let text_secondary = lift(
+            tier(t.text_secondary),
+            &under,
+            t.pole,
+            floor.max(worst(text_muted, &under) * LEVEL),
+        );
         let text = lift(t.text, &under, t.pole, floor.max(worst(text_secondary, &under) * LEVEL));
+        let green = lift(t.accent.rgb(), &under, t.pole, floor);
+        let green_fill = t.accent_fill.rgb();
         Self {
             canvas,
             panel,
@@ -881,16 +1022,18 @@ impl Surfaces {
             text,
             text_secondary,
             text_muted,
-            accent: lift(t.accent, &under, t.pole, floor),
-            success: lift(t.success, &under, t.pole, floor),
+            accent: green,
+            success: green,
             warn: lift(t.warn, &under, t.pole, floor),
             error: lift(t.error, &under, t.pole, floor),
-            accent_fill: t.accent_fill,
-            success_fill: t.success_fill,
+            accent_fill: green_fill,
+            success_fill: green_fill,
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
             fill_fg: t.fill_fg,
-            accent_ink: t.accent_ink,
+            accent_ink: t.accent_ink.rgb(),
+            solid: text,
+            solid_ink: at(t.solid_ink),
             brand: BRAND,
         }
     }
@@ -924,13 +1067,15 @@ pub struct Elevation {
 }
 
 impl Elevation {
-    /// Dark: a shadow deep enough to read on near-black, a lit top edge, and a deep scrim.
+    /// Dark: a quiet shadow, a lit top edge, and a deep scrim. On near-black a shadow cannot
+    /// say where a sheet ends; the lit edge and the hairline say it, so the shadow only gives
+    /// the sheet weight. At 0.4 and 0.5 it was four times Zed's and pooled round every menu.
     pub const DARK: Self = Self {
         shade: Rgb::hex(0),
         scrim: alpha::SCRIM,
         shadow: [
-            Shadow { y: 1.0, blur: 2.0, alpha: 0.4 },
-            Shadow { y: 12.0, blur: 32.0, alpha: 0.5 },
+            Shadow { y: 1.0, blur: 2.0, alpha: 0.1 },
+            Shadow { y: 12.0, blur: 32.0, alpha: 0.125 },
         ],
         highlight: Some(alpha::EDGE),
     };
@@ -1016,7 +1161,8 @@ pub struct Motion {
     pub fade: std::time::Duration,
     /// A selected row's fill moving, a tab resizing, a fold opening.
     pub settle: std::time::Duration,
-    /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval.
+    /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval, a
+    /// tab closing: `MonoCode`'s 200 ms.
     pub sheet: std::time::Duration,
     /// Half a caret blink: shown this long, then hidden as long (Ghostty's cadence). The pace of
     /// a blink, not a transition: nothing eases.
@@ -1033,7 +1179,7 @@ impl Motion {
         hover: std::time::Duration::ZERO,
         fade: std::time::Duration::from_millis(120),
         settle: std::time::Duration::from_millis(160),
-        sheet: std::time::Duration::from_millis(240),
+        sheet: std::time::Duration::from_millis(200),
         blink: std::time::Duration::from_millis(600),
         ease_out: Curve { p1: (0.22, 1.0), p2: (0.36, 1.0) },
         drawer: Curve { p1: (0.32, 0.72), p2: (0.0, 1.0) },
@@ -1057,17 +1203,22 @@ pub struct Density {
     pub row: f32,
     /// A row of two lines: a title over its meta line.
     pub row_two_line: f32,
-    /// A tile's header.
+    /// A tile's header: 40 on the Mac, `MonoCode`'s, so a header holds its title, its state
+    /// and its buttons with air above and below rather than as a strip.
     pub header: f32,
+    /// A button's or a field's height: a row's, so a button in a row fills it.
+    pub control: f32,
     /// The least side of anything tapped or clicked: an icon button, a key cap, a close box.
     pub hit: f32,
 }
 
 impl Density {
     /// A pointer: the Mac.
-    pub const COMPACT: Self = Self { row: 28.0, row_two_line: 40.0, header: 28.0, hit: 24.0 };
+    pub const COMPACT: Self =
+        Self { row: 28.0, row_two_line: 40.0, header: 40.0, control: 28.0, hit: 24.0 };
     /// A finger: the iPhone and the iPad.
-    pub const TOUCH: Self = Self { row: 44.0, row_two_line: 56.0, header: 44.0, hit: 44.0 };
+    pub const TOUCH: Self =
+        Self { row: 44.0, row_two_line: 56.0, header: 44.0, control: 44.0, hit: 44.0 };
 }
 
 impl Default for Density {
@@ -1396,26 +1547,36 @@ mod tests {
         );
 
         let r = Radii::default();
-        assert!(r.xs < r.sm && r.sm < r.md && r.md < r.lg);
-        assert!((r.sm + r.sm - r.lg).abs() < f32::EPSILON, "a sheet is its rows' radius and pad");
+        assert!(r.xs < r.sm && r.sm < r.md && r.md < r.lg && r.lg < r.full);
+        assert!(
+            (Radii::nested(r.lg, 0.0, r.sm) - r.sm).abs() < f32::EPSILON,
+            "a sheet is its rows' radius and pad"
+        );
+        assert!((Radii::nested(r.lg, 1.0, r.xs) - 7.0).abs() < f32::EPSILON, "inside a border");
+        assert!(Radii::nested(r.xs, 1.0, r.md).abs() < f32::EPSILON, "never under zero");
 
+        // `MonoCode`'s chrome sizes: 13, 12 (the most used), 11; prose 15; then the page
+        // headings, 20 and 26, weights no higher than semibold.
         let mut t = Typography::default();
         assert_eq!(
-            (t.caption(), t.meta(), t.small(), t.prose(), t.title(), t.display()),
-            (10.0, 11.0, 12.0, 15.0, 15.0, 22.0)
+            (t.caption(), t.meta(), t.small(), t.prose(), t.title(), t.heading(), t.display()),
+            (11.0, 12.0, 12.0, 15.0, 15.0, 20.0, 26.0)
         );
         const {
             assert!(Typography::MEDIUM_WEIGHT > 400.0);
             assert!(Typography::MEDIUM_WEIGHT < Typography::STRONG_WEIGHT);
+            assert!(Typography::STRONG_WEIGHT <= 600.0, "semibold at the most");
         };
         t.ui_size = 8.0;
         assert_eq!(
             (t.caption(), t.meta(), t.small(), t.title()),
-            (6.0, 6.0, 7.0, 10.0),
+            (6.0, 7.0, 7.0, 10.0),
             "clamped at the floor"
         );
         let s = Spacing::default();
         assert!(s.xxs < s.xs && s.xs < s.sm && s.sm < s.md && s.md < s.lg && s.lg < s.xl);
+        assert!(s.xl < s.xxl && s.xxl < s.xxxl, "the page steps follow");
+        assert!(2.0_f32.mul_add(-s.inset_trailing(), s.inset()).abs() < f32::EPSILON, "12 and 6");
     }
 
     /// The window climbs in both variants (bars, then unfocused headers, then the content),
@@ -1760,12 +1921,12 @@ mod tests {
             [(TerminalPalette::DARK.bg, DARK_TONES), (TerminalPalette::LIGHT.bg, LIGHT_TONES)]
         {
             let s = Surfaces::derive(content, Contrast::Standard);
+            let tier = |share: f32| content.mix(tones.text, share);
             for (name, derived, designed) in [
                 ("text", s.text, tones.text),
-                ("text_secondary", s.text_secondary, tones.text_secondary),
-                ("text_muted", s.text_muted, tones.text_muted),
-                ("accent", s.accent, tones.accent),
-                ("success", s.success, tones.success),
+                ("text_secondary", s.text_secondary, tier(tones.text_secondary)),
+                ("text_muted", s.text_muted, tier(tones.text_muted)),
+                ("accent", s.accent, tones.accent.rgb()),
                 ("warn", s.warn, tones.warn),
                 ("error", s.error, tones.error),
             ] {
@@ -1880,7 +2041,8 @@ mod tests {
             ];
             for (name, fill) in fills {
                 let (sat, light) = sl(fill);
-                assert!(sat >= 0.5, "{variant:?}: {name} is greyed ({sat:.2})");
+                // The brand's own green sits at 0.48, the least saturated of the fills.
+                assert!(sat >= 0.45, "{variant:?}: {name} is greyed ({sat:.2})");
                 assert!((0.4..=0.75).contains(&light), "{variant:?}: {name} lightness {light:.2}");
                 let on = if name == "accent_fill" { s.accent_ink } else { s.fill_fg };
                 let ink = on.contrast(fill);
@@ -1910,10 +2072,12 @@ mod tests {
         assert!(step >= 1.05, "dark: elevated is {step:.3} over the content");
         let light = Theme::new(Variant::Light);
         assert_eq!(light.surfaces.elevated, Rgb::hex(0xff_ffff), "light: what floats is white");
-        for (theme, least) in [(&dark, 0.4), (&light, 0.1)] {
+        for theme in [&dark, &light] {
             let [contact, soft] = theme.elevation.shadow;
             assert!(contact.blur < soft.blur && contact.y < soft.y, "a tight layer, then a soft");
-            assert!(soft.alpha >= least, "{:?}: the shadow shows", theme.variant());
+            assert!(soft.alpha >= 0.1, "{:?}: the shadow shows", theme.variant());
+            // Zed's quiet floor: a dark shadow about a quarter of the 0.5 it was.
+            assert!(soft.alpha <= 0.15, "{:?}: the shadow pools", theme.variant());
         }
         assert_eq!(dark.elevation.highlight, Some(alpha::EDGE), "a dark sheet's lit edge");
         assert_eq!(light.elevation.highlight, None, "white sheets read on their own");
@@ -1925,22 +2089,125 @@ mod tests {
         };
         let (compact, touch) = (Density::COMPACT, Density::TOUCH);
         assert!(touch.hit >= 44.0 && touch.row >= 44.0 && touch.header >= 44.0);
+        assert!(touch.control >= 44.0, "a finger's button");
+        assert_eq!(
+            (compact.row, compact.control, compact.header),
+            (28.0, 28.0, 40.0),
+            "MonoCode's"
+        );
         assert!(compact.row < touch.row && compact.row_two_line < touch.row_two_line);
         assert!(compact.row < compact.row_two_line && touch.row < touch.row_two_line);
         assert_eq!(Theme::default().density, compact, "the Mac is the default");
     }
 
-    /// A primary button is white words on a saturated blue in both variants, as a native one
-    /// is: dark's `346BF1` and light's `1B4ED8` both carry white at AA. Dark's lighter
-    /// `6AA1FF` with dark words read as a disabled or foreign control.
+    /// The primary action is the neutral solid, `MonoCode`'s: the chrome's text as a fill, so
+    /// white on dark and near-black on light, with no hue, and its ink reads at AAA on it for
+    /// every supported background. The blue fill it replaces was a second brand colour.
     #[test]
-    fn the_primary_fill_carries_white() {
+    fn the_primary_is_the_neutral_solid() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let s = Surfaces::derive(content, Contrast::Standard);
+            assert_eq!(s.solid, s.text, "{name}: the solid is the text as a fill");
+            let ink = s.solid_ink.contrast(s.solid);
+            assert!(ink >= AAA, "{name}: ink on the solid is {ink:.2}");
+            assert_ne!(s.solid.is_light(), content.is_light(), "{name}: inverted");
+        }
         for variant in [Variant::Dark, Variant::Light] {
             let s = Theme::new(variant).surfaces;
-            assert_eq!(s.accent_ink, Rgb::hex(0xff_ffff), "{variant:?}: white words");
-            let ink = s.accent_ink.contrast(s.accent_fill);
-            assert!(ink >= AA, "{variant:?}: white on {:?} is {ink:.2}", s.accent_fill);
+            let grey = |c: Rgb| c.r.abs_diff(c.g) <= 2 && c.g.abs_diff(c.b) <= 2;
+            assert!(grey(s.solid) && grey(s.solid_ink), "{variant:?}: neutral");
         }
+        assert_eq!(Theme::new(Variant::Light).surfaces.solid_ink, Rgb::hex(0xff_ffff));
+    }
+
+    /// Every control and every word on a coloured fill reads, for every supported background,
+    /// in the standard look and under Increase Contrast: the solid stands 3:1 off every
+    /// surface it can sit on (WCAG 1.4.11), its ink reads AA on it, and AAA under Increase
+    /// Contrast, at rest and pressed (the solid given [`alpha::DIM`] toward the content, the
+    /// most the kit gives it); a badge's count reads AA on every fill.
+    #[test]
+    fn controls_and_the_words_on_fills_read_in_both_contrasts() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            for (contrast, floor) in [(Contrast::Standard, AA), (Contrast::Increased, AAA)] {
+                let s = Surfaces::derive(content, contrast);
+                for (surface, under) in under_text(&s, content) {
+                    let seen = s.solid.contrast(under);
+                    assert!(seen >= NON_TEXT, "{name} {contrast:?}: solid on {surface} {seen:.2}");
+                }
+                for (state, fill) in
+                    [("rest", s.solid), ("pressed", s.solid.mix(content, alpha::DIM))]
+                {
+                    let ink = s.solid_ink.contrast(fill);
+                    assert!(ink >= floor, "{name} {contrast:?}: ink on the {state} solid {ink:.2}");
+                }
+                for (fill, on) in [
+                    ("accent_fill", s.accent_fill, s.accent_ink),
+                    ("warn_fill", s.warn_fill, s.fill_fg),
+                    ("error_fill", s.error_fill, s.fill_fg),
+                ]
+                .map(|(n, f, o)| (n, o.contrast(f)))
+                {
+                    assert!(on >= AA, "{name} {contrast:?}: words on {fill} {on:.2}");
+                }
+            }
+        }
+    }
+
+    /// Slopty's green in OKLCH is the brand's sRGB, give or take a rounding step.
+    #[test]
+    fn the_brand_in_oklch_is_the_brand() {
+        let made = BRAND_OKLCH.rgb();
+        let off = [made.r.abs_diff(BRAND.r), made.g.abs_diff(BRAND.g), made.b.abs_diff(BRAND.b)];
+        assert!(off.iter().all(|&d| d <= 2), "{made:?} against {BRAND:?}");
+        assert_eq!(Oklch { l: 1.0, c: 0.0, h: 0.0 }.rgb(), Rgb::hex(0xff_ffff));
+        assert_eq!(Oklch { l: 0.0, c: 0.0, h: 0.0 }.rgb(), Rgb::hex(0));
+        // Past the gamut the chroma gives way and the lightness holds.
+        let wild = Oklch { l: 0.72, c: 0.6, h: 150.0 }.rgb();
+        assert!(wild.g > wild.r && wild.g > wild.b, "still green: {wild:?}");
+    }
+
+    /// The interaction accent and success are the brand's green in both variants, one
+    /// colour for one meaning; blue is gone from the chrome. As text it reads AA on every
+    /// surface; as a mark it stands 3:1 off the content, and its ink reads AA on it.
+    #[test]
+    fn the_accent_is_the_brand_green_and_blue_is_gone() {
+        let green = |c: Rgb| c.g > c.r.saturating_add(40) && c.g > c.b.saturating_add(40);
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            assert_eq!((s.accent, s.accent_fill), (s.success, s.success_fill), "{variant:?}");
+            for (name, c) in [("accent", s.accent), ("accent_fill", s.accent_fill)] {
+                assert!(green(c), "{variant:?}: {name} is {c:?}");
+            }
+            let mark = s.accent_fill.contrast(theme.content());
+            assert!(mark >= NON_TEXT, "{variant:?}: the mark is {mark:.2} off the content");
+            let ink = s.accent_ink.contrast(s.accent_fill);
+            assert!(ink >= AA, "{variant:?}: ink on the green is {ink:.2}");
+        }
+        assert_eq!(Theme::new(Variant::Dark).surfaces.accent, BRAND, "dark speaks the brand");
+        let cursor = |p: TerminalPalette| p.cursor == p.fg;
+        assert!(cursor(TerminalPalette::DARK) && cursor(TerminalPalette::LIGHT), "no blue caret");
+        for p in [TerminalPalette::DARK, TerminalPalette::LIGHT] {
+            let c = p.selection;
+            assert!(c.r == c.g && c.g == c.b, "a neutral selection: {c:?}");
+        }
+    }
+
+    /// The hairlines are the text at `MonoCode`'s 7 % in dark, a third again on white where
+    /// the same share reads fainter, and the hover and selected fills sit at its 5 % and
+    /// 8 to 10 %.
+    #[test]
+    fn the_hairlines_and_fills_are_monocode_s_shares() {
+        let share = |l: Hairline| l.opacity();
+        let dark = Theme::new(Variant::Dark).surfaces;
+        let light = Theme::new(Variant::Light).surfaces;
+        assert!((share(dark.border) - 0.07).abs() < 0.003, "{:?}", dark.border);
+        let ratio = share(light.border) / share(dark.border);
+        assert!((1.25..=1.45).contains(&ratio), "light is a third again: {ratio:.2}");
+        assert!((0.045..=0.06).contains(&DARK_TONES.raised.share), "hover");
+        assert!((0.08..=0.10).contains(&DARK_TONES.overlay.share), "selection");
     }
 
     /// A curve starts at rest and lands, and CSS's named curves read as CSS draws them: the

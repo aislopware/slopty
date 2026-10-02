@@ -63,12 +63,15 @@ pub fn drawer() -> impl Fn(f32) -> f32 {
     move |t| Motion::DEFAULT.drawer.at(t)
 }
 
-/// Whether chrome may move: not while the system asks for reduced motion (or a test asks
-/// through [`App::set_reduce_motion`]). GPUI's own flag is not set from the system, so both
-/// are read.
+/// Whether chrome may move: not while GPUI's Reduce Motion flag is set.
+///
+/// The flag is the one answer for every animation, Slopty's and GPUI's own (gpui-kit's
+/// among them): the app sets it from the system as it launches, as the setting changes and
+/// each time it comes forward, and a test sets it with [`App::set_reduce_motion`]. Nothing reads
+/// the system on its own, so no view can move while the rest of the window holds still.
 #[must_use]
 pub fn motion(cx: &App) -> bool {
-    !(cx.reduce_motion() || (!cfg!(test) && slopty_platform::reduce_motion()))
+    !cx.reduce_motion()
 }
 
 /// `el` fading in over [`FADE`] the first time it is drawn under `id`, eased out.
@@ -487,7 +490,7 @@ const EDGE_DEPTH: f32 = 2.0;
 #[must_use]
 pub fn elevate<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(theme.surfaces.elevated))
-        .border_1()
+        .border(px(SHEET_EDGE))
         .border_color(hsla(theme.surfaces.border))
         .shadow(elevation(theme))
 }
@@ -576,28 +579,68 @@ pub fn title(theme: &Theme, text: impl Into<SharedString>) -> Div {
 }
 
 /// How loud a [`button`] is. One primary per surface; the rest are secondary, or ghost where
-/// a frame would crowd a bar.
+/// a fill would crowd a bar.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ButtonKind {
-    /// The one action the surface is for: the accent fill, with the fills' ink on it.
+    /// The one action the surface is for: the neutral [`solid`], white on dark and near-black
+    /// on light, as `MonoCode`'s stop and Commit buttons are. Never the accent: green says
+    /// "live" or "done", not "press here".
     Primary,
-    /// Another way on: the floating surface with a hairline, a step above whatever it sits on
-    /// (white with a rule in light, as Geist's is), so it holds its edge on any surface. On the
-    /// panel it sat below a dialog's own surface and read as a hole.
+    /// Another way on: a neutral fill, the hover step, with no hairline. A row of bordered
+    /// boxes beside the primary read as a form.
     Secondary,
     /// A way out (Cancel): text only until the pointer is on it.
     Ghost,
-    /// A way aside (the other way in, Open in editor): accent text with no pad, so its words
-    /// start on the same edge as the text above them.
+    /// A way aside (the other way in, Open in editor): the text's own tone with no pad and no
+    /// fill, so its words start on the same edge as the text above them; underlined under
+    /// the pointer.
     Link,
+}
+
+/// `el` filled with the neutral solid, its words in the solid's ink: a primary button, the
+/// send and stop disc, a ticked box, a switch that is on, a key that is armed.
+///
+/// One per surface at most: two solids side by side leave nothing to say which leads.
+pub fn solid<E: Styled>(el: E, theme: &Theme) -> E {
+    let s = theme.surfaces;
+    el.bg(hsla(s.solid)).text_color(hsla(s.solid_ink))
+}
+
+/// [`solid`] that answers the pointer: under it the solid gives a little toward the content,
+/// and more while pressed, as a native button darkens.
+pub fn solid_pressable(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
+    let (hovered, pressed) = solid_states(theme);
+    solid(el, theme).hover(move |el| el.bg(hsla(hovered))).active(move |el| el.bg(hsla(pressed)))
+}
+
+/// The solid under the pointer and pressed: given [`alpha::FAINT`] and [`alpha::DIM`] toward
+/// the content. The theme's tests hold the solid's ink to AA on the pressed one.
+fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
+    let (solid, content) = (theme.surfaces.solid, theme.content());
+    (solid.mix(content, alpha::FAINT), solid.mix(content, alpha::DIM))
+}
+
+/// `el` drawn as the selected row: the selected fill with a hairline ring just inside its edge.
+///
+/// The ring lets a selection read on a surface whose tone sits near the fill (a menu, a
+/// selected row on the bars) and hold its shape on any background. A hover is the fill alone.
+pub fn selected<E: Styled>(el: E, theme: &Theme) -> E {
+    let s = theme.surfaces;
+    el.bg(hsla(s.overlay)).shadow(vec![BoxShadow {
+        color: hsla(s.border),
+        offset: point(px(0.0), px(0.0)),
+        blur_radius: px(0.0),
+        spread_radius: px(1.0),
+        inset: true,
+    }])
 }
 
 /// A text button, the one every dialog, panel and empty state draws.
 ///
 /// Four had been written by hand, and the secondary among them filled itself with `raised`,
 /// which on the light theme's `canvas` is one step from `canvas` itself: "Add a window" and
-/// the phone's "Paste" were words floating on a smudge. Every kind wears a 1 pt border (clear on a
-/// ghost or a link) so they all stand the same height side by side. Its words are at the medium
+/// the phone's "Paste" were words floating on a smudge. Every kind stands the density's
+/// control height, so they line up side by side and fill a row. Its words are at the medium
 /// weight: a button is an action, and its label reads as one against the prose round it.
 #[must_use]
 pub fn button(
@@ -616,34 +659,25 @@ pub fn button(
         .flex()
         .items_center()
         .justify_center()
-        .when(kind != ButtonKind::Link, |el| el.px(px(theme.spacing.md)).border_1())
-        .when(kind == ButtonKind::Link, |el| el.border_t_1().border_b_1())
-        .py(px(theme.spacing.xs))
+        .h(px(theme.density.control))
+        .when(kind != ButtonKind::Link, |el| el.px(px(theme.spacing.md)))
         .rounded(px(theme.radii.sm))
         .text_size(px(theme.typography.ui_size))
         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
         .cursor_pointer()
         .child(label);
     let el = match kind {
-        ButtonKind::Primary => el
-            .border_color(hsla(s.accent_fill))
-            .bg(hsla(s.accent_fill))
-            .text_color(hsla(s.accent_ink)),
+        ButtonKind::Primary => solid_pressable(el, theme),
         ButtonKind::Secondary => el
-            .border_color(hsla(s.border))
-            .bg(hsla(s.elevated))
+            .bg(hsla(s.raised))
             .text_color(hsla(s.text))
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .hover(move |el| el.bg(hsla(s.overlay)))
             .active(move |el| el.bg(hsla(s.overlay))),
         ButtonKind::Ghost => el
-            .border_color(gpui::transparent_black())
             .text_color(hsla(s.text_secondary))
             .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
             .active(move |el| el.bg(hsla(s.overlay))),
-        ButtonKind::Link => el
-            .border_color(gpui::transparent_black())
-            .text_color(hsla(s.accent))
-            .hover(Styled::underline),
+        ButtonKind::Link => el.text_color(hsla(s.text)).hover(Styled::underline),
     };
     crate::a11y::tab_stop(el, s.accent)
 }
@@ -677,18 +711,49 @@ impl Row {
     }
 }
 
-/// A list row: its density's height, on the edge grid ([`inset_x`]), its parts centred.
+/// A list row: its density's height, starting on the edge grid ([`inset_x`]) and ending
+/// half as far in ([`slopty_theme::Spacing::inset_trailing`]), its parts centred.
 ///
 /// Its parts sit a base unit apart. The navigator, the palette, the inbox and the menus draw
-/// their rows from it, so one density switch moves them all.
+/// their rows from it, so one density switch moves them all. The trailing end is usually an
+/// icon button or a count, which brings its own room.
 #[must_use]
 pub fn row(theme: &Theme, lines: Row) -> Div {
-    inset_x(div(), theme)
+    div()
+        .pl(px(theme.spacing.inset()))
+        .pr(px(theme.spacing.inset_trailing()))
         .flex_none()
         .flex()
         .items_center()
         .gap(px(theme.spacing.sm))
         .h(px(lines.height(theme)))
+}
+
+/// The hairline [`elevate`] draws round a floating sheet.
+pub const SHEET_EDGE: f32 = 1.0;
+
+/// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox).
+///
+/// Inside its hairline: the sheet's radius less its rows' and the hairline, so a row's corner
+/// shares the sheet's centre (6 inside 12).
+#[must_use]
+pub fn sheet_pad(theme: &Theme) -> f32 {
+    theme.radii.lg - theme.radii.sm - SHEET_EDGE
+}
+
+/// A row inside a floating sheet padded by [`sheet_pad`].
+///
+/// A [`row`] whose fill (hover, selection) is rounded to nest in the sheet's corners, its
+/// leading words still on the edge grid measured from the sheet's own edge, and its trailing
+/// end a row's trailing inset in.
+#[must_use]
+pub fn sheet_row(theme: &Theme, lines: Row) -> Div {
+    let pad = sheet_pad(theme);
+    row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(slopty_theme::Radii::nested(
+        theme.radii.lg,
+        SHEET_EDGE,
+        pad,
+    )))
 }
 
 /// `el` padded in to the one edge grid on both sides: [`slopty_theme::Spacing::inset`]. A
@@ -1001,8 +1066,10 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     // A focused field shows its caret, not a ring: the accent spent on every focused field's
     // hairline made each form one more place the accent shouted.
     c.ring = hsla(s.border);
-    c.caret = hsla(s.accent);
-    c.selection = hsla_alpha(s.accent, alpha::TINT);
+    // The caret and a field's selection are neutral, as the terminal's cursor and selection
+    // are: colour is kept for meaning.
+    c.caret = hsla(s.text);
+    c.selection = hsla_alpha(s.text, alpha::TINT);
     c.accent = hsla(s.raised);
     c.accent_foreground = hsla(s.text);
     c.muted = hsla(s.raised);
@@ -1011,11 +1078,12 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.secondary_foreground = hsla(s.text);
     c.secondary_hover = hsla(s.overlay);
     c.secondary_active = hsla(s.overlay);
-    // A primary button is a fill, so it takes the fill and its ink: the accent's text tone is
-    // a pale blue in dark, lifted for reading on the dark surfaces, and a button in it read as
-    // disabled.
-    c.primary = hsla(s.accent_fill);
-    c.primary_foreground = hsla(s.accent_ink);
+    // gpui-kit's primary (its buttons, switches, checkboxes) is Slopty's: the neutral solid.
+    let (hovered, pressed) = solid_states(theme);
+    c.primary = hsla(s.solid);
+    c.primary_hover = hsla(hovered);
+    c.primary_active = hsla(pressed);
+    c.primary_foreground = hsla(s.solid_ink);
     c.link = hsla(s.accent);
     c.link_hover = hsla(s.accent);
     c.link_active = hsla(s.accent);
@@ -1157,8 +1225,9 @@ mod tests {
                 assert_eq!(kit.mode.is_dark(), variant == Variant::Dark);
                 assert_eq!(kit.colors.background, hsla(theme.surfaces.panel));
                 assert_eq!(kit.colors.foreground, hsla(theme.surfaces.text));
-                assert_eq!(kit.colors.primary, hsla(theme.surfaces.accent_fill), "a fill");
-                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.accent_ink));
+                assert_eq!(kit.colors.primary, hsla(theme.surfaces.solid), "the neutral solid");
+                assert_eq!(kit.colors.primary_foreground, hsla(theme.surfaces.solid_ink));
+                assert_eq!(kit.colors.caret, hsla(theme.surfaces.text), "a neutral caret");
                 assert_eq!(kit.colors.border, hsla(theme.surfaces.border));
                 assert_eq!(kit.colors.ring, hsla(theme.surfaces.border), "no accent on a field");
                 assert_eq!(kit.colors.title_bar, hsla(theme.surfaces.canvas));
@@ -1477,6 +1546,29 @@ mod tests {
         assert_eq!(on.style().size.width, off.style().size.width, "one size either way");
     }
 
+    /// The primary is the neutral solid, the secondary a neutral fill and the rest bare, all
+    /// one control's height, in both variants: no button wears the accent.
+    #[test]
+    fn a_button_is_neutral_and_one_height() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let fill = |kind| button(&theme, "b", "Go", kind).style().background.clone();
+            assert_eq!(fill(ButtonKind::Primary), Some(gpui::Fill::from(hsla(s.solid))));
+            assert_eq!(fill(ButtonKind::Secondary), Some(gpui::Fill::from(hsla(s.raised))));
+            assert_eq!(fill(ButtonKind::Ghost), None);
+            assert_eq!(fill(ButtonKind::Link), None);
+            for kind in [ButtonKind::Primary, ButtonKind::Secondary, ButtonKind::Ghost] {
+                let height = button(&theme, "b", "Go", kind).style().size.height;
+                assert_eq!(height, Some(px(theme.density.control).into()), "{kind:?}");
+            }
+            let mut picked = selected(div(), &theme);
+            assert_eq!(picked.style().background, Some(gpui::Fill::from(hsla(s.overlay))));
+            let ring = picked.style().box_shadow.clone().unwrap_or_default();
+            assert!(ring.iter().all(|l| l.inset && l.spread_radius == px(1.0)), "{ring:?}");
+        }
+    }
+
     /// The first run and About lead with one mark at one size.
     #[test]
     fn the_brand_is_the_app_icon_at_its_side() {
@@ -1560,13 +1652,9 @@ mod tests {
         ));
     }
 
-    /// The accent's text tone is never a fill: lifted for reading on the dark surfaces, it is a
-    /// pale blue in dark, and a button or a ticked box in it read as disabled. A fill takes
-    /// `accent_fill` with the fills' ink.
-    ///
-    /// Nor is it a focused field's border: a field shows focus by its caret, and the accent is
-    /// kept for the one primary action, the keyboard's ring, the selection, links and the busy
-    /// mark.
+    /// The accent's text tone is never a fill: it is lifted for reading, not for carrying
+    /// words. Nor is it a focused field's border: a field shows focus by its caret, and the
+    /// accent is kept for the keyboard's ring, links in prose and the marks that say "live".
     #[test]
     fn the_accent_text_tone_is_never_a_fill() {
         const AWAITING: [&str; 0] = [];
@@ -1585,6 +1673,107 @@ mod tests {
                 }
             }
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A control in the green: words or a glyph in `accent_ink`, which only a green fill
+    /// carries, so the line paints a button, a ticked box, a switch or a key green.
+    fn green_control(line: &str) -> Option<&'static str> {
+        let code = !line.trim_start().starts_with("//");
+        (code && line.contains("accent_ink"))
+            .then_some("a control in the accent; a primary or an on state takes `kit::solid`")
+    }
+
+    #[test]
+    fn the_green_control_check_knows_a_control_from_a_mark() {
+        assert!(green_control(".bg(hsla(s.accent_fill)).text_color(hsla(s.accent_ink))").is_some());
+        assert!(green_control("if lit { (s.accent_fill, s.accent_ink) } else { x }").is_some());
+        assert!(green_control(".size(px(dot)).rounded_full().bg(hsla(s.accent_fill))").is_none());
+        assert!(green_control("kit::solid(el, theme)").is_none());
+        assert!(green_control("// `accent_ink` was the ink").is_none(), "a comment");
+    }
+
+    /// The accent is a mark, never a control's fill: the primary action, a ticked box, a
+    /// switch that is on and an armed key take the neutral [`solid`]. Green on a control read
+    /// as a second brand colour, and made green mean "press here" as well as "live, chosen,
+    /// done". The one green that carries words is a badge's count (the inbox bell's, for
+    /// what finished).
+    #[test]
+    fn the_accent_is_never_a_control() {
+        const RULED: [&str; 1] = ["slopty-ui/src/workspace/titlebar.rs"];
+        // Call sites whose owners move them onto `kit::solid` in their next change.
+        const AWAITING: [&str; 0] = [];
+        let waived: Vec<&str> = RULED.iter().chain(&AWAITING).copied().collect();
+        let wrong = flagged(&waived, green_control);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A colour picked at a call site rather than taken from the theme: a hex or channel
+    /// literal handed to GPUI. The tokens derive every colour from the content, so a literal
+    /// is the one colour a custom background or Increase Contrast cannot move.
+    fn raw_colour(line: &str) -> Option<&'static str> {
+        let code = !line.trim_start().starts_with("//");
+        let literal = ["Rgb::hex(", "gpui::rgb(", "gpui::rgba(", "gpui::hsla(", "Rgb { r:"];
+        (code && literal.iter().any(|l| line.contains(l)))
+            .then_some("a colour literal, not a theme token")
+    }
+
+    #[test]
+    fn the_colour_check_knows_a_literal_from_a_token() {
+        assert!(raw_colour(".bg(gpui::rgb(0x00ff_0000))").is_some());
+        assert!(raw_colour("let white = Rgb::hex(0xff_ffff);").is_some());
+        assert!(raw_colour(".bg(hsla(s.raised))").is_none());
+        assert!(raw_colour("/// not `Rgb::hex(0)`").is_none(), "a comment");
+    }
+
+    /// Chrome paints in the theme's colours only. The waived lines compute a colour from the
+    /// theme's (a cursor's ink against the cursor the program chose), or are this file's lit
+    /// edge, which is white by definition.
+    #[test]
+    fn chrome_has_no_colour_literals() {
+        const RULED: [&str; 1] = ["slopty-app/src/settings.rs"];
+        let wrong = flagged(&RULED, raw_colour);
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A text size, a radius or a control's height written as a literal: a type size off the
+    /// scale, a corner off the radii, a row off the density.
+    fn raw_size(line: &str) -> Option<&'static str> {
+        let code = !line.trim_start().starts_with("//");
+        let squeezed: String = line.split_whitespace().collect();
+        let literal = |call: &str| {
+            squeezed.split(call).skip(1).any(|rest| {
+                rest.strip_prefix("px(")
+                    .is_some_and(|n| n.starts_with(|c: char| c.is_ascii_digit() && c != '0'))
+            })
+        };
+        if !code {
+            return None;
+        }
+        if literal(".text_size(") {
+            return Some("a text size off the type scale");
+        }
+        [".rounded(", ".rounded_t(", ".rounded_b(", ".rounded_l(", ".rounded_r("]
+            .iter()
+            .any(|call| literal(call))
+            .then_some("a radius off `theme.radii`")
+    }
+
+    #[test]
+    fn the_size_check_knows_a_literal_from_a_token() {
+        assert!(raw_size(".text_size(px(13.0))").is_some());
+        assert!(raw_size(".rounded(px(6.0))").is_some());
+        assert!(raw_size(".rounded_t(px(0.0))").is_none(), "square is no radius");
+        assert!(raw_size(".text_size(px(theme.typography.meta()))").is_none());
+        assert!(raw_size(".rounded(px(theme.radii.sm * k))").is_none());
+        assert!(raw_size("// .text_size(px(13.0))").is_none(), "a comment");
+    }
+
+    /// Chrome's type sizes come from the type scale and its corners from the radii.
+    #[test]
+    fn chrome_sizes_come_from_the_scale() {
+        const AWAITING: [&str; 0] = [];
+        let wrong = flagged(&AWAITING, raw_size);
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
