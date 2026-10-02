@@ -2155,20 +2155,20 @@ fn set_cell(line: &mut Line, x: u16, cell: Cell) {
     }
 }
 
-/// A virtual kitty placement: shown only through placeholder cells.
-/// A frame for one viewer joining, with what goes around it (see
-/// [`GhosttyEngine::join_frame`]).
+/// A frame for viewers joining, with what goes around it (see [`GhosttyEngine::join_frame`]
+/// and [`GhosttyEngine::baseline_frame`]).
 #[derive(Debug)]
 pub struct Joined {
     /// Every row.
     pub frame: Frame,
-    /// The images it places that the joiner needs, sent ahead of it.
+    /// The images it places that the joiners need, sent ahead of it.
     pub images: Vec<ImageUpload>,
 }
 
 /// What a frame places: on its screen, and above it when that is due ([`Frame::above`]).
 type Placed = (Vec<Placement>, Option<Vec<Placement>>);
 
+/// A virtual kitty placement: shown only through placeholder cells.
 struct Virtual {
     image: u32,
     placement: u32,
@@ -2604,7 +2604,7 @@ impl GhosttyEngine {
     }
 
     /// Every row, for every viewer (a resize): the next sequence number, and every image
-    /// shipped again.
+    /// shipped again. The rows sent are what the next diff is taken against.
     ///
     /// # Errors
     ///
@@ -2613,10 +2613,11 @@ impl GhosttyEngine {
         self.build_frame(input_ack, Take::Everyone)?.ok_or(EngineError::InvalidSize("empty frame"))
     }
 
-    /// Every row for one viewer joining (attach, catching up), with the images it needs sent
-    /// ahead. The frame carries the sequence number of the last frame the others had, and what
-    /// changed since is still theirs to take: take the pending diff first
-    /// ([`Self::take_frame`]), so it does not reach the joiner as a gap.
+    /// Every row for one viewer joining (attach, catching up) beside viewers that follow the
+    /// diffs, with the images it needs sent ahead. The frame carries the sequence number of the
+    /// last frame the others had, and what changed since is still theirs to take: take the
+    /// pending diff first ([`Self::take_frame`]), so it does not reach the joiner as a gap.
+    /// With nobody following the diffs, [`Self::baseline_frame`].
     ///
     /// # Errors
     ///
@@ -2627,6 +2628,22 @@ impl GhosttyEngine {
         let images = std::mem::replace(&mut self.uploads, others);
         let frame = frame?.ok_or(EngineError::InvalidSize("empty frame"))?;
         Ok(Joined { frame, images })
+    }
+
+    /// Every row for viewers joining while nobody follows the diffs (the first attach, a
+    /// re-attach, catching up alone), with every image it places sent ahead, at the next
+    /// sequence number. What they are sent becomes what the next diff is taken against, so the
+    /// first key after it carries the rows it changed, not every row again as a diff after
+    /// [`Self::join_frame`] would.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn baseline_frame(&mut self, input_ack: u64) -> Result<Joined, EngineError> {
+        // Owed to viewers that no longer follow, and this frame ships every image it places.
+        self.uploads.clear();
+        let frame = self.full_frame(input_ack)?;
+        Ok(Joined { frame, images: std::mem::take(&mut self.uploads) })
     }
 
     /// Nobody is watching: drop what the next frame would have carried that the next joiner's
@@ -3385,6 +3402,51 @@ mod tests {
         let diff = e.take_frame(0).unwrap().expect("the others' diff is still due");
         assert_eq!(diff.seq, first.seq + 1);
         assert!(diff.updates.iter().any(|u| u.line.text() == "one"), "{diff:?}");
+    }
+
+    /// Viewers joining while nobody follows the diffs take a frame that becomes what the next
+    /// diff is taken against: the first key after it carries the row it changed, whether the
+    /// session ran unwatched from its start or scrolled on after the last viewer left.
+    #[test]
+    fn the_first_key_after_a_baseline_carries_only_its_row() {
+        let changed = |f: &Frame| f.updates.iter().map(|u| u.row).collect::<Vec<_>>();
+        let mut e = engine(20, 6);
+        e.write(b"$ ls\r\na  b  c\r\n$ ");
+        let attach = e.baseline_frame(0).unwrap().frame;
+        assert!(attach.full && attach.updates.len() == 6, "every row: {attach:?}");
+        e.write(b"x");
+        let key = e.take_frame(1).unwrap().expect("the key's echo");
+        assert!(!key.full, "{key:?}");
+        assert_eq!(key.seq, attach.seq + 1, "no gap after the baseline");
+        assert_eq!(changed(&key), [2], "the prompt's row alone");
+
+        // The viewer left and the screen scrolled while nobody watched; the record of what it
+        // held is of other lines now.
+        e.write(b"\r\none\r\ntwo\r\nthree\r\nfour\r\n$ ");
+        e.discard_frame();
+        let back = e.baseline_frame(0).unwrap().frame;
+        assert!(back.full && back.updates.len() == 6, "every row: {back:?}");
+        assert_eq!(back.seq, key.seq + 1);
+        e.write(b"y");
+        let key = e.take_frame(2).unwrap().expect("the key's echo");
+        assert!(!key.full, "{key:?}");
+        assert_eq!(changed(&key), [5], "the prompt's row alone");
+        assert_eq!(key.updates[0].line.text().trim_end(), "$ y");
+    }
+
+    /// A viewer joining beside one that follows the diffs leaves the follower's record as it
+    /// was: with the follower up to date, the next key carries the row it changed to both.
+    #[test]
+    fn the_first_key_after_a_join_beside_a_follower_carries_only_its_row() {
+        let mut e = engine(20, 6);
+        e.write(b"$ ls\r\na  b  c\r\n$ ");
+        let follower = e.baseline_frame(0).unwrap().frame;
+        let joined = e.join_frame(0).unwrap().frame;
+        assert!(joined.full && joined.seq == follower.seq, "{joined:?}");
+        e.write(b"x");
+        let key = e.take_frame(1).unwrap().expect("the key's echo");
+        assert!(!key.full, "{key:?}");
+        assert_eq!(key.updates.iter().map(|u| u.row).collect::<Vec<_>>(), [2]);
     }
 
     /// A search of the whole terminal formatted afresh, to hold an incremental one against.
@@ -5998,6 +6060,24 @@ mod graphics_tests {
         // A client attaching holds nothing: a full frame ships them again.
         let _full = e.full_frame(0).unwrap();
         assert_eq!(e.drain_images().len(), 1);
+    }
+
+    /// A baseline ships the pixels of what it places once, ahead of it, and drops what was
+    /// owed to viewers that no longer follow; the diff after it sends none again.
+    #[test]
+    fn a_baseline_ships_its_images_once() {
+        let mut e = engine();
+        e.write(&transmit(1, 32, 2, 2, &[7; 16]));
+        let _first = e.take_frame(0).unwrap().expect("a frame");
+        // Nobody drained this frame's upload: its viewers left before it went out.
+        let joined = e.baseline_frame(0).unwrap();
+        assert_eq!(joined.images.iter().map(|u| u.id).collect::<Vec<_>>(), [1], "once");
+        assert_eq!(joined.frame.images.len(), 1);
+        assert_eq!(e.drain_images(), vec![], "nothing left for the next frame");
+        e.write(b"\r\nhello");
+        let frame = e.take_frame(0).unwrap().expect("a frame");
+        assert!(!frame.full && frame.images.len() == 1, "{frame:?}");
+        assert_eq!(e.drain_images(), vec![], "the joiners hold its pixels");
     }
 
     /// A placeholder run that scrolls into the history is listed above the screen: no frame

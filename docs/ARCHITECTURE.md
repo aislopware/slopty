@@ -101,7 +101,9 @@ The worker runs `libghostty-vt` against the real PTY and ships **rendered rows**
   actor builds the next diff only when a viewer has room, the engine coalescing meanwhile, and a
   viewer that missed a diff is sent every row at the others' sequence number. Other events
   (lines, matches, title, bell) are never skipped. A joining viewer's frame is built the same
-  way, so nobody else is made to resync. Input buys up to two frames outside the 8 ms pace for
+  way, so nobody else is made to resync. With nobody following the diffs, the whole frame is a
+  baseline (`GhosttyEngine::baseline_frame`) that the next diff is taken against, so the first
+  key after an attach carries only the rows it changed. Input buys up to two frames outside the 8 ms pace for
   50 ms, so an echo beside a flood is not held to it. A written frame can still wait in QUIC's
   stream buffer, so the worker follows every 16 KiB of frames with a `TermEvent::Marker` that the
   client answers with `TermRequest::Reached` once it has applied everything before it; a viewer

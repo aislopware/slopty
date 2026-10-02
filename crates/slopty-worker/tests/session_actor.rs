@@ -215,47 +215,49 @@ mod actor {
     /// connection copies into a datagram; the attach's whole frame and output long after the
     /// input are not.
     ///
-    /// The Enter judged goes in once the shell has said it is reading, so what answers it is
-    /// the tty's own echo, which the kernel writes back inside the write. The first diff after
-    /// an attach carries every row, so an Enter at the attach answers the shell's first `read`
-    /// and takes that diff; typed then and judged, it raced the shell's start, which on a
-    /// loaded runner came past the echo's window.
+    /// The Enter goes in as the attach's frame arrives, and what answers it is the tty's own
+    /// echo, which the kernel writes back inside the write, whenever the shell gets to its
+    /// `read`. The attach's frame is what the diffs are taken against, so that answer carries
+    /// the rows the Enter changed, not every row again, and rides as an echo: at the size the
+    /// session has, and at another one the attach resizes it to.
     #[tokio::test]
     async fn only_the_diffs_that_answer_input_are_echoes() {
-        let script = "read x; printf ready; read x; echo typed; sleep 0.3; echo later; sleep 30";
-        let (session, mut child) = start(&["/bin/sh", "-c", script]);
-        let me = ClientId::new();
-        let (tx, mut rx) = mpsc::channel::<Outbound>(64);
-        session.attach(me, size(40, 6), tx).unwrap();
-        let mut state = TermState::new(size(40, 6));
-        // Every frame, as (echo, whole, the screen after it).
-        let mut frames: Vec<(bool, bool, String)> = Vec::new();
-        // How many frames had come when each Enter went in.
-        let mut entered: Vec<usize> = Vec::new();
-        while !frames.last().is_some_and(|(_, _, shown)| shown.contains("later")) {
-            let out = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-                .await
-                .unwrap_or_else(|_| panic!("no frame showing `later`: {frames:?}"))
-                .expect("sink open");
-            let ev = event(&out);
-            if let TermEvent::Frame(f) = &ev {
-                let whole = f.full;
-                let _effects = state.apply(ev.clone());
-                frames.push((out.is_echo(), whole, text(state.screen())));
+        for attach in [size(40, 6), size(50, 8)] {
+            let script = "read x; echo typed; sleep 0.3; echo later; sleep 30";
+            let (session, mut child) = start(&["/bin/sh", "-c", script]);
+            let me = ClientId::new();
+            let (tx, mut rx) = mpsc::channel::<Outbound>(64);
+            session.attach(me, attach, tx).unwrap();
+            let mut state = TermState::new(attach);
+            // Every frame, as (echo, whole, the screen after it).
+            let mut frames: Vec<(bool, bool, String)> = Vec::new();
+            while !frames.last().is_some_and(|(_, _, shown)| shown.contains("later")) {
+                let out = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("no frame showing `later`: {frames:?}"))
+                    .expect("sink open");
+                let ev = event(&out);
+                if let TermEvent::Frame(f) = &ev {
+                    let whole = f.full;
+                    let _effects = state.apply(ev.clone());
+                    frames.push((out.is_echo(), whole, text(state.screen())));
+                    if frames.len() == 1 {
+                        session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
+                    }
+                }
             }
-            let reading = frames.last().is_some_and(|(_, _, shown)| shown.contains("ready"));
-            if (entered.is_empty() && !frames.is_empty()) || (entered.len() == 1 && reading) {
-                entered.push(frames.len());
-                session.request(me, TermRequest::Raw(b"\r".to_vec())).unwrap();
-            }
+            let (first, last) = (frames.first().unwrap(), frames.last().unwrap());
+            assert!(first.1 && !first.0, "the attach's whole frame is no echo: {frames:?}");
+            assert!(!last.0, "output 300 ms after the input is no echo: {frames:?}");
+            let answer = frames.get(1);
+            assert!(
+                answer.is_some_and(|&(echo, whole, _)| echo && !whole),
+                "attached at {attach:?}, the Enter's answer is an echo of what it changed: \
+                 {frames:?}"
+            );
+            session.close();
+            let _killed = child.kill().await;
         }
-        let (first, last) = (frames.first().unwrap(), frames.last().unwrap());
-        assert!(first.1 && !first.0, "the attach's whole frame is no echo: {frames:?}");
-        assert!(!last.0, "output 300 ms after the input is no echo: {frames:?}");
-        let answer = entered.get(1).and_then(|&at| frames.get(at));
-        assert!(answer.is_some_and(|(echo, ..)| *echo), "the Enter's echo is: {frames:?}");
-        session.close();
-        let _killed = child.kill().await;
     }
 
     /// Orchestration resizes a terminal only while no client shows it, checked and applied in

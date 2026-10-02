@@ -1817,10 +1817,17 @@ impl Actor {
         }
     }
 
-    /// Every row and the images on them, encoded for whoever joins at the others' sequence
-    /// number; the error to tell them when the rows could not be read.
+    /// Every row and the images on them, encoded for whoever joins: at the others' sequence
+    /// number beside viewers that follow the diffs, and as what the next diff is taken against
+    /// when none does, so the first key after it is not sent every row again. The error to
+    /// tell them when the rows could not be read.
     fn whole_frame(&mut self) -> Result<Whole, Option<Outbound>> {
-        let joined = self.engine.join_frame(self.ack_seq).map_err(|e| {
+        let joined = if self.viewers.iter().all(|v| v.stale) {
+            self.engine.baseline_frame(self.ack_seq)
+        } else {
+            self.engine.join_frame(self.ack_seq)
+        };
+        let joined = joined.map_err(|e| {
             tracing::error!(session = %self.id, error = %e, "whole frame failed");
             self.encode(&TermEvent::Error(TermError::Engine(e.to_string())))
         })?;
@@ -2053,6 +2060,10 @@ impl Actor {
         self.dirty_since_checkpoint = true;
         self.checkpoint_after_quiet();
         self.broadcast(&TermEvent::Resized { cols: size.cols, rows: size.rows });
+        if self.viewers.iter().all(|v| v.stale) {
+            // Nobody follows the diffs: each viewer is sent every row once it has room.
+            return;
+        }
         match self.engine.full_frame(self.ack_seq) {
             Ok(frame) => {
                 self.send_frame(frame);

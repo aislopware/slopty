@@ -13590,3 +13590,43 @@ cargo test -p slopty-worker --lib -- screen::synthetic::tests::a_submit_that_nev
   screen::synthetic::tests::the_clock_probes --nocapture
 cargo test -p slopty-worker --lib screen::tests::an_encode_that_never_comes_back
 ```
+
+## 2026-10-02 — the first key after an attach
+
+The session actor built an attaching viewer's frame with `join_frame`, which leaves the record of
+what the viewers following the diffs hold as it was, and the dirty state with it, so that viewers
+already following do not lose their next diff. With nobody else following, that record was empty
+or out of date, and the first key typed after an attach, reattach or catch-up was sent every row
+in a full frame. A full frame never rides as an echo datagram. Now, when no viewer follows the
+diffs, the whole frame is a baseline (`GhosttyEngine::baseline_frame`): it becomes what the next
+diff is computed from. A viewer joining beside followers still gets `join_frame`.
+
+The engine's screen is the one from "a scroll ships the rows it moved": `ls -l`-like output and a
+marked zsh-style prompt on the bottom row, written while nobody watched. After the attach frame,
+one typed key is written, and its frame is built and encoded (the encoded `TermEvent::Frame`, length
+prefix included). "Before" is the attach as the actor made it until now (`join_frame`). Both
+attach styles are measured in the same run. Release build, mac-studio M1 Max at load average 15–17
+with other lanes building, median of 51 rounds, three runs:
+
+```sh
+cargo nextest run --release -p slopty-engine --test wire_bytes --no-capture \
+  -E 'test(first_key)'
+```
+
+| first key after an attach | bytes | rows | full | build and encode |
+| --- | --- | --- | --- | --- |
+| 80 × 24 before | 11 134 B | 24 | yes | 51.1–52.8 µs |
+| 80 × 24 after | **230 B** | 1 | no | **2.3–2.4 µs** |
+| 200 × 60 before | 28 439 B | 60 | yes | 209.4–212.4 µs |
+| 200 × 60 after | **232 B** | 1 | no | **3.9–4.0 µs** |
+
+The key's frame now fits one datagram and also goes out as an echo copy, so a lost packet no
+longer leaves it waiting for a retransmit. `only_the_diffs_that_answer_input_are_echoes`
+(`crates/slopty-worker/tests/session_actor.rs`) checks this in the actor against a real shell.
+It types Enter as the attach frame arrives and requires the frame that answers to be an echo and
+not full. With the actor switched back to `join_frame`, it fails: that frame is full and not an
+echo.
+
+A resize with nobody following the diffs no longer builds a frame that nobody receives. The
+viewers waiting are sent the baseline when they have room. The echo test attaches both at the
+session's size and at a size the attach resizes it to.

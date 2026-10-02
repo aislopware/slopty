@@ -1,7 +1,8 @@
-//! What a keystroke's echo and an Enter at a bottom prompt cost on the wire: the encoded
-//! `TermEvent::Frame` a viewer following the diffs is sent. `cargo nextest run -p
-//! slopty-engine --test wire_bytes --no-capture` prints the numbers (`docs/MEASUREMENTS.md`,
-//! 2026-09-25 "a scroll ships the rows it moved").
+//! What a keystroke's echo, an Enter at a bottom prompt and the first key after an attach cost
+//! on the wire: the encoded `TermEvent::Frame` a viewer following the diffs is sent. `cargo
+//! nextest run -p slopty-engine --test wire_bytes --no-capture` prints the numbers
+//! (`docs/MEASUREMENTS.md`, 2026-09-25 "a scroll ships the rows it moved" and 2026-10-02 "the
+//! first key after an attach").
 
 #[cfg(test)]
 #[expect(
@@ -26,6 +27,13 @@ mod wire {
     /// An engine of `cols` × `rows` whose screen is full of `ls -l`-like output, the cursor at a
     /// prompt on the bottom row, and the attach frame already taken.
     fn at_a_full_prompt(cols: u16, rows: u16) -> GhosttyEngine {
+        let mut e = unwatched_at_a_full_prompt(cols, rows);
+        let _attach = e.full_frame(0).unwrap();
+        e
+    }
+
+    /// The same screen, written while nobody watched: no frame taken yet.
+    fn unwatched_at_a_full_prompt(cols: u16, rows: u16) -> GhosttyEngine {
         let size = TermSize { cols, rows, metrics: CellMetrics { cell_width: 8, cell_height: 16 } };
         let mut e = GhosttyEngine::new(EngineConfig { size, scrollback_lines: 10_000 }).unwrap();
         e.write(&prompt(0));
@@ -40,7 +48,6 @@ mod wire {
             );
         }
         e.write(&prompt(0));
-        let _attach = e.full_frame(0).unwrap();
         e
     }
 
@@ -76,6 +83,47 @@ mod wire {
             assert!(echo < 300, "a row travels to its last cell: {echo} B");
             assert!(!frame.full && frame.updates.len() == 4, "the rows that came in: {frame:?}");
             assert!(enter < 1_000, "{enter} B");
+        }
+    }
+
+    /// The first key typed after an attach while nobody else watched. Attached with a frame
+    /// for one viewer beside others (`join_frame`), which leaves the record of what viewers
+    /// hold as it was, the key's diff carried every row; attached with a baseline, the row it
+    /// changed. Bytes are the encoded frame; the time is building and encoding it (run it
+    /// `--release`), the median of `ROUNDS`.
+    #[test]
+    fn the_first_key_after_an_attach_costs_what_it_changed() {
+        const ROUNDS: usize = 51;
+        for (cols, rows) in [(80_u16, 24_u16), (200, 60)] {
+            let mut report = Vec::new();
+            for baseline in [false, true] {
+                let mut spent = Vec::with_capacity(ROUNDS);
+                let mut last = None;
+                for _ in 0..ROUNDS {
+                    let mut e = unwatched_at_a_full_prompt(cols, rows);
+                    let _attach =
+                        if baseline { e.baseline_frame(0) } else { e.join_frame(0) }.unwrap();
+                    e.write(b"l");
+                    let from = std::time::Instant::now();
+                    let frame = e.take_frame(1).unwrap().expect("the key's echo");
+                    let full = frame.full;
+                    let updates = frame.updates.len();
+                    let sent = bytes(frame);
+                    spent.push(from.elapsed());
+                    last = Some((sent, updates, full));
+                }
+                spent.sort_unstable();
+                let (sent, updates, full) = last.unwrap();
+                let median = spent[ROUNDS / 2].as_secs_f64() * 1e6;
+                let how = if baseline { "baseline" } else { "join" };
+                eprintln!(
+                    "{cols}x{rows} {how}: first key {sent} B ({updates} rows, full {full}), \
+                     {median:.1} us to build and encode"
+                );
+                report.push((sent, full));
+            }
+            let (after, full) = report[1];
+            assert!(!full && after < 300, "the row the key changed: {after} B");
         }
     }
 
