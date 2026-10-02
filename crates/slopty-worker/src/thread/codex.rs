@@ -12,6 +12,14 @@
 //! resumable only once its first turn has written it, so one that is not yet is tried again at
 //! its next status change, which the daemon tells every client. When the daemon is not there,
 //! or goes, the worker tries again every [`RETRY`].
+//!
+//! A thread is started from a client ([`Codex::start`], `ThreadRequest::Start` for agent `codex`)
+//! as Codex's own TUI starts one: `thread/start` in the thread's folder, with nothing set but the
+//! model the person picked, so the policies are their Codex configuration's. The connection that
+//! starts a thread is subscribed to it, so it is followed from Codex's answer, and the start's
+//! prompt goes as its first turn, marked with the start's intent. The TUI can join it as it joins
+//! any thread of the daemon. A start while no daemon runs is refused in words: the daemon is the
+//! person's, and Slopty does not start it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,11 +31,13 @@ use slopty_agent::codex::protocol::{self as p, Method, RequestId, ServerNotifica
 use slopty_agent::codex::rpc::{self, Incoming};
 use slopty_agent::codex::shared::{Send, Shared};
 use slopty_core::WallMs;
+use slopty_proto::thread::wire::{Outcome, Start};
 use slopty_proto::thread::{
-    Action, Answerer, AskId, Delivery, IntentId, Liveness, Phase, Status, ThreadId, ThreadState,
+    Action, AgentId, Answerer, AskId, Delivery, Drive, IntentId, Liveness, Phase, Status, ThreadId,
+    ThreadState,
 };
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -39,6 +49,10 @@ pub const RETRY: Duration = Duration::from_secs(2);
 
 /// The name Slopty gives itself to the app-server.
 const CLIENT: &str = "slopty";
+
+/// Why a start is refused while the person's Codex daemon is not there.
+pub const NOT_RUNNING: &str =
+    "Codex's app-server is not running on this worker: start Codex there, then try again";
 
 /// Where the daemon of `codex_home` listens:
 /// `$CODEX_HOME/app-server-control/app-server-control.sock`.
@@ -61,6 +75,7 @@ enum Ask {
     Answer { thread: ThreadId, ask: AskId, choice: String, by: Answerer },
     Send { thread: ThreadId, text: String, delivery: Delivery, intent: IntentId },
     Interrupt { thread: ThreadId },
+    Start { id: IntentId, start: Box<Start>, reply: oneshot::Sender<Outcome> },
 }
 
 /// What is asked of the Codex threads. Cheap to clone.
@@ -94,6 +109,37 @@ impl Codex {
     pub fn interrupt(&self, thread: ThreadId) {
         let _gone = self.0.send(Ask::Interrupt { thread });
     }
+
+    /// Start the thread of intent `id` as `start` says, once: its first turn is `start`'s
+    /// prompt, sent as that intent.
+    pub async fn start(&self, id: IntentId, start: Start) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        if self.0.send(Ask::Start { id, start: Box::new(start), reply }).is_err() {
+            return refused("Codex threads are not served here".to_owned());
+        }
+        outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
+    }
+}
+
+const fn refused(reason: String) -> Outcome {
+    Outcome::Refused { reason }
+}
+
+/// What thread/start asks for `start`, or why it is refused.
+fn checked(start: &Start) -> Result<p::ThreadStartParams, String> {
+    if !start.agent.is(AgentId::CODEX) {
+        return Err(format!("{} is not Codex", start.agent.0));
+    }
+    if start.drive.as_ref().is_some_and(|d| !d.is(Drive::SHARED)) {
+        return Err("A Codex thread is shared with Codex's own TUI".to_owned());
+    }
+    if !start.args.is_empty() {
+        return Err("Codex takes no arguments from a start".to_owned());
+    }
+    if !Path::new(&start.cwd).is_dir() {
+        return Err(format!("There is no folder {} here", start.cwd));
+    }
+    Ok(slopty_agent::codex::shared::start(&start.cwd, start.model.as_deref()))
 }
 
 /// Follow every thread of the daemon at `socket` into `host`, and act on the asks of its
@@ -111,14 +157,25 @@ pub fn spawn(host: Host, socket: PathBuf, Asks(mut asks): Asks) -> JoinHandle<()
                         }
                     }
                     session.exited();
+                    session.abandon(NOT_RUNNING);
                 }
                 Err(why) => tracing::trace!(socket = %socket.display(), "no Codex: {why}"),
             }
-            // What is asked while Codex is not there is not kept: its intent was answered.
+            // What is asked while Codex is not there is not kept: its intent was answered. A
+            // start is refused, in words.
             loop {
                 tokio::select! {
                     () = tokio::time::sleep(RETRY) => break,
-                    ask = asks.recv() => if ask.is_none() { return },
+                    ask = asks.recv() => match ask {
+                        Some(Ask::Start { id, reply, .. }) => {
+                            let outcome = host.started(id).unwrap_or_else(|| {
+                                host.record_start(id, refused(NOT_RUNNING.to_owned()))
+                            });
+                            let _gone = reply.send(outcome);
+                        }
+                        Some(_) => {}
+                        None => return,
+                    },
                 }
             }
         }
@@ -152,8 +209,17 @@ enum Ended {
 enum Waiting {
     Initialize,
     Loaded,
-    Resume { native: String },
-    Turn { thread: ThreadId },
+    Resume {
+        native: String,
+    },
+    Turn {
+        thread: ThreadId,
+    },
+    /// A thread started for intent `id`, whose first turn is `prompt`.
+    Start {
+        id: IntentId,
+        prompt: Option<String>,
+    },
 }
 
 /// A followed thread.
@@ -174,6 +240,12 @@ struct Session {
     native: HashMap<ThreadId, String>,
     /// Threads being resumed, or to resume at their next status change.
     resuming: HashMap<String, bool>,
+    /// Whether the handshake is done, so a thread can be started.
+    ready: bool,
+    /// Starts asked before it was.
+    held: Vec<Ask>,
+    /// Who waits on each start Codex has not answered yet.
+    starting: HashMap<IntentId, Vec<oneshot::Sender<Outcome>>>,
 }
 
 impl Session {
@@ -186,6 +258,24 @@ impl Session {
             threads: HashMap::new(),
             native: HashMap::new(),
             resuming: HashMap::new(),
+            ready: false,
+            held: Vec::new(),
+            starting: HashMap::new(),
+        }
+    }
+
+    /// Every start not answered is refused with `reason`: Codex went before it answered.
+    fn abandon(&mut self, reason: &str) {
+        let held = std::mem::take(&mut self.held).into_iter().filter_map(|ask| match ask {
+            Ask::Start { id, reply, .. } => Some((id, vec![reply])),
+            _ => None,
+        });
+        let starting: Vec<_> = self.starting.drain().chain(held).collect();
+        for (id, waiting) in starting {
+            let outcome = self.host.record_start(id, refused(reason.to_owned()));
+            for reply in waiting {
+                let _gone = reply.send(outcome.clone());
+            }
         }
     }
 
@@ -294,6 +384,10 @@ impl Session {
                 self.send(rpc::notification("initialized")).await?;
                 let list = p::ThreadLoadedListParams::default();
                 self.request(&list, Waiting::Loaded).await?;
+                self.ready = true;
+                for ask in std::mem::take(&mut self.held) {
+                    self.ask(ask).await?;
+                }
             }
             (Waiting::Initialize, Err(e)) => return Err(format!("initialize: {e}")),
             (Waiting::Loaded, Ok(result)) => {
@@ -317,6 +411,29 @@ impl Session {
             }
             (Waiting::Turn { thread }, Err(e)) => {
                 tracing::debug!(%thread, "Codex refused a turn: {e}");
+            }
+            (Waiting::Start { id, prompt }, Ok(result)) => {
+                let outcome = match rpc::response::<p::ThreadStartParams>(result) {
+                    Ok(started) => {
+                        if !self.threads.contains_key(&started.thread.id) {
+                            self.follow(&started.thread);
+                        }
+                        match self.threads.get(&started.thread.id) {
+                            Some(followed) => Outcome::Started { thread: followed.id },
+                            None => refused("Codex's thread could not be kept here".to_owned()),
+                        }
+                    }
+                    Err(e) => refused(format!("Codex's answer did not read: {e}")),
+                };
+                self.answer_start(id, outcome.clone());
+                if let (Outcome::Started { thread }, Some(prompt)) = (outcome, prompt) {
+                    let ask =
+                        Ask::Send { thread, text: prompt, delivery: Delivery::Queue, intent: id };
+                    self.ask(ask).await?;
+                }
+            }
+            (Waiting::Start { id, .. }, Err(e)) => {
+                self.answer_start(id, refused(format!("Codex did not start the thread: {e}")));
             }
             (Waiting::Loaded | Waiting::Turn { .. }, _) => {}
         }
@@ -377,8 +494,41 @@ impl Session {
         Ok(())
     }
 
+    /// Start intent `id` came to `outcome`: noted once, and told to whoever waits on it.
+    fn answer_start(&mut self, id: IntentId, outcome: Outcome) {
+        let outcome = self.host.record_start(id, outcome);
+        for reply in self.starting.remove(&id).unwrap_or_default() {
+            let _gone = reply.send(outcome.clone());
+        }
+    }
+
     async fn ask(&mut self, ask: Ask) -> Result<(), String> {
         match ask {
+            Ask::Start { id, start, reply } => {
+                if let Some(first) = self.host.started(id) {
+                    let _gone = reply.send(first);
+                    return Ok(());
+                }
+                if let Some(waiting) = self.starting.get_mut(&id) {
+                    waiting.push(reply);
+                    return Ok(());
+                }
+                if !self.ready {
+                    self.held.push(Ask::Start { id, start, reply });
+                    return Ok(());
+                }
+                self.starting.insert(id, vec![reply]);
+                match checked(&start) {
+                    Ok(params) => {
+                        let prompt = start.prompt.filter(|p| !p.trim().is_empty());
+                        self.request(&params, Waiting::Start { id, prompt }).await
+                    }
+                    Err(reason) => {
+                        self.answer_start(id, refused(reason));
+                        Ok(())
+                    }
+                }
+            }
             Ask::Answer { thread, ask, choice, by } => {
                 let Some(followed) = self.followed(thread) else { return Ok(()) };
                 let Some((id, result)) = followed.shared.answer(&ask, &choice, by) else {
@@ -417,6 +567,5 @@ impl Session {
 /// Whether `state`'s thread is a Codex thread this adapter answers for.
 #[must_use]
 pub fn is_shared(state: &ThreadState) -> bool {
-    state.meta.agent.is(slopty_proto::thread::AgentId::CODEX)
-        && state.meta.drive.is(slopty_proto::thread::Drive::SHARED)
+    state.meta.agent.is(AgentId::CODEX) && state.meta.drive.is(Drive::SHARED)
 }

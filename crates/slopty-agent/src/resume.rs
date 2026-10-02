@@ -277,6 +277,26 @@ pub fn with_session_id(args: Vec<String>) -> (Vec<String>, Option<String>) {
     (pinned, Some(id))
 }
 
+/// The arguments that start Claude Code on a conversation of a fresh id, and that id.
+///
+/// The id is chosen here, so the thread is named before the first hook. They are as Claude
+/// Code's CLI takes them: `claude --session-id <uuid> [--model=<model>] [-- <prompt>]`, `model`
+/// when one is named and `prompt` as the first message. The prompt follows `--`, so words of it
+/// that look like flags are still the person's words, and the model is joined to its flag for
+/// the same reason.
+#[must_use]
+pub fn started(model: Option<&str>, prompt: Option<&str>) -> (Vec<String>, String) {
+    let session = uuid::Uuid::new_v4().to_string();
+    let mut args = vec![SESSION_ID_FLAG.to_owned(), session.clone()];
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        args.push(format!("--model={model}"));
+    }
+    if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
+        args.extend(["--".to_owned(), prompt.to_owned()]);
+    }
+    (args, session)
+}
+
 /// Whether `id` can be a Claude Code session id: it is typed into a shell and names a file.
 pub(crate) fn is_session_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
@@ -311,6 +331,23 @@ mod tests {
 
     fn words(line: &str) -> Vec<String> {
         line.split_whitespace().map(str::to_owned).collect()
+    }
+
+    /// A start names its conversation, its model joined to the flag, and the person's first
+    /// message after `--`, so words that look like flags stay words; an empty one is no message.
+    #[test]
+    fn a_start_names_its_conversation_and_its_first_message() {
+        let (args, id) = started(None, None);
+        assert_eq!(args, words(&format!("--session-id {id}")));
+        assert_eq!(uuid::Uuid::parse_str(&id).map(|u| u.get_version_num()), Ok(4));
+        let (args, id) = started(Some("opus"), Some("--help me"));
+        assert_eq!(args, [SESSION_ID_FLAG, &id, "--model=opus", "--", "--help me"]);
+        let (args, id) = started(Some(" "), Some("  "));
+        assert_eq!(args, words(&format!("--session-id {id}")));
+        let (args, _) = started(Some("opus"), Some("go"));
+        let (pinned, none) = with_session_id(args);
+        assert!(none.is_none(), "the conversation is picked already: {pinned:?}");
+        assert_eq!(invocation(&pinned).args, ["--model", "opus"], "a resume keeps the model alone");
     }
 
     /// The flags that shape the session are kept in their order, each with what it takes; the

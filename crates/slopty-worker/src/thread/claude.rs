@@ -12,10 +12,12 @@
 //! file's name), since that id names the thread. Until then, a Claude Code the tracker sees in
 //! the terminal (one started by hand, idle at its prompt) has a provisional thread named by the
 //! terminal, removed once the session's own begins or the agent goes, since it never was a
-//! session. A thread the host holds from before (a worker restart) starts over and is read
-//! again from the transcript, under a new epoch. When the terminal moves to another Claude Code
-//! session (`/clear`, `/resume`), the old thread is left exited and resumable, and the new one
-//! begins. A thread declares `approvals` once a hook has been heard in its terminal.
+//! session. One Slopty started ([`start`]) is begun at once ([`Driver::begin`]) under the session
+//! id it was given, so it needs no provisional thread. A thread the host holds from before (a
+//! worker restart) starts over and is read again from the transcript, under a new epoch. When the
+//! terminal moves to another Claude Code session (`/clear`, `/resume`), the old thread is left
+//! exited and resumable, and the new one begins. A thread declares `approvals` once a hook has been
+//! heard in its terminal.
 //!
 //! A permission prompt held for a terminal opens a thread there when none is observed yet (the
 //! session's own when its id is known, else the terminal's provisional one), so the prompt is a
@@ -39,12 +41,14 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentStatus};
 use slopty_proto::conversation::{PermissionEvent, PermissionPrompt};
 use slopty_proto::thread::wire::{EXPANDED_CHARS, Expanded};
-use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadState};
+use slopty_proto::thread::{Action, ContentRef, Liveness, Phase, Status, ThreadId, ThreadState};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::Host;
 use crate::conversation::Seen;
+
+pub mod start;
 
 /// How often a session's transcripts are read between hooks: answers and thinking arrive with
 /// no hook of their own.
@@ -73,6 +77,13 @@ enum Input {
     Title(String),
     /// The whole of a clipped text or picture, asked through a [`Driver`].
     Expand(ContentRef, oneshot::Sender<Expanded>),
+    /// Slopty started Claude Code in the terminal on session `native`, in `cwd`: its thread
+    /// begins now, before the agent says anything, and is answered.
+    Begin {
+        native: String,
+        cwd: String,
+        reply: oneshot::Sender<Option<ThreadId>>,
+    },
 }
 
 /// What is asked of the observed sessions beyond what the daemon's events tell them. Cheap to
@@ -101,6 +112,14 @@ impl Driver {
         }
         rx.await.unwrap_or(Expanded::Gone)
     }
+
+    /// Slopty started Claude Code in terminal `session` on session `native`, in `cwd`: observe
+    /// it from now on, its thread begun at once. The thread, or `None` when nothing observes.
+    pub async fn begin(&self, session: SessionId, native: String, cwd: String) -> Option<ThreadId> {
+        let (reply, rx) = oneshot::channel();
+        self.0.send((session, Input::Begin { native, cwd, reply })).ok()?;
+        rx.await.ok().flatten()
+    }
 }
 
 /// Observe every Claude Code session the daemon's `events` speak of, into `host`, and answer
@@ -117,51 +136,55 @@ pub fn spawn(
         let mut titles: HashMap<SessionId, String> = HashMap::new();
         let claims = Claims::default();
         loop {
-            let heard = tokio::select! {
-                heard = events.recv() => heard,
-                // An ask of a session observed nowhere is dropped, and its asker hears so.
-                Some((session, input)) = asks.recv() => {
-                    if let Some(tx) = sessions.get(&session)
-                        && tx.send(input).is_err()
-                    {
+            let (session, input) = tokio::select! {
+                heard = events.recv() => match heard {
+                    Ok(WorkerMsg::Agent(event)) if event.kind == AgentKind::ClaudeCode => {
+                        (event.session, Input::Status(Box::new(event)))
+                    }
+                    Ok(WorkerMsg::Permission(event)) => (event.session(), Input::Permission(event)),
+                    Ok(WorkerMsg::SessionClosed { session, .. }) => {
                         sessions.remove(&session);
+                        cwds.remove(&session);
+                        titles.remove(&session);
+                        continue;
                     }
-                    continue;
-                }
-            };
-            let (session, input) = match heard {
-                Ok(WorkerMsg::Agent(event)) if event.kind == AgentKind::ClaudeCode => {
-                    (event.session, Input::Status(Box::new(event)))
-                }
-                Ok(WorkerMsg::Permission(event)) => (event.session(), Input::Permission(event)),
-                Ok(WorkerMsg::SessionClosed { session, .. }) => {
-                    sessions.remove(&session);
-                    cwds.remove(&session);
-                    titles.remove(&session);
-                    continue;
-                }
-                Ok(
-                    WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary),
-                ) => {
-                    if let Some(tx) = sessions.get(&summary.id) {
-                        let _gone = tx.send(Input::Title(summary.title.clone()));
+                    Ok(
+                        WorkerMsg::SessionOpened { summary, .. } | WorkerMsg::SessionChanged(summary),
+                    ) => {
+                        if let Some(tx) = sessions.get(&summary.id) {
+                            let _gone = tx.send(Input::Title(summary.title.clone()));
+                        }
+                        titles.insert(summary.id, summary.title);
+                        let Some(cwd) = summary.cwd else { continue };
+                        cwds.insert(summary.id, cwd.clone());
+                        if let Some(tx) = sessions.get(&summary.id) {
+                            let _gone = tx.send(Input::Cwd(cwd));
+                        }
+                        continue;
                     }
-                    titles.insert(summary.id, summary.title);
-                    let Some(cwd) = summary.cwd else { continue };
-                    cwds.insert(summary.id, cwd.clone());
-                    if let Some(tx) = sessions.get(&summary.id) {
-                        let _gone = tx.send(Input::Cwd(cwd));
+                    Ok(_) => continue,
+                    // A status missed is told again with the next change; a prompt missed is in
+                    // the TUI's own dialog.
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::debug!(missed, "the observed sessions missed events");
+                        continue;
                     }
-                    continue;
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+                // An ask of a session observed nowhere is dropped, and its asker hears so; a
+                // begin is what starts observing it.
+                Some((session, input)) = asks.recv() => {
+                    if matches!(input, Input::Begin { .. }) {
+                        (session, input)
+                    } else {
+                        if let Some(tx) = sessions.get(&session)
+                            && tx.send(input).is_err()
+                        {
+                            sessions.remove(&session);
+                        }
+                        continue;
+                    }
                 }
-                Ok(_) => continue,
-                // A status missed is told again with the next change; a prompt missed is in
-                // the TUI's own dialog.
-                Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    tracing::debug!(missed, "the observed sessions missed events");
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => return,
             };
             let tx = sessions.entry(session).or_insert_with(|| {
                 let (tx, rx) = mpsc::unbounded_channel();
@@ -231,6 +254,14 @@ async fn observe(
                 Some(Input::Permission(event)) => on.permission(&event).await,
                 Some(Input::Expand(content, reply)) => {
                     let _gone = reply.send(on.expand(&content).await);
+                }
+                Some(Input::Begin { native, cwd, reply }) => {
+                    if on.cwd.is_empty() {
+                        on.cwd = cwd;
+                    }
+                    on.begin(&native);
+                    let _gone = reply.send(on.observed.as_ref().map(Observed::main));
+                    on.read().await;
                 }
             },
             changed = seen.changed(), if watching => match changed {

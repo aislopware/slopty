@@ -735,6 +735,42 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Not carried yet:** the client's offer itself (queued for the UI), pictures and files in a
     prompt, and the unstable methods (forking, subagents, session notices).
 
+- ✅ **A client starts Claude Code and Codex threads too, each through the agent's own door**
+  (2026-10-02, `crates/slopty-worker/src/thread/claude/start.rs` and `thread/codex.rs`,
+  `slopty_agent::resume::started` and `codex::shared::start`; tests
+  `crates/slopty-worker/tests/claude_start.rs`, `crates/slopty-worker/tests/codex.rs`, and
+  `a_claude_code_start_opens_claude_in_a_terminal_and_names_its_thread` in
+  `apps/slopty-worker/tests/threads.rs`). `ThreadRequest::Start` had refused both agents.
+  - **Claude Code runs in a terminal and is observed.** The worker finds the person's own
+    `claude` as their terminal finds it and opens it in one of its terminals, in the thread's
+    folder. It goes through the worker's usual opening of any `claude`, so it gets the hook relay,
+    the mod and Slopty's tools as a tile opened on `claude` does. The first message is Claude
+    Code's own initial prompt, after `--` on its command line, and the model is its `--model`.
+    Nothing is typed into the TUI, nothing is signed in, and a Claude Code that is not signed in
+    says so in its own terminal. Arguments from a client are refused.
+  - **Named before it speaks.** The worker chooses the session id and passes it with
+    `--session-id`, so the thread's id (`observed::thread_of`) is known when the terminal opens.
+    The observer begins the thread at once, with the terminal named, and the start is answered
+    with it. The hooks and the transcript then fill it in as for any observed session, and the
+    first message carries the start's intent once the transcript shows it. The provisional thread
+    of a terminal whose session id is not yet known is not needed here: the id is never unknown.
+  - **Codex is asked over its daemon.** The worker sends `thread/start` to the person's Codex
+    app-server, as Codex's TUI starts a thread. Only the folder and the model are set, so the
+    approval policy and the sandbox stay the person's own configuration's. The connection that
+    starts a thread is subscribed to it, so the thread is followed from Codex's answer, and the
+    prompt goes as its first turn (`turn/start`), marked with the start's intent. The TUI joins
+    it as it joins any of the daemon's threads. A start while the daemon is not running is
+    refused in words, since the daemon is the person's and Slopty does not start it, and a start
+    asked before the handshake is held until the handshake is done.
+  - **Once.** Both are acted on once per intent id (`Host::record_start` for a thread its
+    adapter begins on its own): a repeat gets the first outcome back and opens or asks for
+    nothing.
+  - **The stand-ins.** `slopty-stub-claude` is the person's `claude` on a `PATH` of the test's
+    own. Its hooks now name the session it was started on, as Claude Code's do, so the relay's
+    first hook is heard on the started thread. The Codex daemon is the recorded client that
+    started a thread (`approval.jsonl`), replayed, with the person's message marked by the id the
+    turn named, as Codex marks it.
+
 - ✅ **One answer answers all of a request's questions, and each adapter reads it as its agent
   takes it** (2026-10-02, `detail::Answer::{choice, read, parts}` and the doc of
   `Intent::Answer` in `slopty-proto`; tests `one_answer_answers_every_question`,

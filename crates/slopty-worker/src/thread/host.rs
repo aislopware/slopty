@@ -413,6 +413,20 @@ impl Host {
         self.inner.lock().starts.outcome(&id).cloned()
     }
 
+    /// Note that intent `id` came to `outcome`, for a start whose thread began on its own (an
+    /// observed or shared agent's, which the adapter begins when the agent first speaks). A
+    /// repeat of the id gets the first outcome back.
+    pub fn record_start(&self, id: IntentId, outcome: Outcome) -> Outcome {
+        let mut inner = self.inner.lock();
+        if let Some(first) = inner.starts.outcome(&id) {
+            return first.clone();
+        }
+        if let Err(e) = inner.starts.record(id, outcome.clone()) {
+            tracing::warn!("a start could not be recorded: {e}");
+        }
+        outcome
+    }
+
     /// Start a thread for intent `id` once: `start` makes its metadata, or says why not. A
     /// repeat of the id gets the first outcome back and starts nothing.
     pub fn start<F>(&self, id: IntentId, start: F) -> Outcome

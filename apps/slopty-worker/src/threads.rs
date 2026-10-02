@@ -2,8 +2,10 @@
 //!
 //! Every Claude Code session the daemon sees is observed into the agent-neutral thread model,
 //! beside today's conversation path, every Codex thread is followed, and a pi thread or the thread
-//! of any ACP agent is started and driven here. They are served to clients: the table on the
-//! control stream, a stream per followed thread, and intents answered once each.
+//! of any ACP agent is started and driven here. A Claude Code thread is started in one of the
+//! daemon's terminals and observed, and a Codex thread is started over the person's Codex daemon.
+//! They are served to clients: the table on the control stream, a stream per followed thread, and
+//! intents answered once each.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -27,6 +29,7 @@ use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
+use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
 use slopty_worker::thread::{Composer, Follower, Host};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
@@ -81,6 +84,7 @@ impl Terminals for Typing {
 pub struct Threads {
     host: Host,
     claude: Driver,
+    claude_start: claude::start::Starter,
     codex: Codex,
     pi: Pi,
     acp: Acp,
@@ -102,10 +106,11 @@ pub fn open(
     match Host::open(dir, slopty_worker::thread::log::Limits::default()) {
         Ok(host) => {
             let (claude, asks) = Driver::channel();
+            let (claude_start, claude_start_asks) = claude::start::Starter::channel();
             let (codex, codex_asks) = Codex::channel();
             let (pi, pi_asks) = Pi::channel();
             let (acp, acp_asks) = Acp::channel();
-            let terminals = Arc::new(PiTerminals(worker.clone()));
+            let terminals = Arc::new(AgentTerminals(worker.clone()));
             let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
@@ -114,13 +119,16 @@ pub fn open(
             let data = dir.parent().unwrap_or(dir).to_path_buf();
             let observing = Observing {
                 claude: asks,
+                claude_start: claude_start_asks,
                 codex: codex_asks,
                 pi: pi_asks,
                 acp: acp_asks,
                 data,
                 terminals,
             };
-            Some((Threads { host, claude, codex, pi, acp, composer, snapshots }, observing))
+            let threads =
+                Threads { host, claude, claude_start, codex, pi, acp, composer, snapshots };
+            Some((threads, observing))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
@@ -129,31 +137,34 @@ pub fn open(
     }
 }
 
-/// The daemon's terminals, as pi's own TUI runs in them when the session is handed to it.
+/// The daemon's terminals, as an agent's own TUI runs in them: Claude Code started from a
+/// client, pi's TUI when a session is handed to it. Each is titled by its program until the
+/// program titles it.
 #[derive(Debug)]
-struct PiTerminals(Worker);
+struct AgentTerminals(Worker);
 
-impl pi::tui::Terminals for PiTerminals {
+impl AgentTerminalsTrait for AgentTerminals {
     fn open(
         &self,
         command: Vec<String>,
         cwd: String,
         env: Vec<(String, String)>,
-    ) -> pi::tui::Pending<'_, Result<SessionId, String>> {
+    ) -> Pending<'_, Result<SessionId, String>> {
         Box::pin(async move {
+            let program = command.first().map(|p| p.rsplit('/').next().unwrap_or(p).to_owned());
             let open = slopty_proto::terminal::OpenSession {
                 size: slopty_proto::terminal::TermSize::default(),
                 cwd: Some(cwd),
                 command,
                 env,
-                title: Some("pi".to_owned()),
+                title: program,
                 attach: false,
             };
             self.0.open(&open).await.map(|session| session.id()).map_err(|e| e.to_string())
         })
     }
 
-    fn exited(&self, session: SessionId) -> pi::tui::Pending<'static, ()> {
+    fn exited(&self, session: SessionId) -> Pending<'static, ()> {
         let handle = self.0.get(session).ok();
         Box::pin(async move {
             let Some(handle) = handle else { return };
@@ -166,10 +177,10 @@ impl pi::tui::Terminals for PiTerminals {
         })
     }
 
-    fn close(&self, session: SessionId) -> pi::tui::Pending<'_, ()> {
+    fn close(&self, session: SessionId) -> Pending<'_, ()> {
         Box::pin(async move {
             if let Err(e) = self.0.close(session).await {
-                tracing::debug!(%session, "pi's terminal did not close: {e}");
+                tracing::debug!(%session, "an agent's terminal did not close: {e}");
             }
         })
     }
@@ -179,23 +190,33 @@ impl pi::tui::Terminals for PiTerminals {
 #[derive(Debug)]
 pub struct Observing {
     claude: claude::Asks,
+    claude_start: claude::start::Asks,
     codex: codex::Asks,
     pi: pi::Asks,
     acp: acp::Asks,
     /// The daemon's data directory.
     data: PathBuf,
-    /// The terminals pi's TUI runs in.
-    terminals: Arc<PiTerminals>,
+    /// The terminals Claude Code and pi's TUI run in.
+    terminals: Arc<AgentTerminals>,
 }
 
 /// Observe every Claude Code session and follow every Codex thread into the daemon's
-/// threads, serve the pi and ACP threads it starts, and snapshot each turn.
+/// threads, start Claude Code threads in its terminals, serve the pi and ACP threads it starts,
+/// and snapshot each turn.
 pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
     drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks.claude));
+    let terminals: Arc<dyn AgentTerminalsTrait> = asks.terminals;
+    drop(claude::start::spawn(
+        threads.host.clone(),
+        threads.claude.clone(),
+        Arc::clone(&terminals),
+        None,
+        asks.claude_start,
+    ));
     if let Some(home) = codex::codex_home() {
         drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
     }
@@ -203,7 +224,7 @@ pub fn start(daemon: &Daemon, asks: Observing) {
     let settings = slopty_settings::path_in(&asks.data);
     let own: acp::Own =
         Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
-    drop(pi::spawn(threads.host.clone(), asks.data, None, asks.terminals, asks.pi));
+    drop(pi::spawn(threads.host.clone(), asks.data, None, terminals, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
 }
 
@@ -360,6 +381,23 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // Claude Code opens in a terminal, and Codex's daemon is asked: on tasks of their own.
+            ThreadRequest::Start { id, start } if start.agent.is(AgentId::CLAUDE_CODE) => {
+                tracing::info!(client = %at.client, %id, cwd = start.cwd, "start Claude Code");
+                let (claude, out) = (threads.claude_start, at.out.clone());
+                at.tasks.spawn(async move {
+                    let outcome = claude.start(id, *start).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
+            ThreadRequest::Start { id, start } if start.agent.is(AgentId::CODEX) => {
+                tracing::info!(client = %at.client, %id, cwd = start.cwd, "start Codex");
+                let (codex, out) = (threads.codex, at.out.clone());
+                at.tasks.spawn(async move {
+                    let outcome = codex.start(id, *start).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             // An ACP agent is looked for and starts: on a task of its own.
             ThreadRequest::Start { id, start }
                 if slopty_agent::acp::name_of(&start.agent).is_some() =>
@@ -373,7 +411,7 @@ impl Following {
             }
             ThreadRequest::Start { id, start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, "start refused");
-                let reason = format!("starting {} from here is not built yet", start.agent.0);
+                let reason = format!("{} is no agent this worker can start", start.agent.0);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
             }
             ThreadRequest::Approvals { on } => {

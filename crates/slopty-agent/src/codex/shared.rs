@@ -68,6 +68,20 @@ pub fn thread_of(native: &str) -> ThreadId {
     ThreadId::from_uuid(uuid::Builder::from_custom_bytes(bytes).into_uuid())
 }
 
+/// What asks the app-server for a new thread in `cwd` (`thread/start`).
+///
+/// It names `model` when one is given, and nothing else: the approval policy, the sandbox and
+/// the rest are the person's own Codex configuration's, so a thread Slopty starts is loosened in
+/// nothing.
+#[must_use]
+pub fn start(cwd: &str, model: Option<&str>) -> p::ThreadStartParams {
+    p::ThreadStartParams {
+        cwd: Some(cwd.to_owned()),
+        model: model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
+        ..p::ThreadStartParams::default()
+    }
+}
+
 /// An approval or question open on the thread.
 #[derive(Clone, Debug)]
 struct Open {

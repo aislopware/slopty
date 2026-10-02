@@ -2,10 +2,8 @@
 //! follows the entries it appends to the session's file until it exits or the session is taken
 //! back once it rests.
 
-use std::future::Future;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::Duration;
 
 use slopty_agent::pi::driven::{self, Driven};
@@ -22,26 +20,7 @@ use crate::thread::Host;
 /// of what it grew by.
 pub const FOLLOW: Duration = Duration::from_millis(250);
 
-/// A future the terminals hand back.
-pub type Pending<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// The worker's terminals, as pi's TUI runs in them.
-pub trait Terminals: Send + Sync + 'static {
-    /// Open a terminal in `cwd` running `command`, with `env` over the worker's own; its
-    /// session, or why not.
-    fn open(
-        &self,
-        command: Vec<String>,
-        cwd: String,
-        env: Vec<(String, String)>,
-    ) -> Pending<'_, Result<SessionId, String>>;
-
-    /// Done once `session`'s program has exited, or at once when there is no such session.
-    fn exited(&self, session: SessionId) -> Pending<'static, ()>;
-
-    /// End `session`'s program and close the terminal.
-    fn close(&self, session: SessionId) -> Pending<'_, ()>;
-}
+pub use crate::thread::terminals::{Pending, Terminals};
 
 /// Where pi keeps the session of `meta`: the file pi named, else the one of its id in pi's
 /// session directory for the thread's folder (`<pi dir>/sessions/--<folder>--/<time>_<id>.jsonl`).

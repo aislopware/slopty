@@ -10,7 +10,9 @@
 //! observed agent is sent is typed into its terminal by the [`Composer`]. A Codex thread is
 //! followed over the person's Codex daemon instead ([`codex`]), and what it is sent goes there.
 //! A pi thread is started here and driven over pi's RPC mode ([`pi`]), and the thread of any other
-//! agent that speaks the Agent Client Protocol over ACP ([`acp`]).
+//! agent that speaks the Agent Client Protocol over ACP ([`acp`]). A Claude Code thread is
+//! started by opening the person's `claude` in one of the worker's [`terminals`] and observing
+//! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one.
 
 pub mod acp;
 pub mod claude;
@@ -23,6 +25,7 @@ pub mod log;
 pub mod pi;
 pub mod review;
 pub mod table;
+pub mod terminals;
 
 pub use compose::Composer;
 pub use follow::Follower;

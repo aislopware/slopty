@@ -6,7 +6,8 @@
 //! - `--version` answers as Claude Code does, so a worker lists it as installed, and `agents
 //!   --json` lists no live session.
 //! - It fires the hooks its `--settings` registers, as Claude Code runs them: every command
-//!   registered for the payload's event, with the payload on stdin and the session's environment,
+//!   registered for the payload's event, with the payload on stdin (naming the session it was
+//!   started on with `--session-id`, unless the payload names one) and the session's environment,
 //!   keeping what each printed. Which hooks, in order, is `STUB_HOOKS` (a JSON array of payloads);
 //!   a `SessionStart` alone when it is unset. `STUB_LATER` is more of them, fired once its prompt
 //!   shows and the file `STUB_LATER_AFTER` exists, as a later turn's.
@@ -322,9 +323,18 @@ fn settings(args: &[String]) -> Value {
 }
 
 /// Fire every payload of `script` in order, recording each: whether every hook registered for
-/// its event ran cleanly (none registered is not fired), and what they printed.
+/// its event ran cleanly (none registered is not fired), and what they printed. A payload that
+/// names no session carries the one the stub was started on (`--session-id`), as each of Claude
+/// Code's does.
 fn fire_all(settings: &Value, script: &Value, record: &mut Record) -> Fallible<()> {
+    let at = record.argv.iter().position(|a| a == "--session-id");
+    let session = at.and_then(|at| record.argv.get(at.saturating_add(1))).cloned();
     for payload in script.as_array().into_iter().flatten() {
+        let mut payload = payload.clone();
+        if let (Some(session), Some(fields)) = (&session, payload.as_object_mut()) {
+            fields.entry("session_id").or_insert_with(|| json!(session));
+        }
+        let payload = &payload;
         let event = payload.get("hook_event_name").and_then(Value::as_str).unwrap_or_default();
         // An event no hook is registered for (a `Statusline` a test posts) goes through the
         // relay, as `slopty hook statusline` posts it.

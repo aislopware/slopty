@@ -23,9 +23,11 @@ mod threads {
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
-        Expanded, Intent, IntentDone, Outcome, TableFrame, ThreadFrame, ThreadRequest,
+        Expanded, Intent, IntentDone, Outcome, Start, TableFrame, ThreadFrame, ThreadRequest,
     };
-    use slopty_proto::thread::{Cursor, IntentId, RequestState, TableState, ThreadId, ThreadState};
+    use slopty_proto::thread::{
+        AgentId, Cap, Cursor, IntentId, RequestState, TableState, ThreadId, ThreadState,
+    };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
     use tokio::sync::mpsc;
@@ -65,8 +67,14 @@ mod threads {
 
     /// ptyd and a worker on `dir`, whose home is `dir`.
     async fn daemons(dir: &Path) -> Daemons {
+        daemons_with(dir, &[]).await
+    }
+
+    /// [`daemons`], each with `env` over its scrubbed environment.
+    async fn daemons_with(dir: &Path, env: &[(&str, std::ffi::OsString)]) -> Daemons {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = scrubbed(bin("slopty-ptyd"), dir)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -83,6 +91,7 @@ mod threads {
         let leaf = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let pasteboard = format!("dev.aislopware.slopty.threads.{leaf}");
         let mut worker = scrubbed(bin("slopty-worker"), dir)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -608,5 +617,74 @@ mod threads {
         for session in [first, second] {
             a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         }
+    }
+
+    /// A Claude Code thread started from a client opens the person's own `claude` (the
+    /// stand-in, first on the worker's `PATH`) in one of the worker's terminals, wired as the
+    /// worker wires any `claude` it opens, on a session id chosen for it and with the first
+    /// message on its own command line. The start is answered with the thread named by that id,
+    /// which a client follows at once, its terminal named, and the agent's first hook is heard
+    /// in it.
+    #[tokio::test]
+    async fn a_claude_code_start_opens_claude_in_a_terminal_and_names_its_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let programs = root.join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), programs.join("claude")).unwrap();
+        let record = root.join("record.json");
+        let env = [
+            ("PATH", slopty_testkit::env::path_with(&programs)),
+            ("STUB_RECORD", record.clone().into_os_string()),
+        ];
+        let daemons = daemons_with(&root, &env).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let id = IntentId::new();
+        let start = Start {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: root.to_string_lossy().into_owned(),
+            drive: None,
+            prompt: Some("Say hello.".to_owned()),
+            model: None,
+            args: Vec::new(),
+        };
+        a.send(ThreadRequest::Start { id, start: Box::new(start) }).await;
+        let outcome = a
+            .heard(|msg| match msg {
+                WorkerMsg::IntentDone(IntentDone { id: done, outcome }) if done == id => {
+                    Some(outcome)
+                }
+                _ => None,
+            })
+            .await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+
+        let seen: serde_json::Value = tokio::time::timeout(STEP, async {
+            loop {
+                if let Some(seen) = std::fs::read(&record)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the stand-in started");
+        let argv: Vec<&str> =
+            seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        let at = argv.iter().position(|a| *a == "--session-id").expect("a session id");
+        let native = argv[at + 1];
+        assert_eq!(thread, slopty_agent::observed::thread_of(native), "named by its session id");
+        assert_eq!(argv[argv.len() - 2..], ["--", "Say hello."], "its own initial prompt");
+        assert!(argv.contains(&"--settings"), "the hook relay, as the worker wires claude");
+        assert_eq!(seen["cwd"], root.to_string_lossy().as_ref());
+
+        // The stand-in's first hook, through the relay, is heard in the thread.
+        a.follow(thread).await;
+        let hooked = |s: &ThreadState| s.meta.terminal.is_some() && s.meta.can(Cap::APPROVALS);
+        a.until(|c| c.thread.as_ref().is_some_and(hooked)).await;
+        assert_eq!(a.state().meta.native, native);
     }
 }
