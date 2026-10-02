@@ -26,8 +26,10 @@ zed itself so it is never behind zed while longbridge lags.
 - Landing a change: stage exactly it (`git add <paths>`), run `cargo gate -m '<message>'`, then
   `git commit -F target/gate/COMMIT_MSG` without restaging, then `cargo xtask land`. The local
   gate takes about a minute with a warm build; it prints the next step when it passes. `land`
-  pushes the commit to the `gate` branch, where CI runs every lane, and main moves to that commit
-  only once all of them pass (below, "Gate"). A red run names the failed lane and tests in its
+  first runs, under `nice`, the tests of the packages the commits change and of their
+  dependents, on HEAD's tree (nextest's `land` profile; `--no-tests` skips it). It then pushes
+  the commit to the `gate` branch, where CI runs every lane, and main moves to that commit only
+  once all of them pass (below, "Gate"). A red run names the failed lane and tests in its
   summary: fix it in a new commit and land again; that push's run, which waits for any run in
   progress, decides. `land --wait` blocks until main moved or the run failed, and says which.
 - Format with `cargo xtask fmt` (nightly rustfmt; stable `cargo fmt` produces different output).

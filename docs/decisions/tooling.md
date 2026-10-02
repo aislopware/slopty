@@ -937,3 +937,19 @@ more full-window layer.
     Linux, which the `pub mod` around it used to hide from the dead-code lint.
   - The crash tests find `main` as `slopty_workerd::main` and `slopty_cli::main`, in each
     `lib.rs`.
+
+- ✅ **`land` runs the changed packages' tests before it pushes** (2026-10-02). 16 of the last
+  41 gate runs failed, each after the better part of an hour, and at least 7 failed on a test
+  that fails every time: the UI's menus, palette and file tests and the CLI's MCP and projects
+  tests. A minute here finds those. `cargo xtask land` now takes the packages its commits change
+  since `origin/main` and every package that depends on them (`gate::pass::affected`, as
+  `--since-pass` does), snapshots HEAD into `target/gate/tree` under the gate's lock, and runs
+  their tests there, in the tests lane's target dir, under `nice -n 10`.
+  - It is a net, not the gate. nextest's `land` profile leaves out the tests that time
+    themselves against the machine's load or start CoreAudio or shells in bulk, each by name;
+    CI runs them. A change outside every package (a root manifest, the lockfile, cargo's
+    config) reaches all of them, and that is CI's to run. Docs alone run nothing.
+  - A run that passed is recorded like a gate lane (`target/gate/pass/land`), so landing the
+    same commits again runs nothing. `--no-tests` pushes without it.
+  - Track the red-run rate (16 of 41 before), the cancelled-run rate (10 of 41) and the median
+    time from push to promote.

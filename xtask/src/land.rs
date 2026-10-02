@@ -3,8 +3,12 @@
 //!
 //! The `gate` branch is always `origin/main` plus what is landing, so each land replaces what the
 //! last one left, with a lease, so a push this checkout has not seen is never dropped. CI runs one
-//! gate at a time on that branch and a newer push cancels an older run: the last green covers
-//! every commit under it.
+//! gate at a time on that branch; a newer push waits behind the run in progress, and only the
+//! newest waits, since its green covers every commit under it.
+//!
+//! Before the push, the tests of the packages the commits change, and of their dependents, run
+//! here ([`crate::gate::land_tests`]): a red run on CI costs the better part of an hour, most of
+//! them a test a minute here fails.
 
 use std::time::{Duration, Instant};
 
@@ -32,6 +36,9 @@ pub struct LandOpts {
     /// Block until CI promoted the commit to main, or failed, and report which.
     #[arg(long)]
     pub wait: bool,
+    /// Push without first running the tests of the packages the commits change.
+    #[arg(long)]
+    pub no_tests: bool,
 }
 
 pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
@@ -55,6 +62,9 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         "HEAD is not on top of origin/main, and main only fast-forwards: `git rebase origin/main` \
          (then the quick gate again) and land"
     );
+    if !opts.no_tests {
+        crate::gate::land_tests("origin/main")?;
+    }
     let leased = cmd!(sh, "git rev-parse --verify --quiet refs/remotes/origin/{BRANCH}")
         .quiet()
         .read()
@@ -149,7 +159,8 @@ fn outcome(sh: &Shell, run: &Run, conclusion: &str, head: &str) -> Result<()> {
             Ok(())
         }
         "cancelled" => bail!(
-            "run {id} was cancelled, most likely by a newer push to {BRANCH}, whose run decides"
+            "run {id} was cancelled, most likely while it waited, by a newer push to {BRANCH}, \
+             whose run decides"
         ),
         _ => {
             let failed = cmd!(

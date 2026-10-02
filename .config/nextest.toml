@@ -138,6 +138,31 @@ filter = '''
 '''
 retries = { backoff = "fixed", count = 2, delay = "1s" }
 
+# The tests `cargo xtask land` runs before it pushes: those of the packages it changes, on a Mac
+# busy with other builds. The gate's profile, less the tests that time themselves against the
+# machine's load or take the shared resources a busy Mac runs short of, which CI runs anyway:
+# the gate's retried ones above, the ones that want every test thread, the two that start
+# CoreAudio, and the two that start shells in bulk (a hosted runner ran out of pseudo-terminals
+# on them). Each is named; never a pattern.
+[profile.land]
+inherits = "gate"
+default-filter = '''
+not (
+    (package(slopty-worker) & binary(session_actor) & (
+        test(=actor::a_slow_viewer_is_skipped_then_caught_up_never_dropped)
+        | test(=actor::a_silent_command_after_a_clear_is_seen_running_at_once)
+        | test(=actor::an_echo_beside_a_flood_is_not_held_to_the_frame_pace)
+        | test(=actor::a_key_after_a_pause_does_not_wait_for_the_checkpoint)))
+    | (package(slopty-workerd) & test(=tests::echo_is_not_held_behind_slow_requests))
+    | (package(slopty-shape) & test(=relay::tests::a_short_wait_ends_when_it_was_asked_to))
+    | (package(slopty-codec) & test(=audio::tests::player_starts_and_drains))
+    | (package(slopty-client) & test(=screen::sound::tests::audio_waits_for_the_player_and_counts_gaps))
+    | (package(slopty-pty) & (
+        test(=spawn::shells_start_while_other_threads_allocate_and_hold_locks)
+        | test(=process_state::spawns_hold_up_in_a_process_in_a_bad_state)))
+)
+'''
+
 # `cargo xtask deep miri`: the pure crates' tests under the interpreter, 50–100 times slower than
 # native. A test still running after 20 minutes is ended and fails, so one slow test is a finding
 # and not a night.

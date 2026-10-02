@@ -254,7 +254,7 @@ pub struct Package {
 }
 
 /// The workspace members of `tree`, from `cargo metadata`.
-fn workspace(tree: &Utf8Path) -> Result<Vec<Package>> {
+pub fn workspace(tree: &Utf8Path) -> Result<Vec<Package>> {
     #[derive(serde::Deserialize)]
     struct Metadata {
         packages: Vec<Member>,

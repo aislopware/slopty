@@ -227,14 +227,8 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     let started = Instant::now();
     crate::upstream::warn_if_stale();
     let root = repo_root()?;
-    // Two gates share `target/gate/tree`: a second one would rewrite the snapshot under the
-    // first one's build and both logs would lie. The lock is released when the file closes.
     let gate_dir = root.join("target").join("gate");
-    std::fs::create_dir_all(&gate_dir)?;
-    let lock = std::fs::File::create(gate_dir.join(".lock"))?;
-    if lock.try_lock().is_err() {
-        bail!("another `cargo gate` is running on this checkout; wait for it");
-    }
+    let _lock = lock(&gate_dir)?;
     crate::prune::ensure_room(&root.join("target"))?;
     if opts.in_place && opts.since_pass {
         bail!("--since-pass compares snapshots of the index; it cannot check the tree in place");
@@ -265,7 +259,7 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
     let (tree, inputs) = if opts.in_place {
         (root.clone(), None)
     } else {
-        let (tree, listing) = snapshot(&root)?;
+        let (tree, listing) = snapshot(&root, Source::Index)?;
         let inputs = Inputs::gather(&gate_dir, &tree, listing)?;
         (tree, Some(inputs))
     };
@@ -377,6 +371,95 @@ pub fn run_only(sh: &Shell, opts: &Options, only: &Only) -> Result<()> {
         println!("✔ gate passed on {} ({:.1?})", lanes.join(", "), started.elapsed());
     }
     Ok(())
+}
+
+/// The gate's lock on `gate_dir`, held until the file it returns closes. Gates (and `land`'s
+/// tests) share `target/gate/tree`: a second one would rewrite the snapshot under the first one's
+/// build and both logs would lie.
+fn lock(gate_dir: &Utf8Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(gate_dir)?;
+    let lock = std::fs::File::create(gate_dir.join(".lock"))?;
+    if lock.try_lock().is_err() {
+        bail!("another `cargo gate` (or `land`'s tests) is running on this checkout; wait for it");
+    }
+    Ok(lock)
+}
+
+/// The nextest profile of the tests `land` runs (`.config/nextest.toml`).
+const NEXTEST_LAND_PROFILE: &str = "land";
+
+/// Before `cargo xtask land` pushes: the tests of the packages its commits change since `base`
+/// and of every package that depends on them, on HEAD's tree (`target/gate/tree`, in the tests
+/// lane's target dir), under `nice`. A red CI run costs the better part of an hour and most were
+/// a test a minute here would have failed (`docs/decisions/tooling.md`, "land runs the changed
+/// packages' tests first"). It is a net, not the gate: the tests that time themselves against
+/// the machine's load are CI's alone (nextest's `land` profile), and a change outside every
+/// package (the manifests' root, the lockfile, cargo's config) leaves all of them to CI, since
+/// it reaches every package. Skipped when it last passed on the same inputs.
+pub fn land_tests(base: &str) -> Result<()> {
+    let started = Instant::now();
+    let root = repo_root()?;
+    let sh = Shell::new()?;
+    sh.change_dir(&root);
+    let diff = cmd!(sh, "git diff --name-only -z {base} HEAD").quiet().output()?;
+    let changed: std::collections::BTreeSet<String> = diff
+        .stdout
+        .split(|b| *b == 0)
+        .filter_map(|p| std::str::from_utf8(p).ok())
+        .filter(|p| !p.is_empty() && !pass::inert(p))
+        .map(str::to_owned)
+        .collect();
+    if changed.is_empty() {
+        println!("  tests before the push: nothing a build reads changed since {base}");
+        return Ok(());
+    }
+    let gate_dir = root.join("target").join("gate");
+    let _lock = lock(&gate_dir)?;
+    crate::prune::ensure_room(&root.join("target"))?;
+    let (tree, listing) = snapshot(&root, Source::Head)?;
+    let Some(packages) = pass::affected(&pass::workspace(&tree)?, &changed) else {
+        let outside: Vec<&str> = changed.iter().take(3).map(String::as_str).collect();
+        println!(
+            "  tests before the push: left to CI, since a change reaches every package ({}…)",
+            outside.join(", ")
+        );
+        return Ok(());
+    };
+    let inputs = Inputs::gather(&gate_dir, &tree, listing)?;
+    let lane = Lane {
+        name: "land",
+        scope: Scope::Build,
+        extra: pass::tool_id("cargo-nextest"),
+        since_pass: false,
+    };
+    cached(Some(&inputs), &tree, &lane, |_| {
+        println!("▶ tests before the push: {}", packages.join(" "));
+        affected_lane(&lane_shell(&tree, &gate_dir, "tests", false)?, &packages)
+    })?;
+    println!("✔ tests before the push ({:.1?})", started.elapsed());
+    Ok(())
+}
+
+/// [`land_tests`]'s build and run of `packages`' tests, at a low priority beside whatever else
+/// this Mac is doing.
+fn affected_lane(sh: &Shell, packages: &[String]) -> Result<()> {
+    let names: Vec<&str> = packages.iter().map(String::as_str).collect();
+    let p = &selected(names.iter().copied().chain([WORKSPACE_HACK]));
+    quiet_step("nextest build", cmd!(sh, "nice -n 10 cargo nextest run {p...} --no-run"))?;
+    if let Some(spawned) = spawned_selection(Some(&names)) {
+        let bins = spawned_bin_args();
+        quiet_step(
+            "spawned binaries",
+            cmd!(sh, "nice -n 10 cargo build --profile test {spawned...} {bins...}"),
+        )?;
+    }
+    let _fresh = sh.push_env(BINS_FRESH, "1");
+    let runner = crate::runner::command()?;
+    quiet_step(
+        "nextest",
+        cmd!(sh, "nice -n 10 cargo nextest run {p...} --profile {NEXTEST_LAND_PROFILE}")
+            .env(crate::runner::RUNNER_VAR, &runner),
+    )
 }
 
 /// What to run once a gate on the index passed: commit what it checked (with the message it was
@@ -669,11 +752,11 @@ const SPAWNING: [&str; 5] =
     ["slopty-workerd", "slopty-worker", "slopty-files", "slopty-cli", "slopty-client"];
 
 /// What the build of [`SPAWNED_BINS`] selects besides `--bin`: the workspace with its tests, or
-/// a shard's packages and those that build the binaries, or nothing when none of the shard's
-/// tests spawns one. A shard leaves the others' tests unbuilt: `--tests` would build the
-/// binaries' packages' tests too, so `--examples` stands in for it. No member has an example,
-/// and selecting them is what makes cargo resolve features with the selected packages'
-/// dev-dependencies, as their test build did.
+/// some packages (a shard's, or those `land` tests) and those that build the binaries, or
+/// nothing when none of those packages' tests spawns one. Those leave the others' tests
+/// unbuilt: `--tests` would build the binaries' packages' tests too, so `--examples` stands in
+/// for it. No member has an example, and selecting them is what makes cargo resolve features
+/// with the selected packages' dev-dependencies, as their test build did.
 fn spawned_selection(packages: Option<&[&str]>) -> Option<Vec<String>> {
     let Some(packages) = packages else {
         return Some(vec!["--workspace".to_owned(), "--tests".to_owned()]);
@@ -704,15 +787,36 @@ fn shard_libs(shard: Shard) -> Result<Vec<String>> {
     Ok(selected(libs.iter().map(String::as_str).chain([WORKSPACE_HACK])))
 }
 
-/// Sync the **index** (what `git commit` would record, not the working tree) into
-/// `target/gate/tree`. Several agents edit this one checkout at once, so only the staged state
-/// is a unit anyone vouched for: what passes is exactly what the next commit records. Blobs are
-/// read in one `git cat-file --batch` pass; a manifest of the blob each path was last written
+/// What [`snapshot`] copies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The index: what the next commit records, which the gate checks.
+    Index,
+    /// HEAD's tree: the commits `land` pushes.
+    Head,
+}
+
+/// `source`'s entries as `git ls-files --stage -z` lists the index's, `<mode> <sha>
+/// <stage>\t<path>` each: a commit's are all at stage 0.
+fn list(sh: &Shell, source: Source) -> Result<std::process::Output> {
+    Ok(match source {
+        Source::Index => cmd!(sh, "git ls-files --stage -z").quiet().output()?,
+        Source::Head => {
+            let format = "--format=%(objectmode) %(objectname) 0%x09%(path)";
+            cmd!(sh, "git ls-tree -r -z --full-tree {format} HEAD").quiet().output()?
+        }
+    })
+}
+
+/// Sync the **index** (what `git commit` would record, not the working tree), or HEAD's tree,
+/// into `target/gate/tree`. Several agents edit this one checkout at once, so only the staged
+/// state is a unit anyone vouched for: what passes is exactly what the next commit records. Blobs
+/// are read in one `git cat-file --batch` pass; a manifest of the blob each path was last written
 /// from keeps unchanged files untouched, so cargo in the snapshot rebuilds exactly what changed.
-/// Paths the index no longer lists are removed; a submodule (`vendor/ghostty`) is a symlink to
-/// a checkout at the commit the index pins ([`submodule_at`]). Returns the tree and the index's
-/// entries it holds.
-fn snapshot(root: &Utf8Path) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
+/// Paths the source no longer lists are removed; a submodule (`vendor/ghostty`) is a symlink to
+/// a checkout at the commit the source pins ([`submodule_at`]). Returns the tree and the
+/// source's entries it holds.
+fn snapshot(root: &Utf8Path, source: Source) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
     let started = Instant::now();
     let gate = root.join("target").join("gate");
     let tree = gate.join("tree");
@@ -720,7 +824,7 @@ fn snapshot(root: &Utf8Path) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
     std::fs::create_dir_all(&tree).with_context(|| format!("create {tree}"))?;
     let sh = Shell::new()?;
     sh.change_dir(root);
-    let listed = cmd!(sh, "git ls-files --stage -z").quiet().output()?;
+    let listed = list(&sh, source)?;
     let before: HashMap<String, String> = std::fs::read_to_string(&manifest_path)
         .unwrap_or_default()
         .lines()
@@ -772,8 +876,9 @@ fn snapshot(root: &Utf8Path) -> Result<(Utf8PathBuf, Vec<pass::Entry>)> {
         s
     });
     std::fs::write(&manifest_path, manifest).with_context(|| format!("write {manifest_path}"))?;
+    let what = if source == Source::Index { "the index" } else { "HEAD" };
     println!(
-        "  snapshot of the index, {} files: {written} written, {removed} removed ({:.1?})",
+        "  snapshot of {what}, {} files: {written} written, {removed} removed ({:.1?})",
         wanted.len(),
         started.elapsed()
     );
@@ -1100,8 +1205,8 @@ mod tests {
     use clap::ValueEnum as _;
 
     use super::{
-        BINS_BUILT, BINS_FRESH, SPAWNED_BINS, Shard, failed_tests, next_step, one_gpui,
-        spawned_selection, summary_of,
+        BINS_BUILT, BINS_FRESH, SPAWNED_BINS, Shard, Source, failed_tests, list, next_step,
+        one_gpui, spawned_selection, summary_of,
     };
     use crate::tools::{WORKSPACE_HACK, repo_root, workspace_packages};
 
@@ -1212,6 +1317,35 @@ mod tests {
                 out.push(path);
             }
         }
+    }
+
+    /// `land` snapshots HEAD as the gate snapshots the index: the same entries, in the same form,
+    /// for every file the index holds as HEAD has it.
+    #[test]
+    fn head_is_listed_as_the_index_is() {
+        let sh = xshell::Shell::new().expect("a shell");
+        sh.change_dir(repo_root().expect("repo root"));
+        let entries = |source| {
+            let listed = list(&sh, source).expect("git lists it");
+            assert!(listed.status.success(), "{source:?}: {listed:?}");
+            listed
+                .stdout
+                .split(|b| *b == 0)
+                .filter(|e| !e.is_empty())
+                .map(|e| String::from_utf8(e.to_vec()).expect("UTF-8"))
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+        let (head, index) = (entries(Source::Head), entries(Source::Index));
+        for entry in &head {
+            let (meta, _path) = entry.split_once('\t').expect("a tab before the path");
+            let fields: Vec<&str> = meta.split(' ').collect();
+            assert!(
+                matches!(fields.as_slice(), [mode, sha, "0"] if mode.len() == 6 && sha.len() == 40),
+                "{entry}"
+            );
+        }
+        let shared = head.intersection(&index).count();
+        assert!(shared * 10 > head.len() * 9, "{shared} of {} entries alike", head.len());
     }
 
     const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#58fb4674";
