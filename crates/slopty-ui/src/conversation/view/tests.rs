@@ -908,3 +908,28 @@ fn a_face_panned_at_rest_composites_its_layer(cx: &mut TestAppContext) {
     let stats = cx.update(|window, _| window.layout_stats());
     assert_eq!((stats.layer_frames_composited, stats.layers_demoted), (FRAMES, 0));
 }
+
+/// The working row's clock says whole seconds and ticks on the turn's own second, so the frame
+/// a tick draws holds until the next one: never a tenth that the next second's frame would
+/// leave stale, and never a second behind the turn.
+#[test]
+fn the_working_clock_says_what_it_ticks() {
+    use std::time::Duration;
+
+    use super::entries::{turn_clock, until_turn_ticks};
+
+    let since = WallMs::from_millis(1_000_000);
+    let at = |ms: u64| WallMs::from_millis(1_000_000 + ms);
+    assert_eq!(turn_clock(since, at(2_500)).as_deref(), Some("2 s"), "not 2.5 s");
+    assert_eq!(until_turn_ticks(since, at(2_500)), Duration::from_millis(500));
+    // Every frame between two ticks says what the tick drew.
+    let tick = at(2_500).saturating_add(until_turn_ticks(since, at(2_500)));
+    assert_eq!(turn_clock(since, tick).as_deref(), Some("3 s"));
+    for ms in (3_000..4_000).step_by(100) {
+        assert_eq!(turn_clock(since, at(ms)).as_deref(), Some("3 s"), "{ms} ms in");
+    }
+    assert_eq!(until_turn_ticks(since, tick), Duration::from_secs(1), "a whole second on");
+    assert_eq!(turn_clock(since, at(300)).as_deref(), Some("1 s"), "from its first second");
+    assert_eq!(turn_clock(WallMs::ZERO, at(300)), None, "no start, no clock");
+    assert_eq!(until_turn_ticks(WallMs::ZERO, at(300)), Duration::from_secs(1));
+}

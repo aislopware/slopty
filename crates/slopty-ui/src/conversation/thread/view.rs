@@ -1184,9 +1184,7 @@ impl ThreadView {
         let hub = self.hub.read(cx);
         let stopping = hub.threads().stopping(self.thread);
         let since = self.state(cx).and_then(|s| s.turn(turn)).map(|t| t.started_ms);
-        let elapsed = since
-            .filter(|t| !t.is_zero())
-            .map(|t| kit::duration(Duration::from_secs(WallMs::now().millis_since(t) / 1_000)));
+        let elapsed = since.filter(|t| !t.is_zero()).map(|t| kit::clock(WallMs::now().since(t)));
         let s = self.theme.surfaces;
         let asks = self.state(cx).is_some_and(|st| st.status.phase == Phase::NeedsYou);
         // The agent trying a failed request again says so, rather than looking hung.

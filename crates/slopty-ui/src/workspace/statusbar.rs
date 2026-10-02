@@ -352,9 +352,9 @@ impl WorkspaceView {
                 let rate = self.stream_rate(item.id, cx)?;
                 Some(format!("{w}\u{d7}{h} \u{b7} {}", fps_label(rate)))
             }
-            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => self
-                .running_for(*session)
-                .map(|ran| format!("Running {}", super::navigator::turn_label(ran))),
+            ItemKind::Terminal { session } if self.agent_state(*session).is_none() => {
+                self.running_for(*session).map(|ran| format!("Running {}", kit::clock(ran)))
+            }
             // A page's host is its header's place: said there, not twice.
             ItemKind::Terminal { .. }
             | ItemKind::Note { .. }

@@ -535,7 +535,7 @@ impl ConversationView {
                     let (started, ended) = times.get(&task.id).copied().unwrap_or_default();
                     let took = match (task.status.as_str(), started, ended) {
                         ("completed", Some(a), Some(b)) if b > a => Some(kit::duration(b.since(a))),
-                        ("in_progress", Some(a), _) if now > a => Some(kit::duration(now.since(a))),
+                        ("in_progress", Some(a), _) if now > a => Some(kit::clock(now.since(a))),
                         _ => None,
                     };
                     div()

@@ -760,10 +760,9 @@ impl ConversationView {
         self.composer.update(cx, |c, cx| c.focus(window, cx));
     }
 
-    /// The elapsed time of a turn ticks once a second, only while it is on screen and the
-    /// agent works; pending messages that never showed up go with the same tick.
     /// Whether something on show counts time: the turn's elapsed time, a pending message,
-    /// background work's, a prompt's fallback.
+    /// background work's, a prompt's fallback. It ticks once a second, only while it is on
+    /// screen; pending messages that never showed up go with the same tick.
     fn ticking(&self) -> bool {
         self.shown
             && (self.working()
@@ -782,7 +781,9 @@ impl ConversationView {
         }
         self.clock = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                // On the turn's own second, so the working row's time is never a second behind.
+                let Ok(wait) = this.update(cx, |this, _cx| this.until_tick()) else { return };
+                cx.background_executor().timer(wait).await;
                 let going = this
                     .update(cx, |this, cx| {
                         let bound = WallMs::from_millis(WallMs::now().as_millis().saturating_sub(
@@ -801,6 +802,12 @@ impl ConversationView {
                 }
             }
         }));
+    }
+
+    /// How long until the working row's clock shows its next second.
+    fn until_tick(&self) -> Duration {
+        let since = self.agent.as_ref().map_or(WallMs::ZERO, |a| a.since_ms);
+        entries::until_turn_ticks(since, WallMs::now())
     }
 
     // ----- rows ------------------------------------------------------------------------

@@ -1445,7 +1445,7 @@ impl ConversationView {
         let s = theme.surfaces;
         let thinking = self.model.live(&ThreadId::Main).any(|(_, b)| b.kind == LiveKind::Thinking);
         let since = self.agent.as_ref().map_or(WallMs::ZERO, |a| a.since_ms);
-        let elapsed = (!since.is_zero()).then(|| crate::kit::duration(WallMs::now().since(since)));
+        let elapsed = turn_clock(since, WallMs::now());
         let written = self
             .model
             .thread(&ThreadId::Main)
@@ -1483,6 +1483,22 @@ impl ConversationView {
             })
             .into_any_element()
     }
+}
+
+/// What the working row's clock says at `now` for a turn under way since `since` (unknown
+/// when zero): whole seconds, since it ticks once a second ([`until_turn_ticks`]).
+pub(super) fn turn_clock(since: WallMs, now: WallMs) -> Option<String> {
+    (!since.is_zero()).then(|| crate::kit::clock(now.since(since)))
+}
+
+/// How long after `now` the clock of a turn under way since `since` next shows another
+/// second: on the turn's own second, so no frame shows a second the turn has passed. A second
+/// when the turn's start is unknown.
+pub(super) fn until_turn_ticks(since: WallMs, now: WallMs) -> Duration {
+    if since.is_zero() {
+        return Duration::from_secs(1);
+    }
+    crate::icons::until_next_second(now.since(since))
 }
 
 /// A fenced block's corner: its language and a copy, at the meta size.

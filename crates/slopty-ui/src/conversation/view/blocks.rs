@@ -462,7 +462,7 @@ impl ConversationView {
             })
         });
         let elapsed = (running && !entry.at_ms.is_zero())
-            .then(|| crate::kit::duration(WallMs::now().since(entry.at_ms)));
+            .then(|| crate::kit::clock(WallMs::now().since(entry.at_ms)));
         let facts = [
             agent.tool_uses.map(|n| tools::count(n, "tool use", "tool uses")),
             agent.tokens.map(|n| format!("{} tokens", tools::tokens(n))),

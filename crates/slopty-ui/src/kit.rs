@@ -411,6 +411,15 @@ pub fn duration(elapsed: std::time::Duration) -> String {
     }
 }
 
+/// A clock that ticks once a second, as a turn at work and a long command count it.
+///
+/// Whole seconds in [`duration`]'s one form, from "1 s", so a frame never shows a fraction the
+/// next tick undoes, nor "0 ms" while the clock has only begun.
+#[must_use]
+pub fn clock(elapsed: std::time::Duration) -> String {
+    duration(std::time::Duration::from_secs(elapsed.as_secs().max(1)))
+}
+
 /// A size in bytes as a person reads it: "812 B", "240 KB", "1.2 MB". Whole kilobytes, since a
 /// tenth of one is noise; a tenth of a megabyte is still a size worth telling apart.
 #[must_use]
@@ -1623,6 +1632,17 @@ mod tests {
         for (millis, said) in cases {
             assert_eq!(duration(ms(millis)), said, "{millis} ms");
         }
+    }
+
+    /// A ticking clock reads in whole seconds in the one duration form, from its first second.
+    #[test]
+    fn a_clock_ticks_in_whole_seconds() {
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(clock(ms(300)), "1 s");
+        assert_eq!(clock(ms(2_500)), "2 s");
+        assert_eq!(clock(ms(9_999)), "9 s");
+        assert_eq!(clock(ms(64_000)), "1m 4s");
+        assert_eq!(clock(ms(3_720_000)), "1h 2m");
     }
 
     /// The one gradient chrome draws is the [`edge_fade`] mask: a gradient anywhere else is a

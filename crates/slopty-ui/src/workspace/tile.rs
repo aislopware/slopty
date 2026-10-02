@@ -1127,7 +1127,7 @@ impl WorkspaceView {
             _ => None,
         };
         let running = running.map(|ran| {
-            let text = SharedString::from(super::navigator::turn_label(ran));
+            let text = SharedString::from(kit::clock(ran));
             kit::tabular(div())
                 .id("running")
                 .debug_selector(move || format!("running-{}", id.as_uuid()))
