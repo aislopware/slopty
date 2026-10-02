@@ -20,7 +20,8 @@ use slopty_worker::conversation::Seen;
 use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Agents, Conversations as _};
 use slopty_worker::session::SessionHandle;
-use slopty_worker::thread::claude::{self, Asks, Driver, Sources};
+use slopty_worker::thread::claude::{self, Driver, Sources};
+use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::{Composer, Follower, Host};
@@ -77,6 +78,7 @@ impl Terminals for Typing {
 pub struct Threads {
     host: Host,
     claude: Driver,
+    codex: Codex,
     composer: Composer,
     snapshots: Snapshots,
 }
@@ -91,15 +93,17 @@ pub fn open(
     snapshots: &Path,
     worker: Worker,
     agents: Arc<parking_lot::Mutex<slopty_agent::AgentTable>>,
-) -> Option<(Threads, Asks)> {
+) -> Option<(Threads, Observing)> {
     match Host::open(dir, slopty_worker::thread::log::Limits::default()) {
         Ok(host) => {
             let (claude, asks) = Driver::channel();
+            let (codex, codex_asks) = Codex::channel();
             let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
-            Some((Threads { host, claude, composer, snapshots }, asks))
+            let observing = Observing { claude: asks, codex: codex_asks };
+            Some((Threads { host, claude, codex, composer, snapshots }, observing))
         }
         Err(e) => {
             tracing::warn!(dir = %dir.display(), "the thread host did not open: {e}");
@@ -108,13 +112,24 @@ pub fn open(
     }
 }
 
-/// Observe every Claude Code session into the daemon's threads, and snapshot each turn.
-pub fn start(daemon: &Daemon, asks: Asks) {
+/// What the adapters take their asks from once they start.
+#[derive(Debug)]
+pub struct Observing {
+    claude: claude::Asks,
+    codex: codex::Asks,
+}
+
+/// Observe every Claude Code session and follow every Codex thread into the daemon's
+/// threads, and snapshot each turn.
+pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
-    drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks));
+    drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks.claude));
+    if let Some(home) = codex::codex_home() {
+        drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
+    }
 }
 
 /// What a request needs of the connection it came on.
@@ -314,6 +329,9 @@ fn decide(
     if !state.meta.can(needs) {
         return (Outcome::Unsupported { cap: Cap::named(needs) }, Vec::new());
     }
+    if codex::is_shared(state) {
+        return (shared(at, &threads.codex, state, id, intent), Vec::new());
+    }
     let Some(session) = state.meta.terminal else {
         let reason = "the thread's agent runs in no terminal here".to_owned();
         return (refused(reason), Vec::new());
@@ -341,6 +359,47 @@ fn decide(
         _ => Outcome::Unsupported { cap: Cap::named(needs) },
     };
     (outcome, Vec::new())
+}
+
+/// What comes of `intent` on a Codex thread: it goes to the app-server as the Codex TUI's own
+/// would. An answer to a request already settled, from the TUI or another client, is no
+/// error: the card shows who settled it.
+fn shared(
+    at: &Origin<'_>,
+    codex: &Codex,
+    state: &ThreadState,
+    id: IntentId,
+    intent: &Intent,
+) -> Outcome {
+    let thread = state.meta.id;
+    match intent {
+        Intent::Answer { ask, choice, .. } => {
+            let Some(request) = state.requests.iter().find(|r| r.id == *ask) else {
+                return refused(format!("no request {}", ask.0));
+            };
+            if !request.is_open() {
+                return Outcome::Done;
+            }
+            if !request.options.iter().any(|o| o.id == *choice) {
+                return refused(format!("no choice {choice}"));
+            }
+            let by = slopty_proto::thread::Answerer {
+                client: Some(at.client),
+                name: "Slopty".to_owned(),
+            };
+            codex.answer(thread, ask.clone(), choice.clone(), by);
+            Outcome::Done
+        }
+        Intent::Send { text, delivery } => {
+            codex.send(thread, text.clone(), *delivery, id);
+            Outcome::Done
+        }
+        Intent::Interrupt => {
+            codex.interrupt(thread);
+            Outcome::Done
+        }
+        other => Outcome::Unsupported { cap: Cap::named(other.needs()) },
+    }
 }
 
 fn answered(taken: bool) -> Outcome {

@@ -7,9 +7,11 @@
 //! it holds ([`Follower`]) and is sent only what it missed, or a snapshot when the log no
 //! longer holds the gap. The [`table`] keeps a row per thread for the lists that follow
 //! nothing. Every intent is acted on once per id ([`intents`], [`Host::intent`]); what an
-//! observed agent is sent is typed into its terminal by the [`Composer`].
+//! observed agent is sent is typed into its terminal by the [`Composer`]. A Codex thread is
+//! followed over the person's Codex daemon instead ([`codex`]), and what it is sent goes there.
 
 pub mod claude;
+pub mod codex;
 pub mod compose;
 pub mod follow;
 pub mod host;

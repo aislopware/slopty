@@ -450,3 +450,33 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     scrubbed. The fixture tests read every recorded frame through the generated types. What
     either side sent reads back to the same JSON, and the routing above is asserted as
     recorded.
+  - **The codec and the worker** (`codex/shared.rs`, `crates/slopty-worker/src/thread/codex.rs`;
+    `crates/slopty-agent/tests/codex.rs` maps the recording, `apps/slopty-worker/tests/codex.rs`
+    replays it to the real daemon from a stand-in app-server).
+    - The worker joins the daemon's control socket under `$CODEX_HOME`, else `~/.codex`, and
+      tries again every 2 s while there is none. It initializes as `slopty` with the
+      experimental API, lists the loaded threads and resumes each. It resumes a thread the daemon
+      starts later at `thread/started`, or at the thread's next status change while it is not
+      yet resumable: the daemon tells every client of those, followed or not.
+    - A Codex thread is one thread with drive `shared`, its id derived from Codex's. The turns
+      a resume brings back are read first. Each of Codex's turns is the next of Slopty's, and
+      an item keeps Codex's id. The status maps idle to done, failed or stopped by how the
+      last turn ended, and `waitingOnApproval` to needs you, worded with the request once it
+      opens.
+    - A command or file approval offers Codex's `availableDecisions` in Codex's order: allow,
+      allow for this session, always allow with the rule as its scope, deny, and deny and stop
+      (`cancel`). The choice id is the decision's own name, so the answer sent is the TUI's own
+      JSON-RPC answer, byte for byte as the recording has it. A permissions grant, a question
+      or an elicitation opens as a request with no answers, for the TUI to answer.
+    - **Two sides, one answer.** A request is settled only by `serverRequest/resolved`. It is
+      named as answered from Slopty when this worker sent the first answer, else as answered by
+      `Codex`. An answer to a request that is already settled, from a second client or after
+      the TUI, is taken (`Outcome::Done`) and sent nowhere. The card shows who settled it. It
+      is never an error, because nothing went wrong. In the narrow race where the TUI and
+      Slopty answer within one round trip, Codex keeps the first it hears. Slopty may name
+      itself then, since `serverRequest/resolved` does not say who answered.
+    - A message goes as `turn/start`, or as `turn/steer` into the turn under way, carrying its
+      intent as `clientUserMessageId`, which comes back as the user message's intent. An
+      interrupt is `turn/interrupt`. Queueing is not offered yet (no `queue` capability).
+    - Not carried yet: starting a Codex thread or its TUI from Slopty (`codex --remote`), the
+      models list, images in a user message, and expanding a clipped output.

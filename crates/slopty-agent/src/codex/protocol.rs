@@ -364,7 +364,7 @@ pub type AbsolutePathBuf = String;
 /// Clients should merge available values into the most recent `account/rateLimits/read` response or
 /// refetch that snapshot. Nullable account metadata may be unavailable in a rolling update and does
 /// not clear a previously observed value.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AccountRateLimitsUpdatedNotification {
     /// `rateLimits`.
     #[serde(rename = "rateLimits")]
@@ -372,7 +372,7 @@ pub struct AccountRateLimitsUpdatedNotification {
 }
 
 /// `ActivePermissionProfile`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ActivePermissionProfile {
     /// Parent profile identifier from the selected permissions profile's `extends` setting, when
     /// present.
@@ -404,7 +404,7 @@ pub enum AdditionalContextKind {
 }
 
 /// `AdditionalFileSystemPermissions`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AdditionalFileSystemPermissions {
     /// `entries`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -421,7 +421,7 @@ pub struct AdditionalFileSystemPermissions {
 }
 
 /// `AdditionalNetworkPermissions`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AdditionalNetworkPermissions {
     /// `enabled`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -429,7 +429,7 @@ pub struct AdditionalNetworkPermissions {
 }
 
 /// `AdditionalPermissionProfile`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AdditionalPermissionProfile {
     /// `fileSystem`.
     #[serde(rename = "fileSystem", default, skip_serializing_if = "Option::is_none")]
@@ -448,7 +448,7 @@ pub enum AgentMessageDelivery {
 }
 
 /// `AgentMessageDeltaNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AgentMessageDeltaNotification {
     /// `delta`.
     pub delta: String,
@@ -520,7 +520,7 @@ pub enum AskForApproval {
 }
 
 /// `AskForApprovalGranular`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AskForApprovalGranular {
     /// `mcp_elicitations`.
     pub mcp_elicitations: bool,
@@ -537,7 +537,7 @@ pub struct AskForApprovalGranular {
 }
 
 /// `AsyncUserInputQuestion`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct AsyncUserInputQuestion {
     /// `options`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -547,7 +547,7 @@ pub struct AsyncUserInputQuestion {
 }
 
 /// `ByteRange`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ByteRange {
     /// `end`.
     pub end: u64,
@@ -571,7 +571,7 @@ pub enum CapabilityRootLocation {
 }
 
 /// `ClientInfo`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ClientInfo {
     /// `name`.
     pub name: String,
@@ -660,7 +660,7 @@ pub struct CodexErrorInfoActiveTurnNotSteerable {
 }
 
 /// `CodexErrorInfoHttpConnectionFailed`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CodexErrorInfoHttpConnectionFailed {
     /// `httpStatusCode`.
     #[serde(rename = "httpStatusCode", default, skip_serializing_if = "Option::is_none")]
@@ -668,7 +668,7 @@ pub struct CodexErrorInfoHttpConnectionFailed {
 }
 
 /// `CodexErrorInfoResponseStreamConnectionFailed`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CodexErrorInfoResponseStreamConnectionFailed {
     /// `httpStatusCode`.
     #[serde(rename = "httpStatusCode", default, skip_serializing_if = "Option::is_none")]
@@ -676,7 +676,7 @@ pub struct CodexErrorInfoResponseStreamConnectionFailed {
 }
 
 /// `CodexErrorInfoResponseStreamDisconnected`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CodexErrorInfoResponseStreamDisconnected {
     /// `httpStatusCode`.
     #[serde(rename = "httpStatusCode", default, skip_serializing_if = "Option::is_none")]
@@ -684,7 +684,7 @@ pub struct CodexErrorInfoResponseStreamDisconnected {
 }
 
 /// `CodexErrorInfoResponseTooManyFailedAttempts`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CodexErrorInfoResponseTooManyFailedAttempts {
     /// `httpStatusCode`.
     #[serde(rename = "httpStatusCode", default, skip_serializing_if = "Option::is_none")]
@@ -854,7 +854,7 @@ pub enum CommandExecutionApprovalDecision {
 }
 
 /// `CommandExecutionApprovalDecisionAcceptWithExecpolicyAmendment`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CommandExecutionApprovalDecisionAcceptWithExecpolicyAmendment {
     /// `execpolicy_amendment`.
     pub execpolicy_amendment: Vec<String>,
@@ -879,7 +879,7 @@ pub enum CommandExecutionApprovalKind {
 }
 
 /// `CommandExecutionOutputDeltaNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CommandExecutionOutputDeltaNotification {
     /// `delta`.
     pub delta: String,
@@ -895,7 +895,7 @@ pub struct CommandExecutionOutputDeltaNotification {
 }
 
 /// `CommandExecutionRequestApprovalParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CommandExecutionRequestApprovalParams {
     /// Optional additional permissions requested for this command.
     #[serde(rename = "additionalPermissions", default, skip_serializing_if = "Option::is_none")]
@@ -1056,7 +1056,7 @@ pub enum ContentItemInputImageForm {
 }
 
 /// Deprecated: Use `ContextCompaction` item type instead.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ContextCompactedNotification {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -1067,7 +1067,7 @@ pub struct ContextCompactedNotification {
 }
 
 /// `CreditsSnapshot`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct CreditsSnapshot {
     /// `balance`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1185,7 +1185,7 @@ pub enum DynamicToolSpec {
 }
 
 /// `ErrorNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ErrorNotification {
     /// `error`.
     pub error: TurnError,
@@ -1221,7 +1221,7 @@ pub enum FileChangeApprovalDecision {
 /// Deprecated legacy notification for `apply_patch` textual output.
 ///
 /// The server no longer emits this notification.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct FileChangeOutputDeltaNotification {
     /// `delta`.
     pub delta: String,
@@ -1237,7 +1237,7 @@ pub struct FileChangeOutputDeltaNotification {
 }
 
 /// `FileChangePatchUpdatedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct FileChangePatchUpdatedNotification {
     /// `changes`.
     pub changes: Vec<FileUpdateChange>,
@@ -1253,7 +1253,7 @@ pub struct FileChangePatchUpdatedNotification {
 }
 
 /// `FileChangeRequestApprovalParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct FileChangeRequestApprovalParams {
     /// `[UNSTABLE]` When set, the agent is asking the user to allow writes under this root for the
     /// remainder of the session (unclear if this is honored today).
@@ -1432,7 +1432,7 @@ pub enum FunctionCallOutputContentItemInputImageForm {
 }
 
 /// `GitInfo`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct GitInfo {
     /// `branch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1446,7 +1446,7 @@ pub struct GitInfo {
 }
 
 /// `GrantedPermissionProfile`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct GrantedPermissionProfile {
     /// `fileSystem`.
     #[serde(rename = "fileSystem", default, skip_serializing_if = "Option::is_none")]
@@ -1457,7 +1457,7 @@ pub struct GrantedPermissionProfile {
 }
 
 /// `HookPromptFragment`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct HookPromptFragment {
     /// `hookRunId`.
     #[serde(rename = "hookRunId")]
@@ -1500,7 +1500,7 @@ pub enum ImageGenerationFailure {
 }
 
 /// Client-declared capabilities negotiated during initialize.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct InitializeCapabilities {
     /// Opt into receiving experimental API methods and fields.
     #[serde(rename = "experimentalApi", default, skip_serializing_if = "Option::is_none")]
@@ -1535,7 +1535,7 @@ pub struct InitializeCapabilities {
 }
 
 /// `InitializeParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct InitializeParams {
     /// `capabilities`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1581,7 +1581,7 @@ pub enum InputModality {
 ///
 /// Responses API strongly types this payload. Do not modify it without first getting API approval
 /// and making the corresponding Responses API change.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct InternalChatMessageMetadataPassthrough {
     /// `turn_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1716,7 +1716,7 @@ pub enum McpElicitationBooleanType {
 }
 
 /// `McpElicitationConstOption`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct McpElicitationConstOption {
     /// `const`.
     pub r#const: String,
@@ -1901,7 +1901,7 @@ pub enum McpElicitationStringType {
 }
 
 /// `McpElicitationTitledEnumItems`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct McpElicitationTitledEnumItems {
     /// `anyOf`.
     #[serde(rename = "anyOf")]
@@ -2123,7 +2123,7 @@ pub struct McpServerElicitationRequestResponse {
 }
 
 /// `McpToolCallAppContext`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct McpToolCallAppContext {
     /// `actionName`.
     #[serde(rename = "actionName", default, skip_serializing_if = "Option::is_none")]
@@ -2143,14 +2143,14 @@ pub struct McpToolCallAppContext {
 }
 
 /// `McpToolCallError`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct McpToolCallError {
     /// `message`.
     pub message: String,
 }
 
 /// `McpToolCallProgressNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct McpToolCallProgressNotification {
     /// `itemId`.
     #[serde(rename = "itemId")]
@@ -2166,7 +2166,7 @@ pub struct McpToolCallProgressNotification {
 }
 
 /// `McpToolCallResult`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct McpToolCallResult {
     /// `_meta`.
     #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
@@ -2193,7 +2193,7 @@ pub enum McpToolCallStatus {
 }
 
 /// `MemoryCitation`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct MemoryCitation {
     /// `entries`.
     pub entries: Vec<MemoryCitationEntry>,
@@ -2203,7 +2203,7 @@ pub struct MemoryCitation {
 }
 
 /// `MemoryCitationEntry`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct MemoryCitationEntry {
     /// `lineEnd`.
     #[serde(rename = "lineEnd")]
@@ -2234,7 +2234,7 @@ pub enum MessagePhase {
 }
 
 /// `MisalignmentErrorDetails`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct MisalignmentErrorDetails {
     /// A substantive localized explanation is required before offering continuation.
     #[serde(rename = "detailedExplanation", default, skip_serializing_if = "Option::is_none")]
@@ -2248,7 +2248,7 @@ pub struct MisalignmentErrorDetails {
 }
 
 /// `MisalignmentSteer`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct MisalignmentSteer {
     /// `message`.
     pub message: String,
@@ -2324,21 +2324,21 @@ pub struct Model {
 }
 
 /// Caller-specific explicit access programs advertised by model discovery.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ModelAccessPrograms {
     /// Accepted explicit selections.
     pub cyber: Vec<CyberAccessProgram>,
 }
 
 /// `ModelAvailabilityNux`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ModelAvailabilityNux {
     /// `message`.
     pub message: String,
 }
 
 /// `ModelListParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ModelListParams {
     /// Opaque pagination cursor returned by a previous call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2352,7 +2352,7 @@ pub struct ModelListParams {
 }
 
 /// `ModelListResponse`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ModelListResponse {
     /// `data`.
     pub data: Vec<Model>,
@@ -2390,7 +2390,7 @@ pub struct ModelReroutedNotification {
 }
 
 /// `ModelServiceTier`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ModelServiceTier {
     /// `description`.
     pub description: String,
@@ -2401,7 +2401,7 @@ pub struct ModelServiceTier {
 }
 
 /// `ModelUpgradeInfo`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ModelUpgradeInfo {
     /// `migrationMarkdown`.
     #[serde(rename = "migrationMarkdown", default, skip_serializing_if = "Option::is_none")]
@@ -2591,7 +2591,7 @@ pub struct PermissionsRequestApprovalParams {
 }
 
 /// `PermissionsRequestApprovalResponse`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct PermissionsRequestApprovalResponse {
     /// `permissions`.
     pub permissions: GrantedPermissionProfile,
@@ -2619,7 +2619,7 @@ pub enum Personality {
 
 /// EXPERIMENTAL - proposed plan streaming deltas for plan items. Clients should not assume
 /// concatenated deltas match the completed plan item content.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct PlanDeltaNotification {
     /// `delta`.
     pub delta: String,
@@ -2714,7 +2714,7 @@ pub enum RateLimitReachedType {
 }
 
 /// `RateLimitSnapshot`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct RateLimitSnapshot {
     /// `credits`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2749,7 +2749,7 @@ pub struct RateLimitSnapshot {
 }
 
 /// `RateLimitWindow`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct RateLimitWindow {
     /// `resetsAt`.
     #[serde(rename = "resetsAt", default, skip_serializing_if = "Option::is_none")]
@@ -2823,7 +2823,7 @@ pub enum ReasoningSummary {
 }
 
 /// `ReasoningSummaryPartAddedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ReasoningSummaryPartAddedNotification {
     /// `itemId`.
     #[serde(rename = "itemId")]
@@ -2840,7 +2840,7 @@ pub struct ReasoningSummaryPartAddedNotification {
 }
 
 /// `ReasoningSummaryTextDeltaNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ReasoningSummaryTextDeltaNotification {
     /// `delta`.
     pub delta: String,
@@ -2859,7 +2859,7 @@ pub struct ReasoningSummaryTextDeltaNotification {
 }
 
 /// `ReasoningTextDeltaNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ReasoningTextDeltaNotification {
     /// `contentIndex`.
     #[serde(rename = "contentIndex")]
@@ -2888,7 +2888,7 @@ pub enum RequestId {
 }
 
 /// `RequestPermissionProfile`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct RequestPermissionProfile {
     /// `fileSystem`.
     #[serde(rename = "fileSystem", default, skip_serializing_if = "Option::is_none")]
@@ -3299,7 +3299,7 @@ pub enum SessionSource {
 }
 
 /// Settings for a collaboration mode.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct Settings {
     /// `developer_instructions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3323,7 +3323,7 @@ pub enum SortDirection {
 }
 
 /// `SpendControlLimitSnapshot`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct SpendControlLimitSnapshot {
     /// `limit`.
     pub limit: String,
@@ -3393,7 +3393,7 @@ pub struct SubAgentSourceThreadSpawn {
 }
 
 /// `TextElement`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TextElement {
     /// Byte range in the parent `text` buffer that this element occupies.
     #[serde(rename = "byteRange")]
@@ -3517,7 +3517,7 @@ pub enum ThreadActiveFlag {
 }
 
 /// `ThreadClosedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadClosedNotification {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -3879,7 +3879,7 @@ pub enum ThreadListCwdFilter {
 }
 
 /// `ThreadListParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadListParams {
     /// Optional ancestor thread filter. Returns spawned descendants at any depth, excluding the
     /// ancestor itself. Mutually exclusive with `parentThreadId`.
@@ -3939,7 +3939,7 @@ pub struct ThreadListParams {
 }
 
 /// `ThreadListResponse`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadListResponse {
     /// Opaque cursor to pass as `cursor` when reversing `sortDirection`. This is only populated
     /// when the page contains at least one thread. Use it with the opposite `sortDirection`; for
@@ -3956,7 +3956,7 @@ pub struct ThreadListResponse {
 }
 
 /// `ThreadLoadedListParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadLoadedListParams {
     /// Opaque pagination cursor returned by a previous call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3967,7 +3967,7 @@ pub struct ThreadLoadedListParams {
 }
 
 /// `ThreadLoadedListResponse`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadLoadedListResponse {
     /// Thread ids for sessions currently loaded in memory.
     pub data: Vec<String>,
@@ -3978,7 +3978,7 @@ pub struct ThreadLoadedListResponse {
 }
 
 /// `ThreadNameUpdatedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadNameUpdatedNotification {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -3989,7 +3989,7 @@ pub struct ThreadNameUpdatedNotification {
 }
 
 /// `ThreadQueueChangedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadQueueChangedNotification {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -3997,7 +3997,7 @@ pub struct ThreadQueueChangedNotification {
 }
 
 /// `ThreadReadParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadReadParams {
     /// When true, include turns and their items from rollout history. Full-history hydration is
     /// deprecated for paginated threads; prefer a metadata-only read and page with
@@ -4017,7 +4017,7 @@ pub struct ThreadReadResponse {
 }
 
 /// `ThreadResumeInitialTurnsPageParams`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadResumeInitialTurnsPageParams {
     /// How much item detail to include for each returned turn; defaults to summary.
     #[serde(rename = "itemsView", default, skip_serializing_if = "Option::is_none")]
@@ -4042,7 +4042,7 @@ pub struct ThreadResumeInitialTurnsPageParams {
 /// are treated as absent.
 ///
 /// Prefer using `thread_id` whenever possible.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadResumeParams {
     /// `approvalPolicy`.
     #[serde(rename = "approvalPolicy", default, skip_serializing_if = "Option::is_none")]
@@ -4171,7 +4171,7 @@ pub struct ThreadResumeResponse {
 }
 
 /// An independently persisted, user-visible thread section.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadSection {
     /// Optional appearance synchronized across clients.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4183,7 +4183,7 @@ pub struct ThreadSection {
 }
 
 /// Extensible visual presentation for a custom thread section.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadSectionAppearance {
     /// `color`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4194,7 +4194,7 @@ pub struct ThreadSectionAppearance {
 }
 
 /// `ThreadSetNameParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadSetNameParams {
     /// `name`.
     pub name: String,
@@ -4262,7 +4262,7 @@ pub enum ThreadSourceKind {
 }
 
 /// `ThreadStartParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadStartParams {
     /// Allow a provider with an authoritative static model catalog to replace an unavailable
     /// requested model with its default.
@@ -4456,7 +4456,7 @@ pub struct ThreadStatusChangedNotification {
 }
 
 /// `ThreadTokenUsage`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadTokenUsage {
     /// `last`.
     pub last: TokenUsageBreakdown,
@@ -4468,7 +4468,7 @@ pub struct ThreadTokenUsage {
 }
 
 /// `ThreadTokenUsageUpdatedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadTokenUsageUpdatedNotification {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -4482,7 +4482,7 @@ pub struct ThreadTokenUsageUpdatedNotification {
 }
 
 /// `ThreadUnsubscribeParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ThreadUnsubscribeParams {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -4511,7 +4511,7 @@ pub enum ThreadUnsubscribeStatus {
 }
 
 /// `TokenUsageBreakdown`, as Codex's schema names it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TokenUsageBreakdown {
     /// `cacheWriteInputTokens`.
     #[serde(rename = "cacheWriteInputTokens", default, skip_serializing_if = "Option::is_none")]
@@ -4534,14 +4534,14 @@ pub struct TokenUsageBreakdown {
 }
 
 /// EXPERIMENTAL. Captures a user's answer to a `request_user_input` question.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ToolRequestUserInputAnswer {
     /// `answers`.
     pub answers: Vec<String>,
 }
 
 /// EXPERIMENTAL. Defines a single selectable option for `request_user_input`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ToolRequestUserInputOption {
     /// `description`.
     pub description: String,
@@ -4550,7 +4550,7 @@ pub struct ToolRequestUserInputOption {
 }
 
 /// EXPERIMENTAL. Params sent with a `request_user_input` event.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ToolRequestUserInputParams {
     /// @deprecated Use `isBlocking` to decide whether the request should block.
     #[serde(rename = "autoResolutionMs", default, skip_serializing_if = "Option::is_none")]
@@ -4572,7 +4572,7 @@ pub struct ToolRequestUserInputParams {
 }
 
 /// EXPERIMENTAL. Represents one `request_user_input` question and its required options.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ToolRequestUserInputQuestion {
     /// `header`.
     pub header: String,
@@ -4592,7 +4592,7 @@ pub struct ToolRequestUserInputQuestion {
 }
 
 /// EXPERIMENTAL. Response payload mapping question ids to answers.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct ToolRequestUserInputResponse {
     /// `answers`.
     pub answers: BTreeMap<String, ToolRequestUserInputAnswer>,
@@ -4636,7 +4636,7 @@ pub struct TurnCompletedNotification {
 
 /// Notification that the turn-level unified diff has changed. Contains the latest aggregated diff
 /// across all file changes in the turn.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TurnDiffUpdatedNotification {
     /// `diff`.
     pub diff: String,
@@ -4662,7 +4662,7 @@ pub struct TurnEnvironmentParams {
 }
 
 /// `TurnError`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TurnError {
     /// `additionalDetails`.
     #[serde(rename = "additionalDetails", default, skip_serializing_if = "Option::is_none")]
@@ -4678,7 +4678,7 @@ pub struct TurnError {
 }
 
 /// `TurnInterruptParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TurnInterruptParams {
     /// `threadId`.
     #[serde(rename = "threadId")]
@@ -4730,7 +4730,7 @@ pub enum TurnPlanStepStatus {
 }
 
 /// `TurnPlanUpdatedNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TurnPlanUpdatedNotification {
     /// `explanation`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4746,7 +4746,7 @@ pub struct TurnPlanUpdatedNotification {
 }
 
 /// `TurnStartParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct TurnStartParams {
     /// Optional client-provided context fragments keyed by an opaque source identifier.
     #[serde(rename = "additionalContext", default, skip_serializing_if = "Option::is_none")]
@@ -4885,7 +4885,7 @@ pub enum TurnStatus {
 }
 
 /// `TurnSteerParams`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TurnSteerParams {
     /// Optional client-provided context fragments keyed by an opaque source identifier.
     #[serde(rename = "additionalContext", default, skip_serializing_if = "Option::is_none")]
@@ -4918,7 +4918,7 @@ pub struct TurnSteerParams {
 }
 
 /// `TurnSteerResponse`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct TurnSteerResponse {
     /// `turnId`.
     #[serde(rename = "turnId")]
@@ -4938,7 +4938,7 @@ pub struct TurnToolOutput {
 }
 
 /// `TurnsPage`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
 pub struct TurnsPage {
     /// `backwardsCursor`.
     #[serde(rename = "backwardsCursor", default, skip_serializing_if = "Option::is_none")]
@@ -5024,7 +5024,7 @@ pub enum UserInputImageForm {
 }
 
 /// `WarningNotification`, as Codex's schema names it.
-#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
 pub struct WarningNotification {
     /// Concise warning message for the user.
     pub message: String,

@@ -31,6 +31,8 @@ pub enum Incoming {
     Request {
         /// Its id, which the answer carries.
         id: RequestId,
+        /// The thread it is about, as its params name it.
+        thread: Option<String>,
         /// What it asks.
         request: Box<ServerRequest>,
     },
@@ -42,7 +44,12 @@ pub enum Incoming {
         method: String,
     },
     /// A notification.
-    Notification(Box<ServerNotification>),
+    Notification {
+        /// The thread it is about, as its params name it.
+        thread: Option<String>,
+        /// What it says.
+        note: Box<ServerNotification>,
+    },
     /// A notification these types do not name.
     UnknownNotification {
         /// Its method.
@@ -119,13 +126,14 @@ pub fn read(frame: &str) -> Result<Incoming, ReadError> {
         None => None,
     };
     let params = msg.remove("params").unwrap_or(Value::Null);
+    let thread = params.get("threadId").and_then(Value::as_str).map(str::to_owned);
     match (id, method) {
         (Some(id), Some(method)) => Ok(match ServerRequest::read(&method, params) {
-            Some(request) => Incoming::Request { id, request: Box::new(request?) },
+            Some(request) => Incoming::Request { id, thread, request: Box::new(request?) },
             None => Incoming::UnknownRequest { id, method },
         }),
         (None, Some(method)) => Ok(match ServerNotification::read(&method, params) {
-            Some(note) => Incoming::Notification(Box::new(note?)),
+            Some(note) => Incoming::Notification { thread, note: Box::new(note?) },
             None => Incoming::UnknownNotification { method },
         }),
         (Some(id), None) => Ok(Incoming::Answer { id, outcome: outcome(&mut msg)? }),

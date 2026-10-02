@@ -11,6 +11,12 @@ mod tests {
     use serde_json::{Value, json};
     use slopty_agent::codex::protocol::{self as p, ServerNotification, ServerRequest};
     use slopty_agent::codex::rpc::{self, Incoming};
+    use slopty_agent::codex::shared::{self, Shared};
+    use slopty_core::WallMs;
+    use slopty_proto::thread::{
+        Action, AgentId, Answerer, Drive, Effect, ItemBody, Phase, Request, RequestState, Status,
+        ThreadState, TurnId, TurnState,
+    };
 
     /// The notifications Slopty passes over: the app-server's remote-control state, its
     /// deprecation notices and thread goals.
@@ -96,7 +102,7 @@ mod tests {
                 Incoming::Answer { outcome, .. } => {
                     outcome.unwrap();
                 }
-                Incoming::Request { .. } | Incoming::Notification(_) => read += 1,
+                Incoming::Request { .. } | Incoming::Notification { .. } => read += 1,
             }
         }
         assert_eq!(unnamed, PASSED_OVER.iter().map(|m| (*m).to_owned()).collect());
@@ -143,7 +149,7 @@ mod tests {
         let heard = |line: &Line| (!line.sent).then(|| rpc::read(&line.msg.to_string()).unwrap());
         let mut asked = Vec::new();
         for line in &lines {
-            if let Some(Incoming::Request { id, request }) = heard(line) {
+            if let Some(Incoming::Request { id, request, .. }) = heard(line) {
                 assert!(matches!(*request, ServerRequest::ItemCommandExecutionRequestApproval(_)));
                 asked.push((line.client.clone(), id));
             }
@@ -163,7 +169,7 @@ mod tests {
         let resolved: Vec<&str> = lines[first..second]
             .iter()
             .filter_map(|line| match heard(line) {
-                Some(Incoming::Notification(note)) => match *note {
+                Some(Incoming::Notification { note, .. }) => match *note {
                     ServerNotification::ServerRequestResolved(done) => {
                         assert_eq!(done.request_id, id);
                         Some(line.client.as_str())
@@ -188,5 +194,137 @@ mod tests {
             .map(|line| &line.msg)
             .collect();
         assert!(after.is_empty(), "a late answer is never answered: {after:?}");
+    }
+
+    /// One client's view of the recorded thread, mapped: the thread its `thread/start` or
+    /// `thread/resume` brought back, then every request and notification it heard about it.
+    /// `answer` is how the client answers the approval, when it does: through the mapper, as
+    /// the face would, which must send what the recording sent.
+    fn mapped(client: &str, answer: Option<&str>) -> (ThreadState, Vec<Status>) {
+        let lines = approval();
+        let mut shared: Option<Shared> = None;
+        let mut state: Option<ThreadState> = None;
+        let mut statuses = Vec::new();
+        let now = WallMs::from_millis(1);
+        for line in lines.iter().filter(|line| line.client == client) {
+            if line.sent {
+                if line.msg.get("result").is_some()
+                    && let (Some(choice), Some(shared)) = (answer, shared.as_mut())
+                {
+                    let id = serde_json::from_value(line.msg["id"].clone()).unwrap();
+                    let by = Answerer { client: None, name: "Slopty".to_owned() };
+                    let (to, result) = shared.answer(&shared::ask_of(&id), choice, by).unwrap();
+                    assert_eq!(
+                        (to, result),
+                        (id, line.msg["result"].clone()),
+                        "as the TUI answers"
+                    );
+                }
+                continue;
+            }
+            let actions = match rpc::read(&line.msg.to_string()).unwrap() {
+                Incoming::Answer { outcome: Ok(result), .. } if result.get("thread").is_some() => {
+                    let thread: p::Thread =
+                        serde_json::from_value(result["thread"].clone()).unwrap();
+                    let (begun, actions) = Shared::new(&thread, None);
+                    state = Some(ThreadState::new(begun.meta().clone()));
+                    shared = Some(begun);
+                    actions
+                }
+                Incoming::Request { id, request, .. } => {
+                    shared.as_mut().unwrap().request(&id, &request, now)
+                }
+                Incoming::Notification { note, .. } => match shared.as_mut() {
+                    Some(shared) => shared.notification(&note, now),
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            let Some(state) = state.as_mut() else { continue };
+            for action in &actions {
+                state.apply(action);
+                if let Action::Status(status) = action {
+                    statuses.push(status.clone());
+                }
+            }
+        }
+        (state.unwrap(), statuses)
+    }
+
+    fn texts(state: &ThreadState) -> Vec<String> {
+        state
+            .items
+            .iter()
+            .map(|item| match &item.body {
+                ItemBody::User(message) => format!("user: {}", message.text.text),
+                ItemBody::Text(text) => format!("text: {}", text.text),
+                ItemBody::Tool(call) => format!("{} {:?}: {}", call.kind, call.state, call.title),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The thread as the client that started it saw it: two turns, the command it approved
+    /// elsewhere in its place, and the request answered by the TUI.
+    #[test]
+    fn the_starter_sees_the_thread_and_the_approval_settled_elsewhere() {
+        let (state, statuses) = mapped("a", None);
+        assert_eq!(state.meta.drive, Drive::named(Drive::SHARED));
+        assert_eq!(state.meta.agent, AgentId::named(AgentId::CODEX));
+        assert_eq!(state.meta.agent_version, "0.160.0");
+        assert_eq!(
+            texts(&state),
+            [
+                "user: Say hello.",
+                "text: Hello.",
+                "user: Make a file called made-by-codex.",
+                "exec Completed: /bin/zsh -lc 'touch made-by-codex'",
+                "text: Made it.",
+            ]
+        );
+        let turns: Vec<(TurnId, TurnState)> =
+            state.turns.iter().map(|t| (t.id, t.state.clone())).collect();
+        assert_eq!(turns, [(TurnId(1), TurnState::Complete), (TurnId(2), TurnState::Complete)]);
+        let inputs: Vec<Option<&str>> =
+            state.turns.iter().map(|t| t.input.as_ref().map(|i| i.0.as_str())).collect();
+        let users: Vec<Option<&str>> = state
+            .items
+            .iter()
+            .filter(|i| matches!(i.body, ItemBody::User(_)))
+            .map(|i| Some(i.id.0.as_str()))
+            .collect();
+        assert_eq!(inputs, users, "each turn names the message that started it");
+        let [request] = &*state.requests else { panic!("one request: {:?}", state.requests) };
+        assert_eq!(request.kind, Request::APPROVAL);
+        assert_eq!(request.title, "Run /bin/zsh -lc 'touch made-by-codex'?");
+        let offered: Vec<(&str, Effect, bool)> =
+            request.options.iter().map(|c| (c.id.as_str(), c.effect, c.stops)).collect();
+        assert_eq!(
+            offered,
+            [
+                ("accept", Effect::Allow, false),
+                ("acceptWithExecpolicyAmendment", Effect::Allow, false),
+                ("cancel", Effect::Deny, true),
+            ]
+        );
+        let by = Answerer { client: None, name: shared::ELSEWHERE.to_owned() };
+        assert_eq!(request.state, RequestState::Answered { by, choice: String::new() });
+        let asked =
+            statuses.iter().rfind(|s| s.phase == Phase::NeedsYou).expect("it needed the person");
+        assert_eq!(asked.wait.as_ref().map(|w| w.text.as_str()), Some(request.title.as_str()));
+        assert_eq!(state.status.phase, Phase::Done);
+    }
+
+    /// The client that answered first sees its own answer settle the request, and what it
+    /// sent is what the recording sent: the TUI's own JSON-RPC answer. It joined after the
+    /// first turn, which its `thread/resume` brought back.
+    #[test]
+    fn the_first_answer_from_here_is_named_as_ours() {
+        let (state, _) = mapped("b", Some("accept"));
+        let [request] = &*state.requests else { panic!("one request: {:?}", state.requests) };
+        let by = Answerer { client: None, name: "Slopty".to_owned() };
+        assert_eq!(request.state, RequestState::Answered { by, choice: "accept".to_owned() });
+        let (started, _) = mapped("a", None);
+        assert_eq!(texts(&state), texts(&started), "the first turn came back with the resume");
     }
 }

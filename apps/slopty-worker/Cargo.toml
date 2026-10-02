@@ -52,6 +52,9 @@ tracing-subscriber.workspace = true
 slopty-dnd.workspace = true
 
 [dev-dependencies]
+# The stand-in Codex app-server of `tests/codex.rs` speaks WebSocket on a Unix socket.
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
 slopty-codec.workspace = true
 serde_json.workspace = true
 slopty-worker.workspace = true

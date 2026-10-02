@@ -7906,6 +7906,7 @@ dependencies = [
  "bytes",
  "dispatch2",
  "ec4rs",
+ "futures-util",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
@@ -7944,6 +7945,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 
@@ -7955,6 +7957,7 @@ dependencies = [
  "blake3",
  "bytes",
  "clap",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -7983,6 +7986,7 @@ dependencies = [
  "slopty-worker",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]

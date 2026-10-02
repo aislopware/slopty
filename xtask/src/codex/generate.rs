@@ -685,6 +685,8 @@ struct Traits {
     copy: BTreeMap<String, bool>,
     /// No float and no JSON value anywhere in it.
     hash: BTreeMap<String, bool>,
+    /// A struct whose every field has a default.
+    default: BTreeMap<String, bool>,
 }
 
 impl Traits {
@@ -692,6 +694,10 @@ impl Traits {
         let mut eq: BTreeMap<String, bool> = items.keys().map(|k| (k.clone(), true)).collect();
         let mut copy: BTreeMap<String, bool> = items.keys().map(|k| (k.clone(), true)).collect();
         let mut hash: BTreeMap<String, bool> = items.keys().map(|k| (k.clone(), true)).collect();
+        let mut default: BTreeMap<String, bool> = items
+            .iter()
+            .map(|(k, item)| (k.clone(), matches!(item.shape, Shape::Struct(_))))
+            .collect();
         // A fixed point: each pass takes away what a field's type cannot give.
         loop {
             let mut moved = false;
@@ -700,6 +706,7 @@ impl Traits {
                 let item_eq = tys.iter().all(|t| ty_eq(t, &eq));
                 let item_copy = tys.iter().all(|t| ty_copy(t, &copy));
                 let item_hash = tys.iter().all(|t| ty_hash(t, &hash));
+                let item_default = tys.iter().all(|t| ty_default(t, &default));
                 if eq.get(&item.name) == Some(&true) && !item_eq {
                     eq.insert(item.name.clone(), false);
                     moved = true;
@@ -712,9 +719,13 @@ impl Traits {
                     hash.insert(item.name.clone(), false);
                     moved = true;
                 }
+                if default.get(&item.name) == Some(&true) && !item_default {
+                    default.insert(item.name.clone(), false);
+                    moved = true;
+                }
             }
             if !moved {
-                return Self { eq, copy, hash };
+                return Self { eq, copy, hash, default };
             }
         }
     }
@@ -758,6 +769,21 @@ fn ty_hash(ty: &Ty, hash: &BTreeMap<String, bool>) -> bool {
             ty_hash(inner, hash)
         }
         Ty::String | Ty::Bool | Ty::Int(_) => true,
+    }
+}
+
+fn ty_default(ty: &Ty, default: &BTreeMap<String, bool>) -> bool {
+    match ty {
+        Ty::Named(name) => default.get(name).copied().unwrap_or(false),
+        Ty::Boxed(inner) => ty_default(inner, default),
+        Ty::String
+        | Ty::Bool
+        | Ty::Int(_)
+        | Ty::Float
+        | Ty::Json
+        | Ty::Vec(_)
+        | Ty::Map(_)
+        | Ty::Option(_) => true,
     }
 }
 
@@ -852,6 +878,9 @@ fn derives(name: &str, traits: &Traits) -> String {
     }
     if traits.hash.get(name) == Some(&true) {
         list.push("Hash");
+    }
+    if traits.default.get(name) == Some(&true) {
+        list.push("Default");
     }
     list.extend(["Debug", "Serialize", "Deserialize"]);
     format!("#[derive({})]", list.join(", "))
