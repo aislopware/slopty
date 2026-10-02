@@ -13785,3 +13785,72 @@ are not sent again.
 cargo test -p slopty-client --test remote_link -- \
   a_download_cut_by_a_lost_link_goes_on_over_the_next_link --nocapture
 ```
+
+## 2026-10-03 — the app's deploy into a fresh guest, the Linux e2e's new cases, a Linux lane in CI
+
+On mac-studio (M1 Max, 10 cores, 32 GB) while other sessions built, every cargo command under
+`nice -n 19` with four jobs.
+
+**The app's deploy into a fresh macOS guest** (`docs/decisions/workers.md`, "The app's deploy
+ran live into a fresh macOS guest"). Guest macOS 26.6.2, 4 cores, 8 GB, on the external disk.
+
+| step | run 1 (fresh clone) | run 2 (kept clone, worker there) | run 3 (fresh clone) |
+| --- | --- | --- | --- |
+| clone, boot to a command in the session | 0.03 s, 31.2 s | — | 0.02 s, 36.3 s |
+| first step stopped on the unknown host key | — | 59 ms | 103 ms |
+| the key read again and fingerprinted (`Ssh::explain`) | — | 69 ms | 66 ms |
+| the deploy once trusted: 76.8 MB up, install, doctor | 1.62 s | 1.82 s | 1.61 s |
+| `slopty ping` ×3 in the guest, its own worker over QUIC | — | — | rtt 1.98, 0.59, 0.69 ms |
+
+Run 1 failed at the dial from this Mac (it had no guest-side ping yet), which found the Local
+Network denial of this session's process tree (`EHOSTUNREACH` on every UDP send to the guest,
+system binaries excepted); runs 2 and 3 stop there by design until that grant is given.
+
+```sh
+cargo xtask vm deploy --app
+cargo xtask vm deploy --app --keep     # leaves the guest; `cargo xtask vm prune --kept`
+```
+
+**The Linux e2e's new cases** (`docs/decisions/platform.md`, "A Linux worker's files, search,
+uploads and tunnels"). Debian trixie, aarch64, in Docker Desktop capped at two CPUs; the client
+on this Mac over the published loopback port. All five cases passed in 3.3 s of tests.
+
+| what | number |
+| --- | --- |
+| a file written by `docker exec` there, to its `WorkerMsg::File` here | 47.7 ms (an upper bound: most of it is `docker exec` starting) |
+| an upload of 2.5 MB into the shell's directory, to its `Done` | 62.4 ms |
+| 300 keys echoed by `cat` | p50 0.66 ms, p90 1.12 ms, p99 3.01 ms (QUIC rtt 0.43 ms) |
+| `cargo xtask linux e2e`, warm, from cross-build to the end | 63.1 s cross-build, 112.8 s the e2e step |
+
+```sh
+cargo xtask linux e2e > target/logs/linux-e2e.log 2>&1
+```
+
+**A Linux lane in CI** (`docs/decisions/tooling.md`, "The Linux worker is built and tested on a
+Linux runner"). The repository's Actions cache on 2026-10-03: 10.78 GB in 8 309 entries, against
+a 10 GB quota with least-recently-used eviction (`gh api repos/aislopware/slopty/actions/cache/usage`).
+So the Linux job compiles cold, with no cache entry of its own; its wall time is to be read from
+its first runs (`gh run view <id> --json jobs`) before it joins what `promote` needs.
+
+**A release built here** (`cargo xtask dist`, ad hoc signed, cold for the dist profile). Every
+artifact the release job uploads came out and matched its `SHA256SUMS`.
+
+| step | time |
+| --- | --- |
+| `cargo build` (dist), this Mac | 937.1 s |
+| cross-build the Linux workers (glibc 2.28), arm64 and x86_64 | 563.9 s |
+| cross-build the Linux servers (static musl), arm64 and x86_64 | 445.5 s |
+| zip the app; the dSYMs archived | 8.9 s; 14.7 s |
+
+| artifact | size |
+| --- | --- |
+| `Slopty-0.1.0-macos-arm64.zip` | 87 MB |
+| `slopty-0.1.0-macos-arm64.tar.gz` (worker, ptyd, server, CLI) | 22 MB |
+| `slopty-worker-0.1.0-linux-{arm64,x86_64}.tar.gz` | 15 MB, 16 MB |
+| `slopty-server-0.1.0-linux-{arm64,x86_64}.tar.gz` | 5.1 MB, 5.4 MB |
+| `slopty-0.1.0-dSYMs.tar.gz` | 177 MB |
+
+```sh
+cargo xtask dist --ad-hoc --out target/dist-out > target/logs/dist.log 2>&1
+(cd target/dist-out && shasum -a 256 -c SHA256SUMS)
+```

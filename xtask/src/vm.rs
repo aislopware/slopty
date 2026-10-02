@@ -27,6 +27,11 @@
 //!   no ssh options, so this binary stands in as that program: `slopty worker deploy vm --ssh
 //!   <xtask>` makes the CLI run `xtask vm <script>`, which runs the system `ssh` with the guest's
 //!   address, key and options ([`VmOpts::script`]).
+//! - `deploy --app` deploys as the app does instead, into a fresh clone that has never had a
+//!   worker: `slopty-deploy`'s `guest` test runs the app's own runner (`Ssh::unattended`, which
+//!   never asks) from this Mac, meets a host key it does not know, checks the offered fingerprint
+//!   against the guest's key file (read here through the guest agent, not over SSH), trusts it in a
+//!   known-hosts file of the test's own, deploys, and pings the worker.
 //! - `live -p <crate> [--test <target>] -- <nextest filters>` runs tests in a fresh clone against
 //!   the guest's own worker. A nextest archive of the crates' tests goes into the guest at this
 //!   checkout's own path (so the paths compiled into the tests hold) and runs there in the
@@ -146,7 +151,18 @@ pub enum VmCmd {
     },
     /// Build this tree's worker and put it on the guest with `slopty worker deploy` (cloned from
     /// the base when it does not exist yet).
-    Deploy(Which),
+    Deploy {
+        #[command(flatten)]
+        which: Which,
+        /// Deploy as the app does, into a fresh clone removed afterwards: its runner, a host key
+        /// trusted on first use, the worker pinged from here.
+        #[arg(long, conflicts_with = "name")]
+        app: bool,
+        /// With `--app`, leave the guest running afterwards (`cargo xtask vm prune --kept`
+        /// removes it).
+        #[arg(long, requires = "app")]
+        keep: bool,
+    },
     /// Run live tests in a fresh guest, against its own worker, and bring the results back.
     Live(LiveOpts),
     /// The lane's own proof: the host reaches the guest's worker, and a real HID event posted in
@@ -278,7 +294,8 @@ pub fn run(sh: &Shell, opts: &VmOpts) -> Result<()> {
             ensure!(status.success(), "{}: {status}", command.join(" "));
             Ok(())
         }
-        VmCmd::Deploy(which) => {
+        VmCmd::Deploy { which, app: true, keep } => app_deploy(sh, &home, which.macos, *keep),
+        VmCmd::Deploy { which, app: false, .. } => {
             let name = which.name();
             let bins = build_worker(sh)?;
             ensure_clone(&home, which.macos, &name)?;
@@ -722,6 +739,57 @@ fn deploy(sh: &Shell, home: &Utf8Path, name: &str, bins: &Utf8Path) -> Result<Du
     let took = started.elapsed();
     println!("  ✓ worker at {ip}:{WORKER_PORT} ({took:.1?})");
     Ok(took)
+}
+
+/// The guest's own host key, as `ssh-keygen -lf` prints its fingerprint, read through the guest
+/// agent so that no SSH connection stands between.
+fn host_key(home: &Utf8Path, name: &str) -> Result<String> {
+    let said = exec_out(home, name, "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub")?;
+    let sha256 = said.split_whitespace().find(|word| word.starts_with("SHA256:"));
+    Ok(sha256.with_context(|| format!("no fingerprint in {said:?}"))?.to_owned())
+}
+
+/// `deploy --app`: a fresh clone, booted, this Mac admitted, then `slopty-deploy`'s `guest` test
+/// deploys to it as the app does; the clone is removed afterwards.
+fn app_deploy(sh: &Shell, home: &Utf8Path, macos: Macos, keep: bool) -> Result<()> {
+    watch_signals()?;
+    reap_orphans(home)?;
+    let plan = Plan::new(sh, macos, keep)?;
+    step(
+        "build slopty-deploy guest",
+        &cmd!(sh, "cargo nextest run -p slopty-deploy --test guest --run-ignored only --no-run"),
+    )?;
+    let (guest, cloned) = RunGuest::clone(home, macos, plan.name, keep)?;
+    let booted = boot(home, &guest.name)?;
+    println!("▶ {} cloned in {cloned:.1?}, booted in {booted:.1?}", guest.name);
+    let ip = ip(home, &guest.name)?;
+    let host = ssh_out(home, &ip, "echo ${SSH_CONNECTION%% *}")?;
+    ensure!(!host.is_empty(), "no SSH_CONNECTION on the guest");
+    admit(home, &ip, &host)?;
+    let installed = ssh(home, &ip)
+        .arg(format!("test -e '{WORKER_EXE}'"))
+        .stdin(Stdio::null())
+        .status()?
+        .success();
+    ensure!(!installed, "{} already has a worker: a clone of the base must not", guest.name);
+    let fingerprint = host_key(home, &guest.name)?;
+    let key = home.join("ssh/id_ed25519");
+    let _env = [
+        sh.push_env("SLOPTY_VM_GUEST", &ip),
+        sh.push_env("SLOPTY_VM_USER", USER),
+        sh.push_env("SLOPTY_VM_KEY", key.as_str()),
+        sh.push_env("SLOPTY_VM_BINS", plan.bins.as_str()),
+        sh.push_env("SLOPTY_VM_HOST_KEY", &fingerprint),
+        // The test spawns no daemon of this Mac's: nextest's setup script need build none.
+        sh.push_env(crate::gate::BINS_FRESH, "1"),
+    ];
+    step(
+        "slopty-deploy guest: the app's deploy into a guest it has never reached",
+        &cmd!(
+            sh,
+            "cargo nextest run -p slopty-deploy --test guest --run-ignored only --no-capture"
+        ),
+    )
 }
 
 /// Add `host` to `[worker] allow` in the guest's settings, keeping every other key there. A file
@@ -1410,6 +1478,18 @@ mod tests {
         assert_eq!(opts.script.as_deref(), Some("sh -c 'uname -sm'"));
         let opts = parse(&["vm", "list"]);
         assert!(matches!(opts.cmd, Some(VmCmd::List)), "a subcommand is one: {opts:?}");
+    }
+
+    /// `deploy --app` takes a fresh clone of its own, so it never names a guest.
+    #[test]
+    fn deploying_as_the_app_takes_a_fresh_guest() {
+        let opts = parse(&["vm", "deploy", "--app"]);
+        assert!(matches!(opts.cmd, Some(VmCmd::Deploy { app: true, .. })), "{opts:?}");
+        let opts = parse(&["vm", "deploy", "--name", "mine"]);
+        assert!(matches!(opts.cmd, Some(VmCmd::Deploy { app: false, .. })), "{opts:?}");
+        let command = VmOpts::augment_args(clap::Command::new("vm"));
+        let both = command.try_get_matches_from(["vm", "deploy", "--app", "--name", "mine"]);
+        assert!(both.is_err(), "a named guest is not a fresh one");
     }
 
     /// `live` keeps its crates and targets for the archive and hands the rest to nextest.
