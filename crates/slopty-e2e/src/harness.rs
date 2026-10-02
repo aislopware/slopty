@@ -182,7 +182,7 @@ pub struct Simulator {
     pub bundle_id: String,
 }
 
-/// Where the binaries are: under nextest, the run's own set ([`pinned`]); else a copy of the
+/// Where the binaries are: under nextest, the run's own pinned set; else a copy of the
 /// build's in the temporary directory, or the build's own when the copy cannot be made.
 ///
 /// # Errors
