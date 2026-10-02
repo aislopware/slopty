@@ -704,11 +704,24 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (it could not open its session, or ended with an error) are dropped with the thread saying
     why, rather than handed to a fresh start that would fail the same way, over and over. The
     person's next message tries again.
-  - **The fixtures.** `initialize`, `session/new` and the commands are OpenCode 1.18.34's own
-    answers, taken from a run in a scratch home with nothing signed in and no model called. The
-    turns after them are written from the protocol's schema, since recording them needs a model
-    behind the agent; `tests/acp.rs` holds every line to the schema's types and every message
-    Slopty sends to the very JSON in the fixture.
+  - **The fixtures are recorded.** `cargo xtask acp fixtures` downloads OpenCode 1.18.34 from the
+    npm registry, checked against its SHA-512, and runs `opencode acp` in a scratch home with
+    nothing signed in, its model list not fetched and its own providers off. Its model is a
+    canned Messages API on loopback, set in the scratch config as the only provider, and every
+    tool asks first. The recorder sends what the adapter sends and refuses what it refuses: a
+    greeting with thinking, a write allowed once, a command rejected, a command cancelled while
+    asked about, then the session loaded in a second process and prompted again. The lines are
+    scrubbed (paths, OpenCode's time-ordered ids, times) into `turns.jsonl` and `load.jsonl`.
+    Only `auth.jsonl`, an agent that wants a sign-in, is written to the schema by hand, since
+    nothing signed out reaches it. `tests/acp.rs` holds every line to the schema's types and
+    every message Slopty sends to the very JSON the agent was sent.
+  - **What the recording showed of OpenCode.** It asks the client to write the file
+    (`fs/write_text_file`) even though `initialize` offered no file system. The worker's refusal
+    leaves the write to OpenCode, which makes the file itself. A write's diff appears only in the
+    permission request, and the call's end replaces it with the tool's output, so the adapter
+    keeps a diff once told. A new file's diff has an empty old text where the protocol has none,
+    so an empty old text reads as a write. Its loaded session ends a rejected or cancelled call
+    as failed, since nothing in the replay says why.
   - **The person's own agents.** `[worker.acp]` in the settings names an agent and its command
     line, or replaces a known one by name, and an empty list hides one. The worker reads it at
     each start, off the runtime, so an edit needs no restart.
@@ -740,9 +753,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **A secret stays in the terminal.** A Codex question for a secret (`isSecret`) is not
     carried: an answer given in the GUI is kept in the thread's log. The card says to answer
     it in Codex's own terminal, which runs beside the face.
-  - **The fixture** (`tests/fixtures/codex/question.jsonl`) is written from the pinned
-    app-server schema, since the recorder (`cargo xtask codex fixtures`) does not yet drive a
-    question. Its frames are held to the generated types.
+  - **The fixture is recorded.** `cargo xtask codex fixtures` starts a turn in Plan mode, where
+    Codex offers the model its `request_user_input` tool. The canned model asks two questions,
+    the recorder answers them by their ids as the adapter does, and Codex hands the answers back
+    to the model as the tool's output (`tests/fixtures/codex/question.jsonl`). Its frames are
+    held to the generated types, and a secret question is the recorded request with `isSecret`
+    set.
 
 - ✅ **The thread view carries what the conversation face showed, and its e2e moved with it**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/`;

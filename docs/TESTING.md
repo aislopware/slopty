@@ -140,6 +140,20 @@ measurement sits in `frame_time` and runs under `smooth`, alone. The live tests 
 `slopty-capture` and `slopty-input` still return early without `SLOPTY_SCREEN_E2E` or
 `SLOPTY_INPUT_E2E`, which the xtask sets for them.
 
+## Agents: recordings and stand-ins
+No test runs a signed-in agent. Each adapter is held to a recording of the agent's own pinned
+build: `cargo xtask codex fixtures`, `pi fixtures` and `acp fixtures` run Codex, pi and OpenCode
+in a scratch home with nothing signed in, against a canned model on loopback, and drive them as
+the worker does. The scrubbed lines land in `crates/slopty-agent/tests/fixtures/<agent>/`. There
+the adapter's tests read every line the agent wrote into its protocol's types, and replay the
+rest through the codec, which must send exactly what the agent was sent. The worker's tests start
+stand-ins in the agent's place: `slopty-stub-pi` and `slopty-stub-acp` replay such a recording
+(named in a config file beside the binary), match each message the worker sends to the next one
+recorded, and write down what they heard. A test then asserts both the thread the worker built
+and what the agent was sent. Claude Code is played through its hooks (`CtlRequest::Hook`,
+`slopty hook` as the test's own child) and `slopty-stub-claude`. A fixture no recording can reach,
+such as an agent asking to be signed in, is written to the schema by hand, and its test says so.
+
 ## Where the gate runs
 Layers 1 and 2, the doctests and every lint make up `cargo gate`, split between this Mac and
 GitHub Actions. Before a commit, `cargo gate` runs the cheap lanes on the staged tree: fmt,

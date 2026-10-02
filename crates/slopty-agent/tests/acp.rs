@@ -1,6 +1,7 @@
-//! ACP's wire, as the fixtures hold an agent's session (`tests/fixtures/acp/`): every message the
-//! agent wrote reads into the protocol's types, what Slopty sends is the very message the agent
-//! was sent, and the session maps onto the thread model as the worker drives it.
+//! ACP's wire, as the fixtures hold an agent's session (`tests/fixtures/acp/`, recorded from
+//! `OpenCode` by `cargo xtask acp fixtures` but for `auth.jsonl`, written to the schema): every
+//! message the agent wrote reads into the protocol's types, what Slopty sends is the very message
+//! the agent was sent, and the session maps onto the thread model as the worker drives it.
 
 #[cfg(test)]
 mod tests {
@@ -63,11 +64,17 @@ mod tests {
                             serde_json::from_value(params).unwrap();
                         assert_eq!(*note.session_id.0, *SESSION);
                     }
-                    Incoming::Request { method, params, .. } => {
-                        assert_eq!(method, "session/request_permission");
-                        let _asked: acp::RequestPermissionRequest =
-                            serde_json::from_value(params).unwrap();
-                    }
+                    Incoming::Request { method, params, .. } => match method.as_str() {
+                        "session/request_permission" => {
+                            let _asked: acp::RequestPermissionRequest =
+                                serde_json::from_value(params).unwrap();
+                        }
+                        "fs/write_text_file" => {
+                            let _asked: acp::WriteTextFileRequest =
+                                serde_json::from_value(params).unwrap();
+                        }
+                        other => panic!("the agent asked {other}"),
+                    },
                     Incoming::Response { outcome: Err(error), .. } => {
                         assert_eq!(error.code, acp::ErrorCode::AuthRequired, "{error:?}");
                     }
@@ -111,6 +118,7 @@ mod tests {
         apply(&mut state, begun);
         let mut sends = 0_u128;
         let mut asked = std::collections::BTreeMap::<String, AskId>::default();
+        let mut refused = std::collections::BTreeMap::<String, Value>::default();
         for line in fixture(name) {
             let msg = &line.msg;
             let method = msg.get("method").and_then(Value::as_str);
@@ -149,6 +157,11 @@ mod tests {
                         serde_json::to_value(cancelled.notification).unwrap()
                     }
                     Some(other) => panic!("sent {other}"),
+                    None if msg.get("error").is_some() => {
+                        let refusal = refused.remove(&msg["id"].to_string()).unwrap();
+                        assert_eq!(*msg, refusal, "the refusal that went");
+                        continue;
+                    }
                     None => {
                         let id = msg["id"].to_string();
                         let ask = asked.remove(&id).unwrap();
@@ -173,10 +186,17 @@ mod tests {
                 Incoming::Notification { params, .. } => {
                     apply(&mut state, session.update(&params, WallMs::ZERO));
                 }
-                Incoming::Request { id, params, .. } => {
-                    let actions = session.permission(&id, &params, WallMs::ZERO).unwrap();
-                    apply(&mut state, actions);
-                    asked.insert(msg["id"].to_string(), AskId(rpc::id_text(&id)));
+                Incoming::Request { id, method, params } => {
+                    if method == "session/request_permission" {
+                        let actions = session.permission(&id, &params, WallMs::ZERO).unwrap();
+                        apply(&mut state, actions);
+                        asked.insert(msg["id"].to_string(), AskId(rpc::id_text(&id)));
+                    } else {
+                        // What the worker refuses: no file system, no terminal.
+                        let refusal = rpc::error(&id, acp::Error::method_not_found()).unwrap();
+                        let refusal = serde_json::from_slice(&refusal).unwrap();
+                        refused.insert(msg["id"].to_string(), refusal);
+                    }
                 }
                 Incoming::Response { outcome, .. } => {
                     let result = outcome.unwrap();
@@ -224,11 +244,11 @@ mod tests {
         for cap in [Cap::APPROVALS, Cap::INTERRUPT, Cap::QUEUE, Cap::SET_MODE, Cap::SET_MODEL] {
             assert!(state.meta.can(cap), "{cap}");
         }
-        assert_eq!(state.meta.models.len(), 9, "the agent's model choices");
-        assert_eq!(state.meters.model_id.as_deref(), Some("opencode/big-pickle"));
+        assert_eq!(state.meta.models.len(), 1, "the agent's model choices");
+        assert_eq!(state.meters.model_id.as_deref(), Some("canned/canned-1"));
         assert_eq!(state.meters.mode.as_deref(), Some("build"));
         assert_eq!(state.meters.context_window, Some(200_000));
-        assert_eq!(state.meters.cost_micro_usd, Some(12_300));
+        assert_eq!(state.meters.cost_micro_usd, Some(128_000), "the session's cost so far");
         assert_eq!(state.commands.len(), 3);
 
         let ends: Vec<&TurnState> = state.turns.iter().map(|t| &t.state).collect();
@@ -262,9 +282,9 @@ mod tests {
             })
             .collect();
         let want = [
-            ("call_1", &ToolState::Completed, "write"),
-            ("call_2", &ToolState::Rejected, "exec"),
-            ("call_3", &ToolState::Cancelled, "exec"),
+            ("toolu_1", &ToolState::Completed, "write"),
+            ("toolu_2", &ToolState::Rejected, "exec"),
+            ("toolu_3", &ToolState::Cancelled, "exec"),
         ];
         assert_eq!(calls, want);
         let written = state.items.iter().find_map(|i| match &i.body {
@@ -300,11 +320,30 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let want =
-            [("Say hello.".to_owned(), None), ("Say hello again.".to_owned(), Some(intent(1)))];
+        let replayed =
+            ["Say hello.", "Make a file called made-by-acp.", "Remove it.", "Remove it again."];
+        let want: Vec<(String, Option<IntentId>)> = replayed
+            .iter()
+            .map(|text| ((*text).to_owned(), None))
+            .chain([("Say hello again.".to_owned(), Some(intent(1)))])
+            .collect();
         assert_eq!(users, want, "a replayed message carries no intent of the codec's");
-        assert_eq!(state.turns.len(), 2);
+        assert_eq!(state.turns.len(), 5);
         assert!(state.turns.iter().all(|t| t.state == TurnState::Complete));
+        let calls: Vec<(&str, &ToolState)> = state
+            .items
+            .iter()
+            .filter_map(|i| match &i.body {
+                ItemBody::Tool(call) => Some((i.id.0.as_str(), &call.state)),
+                _ => None,
+            })
+            .collect();
+        let want = [
+            ("toolu_1", &ToolState::Completed),
+            ("toolu_2", &ToolState::Failed),
+            ("toolu_3", &ToolState::Failed),
+        ];
+        assert_eq!(calls, want, "each call as it ended, with no request to tell why");
         assert_eq!(state.meta.title, "Say hello.", "named by its first message");
     }
 

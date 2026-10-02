@@ -940,7 +940,15 @@ impl Session {
             raw.name = Some(name.clone());
         }
         if let Some(content) = &fields.content {
+            // A diff stays once told: OpenCode shows a write's diff only while it asks, and
+            // ends the call with its output in place of it.
+            let kept: Vec<acp::ToolCallContent> = if content.iter().any(is_diff) {
+                Vec::new()
+            } else {
+                raw.content.iter().filter(|c| is_diff(c)).cloned().collect()
+            };
             raw.content.clone_from(content);
+            raw.content.extend(kept);
         }
         if let Some(locations) = &fields.locations {
             raw.locations.clone_from(locations);
@@ -1270,6 +1278,10 @@ fn select_current(option: &acp::SessionConfigOption) -> Option<String> {
     }
 }
 
+const fn is_diff(content: &acp::ToolCallContent) -> bool {
+    matches!(content, acp::ToolCallContent::Diff(_))
+}
+
 fn select_offers(option: &acp::SessionConfigOption, value: &str) -> bool {
     select_choices(option).iter().any(|(id, _)| id == value)
 }
@@ -1295,13 +1307,16 @@ fn shown(raw: &Told) -> ToolCall {
             let path = diff.path.to_string_lossy().into_owned();
             let old = diff.old_text.clone().unwrap_or_default();
             let patch = patch_of(&old, &diff.new_text);
-            if diff.old_text.is_some() {
+            if old.is_empty() {
+                // The protocol says a new file has no old text; OpenCode gives it an empty one,
+                // which is a whole file written either way.
+                let lines = u32::try_from(diff.new_text.lines().count()).unwrap_or(u32::MAX);
+                let created = diff.old_text.is_none().then_some(true);
+                let write = WriteDetail { path, lines, created, patch };
+                (kind::WRITE, Some(ToolDetail::Write(write)))
+            } else {
                 let edit = EditDetail { path, edits: 1, replace_all: false, patch };
                 (kind::EDIT, Some(ToolDetail::Edit(edit)))
-            } else {
-                let lines = u32::try_from(diff.new_text.lines().count()).unwrap_or(u32::MAX);
-                let write = WriteDetail { path, lines, created: Some(true), patch };
-                (kind::WRITE, Some(ToolDetail::Write(write)))
             }
         }
         (acp::ToolKind::Execute, None) => {

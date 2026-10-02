@@ -230,7 +230,7 @@ mod acp {
         assert_eq!(users(&state), [("Say hello.".to_owned(), Some(id))]);
         assert_eq!(texts(&state), ["Hello, there."]);
         assert_eq!(state.meters.mode.as_deref(), Some("build"));
-        assert_eq!(state.meters.context_tokens, Some(1840));
+        assert_eq!(state.meters.context_tokens, Some(12));
         assert_eq!(state.status.phase, Phase::Done);
         let record = rig.record();
         assert_eq!(record["argv"], serde_json::json!(["acp"]), "as the registry starts it");
@@ -246,7 +246,7 @@ mod acp {
         let state = rig.until(thread, "the first ask", asking(1)).await;
         assert_eq!(state.status.phase, Phase::NeedsYou);
         let request = &state.requests[0];
-        assert_eq!(request.title, "made-by-acp?");
+        assert_eq!(request.title, "/work/made-by-acp?", "the call, as the agent titles it");
         let offered: Vec<&str> = request.options.iter().map(|o| o.id.as_str()).collect();
         assert_eq!(offered, ["once", "always", "reject"], "what the agent offers, no more");
         let ask = request.id.clone();
@@ -286,9 +286,9 @@ mod acp {
             rig.until(thread, "the stopped turn", turn_ended(4, TurnState::Interrupted)).await;
         assert_eq!(state.status.phase, Phase::Stopped);
         let want = [
-            ("call_1".to_owned(), ToolState::Completed),
-            ("call_2".to_owned(), ToolState::Rejected),
-            ("call_3".to_owned(), ToolState::Cancelled),
+            ("toolu_1".to_owned(), ToolState::Completed),
+            ("toolu_2".to_owned(), ToolState::Rejected),
+            ("toolu_3".to_owned(), ToolState::Cancelled),
         ];
         assert_eq!(tools(&state), want);
         assert_eq!(state.requests[2].state, RequestState::Withdrawn);
@@ -299,11 +299,13 @@ mod acp {
 
         let record = rig.record();
         assert_eq!(record["unexpected"], serde_json::json!([]), "the agent was sent what it was");
-        let answers: Vec<&Value> = record["heard"]
-            .as_array()
-            .unwrap()
+        let heard = record["heard"].as_array().unwrap();
+        let refused: Vec<&Value> = heard.iter().filter_map(|m| m.get("error")).collect();
+        assert_eq!(refused.len(), 1, "the agent's own write to the file system, refused");
+        assert_eq!(refused[0]["code"], -32_601);
+        let answers: Vec<&Value> = heard
             .iter()
-            .filter(|m| m.get("method").is_none())
+            .filter(|m| m.get("method").is_none() && m.get("error").is_none())
             .map(|m| &m["result"]["outcome"])
             .collect();
         let want = [
@@ -339,14 +341,24 @@ mod acp {
 
         let again = rig.send(&acp, thread, "Say hello again.");
         let state =
-            rig.until(thread, "the turn after the load", turn_ended(2, TurnState::Complete)).await;
+            rig.until(thread, "the turn after the load", turn_ended(5, TurnState::Complete)).await;
         assert_eq!(state.status.liveness, Liveness::Live);
         assert_eq!(
             users(&state),
-            [("Say hello.".to_owned(), Some(id)), ("Say hello again.".to_owned(), Some(again))],
-            "read again from the agent's record, its intent kept"
+            [
+                ("Say hello.".to_owned(), Some(id)),
+                ("Make a file called made-by-acp.".to_owned(), None),
+                ("Remove it.".to_owned(), None),
+                ("Remove it again.".to_owned(), None),
+                ("Say hello again.".to_owned(), Some(again)),
+            ],
+            "read again from the agent's record, the intent of the message it knew kept, and \
+             the turns it had that the thread had not seen taken in"
         );
-        assert_eq!(texts(&state), ["Hello, there.", "Hello again."]);
+        assert_eq!(
+            texts(&state),
+            ["Hello, there.", "I will write it.", "Made it.", "Hello again."]
+        );
         let record = rig.record();
         assert_eq!(record["heard"][1]["method"], "session/load", "the session, loaded");
         assert_eq!(record["heard"][1]["params"]["sessionId"], "ses_00000000000000000000000001");
