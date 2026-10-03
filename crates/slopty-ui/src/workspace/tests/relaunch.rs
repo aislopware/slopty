@@ -13,7 +13,7 @@ fn relaunched<'a>(
     cx: &'a mut TestAppContext,
     path: &std::path::Path,
 ) -> (Entity<WorkspaceView>, &'a mut VisualTestContext) {
-    let saved = read_layout(path).expect("written");
+    let saved = read_layout(path).ok().flatten().expect("written");
     let path = path.to_owned();
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -104,7 +104,7 @@ fn a_relaunch_shows_each_picked_face_and_knows_where_the_window_stood(cx: &mut T
         vcx.run_until_parked();
         view.read_with(vcx, |v, _| v.item(tile).cloned()).expect("its item")
     };
-    let saved = read_layout(&path).expect("written");
+    let saved = read_layout(&path).ok().flatten().expect("written");
     assert_eq!(saved.window.as_ref(), Some(&frame));
     assert_eq!(saved.faces.len(), 1, "{:?}", saved.faces);
 
@@ -195,7 +195,7 @@ fn a_relaunch_keeps_how_far_each_board_was_read(cx: &mut TestAppContext) {
         });
         vcx.run_until_parked();
     }
-    let saved = read_layout(&path).expect("written");
+    let saved = read_layout(&path).ok().flatten().expect("written");
     assert_eq!(saved.looked.len(), 1, "{:?}", saved.looked);
 
     let (view, cx) = relaunched(cx, &path);

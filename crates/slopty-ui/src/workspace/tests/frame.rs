@@ -53,7 +53,7 @@ fn temp_layout() -> (std::path::PathBuf, std::path::PathBuf) {
 fn saved_navigator(cx: &VisualTestContext, path: &std::path::Path) -> Navigator {
     cx.executor().advance_clock(SAVE_AFTER);
     cx.run_until_parked();
-    read_layout(path).expect("written").navigator
+    read_layout(path).ok().flatten().expect("written").navigator
 }
 
 /// How the navigator sits: docked where the strip keeps a desktop's width beside it, and on an
@@ -95,7 +95,7 @@ fn cmd_b_hides_and_shows_the_navigator_and_the_layout_keeps_it(cx: &mut TestAppC
     let freed = Navigator::DEFAULT_WIDTH - navigator::RAIL_W;
     assert!((alone - beside - freed).abs() < 1.0, "{beside} → {alone}");
     assert!(!saved_navigator(cx, &path).shown, "the layout keeps it hidden");
-    let saved = read_layout(&path).expect("written");
+    let saved = read_layout(&path).ok().flatten().expect("written");
     let restored =
         cx.update(|_w, cx| cx.new(|cx| WorkspaceView::new(Theme::default(), Some(saved), cx)));
     assert!(!restored.read_with(cx, |v, _| v.layout().navigator().shown), "and starts hidden");
@@ -130,7 +130,7 @@ fn dragging_the_handle_resizes_the_navigator_within_its_clamps(cx: &mut TestAppC
     drag_handle(cx, -900.0);
     near(width(cx).0, Navigator::MIN_WIDTH);
     near(saved_navigator(cx, &path).width, Navigator::MIN_WIDTH);
-    let saved = read_layout(&path).expect("written");
+    let saved = read_layout(&path).ok().flatten().expect("written");
     let restored =
         cx.update(|_w, cx| cx.new(|cx| WorkspaceView::new(Theme::default(), Some(saved), cx)));
     near(restored.read_with(cx, |v, _| v.navigator_width()), Navigator::MIN_WIDTH);

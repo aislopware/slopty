@@ -35,10 +35,10 @@ use super::model::{
 use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
-    AddressComments, ApproveTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask, OpenNode,
-    PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard,
-    ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, TellOrchestrator,
-    ToggleAskToStart, TogglePush,
+    AddressComments, ApproveTask, CancelTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask,
+    OpenNode, PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious,
+    ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask,
+    StopTaskAgent, TellOrchestrator, ToggleAskToStart, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
@@ -303,8 +303,6 @@ pub struct ProjectView {
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
     checks: Option<Checks>,
-    /// The checks panel opens with the next frame, which has the window its fields need.
-    checks_wanted: bool,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -348,7 +346,6 @@ impl ProjectView {
             composer: None,
             refused: None,
             checks: None,
-            checks_wanted: false,
             #[cfg(test)]
             renders: 0,
         }
@@ -536,7 +533,7 @@ impl ProjectView {
             cx.emit(ProjectEvent::Say(format!("Stand on a task to {}", verb_of(action))));
             return;
         };
-        if board.actions(task).contains(&action) {
+        if board.actions(task).contains(&action) || board.controls(task).contains(&action) {
             cx.emit(ProjectEvent::Act(task, action));
         } else {
             cx.emit(ProjectEvent::Say(format!("#{task} has nothing to {}", verb_of(action))));
@@ -930,6 +927,50 @@ fn place_line(project: &slopty_proto::project::Project) -> String {
     }
 }
 
+/// A switch at `zoom`: a track the solid fills while on, its knob at the far end.
+pub(super) fn switch(
+    theme: &Theme,
+    zoom: f32,
+    id: &'static str,
+    label: &'static str,
+    on: bool,
+) -> Stateful<Div> {
+    let z = |v: f32| px(v * zoom);
+    let (s, sp) = (theme.surfaces, theme.spacing);
+    let knob = 2.0_f32.mul_add(-sp.xxs, sp.lg);
+    let width = sp.xl + sp.xs;
+    let travel = 2.0_f32.mul_add(-sp.xxs, width - knob);
+    let (track, ink) = if on { (s.solid, s.solid_ink) } else { (s.overlay, s.text_secondary) };
+    let el = div()
+        .id(id)
+        .debug_selector(move || id.to_owned())
+        .role(Role::Switch)
+        .aria_label(label)
+        .aria_toggled(if on {
+            gpui::accesskit::Toggled::True
+        } else {
+            gpui::accesskit::Toggled::False
+        })
+        .flex_none()
+        .w(z(width))
+        .h(z(sp.lg))
+        .flex()
+        .items_center()
+        .px(z(sp.xxs))
+        .rounded_full()
+        .bg(hsla(track))
+        .cursor_pointer()
+        .child(
+            div()
+                .flex_none()
+                .size(z(knob))
+                .ml(z(if on { travel } else { 0.0 }))
+                .rounded_full()
+                .bg(hsla(ink)),
+        );
+    tab_stop(el, s.accent)
+}
+
 /// What an action does, as "nothing to …" and "stand on a task to …" say it.
 const fn verb_of(action: TaskAction) -> &'static str {
     match action {
@@ -942,6 +983,8 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::AddressComments => "address",
         TaskAction::ResolveConflicts => "resolve",
         TaskAction::PushAgain => "push again",
+        TaskAction::Cancel => "cancel",
+        TaskAction::Stop => "stop",
     }
 }
 
@@ -1175,7 +1218,8 @@ impl ProjectView {
         out
     }
 
-    /// A task's actions, as buttons on its row or card: what needs the person to move on.
+    /// A task's actions, as buttons on its row or card: what needs the person to move on, and
+    /// on the task the board stands on its controls after them, quieter ([`Board::controls`]).
     fn actions(
         &self,
         board: &Board,
@@ -1185,20 +1229,24 @@ impl ProjectView {
     ) -> Option<Div> {
         // Choosing a worker is the machines lens's: elsewhere it is the palette's, so a tree
         // of planned tasks is not a column of the same button.
-        let actions: Vec<TaskAction> = board
+        let mut actions: Vec<(TaskAction, bool)> = board
             .actions(task)
             .into_iter()
             .filter(|a| {
                 *a != TaskAction::RunOn || matches!(prefix, "project-machine" | "project-plan")
             })
+            .map(|a| (a, false))
             .collect();
+        if self.picked() == Some(Some(task)) {
+            actions.extend(board.controls(task).into_iter().map(|a| (a, true)));
+        }
         if actions.is_empty() {
             return None;
         }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        let buttons = actions.into_iter().map(|action| {
+        let buttons = actions.into_iter().map(|(action, control)| {
             let id = action.selector(prefix, task);
             let selector = id.clone();
             let el = div()
@@ -1219,7 +1267,12 @@ impl ProjectView {
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(action.label());
-            let el = crate::kit::secondary(el, theme);
+            let el = if control {
+                el.text_color(hsla(s.text_secondary))
+                    .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+            } else {
+                crate::kit::secondary(el, theme)
+            };
             tab_stop(el, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
                 cx.emit(ProjectEvent::Act(task, action));
@@ -2558,15 +2611,8 @@ impl ProjectView {
     }
 
     /// Open the panel that sets how the project's work is checked, its fields holding what
-    /// the project has now, the keyboard in the verifier's. Without a window yet (the board
-    /// is about to show), it opens with the next frame.
-    pub fn ask_checks(&mut self, cx: &mut Context<Self>) {
-        self.checks_wanted = true;
-        cx.notify();
-    }
-
+    /// the project has now, the keyboard in the verifier's.
     fn open_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.checks_wanted = false;
         let project = self.seen.board.as_ref().map(|b| &b.project);
         let verifier = project.and_then(|p| p.verifier.clone()).unwrap_or_default();
         let brief = project.and_then(|p| p.review.clone());
@@ -2716,42 +2762,9 @@ impl ProjectView {
         Some(panel)
     }
 
-    /// The reviewer's switch: a track the solid fills while on, its knob at the far end.
+    /// The reviewer's switch.
     fn review_switch(&self, on: bool) -> Stateful<Div> {
-        let theme = &self.theme;
-        let (s, sp) = (theme.surfaces, theme.spacing);
-        let knob = 2.0_f32.mul_add(-sp.xxs, sp.lg);
-        let width = sp.xl + sp.xs;
-        let travel = 2.0_f32.mul_add(-sp.xxs, width - knob);
-        let (track, ink) = if on { (s.solid, s.solid_ink) } else { (s.overlay, s.text_secondary) };
-        let el = div()
-            .id("project-review-switch")
-            .debug_selector(|| "project-review-switch".to_owned())
-            .role(Role::Switch)
-            .aria_label(REVIEW)
-            .aria_toggled(if on {
-                gpui::accesskit::Toggled::True
-            } else {
-                gpui::accesskit::Toggled::False
-            })
-            .flex_none()
-            .w(self.z(width))
-            .h(self.z(sp.lg))
-            .flex()
-            .items_center()
-            .px(self.z(sp.xxs))
-            .rounded_full()
-            .bg(hsla(track))
-            .cursor_pointer()
-            .child(
-                div()
-                    .flex_none()
-                    .size(self.z(knob))
-                    .ml(self.z(if on { travel } else { 0.0 }))
-                    .rounded_full()
-                    .bg(hsla(ink)),
-            );
-        tab_stop(el, s.accent)
+        switch(&self.theme, self.zoom, "project-review-switch", REVIEW, on)
     }
 
     /// The line at the board's foot that talks to the orchestrator, while it has one.
@@ -3398,9 +3411,6 @@ impl Render for ProjectView {
         }
         self.keep_time(cx);
         self.composer_in(window, cx);
-        if self.checks_wanted {
-            self.open_checks(window, cx);
-        }
         let theme = &self.theme;
         // The board's bare keys hold only while the board has the keyboard: the line to the
         // orchestrator is beside them, so a letter typed there is a letter.
@@ -3443,6 +3453,12 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &PushTask, _w, cx| {
                 this.act_on_picked(TaskAction::PushAgain, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CancelTask, _w, cx| {
+                this.act_on_picked(TaskAction::Cancel, cx);
+            }))
+            .on_action(cx.listener(|this, _: &StopTaskAgent, _w, cx| {
+                this.act_on_picked(TaskAction::Stop, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePush, _w, cx| this.toggle_push(cx)))
             .on_action(cx.listener(|_this, _: &ShowTerminal, _w, cx| {

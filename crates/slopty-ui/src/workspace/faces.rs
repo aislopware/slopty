@@ -349,7 +349,11 @@ impl WorkspaceView {
     }
 
     /// `key`'s threads, made the first time they are asked for.
-    fn thread_hub(&mut self, key: WorkerKey, cx: &mut Context<Self>) -> Entity<ThreadHub> {
+    pub(super) fn thread_hub(
+        &mut self,
+        key: WorkerKey,
+        cx: &mut Context<Self>,
+    ) -> Entity<ThreadHub> {
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             return hub.clone();
         }

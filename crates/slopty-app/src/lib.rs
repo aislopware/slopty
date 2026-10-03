@@ -126,6 +126,10 @@ fn hardware_keyboard_attached() -> bool {
 
 /// Link events applied per foreground turn at most (see the link loop).
 const LINK_BATCH: usize = 256;
+/// How long an answer sent from a note is given to leave the link before the grace that woke
+/// the app for it goes.
+#[cfg(target_os = "ios")]
+const ANSWER_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
 /// non-printing keys). In the order a phone shows them before the row scrolls: the keys the
@@ -529,6 +533,14 @@ pub struct Workspace {
     /// stay up for what arrives just after the phone is pocketed.
     #[cfg(target_os = "ios")]
     grace: Option<slopty_platform::notify::BackgroundGrace>,
+    /// The time iOS grants an app woken in the background by a note's "Allow" or "Deny", held
+    /// until the answer is out ([`WorkspaceEvent::TapsSettled`] and [`ANSWER_FLUSH`] after),
+    /// so it is not suspended while the answer waits for its link.
+    #[cfg(target_os = "ios")]
+    answer_grace: Option<slopty_platform::notify::BackgroundGrace>,
+    /// Lets [`Self::answer_grace`] go once the answer has had time to leave.
+    #[cfg(target_os = "ios")]
+    answer_flush: Option<gpui::Task<()>>,
     /// The system's paste button over the key bar's Paste, made with the first key bar, so a
     /// paste there needs no permission alert.
     #[cfg(target_os = "ios")]
@@ -588,6 +600,18 @@ impl Workspace {
             WorkspaceEvent::Unanswered { route, why } => {
                 let title = ws.view.read(cx).route_title(*route);
                 ws.attention.unanswered(*route, title, why);
+            }
+            WorkspaceEvent::ClipboardShared { worker, share } => {
+                ws.keep_clipboard_shared(*worker, *share, cx);
+            }
+            WorkspaceEvent::ProjectNews => {
+                for news in ws.view.update(cx, |view, _cx| view.take_project_news()) {
+                    ws.attention.project_news(&news);
+                }
+            }
+            WorkspaceEvent::TapsSettled => {
+                #[cfg(target_os = "ios")]
+                ws.answers_out(cx);
             }
         });
         // The key bar follows the focused tile: the app's own build is drawn again only when
@@ -650,6 +674,10 @@ impl Workspace {
             dial,
             #[cfg(target_os = "ios")]
             grace: None,
+            #[cfg(target_os = "ios")]
+            answer_grace: None,
+            #[cfg(target_os = "ios")]
+            answer_flush: None,
             #[cfg(target_os = "ios")]
             paste_key: None,
         };
@@ -996,9 +1024,38 @@ impl Workspace {
         self.workers.iter_mut().find(|w| w.id == id)
     }
 
-    /// A note was tapped: its tile comes forward, on whichever worker it lives.
-    fn open_notification(&self, tap: &Tap, cx: &mut Context<Self>) {
+    /// A note was tapped: its tile comes forward, on whichever worker it lives. A note's
+    /// "Allow" or "Deny" may have woken the app in the background on iOS: it holds the grace
+    /// the system grants until the answer is out.
+    #[cfg_attr(
+        not(target_os = "ios"),
+        expect(
+            clippy::needless_pass_by_ref_mut,
+            reason = "the answer's background grace is held only on iOS"
+        )
+    )]
+    fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
+        #[cfg(target_os = "ios")]
+        if slopty_ui::workspace::attention::answers(tap) {
+            self.answer_flush = None;
+            if self.answer_grace.is_none() {
+                self.answer_grace =
+                    slopty_platform::notify::BackgroundGrace::begin("Slopty sends your answer");
+            }
+        }
         self.view.update(cx, |v, cx| v.open_notification(tap, cx));
+    }
+
+    /// Every tapped answer is out, or said to have found nothing: the grace held for it goes
+    /// once the last has had [`ANSWER_FLUSH`] to leave the link.
+    #[cfg(target_os = "ios")]
+    fn answers_out(&mut self, cx: &Context<Self>) {
+        if self.answer_grace.is_some() {
+            self.answer_flush = Some(cx.spawn(async |ws, cx| {
+                cx.background_executor().timer(ANSWER_FLUSH).await;
+                let _gone = ws.update(cx, |ws, _cx| ws.answer_grace = None);
+            }));
+        }
     }
 
     /// Start (or refresh) a worker: its tiles wait in the workspace and a connect loop of its
@@ -1179,14 +1236,18 @@ impl Workspace {
         let add: MenuRun = Rc::new(move |window, cx| {
             let _gone = this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
         });
-        self.view.update(cx, |v, cx| v.set_host_actions(hosts, Some(add), cx));
+        self.view.update(cx, |v, cx| {
+            v.set_tailnet_grant(Some(server::client_grant()));
+            v.set_host_actions(hosts, Some(add), cx);
+        });
     }
 
     /// Something may have killed the links: the device was away, the app came back to the
     /// front, or the path moved. Each live link is probed at once and a dead one dialled again
     /// at once ([`workers::Probe`]); a worker between links is dialled now. On a path change the
     /// connections migrate to the new path first (QUIC's own migration, which the probe then
-    /// tests), so a link that survives it is never dialled again.
+    /// tests), so a link that survives it is never dialled again. The server link is probed
+    /// the same way.
     pub(crate) fn resume(&self, resume: slopty_platform::resume::Resume) {
         tracing::info!(
             resume = resume.name(),
@@ -1196,6 +1257,7 @@ impl Workspace {
         if resume.moved() {
             net::path_changed();
         }
+        self.resume_server();
         for slot in &self.workers {
             slot.resume(resume);
         }
@@ -1211,8 +1273,9 @@ impl Workspace {
     /// Connect to `id` and keep it connected: each drop (worker restart, network change,
     /// silence) is redialled on the shared backoff ([`slopty_net::redial`]); the loop ends
     /// when the worker is dropped.
-    /// While the server says the worker is away the loop waits for it to come back online
-    /// (or for [`server::HOLD_RETRY`], in case the server is the one that cannot see it). A
+    /// While the server says the worker is away the loop waits for it to come back online, for
+    /// a wake (a resume, a click), or for [`server::HOLD_RETRY`] in case the server is the one
+    /// that cannot see it, and then dials once. A
     /// worker on another build changes only when someone updates it, so it is asked again after
     /// [`slopty_net::redial::WRONG_BUILD`], or at once when something wakes the loop.
     fn spawn_worker_loop(&self, id: WorkerId, cx: &Context<Self>) {
@@ -1238,8 +1301,11 @@ impl Workspace {
                         });
                     }
                     view.update(cx, |v, cx| v.set_worker_status(key, status, cx));
-                    // Woken: back online, or the server went away. Timed out: try it anyway.
-                    held = !wait_or_wake(cx, &wake, server::HOLD_RETRY).await;
+                    // Woken (back online, the server went away, a resume, a click on the
+                    // worker) or timed out: either way it is dialled once before the next hold,
+                    // since only the direct dial can tell whether the server's word still holds.
+                    let _woken = wait_or_wake(cx, &wake, server::HOLD_RETRY).await;
+                    held = true;
                     continue;
                 }
                 held = false;
@@ -1969,6 +2035,23 @@ impl Workspace {
 
     /// Write `[client] server` into `settings.toml`, the rest of the file untouched, and take
     /// it as loaded so the watcher sees nothing new.
+    /// Keep the person's word on sharing the clipboard with `worker` in the settings file, by
+    /// its name; what could not be written is said, and the workspace keeps it until the app
+    /// quits.
+    fn keep_clipboard_shared(&mut self, worker: WorkerKey, share: bool, cx: &mut Context<Self>) {
+        let Some(name) = self.workers.iter().find(|w| w.key == worker).map(|w| w.name.clone())
+        else {
+            return;
+        };
+        let text = settings::editable_text(&self.settings_path);
+        let kept = settings::with_clipboard_shared(&text, &name, share)
+            .and_then(|text| settings::save(&self.settings_path, &text, &mut self.settings_seen));
+        match kept {
+            Ok(loaded) => self.settings = loaded.settings,
+            Err(e) => self.show_notice(format!("Settings: {e}"), cx),
+        }
+    }
+
     fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
         let text = settings::editable_text(&self.settings_path);
         let text = slopty_settings::with_server(&text, slopty_settings::ServerOf::Client, server)?;
@@ -3521,19 +3604,28 @@ pub fn open_workspace(
     // Under the self-test a frame is a step, not a moment: the layout lands at once so a
     // `dump` reads where things went, not where they were passing through. Each run starts
     // from an empty layout there, so no test depends on the last one's.
-    let saved = if cfg!(feature = "e2e") {
-        None
+    let read = if cfg!(feature = "e2e") {
+        Ok(None)
     } else {
         slopty_ui::workspace::read_layout(&layout_path())
     };
+    let unreadable = read.is_err();
     let view = cx.new(|cx| {
-        let mut view = WorkspaceView::new(Theme::default(), saved, cx);
+        let mut view = WorkspaceView::new(Theme::default(), read.ok().flatten(), cx);
+        if unreadable {
+            view.show_notice(slopty_ui::workspace::LAYOUT_SET_ASIDE.to_owned(), cx);
+        }
         view.extend_palette(app_palette_items());
         view.set_layout_path(layout_path());
         // Beside the layout: the file tiles' edits not yet saved, taken back after a quit or a
         // crash.
         view.set_unsaved_store(
             slopty_client::unsaved::Store::new(slopty_platform::dirs::data_dir().join("unsaved")),
+            cx,
+        );
+        // And the transfers in flight, taken up again at the next launch.
+        view.set_transfer_ledger(
+            slopty_platform::dirs::data_dir().join(slopty_client::xfer::ledger::FILE),
             cx,
         );
         // Each worker's threads, so an agent's thread draws in its first frame.
@@ -4962,6 +5054,53 @@ mod tests {
         ws.update(cx, |ws, _cx| ws.connect_now(id));
         cx.run_until_parked();
         assert_eq!(dials.get(), 3, "or at once when woken");
+        ws.update(cx, |ws, cx| ws.drop_slot(id, cx));
+        cx.run_until_parked();
+    }
+
+    /// A worker the server calls away is not dialled on every backoff, only after the hold;
+    /// but a resume (or any wake) dials it at once, once, rather than starting the hold over.
+    #[gpui::test]
+    fn a_wake_dials_a_held_worker_once_rather_than_holding_again(cx: &mut TestAppContext) {
+        use slopty_proto::server::{Liveness, WorkerInfo};
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ws = workspace(cx, &runtime, &dir);
+        let dials = Rc::new(std::cell::Cell::new(0_u32));
+        let counted = Rc::clone(&dials);
+        let id = WorkerId::new();
+        ws.update(cx, |ws, _cx| {
+            ws.dial = Dialer(Rc::new(move |_id, _address, _cx| {
+                counted.set(counted.get().saturating_add(1));
+                gpui::Task::ready(Err(net::DialFailed::Other("no answer".to_owned())))
+            }));
+            ws.directory = slopty_client::directory::Directory::cached(vec![WorkerInfo {
+                worker: id,
+                name: "box".to_owned(),
+                address: "100.64.0.2:45550".to_owned(),
+                liveness: Liveness::Unreachable,
+                caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),
+                load: 0.0,
+                last_seen_ms: slopty_core::WallMs::ZERO,
+            }]);
+            ws.directory.set_server(slopty_client::directory::ServerState::Linked {
+                name: "hub".to_owned(),
+                link: 1,
+            });
+        });
+        ws.update(cx, |ws, cx| ws.add_worker(id, "box".to_owned(), false, cx));
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 0, "held on the server's word");
+
+        ws.update(cx, |ws, _cx| ws.resume(slopty_platform::resume::Resume::Woke));
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 1, "dialled at once on the resume");
+        cx.executor().advance_clock(slopty_net::redial::MAX);
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 1, "held again after that dial, not on the backoff");
+        cx.executor().advance_clock(server::HOLD_RETRY);
+        cx.run_until_parked();
+        assert_eq!(dials.get(), 2, "and tried again after the hold");
         ws.update(cx, |ws, cx| ws.drop_slot(id, cx));
         cx.run_until_parked();
     }

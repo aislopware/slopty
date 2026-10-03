@@ -1079,3 +1079,103 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - Tests: `the_items_kept_read_back_and_a_broken_file_goes` (`slopty-client`),
     `a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back` (`tests/relaunch.rs`),
     `a_worker_on_another_build_offers_update_where_it_is_named` (`tests/bars.rs`).
+
+- ✅ **The away pill says why and offers the way back** (2026-10-04, readiness N9). The pill
+  said only "Reconnecting…", so a machine the tailnet policy shuts out, one asleep and a
+  dropped link all looked alike, and the way back was buried in the hosts popover.
+  - A dropped link shows the first line of its reason beside the pill's text. A machine the
+    policy turns away says "studio does not let this device in".
+  - Buttons, only while the tile is away: Retry now runs the app's connect for the host;
+    Wake runs its wake while the machine is unreachable or gone; Copy grant puts the tailnet
+    grant the app derives for this device on the clipboard when the policy turns it away, and
+    says where it goes. A button the app cannot run is not drawn.
+  - Test: `the_away_pill_says_why_and_offers_the_way_back` (`tests/away.rs`).
+
+- ✅ **The clipboard is shared or stopped per machine from the palette** (2026-10-04,
+  readiness N25). Sharing per machine was a settings key, so stopping it for one machine meant
+  editing the file, and nothing showed which machines were left out.
+  - The palette has "Stop sharing the clipboard with studio" for each machine it is shared
+    with and "Share the clipboard with studio" for the rest. Running one changes the live
+    sharing at once, says so, and the app writes the choice under `[clipboard.workers]` by
+    the machine's name. The text edit keeps the rest of the file as the person wrote it.
+  - A machine the clipboard is not shared with carries a clipboard glyph in its navigator
+    row, named for a screen reader. Shared machines carry nothing, since sharing is the
+    default and the quiet state.
+  - Test: `the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette`
+    (`tests/bars.rs`), `the_clipboard_is_kept_off_for_one_machine_by_name` (`slopty-app`).
+
+- ✅ **A layout this build cannot read is set aside and said** (2026-10-04, readiness N29).
+  The read gave nothing for a file that would not parse, and the next save overwrote it. So a
+  layout from another build was lost without a word.
+  - A file that does not parse is renamed `layout.json.bad`, replacing an older one, and the
+    workspace starts empty with "The last layout could not be read; it was kept as
+    layout.json.bad". No reader for older shapes is kept (pre-release). A missing file is
+    still a first launch, said nothing about.
+  - The unsaved-edit backup says "Unsaved edits can't be kept on this device" with the first
+    line of the error once three passes in a row have failed. One failure is a passing hiccup
+    the next pass retries; three are a disk that will not take them. A success resets the
+    count, so a new run of failures is said again.
+  - Tests: `the_layout_is_saved_and_restored` (`tests.rs`),
+    `a_failed_write_is_tried_again_without_another_edit` (`tests/unsaved.rs`).
+
+- ✅ **A yes or no is answered from wherever it is seen** (2026-10-04, readiness N6 and N14).
+  A thread agent's approval could be answered only inside its thread. The inbox and the
+  notification offered Allow and Deny for terminal agents alone. On iOS, an answer tapped on
+  the lock screen could be cut off when the app was suspended before it was sent.
+  - A thread's request is answerable outside the thread when it is an approval with a plain
+    allow and a plain deny, the same pair the thread's own keys pick. Anything with more
+    choices (a standing grant, edit before allowing, a questionnaire) opens the thread
+    instead, because a one-word answer would choose for the person.
+  - Its inbox row and its note carry Allow and Deny. Either sends the answer intent to the
+    thread's agent once, and the row and the note go when the thread hears it.
+  - The app holds a background grace from the tap until every answer tapped is settled (sent,
+    or given up as unreachable), plus two seconds for the bytes to leave. Then iOS may suspend
+    it again.
+  - Tests: `a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note`
+    (`tests/thread_waits.rs`), `a_notes_answer_waits_for_its_prompt` (`tests/attention.rs`).
+
+- ✅ **Every transfer is on one list in the status bar, and survives a relaunch** (2026-10-04,
+  readiness N22). The bar counted only uploads, as one percentage. A download (Save a copy,
+  Download, a drag out) showed nowhere in the app, and nothing could be stopped from the bar.
+  Every transfer in flight was lost with the app.
+  - **The list.** The bar's readout counts both ways (`1 upload`, `2 downloads`, `3 transfers`,
+    with the percentage of their bytes together). It shows while a transfer is not the focused
+    tile's own upload, which its header says with its stop. Clicked, a popover lists each one:
+    its way's mark, its name, its machine, `42% · 3.1 MB/s · 12 s left` and a hairline of how
+    far it got, and its Cancel under the pointer or the keyboard. It closes once nothing is
+    left. The rate is the bytes landed over the last five seconds, measured up to now, so a
+    stall reads as slowing. It is said only after the first second, which is mostly
+    handshake.
+  - **Downloads are seen.** `Remote::download` takes a `xfer::Download`: the transfer id the
+    UI chose, so its Cancel reaches it on whichever link it is, and a watch the client's
+    `Fetch` tells of each byte count. The UI draws it at most four times a second.
+  - **The ledger.** A transfer that still means something to a new run is written to
+    `transfers.json` in the data directory (`slopty_client::xfer::ledger`). That is a drop on a
+    shell or a folder, or a worker file brought down to a place the person chose. A paste, an
+    attachment and a drag over a remote window end with their run. It is written whole, off
+    the main thread, newest only, and goes when the last one ends. At the next launch each is
+    listed as waiting for its machine. When the machine links, an upload begins again under
+    its id with `again` set: every file first asks the worker what it holds, so it resumes
+    where the worker's partial file stands. A download fetches again into its staging
+    directory, named for the transfer, so the earlier run's directory is reused and cleaned.
+    A taken-up upload says "a.txt reached studio" at its end, and types nothing: the shell's
+    prompt has moved on since.
+  - Tests: ui `the_transfers_list_shows_both_ways_and_stops_one`,
+    `transfers_in_flight_are_taken_up_at_the_next_launch`,
+    `a_transfers_rate_follows_its_last_seconds`, statusbar `the_readouts_say_what_they_count`;
+    client `transfers_kept_come_back_and_the_file_goes_with_the_last`,
+    `an_upload_begun_again_after_a_relaunch_sends_from_what_the_worker_holds`,
+    `a_download_lands_in_place_and_answers_the_blocking_caller` (its watch ends at the size).
+
+- ✅ **A failed drag out says why; a file that never came says it waits for its machine**
+  (2026-10-04, readiness N30). A file promise that could not be kept left only Finder's bare
+  error. A drag out of a machine that is away did nothing. A file tile whose machine went away
+  before its text came sat on "Reading…".
+  - A drag out from a machine that is away says "studio is away; a.txt was not dragged out".
+    A promise whose download fails says "a.txt was not dragged out: why". A drag out is now a
+    download on the transfers list too.
+  - A file tile not read yet whose link drops says "Opens when the machine is back". The next
+    read ends it. One opened while the machine is away shows the away pill over an empty
+    body, as every tile of an away machine does.
+  - Tests: `a_drag_out_that_fails_says_why`,
+    `a_file_whose_machine_went_away_unread_says_it_waits_for_it`.

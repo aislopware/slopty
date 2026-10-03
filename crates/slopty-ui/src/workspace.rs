@@ -286,6 +286,20 @@ pub enum WorkspaceEvent {
         /// What to say.
         why: &'static str,
     },
+    /// The person stopped or started sharing the clipboard with a machine: the app keeps it in
+    /// the settings by the machine's name.
+    ClipboardShared {
+        /// The machine.
+        worker: WorkerKey,
+        /// Shared now, or not.
+        share: bool,
+    },
+    /// A project's moment is worth a note while the app is away: the app takes them with
+    /// [`WorkspaceView::take_project_news`].
+    ProjectNews,
+    /// Every note's "Allow" or "Deny" tapped so far was sent, or was said to have found
+    /// nothing: an app woken in the background to send one may be let go once it is out.
+    TapsSettled,
 }
 
 /// Where the phone key bar sends its keys (see [`WorkspaceView::active_key_target`]).
@@ -777,6 +791,9 @@ pub struct WorkspaceView {
     /// What the app does for a line or a button of ours (wake a worker, dial it now), run on
     /// the next frame, where there is a window to run it in.
     pending_runs: Vec<MenuRun>,
+    /// The tailnet policy grant that lets this device in, as the app words it: the away pill
+    /// copies it for a worker whose policy turns the device away.
+    tailnet_grant: Option<SharedString>,
     palette_extra: Vec<PaletteItem>,
     /// A keyboard is there to press chords on: always on a Mac, only when one is attached on
     /// a phone or tablet.
@@ -873,6 +890,8 @@ pub struct WorkspaceView {
     about: Option<about::AboutPanel>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
+    /// Downloads in flight, and the ledger that keeps transfers across a relaunch.
+    transfers: remote::transfers::Transfers,
     /// The landing of the drop being handed to the tiles, for the tile that takes it to upload
     /// from and delete once the upload ends.
     drop_landing: Option<std::path::PathBuf>,
@@ -1013,6 +1032,7 @@ impl WorkspaceView {
             palette_action: None,
             palette_hidden: HashSet::new(),
             pending_runs: Vec::new(),
+            tailnet_grant: None,
             palette_extra: Vec::new(),
             hardware_keyboard: true,
             key_bar_shown: false,
@@ -1072,6 +1092,7 @@ impl WorkspaceView {
             empty_mark,
             about: None,
             uploads: HashMap::new(),
+            transfers: remote::transfers::Transfers::default(),
             drop_landing: None,
             #[cfg(target_os = "macos")]
             drag_sink: None,
@@ -1876,7 +1897,8 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::group_navigator_by))
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))
-            .on_action(cx.listener(Self::name_project));
+            .on_action(cx.listener(Self::name_project))
+            .on_action(cx.listener(Self::share_clipboard));
         // Only while they apply to the focus ([`actions::Applies`]).
         let root = root
             .when(applies.tile, |el| {
@@ -1885,7 +1907,10 @@ impl gpui::Render for WorkspaceView {
                     .on_action(cx.listener(Self::point_others))
             })
             .when(applies.terminal, |el| el.on_action(cx.listener(Self::start_project)))
-            .when(applies.agent, |el| el.on_action(cx.listener(Self::toggle_conversation)))
+            .when(applies.agent, |el| {
+                el.on_action(cx.listener(Self::toggle_conversation))
+                    .on_action(cx.listener(Self::make_orchestrator))
+            })
             .when(applies.project, |el| el.on_action(cx.listener(Self::toggle_project_board)))
             .when(applies.undo, |el| el.on_action(cx.listener(Self::undo_close)))
             .when(applies.offer, |el| el.on_action(cx.listener(Self::open_last_offer)))
@@ -1937,6 +1962,7 @@ impl gpui::Render for WorkspaceView {
             .when_some(picker, gpui::ParentElement::child)
             .when_some(palette, gpui::ParentElement::child)
             .children(self.search_drawn())
+            .children(self.render_project_sheet(window, cx))
             .children(self.render_about(window, cx))
     }
 }
@@ -2141,21 +2167,41 @@ fn write_layout(path: &std::path::Path, saved: &Saved) {
     }
 }
 
-/// Read the layout a previous run saved at `path`; nothing (and a warning) when it is missing
-/// or does not parse, so a bad file costs an arrangement, never the app.
-#[must_use]
-pub fn read_layout(path: &std::path::Path) -> Option<Saved> {
+/// What the app says when the last layout could not be read and was set aside.
+pub const LAYOUT_SET_ASIDE: &str =
+    "The last layout could not be read; it was kept as layout.json.bad";
+
+/// A layout file that does not read as this build's: set aside as `<path>.bad`, so the next
+/// save does not overwrite it, and said to the person.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LayoutUnreadable;
+
+/// Read the layout a previous run saved at `path`: none when there is no file.
+///
+/// One that does not read (another build's, or broken) is renamed to `<path>.bad`, replacing
+/// an older one, so it costs an arrangement, never the app, and is still there to look at.
+/// There is no reading of an older shape: the layout is this device's convenience.
+///
+/// # Errors
+///
+/// [`LayoutUnreadable`] when the file is there and does not read.
+pub fn read_layout(path: &std::path::Path) -> Result<Option<Saved>, LayoutUnreadable> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "layout read");
-            return None;
+            return Err(LayoutUnreadable);
         }
     };
-    serde_json::from_slice(&bytes)
-        .map_err(|e| tracing::warn!(path = %path.display(), error = %e, "layout parse"))
-        .ok()
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+        let bad = path.with_extension("json.bad");
+        tracing::warn!(path = %path.display(), error = %e, "layout parse: set aside");
+        if let Err(e) = std::fs::rename(path, &bad) {
+            tracing::warn!(path = %bad.display(), error = %e, "layout set aside");
+        }
+        LayoutUnreadable
+    })
 }
 
 #[cfg(test)]

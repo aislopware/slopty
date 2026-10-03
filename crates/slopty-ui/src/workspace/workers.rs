@@ -28,6 +28,62 @@ use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 const QUOTE_FRAMES: u8 = 4;
 
 impl WorkspaceView {
+    /// "Stop sharing the clipboard with …" or "Share the clipboard with …": applied at once
+    /// and said, and handed to the app to keep in the settings by the machine's name.
+    pub(super) fn share_clipboard(
+        &mut self,
+        share: &super::actions::ShareClipboard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(name) = self.workers.get(&share.worker).map(|w| w.name.clone()) else { return };
+        let mut sharing = self.clip_sharing.clone();
+        sharing.workers.insert(name.clone(), share.share);
+        self.set_clipboard_sharing(sharing, cx);
+        let said = if share.share {
+            format!("The clipboard is shared with {name}")
+        } else {
+            format!("The clipboard is no longer shared with {name}")
+        };
+        self.show_notice(said, cx);
+        cx.emit(WorkspaceEvent::ClipboardShared { worker: share.worker, share: share.share });
+    }
+
+    /// Whether the clipboard is shared with `key`, as the settings say by its name.
+    #[must_use]
+    pub fn clipboard_shared(&self, key: WorkerKey) -> bool {
+        self.workers.get(&key).is_none_or(|w| self.clip_sharing.shared_with(&w.name))
+    }
+
+    /// "Stop sharing the clipboard with …" for each machine it is shared with, and "Share the
+    /// clipboard with …" for each it is not.
+    pub(super) fn clipboard_lines(&self) -> Vec<crate::palette::PaletteItem> {
+        self.workers
+            .iter()
+            .map(|(key, w)| {
+                let shared = self.clip_sharing.shared_with(&w.name);
+                let label = if shared {
+                    format!("Stop sharing the clipboard with {}", w.name)
+                } else {
+                    format!("Share the clipboard with {}", w.name)
+                };
+                let action = super::actions::ShareClipboard { worker: *key, share: !shared };
+                crate::palette::PaletteItem::new(
+                    &label,
+                    crate::icons::IconName::Clipboard,
+                    Box::new(action),
+                    &[],
+                )
+            })
+            .collect()
+    }
+
+    /// The tailnet policy grant that lets this device in, which the away pill copies for a
+    /// worker whose policy turns it away.
+    pub fn set_tailnet_grant(&mut self, grant: Option<String>) {
+        self.tailnet_grant = grant.map(gpui::SharedString::from);
+    }
+
     /// The agent a command block from `session`'s terminal goes to as context: the agent in
     /// that terminal, else the agent tile last focused on the same worker. `None` hides the
     /// offer to attach.
@@ -827,7 +883,7 @@ impl WorkspaceView {
             TerminalViewEvent::DragOut { path } => {
                 let path = this.absolute_in_session(sid, path);
                 if let Some(worker) = this.worker_of_session(sid) {
-                    this.drag_out(worker, &path);
+                    this.drag_out(worker, &path, cx);
                 }
             }
             TerminalViewEvent::PasteFiles(files) => {

@@ -30,9 +30,11 @@ use slopty_proto::ClientMsg;
 use slopty_proto::conversation::{
     ConversationRequest, PermissionEvent, PermissionPrompt, ToolDetail, Verdict,
 };
+use slopty_proto::thread::wire::{Intent, RequestCard};
+use slopty_proto::thread::{AskId, Choice, Effect, Request, ThreadId};
 
 use crate::conversation::approval::{PLAN_TOOL, QUESTION_TOOL};
-use crate::workspace::attention::{NO_LONGER_WAITING, Route};
+use crate::workspace::attention::{About, NO_LONGER_WAITING, Route};
 use crate::workspace::{WorkspaceEvent, WorkspaceView};
 
 /// How long after a worker is asked for approvals every prompt it holds has arrived: a round
@@ -50,7 +52,8 @@ pub(in crate::workspace) const NOT_REACHED: &str = "Couldn't reach that agent's 
 #[derive(Debug)]
 struct Tapped {
     route: Route,
-    ask: u64,
+    /// The prompt's number, or the thread's request's id, as the note carried it.
+    ask: String,
     verdict: Verdict,
     /// When it was tapped: it waits [`HOLD_VERDICT`] from then.
     at: Instant,
@@ -68,8 +71,30 @@ pub(in crate::workspace) struct Approvals {
     sent: HashSet<(SessionId, u64)>,
     /// Verdicts from notes waiting for their prompt, oldest first.
     tapped: Vec<Tapped>,
+    /// The request each thread was answered here on, until its worker's table moves past it:
+    /// each goes once.
+    threads_sent: HashMap<ThreadId, AskId>,
     /// Looks at [`Self::tapped`] again when the next of them is due.
     wake: Option<gpui::Task<()>>,
+}
+
+/// Whether a thread's open request is a yes or no that "Allow" and "Deny" answer whole: an
+/// approval offering a plain allow and a deny.
+#[must_use]
+pub(in crate::workspace) fn answerable(card: &RequestCard) -> bool {
+    card.kind == Request::APPROVAL
+        && request_choice(&card.options, true).is_some()
+        && request_choice(&card.options, false).is_some()
+}
+
+/// The choice of `options` that allows (`allow`) or denies the call once and no more: the
+/// plain allow; the plain deny, else the first.
+fn request_choice(options: &[Choice], allow: bool) -> Option<&Choice> {
+    if allow {
+        options.iter().find(|c| c.effect == Effect::Allow && c.scope.is_none())
+    } else {
+        crate::conversation::thread::view::denying::plain_deny(options)
+    }
 }
 
 /// Whether `prompt` is a yes or no that "Allow" or "Deny" answers whole.
@@ -159,13 +184,49 @@ impl WorkspaceView {
         true
     }
 
+    /// Answer `thread`'s open request `ask` on `worker` with its plain allow or deny, through
+    /// the worker's thread hub as the thread's own tray would; `false` when it does not wait on
+    /// that request any more, or it was answered here already.
+    pub fn answer_thread(
+        &mut self,
+        worker: WorkerKey,
+        thread: ThreadId,
+        ask: &AskId,
+        allow: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let open = self.thread_stand(thread).and_then(|s| s.asks.as_ref()).filter(|a| a.id == *ask);
+        let choice = open.filter(|a| answerable(a)).and_then(|a| request_choice(&a.options, allow));
+        let Some(choice) = choice.map(|c| c.id.clone()) else {
+            tracing::debug!(%thread, ask = ask.0, "a request no longer open here");
+            return false;
+        };
+        if self.inbox.approvals.threads_sent.get(&thread) == Some(ask) {
+            return false;
+        }
+        tracing::info!(%thread, ask = ask.0, allow, "request answered");
+        self.inbox.approvals.threads_sent.insert(thread, ask.clone());
+        let intent = Intent::Answer { ask: ask.clone(), choice, message: None };
+        let hub = self.thread_hub(worker, cx);
+        let _id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+        cx.notify();
+        true
+    }
+
+    /// The request this client answered on `thread` that its worker's table still shows open.
+    #[must_use]
+    pub(in crate::workspace) fn thread_answered_here(&self, thread: ThreadId) -> Option<&AskId> {
+        let open = self.thread_stand(thread)?.asks.as_ref()?;
+        self.inbox.approvals.threads_sent.get(&thread).filter(|ask| **ask == open.id)
+    }
+
     /// A note's "Allow" or "Deny" for `route`'s prompt `ask`: answered now when the prompt is
     /// held here, else once it arrives, or said to have found none once its worker has sent
     /// what it holds or could not be reached.
     pub(in crate::workspace) fn verdict_tapped(
         &mut self,
         route: Route,
-        ask: u64,
+        ask: String,
         verdict: Verdict,
         cx: &mut Context<Self>,
     ) {
@@ -181,11 +242,24 @@ impl WorkspaceView {
         let now = cx.background_executor().now();
         let mut due: Option<Duration> = None;
         for tap in std::mem::take(&mut self.inbox.approvals.tapped) {
-            let Some(session) = tap.route.session() else { continue };
-            if self.approval(session).is_some_and(|p| p.ask == tap.ask) {
-                self.answer_approval(session, tap.ask, tap.verdict, cx);
-                continue;
-            }
+            let answered = match tap.route.about {
+                About::Session(session) => {
+                    let Ok(ask) = tap.ask.parse::<u64>() else { continue };
+                    if self.approval(session).is_some_and(|p| p.ask == ask) {
+                        self.answer_approval(session, ask, tap.verdict, cx);
+                        continue;
+                    }
+                    self.inbox.approvals.sent.contains(&(session, ask))
+                }
+                About::Thread(thread) => {
+                    let ask = AskId(tap.ask.clone());
+                    let allow = matches!(tap.verdict, Verdict::Allow);
+                    if self.answer_thread(tap.route.worker, thread, &ask, allow, cx) {
+                        continue;
+                    }
+                    self.inbox.approvals.threads_sent.get(&thread) == Some(&ask)
+                }
+            };
             let me = self.me(tap.route.worker);
             // How long until the worker has surely sent what it holds, once it was asked.
             let sync = self
@@ -196,7 +270,6 @@ impl WorkspaceView {
                 .filter(|(link, _)| Some(*link) == me)
                 .map(|(_, at)| SYNCED.saturating_sub(now.saturating_duration_since(*at)));
             let hold = HOLD_VERDICT.saturating_sub(now.saturating_duration_since(tap.at));
-            let answered = self.inbox.approvals.sent.contains(&(session, tap.ask));
             if answered || sync.is_some_and(|left| left.is_zero()) {
                 self.unanswered(tap.route, NO_LONGER_WAITING, cx);
             } else if hold.is_zero() {
@@ -206,6 +279,9 @@ impl WorkspaceView {
                 due = Some(due.map_or(next, |due| due.min(next)));
                 self.inbox.approvals.tapped.push(tap);
             }
+        }
+        if self.inbox.approvals.tapped.is_empty() {
+            cx.emit(WorkspaceEvent::TapsSettled);
         }
         self.inbox.approvals.wake = due.map(|due| {
             cx.spawn(async move |this, cx| {

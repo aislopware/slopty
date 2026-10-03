@@ -587,6 +587,9 @@ pub(super) fn title(text: impl Into<SharedString>, color: gpui::Hsla) -> Div {
 
 /// Meta text on the right of a row's line, in tabular figures: an age, a turn's time or a
 /// round trip that changes does not move what is beside it.
+/// What a machine's clipboard glyph says: copy and paste do not cross to it.
+pub(super) const CLIPBOARD_OFF: &str = "The clipboard is not shared";
+
 pub(super) fn readout(theme: &Theme, text: impl Into<SharedString>) -> Div {
     tabular(meta(div(), theme)).flex_none().whitespace_nowrap().child(text.into())
 }
@@ -2738,21 +2741,32 @@ impl WorkspaceView {
         // before them what a folded worker's tiles add up to. They grow leftwards, so a rollup
         // coming or going moves nothing after it.
         let rollup = folded.then_some(worker.rollup).filter(|r| r.shown().is_some());
-        let rest =
-            div()
-                .flex()
-                .items_center()
-                .justify_end()
-                .gap(px(theme.spacing.xs))
-                .group_hover(group.clone(), gpui::Styled::invisible)
-                .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
-                .children(worker.health.map(|(_, word)| readout(theme, word)))
-                .children(worker.relay.clone().map(|relay| {
-                    readout(theme, relay).debug_selector(move || format!("nav-path-{key}"))
-                }))
-                .children(worker.rtt.clone().map(|rtt| {
+        let rest = div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap(px(theme.spacing.xs))
+            .group_hover(group.clone(), gpui::Styled::invisible)
+            .children(rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{key}"), r, false)))
+            .children(worker.health.map(|(_, word)| readout(theme, word)))
+            .children(worker.relay.clone().map(|relay| {
+                readout(theme, relay).debug_selector(move || format!("nav-path-{key}"))
+            }))
+            .children(
+                worker.rtt.clone().map(|rtt| {
                     readout(theme, rtt).debug_selector(move || format!("nav-rtt-{key}"))
-                }));
+                }),
+            )
+            .children((!self.clipboard_shared(key)).then(|| {
+                // Copy and paste stop at this machine: said where the machine is named.
+                div()
+                    .id(SharedString::from(format!("nav-clip-off-{key}")))
+                    .debug_selector(move || format!("nav-clip-off-{key}"))
+                    .role(Role::Image)
+                    .aria_label(CLIPBOARD_OFF)
+                    .flex_none()
+                    .child(icon(theme, IconName::Clipboard, IconSize::Inline, hsla(s.text_muted)))
+            }));
         let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
         let side = theme.typography.icon_large();
         // A worker on another build: Update in place of its readouts, at rest too, since it

@@ -1078,3 +1078,80 @@ fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
         "The pull request's checks could not be read: this worker has no gh"
     );
 }
+
+/// What lands on the timeline is said to the person only when it holds a task up or waits on
+/// them: failed checks, a failed verifier, a conflict, a stopped step, a stuck agent, a start
+/// proposed, a budget near or at its cap. The rest is the board's to show.
+#[test]
+fn only_what_holds_a_task_up_or_waits_on_the_person_is_news() {
+    use slopty_proto::project::{
+        Checks, ChecksState, Report, ReportKind, StepKind, StepState, TaskStep,
+    };
+
+    use super::fixtures::run;
+    use super::model::news_line;
+
+    let mirror = one(vec![card(1, "Lock the refresh row", TaskState::Running, None)]);
+    let b = board(&mirror);
+    let say = |what| news_line(b, &entry(9, Some(1), what));
+    let failing = Checks {
+        state: ChecksState::Failing,
+        passed: 3,
+        failed: 1,
+        pending: 0,
+        skipped: 0,
+        failing: vec!["clippy".into()],
+        why: None,
+        at_ms: AT,
+    };
+    assert_eq!(
+        say(Moment::Checks(failing)).as_deref(),
+        Some("#1 Lock the refresh row: its pull request's checks fail (clippy)")
+    );
+    assert_eq!(
+        say(Moment::Verified(run(false, "abc1234"))).as_deref(),
+        Some("#1 Lock the refresh row: its verifier failed")
+    );
+    assert_eq!(say(Moment::Verified(run(true, "abc1234"))), None, "a pass is the board's");
+    let step = |kind, why: &str| {
+        Moment::Step(TaskStep {
+            kind,
+            worker: WorkerId::new(),
+            state: StepState::Failed { why: why.into() },
+            since_ms: AT,
+            term: None,
+        })
+    };
+    assert_eq!(
+        say(step(StepKind::Rebase, "CONFLICT (content)")).as_deref(),
+        Some("#1 Lock the refresh row: its work does not rebase onto main")
+    );
+    assert_eq!(
+        say(step(StepKind::Merge, "the worker is away\nmore")).as_deref(),
+        Some("#1 Lock the refresh row: its merge stopped: the worker is away")
+    );
+    let report = |kind| Report {
+        kind,
+        note: "The schema is not mine to change".into(),
+        artifacts: Vec::new(),
+        branch: None,
+        pr: None,
+    };
+    assert_eq!(
+        say(Moment::Reported { report: report(ReportKind::Stuck) }).as_deref(),
+        Some("#1 Lock the refresh row: its agent is stuck: The schema is not mine to change")
+    );
+    assert_eq!(say(Moment::Reported { report: report(ReportKind::Checkpoint) }), None);
+    assert_eq!(
+        say(Moment::Proposed { on: None }).as_deref(),
+        Some("#1 Lock the refresh row: waits for you to start it")
+    );
+    let budget =
+        |share_bp| news_line(b, &entry(9, None, Moment::Budget { meter: "usd".into(), share_bp }));
+    assert_eq!(budget(8_100).as_deref(), Some("81% of its cost budget is spent"));
+    assert_eq!(
+        budget(10_000).as_deref(),
+        Some("its cost budget is spent; no task starts until it is raised")
+    );
+    assert_eq!(say(Moment::Note { text: "hello".into() }), None);
+}

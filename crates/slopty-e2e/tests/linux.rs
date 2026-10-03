@@ -376,7 +376,7 @@ mod tests {
         std::fs::write(&sent, &bytes).unwrap();
         let xfer = XferId::new();
         let started = Instant::now();
-        shell.link.remote().upload(xfer, vec![sent], Dest::SessionCwd(shell.session));
+        shell.link.remote().upload(xfer, vec![sent], Dest::SessionCwd(shell.session), false);
         let (path, hash) = shell
             .until_control("the upload", |msg| match msg {
                 WorkerMsg::Xfer(XferMsg::Done { xfer: x, path, hash, .. }) if x == xfer => {

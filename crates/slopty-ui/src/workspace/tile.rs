@@ -25,7 +25,7 @@ use super::actions::{CloseItem, FullscreenTile};
 use super::browsers::ADDRESS;
 use super::faces::ThreadStand;
 use super::strip::Handed;
-use super::{Field, WorkerStatus, WorkspaceView};
+use super::{Field, MenuRun, WorkerStatus, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::browser::BrowserView;
 use crate::chrome_text::ChromeText;
@@ -404,6 +404,20 @@ pub(super) fn place_name(cwd: &str, repo: Option<&str>, home: Option<&str>) -> O
     })
 }
 
+/// What the away pill offers ([`WorkspaceView::away_actions`]).
+#[derive(Default)]
+struct AwayActions {
+    grant: Option<SharedString>,
+    wake: Option<MenuRun>,
+    retry: Option<MenuRun>,
+}
+
+/// The away pill's button that copies the tailnet grant.
+pub const COPY_GRANT: &str = "Copy grant";
+/// What the app says once the grant is on the clipboard.
+pub const GRANT_COPIED: &str =
+    "Copied the tailnet grant: add it to Tailscale's access controls to let this device in";
+
 /// The in-body state of a tile whose body cannot show what it should: what the pill says and
 /// what it offers.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -503,7 +517,7 @@ impl WorkspaceView {
     /// The way to update `key` where it runs a different build and the app can run one now (not
     /// while one is under way): what the navigator's row and the hosts popover offer as Update,
     /// as its tiles' pills do.
-    pub(super) fn update_run(&self, key: WorkerKey, cx: &App) -> Option<super::MenuRun> {
+    pub(super) fn update_run(&self, key: WorkerKey, cx: &App) -> Option<MenuRun> {
         let WorkerStatus::NeedsUpdate(notice) = &self.workers.get(&key)?.status else {
             return None;
         };
@@ -2227,6 +2241,9 @@ impl WorkspaceView {
                     BodyState::Away(format!("{name} is unreachable").into())
                 }
                 Some(WorkerStatus::Gone) => BodyState::Away(format!("{name} is gone").into()),
+                Some(WorkerStatus::NotGranted) => {
+                    BodyState::Away(format!("{name} does not let this device in").into())
+                }
                 _ => BodyState::Away(RECONNECTING.into()),
             });
         }
@@ -2236,6 +2253,20 @@ impl WorkspaceView {
             Some(SessionState::Running) => None,
             None if self.terminals.contains_key(&session) => None,
             None => Some(BodyState::Ended),
+        }
+    }
+
+    /// What the away pill offers for `worker`: the tailnet grant to copy when its policy turns
+    /// this device away, a wake while it can be woken, and a dial now while its link is down.
+    fn away_actions(&self, worker: WorkerKey) -> AwayActions {
+        let status = self.workers.get(&worker).map(|w| &w.status);
+        let host = self.host_actions(worker);
+        let not_granted = matches!(status, Some(WorkerStatus::NotGranted));
+        let asleep = matches!(status, Some(WorkerStatus::Unreachable | WorkerStatus::Gone));
+        AwayActions {
+            grant: self.tailnet_grant.clone().filter(|_| not_granted),
+            wake: host.and_then(|h| h.wake.clone()).filter(|_| asleep),
+            retry: host.and_then(|h| h.connect.clone()),
         }
     }
 
@@ -2306,8 +2337,37 @@ impl WorkspaceView {
                 });
                 (detail, copy)
             }
+            BodyState::Away(_) => {
+                let why = match self.workers.get(&tile.worker).map(|w| &w.status) {
+                    Some(WorkerStatus::Reconnecting(why)) => Some(kit::first_line(why).to_owned()),
+                    _ => None,
+                };
+                let detail = why.filter(|w| !w.trim().is_empty()).map(|said| {
+                    div()
+                        .debug_selector(move || format!("away-why-{}", id.as_uuid()))
+                        .min_w_0()
+                        .truncate()
+                        .text_color(hsla(s.text_muted))
+                        .child(ChromeText::new(said, px(theme.typography.small()), k))
+                });
+                (detail, None)
+            }
             _ => (None, None),
         };
+        let away = matches!(state, BodyState::Away(_)).then(|| self.away_actions(tile.worker));
+        let away = away.unwrap_or_default();
+        let in_menu = |run: MenuRun| {
+            move |_ev: &gpui::ClickEvent, window: &mut Window, cx: &mut App| run(window, cx)
+        };
+        let grant = away.grant.map(|grant| {
+            button("copy-grant", COPY_GRANT).on_click(cx.listener(move |this, _ev, _w, cx| {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(grant.to_string()));
+                this.show_notice(GRANT_COPIED.to_owned(), cx);
+            }))
+        });
+        let wake = away.wake.map(|run| button("wake-worker", "Wake").on_click(in_menu(run)));
+        let retry =
+            away.retry.map(|run| button("retry-worker", "Retry now").on_click(in_menu(run)));
         // Offered only where the app can run `ssh`; again after a failure, never while it runs.
         let start = update.as_ref().and_then(|u| u.start.clone());
         let host = match state {
@@ -2329,8 +2389,13 @@ impl WorkspaceView {
                     .child(bar)
             })
         });
-        let actions =
-            restart.is_some() || close.is_some() || copy.is_some() || update_button.is_some();
+        let actions = restart.is_some()
+            || close.is_some()
+            || copy.is_some()
+            || update_button.is_some()
+            || grant.is_some()
+            || wake.is_some()
+            || retry.is_some();
         let pill = div()
             .id("state")
             .debug_selector(move || format!("state-{}", id.as_uuid()))
@@ -2364,6 +2429,9 @@ impl WorkspaceView {
             .when_some(close, gpui::ParentElement::child)
             .when_some(update_button, gpui::ParentElement::child)
             .when_some(copy, gpui::ParentElement::child)
+            .when_some(grant, gpui::ParentElement::child)
+            .when_some(wake, gpui::ParentElement::child)
+            .when_some(retry, gpui::ParentElement::child)
             .when_some(bar, |el, bar| el.relative().child(bar));
         div()
             .absolute()
@@ -2409,7 +2477,7 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _ev, _w, cx| {
-                    this.drag_out(worker, &path);
+                    this.drag_out(worker, &path, cx);
                     cx.stop_propagation();
                 }),
             )

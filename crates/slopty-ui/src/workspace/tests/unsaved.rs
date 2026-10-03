@@ -301,7 +301,8 @@ fn a_failed_write_is_written_again_on_quit(cx: &mut TestAppContext) {
 }
 
 /// A write that failed (the disk full for a moment) is tried again on its own, with no edit
-/// after it and no quit, so a crash after the disk recovers still finds the edit.
+/// after it and no quit, so a crash after the disk recovers still finds the edit. A few
+/// failures in a row are said, once.
 #[cfg(unix)]
 #[gpui::test]
 fn a_failed_write_is_tried_again_without_another_edit(cx: &mut TestAppContext) {
@@ -322,6 +323,18 @@ fn a_failed_write_is_tried_again_without_another_edit(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     settle(cx);
     assert!(kept(&store).is_empty(), "the write failed");
+    let toasts = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_texts());
+    let not_kept = super::super::unsaved::NOT_KEPT;
+    assert!(!toasts(cx).iter().any(|t| t.starts_with(not_kept)), "one failure is a hiccup");
+    // Each time the notice comes up, over a minute of failing passes.
+    let mut shown = Vec::new();
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        settle(cx);
+        shown.push(toasts(cx).iter().any(|t| t.starts_with(not_kept)));
+    }
+    let comes_up = shown.windows(2).filter(|w| w == &[false, true]).count();
+    assert_eq!(comes_up, 1, "a few failures in a row are said, once: {shown:?}");
     std::fs::set_permissions(&unsaved, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     cx.executor().advance_clock(Duration::from_secs(60));
     settle(cx);

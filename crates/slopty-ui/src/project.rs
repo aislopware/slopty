@@ -5,6 +5,7 @@
 //! conversation face and the board, so the board sits where the person talks to the
 //! orchestrator, and every agent the tree names is a tile of its own that the board opens.
 //!
+//! * [`create`] — the sheet that makes a project from a terminal its agent orchestrates.
 //! * [`model`] — the server's projects mirrored, and what the board derives from one.
 //! * [`recap`] — what changed since this client last looked.
 //! * [`spend`] — time at work per node and subtree, and what the agents' threads say they cost.
@@ -13,6 +14,7 @@
 
 #![expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 
+pub mod create;
 pub mod model;
 pub mod recap;
 pub mod spend;
@@ -63,6 +65,10 @@ gpui::actions!(
         ResolveConflicts,
         /// Push the target again for the task the keyboard stands on, whose push failed.
         PushTask,
+        /// Give up the task the keyboard stands on.
+        CancelTask,
+        /// End the terminal of the agent of the task the keyboard stands on.
+        StopTaskAgent,
         /// Push the target after each merge, or stop.
         TogglePush,
         /// Turn the orchestrator's tile back to its terminal.
@@ -98,6 +104,8 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
         Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
         Command::new(Scope::Project, "push_task", PushTask, &[], BOARD),
+        Command::new(Scope::Project, "cancel_task", CancelTask, &[], BOARD),
+        Command::new(Scope::Project, "stop_task_agent", StopTaskAgent, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
         Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
@@ -135,6 +143,8 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
             Box::new(ResolveConflicts),
         ),
         line("Push the task's merge again", IconName::Upload, Box::new(PushTask)),
+        line("Cancel the task", IconName::X, Box::new(CancelTask)),
+        line("Stop the task's agent", IconName::Square, Box::new(StopTaskAgent)),
         line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
         line("Start the task", IconName::CircleDot, Box::new(StartTask)),
         line("Start every proposed task", IconName::ListChecks, Box::new(StartProposed)),

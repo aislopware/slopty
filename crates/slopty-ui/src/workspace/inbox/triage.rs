@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use gpui::{Context, Window, actions};
 use slopty_core::SessionId;
-use slopty_proto::conversation::Verdict;
 
 use super::super::agents::Step;
 use super::super::faces::ThreadWait;
@@ -222,8 +221,8 @@ impl WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some((session, ask)) = self.selected_row().and_then(|row| row.approval) {
-            self.answer_approval(session, ask, Verdict::Allow, cx);
+        if let Some(answer) = self.selected_row().and_then(|row| row.approval) {
+            self.answer_row(&answer, true, cx);
         }
     }
 
@@ -233,9 +232,8 @@ impl WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some((session, ask)) = self.selected_row().and_then(|row| row.approval) {
-            let verdict = Verdict::Deny { message: String::new(), interrupt: false };
-            self.answer_approval(session, ask, verdict, cx);
+        if let Some(answer) = self.selected_row().and_then(|row| row.approval) {
+            self.answer_row(&answer, false, cx);
         }
     }
 

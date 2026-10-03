@@ -258,6 +258,11 @@ pub enum TaskAction {
     ResolveConflicts,
     /// Push its target to the forge again, after the push that went with its merge failed.
     PushAgain,
+    /// Give it up: it holds its paths no more and leaves the merge queue, and it may be
+    /// planned again. Its agent, if one runs, is left to the person.
+    Cancel,
+    /// End its agent's terminal; the task waits for its next start.
+    Stop,
 }
 
 impl TaskAction {
@@ -274,6 +279,8 @@ impl TaskAction {
             Self::AddressComments => "Address comments",
             Self::ResolveConflicts => "Resolve conflicts",
             Self::PushAgain => "Push again",
+            Self::Cancel => "Cancel task",
+            Self::Stop => "Stop its agent",
         }
     }
 
@@ -296,6 +303,8 @@ impl TaskAction {
             Self::AddressComments => "address-comments",
             Self::ResolveConflicts => "resolve-conflicts",
             Self::PushAgain => "push-again",
+            Self::Cancel => "cancel",
+            Self::Stop => "stop",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -923,6 +932,22 @@ impl Board {
         out
     }
 
+    /// What the person can do to `task` beyond what moves it on ([`Self::actions`]): stop its
+    /// agent while one runs, and cancel it until it is merged or given up. Rare, and never
+    /// what the task waits for, so the board offers them only on the task it stands on.
+    #[must_use]
+    pub fn controls(&self, task: TaskId) -> Vec<TaskAction> {
+        let Some(card) = self.tasks.get(&task) else { return Vec::new() };
+        let mut out = Vec::new();
+        if self.terminal(Some(task)).is_some() {
+            out.push(TaskAction::Stop);
+        }
+        if !matches!(card.state, TaskState::Merged | TaskState::Failed) {
+            out.push(TaskAction::Cancel);
+        }
+        out
+    }
+
     /// What the person says to `task`'s agent for a next step, in their words: what failed or
     /// what was asked, from what the board knows, and what to do about it.
     #[must_use]
@@ -998,7 +1023,9 @@ impl Board {
             | TaskAction::Approve
             | TaskAction::RunOn
             | TaskAction::Start
-            | TaskAction::PushAgain => None,
+            | TaskAction::PushAgain
+            | TaskAction::Cancel
+            | TaskAction::Stop => None,
         }
     }
 
@@ -1214,6 +1241,57 @@ impl Board {
         let entry = self.timeline.back().map_or(WallMs::ZERO, |e| e.at_ms);
         task.max(entry).max(self.project.created_ms)
     }
+}
+
+/// What `entry` says to the person when it lands, as a toast or a note.
+///
+/// That is a failure that holds a task up, an agent that cannot go on, a start that waits for
+/// them, or a budget near or at its cap. `None` for the rest, which the board says where it
+/// shows.
+#[must_use]
+pub fn news_line(board: &Board, entry: &TimelineEntry) -> Option<String> {
+    let task = entry.task.map(|t| {
+        let title = board.tasks.get(&t).map_or("", |c| c.title.trim());
+        if title.is_empty() { format!("#{t}") } else { format!("#{t} {title}") }
+    });
+    let of = |words: String| match &task {
+        Some(task) => format!("{task}: {words}"),
+        None => words,
+    };
+    let first = |text: &str| crate::kit::first_line(text).trim().to_owned();
+    Some(match &entry.what {
+        Moment::Checks(checks) if checks.state == ChecksState::Failing => {
+            of(format!("its pull request's checks fail ({})", checks.failing.join(", ")))
+        }
+        Moment::Verified(run) if !run.passed => of("its verifier failed".to_owned()),
+        Moment::Step(TaskStep { kind, state: StepState::Failed { why }, .. }) => match kind {
+            StepKind::Rebase => {
+                of(format!("its work does not rebase onto {}", board.project.target))
+            }
+            StepKind::Clone => of(format!("the clone it needs failed: {}", first(why))),
+            StepKind::Home => of(format!("its branch did not come home: {}", first(why))),
+            StepKind::Verify => of(format!("its verifier did not run: {}", first(why))),
+            StepKind::Review => of(format!("its review stopped: {}", first(why))),
+            StepKind::Merge => of(format!("its merge stopped: {}", first(why))),
+        },
+        Moment::Reported { report } if report.kind == ReportKind::Stuck => {
+            of(format!("its agent is stuck: {}", first(&report.note)))
+        }
+        Moment::Proposed { .. } => of("waits for you to start it".to_owned()),
+        Moment::Budget { meter, share_bp } => {
+            let what = if meter == slopty_proto::project::Budget::USD {
+                "cost".to_owned()
+            } else {
+                format!("{meter} window")
+            };
+            if *share_bp >= 10_000 {
+                format!("its {what} budget is spent; no task starts until it is raised")
+            } else {
+                format!("{}% of its {what} budget is spent", share_bp / 100)
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// `entry` in words, with the worker names `name` gives and the agents `agent` names by their

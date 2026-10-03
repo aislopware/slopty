@@ -586,6 +586,86 @@ fn a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row(cx: &mut TestAp
     assert_eq!(woke.get(), 2, "and so did the row");
 }
 
+/// The palette stops sharing the clipboard with one machine and shares it again, by its
+/// name: the navigator marks the machine it is not shared with, the app is told to keep the
+/// choice, and the other machine is left as it was.
+#[gpui::test]
+fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let (studio_key, laptop_key) = (studio.key, laptop.key);
+    let events = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let heard = Rc::clone(&events);
+    cx.update(|_window, cx| {
+        cx.subscribe(&view, move |_view, event: &WorkspaceEvent, _cx| {
+            if matches!(event, WorkspaceEvent::ClipboardShared { .. }) {
+                heard.borrow_mut().push(*event);
+            }
+        })
+        .detach();
+    });
+    view.update_in(cx, |v, _w, cx| {
+        let sharing = slopty_settings::ClipboardSettings { sync: true, ..v.clip_sharing.clone() };
+        v.set_clipboard_sharing(sharing, cx);
+    });
+    cx.run_until_parked();
+    let lines = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| -> Vec<String> {
+        view.update(cx, |v, cx| {
+            let mut lines: Vec<String> = v
+                .palette_lines(cx)
+                .into_iter()
+                .map(|l| l.label)
+                .filter(|l| l.contains("the clipboard with"))
+                .collect();
+            lines.sort();
+            lines
+        })
+    };
+    assert_eq!(
+        lines(&view, cx),
+        ["Stop sharing the clipboard with laptop", "Stop sharing the clipboard with studio"]
+    );
+    let off = |cx: &mut VisualTestContext, key: WorkerKey| {
+        cx.debug_bounds(leak(format!("nav-clip-off-{key}"))).is_some()
+    };
+    assert!(!off(cx, laptop_key) && !off(cx, studio_key), "shared: nothing to mark");
+
+    let run = |cx: &mut VisualTestContext, line: &str| {
+        cx.simulate_keystrokes("cmd-shift-p");
+        cx.run_until_parked();
+        cx.simulate_input(line);
+        cx.run_until_parked();
+        cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+    };
+    run(cx, "Stop sharing the clipboard with laptop");
+    assert!(!view.read_with(cx, |v, _| v.clipboard_shared(laptop_key)));
+    assert!(view.read_with(cx, |v, _| v.clipboard_shared(studio_key)), "the other is kept");
+    assert!(off(cx, laptop_key) && !off(cx, studio_key), "the navigator marks the laptop");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The clipboard is no longer shared with laptop")
+    );
+    assert_eq!(
+        lines(&view, cx),
+        ["Share the clipboard with laptop", "Stop sharing the clipboard with studio"]
+    );
+
+    run(cx, "Share the clipboard with laptop");
+    assert!(view.read_with(cx, |v, _| v.clipboard_shared(laptop_key)));
+    assert!(!off(cx, laptop_key), "shared again, unmarked");
+    assert_eq!(
+        events.borrow().as_slice(),
+        [
+            WorkspaceEvent::ClipboardShared { worker: laptop_key, share: false },
+            WorkspaceEvent::ClipboardShared { worker: laptop_key, share: true },
+        ],
+        "the app keeps each choice"
+    );
+}
+
 /// A worker that turns this device away says so in a word wherever its link's health shows,
 /// and in full when it is gone to.
 #[gpui::test]

@@ -498,3 +498,72 @@ fn opens_on_a_worker_out_of_reach_are_said_and_not_kept(cx: &mut TestAppContext)
     });
     assert_eq!(view.read_with(cx, |v, _| v.new_on), None, "the choice went with the menu");
 }
+
+/// The away pill says why the link dropped and offers what can be done from here: a dial now
+/// while the app can reach the host, a wake while the machine sleeps or is gone, and the
+/// tailnet grant to copy when the policy turns this device away. A tile whose link is up
+/// offers none of them.
+#[gpui::test]
+fn the_away_pill_says_why_and_offers_the_way_back(cx: &mut TestAppContext) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let key = studio.key;
+    let (dialled, woke) = (Rc::new(Cell::new(0_u32)), Rc::new(Cell::new(0_u32)));
+    let count = |n: &Rc<Cell<u32>>| -> MenuRun {
+        let n = Rc::clone(n);
+        Rc::new(move |_w, _cx| n.set(n.get().saturating_add(1)))
+    };
+    let actions =
+        HostActions { connect: Some(count(&dialled)), forget: None, wake: Some(count(&woke)) };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_host_actions(std::iter::once((key, actions)).collect(), None, cx);
+        v.set_tailnet_grant(Some("grant-json".to_owned()));
+    });
+    cx.run_until_parked();
+    let drawn = |cx: &mut VisualTestContext, part: &str| {
+        cx.debug_bounds(selector(part, shell.item)).is_some()
+    };
+    for part in ["away-why", "retry-worker", "wake-worker", "copy-grant"] {
+        assert!(!drawn(cx, part), "{part}: the link is up");
+    }
+    let press = |cx: &mut VisualTestContext, part: &str| {
+        let at = cx.debug_bounds(selector(part, shell.item)).expect("drawn");
+        cx.simulate_click(at.center(), Modifiers::default());
+        cx.run_until_parked();
+    };
+
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("worker silent\nfor 9 s".into()), cx);
+    });
+    cx.run_until_parked();
+    assert!(drawn(cx, "away-why"), "the reason, its first line");
+    assert!(!drawn(cx, "wake-worker") && !drawn(cx, "copy-grant"), "a dropped link only");
+    press(cx, "retry-worker");
+    assert_eq!(dialled.get(), 1, "retry dials now");
+
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::Unreachable, cx));
+    cx.run_until_parked();
+    press(cx, "wake-worker");
+    assert_eq!(woke.get(), 1, "a machine that cannot be reached is woken");
+    assert!(!drawn(cx, "copy-grant"));
+
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NotGranted, cx));
+    cx.run_until_parked();
+    assert!(!drawn(cx, "wake-worker"), "waking does not change the policy");
+    press(cx, "copy-grant");
+    let copied = cx.update(|_w, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(copied.as_deref(), Some("grant-json"));
+    let notice = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(notice.as_deref(), Some(tile::GRANT_COPIED));
+
+    view.update_in(cx, |v, _w, cx| {
+        v.set_tailnet_grant(None);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(!drawn(cx, "copy-grant"), "no grant to copy, no button");
+}

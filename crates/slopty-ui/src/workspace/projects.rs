@@ -18,14 +18,17 @@ use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
     LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, RunOn, TaskChange, TaskId,
+    TaskState, TimelineEntry,
 };
 use slopty_proto::thread::AgentId;
 
-use super::WorkspaceView;
-use super::actions::ToggleProjectBoard;
+use super::actions::{MakeOrchestrator, ToggleProjectBoard};
 use super::agents::agent_ask_line;
+use super::attention::{About, ProjectNote, Route};
+use super::{WorkspaceEvent, WorkspaceView};
 use crate::icons::Status;
-use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction};
+use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
+use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction, news_line};
 use crate::project::recap::{Looked, Recap};
 use crate::project::spend::MetersBySession;
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
@@ -45,6 +48,19 @@ const RECAP_PAGES: usize = 8;
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
 /// What the person says approving a task's work from the board.
 pub(crate) const APPROVED_HERE: &str = "Approved by the person";
+/// What the timeline says of a task the person cancelled from the board.
+pub(crate) const CANCELLED: &str = "Cancelled by the person";
+/// What "Start a project here" and "Make this agent … orchestrator" say in a plain shell.
+pub(crate) const NOT_AN_AGENT: &str = "Start an agent in this terminal first: an orchestrator is an agent, and a shell never \
+     hears what the board tells it";
+
+/// The open "New project" sheet.
+pub(super) struct Sheet {
+    view: Entity<ProjectSheet>,
+    /// The terminal whose agent orchestrates the project made.
+    term: TermRef,
+    _events: gpui::Subscription,
+}
 
 /// What the workspace keeps about projects.
 #[derive(Default)]
@@ -63,11 +79,13 @@ pub(super) struct ProjectsState {
     pub dirty: bool,
     /// How the boards' actions reach the server, while the app is linked to one.
     pub caller: Option<ServerCaller>,
-    /// A project just started here, whose board shows once the mirror hears of it.
-    pub opening: Option<ProjectId>,
-    /// Boards that open their checks panel once they are made: a project just started here
-    /// has its verifier and review set where it was started.
-    pub checks: HashSet<ProjectId>,
+    /// A project just started or given an orchestrator here, whose board shows once the
+    /// mirror has that terminal as its orchestrator.
+    pub opening: Option<(ProjectId, TermRef)>,
+    /// The "New project" sheet, open over the workspace for the orchestrator it names.
+    pub sheet: Option<Sheet>,
+    /// The projects' moments to note while the app is away, until the app takes them.
+    pub news: Vec<ProjectNote>,
     /// The workers as the server last said they are doing, for the machines lens.
     pub machines: Vec<Machine>,
     /// A question about the workers is out: another waits for its answer.
@@ -180,9 +198,59 @@ impl WorkspaceView {
     /// A project changed, as the server's event `seq` says; a change the snapshot holds is
     /// dropped.
     pub fn project_update(&mut self, seq: u64, update: ProjectUpdate, cx: &mut Context<Self>) {
-        if self.projects.mirror.apply_update(seq, update).is_some() {
+        let entry = update.entry.clone();
+        if let Some(project) = self.projects.mirror.apply_update(seq, update) {
+            if let Some(entry) = entry {
+                self.project_moment(&project, &entry, cx);
+            }
             self.projects_moved(cx);
         }
+    }
+
+    /// `entry` just landed on `project`'s timeline: one worth saying is a notice with the app
+    /// in front, unless the project's board has the person's eye, and a note while it is away.
+    fn project_moment(
+        &mut self,
+        project: &ProjectId,
+        entry: &TimelineEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(board) = self.projects.mirror.get(project) else { return };
+        let Some(line) = news_line(board, entry) else { return };
+        let title = board.project.title.clone();
+        let orchestrator = board.project.orchestrator;
+        if self.app_active {
+            let watched = orchestrator.is_some_and(|t| {
+                self.focused_session() == Some(t.session)
+                    && self.projects.shown.contains(&t.session)
+            });
+            if !watched {
+                self.show_notice(format!("{title}: {line}"), cx);
+            }
+            return;
+        }
+        let Some(term) = orchestrator else { return };
+        let route = self.attention_route(term.session).map_or_else(
+            || Route {
+                worker: worker_key(term.worker),
+                item: None,
+                about: About::Session(term.session),
+            },
+            |(route, _)| route,
+        );
+        self.projects.news.push(ProjectNote {
+            route,
+            id: format!("project-{project}-{}", entry.seq),
+            project: project.as_str().to_owned(),
+            title,
+            body: line,
+        });
+        cx.emit(WorkspaceEvent::ProjectNews);
+    }
+
+    /// The projects' moments to note since the last take.
+    pub fn take_project_news(&mut self) -> Vec<ProjectNote> {
+        std::mem::take(&mut self.projects.news)
     }
 
     /// The server was let go: its projects go with it, and every board turns back to its
@@ -411,12 +479,92 @@ impl WorkspaceView {
             .collect()
     }
 
+    /// "Make this agent `project`'s orchestrator" for each project the focused terminal's
+    /// agent does not orchestrate, while an agent runs there.
+    pub(super) fn orchestrator_lines(&self) -> Vec<crate::palette::PaletteItem> {
+        let Some(session) = self.focused_session() else { return Vec::new() };
+        if self.session_agent(session).is_none() {
+            return Vec::new();
+        }
+        self.projects
+            .mirror
+            .boards()
+            .filter(|b| b.project.orchestrator.is_none_or(|t| t.session != session))
+            .map(|board| {
+                let label = format!("Make this agent {}'s orchestrator", board.project.title);
+                let action = MakeOrchestrator { project: board.project.id.clone() };
+                crate::palette::PaletteItem::new(
+                    &label,
+                    crate::icons::IconName::Workflow,
+                    Box::new(action),
+                    &[],
+                )
+            })
+            .collect()
+    }
+
+    /// The focused terminal's agent becomes `project`'s orchestrator, and the tile shows its
+    /// board. A plain shell is refused, as it never hears what the board tells it.
+    pub(super) fn make_orchestrator(
+        &mut self,
+        make: &MakeOrchestrator,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.focused_session() else {
+            self.show_notice(NO_TERMINAL.to_owned(), cx);
+            return;
+        };
+        if self.session_agent(session).is_none() {
+            self.show_notice(NOT_AN_AGENT.to_owned(), cx);
+            return;
+        }
+        let Some(worker) = self.worker_of_session(session).and_then(worker_id) else {
+            self.show_notice(NO_TERMINAL.to_owned(), cx);
+            return;
+        };
+        let verb = Verb::ProjectSet {
+            project: make.project.clone(),
+            members: None,
+            orchestrator: Some(TermRef { worker, session }),
+            verifier: None,
+            review: None,
+            push: None,
+            ask_to_start: None,
+            limits: LimitsChange::default(),
+            metadata: None,
+        };
+        let (project, term) = (make.project.clone(), TermRef { worker, session });
+        self.send_to_server(
+            verb,
+            move |this, cx| this.open_when_orchestrated(project, term, cx),
+            cx,
+        );
+    }
+
+    /// Show `project`'s board in `term`'s tile, now if the mirror has `term` as its orchestrator
+    /// and else once it does: the server's word of the change may come before or after its
+    /// answer.
+    fn open_when_orchestrated(
+        &mut self,
+        project: ProjectId,
+        term: TermRef,
+        cx: &mut Context<Self>,
+    ) {
+        let mirror = &self.projects.mirror;
+        if mirror.get(&project).is_some_and(|b| b.project.orchestrator == Some(term)) {
+            self.open_project(&project, cx);
+        } else {
+            self.projects.opening = Some((project, term));
+        }
+    }
+
     /// Something a board shows changed: they are handed it in the next frame. A project just
-    /// started here shows its board as soon as it is heard of.
+    /// started or given an orchestrator here shows its board once the mirror says so.
     fn projects_moved(&mut self, cx: &mut Context<Self>) {
-        if let Some(project) =
-            self.projects.opening.take_if(|p| self.projects.mirror.get(p).is_some())
-        {
+        if let Some((project, _)) = self.projects.opening.take_if(|(p, term)| {
+            self.projects.mirror.get(p).is_some_and(|b| b.project.orchestrator == Some(*term))
+        }) {
             self.open_project(&project, cx);
         }
         self.projects.dirty = true;
@@ -510,13 +658,6 @@ impl WorkspaceView {
             if let Some(view) = self.projects.views.get(&project).cloned() {
                 view.update(cx, |v, cx| v.focus(window, cx));
             }
-        }
-        let views = &self.projects.views;
-        let ready: Vec<Entity<ProjectView>> =
-            self.projects.checks.iter().filter_map(|p| views.get(p).cloned()).collect();
-        self.projects.checks.retain(|p| !views.contains_key(p));
-        for view in ready {
-            view.update(cx, ProjectView::ask_checks);
         }
     }
 
@@ -698,7 +839,9 @@ impl WorkspaceView {
 
     /// A board's action on a task, as the person's word to the server: a merge and a retry
     /// both put the task in the merge queue, which checks it afresh; an approval stands over
-    /// the reviewer's; a next step is said to the task's agent, as the person.
+    /// the reviewer's; a next step is said to the task's agent, as the person. A cancel gives
+    /// the task up with the person's word on the timeline, and a stop ends its agent's
+    /// terminal, whose session its agent can take up again.
     fn act_on_task(
         &mut self,
         project: &ProjectId,
@@ -721,6 +864,21 @@ impl WorkspaceView {
             },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
             TaskAction::Start => Verb::TaskStart { project, task, pin: None },
+            TaskAction::Cancel => {
+                let change = TaskChange {
+                    state: Some(TaskState::Failed),
+                    note: Some(CANCELLED.to_owned()),
+                    ..TaskChange::default()
+                };
+                Verb::TaskUpdate { project, task, change: Box::new(change) }
+            }
+            TaskAction::Stop => {
+                let board = self.projects.mirror.get(&project);
+                let Some((worker, session)) = board.and_then(|b| b.terminal(Some(task))) else {
+                    return self.show_notice(format!("#{task} has no agent running"), cx);
+                };
+                Verb::Close { term: TermRef { worker, session } }
+            }
             TaskAction::FixCi | TaskAction::AddressComments | TaskAction::ResolveConflicts => {
                 let board = self.projects.mirror.get(&project);
                 let Some(text) = board.and_then(|b| b.told(task, action)) else { return };
@@ -895,13 +1053,14 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// "Start a project here": make a project of the focused terminal's repository, with the
-    /// terminal as its orchestrator, and show its board once the server has it. It is named
-    /// for the directory and lands on the branch checked out.
+    /// "Start a project here": the "New project" sheet for the focused terminal's agent as
+    /// its orchestrator, named for the terminal's directory, its repository and the branch
+    /// checked out filled in. A terminal that orchestrates one already shows that one, and a
+    /// plain shell is refused: nothing in it would hear what the board tells it.
     pub(super) fn start_project(
         &mut self,
         _: &StartProject,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.focused_session() else {
@@ -912,6 +1071,10 @@ impl WorkspaceView {
             self.projects.mirror.of_orchestrator(session).map(|b| b.project.id.clone())
         {
             self.open_project(&project, cx);
+            return;
+        }
+        if self.session_agent(session).is_none() {
+            self.show_notice(NOT_AN_AGENT.to_owned(), cx);
             return;
         }
         let Some(worker) = self.worker_of_session(session).and_then(worker_id) else {
@@ -925,23 +1088,49 @@ impl WorkspaceView {
         };
         let target = summary.and_then(|s| s.branch.clone()).unwrap_or_else(|| "main".to_owned());
         let title = repo.trim_end_matches('/').rsplit('/').next().unwrap_or(&repo).to_owned();
+        let agent = self
+            .session_agent(session)
+            .map_or_else(String::new, |a| agent_label(&AgentId(a.to_owned())));
+        let machine = self.worker_name(worker_key(worker));
+        let orchestrator = format!("Orchestrated by {agent} on {machine}, in this terminal");
+        let filled = NewProject { title, repo, target, verifier: None, push: false };
+        let theme = self.theme.clone();
+        let view = cx.new(|cx| ProjectSheet::new(theme, filled, orchestrator, window, cx));
+        let events = cx.subscribe(&view, |this, _sheet, event: &SheetEvent, cx| match event {
+            SheetEvent::Create(new) => this.create_project(new.clone(), cx),
+            SheetEvent::Cancel => this.close_project_sheet(cx),
+        });
+        let term = TermRef { worker, session };
+        self.projects.sheet = Some(Sheet { view, term, _events: events });
+        cx.notify();
+    }
+
+    /// Make the project the sheet holds, with its terminal as the orchestrator, and show its
+    /// board once the server has it. A refusal is said and the sheet stays to be put right.
+    fn create_project(&mut self, new: NewProject, cx: &mut Context<Self>) {
+        let Some(term) = self.projects.sheet.as_ref().map(|s| s.term) else { return };
+        if new.title.is_empty() {
+            self.show_notice("Name the project".to_owned(), cx);
+            return;
+        }
         let mirror = &self.projects.mirror;
-        let Some(project) = project_name(&title, |id| mirror.get(id).is_some()) else {
-            self.show_notice(format!("No name is left for a project of {title}"), cx);
+        let Some(project) = project_name(&new.title, |id| mirror.get(id).is_some()) else {
+            self.show_notice(format!("No name is left for a project called {}", new.title), cx);
             return;
         };
+        let target = if new.target.is_empty() { "main".to_owned() } else { new.target };
         let verb = Verb::ProjectCreate {
             project: project.clone(),
-            title,
-            repo,
+            title: new.title,
+            repo: new.repo,
             target,
-            verifier: None,
+            verifier: new.verifier,
             review: None,
-            push: false,
+            push: new.push,
             // The person directs from the board, so a project made there asks before each
             // task starts.
             ask_to_start: true,
-            orchestrator: Some(TermRef { worker, session }),
+            orchestrator: Some(term),
             limits: LimitsChange::default(),
             metadata: None,
             members: Vec::new(),
@@ -949,17 +1138,51 @@ impl WorkspaceView {
         self.send_to_server(
             verb,
             move |this, cx| {
-                // Its board opens on how its work is checked, which only the person sets.
-                this.projects.checks.insert(project.clone());
-                // The server's word of the new project may come before or after its answer.
-                if this.projects.mirror.get(&project).is_some() {
-                    this.open_project(&project, cx);
-                } else {
-                    this.projects.opening = Some(project);
-                }
+                this.close_project_sheet(cx);
+                this.open_when_orchestrated(project, term, cx);
             },
             cx,
         );
+    }
+
+    /// What the open "New project" sheet holds.
+    #[cfg(test)]
+    pub(super) fn project_sheet_typed(&self, cx: &gpui::App) -> Option<NewProject> {
+        Some(self.projects.sheet.as_ref()?.view.read(cx).typed(cx))
+    }
+
+    /// Let the "New project" sheet go; the keyboard goes back to the terminal it came from.
+    pub(super) fn close_project_sheet(&mut self, cx: &mut Context<Self>) {
+        if let Some(sheet) = self.projects.sheet.take() {
+            if let Some(tile) = self.tile_of_session(sheet.term.session) {
+                self.focus_tile(tile, cx);
+            }
+            cx.notify();
+        }
+    }
+
+    /// The "New project" sheet over the workspace, while it is open.
+    pub(super) fn render_project_sheet(
+        &self,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _};
+        let sheet = self.projects.sheet.as_ref()?;
+        Some(
+            crate::kit::backdrop(&self.theme, window)
+                .id("project-sheet-backdrop")
+                .occlude()
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _ev, _window, cx| {
+                        this.close_project_sheet(cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .child(sheet.view.clone())
+                .into_any_element(),
+        )
     }
 
     /// How each agent of `board` is doing, as this client sees it.

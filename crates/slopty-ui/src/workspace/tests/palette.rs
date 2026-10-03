@@ -78,23 +78,24 @@ fn the_palette_lists_tiles_then_workers_then_commands(cx: &mut TestAppContext) {
     assert!(tree.iter().any(|n| n.is("Heading", Some("Machines"))), "{tree:#?}");
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
 
-    // "studio" names the worker and where its tile runs, and no command.
-    cx.simulate_keystrokes("s t u d i o");
+    // "lap" names the laptop and its own commands, and no tile: none runs there.
+    cx.simulate_keystrokes("l a p");
     cx.run_until_parked();
-    assert!(top(cx, "palette-heading-tiles").is_some());
+    assert!(top(cx, "palette-heading-tiles").is_none(), "an empty group hides its heading");
     assert!(top(cx, "palette-heading-workers").is_some());
-    assert!(top(cx, "palette-heading-commands").is_none(), "an empty group hides its heading");
+    assert!(top(cx, "palette-heading-commands").is_some());
 
-    // Only the other worker is left: one group, no heading at all.
-    cx.simulate_keystrokes("backspace backspace backspace backspace backspace backspace l a p");
+    // Only one command is left: one group, no heading at all.
+    cx.simulate_keystrokes("backspace backspace backspace");
+    cx.simulate_input("clipboard with laptop");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("palette-item-0").is_some(), "the laptop's line");
+    assert!(cx.debug_bounds("palette-item-0").is_some(), "the laptop's clipboard line");
     assert!(cx.debug_bounds("palette-item-1").is_none());
     for heading in ["palette-heading-tiles", "palette-heading-workers", "palette-heading-commands"]
     {
         assert!(top(cx, heading).is_none(), "{heading} over a lone group");
     }
-    // ↩ runs what is shown: the laptop's line, the one left.
+    // ↩ runs what is shown: the line left.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert!(!view.read_with(cx, |v, _| v.palette_open()));

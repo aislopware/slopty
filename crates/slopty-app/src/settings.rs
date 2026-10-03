@@ -64,6 +64,29 @@ pub fn save(path: &Path, text: &str, seen: &mut Seen) -> Result<Loaded, String> 
     Ok(loaded)
 }
 
+/// `text` (a `settings.toml`) with the clipboard shared with the machine called `name` or not,
+/// under `[clipboard.workers]`, every other line kept as it was.
+///
+/// # Errors
+///
+/// When `text` does not parse, or the edit does not read back as asked (the table written
+/// some other way by hand): editing it blind would bury the mistake.
+pub fn with_clipboard_shared(text: &str, name: &str, share: bool) -> Result<String, String> {
+    if let Some(error) = Settings::parse(text).error {
+        return Err(error.to_string());
+    }
+    let bare =
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let key = if bare { name.to_owned() } else { format!("{name:?}") };
+    let out = slopty_settings::edit::write(text, "clipboard.workers", &key, &share.to_string());
+    match Settings::parse(&out) {
+        Loaded { error: None, settings, .. } if settings.clipboard.shared_with(name) == share => {
+            Ok(out)
+        }
+        _ => Err(format!("could not set the clipboard for {name} in settings.toml")),
+    }
+}
+
 /// Whether a window appearance is one of the dark ones.
 #[must_use]
 pub const fn is_dark(appearance: WindowAppearance) -> bool {
@@ -212,6 +235,23 @@ pub const fn agent_alerts(settings: &Settings, window_active: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stopping the clipboard for one machine keeps every other line, sets it again in place,
+    /// and leaves the rest shared; a name a bare key cannot hold is quoted.
+    #[test]
+    fn the_clipboard_is_kept_off_for_one_machine_by_name() {
+        let text = "# mine\n[clipboard]\nsync = true\n";
+        let off = with_clipboard_shared(text, "studio", false).expect("set");
+        assert!(off.starts_with("# mine\n[clipboard]\nsync = true\n"), "{off}");
+        let read = Settings::parse(&off).settings.clipboard;
+        assert!(!read.shared_with("studio") && read.shared_with("mini"), "{off}");
+        let on = with_clipboard_shared(&off, "studio", true).expect("set again");
+        assert_eq!(on.matches("studio").count(), 1, "in place: {on}");
+        assert!(Settings::parse(&on).settings.clipboard.shared_with("studio"));
+        let spaced = with_clipboard_shared(text, "Cong's Mac", false).expect("quoted");
+        assert!(!Settings::parse(&spaced).settings.clipboard.shared_with("Cong's Mac"), "{spaced}");
+        assert!(with_clipboard_shared("[clipboard\n", "studio", false).is_err(), "broken file");
+    }
 
     #[test]
     fn family_leads_the_fallback_list() {

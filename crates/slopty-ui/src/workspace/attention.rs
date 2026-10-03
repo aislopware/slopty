@@ -46,6 +46,7 @@ use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::{Notice, NoticeKind};
 
 use super::agents::{agent_ask_line, agent_status_word};
+use super::inbox::approvals::answerable;
 use super::{Finished, WorkspaceView};
 use crate::terminal::TerminalView;
 
@@ -63,6 +64,13 @@ const ASK: &str = "ask";
 /// What a note's answer says when its prompt was no longer held: answered elsewhere, or the
 /// terminal asks by now.
 pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
+
+/// Whether `tap` is a note's "Allow" or "Deny", which answers where the note is and may have
+/// woken the app in the background to do it.
+#[must_use]
+pub fn answers(tap: &Tap) -> bool {
+    matches!(tap.action.as_deref(), Some(notify::ALLOW | notify::DENY))
+}
 
 /// What a note is about: a terminal, whose agent or shell it speaks of, or a thread driven
 /// over a protocol with no terminal.
@@ -143,25 +151,26 @@ pub struct Asking {
     pub title: String,
     /// What it asks (`agent_ask_line`), else its state in a word or two.
     pub body: String,
-    /// The yes-or-no prompt held for this client that the note's buttons answer.
-    pub approval: Option<u64>,
-    /// The prompt this client answered that its worker has not yet said is settled.
-    pub answered: Option<u64>,
+    /// The yes or no the note's buttons answer, as the note carries it: a terminal's prompt
+    /// held for this client by its number, a thread's request by its id.
+    pub approval: Option<String>,
+    /// The prompt or request this client answered that its worker has not yet said is settled.
+    pub answered: Option<String>,
 }
 
 impl Asking {
     /// Its note: the approval buttons while a prompt is held, and a sound unless `silent`.
     fn note(&self, silent: bool) -> Note {
         let mut info = self.route.info();
-        if let Some(ask) = self.approval {
-            info.insert(ASK.to_owned(), ask.to_string());
+        if let Some(ask) = &self.approval {
+            info.insert(ASK.to_owned(), ask.clone());
         }
         Note {
             id: self.route.about.note_id(),
             title: self.title.clone(),
             body: self.body.clone(),
             info,
-            category: self.approval.map(|_| APPROVAL),
+            category: self.approval.as_ref().map(|_| APPROVAL),
             silent,
             thread: None,
         }
@@ -206,6 +215,22 @@ pub struct Heard {
     pub body: String,
 }
 
+/// A project's moment worth a note while the app is away ([`crate::project::model::news_line`]),
+/// leading to its orchestrator's terminal.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ProjectNote {
+    /// Where a tap leads: the orchestrator's terminal.
+    pub route: Route,
+    /// The note's identifier, one per timeline entry.
+    pub id: String,
+    /// The project, which its notes stack under.
+    pub project: String,
+    /// The project's title.
+    pub title: String,
+    /// What happened.
+    pub body: String,
+}
+
 /// Why a note is up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Why {
@@ -230,12 +255,14 @@ pub struct Attention {
     turns: HashSet<About>,
     /// The notes up.
     posted: HashMap<About, Why>,
-    /// The prompt each agent's note up answers.
-    answers: HashMap<About, Option<u64>>,
+    /// The prompt or request each agent's note up answers.
+    answers: HashMap<About, Option<String>>,
     /// The badge last set.
     badge: Option<usize>,
     /// The project each terminal and thread was in at the last look.
     projects: HashMap<About, String>,
+    /// The projects' notes up, by identifier.
+    project_notes: HashSet<String>,
 }
 
 impl std::fmt::Debug for Attention {
@@ -264,6 +291,7 @@ impl Attention {
             answers: HashMap::new(),
             badge: None,
             projects: HashMap::new(),
+            project_notes: HashSet::new(),
         }
     }
 
@@ -337,6 +365,9 @@ impl Attention {
         for (about, _) in self.posted.drain() {
             self.notifier.withdraw(&about.note_id());
         }
+        for id in self.project_notes.drain() {
+            self.notifier.withdraw(&id);
+        }
         self.answers.clear();
     }
 
@@ -349,7 +380,7 @@ impl Attention {
             for asking in &look.asking {
                 let session = asking.route.about;
                 let up = self.posted.get(&session) == Some(&Why::Asks);
-                let was = self.answers.get(&session).copied().flatten();
+                let was = self.answers.get(&session).cloned().flatten();
                 if !self.asking.contains(&session) && !self.server_led {
                     self.post(session, Why::Asks, asking.note(false));
                 } else if up && asking.approval.is_none() && was.is_some() && was == asking.answered
@@ -363,7 +394,7 @@ impl Attention {
                 } else {
                     continue;
                 }
-                self.answers.insert(session, asking.approval);
+                self.answers.insert(session, asking.approval.clone());
             }
         }
         let stopped: Vec<About> = self.asking.difference(&now).copied().collect();
@@ -431,6 +462,24 @@ impl Attention {
         self.post(route.about, Why::Program, note);
     }
 
+    /// A project's moment (`news`): it notifies while the app is away, stacked with the
+    /// project's other notes.
+    pub fn project_news(&mut self, news: &ProjectNote) {
+        if !self.away() {
+            return;
+        }
+        tracing::debug!(id = news.id, "project note");
+        self.project_notes.insert(news.id.clone());
+        self.notifier.post(Note {
+            id: news.id.clone(),
+            title: news.title.clone(),
+            body: news.body.clone(),
+            info: news.route.info(),
+            thread: Some(news.project.clone()),
+            ..Note::default()
+        });
+    }
+
     /// A note's "Allow" or "Deny" for `route`'s agent found no prompt to answer (`why`): said
     /// in a note of its own while the app is away. `title` is the tile's name.
     pub fn unanswered(&mut self, route: Route, title: String, why: &str) {
@@ -471,8 +520,8 @@ impl WorkspaceView {
                 let body = agent_ask_line(agent).unwrap_or_else(|| agent_status_word(agent));
                 let item = w.tile.map(|t| t.item);
                 let route = Route { worker: w.worker, item, about: About::Session(w.session) };
-                let approval = self.approval(w.session).map(|prompt| prompt.ask);
-                let answered = self.answered_here(w.session);
+                let approval = self.approval(w.session).map(|prompt| prompt.ask.to_string());
+                let answered = self.answered_here(w.session).map(|ask| ask.to_string());
                 let title = self.route_title(route);
                 Some(Asking { route, title, body, approval, answered })
             })
@@ -486,7 +535,10 @@ impl WorkspaceView {
                 let item = w.tile.map(|t| t.item);
                 let route = Route { worker: w.worker, item, about: About::Thread(w.thread) };
                 let title = self.thread_title(w.thread);
-                Some(Asking { route, title, body, approval: None, answered: None })
+                let approval =
+                    stand.asks.as_ref().filter(|a| answerable(a)).map(|a| a.id.0.clone());
+                let answered = self.thread_answered_here(w.thread).map(|ask| ask.0.clone());
+                Some(Asking { route, title, body, approval, answered })
             }))
             .collect();
         let turns = self
@@ -594,9 +646,8 @@ impl WorkspaceView {
             Some(_) | None => None,
         };
         if let Some(verdict) = verdict {
-            let ask = tap.info.get(ASK).and_then(|ask| ask.parse().ok());
-            if let (Some(route), Some(ask)) = (route, ask) {
-                self.verdict_tapped(route, ask, verdict, cx);
+            if let (Some(route), Some(ask)) = (route, tap.info.get(ASK)) {
+                self.verdict_tapped(route, ask.clone(), verdict, cx);
             }
             return;
         }

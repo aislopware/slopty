@@ -1588,7 +1588,8 @@ fn the_worker_list_goes_to_a_worker(cx: &mut TestAppContext) {
 // ----- the layout on disk ------------------------------------------------------------------
 
 /// The layout is written after it changes, and a new workspace read from the file puts every
-/// tile back where it was, waiting for its worker.
+/// tile back where it was, waiting for its worker. A file that does not read is set aside as
+/// `.bad` and said, once.
 #[gpui::test]
 fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     let dir = std::env::temp_dir().join(format!("slopty-layout-{}", ItemId::new()));
@@ -1600,13 +1601,20 @@ fn the_layout_is_saved_and_restored(cx: &mut TestAppContext) {
     let [(_, first), _, (_, third)] = three_shells(&view, cx, &fake);
     cx.executor().advance_clock(SAVE_AFTER);
     cx.run_until_parked();
-    let saved = read_layout(&path).expect("written");
+    let saved = read_layout(&path).ok().flatten().expect("written");
     let restored = Layout::restore(saved, LayoutConfig::default());
     assert_eq!(restored.focused(), Some(third));
     assert_eq!(restored.position(first).map(|p| p.column), Some(0));
-    assert!(read_layout(&dir.join("missing.json")).is_none(), "no file, no layout");
+    assert_eq!(read_layout(&dir.join("missing.json")), Ok(None), "no file, no layout");
     std::fs::write(dir.join("bad.json"), "{").unwrap();
-    assert!(read_layout(&dir.join("bad.json")).is_none(), "a bad file costs the layout only");
+    assert_eq!(
+        read_layout(&dir.join("bad.json")),
+        Err(LayoutUnreadable),
+        "a bad file costs the layout only"
+    );
+    assert!(!dir.join("bad.json").exists(), "set aside, so the next save keeps it");
+    assert_eq!(std::fs::read_to_string(dir.join("bad.json.bad")).unwrap(), "{", "kept to read");
+    assert_eq!(read_layout(&dir.join("bad.json")), Ok(None), "said once");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

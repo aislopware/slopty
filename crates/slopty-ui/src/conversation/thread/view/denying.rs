@@ -38,7 +38,14 @@ pub fn deny_choice(request: &Request) -> Option<&Choice> {
     if !request.questions.is_empty() || request.kind == Request::QUESTION {
         return None;
     }
-    let denies = || request.options.iter().filter(|c| c.effect == Effect::Deny);
+    plain_deny(&request.options)
+}
+
+/// The deny of `options` that turns the call down once and no more: the plain one, else the
+/// first.
+#[must_use]
+pub fn plain_deny(options: &[Choice]) -> Option<&Choice> {
+    let denies = || options.iter().filter(|c| c.effect == Effect::Deny);
     denies().find(|c| c.scope.is_none() && !c.stops).or_else(|| denies().next())
 }
 

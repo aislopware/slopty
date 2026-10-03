@@ -153,7 +153,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
     assert_eq!(posted.len(), 1);
     assert_eq!((posted[0].title.as_str(), posted[0].category), ("Fix the build", None));
 
-    let held = Asking { approval: Some(7), ..asking(a, "Run cargo test") };
+    let held = Asking { approval: Some("7".into()), ..asking(a, "Run cargo test") };
     attention.look(&Look {
         asking: vec![held],
         turns: Vec::new(),
@@ -466,7 +466,7 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
         unread: 1,
         projects: HashMap::new(),
     });
-    let held = Asking { approval: Some(3), ..asking(a, "Run make") };
+    let held = Asking { approval: Some("3".into()), ..asking(a, "Run make") };
     attention.look(&Look {
         asking: vec![held.clone()],
         turns: Vec::new(),
@@ -510,13 +510,13 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
     attention.look(&asks());
     memory.clear();
     attention.look(&Look {
-        asking: vec![Asking { approval: Some(4), ..asking(b, "Run make") }],
+        asking: vec![Asking { approval: Some("4".into()), ..asking(b, "Run make") }],
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
     });
     let answered = Look {
-        asking: vec![Asking { answered: Some(4), ..asking(b, "Run make") }],
+        asking: vec![Asking { answered: Some("4".into()), ..asking(b, "Run make") }],
         turns: Vec::new(),
         unread: 1,
         projects: HashMap::new(),
@@ -561,8 +561,8 @@ fn asked(session: SessionId, ask: u64, tool: &str) -> PermissionEvent {
 
 /// The workspace asks its worker for approvals as it links. A yes or no held for it rides the
 /// agent's note: "Allow" on the note answers it once and moves nothing, a second press says it
-/// no longer waits, and the inbox's "Deny" answers the next without going to the agent. A
-/// question never gets the buttons.
+/// no longer waits, and the inbox's "Deny" and "Allow" answer the next ones without going to
+/// the agent. A question never gets the buttons.
 #[gpui::test]
 fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -592,14 +592,14 @@ fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut T
     view.update_in(cx, |v, _window, cx| {
         v.permission_event(asked(session, 7, "AskUserQuestion"), cx);
     });
-    let none = view.update(cx, |v, _| v.attention_look().asking[0].approval);
+    let none = view.update(cx, |v, _| v.attention_look().asking[0].approval.clone());
     assert_eq!(none, None, "a question waits for the conversation");
 
     view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 8, "Bash"), cx));
     let tap = view.update(cx, |v, _| {
         let look = v.attention_look();
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
-        assert_eq!(asks.approval, Some(8), "the note answers the prompt held");
+        assert_eq!(asks.approval.as_deref(), Some("8"), "the note answers the prompt held");
         let note = asks.note(false);
         Tap { id: note.id, info: note.info, action: Some(notify::ALLOW.to_owned()) }
     });
@@ -623,6 +623,16 @@ fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut T
         assert_eq!(v.focused(), Some(tiles[1]), "without going to the agent");
         assert!(v.approval(session).is_none(), "answered");
     });
+
+    view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 10, "Bash"), cx));
+    cx.run_until_parked();
+    press(cx, leak(format!("inbox-allow-{session}")));
+    let answer = ConversationRequest::Answer { session, ask: 10, verdict: Verdict::Allow };
+    assert_eq!(conversation(&mut link), [answer], "allowed from the inbox");
+    assert!(
+        cx.debug_bounds(leak(format!("inbox-allow-{session}"))).is_none(),
+        "answered, the row has no buttons"
+    );
 }
 
 /// The person looking at the session's terminal with the app in front gets Claude Code's own
@@ -691,6 +701,12 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let answer = ConversationRequest::Answer { session, ask: 8, verdict: Verdict::Allow };
     assert_eq!(conversation(&mut link), [answer], "answered as it came");
+    assert_eq!(
+        events.borrow().as_slice(),
+        [WorkspaceEvent::TapsSettled],
+        "out: an app woken for it may sleep again"
+    );
+    events.borrow_mut().clear();
 
     view.update_in(cx, |v, _window, cx| v.open_notification(&tap(route, 9, notify::DENY), cx));
     cx.run_until_parked();
@@ -722,7 +738,7 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(
         events.borrow().as_slice(),
-        [WorkspaceEvent::Unanswered { route: far, why: NOT_REACHED }],
+        [WorkspaceEvent::Unanswered { route: far, why: NOT_REACHED }, WorkspaceEvent::TapsSettled],
         "until it is given up on"
     );
 }

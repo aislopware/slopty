@@ -54,6 +54,14 @@ const RETRY_FIRST: Duration = Duration::from_secs(1);
 /// The longest a write that keeps failing waits to be tried again.
 const RETRY_MOST: Duration = Duration::from_secs(30);
 
+/// How many passes in a row may fail before the person is told their edits are not kept:
+/// one is a hiccup, a few in a row (about seven seconds of retries) is a disk that is full or
+/// will not be written.
+const FAILS_SAID: u32 = 3;
+
+/// What the person is told once [`FAILS_SAID`] passes in a row failed, with the first error.
+pub(super) const NOT_KEPT: &str = "Unsaved edits can't be kept on this device";
+
 /// A kept edit whose tile has not come back for this long is old: the person hears of it at
 /// start, and the palette can let it go.
 const OLD_AFTER: Duration = Duration::from_hours(7 * 24);
@@ -103,6 +111,8 @@ pub(super) struct Kept {
     /// The number of the last change handed to the store: of two changes to one backup, the
     /// later stands, whichever thread writes it first.
     seq: u64,
+    /// The passes that failed in a row since the last that wrote everything.
+    failures: u32,
 }
 
 impl Kept {
@@ -146,6 +156,7 @@ impl WorkspaceView {
             busy: false,
             stale: false,
             seq: 0,
+            failures: 0,
         });
         cx.spawn(async move |this, cx| {
             let found = cx
@@ -294,14 +305,10 @@ impl WorkspaceView {
                 }
                 let applied =
                     cx.background_executor().spawn(async move { apply(&store, pass) }).await;
-                let failed = applied.failed;
-                let _gone = this.update(cx, |this, _cx| {
+                let failed = applied.failed.is_some();
+                let _gone = this.update(cx, |this, cx| {
                     this.kept_done(&applied.done);
-                    // Nothing else may change to bring on another pass, and the edit is still
-                    // only in its tile: the pass comes again on its own.
-                    if failed && let Some(kept) = this.kept.as_mut() {
-                        kept.stale = true;
-                    }
+                    this.pass_failed(applied.failed.as_deref(), cx);
                 });
                 let wait = if failed {
                     let wait = retry;
@@ -315,6 +322,22 @@ impl WorkspaceView {
             }
         })
         .detach();
+    }
+
+    /// A pass ended, failing for `why` or not. A failed one comes again on its own, since
+    /// nothing else may change to bring it on and the edit is still only in its tile; the
+    /// [`FAILS_SAID`]th in a row is said, once until a pass writes everything again.
+    fn pass_failed(&mut self, why: Option<&str>, cx: &mut Context<Self>) {
+        let Some(kept) = self.kept.as_mut() else { return };
+        let Some(why) = why else {
+            kept.failures = 0;
+            return;
+        };
+        kept.stale = true;
+        kept.failures = kept.failures.saturating_add(1);
+        if kept.failures == FAILS_SAID {
+            self.show_notice(format!("{NOT_KEPT}: {}", crate::kit::first_line(why)), cx);
+        }
     }
 
     /// Write what is left now, on this thread, the ones still on their way included: the app
@@ -499,15 +522,16 @@ fn keep_every(bytes: u64) -> Duration {
 struct Applied {
     /// The changes that finished.
     done: Vec<(TileKey, u64)>,
-    /// A change failed: it is asked again by a later pass, the edit still in its tile.
-    failed: bool,
+    /// A change failed: it is asked again by a later pass, the edit still in its tile. Why the
+    /// first one did.
+    failed: Option<String>,
     /// The bytes of edit text written.
     bytes: u64,
 }
 
 /// Carry out one pass on the store, off the UI thread. A write that fails is logged.
 fn apply(store: &Store, pass: Vec<Keep>) -> Applied {
-    let mut applied = Applied { done: Vec::with_capacity(pass.len()), failed: false, bytes: 0 };
+    let mut applied = Applied { done: Vec::with_capacity(pass.len()), failed: None, bytes: 0 };
     for keep in pass {
         let (key, seq, result) = match keep {
             Keep::Put(backup, kept_ms, seq) => {
@@ -527,8 +551,8 @@ fn apply(store: &Store, pass: Vec<Keep>) -> Applied {
             Ok(true) => applied.done.push((key, seq)),
             Ok(false) => {}
             Err(e) => {
-                applied.failed = true;
                 tracing::warn!(error = %e, item = %key.1, "unsaved edit not kept");
+                applied.failed.get_or_insert_with(|| e.to_string());
             }
         }
     }

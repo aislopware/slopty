@@ -311,3 +311,115 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
     cx.run_until_parked();
     assert_eq!(view.read_with(cx, |v, _| v.needs_you_count()), 0, "no word left to go on");
 }
+
+/// The answer `drained` sent a thread, if any.
+fn answer_sent(drained: &[ClientMsg]) -> Vec<slopty_proto::thread::wire::Intent> {
+    use slopty_proto::thread::wire::{Intent, ThreadRequest};
+    drained
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Intent {
+                intent: i @ Intent::Answer { .. }, ..
+            }) => Some(i.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A thread with no terminal that waits on a yes or no it offers plainly is answered from the
+/// inbox's "Allow" and "Deny", and its note carries the request for the note's buttons. The
+/// answer is the request's own plain allow, never its standing grant, sent through the
+/// worker's thread hub once: the row takes its buttons back until the table moves. A request
+/// with no plain answer offers none.
+#[gpui::test]
+fn a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::Intent;
+    use slopty_proto::thread::{Choice, Effect};
+    let choice = |id: &str, effect, scope: Option<&str>| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: scope.map(str::to_owned),
+        stops: false,
+    };
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut row = asking(None);
+    let thread = row.id;
+    if let Some(card) = row.requests.first_mut() {
+        card.options = vec![
+            choice("always", Effect::Allow, Some("cargo in this folder")),
+            choice("accept", Effect::Allow, None),
+            choice("decline", Effect::Deny, None),
+        ];
+    }
+    table(&view, cx, key, vec![row.clone()]);
+    let approval = view.update(cx, |v, _| v.attention_look().asking[0].approval.clone());
+    assert_eq!(approval.as_deref(), Some("ask-1"), "its note answers the request");
+
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let bell = cx.debug_bounds("bell").expect("the bell");
+    cx.simulate_click(bell.center(), Modifiers::none());
+    cx.run_until_parked();
+    studio.drain();
+    let allow = cx.debug_bounds(leak(format!("inbox-allow-{thread}"))).expect("Allow on its row");
+    cx.simulate_click(allow.center(), Modifiers::none());
+    cx.run_until_parked();
+    let sent = answer_sent(&studio.drain());
+    assert_eq!(
+        sent,
+        [Intent::Answer {
+            ask: AskId("ask-1".to_owned()),
+            choice: "accept".to_owned(),
+            message: None
+        }],
+        "the plain allow, once"
+    );
+    assert!(
+        cx.debug_bounds(leak(format!("inbox-allow-{thread}"))).is_none(),
+        "answered here, the row waits for its worker"
+    );
+    let again = view.update_in(cx, |v, _w, cx| {
+        v.answer_thread(key, thread, &AskId("ask-1".to_owned()), false, cx)
+    });
+    assert!(!again, "once");
+
+    let mut later = row.clone();
+    if let Some(card) = later.requests.first_mut() {
+        card.id = AskId("ask-2".to_owned());
+    }
+    table(&view, cx, key, vec![later]);
+    studio.drain();
+    let tap = slopty_platform::notify::Tap {
+        id: format!("thread-{thread}"),
+        info: [
+            ("worker".to_owned(), key.value().to_string()),
+            ("thread".to_owned(), thread.to_string()),
+            ("ask".to_owned(), "ask-2".to_owned()),
+        ]
+        .into(),
+        action: Some(slopty_platform::notify::DENY.to_owned()),
+    };
+    view.update_in(cx, |v, _w, cx| v.open_notification(&tap, cx));
+    cx.run_until_parked();
+    let sent = answer_sent(&studio.drain());
+    assert_eq!(
+        sent,
+        [Intent::Answer {
+            ask: AskId("ask-2".to_owned()),
+            choice: "decline".to_owned(),
+            message: None
+        }],
+        "the note's Deny"
+    );
+
+    let mut bare = another(asking(None));
+    if let Some(card) = bare.requests.first_mut() {
+        card.options = vec![choice("always", Effect::Allow, Some("everything"))];
+    }
+    table(&view, cx, key, vec![bare]);
+    let look = view.update(cx, |v, _| v.attention_look());
+    assert_eq!(look.asking[0].approval, None, "no plain answer, no buttons");
+}

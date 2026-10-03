@@ -125,8 +125,17 @@ pub(super) struct Row {
     /// The history's number of the finish it shows; `None` for an agent that waits.
     logged: Option<u64>,
     go: Go,
-    /// The prompt "Deny" and "Allow" answer: its session and ask.
-    approval: Option<(SessionId, u64)>,
+    /// The yes or no "Deny" and "Allow" answer.
+    approval: Option<Answer>,
+}
+
+/// What a row's "Deny" and "Allow" answer.
+#[derive(Clone)]
+pub(super) enum Answer {
+    /// A terminal's permission prompt held for this client: its session and number.
+    Prompt(SessionId, u64),
+    /// A thread's open request, on its worker.
+    Request(WorkerKey, ThreadId, slopty_proto::thread::AskId),
 }
 
 /// Where a row goes when clicked.
@@ -371,7 +380,7 @@ impl WorkspaceView {
             unread: true,
             logged: None,
             go: Go::Waiting(waiting),
-            approval: self.approval(session).map(|prompt| (session, prompt.ask)),
+            approval: self.approval(session).map(|prompt| Answer::Prompt(session, prompt.ask)),
         }
     }
 
@@ -403,7 +412,12 @@ impl WorkspaceView {
             unread: true,
             logged: None,
             go: Go::Thread(wait.worker, wait.thread),
-            approval: None,
+            approval: stand
+                .asks
+                .as_ref()
+                .filter(|a| approvals::answerable(a))
+                .filter(|a| self.thread_answered_here(wait.thread) != Some(&a.id))
+                .map(|a| Answer::Request(wait.worker, wait.thread, a.id.clone())),
         })
     }
 
@@ -641,7 +655,7 @@ impl WorkspaceView {
         let word = row.word.map(|word| {
             div().debug_selector(move || word_id).flex_none().child(SharedString::from(word))
         });
-        let answers = row.approval.map(|(session, ask)| self.approval_buttons(session, ask, cx));
+        let answers = row.approval.as_ref().map(|answer| self.approval_buttons(answer, cx));
         // Two separators at most: the word, if any, takes one.
         let room = if word.is_some() { 2 } else { 3 };
         let shown: Vec<&str> = row.facts.iter().take(room).map(String::as_str).collect();
@@ -702,9 +716,27 @@ impl WorkspaceView {
 }
 
 impl WorkspaceView {
-    /// "Deny" and "Allow" for `session`'s prompt `ask`, as quiet text buttons the height of a
-    /// row's second line: the answer goes where the row is, without going to the agent.
-    fn approval_buttons(&self, session: SessionId, ask: u64, cx: &Context<Self>) -> Div {
+    /// Allow (`allow`) or deny what a row's buttons answer.
+    pub(super) fn answer_row(&mut self, answer: &Answer, allow: bool, cx: &mut Context<Self>) {
+        match answer {
+            Answer::Prompt(session, ask) => {
+                let verdict = if allow {
+                    Verdict::Allow
+                } else {
+                    Verdict::Deny { message: String::new(), interrupt: false }
+                };
+                self.answer_approval(*session, *ask, verdict, cx);
+            }
+            Answer::Request(worker, thread, ask) => {
+                self.answer_thread(*worker, *thread, ask, allow, cx);
+            }
+        }
+    }
+
+    /// "Deny" and "Allow" for a terminal's prompt or a thread's request, as quiet text buttons
+    /// the height of a row's second line: the answer goes where the row is, without going to
+    /// the agent.
+    fn approval_buttons(&self, answer: &Answer, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let (_, second_h) = super::navigator::line_heights(theme);
@@ -727,19 +759,20 @@ impl WorkspaceView {
                 .child(label);
             tab_stop(el, s.accent)
         };
-        let deny = button(format!("inbox-deny-{session}"), DENY, s.text_secondary).on_click(
-            cx.listener(move |this, _ev, _w, cx| {
+        let of = match answer {
+            Answer::Prompt(session, _) => session.to_string(),
+            Answer::Request(_, thread, _) => thread.to_string(),
+        };
+        let answered = |allow: bool| {
+            let answer = answer.clone();
+            cx.listener(move |this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
                 cx.stop_propagation();
-                let verdict = Verdict::Deny { message: String::new(), interrupt: false };
-                this.answer_approval(session, ask, verdict, cx);
-            }),
-        );
-        let allow = button(format!("inbox-allow-{session}"), ALLOW, s.accent).on_click(
-            cx.listener(move |this, _ev, _w, cx| {
-                cx.stop_propagation();
-                this.answer_approval(session, ask, Verdict::Allow, cx);
-            }),
-        );
+                this.answer_row(&answer, allow, cx);
+            })
+        };
+        let deny =
+            button(format!("inbox-deny-{of}"), DENY, s.text_secondary).on_click(answered(false));
+        let allow = button(format!("inbox-allow-{of}"), ALLOW, s.accent).on_click(answered(true));
         div().flex_none().flex().items_center().gap(px(theme.spacing.xxs)).child(deny).child(allow)
     }
 }
