@@ -1,14 +1,14 @@
 //! The composer beyond its text: its `/` and `@` menus, attachments, and changing a message
 //! that waits in the queue.
 
-use std::cell::RefCell;
-use std::rc::Rc;
-
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Modifiers, MouseButton, TestAppContext};
+use slopty_core::SessionId;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Command, Delivery, IntentId, Pending, PendingState, ThreadState};
+use slopty_proto::thread::{
+    AgentId, Cap, Command, Delivery, IntentId, Pending, PendingState, ThreadState,
+};
 
-use super::{hub, intents, snapshot, view};
+use super::{asked, hub, intents, snapshot, view};
 use crate::conversation::composer::{self, Attach};
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
@@ -23,22 +23,6 @@ fn command(name: &str, description: &str, source: &str) -> Command {
         argument_hint: None,
         source: source.to_owned(),
     }
-}
-
-/// What the view asked of the workspace.
-fn asked(
-    cx: &mut VisualTestContext,
-    view: &Entity<ThreadView>,
-) -> Rc<RefCell<Vec<ThreadViewEvent>>> {
-    let asked: Rc<RefCell<Vec<ThreadViewEvent>>> = Rc::default();
-    let into = Rc::clone(&asked);
-    cx.update(|_window, cx| {
-        cx.subscribe(view, move |_view, event: &ThreadViewEvent, _cx| {
-            into.borrow_mut().push(event.clone());
-        })
-        .detach();
-    });
-    asked
 }
 
 fn state() -> ThreadState {
@@ -178,12 +162,13 @@ fn a_queued_message_is_changed_in_the_composer(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-editing").is_none());
 }
 
-/// An attachment's chip shows in the frame it is attached; nothing goes while it is on its
-/// way up, and the message carries where it landed after its text.
+/// A thread with a terminal takes files: ↵ while one is on its way up waits for it, says so,
+/// and sends by itself the moment it lands, carrying its path.
 #[gpui::test]
 fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
-    let state = state();
+    let mut state = state();
+    state.meta.terminal = Some(SessionId::new());
     let thread = state.meta.id;
     hub.update(cx, ThreadHub::connected);
     let (view, cx) = view(cx, &hub, thread);
@@ -200,14 +185,22 @@ fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppConte
     assert!(cx.debug_bounds("composer-attachment").is_some(), "its chip, at once");
     cx.simulate_input("Look at this");
     cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
     assert!(intents(&sent).is_empty(), "not while it is on its way up");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.composer_notice().map(str::to_owned)).as_deref(),
+        Some("Sends once the attachments are up"),
+        "\u{21b5} is never silent"
+    );
+    assert!(cx.debug_bounds("thread-composer-notice").is_some());
 
     let landed = ["/drop/x/shot.png".to_owned()];
     view.update(cx, |v, cx| v.attachment_landed(id, &landed, cx));
-    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
     let text = composer::with_paths("Look at this", &landed);
     assert_eq!(intents(&sent), [Intent::Send { text, delivery: Delivery::Steer }]);
     assert!(cx.debug_bounds("composer-attachment").is_none(), "the chip went with it");
+    assert!(cx.debug_bounds("thread-composer-notice").is_none(), "nothing left to say");
 
     view.update(cx, |v, cx| v.attach(Attach::Files(vec!["/tmp/a.txt".into()]), cx));
     let remove = cx.debug_bounds("composer-attachment-remove").expect("its way off").center();
@@ -216,4 +209,120 @@ fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppConte
         matches!(asked.borrow().last(), Some(ThreadViewEvent::Detach { .. })),
         "taken off: its upload stops"
     );
+}
+
+/// A send waiting on an upload that fails sends nothing and says so; the words stay in the
+/// composer for the person to try again.
+#[gpui::test]
+fn a_failed_upload_under_a_waiting_send_sends_nothing_and_says_so(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = state();
+    state.meta.terminal = Some(SessionId::new());
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let asked = asked(cx, &view);
+
+    view.update(cx, |v, cx| v.attach(Attach::Files(vec!["/tmp/shot.png".into()]), cx));
+    cx.run_until_parked();
+    let id = match asked.borrow().as_slice() {
+        [ThreadViewEvent::Attach { id, .. }] => *id,
+        other => panic!("the workspace is asked to send it up: {other:?}"),
+    };
+    cx.simulate_input("Look at this");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.armed()));
+
+    view.update(cx, |v, cx| v.attachment_ended(id, cx));
+    cx.run_until_parked();
+    assert!(intents(&sent).is_empty(), "nothing goes without its file");
+    assert!(!view.read_with(cx, |v, _| v.armed()));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.composer_notice().map(str::to_owned)).as_deref(),
+        Some("An attachment didn't upload, so nothing was sent")
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send { text: "Look at this".to_owned(), delivery: Delivery::Steer }],
+        "the words were kept to send again"
+    );
+}
+
+/// A thread with no terminal (Codex, pi, ACP) can't take a file yet: offering one says so in
+/// the composer, adds no chip, and \u{21b5} still sends the words.
+#[gpui::test]
+fn a_thread_with_no_terminal_says_it_cannot_take_a_file(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = state();
+    state.meta.agent = AgentId::named(AgentId::PI);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let asked = asked(cx, &view);
+
+    view.update(cx, |v, cx| v.attach(Attach::Files(vec!["/tmp/shot.png".into()]), cx));
+    cx.run_until_parked();
+    assert!(asked.borrow().is_empty(), "nothing is sent up");
+    assert!(cx.debug_bounds("composer-attachment").is_none(), "no chip");
+    let notice = view.read_with(cx, |v, _| v.composer_notice().map(str::to_owned));
+    assert_eq!(notice.as_deref(), Some("Files can't be attached to pi threads yet"));
+
+    cx.simulate_input("Look at this");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send { text: "Look at this".to_owned(), delivery: Delivery::Steer }]
+    );
+}
+
+/// A secondary click on Send (a right click, or a long press on touch) queues the message
+/// behind the turn instead of steering it.
+#[gpui::test]
+fn a_secondary_click_on_send_queues_the_message(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    cx.simulate_input("After this turn");
+    let send = cx.debug_bounds("thread-send").expect("the send button").center();
+    cx.simulate_mouse_down(send, MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(send, MouseButton::Right, Modifiers::none());
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send { text: "After this turn".to_owned(), delivery: Delivery::Queue }]
+    );
+}
+
+/// An agent that compacts lists `/compact` even when it lists no such command, and sending
+/// it asks the agent to compact rather than saying the words.
+#[gpui::test]
+fn compact_is_a_command_when_the_agent_compacts(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = state();
+    state.meta.caps.push(Cap::named(Cap::COMPACT));
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    let listed =
+        view.read_with(cx, |v, cx| v.commands(cx).into_iter().map(|c| c.name).collect::<Vec<_>>());
+    assert!(listed.iter().any(|c| c == "compact"), "{listed:?}");
+    cx.simulate_input("/compact");
+    cx.simulate_keystrokes("enter");
+    assert!(intents(&sent).is_empty(), "\u{21b5} on the menu writes the command");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(intents(&sent), [Intent::Compact]);
 }

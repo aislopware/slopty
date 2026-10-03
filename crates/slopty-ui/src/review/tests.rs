@@ -8,7 +8,7 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::detail::Hunk;
 use slopty_proto::thread::wire::{
-    FileDiff, Intent, Review, ReviewScope, ThreadFrame, ThreadRequest,
+    FileDiff, Intent, IntentDone, Outcome, Review, ReviewScope, ThreadFrame, ThreadRequest,
 };
 use slopty_proto::thread::{Cursor, Delivery, Patch, TurnId};
 use slopty_theme::Theme;
@@ -187,4 +187,29 @@ fn mark_reviewed_keeps_every_file(cx: &mut TestAppContext) {
         .filter(|i| matches!(i, Intent::Keep(p) if p.hunks.is_empty()))
         .count();
     assert_eq!(kept, 3);
+}
+
+/// A keep the worker turns down says why on the hunk it was for, in the frame the answer
+/// comes, with Keep and Revert back beside it; trying again lets the old refusal go.
+#[gpui::test]
+fn a_refused_keep_says_why_on_its_hunk(cx: &mut TestAppContext) {
+    let (_view, hub, sent, cx) = tile(cx, 1200.0);
+    click(cx, "review-keep-hunk-1-0");
+    let (id, thread) = hub
+        .read_with(cx, |h, _| h.threads().outbox().all().first().map(|s| (s.id, s.thread)))
+        .expect("the keep is on its way");
+    let reason = "src/lib.rs changed since the review".to_owned();
+    let done = IntentDone { id, outcome: Outcome::Refused { reason: reason.clone() } };
+    hub.update(cx, |hub, cx| hub.done(&done, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-refused-hunk-1-0").is_some(), "said on its hunk");
+    assert!(cx.debug_bounds("review-refused-file-1").is_none(), "not on the whole file");
+    let words: Vec<String> =
+        hub.read_with(cx, |h, _| h.refusals(thread).map(|r| r.words.clone()).collect());
+    assert_eq!(words, [format!("Couldn't keep lib.rs: {reason}")]);
+    assert!(cx.debug_bounds("review-keep-hunk-1-0").is_some(), "Keep is back to try again");
+
+    click(cx, "review-keep-hunk-1-0");
+    assert!(cx.debug_bounds("review-refused-hunk-1-0").is_none(), "the new try speaks now");
+    assert_eq!(intents(&sent).len(), 2);
 }

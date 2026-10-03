@@ -345,8 +345,12 @@ impl ReviewView {
         self.hub.update(cx, |hub, cx| hub.intent(thread, intent, cx))
     }
 
-    /// Keep or put back the file at `at`, or one of its hunks.
+    /// Keep or put back the file at `at`, or one of its hunks. A refusal of an earlier try
+    /// goes: this one speaks for it now.
     fn pick(&mut self, at: usize, hunk: Option<usize>, keep: bool, cx: &mut Context<Self>) {
+        if let Some((refused, _)) = self.refused(at, hunk, cx) {
+            self.hub.update(cx, |hub, cx| hub.dismiss(refused, cx));
+        }
         let hunks = hunk.and_then(|h| u32::try_from(h).ok()).into_iter().collect();
         if let Some(intent) = self.model.pick(at, hunks, keep) {
             let id = self.intent(intent, cx);
@@ -442,6 +446,24 @@ impl ReviewView {
             let covers = pick.path == *path
                 && (pick.hunks.is_empty() || hunk.is_some_and(|h| pick.hunks.contains(&h)));
             (covers && !s.failed() && s.outcome.is_none()).then_some(words)
+        })
+    }
+
+    /// The worker's refusal of the last keep or put back of the file at `at`, or of its hunk:
+    /// the refusal and why, in words.
+    fn refused(&self, at: usize, hunk: Option<usize>, cx: &App) -> Option<(IntentId, String)> {
+        let path = &self.model.file(at)?.path;
+        let hunk = hunk.and_then(|h| u32::try_from(h).ok());
+        self.hub.read(cx).refusals(self.thread).rev().find_map(|refusal| {
+            let Some(Intent::Keep(pick) | Intent::Revert(pick)) = &refusal.intent else {
+                return None;
+            };
+            let covers = pick.path == *path
+                && match hunk {
+                    Some(h) => pick.hunks.is_empty() || pick.hunks.contains(&h),
+                    None => pick.hunks.is_empty(),
+                };
+            covers.then(|| (refusal.id, refusal.words.clone()))
         })
     }
 
@@ -631,11 +653,25 @@ impl ReviewView {
                 .into_any_element();
         }
         let tag = hunk.map_or_else(|| format!("{at}"), |h| format!("{at}-{h}"));
+        let refused = self.refused(at, hunk, cx).map(|(_, words)| {
+            let selector = format!("review-refused-{what}-{tag}");
+            div()
+                .debug_selector(move || selector)
+                .min_w_0()
+                .max_w(gpui::relative(0.5))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(self.z(self.theme.typography.small()))
+                .text_color(hsla(s.error))
+                .child(SharedString::from(words))
+        });
         div()
-            .flex_none()
+            .min_w_0()
             .flex()
             .items_center()
             .gap(self.z(self.theme.spacing.xxs))
+            .children(refused)
             .child(
                 self.action(format!("review-revert-{what}-{tag}"), "Revert", false)
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.pick(at, hunk, false, cx))),

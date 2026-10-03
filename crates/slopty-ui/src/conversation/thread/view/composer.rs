@@ -14,8 +14,8 @@ use gpui::{
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
-use slopty_proto::thread::Cap;
 use slopty_proto::thread::wire::Intent;
+use slopty_proto::thread::{Cap, Delivery};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
@@ -69,6 +69,13 @@ pub(super) fn model_said(meters: &slopty_proto::thread::Meters) -> Option<String
         .flatten()
         .find(|m| !m.trim().is_empty())
         .map(|m| crate::conversation::figures::spoken_model(m).0)
+}
+
+/// Where the person changes a thread's mode when Slopty cannot: in the agent's own TUI, for an
+/// agent that has one. Slopty never cycles a mode key for them.
+pub(super) fn mode_hint(meta: &slopty_proto::thread::ThreadMeta) -> Option<String> {
+    (!meta.can(Cap::SET_MODE) && meta.can(Cap::LIVE_TUI))
+        .then(|| format!("Change the mode in {}'s own terminal", agent_name(&meta.agent)))
 }
 
 /// The fact that names a thread's branch, as the workers set it.
@@ -352,10 +359,17 @@ impl ThreadView {
             return None;
         }
         let words = words.join(" \u{b7} ");
+        let hint = mode_hint(&state.meta).map(|hint| (hint, self.theme.clone()));
         Some(
             self.chip("thread-mode", format!("Mode, {words}"))
                 .role(Role::Label)
                 .child(SharedString::from(words))
+                .when_some(hint, |el, (hint, theme)| {
+                    el.tooltip(move |_window, cx| {
+                        let theme = std::rc::Rc::new(theme.clone());
+                        cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
+                    })
+                })
                 .into_any_element(),
         )
     }
@@ -492,11 +506,19 @@ impl ThreadView {
                     this.submit(delivery, window, cx);
                 }
             }));
+        // A long press (a right click on the Mac) sends after the turn under way, as ⌘↵ does:
+        // the one way to queue with no keyboard.
+        let queues = !stop && self.state(cx).is_some_and(|st| st.meta.can(Cap::QUEUE));
+        let el = el.when(queues, |el| {
+            el.on_aux_click(cx.listener(|this, _ev, window, cx| {
+                this.submit(Delivery::Queue, window, cx);
+            }))
+        });
         crate::a11y::tab_stop(el, s.accent).into_any_element()
     }
 
     /// The composer card's corners: all round, or with the tray as its head only the foot's.
-    fn card_corners<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
+    pub(super) fn card_corners<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
         let r = self.z(self.theme.radii.lg);
         if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) }
     }
@@ -507,6 +529,9 @@ impl ThreadView {
     pub(super) fn composer_box(&self, capped: bool, cx: &Context<Self>) -> AnyElement {
         if self.tui_holds(cx) == Some(true) {
             return self.held_strip(capped, cx);
+        }
+        if let Some(strip) = self.exited_strip(capped, cx) {
+            return strip;
         }
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -532,7 +557,9 @@ impl ThreadView {
                     .px(self.z(theme.spacing.md))
                     .pt(self.z(theme.spacing.sm))
                     .text_size(self.z(theme.typography.prose()))
+                    .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
+                    .children(self.notice_strip())
                     .children(self.editing_strip(cx))
                     .children(self.attachment_chips(cx))
                     .child(
@@ -566,9 +593,7 @@ impl ThreadView {
                     .when(!editing, |el| {
                         el.child(
                             self.icon_button("thread-attach", IconName::Plus, "Attach files")
-                                .on_click(cx.listener(|_this, _ev, _w, cx| {
-                                    cx.emit(ThreadViewEvent::PickFiles);
-                                })),
+                                .on_click(cx.listener(|this, _ev, _w, cx| this.pick_files(cx))),
                         )
                     })
                     .children(self.model_chip(cx))

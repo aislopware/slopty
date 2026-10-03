@@ -12,7 +12,11 @@
 //! - **Attachments.** A pasted picture, files copied here, a drop on the tile or the picker's files
 //!   go up through the workspace as a drop on the face does; each shows as a chip
 //!   ([`crate::conversation::chips`]) until the message goes, which carries their paths after its
-//!   text ([`composer::with_paths`]). Nothing goes while one is still on its way up.
+//!   text ([`composer::with_paths`]). Files go up through the terminal the thread's agent runs in,
+//!   so a thread with none (Codex, pi, an ACP agent) takes no attachment: the composer says so in
+//!   words, and no chip waits for an upload that never starts. ↵ while one is still on its way up
+//!   arms the message: it goes as soon as the last one lands, and an upload that fails disarms it,
+//!   saying so, rather than sending without the file.
 //! - **Editing.** A waiting message's words take the composer and the draft is put aside; ↵ sends
 //!   the change (`Intent::Edit`) and brings the draft back, Esc brings it back unchanged. A message
 //!   that goes meanwhile leaves its words in the composer as a new draft, the one put aside after
@@ -30,7 +34,7 @@ use gpui::{
 };
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Command, IntentId, Model};
+use slopty_proto::thread::{Cap, Command, Delivery, IntentId, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
@@ -41,6 +45,15 @@ use crate::kit::ButtonKind;
 
 /// Rows the menu shows before it scrolls.
 const MENU_ROWS: f32 = 8.0;
+
+/// The command that compacts the context, as the menu lists it.
+const COMPACT: &str = "compact";
+
+/// Whether `state`'s agent compacts through Slopty ([`Cap::COMPACT`]) rather than by a command
+/// it lists itself.
+fn compacts(state: &slopty_proto::thread::ThreadState) -> bool {
+    state.meta.can(Cap::COMPACT) && !state.commands.iter().any(|c| c.name == COMPACT)
+}
 
 /// What the composer's menu lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,12 +112,23 @@ pub(super) struct Composing {
     editing: Option<Editing>,
     /// The model chip's menu is open.
     models: bool,
+    /// What the composer says above the field until the draft changes: an attachment it cannot
+    /// take, a message waiting for its uploads.
+    notice: Option<String>,
+    /// ↵ was pressed while an attachment was on its way up: the message goes, so, in the window
+    /// it was pressed in, once the last one lands.
+    armed: Option<(Delivery, gpui::AnyWindowHandle)>,
 }
 
 impl Composing {
     /// Whether a waiting message is being changed.
     pub(super) const fn editing(&self) -> bool {
         self.editing.is_some()
+    }
+
+    /// Whether an attachment is still on its way up.
+    pub(super) fn uploading(&self) -> bool {
+        self.attachments.uploading()
     }
 
     /// What answers `query`: the worker's answer to it, else the last answer for a shorter
@@ -157,9 +181,9 @@ impl ThreadView {
         }
         match self.menu_token(cx)? {
             Token::Command { query } => {
-                let all = &self.state(cx)?.commands;
+                let all = self.commands(cx);
                 let found: Vec<Command> =
-                    menu::commands(all, &query).into_iter().cloned().collect();
+                    menu::commands(&all, &query).into_iter().cloned().collect();
                 (!found.is_empty()).then_some(MenuRows::Commands(found))
             }
             Token::Mention { query, .. } => {
@@ -172,10 +196,39 @@ impl ThreadView {
         }
     }
 
+    /// The commands the `/` menu lists: the agent's own, and `/compact` where Slopty compacts
+    /// the context through the agent's own door ([`Cap::COMPACT`]) and the agent lists no
+    /// command of that name.
+    #[must_use]
+    pub fn commands(&self, cx: &App) -> Vec<Command> {
+        let Some(state) = self.state(cx) else { return Vec::new() };
+        let mut all = state.commands.clone();
+        if compacts(state) {
+            all.push(Command {
+                name: COMPACT.to_owned(),
+                description: "Summarize the conversation to free up context".to_owned(),
+                argument_hint: None,
+                source: "built-in".to_owned(),
+            });
+        }
+        all
+    }
+
+    /// Whether the draft asks Slopty to compact the context: `/compact` alone, where the agent
+    /// compacts through its door rather than by a command of its own.
+    pub(super) fn compact_asked(&self, cx: &App) -> bool {
+        self.state(cx).is_some_and(compacts)
+            && self.draft(cx).trim() == format!("/{COMPACT}")
+            && self.composing.attachments.chips().is_empty()
+    }
+
     /// The draft or its caret moved: the menu's row goes back to the top, a word the person
     /// closed the menu on is forgotten once the caret left it, and an `@` word asks the worker
-    /// for what it now matches.
+    /// for what it now matches. What the composer said about an attachment has been read.
     pub(super) fn composer_changed(&mut self, cx: &mut Context<Self>) {
+        if self.composing.armed.is_none() {
+            self.composing.notice = None;
+        }
         let token = {
             let composer = self.composer.read(cx);
             menu::token(&composer.value(), composer.cursor())
@@ -538,13 +591,43 @@ impl ThreadView {
     // ----- attachments -----------------------------------------------------------------
 
     /// A paste into the composer: a picture with no text on the clipboard, or files copied
-    /// here, are attached rather than pasted as text. Whether the paste was taken.
+    /// here, are attached rather than pasted as text. Whether the paste was taken: one this
+    /// thread cannot take is taken all the same, said so, since a picture or a path on this
+    /// Mac means nothing pasted as text to the agent.
     pub fn paste_attachment(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) -> bool {
         Attach::of_paste(item).map(|what| self.attach(what, cx)).is_some()
     }
 
-    /// Show `what`'s chip and ask the workspace to send it up.
+    /// Why this thread takes no attachment, in words; `None` when it takes them. Files go up
+    /// through the terminal its agent runs in.
+    pub fn attachments_refused(&self, cx: &App) -> Option<String> {
+        let meta = &self.state(cx)?.meta;
+        meta.terminal.is_none().then(|| {
+            format!("Files can't be attached to {} threads yet", super::agent_name(&meta.agent))
+        })
+    }
+
+    /// Say `words` above the field until the draft changes.
+    fn say(&mut self, words: String, cx: &mut Context<Self>) {
+        self.composing.notice = Some(words);
+        cx.notify();
+    }
+
+    /// The attach button: the picker, or why this thread takes no files.
+    pub(super) fn pick_files(&mut self, cx: &mut Context<Self>) {
+        match self.attachments_refused(cx) {
+            Some(why) => self.say(why, cx),
+            None => cx.emit(ThreadViewEvent::PickFiles),
+        }
+    }
+
+    /// Show `what`'s chip and ask the workspace to send it up; or say why this thread takes no
+    /// attachment, with no chip.
     pub fn attach(&mut self, what: Attach, cx: &mut Context<Self>) {
+        if let Some(why) = self.attachments_refused(cx) {
+            self.say(why, cx);
+            return;
+        }
         let id = self.composing.attachments.add(what.name());
         if let Some(picture) = what.picture() {
             self.composing.pictures.insert(id, picture);
@@ -572,32 +655,109 @@ impl ThreadView {
         }
     }
 
-    /// Attachment `id` landed at `paths` on the worker: its chip stays until the message goes.
+    /// Attachment `id` landed at `paths` on the worker: its chip stays until the message goes,
+    /// which goes now if it was waiting for this one. Landing nowhere, it did not land.
     pub fn attachment_landed(&mut self, id: u64, paths: &[String], cx: &mut Context<Self>) {
         if self.composing.attachments.land(id, paths) {
             if paths.is_empty() {
                 self.composing.pictures.remove(&id);
+                self.upload_failed(cx);
             }
+            self.send_armed(cx);
             cx.notify();
         }
     }
 
-    /// Attachment `id`'s upload is over: landed, its chip stays for the message; not, it goes.
+    /// Attachment `id`'s upload is over: landed, its chip stays for the message; not, it goes,
+    /// and a message waiting for it waits no more.
     pub fn attachment_ended(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.composing.attachments.over(id) {
             self.composing.pictures.remove(&id);
+            self.upload_failed(cx);
             cx.notify();
         }
+        self.send_armed(cx);
     }
 
     /// The person takes attachment `id` off the draft: its chip goes at once, and the
-    /// workspace stops its upload.
+    /// workspace stops its upload. A message waiting only for it goes now.
     pub fn detach(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.composing.attachments.end(id) {
             self.composing.pictures.remove(&id);
             cx.emit(ThreadViewEvent::Detach { id });
+            self.send_armed(cx);
             cx.notify();
         }
+    }
+
+    /// ↵ while an attachment is on its way up: the message goes as `delivery` once the last
+    /// one lands, and says so meanwhile.
+    pub(super) fn arm(&mut self, delivery: Delivery, window: &Window, cx: &mut Context<Self>) {
+        self.composing.armed = Some((delivery, window.window_handle()));
+        self.say("Sends once the attachments are up".to_owned(), cx);
+    }
+
+    /// An upload ended without landing: a message waiting for it is not sent without it.
+    fn upload_failed(&mut self, cx: &mut Context<Self>) {
+        if self.composing.armed.take().is_some() {
+            self.say("An attachment didn't upload, so nothing was sent".to_owned(), cx);
+        }
+    }
+
+    /// The armed message goes, once nothing is on its way up.
+    fn send_armed(&mut self, cx: &Context<Self>) {
+        if self.composing.attachments.uploading() {
+            return;
+        }
+        let Some((delivery, window)) = self.composing.armed.take() else { return };
+        self.composing.notice = None;
+        // Sending clears the field, which takes the window: had in a task of its own, since an
+        // entity's update cannot reach its window.
+        cx.spawn(async move |this, cx| {
+            let _gone = window.update(cx, |_root, window, cx| {
+                this.update(cx, |this, cx| this.submit(delivery, window, cx))
+            });
+        })
+        .detach();
+    }
+
+    /// Whether a message waits for its attachments.
+    #[must_use]
+    pub const fn armed(&self) -> bool {
+        self.composing.armed.is_some()
+    }
+
+    /// What the composer says above the field, if anything.
+    #[must_use]
+    pub fn composer_notice(&self) -> Option<&str> {
+        self.composing.notice.as_deref()
+    }
+
+    /// The line over the field saying what the composer could not do, or waits for.
+    pub(super) fn notice_strip(&self) -> Option<AnyElement> {
+        let words = self.composing.notice.clone()?;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let waiting = self.composing.armed.is_some();
+        Some(
+            div()
+                .id("thread-composer-notice")
+                .debug_selector(|| "thread-composer-notice".to_owned())
+                .role(Role::Status)
+                .aria_label(SharedString::from(words.clone()))
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
+                .text_size(self.z(theme.typography.meta()))
+                .text_color(hsla(s.text_secondary))
+                .child(if waiting {
+                    self.spinner(true)
+                } else {
+                    self.icon(IconName::Info, s.text_muted)
+                })
+                .child(div().min_w_0().flex_1().child(SharedString::from(words)))
+                .into_any_element(),
+        )
     }
 
     /// The message to send, the landed attachments' paths after its text; `None` while there
@@ -615,6 +775,7 @@ impl ThreadView {
         self.composing.pictures.clear();
         self.composing.asked = None;
         self.composing.found = None;
+        self.composing.notice = None;
         Some(text)
     }
 

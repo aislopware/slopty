@@ -16,7 +16,7 @@ use slopty_theme::Theme;
 use super::fixtures;
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::Row;
-use super::view::ThreadView;
+use super::view::{ThreadView, ThreadViewEvent};
 
 type Sent = Rc<RefCell<Vec<ClientMsg>>>;
 
@@ -86,6 +86,22 @@ fn approval(id: &str) -> Request {
         opened_ms: slopty_core::WallMs::ZERO,
         until_ms: None,
     }
+}
+
+/// What the view asked of the workspace from now on.
+fn asked(
+    cx: &mut VisualTestContext,
+    view: &Entity<ThreadView>,
+) -> Rc<RefCell<Vec<ThreadViewEvent>>> {
+    let asked: Rc<RefCell<Vec<ThreadViewEvent>>> = Rc::default();
+    let into = Rc::clone(&asked);
+    cx.update(|_window, cx| {
+        cx.subscribe(view, move |_view, event: &ThreadViewEvent, _cx| {
+            into.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    asked
 }
 
 fn intents(sent: &Sent) -> Vec<Intent> {
@@ -389,6 +405,7 @@ fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
 }
 
 mod composing;
+mod doors;
 mod face;
 mod questions;
 mod steps;

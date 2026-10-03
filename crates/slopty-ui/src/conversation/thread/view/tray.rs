@@ -18,13 +18,14 @@ use gpui::{
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{BackgroundTask, Choice, Effect, ItemId, Request};
+use slopty_proto::thread::{BackgroundTask, Cap, Choice, Drive, Effect, ItemId, Request};
 use slopty_theme::{Rgb, Theme, Typography};
 
 use super::composer::sentence;
 use super::{PEEK_LINES, ThreadView, ThreadViewEvent, tail};
 use crate::colors::hsla;
 use crate::conversation::thread::activity::{Activity, Asked, Edit, STEP_DONE};
+use crate::conversation::thread::hub::Refusal;
 use crate::conversation::thread::questions;
 use crate::conversation::thread::rows::Row;
 use crate::icons::IconName;
@@ -184,8 +185,11 @@ impl ThreadView {
             .filter(|_| placement != Placement::Inline)
             .map(|current| self.request_card(current.request, at, waiting.len(), placement, cx));
         let mut sections: Vec<AnyElement> = Vec::new();
+        for refusal in hub.refusals(self.thread) {
+            sections.push(self.refusal_line(refusal, cx));
+        }
         for asked in bar.asked.iter().filter(|a| a.answered.is_some()) {
-            sections.push(self.answered_line(asked));
+            sections.push(self.answered_line(asked, cx));
         }
         if let Some(plan) = bar.plan {
             sections.push(self.plan_section(plan, cx));
@@ -272,11 +276,40 @@ impl ThreadView {
             .text_size(self.z(self.theme.typography.small()))
     }
 
-    fn answered_line(&self, asked: &Asked<'_>) -> AnyElement {
+    /// Something the worker turned down that the thread would not show: what and why, until
+    /// the person lets it go.
+    fn refusal_line(&self, refusal: &Refusal, cx: &Context<Self>) -> AnyElement {
+        let s = self.theme.surfaces;
+        let id = refusal.id;
+        self.section()
+            .id(ElementId::Name(format!("refused-{id}").into()))
+            .debug_selector(move || format!("refused-{id}"))
+            .role(Role::Alert)
+            .aria_label(SharedString::from(refusal.words.clone()))
+            .text_color(hsla(s.text_secondary))
+            .child(self.slot().child(self.icon(IconName::CircleAlert, s.error)))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .whitespace_normal()
+                    .child(SharedString::from(refusal.words.clone())),
+            )
+            .child(
+                self.icon_button(format!("refused-dismiss-{id}"), IconName::X, "Dismiss")
+                    .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(id, cx))),
+            )
+            .into_any_element()
+    }
+
+    fn answered_line(&self, asked: &Asked<'_>, cx: &Context<Self>) -> AnyElement {
         let s = self.theme.surfaces;
         let choice = asked.answered.and_then(|sent| match &sent.intent {
             Intent::Answer { choice, .. } => Some(choice.clone()),
-            Intent::Release { .. } => Some("Answer in the terminal".to_owned()),
+            Intent::Release { .. } => self
+                .state(cx)
+                .and_then(|st| release_words(&st.meta))
+                .or_else(|| Some("Answer in the terminal".to_owned())),
             _ => None,
         });
         let request = asked.request;
@@ -318,14 +351,18 @@ impl ThreadView {
     /// where it has one in a terminal; a request that offers nothing here (a secret Codex
     /// keeps to its own terminal) makes that way its one solid.
     pub(super) fn answer_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
+        if let Some(reason) = self.deny_row(request, cx) {
+            return vec![reason];
+        }
         let mut answers = self.choice_buttons(request, cx);
         answers.extend(self.release_button(request, cx));
         answers
     }
 
-    /// The answers `request` offers here, as buttons.
+    /// The answers `request` offers here, as buttons, "Deny…" after the plain deny.
     fn choice_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
         let ask = request.id.clone();
+        let plain_deny = super::denying::deny_choice(request).map(|c| c.id.clone());
         let mut answers: Vec<AnyElement> = Vec::new();
         for (choice, kind) in request.options.iter().zip(answer_kinds(&request.options)) {
             let (ask, id) = (ask.clone(), choice.id.clone());
@@ -341,28 +378,32 @@ impl ThreadView {
                 }))
                 .into_any_element(),
             );
+            if plain_deny.as_deref() == Some(choice.id.as_str()) {
+                answers.extend(self.deny_with_reason_button(request, cx));
+            }
         }
         answers
     }
 
-    /// The way back to the agent's own prompt: only an agent whose prompt runs in a terminal
-    /// can take the request back there. Its one solid when nothing else answers it here.
+    /// The way back to the agent's own prompt: an agent whose prompt runs in a terminal takes
+    /// the request back there, and one whose own TUI can join the thread beside Slopty
+    /// ([`Cap::LIVE_TUI`] with no terminal yet: Codex) has it opened on the thread first. Its
+    /// one solid when nothing else answers it here. The terminal comes into view.
     fn release_button(&self, request: &Request, cx: &Context<Self>) -> Option<AnyElement> {
-        if self.state(cx).is_none_or(|st| st.meta.terminal.is_none()) {
-            return None;
-        }
+        let words = release_words(&self.state(cx)?.meta)?;
         let only_way = request.options.is_empty() && request.questions.is_empty();
         let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
         let release = request.id.clone();
         Some(
             self.answer_button(
                 format!("release-{}", release.0),
-                ("Answer in the terminal".to_owned(), None),
+                (words, None),
                 kind,
                 Some((IconName::SquareTerminal, None)),
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| {
                 let _id = this.intent(Intent::Release { ask: release.clone() }, cx);
+                this.show_terminal(cx);
             }))
             .into_any_element(),
         )
@@ -428,8 +469,10 @@ impl ThreadView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (choices, release) =
-            (self.choice_buttons(request, cx), self.release_button(request, cx));
+        let (choices, release) = match self.deny_row(request, cx) {
+            Some(reason) => (vec![reason], None),
+            None => (self.choice_buttons(request, cx), self.release_button(request, cx)),
+        };
         let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
         let (title, counter) = match asking {
             Some(asking) => {
@@ -899,6 +942,16 @@ impl ThreadView {
             })
             .into_any_element()
     }
+}
+
+/// What the way back to the agent's own prompt says: the terminal its prompt runs in, or the
+/// agent's own TUI opened on the thread; `None` where it has neither.
+fn release_words(meta: &slopty_proto::thread::ThreadMeta) -> Option<String> {
+    let joins = meta.can(Cap::LIVE_TUI) && meta.drive.is(Drive::SHARED);
+    if joins {
+        return Some(format!("Answer in {}", super::agent_name(&meta.agent)));
+    }
+    meta.terminal.is_some().then(|| "Answer in the terminal".to_owned())
 }
 
 /// How each answer's button reads: the first plain allow leads, the one solid; the rest are

@@ -20,6 +20,7 @@ Button │ Answer in the terminal
 Button │ Allow
 Button │ Always allow · /work; accept edits mode
 Button │ Deny
+Button │ Deny…
 Button │ Deny and stop
 Group │ Edits · notes.txt
 Button │ Review

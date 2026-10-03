@@ -89,6 +89,8 @@ const BUBBLE_CHARS: usize = 480;
 mod asking;
 mod composer;
 mod composing;
+pub mod denying;
+pub mod exited;
 mod notes;
 mod pictures;
 mod tools;
@@ -178,6 +180,11 @@ pub struct ThreadView {
     pictures: RefCell<HashMap<String, Arc<gpui::Image>>>,
     /// The questionnaire of the request on show, when it asks questions.
     asking: Option<asking::Asking>,
+    /// A request being denied with a reason.
+    denying: Option<denying::Denying>,
+    /// The agent's terminal comes into view once the thread names one: the person asked for
+    /// it before the worker had opened it.
+    reveal_terminal: bool,
     /// What the last frame drew from the list's scroll: where the request on show was
     /// answered and whether the way down showed.
     marks: Cell<tray::Marks>,
@@ -280,6 +287,8 @@ impl ThreadView {
             trail: Vec::new(),
             pictures: RefCell::default(),
             asking: None,
+            denying: None,
+            reveal_terminal: false,
             marks: Cell::default(),
             #[cfg(test)]
             marks_moved: Cell::default(),
@@ -447,7 +456,20 @@ impl ThreadView {
         self.spans = built.spans;
         self.keys = keys;
         self.run_clock(cx);
+        if self.reveal_terminal && self.state(cx).is_some_and(|st| st.meta.terminal.is_some()) {
+            self.reveal_terminal = false;
+            cx.emit(ThreadViewEvent::ShowTerminal);
+        }
         cx.notify();
+    }
+
+    /// Bring the agent's terminal into view: now when the thread names one, else once it does.
+    pub(super) fn show_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.state(cx).is_some_and(|st| st.meta.terminal.is_some()) {
+            cx.emit(ThreadViewEvent::ShowTerminal);
+        } else {
+            self.reveal_terminal = true;
+        }
     }
 
     /// What says a row must be measured again: its items' revisions and what the reader
@@ -544,6 +566,15 @@ impl ThreadView {
     fn submit(&mut self, delivery: Delivery, window: &mut Window, cx: &mut Context<Self>) {
         if self.composing.editing() {
             self.save_edit(window, cx);
+            return;
+        }
+        if self.compact_asked(cx) {
+            let _id = self.intent(Intent::Compact, cx);
+            self.composer.update(cx, |c, cx| c.clean(window, cx));
+            return;
+        }
+        if self.composing.uploading() {
+            self.arm(delivery, window, cx);
             return;
         }
         let Some(text) = self.take_message(cx) else { return };
@@ -1267,7 +1298,7 @@ impl ThreadView {
                 .child(if hub.threads().linked() {
                     "Sending"
                 } else {
-                    "Sends when the worker is back"
+                    "Sends when the machine is back"
                 })
                 .into_any_element(),
         };
@@ -1401,7 +1432,7 @@ impl ThreadView {
             } else if linked {
                 "Reading the thread…"
             } else {
-                "The worker is out of reach"
+                "The machine is out of reach"
             };
             let agent = self.state(cx).map(|st| &st.meta.agent);
             return region

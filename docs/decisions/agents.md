@@ -759,9 +759,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     approval policy and the sandbox stay the person's own configuration's. The connection that
     starts a thread is subscribed to it, so the thread is followed from Codex's answer, and the
     prompt goes as its first turn (`turn/start`), marked with the start's intent. The TUI joins
-    it as it joins any of the daemon's threads. A start while the daemon is not running is
-    refused in words, since the daemon is the person's and Slopty does not start it, and a start
-    asked before the handshake is held until the handshake is done.
+    it as it joins any of the daemon's threads. A start asked before the handshake is held until
+    the handshake is done. (A start while the daemon is not running was refused here; that is
+    superseded by "A Codex start brings the person's daemon up" below.)
   - **Once.** Both are acted on once per intent id (`Host::record_start` for a thread its
     adapter begins on its own): a repeat gets the first outcome back and opens or asks for
     nothing.
@@ -910,3 +910,82 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `the_starter_sees_the_thread_and_the_approval_settled_elsewhere`,
     `an_open_request_waits_on_the_person_whatever_the_flags`,
     `a_commands_shell_wrapper_is_taken_off` and `the_session_maps_onto_the_thread`.
+
+- ✅ **A Codex start brings the person's daemon up** (2026-10-04, rulings §3). A Codex start
+  while no app-server daemon answers runs `codex app-server daemon start`. That is Codex's own
+  lifecycle command, published for remote clients reaching a machine over SSH, and the one
+  Codex's TUI itself runs at launch since 0.157.0. It runs the person's `codex`, found as their
+  login shell finds it. The start waits while the command runs (up to 20 s, `DAEMON_WAIT`) and
+  goes on once the daemon answers. The JSON object the command writes names the socket. A second
+  start meanwhile is held with the first and starts nothing more.
+  - **Refused in words, never retried.** No `codex` on the machine gives "Codex isn't installed
+    on this machine". A start that fails is quoted as Codex wrote it, without its `Error:`
+    label: "Codex's app-server didn't start: …". Nothing tries again until the next start.
+  - **Only on a start.** A worker that only follows Codex never launches it, however long no
+    daemon runs. A request handed to Codex's TUI while no daemon runs is still refused.
+  - **No private server.** A `codex app-server` child of the worker would hold the thread
+    outside the daemon, where the person's TUI cannot join it: a second writer.
+  - **Resume is a start of the same thread.** A start whose arguments are `resume <thread>`
+    (Codex's own words, `codex resume`) takes the thread up again with `thread/resume`. It is
+    followed under the same thread id and answered `Started` with it, at once when it is followed
+    already, and refused in Codex's words when Codex cannot load it. An exited Codex thread's
+    Resume sends that start, so the daemon comes up and the thread comes back through one door.
+  - **Left:** `InstalledAgent` names its agent by the closed `AgentKind`, which has only Claude
+    Code, so detecting `codex` and `pi` in `caps.rs` waits on a wire change (an open `AgentId`
+    there). Proposed to the owner of `slopty-proto`.
+  - Code: `crates/slopty-worker/src/thread/codex.rs` (`Launch`, `Bringing`, `Begin`),
+    `crates/slopty-agent/src/codex/daemon.rs`. Tests (`crates/slopty-worker/tests/codex.rs`):
+    `a_codex_start_with_no_daemon_starts_the_persons_daemon_once`,
+    `a_failed_daemon_start_is_refused_in_codexs_words`, `a_worker_alone_never_starts_codex` and
+    `a_start_that_names_a_thread_takes_it_up_again`. A stand-in `codex` records how it was run.
+    Also `daemon::tests::a_start_reads_as_its_socket_or_codexs_words`.
+
+- ✅ **What an agent turns down is said, and Codex answers through its own doors** (2026-10-04,
+  readiness #2, #8, #9, #14).
+  - **Refusals stay in words.** The client's outbox settles a failed intent at once, so a
+    refused stop, model switch, mode, compact, answer, release, Keep or Revert used to vanish
+    without a word. The thread hub now keeps each one, other than a message or an edit to one
+    (those keep their own line), as "Couldn't stop: …" or "Couldn't keep lib.rs: …". It stays
+    until the person dismisses it or tries again, and holds up to 32. An intent the agent has no
+    door for reads "the agent can't do that through Slopty".
+  - **Attachments are refused in words where they cannot go.** A file reaches an agent only
+    through a terminal its prompt runs in. On a thread with none (Codex, pi, ACP), attaching
+    says "Files can't be attached to {agent} threads yet" and adds no chip. ↵ while a file is
+    still uploading waits for it ("Sends once the attachments are up") and sends by itself when
+    it lands. A failed upload sends nothing and says so, keeping the words.
+  - **Codex queues.** A message queued while a Codex turn runs is held by the thread's mapping
+    (`Shared::send` → `Send::Held`), shown as pending, changeable and withdrawable. It goes as the
+    next `turn/start` once Codex says the turn ended. Codex has no queue of its own, so the
+    thread now offers `Cap::QUEUE`.
+  - **Codex's forms.** An MCP server's form (`mcpServer/elicitation/request`, mode `form`) is a
+    request whose questions are its fields, in the order of their names. A boolean is Yes or
+    No, an enum is its titles (several for a list), and text and numbers are words. The answers
+    go back as `{"action": "accept", "content": {…}}`, each value of its field's type, and an
+    answer that does not fit its field sends nothing. Decline and Cancel are the denies. A page
+    to open or a device check stays with Codex's TUI.
+  - **"Answer in Codex".** A Codex request with nothing to answer in the GUI (a secret, a
+    grant) is released to Codex's own TUI. The worker runs `codex resume <thread>` in one of its
+    terminals, which joins the running daemon as one more client, and names that terminal on the
+    thread while it runs. The client brings it into view once it is named.
+  - **Deny with a reason.** "Deny…" turns the answers into a field. The words go with the plain
+    deny as the answer's message. Claude Code and pi take a denial's reason. Codex and an ACP
+    agent hear it as the person's next message (a steer).
+  - **Resume through each agent's door.** Claude Code: a start of `claude --resume <session>`
+    in a new terminal, on the same thread. It is refused when that session already runs or the
+    id is not a session. Codex: a start of `resume <thread>`, as above. pi and an ACP agent that
+    loads sessions: the next message, which the composer says. An agent that cannot load its
+    session says it cannot.
+  - **Compact and modes.** `/compact` is listed where the thread has `Cap::COMPACT` and the
+    agent lists no such command, and sends `Intent::Compact`. No wire field lists an agent's
+    modes, so a thread with its own TUI but no `SET_MODE` says the mode is changed there.
+    Proposed wire change: `ThreadMeta.modes`.
+  - **"Machine", not "worker",** in what these surfaces say (rulings §8).
+  - **Left:** "Edit…" on an edit approval (rulings §5a) needs `Verdict::AllowEdited { input }` in
+    `slopty-proto`. Driving Claude Code for API-key users (§5c) is not built. Uploads to threads
+    with no terminal are still to come.
+  - Tests: `conversation::thread::tests::doors::*` and the attachment, queue and `/compact` tests
+    in `tests::composing`; `review::tests::a_refused_keep_says_why_on_its_hunk`;
+    `codex::form::tests::*`; `a_queued_message_waits_for_the_turn_and_goes_as_the_next` and
+    `an_mcp_form_is_answered_as_its_content` (`crates/slopty-agent/tests/codex.rs`);
+    `an_exited_thread_is_resumed_on_its_own_session_in_a_new_terminal`
+    (`crates/slopty-worker/tests/claude_start.rs`).
