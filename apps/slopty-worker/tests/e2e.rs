@@ -4103,7 +4103,7 @@ mod tests {
         assert_eq!(paths, expected);
         assert_eq!(digest(&std::fs::read(cwd.join("big.bin")).unwrap()), digest(&big));
 
-        // A name the directory already has lands in the drop directory instead.
+        // A name the directory already has lands beside it, numbered as Finder's Keep Both.
         let clash = XferId::new();
         let begin = XferMsg::Begin {
             xfer: clash,
@@ -4121,10 +4121,10 @@ mod tests {
             _ => None,
         })
         .await;
-        let dropped = dir.path().join("drop").join(clash.to_string()).join("taken.txt");
-        assert_eq!(paths, [dropped.to_string_lossy().into_owned()]);
+        let beside = cwd.join("taken 2.txt");
+        assert_eq!(paths, [beside.to_string_lossy().into_owned()]);
         assert_eq!(std::fs::read(cwd.join("taken.txt")).unwrap(), b"mine", "untouched");
-        assert_eq!(std::fs::read(dropped).unwrap(), b"yours");
+        assert_eq!(std::fs::read(beside).unwrap(), b"yours");
         let close = ClientMsg::Term { session, req: TermRequest::Close };
         worker.tx.send(&close).await.unwrap();
     }

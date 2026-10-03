@@ -215,11 +215,9 @@ async fn receive(
     drop(claim);
     let Some(finished) = finished else { return };
     if let Some(drag) = finished.drag {
-        for path in &finished.paths {
-            let top = path.file_name().map(|n| n.to_string_lossy().into_owned());
-            if let Some(top) = top {
-                daemon.dnd.drags().tell(drag, Heard::Landed { name: top, path: path.clone() });
-            }
+        for (name, path) in finished.names.iter().zip(&finished.paths) {
+            let landed = Heard::Landed { name: name.clone(), path: path.clone() };
+            daemon.dnd.drags().tell(drag, landed);
         }
     }
     if finished.staging {
@@ -271,8 +269,11 @@ async fn write(
     let mut cancel = daemon.transfers.cancelled(xfer).ok_or(XferError::Unknown)?;
     let (tx, mut chunks) = mpsc::channel::<Bytes>(QUEUED);
     let (offset, size, mode, mtime) = (header.offset, header.size, header.mode, header.mtime_ms);
+    // A top-level file chose a name nothing was at; something may have taken it since.
+    let entry = !header.name.contains('/');
     let writer = tokio::task::spawn_blocking(move || {
-        let mut file = Receiving::open(&target, offset, size)?;
+        let file = Receiving::open(&target, offset, size)?;
+        let mut file = if entry { file.keep_both() } else { file };
         while let Some(chunk) = chunks.blocking_recv() {
             if let Err(e) = file.write(&chunk) {
                 let _held = file.keep();

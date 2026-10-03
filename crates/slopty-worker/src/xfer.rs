@@ -3,11 +3,14 @@
 //!
 //! [`Transfers`] holds every transfer a client began ([`Transfers::begin`]) until its last file
 //! landed. Each top-level entry of a drop (a file, or a directory and everything under it) goes
-//! to the transfer's base directory, or to `<drop>/<xfer>/` when that name is taken there; the
-//! choice is made once per entry, on its first file, and a name another transfer in flight
-//! claimed there counts as taken, so two drops of the same name never share a partial file. A
-//! file is written to `name.partial` ([`Receiving`]), synced, and renamed into place, so a
-//! retried file resumes from the bytes the partial holds ([`durable`]).
+//! to the transfer's base directory under its own name, or, when that name is taken there, under
+//! the next free one as Finder's "Keep Both" names it: `report 2.pdf`, `proj 2` ([`numbered`]).
+//! The choice is made once per entry, on its first file. A name another transfer in flight
+//! claimed there, or a partial file of it, counts as taken, so two drops of the same name never
+//! share a partial file; a directory entry is made on the spot, so nothing else takes its name
+//! meanwhile, and a file entry is renamed into place only where nothing is, so nothing is ever
+//! written over. A file is written to `name.partial` ([`Receiving`]), synced, and renamed into
+//! place, so a retried file resumes from the bytes the partial holds ([`durable`]).
 //!
 //! The entries of unfinished transfers are listed in a ledger in the drop directory, and
 //! [`Transfers::sweep`] removes the partial files under them that nothing wrote to for
@@ -47,12 +50,15 @@ pub const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 pub const STALE_PARTIAL: Duration = Duration::from_hours(24);
 
 /// The ledger of unfinished transfers' entries, in the drop directory: one JSON array of the
-/// transfer id and the entry's path per line.
+/// transfer id, the entry's name as the client sent it and the path it lands at, per line.
 const LEDGER: &str = ".partials";
 
 /// Discarded drags remembered, so an upload into one that comes late is not begun: a drag's
 /// uploads begin on the control stream, which nothing orders against its end on the stream's.
 const DISCARDED: usize = 32;
+
+/// The most names [`numbered`] tries for one entry before it gives up.
+const NUMBERED_MOST: u32 = 10_000;
 
 /// Finished transfers remembered, newest last: a client whose link went before it heard the
 /// end begins the transfer again on its next link and is told the end again.
@@ -89,6 +95,9 @@ pub enum XferError {
         /// Bytes in the partial file.
         held: u64,
     },
+    /// Every name [`numbered`] gives an entry, up to the ten thousandth, is taken.
+    #[error("no free name for {0:?}")]
+    Crowded(String),
     /// The disk.
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -108,8 +117,11 @@ pub struct Landed {
 /// Every file of a transfer landed.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Finished {
-    /// The top-level entries, in the order their first file arrived.
+    /// The top-level entries, in the order their first file arrived, where they landed.
     pub paths: Vec<PathBuf>,
+    /// Their names as the client sent them, in the same order: a name taken where it went
+    /// lands under another ([`numbered`]).
+    pub names: Vec<String>,
     /// The transfer was for a streamed window: the paths go on the pasteboard.
     pub staging: bool,
     /// The drag whose drop the files are, for an upload into its landing.
@@ -118,15 +130,13 @@ pub struct Finished {
 
 #[derive(Debug)]
 struct Transfer {
-    /// Where top-level entries go unless their name is taken there.
+    /// Where top-level entries go.
     base: PathBuf,
-    /// Where they go when it is: `<drop>/<xfer>/`.
-    fallback: PathBuf,
     staging: bool,
     drag: Option<DragId>,
     files: u32,
-    /// Each top-level entry and the directory it landed in, in first-sight order.
-    roots: Vec<(String, PathBuf)>,
+    /// Each top-level entry as the client named it, and where it lands, in first-sight order.
+    entries: Vec<(String, PathBuf)>,
     landed: HashMap<String, Landed>,
     received: u64,
     reported: Option<Instant>,
@@ -195,27 +205,22 @@ pub struct Again {
 }
 
 impl Transfer {
-    /// The directory top-level entry `top` landed in, once chosen.
-    fn known_root(&self, top: &str) -> Option<&PathBuf> {
-        self.roots.iter().find(|(n, _root)| n == top).map(|(_top, root)| root)
+    /// Where top-level entry `top` lands, once chosen.
+    fn known_entry(&self, top: &str) -> Option<&PathBuf> {
+        self.entries.iter().find(|(n, _entry)| n == top).map(|(_top, entry)| entry)
     }
 
     /// Whether this transfer put a top-level entry at `entry`.
     fn claims(&self, entry: &Path) -> bool {
-        self.roots.iter().any(|(top, root)| root.join(top) == entry)
+        self.entries.iter().any(|(_top, mine)| mine == entry)
     }
 
-    /// Choose where `top` lands: the base directory, unless the name is there already or
-    /// `claimed` by another transfer.
-    fn choose_root(&mut self, top: &str, claimed: bool) -> PathBuf {
-        let taken = claimed || std::fs::symlink_metadata(self.base.join(top)).is_ok();
-        let root = if taken { self.fallback.clone() } else { self.base.clone() };
-        self.roots.push((top.to_owned(), root.clone()));
-        root
-    }
-
-    /// Record a landed file; `true` once every file has.
+    /// Record a landed file; `true` once every file has. A file entry that had to land under
+    /// another name than the one chosen ([`Receiving::finish`]) is where it landed from now on.
     fn land(&mut self, name: &str, landed: Landed) -> bool {
+        if let Some((_top, entry)) = self.entries.iter_mut().find(|(top, _entry)| top == name) {
+            entry.clone_from(&landed.path);
+        }
         self.landed.insert(name.to_owned(), landed);
         self.landed.len() >= usize::try_from(self.files).unwrap_or(usize::MAX)
     }
@@ -273,11 +278,147 @@ fn relative(name: &str) -> Result<PathBuf, XferError> {
     relative_path(name).ok_or_else(|| XferError::Name(name.to_owned()))
 }
 
-/// One ledger line: `["<xfer>","<entry>"]` and a newline; `None` for a path that is not UTF-8.
-fn ledger_line(xfer: XferId, entry: &Path) -> Option<String> {
-    let mut line = serde_json::to_string(&(xfer.to_string(), entry.to_str()?)).ok()?;
-    line.push('\n');
-    Some(line)
+/// The `n`th name Finder's "Keep Both" gives `name` in a directory that holds it already:
+/// `name` itself for 0, then `report 2.pdf`, `report 3.pdf`, and so on.
+///
+/// A name that ends in a number goes on from it (`report 2.pdf` gives `report 3.pdf`). A
+/// directory, and a file with no extension (`Makefile`, `.zshrc`), is numbered at its end
+/// (`proj 2`, `.zshrc 2`). A tarball keeps both its extensions (`archive 2.tar.gz`).
+#[must_use]
+pub fn numbered(name: &str, n: u32, dir: bool) -> String {
+    if n == 0 {
+        return name.to_owned();
+    }
+    let (stem, ext) = if dir { (name, "") } else { split_extension(name) };
+    let (base, from) = match stem.rsplit_once(' ') {
+        Some((base, digits))
+            if !base.is_empty()
+                && !digits.starts_with('0')
+                && digits.bytes().all(|b| b.is_ascii_digit())
+                && let Ok(from) = digits.parse::<u32>() =>
+        {
+            (base, from)
+        }
+        _ => (stem, 1),
+    };
+    format!("{base} {}{ext}", from.saturating_add(n))
+}
+
+/// `name` as its stem and its extension, dot included: none for a name whose only dot leads it
+/// (`.zshrc`) or ends it, nor for one whose last part has a space (`v1. final draft`), and both
+/// of a tarball's (`.tar.gz`).
+fn split_extension(name: &str) -> (&str, &str) {
+    let Some((stem, ext)) = name.rsplit_once('.') else { return (name, "") };
+    if stem.is_empty() || ext.is_empty() || ext.contains(' ') {
+        return (name, "");
+    }
+    let stem = match stem.rsplit_once('.') {
+        Some((before, tar)) if !before.is_empty() && tar.eq_ignore_ascii_case("tar") => before,
+        _ => stem,
+    };
+    name.split_at_checked(stem.len()).unwrap_or((name, ""))
+}
+
+/// Where top-level entry `top` lands in `base`: under the first of its [`numbered`] names that
+/// nothing is at, no partial file is at, and no other transfer in flight `claimed`. A directory
+/// entry is made there at once, so nothing takes its name before its files come; a file entry
+/// is renamed into place only where nothing is ([`Receiving::keep_both`]).
+fn choose(
+    base: &Path,
+    top: &str,
+    dir: bool,
+    claimed: impl Fn(&Path) -> bool,
+) -> Result<PathBuf, XferError> {
+    if dir {
+        std::fs::create_dir_all(base)?;
+    }
+    for n in 0..NUMBERED_MOST {
+        let entry = base.join(numbered(top, n, dir));
+        let there = std::fs::symlink_metadata(&entry).is_ok()
+            || std::fs::symlink_metadata(partial_of(&entry)).is_ok();
+        if there || claimed(&entry) {
+            continue;
+        }
+        if !dir {
+            return Ok(entry);
+        }
+        #[expect(
+            clippy::create_dir,
+            reason = "made only if absent: the name is claimed in one step"
+        )]
+        let made = std::fs::create_dir(&entry);
+        match made {
+            Ok(()) => return Ok(entry),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(XferError::Crowded(top.to_owned()))
+}
+
+/// Rename `from` to `to` unless something is at `to` (`AlreadyExists` then), in one step. A
+/// file system that cannot (`renameat2` refused on some Linux ones) links the file there,
+/// which fails the same way, and removes the old name.
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+    match renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(e) if [Errno::INVAL, Errno::NOSYS, Errno::NOTSUP].contains(&e) => {
+            std::fs::hard_link(from, to)?;
+            std::fs::remove_file(from)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Rename `partial` into place at `target`, or, when something took that name since it was
+/// chosen, at the next [`numbered`] name nothing is at: never over anything. Returns where it
+/// landed.
+fn land_beside(partial: &Path, target: &Path) -> std::io::Result<PathBuf> {
+    let name = target.file_name().and_then(|n| n.to_str());
+    for n in 0..NUMBERED_MOST {
+        let candidate = match (n, name) {
+            (0, _) | (_, None) => target.to_path_buf(),
+            (n, Some(name)) => target.with_file_name(numbered(name, n, false)),
+        };
+        if n > 0 && std::fs::symlink_metadata(partial_of(&candidate)).is_ok() {
+            continue;
+        }
+        match rename_new(partial, &candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && name.is_some() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no free name to land under"))
+}
+
+/// One entry of an unfinished transfer, as the ledger lists it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Listed {
+    xfer: XferId,
+    /// The top-level entry as the client named it.
+    top: String,
+    /// Where it lands.
+    entry: PathBuf,
+}
+
+impl Listed {
+    /// Its ledger line: `["<xfer>","<top>","<entry>"]` and a newline; `None` for a path that is
+    /// not UTF-8.
+    fn line(&self) -> Option<String> {
+        let fields = (self.xfer.to_string(), &self.top, self.entry.to_str()?);
+        let mut line = serde_json::to_string(&fields).ok()?;
+        line.push('\n');
+        Some(line)
+    }
+
+    /// The entry a ledger line lists; `None` for one that does not read.
+    fn read(line: &str) -> Option<Self> {
+        let (xfer, top, entry) = serde_json::from_str::<(String, String, PathBuf)>(line).ok()?;
+        Some(Self { xfer: xfer.parse().ok()?, top, entry })
+    }
 }
 
 /// The partial files of top-level entry `entry`: its own, and every one under it when it is a
@@ -327,7 +468,8 @@ pub fn durable(target: &Path) -> u64 {
 }
 
 impl Transfers {
-    /// Transfers whose clashing and staged entries go under `drop_root/<xfer>/`.
+    /// Transfers whose staged entries, and those with nowhere else to go, land under
+    /// `drop_root/<xfer>/`.
     #[must_use]
     pub fn new(drop_root: PathBuf) -> Self {
         Self {
@@ -369,7 +511,6 @@ impl Transfers {
             self.begun.notify_waiters();
             return Begun::Again;
         }
-        let fallback = self.drop_root.join(xfer.to_string());
         let (base, staging) = match dest {
             Dest::SessionCwd(_) => (cwd.map(|c| crate::file::expand_home(Path::new(c))), false),
             Dest::Staging => (None, true),
@@ -381,14 +522,13 @@ impl Transfers {
             Dest::Drag(drag) => Some(*drag),
             Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Path(_) => None,
         };
-        let roots = self.ledger_roots(xfer);
+        let entries = self.ledger_entries(xfer);
         let transfer = Transfer {
-            base: base.unwrap_or_else(|| fallback.clone()),
-            fallback,
+            base: base.unwrap_or_else(|| self.drop_root.join(xfer.to_string())),
             staging,
             drag,
             files,
-            roots,
+            entries,
             landed: HashMap::new(),
             received: 0,
             reported: None,
@@ -409,22 +549,20 @@ impl Transfers {
         begun
     }
 
-    /// The top-level entries the ledger says `xfer` placed, each with the directory it went
-    /// to, in the order they were placed: what a restart forgot of a transfer in flight.
-    fn ledger_roots(&self, xfer: XferId) -> Vec<(String, PathBuf)> {
+    /// The top-level entries the ledger says `xfer` placed, each with where it lands, in the
+    /// order they were placed: what a restart forgot of a transfer in flight.
+    fn ledger_entries(&self, xfer: XferId) -> Vec<(String, PathBuf)> {
         let listed = {
             let _held = self.ledger.lock();
             self.read_ledger()
         };
-        let mut roots: Vec<(String, PathBuf)> = Vec::new();
-        for (_xfer, entry) in listed.into_iter().filter(|(x, _entry)| *x == xfer) {
-            let (Some(top), Some(root)) = (entry.file_name(), entry.parent()) else { continue };
-            let Some(top) = top.to_str().map(str::to_owned) else { continue };
-            if !roots.iter().any(|(known, _root)| *known == top) {
-                roots.push((top, root.to_path_buf()));
+        let mut entries: Vec<(String, PathBuf)> = Vec::new();
+        for Listed { top, entry, .. } in listed.into_iter().filter(|l| l.xfer == xfer) {
+            if !entries.iter().any(|(known, _entry)| *known == top) {
+                entries.push((top, entry));
             }
         }
-        roots
+        entries
     }
 
     /// Where the files of a drop from the client's drag `drag` land: `drop_root/<drag>/`.
@@ -488,22 +626,33 @@ impl Transfers {
     }
 
     /// Where file `name` of `xfer` lands. The first file of a top-level entry decides for the
-    /// whole entry: the base directory, or the fallback when the name is taken there or
-    /// another transfer in flight put an entry of that name there.
+    /// whole entry: the base directory, under the entry's name or, when that is taken there,
+    /// the next free one ([`numbered`]).
+    ///
+    /// # Errors
+    ///
+    /// [`XferError::Unknown`] when no such transfer is in flight, [`XferError::Name`] for a name
+    /// that climbs out, and the disk's error when a directory entry cannot be made.
     pub fn target(&self, xfer: XferId, name: &str) -> Result<PathBuf, XferError> {
         let rel = relative(name)?;
         let top = name.split('/').next().unwrap_or(name);
+        let inside: PathBuf = rel.components().skip(1).collect();
+        let under = |entry: &Path| {
+            if inside.as_os_str().is_empty() { entry.to_path_buf() } else { entry.join(&inside) }
+        };
         let mut inner = self.inner.lock();
         let transfer = inner.get(&xfer).ok_or(XferError::Unknown)?;
-        if let Some(root) = transfer.known_root(top) {
-            return Ok(root.join(rel));
+        if let Some(entry) = transfer.known_entry(top) {
+            return Ok(under(entry));
         }
-        let entry = transfer.base.join(top);
-        let claimed = inner.iter().any(|(id, other)| *id != xfer && other.claims(&entry));
-        let root = inner.get_mut(&xfer).ok_or(XferError::Unknown)?.choose_root(top, claimed);
+        let base = transfer.base.clone();
+        let theirs = |at: &Path| inner.iter().any(|(id, other)| *id != xfer && other.claims(at));
+        let entry = choose(&base, top, name.contains('/'), theirs)?;
+        let transfer = inner.get_mut(&xfer).ok_or(XferError::Unknown)?;
+        transfer.entries.push((top.to_owned(), entry.clone()));
         drop(inner);
-        self.record(xfer, &root.join(top));
-        Ok(root.join(rel))
+        self.record(&Listed { xfer, top: top.to_owned(), entry: entry.clone() });
+        Ok(under(&entry))
     }
 
     /// Bytes of `name` the worker holds durably: all of them once it landed (in a transfer
@@ -567,8 +716,8 @@ impl Transfers {
         }
         let t = self.inner.lock().remove(&xfer)?;
         self.unrecord(xfer);
-        let paths = t.roots.iter().map(|(top, root)| root.join(top)).collect();
-        let finished = Finished { paths, staging: t.staging, drag: t.drag };
+        let (names, paths) = t.entries.iter().cloned().unzip();
+        let finished = Finished { paths, names, staging: t.staging, drag: t.drag };
         let mut past = self.past.lock();
         if past.len() >= FINISHED_KEPT {
             past.pop_front();
@@ -589,11 +738,12 @@ impl Transfers {
         };
         let now = SystemTime::now();
         let mut removed: usize = 0;
-        let mut kept: Vec<(XferId, PathBuf)> = Vec::new();
-        for (xfer, entry) in listed.iter().cloned() {
+        let mut kept: Vec<Listed> = Vec::new();
+        for line in &listed {
+            let entry = &line.entry;
             let mut young = false;
             let mut partials = Vec::new();
-            partials_under(&entry, &mut partials);
+            partials_under(entry, &mut partials);
             for partial in partials {
                 let written = std::fs::symlink_metadata(&partial).and_then(|m| m.modified());
                 let age = written
@@ -610,12 +760,12 @@ impl Transfers {
                 let dir = self.drop_root.join(first);
                 remove_empty_dirs(&dir);
             }
-            if young && !kept.contains(&(xfer, entry.clone())) {
-                kept.push((xfer, entry));
+            if young && !kept.contains(line) {
+                kept.push(line.clone());
             }
         }
         let _held = self.ledger.lock();
-        let appended: Vec<(XferId, PathBuf)> =
+        let appended: Vec<Listed> =
             self.read_ledger().into_iter().filter(|line| !listed.contains(line)).collect();
         for line in appended {
             if !kept.contains(&line) {
@@ -630,47 +780,45 @@ impl Transfers {
         self.drop_root.join(LEDGER)
     }
 
-    /// List `entry` of `xfer` in the ledger, so a sweep finds its partial files if it never
-    /// finishes. A path that is not UTF-8 is not listed.
-    fn record(&self, xfer: XferId, entry: &Path) {
+    /// List an entry in the ledger, so a sweep finds its partial files if its transfer never
+    /// finishes, and a restart where it went. A path that is not UTF-8 is not listed.
+    fn record(&self, listed: &Listed) {
         use std::io::Write as _;
-        let Some(line) = ledger_line(xfer, entry) else { return };
+        let Some(line) = listed.line() else { return };
         let _held = self.ledger.lock();
         let appended = std::fs::create_dir_all(&self.drop_root).and_then(|()| {
             let mut file = File::options().create(true).append(true).open(self.ledger_path())?;
             file.write_all(line.as_bytes())
         });
         if let Err(e) = appended {
-            tracing::warn!(%xfer, entry = %entry.display(), error = %e, "partial ledger");
+            let (xfer, entry) = (listed.xfer, listed.entry.display());
+            tracing::warn!(%xfer, %entry, error = %e, "partial ledger");
         }
     }
 
     /// Drop `xfer`'s entries from the ledger: every file of it landed.
     fn unrecord(&self, xfer: XferId) {
         let _held = self.ledger.lock();
-        let rest: Vec<(XferId, PathBuf)> =
-            self.read_ledger().into_iter().filter(|(x, _entry)| *x != xfer).collect();
+        let rest: Vec<Listed> =
+            self.read_ledger().into_iter().filter(|listed| listed.xfer != xfer).collect();
         self.write_ledger(&rest);
     }
 
     /// The ledger's entries; a line that does not read is skipped.
-    fn read_ledger(&self) -> Vec<(XferId, PathBuf)> {
+    fn read_ledger(&self) -> Vec<Listed> {
         let Ok(text) = std::fs::read_to_string(self.ledger_path()) else { return Vec::new() };
-        text.lines()
-            .filter_map(|line| serde_json::from_str::<(String, PathBuf)>(line).ok())
-            .filter_map(|(xfer, entry)| Some((xfer.parse().ok()?, entry)))
-            .collect()
+        text.lines().filter_map(Listed::read).collect()
     }
 
     /// Replace the ledger with `entries` (`slopty_platform::fs::replace`), so a crash leaves the
     /// old list or the new. No entries removes it.
-    fn write_ledger(&self, entries: &[(XferId, PathBuf)]) {
+    fn write_ledger(&self, entries: &[Listed]) {
         let path = self.ledger_path();
         if entries.is_empty() {
             let _absent = std::fs::remove_file(&path);
             return;
         }
-        let text: String = entries.iter().filter_map(|(x, e)| ledger_line(*x, e)).collect();
+        let text: String = entries.iter().filter_map(Listed::line).collect();
         if let Err(e) = slopty_platform::fs::replace(&path, text.as_bytes()) {
             tracing::warn!(path = %path.display(), error = %e, "partial ledger");
         }
@@ -704,6 +852,8 @@ pub struct Receiving {
     hasher: blake3::Hasher,
     at: u64,
     size: u64,
+    /// Land beside whatever took the target's name since it was chosen, never over it.
+    keep_both: bool,
 }
 
 impl Receiving {
@@ -728,7 +878,16 @@ impl Receiving {
         file.seek(SeekFrom::Start(0))?;
         std::io::copy(&mut (&mut file).take(offset), &mut hasher)?;
         file.seek(SeekFrom::Start(offset))?;
-        Ok(Self { file, target: target.to_path_buf(), hasher, at: offset, size })
+        Ok(Self { file, target: target.to_path_buf(), hasher, at: offset, size, keep_both: false })
+    }
+
+    /// Land beside whatever took the target's name since it was chosen, under the next free
+    /// [`numbered`] name, rather than over it: for a top-level file entry, whose name was free
+    /// when it was chosen, as a file inside an entry's own directory need not be.
+    #[must_use]
+    pub const fn keep_both(mut self) -> Self {
+        self.keep_both = true;
+        self
     }
 
     /// Bytes of the file written so far.
@@ -750,7 +909,8 @@ impl Receiving {
     }
 
     /// The file is whole: give it `mode` (when not 0) and its modification time, hand its
-    /// bytes to the drive and rename it into place.
+    /// bytes to the drive and rename it into place, beside a file that took its name meanwhile
+    /// when it is to keep both ([`Self::keep_both`]). The landing says where it went.
     pub fn finish(self, mode: u32, mtime: WallMs) -> Result<Landed, XferError> {
         use std::os::unix::fs::PermissionsExt as _;
         if self.at != self.size {
@@ -762,8 +922,15 @@ impl Receiving {
         if mode & MODE_BITS != 0 {
             self.file.set_permissions(std::fs::Permissions::from_mode(mode & MODE_BITS))?;
         }
-        land(&self.file, &partial_of(&self.target), &self.target)?;
-        Ok(Landed { path: self.target, size: self.size, hash: self.hasher.finalize().into() })
+        let partial = partial_of(&self.target);
+        let path = if self.keep_both {
+            rustix::fs::fsync(&self.file).map_err(std::io::Error::from)?;
+            land_beside(&partial, &self.target)?
+        } else {
+            land(&self.file, &partial, &self.target)?;
+            self.target
+        };
+        Ok(Landed { path, size: self.size, hash: self.hasher.finalize().into() })
     }
 
     /// The stream was cut or cancelled: make what was written durable for a resume. Returns
@@ -908,36 +1075,159 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), body);
     }
 
-    /// Entries land in the session's directory, a clashing one in the drop directory with the
-    /// rest of its entry, and the transfer finishes with the top-level paths once every file
-    /// is in.
+    /// Finder's "Keep Both" names: a number before the extension, going on from one the name
+    /// ends in; a directory and a name with no extension numbered at the end; a tarball's two
+    /// extensions kept together.
     #[test]
-    fn a_clash_lands_in_the_drop_directory_and_finish_names_the_entries() {
+    fn a_taken_name_is_numbered_as_finder_numbers_it() {
+        let cases = [
+            ("report.pdf", false, "report 2.pdf"),
+            ("report 2.pdf", false, "report 3.pdf"),
+            ("report 02.pdf", false, "report 02 2.pdf"),
+            ("archive.tar.gz", false, "archive 2.tar.gz"),
+            ("my.notes.v1.md", false, "my.notes.v1 2.md"),
+            (".zshrc", false, ".zshrc 2"),
+            (".env.local", false, ".env 2.local"),
+            ("Makefile", false, "Makefile 2"),
+            ("a.", false, "a. 2"),
+            ("draft. final copy", false, "draft. final copy 2"),
+            ("proj.v2", true, "proj.v2 2"),
+            ("proj 9", true, "proj 10"),
+            ("2024", false, "2024 2"),
+        ];
+        for (name, dir, second) in cases {
+            assert_eq!(numbered(name, 0, dir), name, "the name itself first");
+            assert_eq!(numbered(name, 1, dir), second, "{name}");
+        }
+        assert_eq!(numbered("report.pdf", 3, false), "report 4.pdf");
+    }
+
+    /// Entries land in the session's directory; one whose name is taken there lands under the
+    /// next free name, the rest of its entry with it, and the transfer finishes with the paths
+    /// they landed at once every file is in.
+    #[test]
+    fn a_clash_lands_under_the_next_free_name_and_finish_names_the_entries() {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("cwd");
         std::fs::create_dir_all(cwd.join("taken")).unwrap();
+        std::fs::write(cwd.join("a.txt"), "theirs").unwrap();
+        std::fs::write(cwd.join("a 2.txt"), "theirs too").unwrap();
         let t = transfers(dir.path());
         let xfer = XferId::new();
-        t.begin(xfer, &Dest::SessionCwd(SessionId::new()), cwd.to_str(), 3);
-        let fallback = dir.path().join("drop").join(xfer.to_string());
+        t.begin(xfer, &Dest::SessionCwd(SessionId::new()), cwd.to_str(), 4);
         assert_eq!(t.target(xfer, "new.txt").unwrap(), cwd.join("new.txt"));
-        assert_eq!(t.target(xfer, "taken/a").unwrap(), fallback.join("taken/a"));
-        std::fs::create_dir_all(cwd.join("dir")).unwrap();
-        assert_eq!(t.target(xfer, "taken/b").unwrap(), fallback.join("taken/b"), "per entry");
+        assert_eq!(t.target(xfer, "a.txt").unwrap(), cwd.join("a 3.txt"), "down the chain");
+        assert_eq!(t.target(xfer, "taken/a").unwrap(), cwd.join("taken 2/a"));
+        assert!(cwd.join("taken 2").is_dir(), "a directory entry is made at once");
+        assert_eq!(t.target(xfer, "taken/b").unwrap(), cwd.join("taken 2/b"), "per entry");
         assert!(matches!(t.target(XferId::new(), "x"), Err(XferError::Unknown)));
 
-        let land = |name: &str| Landed { path: PathBuf::from(name), size: 1, hash: [0; 32] };
-        assert_eq!(t.landed(xfer, "new.txt", land("new.txt")), None);
+        let land = |path: PathBuf| Landed { path, size: 1, hash: [0; 32] };
+        assert_eq!(t.landed(xfer, "new.txt", land(cwd.join("new.txt"))), None);
         assert_eq!(t.durable(xfer, "new.txt").unwrap(), 1, "a landed file is all there");
-        assert_eq!(t.landed(xfer, "taken/a", land("a")), None);
-        let done = t.landed(xfer, "taken/b", land("b")).unwrap();
-        assert_eq!(done.paths, [cwd.join("new.txt"), fallback.join("taken")]);
+        assert_eq!(t.landed(xfer, "a.txt", land(cwd.join("a 3.txt"))), None);
+        assert_eq!(t.landed(xfer, "taken/a", land(cwd.join("taken 2/a"))), None);
+        let done = t.landed(xfer, "taken/b", land(cwd.join("taken 2/b"))).unwrap();
+        assert_eq!(done.paths, [cwd.join("new.txt"), cwd.join("a 3.txt"), cwd.join("taken 2")]);
+        assert_eq!(done.names, ["new.txt", "a.txt", "taken"], "as the client named them");
         assert!(!done.staging);
+        assert_eq!(std::fs::read_to_string(cwd.join("a.txt")).unwrap(), "theirs", "untouched");
         assert!(matches!(t.target(xfer, "x"), Err(XferError::Unknown)), "forgotten once done");
     }
 
-    /// Two drops of one name into one directory at once: the second lands in its own drop
-    /// directory, so their partial files are two.
+    /// A file entry whose name something took after it was chosen lands beside it under the
+    /// next free name, never over it, and the transfer's end names where it went. A file inside
+    /// an entry's own directory lands under its name.
+    #[test]
+    fn a_name_taken_while_the_file_came_is_kept_and_the_file_lands_beside_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        let t = transfers(dir.path());
+        let xfer = XferId::new();
+        t.begin(xfer, &Dest::Path(cwd.to_string_lossy().into_owned()), None, 1);
+        let target = t.target(xfer, "notes.md").unwrap();
+        assert_eq!(target, cwd.join("notes.md"));
+        let mut rx = Receiving::open(&target, 0, 4).unwrap().keep_both();
+        rx.write(b"ours").unwrap();
+        std::fs::write(cwd.join("notes.md"), "made meanwhile").unwrap();
+        let landed = rx.finish(0, WallMs::ZERO).unwrap();
+        assert_eq!(landed.path, cwd.join("notes 2.md"));
+        assert_eq!(std::fs::read_to_string(cwd.join("notes.md")).unwrap(), "made meanwhile");
+        assert_eq!(std::fs::read_to_string(cwd.join("notes 2.md")).unwrap(), "ours");
+        assert!(!partial_of(&target).exists());
+        let done = t.landed(xfer, "notes.md", landed).unwrap();
+        assert_eq!(done.paths, [cwd.join("notes 2.md")], "where it went");
+
+        let inner = cwd.join("proj/a.txt");
+        let mut rx = Receiving::open(&inner, 0, 1).unwrap();
+        rx.write(b"b").unwrap();
+        std::fs::write(&inner, "a").unwrap();
+        assert_eq!(rx.finish(0, WallMs::ZERO).unwrap().path, inner);
+        assert_eq!(std::fs::read_to_string(&inner).unwrap(), "b");
+    }
+
+    /// A cut upload of a renamed entry resumes into the name it was given, not the next one:
+    /// on the same transfer begun again, and after a restart, from the ledger.
+    #[test]
+    fn a_renamed_entry_resumes_into_the_name_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("big.bin"), "theirs").unwrap();
+        let dest = Dest::SessionCwd(SessionId::new());
+        let xfer = XferId::new();
+        let body: Vec<u8> = (0..50_000_u32).map(|i| (i % 253) as u8).collect();
+        let size = body.len() as u64;
+        let before = transfers(dir.path());
+        before.begin(xfer, &dest, cwd.to_str(), 1);
+        let target = before.target(xfer, "big.bin").unwrap();
+        assert_eq!(target, cwd.join("big 2.bin"));
+        let mut rx = Receiving::open(&target, 0, size).unwrap().keep_both();
+        rx.write(&body[..20_000]).unwrap();
+        assert_eq!(rx.keep(), 20_000);
+        assert_eq!(before.begin(xfer, &dest, cwd.to_str(), 1), Begun::Again);
+        assert_eq!(before.target(xfer, "big.bin").unwrap(), target, "begun again: the same");
+        drop(before);
+
+        let after = transfers(dir.path());
+        assert_eq!(after.begin(xfer, &dest, cwd.to_str(), 1), Begun::New);
+        assert_eq!(after.target(xfer, "big.bin").unwrap(), target, "a restart: the same");
+        assert_eq!(after.durable(xfer, "big.bin").unwrap(), 20_000);
+        let mut rx = Receiving::open(&target, 20_000, size).unwrap().keep_both();
+        rx.write(&body[20_000..]).unwrap();
+        let landed = rx.finish(0, WallMs::ZERO).unwrap();
+        assert_eq!(landed.hash, *blake3::hash(&body).as_bytes(), "the digest of the whole");
+        assert_eq!(landed.path, target);
+        assert_eq!(after.landed(xfer, "big.bin", landed).unwrap().paths, [&*target]);
+        assert_eq!(std::fs::read(&target).unwrap(), body);
+        assert_eq!(std::fs::read_to_string(cwd.join("big.bin")).unwrap(), "theirs");
+    }
+
+    /// A drop into a folder nothing may write to fails in the disk's words: a directory entry
+    /// when its directory is made, a file when its partial is.
+    #[test]
+    fn a_drop_into_a_folder_that_takes_no_writes_fails_in_the_disks_words() {
+        use std::io::ErrorKind::PermissionDenied;
+        let dir = tempfile::tempdir().unwrap();
+        let shut = dir.path().join("shut");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let t = transfers(dir.path());
+        let xfer = XferId::new();
+        t.begin(xfer, &Dest::Path(shut.to_string_lossy().into_owned()), None, 2);
+        let denied =
+            |e: &XferError| matches!(e, XferError::Io(io) if io.kind() == PermissionDenied);
+        let refused = t.target(xfer, "proj/a.txt");
+        assert!(refused.as_ref().is_err_and(denied), "{refused:?}");
+        let file = t.target(xfer, "a.txt").unwrap();
+        let opened = Receiving::open(&file, 0, 1);
+        assert!(opened.as_ref().is_err_and(denied), "{opened:?}");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Two drops of one name into one directory at once: the second takes the next name, so
+    /// their partial files are two, though nothing is on disk under the first's name yet. A
+    /// partial file a transfer left there counts as taken too, for a restarted worker.
     #[test]
     fn two_drops_of_one_name_never_share_a_partial() {
         let dir = tempfile::tempdir().unwrap();
@@ -950,9 +1240,25 @@ mod tests {
         let a = t.target(first, "a.txt").unwrap();
         let b = t.target(second, "a.txt").unwrap();
         assert_eq!(a, cwd.join("a.txt"));
-        assert_eq!(b, dir.path().join("drop").join(second.to_string()).join("a.txt"));
+        assert_eq!(b, cwd.join("a 2.txt"));
         assert_ne!(partial_of(&a), partial_of(&b));
         assert_eq!(t.target(first, "a.txt").unwrap(), a, "a retry keeps its place");
+        let mut rx = Receiving::open(&b, 0, 2).unwrap();
+        rx.write(b"b").unwrap();
+        let _held = rx.keep();
+        drop(t);
+
+        let fresh = transfers(dir.path());
+        let third = XferId::new();
+        fresh.begin(third, &dest, cwd.to_str(), 1);
+        assert_eq!(fresh.target(third, "a.txt").unwrap(), cwd.join("a.txt"), "nothing there");
+        let fourth = XferId::new();
+        fresh.begin(fourth, &dest, cwd.to_str(), 1);
+        assert_eq!(
+            fresh.target(fourth, "a.txt").unwrap(),
+            cwd.join("a 3.txt"),
+            "a partial file another transfer left counts as taken"
+        );
     }
 
     /// A worker start sweeps the partial files of transfers that never finished once nothing
@@ -1043,7 +1349,9 @@ mod tests {
         rx.write(b"png").unwrap();
         let landed = rx.finish(0o644, WallMs::ZERO).unwrap();
         let finished = t.landed(xfer, "shot.png", landed).unwrap();
-        assert_eq!(finished, Finished { paths: vec![target], staging: false, drag: Some(drag) });
+        let names = vec!["shot.png".to_owned()];
+        let whole = Finished { paths: vec![target], names, staging: false, drag: Some(drag) };
+        assert_eq!(finished, whole);
         assert_eq!(t.drag_of(xfer), None, "done and forgotten");
         let staged = XferId::new();
         t.begin(staged, &Dest::Staging, None, 1);
@@ -1120,7 +1428,7 @@ mod tests {
 
     /// A restarted worker forgot a transfer in flight; begun again, its entries go where the
     /// ledger says they went, though the directory is there now, so its partial file resumes
-    /// rather than starting over in the drop directory.
+    /// rather than starting over under another name.
     #[test]
     fn a_restart_finds_where_a_transfers_entries_went() {
         let dir = tempfile::tempdir().unwrap();
@@ -1144,7 +1452,7 @@ mod tests {
         assert_eq!(after.durable(xfer, "proj/a.bin").unwrap(), 40_000, "what it held");
         let other = XferId::new();
         after.begin(other, &dest, cwd.to_str(), 1);
-        let clash = dir.path().join("drop").join(other.to_string()).join("proj/a.bin");
+        let clash = cwd.join("proj 2/a.bin");
         assert_eq!(after.target(other, "proj/a.bin").unwrap(), clash, "another drop's is apart");
     }
 

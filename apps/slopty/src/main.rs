@@ -35,7 +35,8 @@ use actions::{Hide, HideOthers, Quit, ShowAll};
 /// shown next to them come from the keymap in effect whenever the menu is built.
 ///
 /// The File menu opens and saves what the palette does, by the same actions: Save is the file
-/// tile's own, so it is greyed unless a file has the keyboard.
+/// tile's own, so it is greyed unless a file has the keyboard. Upload sends files picked here up
+/// to the focused shell, folder or window; Download brings a folder tile's selected entry down.
 ///
 /// The Edit menu names the text fields' own actions (gpui-kit's), which every field answers:
 /// the editors, the composer and the settings' search, and the terminal as its own. Cut, Copy,
@@ -45,6 +46,7 @@ fn menus() -> Vec<Menu> {
     use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
     use slopty_app::{Minimize, OpenHelp, ShowWindow, Zoom};
     use slopty_ui::file::SaveFile;
+    use slopty_ui::folder::{SaveToFiles, UploadFromFiles};
     use slopty_ui::terminal::{Find, FindNext, FindPrev};
     use slopty_ui::workspace::{
         AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
@@ -57,7 +59,7 @@ fn menus() -> Vec<Menu> {
         Menu::new("Slopty").items([
             MenuItem::action("Settings…", slopty_app::OpenSettings),
             MenuItem::separator(),
-            MenuItem::action("Add Worker…", slopty_app::AddWorker),
+            MenuItem::action("Add Machine…", slopty_app::AddWorker),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -76,6 +78,9 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Open File…", OpenFile),
             MenuItem::action("Open Folder…", OpenFolder),
             MenuItem::action("Open URL…", OpenUrl),
+            MenuItem::separator(),
+            MenuItem::action("Upload…", UploadFromFiles),
+            MenuItem::action("Download…", SaveToFiles),
             MenuItem::separator(),
             MenuItem::action("Save", SaveFile),
             MenuItem::action("Save a Copy…", SaveCopy),
@@ -209,8 +214,8 @@ mod tests {
 
     use super::*;
 
-    /// The File menu opens a file, a folder and a page, and saves, by the very actions the
-    /// palette's lines run, so the menu and the palette never drift apart.
+    /// The File menu opens a file, a folder and a page, uploads and downloads, and saves, by the
+    /// very actions the palette's lines run, so the menu and the palette never drift apart.
     #[test]
     fn the_file_menu_opens_and_saves_as_the_palette_does() {
         let menus = menus();
@@ -228,6 +233,8 @@ mod tests {
             "Open file…",
             "Open folder…",
             "Open URL…",
+            slopty_ui::folder::UPLOAD,
+            slopty_ui::folder::DOWNLOAD,
             "Save file",
             slopty_ui::workspace::SAVE_A_COPY,
         ];

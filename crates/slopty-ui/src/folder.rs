@@ -51,9 +51,11 @@ mod actions {
             OpenSelected,
             /// Go up to the folder this one is in.
             OpenParent,
-            /// Pick files in the Files app and send them up into this folder (iOS).
+            /// Pick files here and send them up into this folder: the Files app on iOS, the open
+            /// panel on a Mac.
             UploadFromFiles,
-            /// Bring the selected entry down and save it with the Files app (iOS).
+            /// Bring the selected entry down and save it here: with the Files app on iOS, into
+            /// a folder picked on a Mac.
             SaveToFiles,
         ]
     );
@@ -74,10 +76,14 @@ pub(crate) const NOT_A_FOLDER: &str = "Not a folder";
 pub(crate) const CANNOT_LIST: &str = "Cannot list this folder";
 /// The header's way up, and the palette's.
 pub(crate) const ENCLOSING_FOLDER: &str = "Enclosing folder";
-/// The path bar's upload through the Files picker, and the palette's.
+/// The path bar's upload through the Files picker, and the palette's, on iOS.
 pub const UPLOAD_FROM_FILES: &str = "Upload from Files\u{2026}";
-/// The selected row's save through the Files picker, and the palette's.
+/// The selected row's save through the Files picker, and the palette's, on iOS.
 pub const SAVE_TO_FILES: &str = "Save to Files\u{2026}";
+/// The palette's upload where the open panel picks the files: a Mac.
+pub const UPLOAD: &str = "Upload\u{2026}";
+/// The palette's download where a folder picked here takes the selected entry: a Mac.
+pub const DOWNLOAD: &str = "Download\u{2026}";
 
 /// Whether the Files picker stands in for Finder here: iOS, where nothing else reaches the
 /// Files app, and no file can be dragged in or out of an iPhone.
@@ -883,25 +889,27 @@ struct Drawn {
     rows: Vec<(usize, Bounds<Pixels>)>,
 }
 
-/// The palette's lines for the Files picker: on iOS, where it stands in for Finder (`ios`),
-/// and nowhere else.
+/// The palette's lines that send files up and bring them down.
+///
+/// They are named for the Files picker on iOS, where it stands in for Finder (`ios`), and
+/// plainly on a Mac, where the open panel and a picked folder do. Dragging does the same on a
+/// Mac; these are its keyboard's way.
 #[must_use]
 pub fn files_palette_items(
     ios: bool,
     bindings: &[gpui::KeyBinding],
 ) -> Vec<crate::palette::PaletteItem> {
-    if !ios {
-        return Vec::new();
-    }
+    let (upload, download) =
+        if ios { (UPLOAD_FROM_FILES, SAVE_TO_FILES) } else { (UPLOAD, DOWNLOAD) };
     vec![
         crate::palette::PaletteItem::new(
-            UPLOAD_FROM_FILES,
+            upload,
             IconName::Upload,
             Box::new(UploadFromFiles),
             bindings,
         ),
         crate::palette::PaletteItem::new(
-            SAVE_TO_FILES,
+            download,
             IconName::Download,
             Box::new(SaveToFiles),
             bindings,

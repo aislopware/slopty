@@ -303,21 +303,21 @@ fn a_row_under_a_held_touch_is_offered_as_the_workers_file(cx: &mut TestAppConte
     assert_eq!(std::fs::read_to_string(landed).unwrap(), "/w/proj/a.txt", "the worker's file");
 }
 
-/// The Files picker is a palette command on iOS and nowhere else.
+/// Upload and download are palette commands everywhere: named for the Files picker on iOS,
+/// plainly on a Mac, where the open panel and a picked folder stand in for it.
 #[test]
-fn the_files_picker_is_offered_on_ios_only() {
-    use crate::folder::{SAVE_TO_FILES, UPLOAD_FROM_FILES, files_palette_items};
+fn upload_and_download_are_offered_on_every_device() {
+    use crate::folder::{DOWNLOAD, SAVE_TO_FILES, UPLOAD, UPLOAD_FROM_FILES, files_palette_items};
     let bindings = key_bindings();
-    assert!(files_palette_items(false, &bindings).is_empty());
-    let labels: Vec<String> =
-        files_palette_items(true, &bindings).into_iter().map(|i| i.label).collect();
-    assert_eq!(labels, [UPLOAD_FROM_FILES, SAVE_TO_FILES]);
-    let listed: Vec<String> = palette_items()
-        .into_iter()
-        .map(|i| i.label)
-        .filter(|l| l == UPLOAD_FROM_FILES || l == SAVE_TO_FILES)
-        .collect();
-    assert_eq!(listed.len(), if cfg!(target_os = "ios") { 2 } else { 0 }, "{listed:?}");
+    let labels = |ios| -> Vec<String> {
+        files_palette_items(ios, &bindings).into_iter().map(|i| i.label).collect()
+    };
+    assert_eq!(labels(true), [UPLOAD_FROM_FILES, SAVE_TO_FILES]);
+    assert_eq!(labels(false), [UPLOAD, DOWNLOAD]);
+    let here = labels(cfg!(target_os = "ios"));
+    let listed: Vec<String> =
+        palette_items().into_iter().map(|i| i.label).filter(|l| here.contains(l)).collect();
+    assert_eq!(listed, here);
 }
 
 /// "Upload from Files…" on a folder tile asks the Files picker (here its seam) for files to
