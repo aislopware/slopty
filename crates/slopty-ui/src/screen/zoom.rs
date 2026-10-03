@@ -154,6 +154,77 @@ pub fn double_tap_target(one_to_one: f32) -> f32 {
     if one_to_one > 1.0 + FIT_EPSILON { one_to_one } else { 2.0 }
 }
 
+/// A part of the picture in fractions of it: left, top, right and bottom edges.
+pub type Part = (f32, f32, f32, f32);
+
+/// The part of the picture a body of `body` shows with the picture fitted at `frame` and drawn
+/// as `zoom`: the body's corners through the zoom, held to the picture. A zoomed picture runs
+/// past its frame into the bars beside it, so this can be more of it than the frame shows.
+#[must_use]
+pub fn in_view(zoom: Zoom, body: (f32, f32), frame: Frame) -> Part {
+    let corner = |at: (f32, f32)| {
+        let fraction = (
+            (at.0 - frame.origin.0) / frame.size.0.max(f32::EPSILON),
+            (at.1 - frame.origin.1) / frame.size.1.max(f32::EPSILON),
+        );
+        let (x, y) = zoom.to_picture(fraction);
+        (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
+    };
+    let (left, top) = corner((0.0, 0.0));
+    let (right, bottom) = corner(body);
+    (left, top, right, bottom)
+}
+
+/// What a zoomed picture showing `view` streams: the view and a quarter of it on every side
+/// (`docs/decisions/video.md`, "A zoomed picture streams its region"), so a small pan stays in
+/// what is streamed. At an edge of the picture it is moved inside rather than cut, so a pan at
+/// one zoom keeps one size of region, which the worker moves without a new encoder session.
+/// `None` when that is all of the picture.
+#[must_use]
+pub fn streamed(view: Part) -> Option<Part> {
+    let side = |from: f32, to: f32| -> (f32, f32) {
+        let len = ((to - from) * 1.5).min(1.0);
+        let start = (from - (to - from) / 4.0).clamp(0.0, 1.0 - len);
+        (start, start + len)
+    };
+    let (left, right) = side(view.0, view.2);
+    let (top, bottom) = side(view.1, view.3);
+    let whole = right - left >= 1.0 && bottom - top >= 1.0;
+    (!whole).then_some((left, top, right, bottom))
+}
+
+/// Whether `part` lies inside `within`, both in fractions of the picture, to a hair.
+#[must_use]
+pub fn covers(within: Part, part: Part) -> bool {
+    const HAIR: f32 = 1e-3;
+    part.0 >= within.0 - HAIR
+        && part.1 >= within.1 - HAIR
+        && part.2 <= within.2 + HAIR
+        && part.3 <= within.3 + HAIR
+}
+
+/// How hard a pointer at `at` in a body of `body` pushes a zoomed picture along each axis: 0
+/// away from the edges, rising to 1 at an edge, inside a band `band` deep (`docs/decisions/
+/// input.md`, "A zoomed picture pans when the pointer pushes at the edge"). Negative toward
+/// the left and the top. A pointer off the body pushes nothing.
+#[must_use]
+pub fn edge_push(at: (f32, f32), body: (f32, f32), band: f32) -> (f32, f32) {
+    let axis = |p: f32, len: f32| -> f32 {
+        if band <= 0.0 || !(0.0..=len).contains(&p) {
+            return 0.0;
+        }
+        let band = band.min(len / 2.0);
+        if p < band {
+            -(band - p) / band
+        } else if p > len - band {
+            (p - (len - band)) / band
+        } else {
+            0.0
+        }
+    };
+    (axis(at.0, body.0), axis(at.1, body.1))
+}
+
 /// What the readout says: `Fit`, or the size against one to one (`100 %` is pixel for pixel).
 #[must_use]
 pub fn readout(zoom: Zoom, one_to_one: f32) -> String {
@@ -279,6 +350,54 @@ mod tests {
         // The picture's own corner can only reach the frame's corner.
         let r = z.revealing((1.0, 1.0), (0.1, 0.1), 8.0);
         assert!(near(r.to_frame((1.0, 1.0)), (1.0, 1.0)), "{r:?}");
+    }
+
+    fn near4(a: Part, b: Part) -> bool {
+        near((a.0, a.1), (b.0, b.1)) && near((a.2, a.3), (b.2, b.3))
+    }
+
+    /// At fit a body shows all of the picture; zoomed it shows the part the zoom puts in it,
+    /// including the rows a letterboxed frame leaves to the bars.
+    #[test]
+    fn the_view_is_the_body_through_the_zoom() {
+        let body = (400.0, 300.0);
+        let frame = fit(body, (800, 400));
+        assert!(near4(in_view(Zoom::FIT, body, frame), (0.0, 0.0, 1.0, 1.0)));
+        let z = Zoom::FIT.about((0.5, 0.5), 4.0, 8.0);
+        // The frame is 400 × 200 at y 50; four times that about the middle shows a quarter of
+        // the width, and the body's 300 rows are 0.375 of the picture's 800.
+        assert!(near4(in_view(z, body, frame), (0.375, 0.3125, 0.625, 0.6875)), "{z:?}");
+    }
+
+    /// What is streamed is the view and a quarter of it each side, moved in at an edge rather
+    /// than cut, so its size stays; all of the picture is `None`.
+    #[test]
+    fn a_region_is_the_view_and_a_margin_moved_inside() {
+        let middle = streamed((0.4, 0.4, 0.6, 0.6)).expect("a region");
+        assert!(near4(middle, (0.35, 0.35, 0.65, 0.65)), "{middle:?}");
+        let corner = streamed((0.0, 0.0, 0.2, 0.2)).expect("a region");
+        assert!(near4(corner, (0.0, 0.0, 0.3, 0.3)), "moved in: {corner:?}");
+        let far = streamed((0.8, 0.85, 1.0, 1.0)).expect("a region");
+        assert!(near4(far, (0.7, 0.775, 1.0, 1.0)), "{far:?}");
+        assert!((far.2 - far.0 - (middle.2 - middle.0)).abs() < 1e-4, "one size");
+        assert_eq!(streamed((0.0, 0.0, 1.0, 1.0)), None, "fit");
+        assert_eq!(streamed((0.1, 0.1, 0.8, 0.8)), None, "a margin past every edge");
+        assert!(streamed((0.1, 0.4, 0.8, 0.6)).is_some(), "the rows still trimmed");
+        assert!(covers(middle, (0.4, 0.4, 0.6, 0.6)));
+        assert!(!covers(middle, (0.3, 0.4, 0.5, 0.6)), "panned past the margin");
+    }
+
+    /// The pointer pushes only inside the band, harder toward the edge, each axis on its own;
+    /// off the body or with no band it pushes nothing.
+    #[test]
+    fn the_pointer_pushes_at_the_edges() {
+        let body = (400.0, 300.0);
+        assert_eq!(edge_push((200.0, 150.0), body, 20.0), (0.0, 0.0));
+        assert_eq!(edge_push((390.0, 150.0), body, 20.0), (0.5, 0.0));
+        assert_eq!(edge_push((400.0, 0.0), body, 20.0), (1.0, -1.0), "the corner");
+        assert_eq!(edge_push((15.0, 295.0), body, 20.0), (-0.25, 0.75));
+        assert_eq!(edge_push((-1.0, 150.0), body, 20.0), (0.0, 0.0), "off the body");
+        assert_eq!(edge_push((0.0, 0.0), body, 0.0), (0.0, 0.0), "no band");
     }
 
     /// The readout says fit, or the size against one to one.

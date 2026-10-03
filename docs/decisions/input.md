@@ -415,8 +415,41 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `a_pinch_over_a_stream_zooms_it_and_over_a_shell_opens_the_overview`. The iOS simulator
   harness can deliver a pinch (`UiPinch`) but has no streamed picture to aim it at, so these
   run at the slopty-ui layer on gpui's own pinch and touch-drag events. The frame cost is in
-  MEASUREMENTS ("a zoomed stream's frame"). Not built: panning a zoomed picture on the Mac,
-  where a trackpad pinch reports no centroid travel.
+  MEASUREMENTS ("a zoomed stream's frame"). Panning a zoomed picture on the Mac, where a
+  trackpad pinch reports no centroid travel, is the next entry.
+
+- ✅ **A zoomed picture pans when the pointer pushes at the edge, and with ⌥-scroll**
+  (2026-10-03). On the Mac a zoomed picture could not be panned: a trackpad pinch reports no
+  centroid travel, and every scroll and drag belongs to the remote app. Other clients:
+  - Apple's Screen Sharing offers three ways to scroll a scaled-up screen: continuously with
+    the cursor, when the cursor reaches an edge, or only by the scroll bars.
+  - Jump Desktop pans with the pointer, with an optional "Screen Scrolling" on ⌘-scroll that
+    is off by default, and zooms on ⌥⌘ shortcuts.
+  - RealVNC Viewer has scroll bars, and "bump scrolling" at the edges in full screen.
+  - Parsec documents no zoom.
+  - Screens 5 and Windows App document no pan of a zoomed picture.
+  Two of them use the pointer at the edge, and it needs no hand off the pointing device, so:
+  - **Edge push.** This Mac's pointer inside a `spacing.xl` band at an edge of a zoomed
+    picture's body pans the picture toward that edge for as long as it stays there. The pan
+    grows with the square of how deep in the band the pointer is, up to 1.5 frames a second at
+    the edge, stepped at 120 Hz (`zoom::edge_push`, `EDGE_PAN_FRAMES_PER_S`). It stops at the
+    picture's own edge, when the pointer leaves the band or the body, and at fit. As the picture
+    moves under the still pointer, the worker's pointer is moved to what is now under it, so a
+    click lands where it is drawn. A body that reaches the display's edge puts the band where the
+    pointer stops, which is Screen Sharing's "when the cursor reaches an edge".
+  - **⌥-scroll pans** a zoomed picture by the scroll's travel (a wheel's line is `spacing.xl`)
+    and sends nothing to the worker, for a person who wants a precise pan. A trackpad gesture
+    decides as it begins and keeps its side to the end of its coast, so letting go of ⌥ halfway
+    leaves neither the pan nor the remote app's scroll without its end. ⌥ was the free
+    modifier: ⌘-scroll is the remote app's (the ⌘-scroll entry below), ⌘⌥ is the workspace's,
+    ⌃-scroll is macOS's own accessibility zoom, and ⇧-scroll is a horizontal scroll. ⌥-scroll
+    at fit still goes to the remote app.
+  Rejected: panning continuously with the cursor (the picture moves on every pointer move, so
+  nothing holds still under the pointer to be clicked); scroll bars (chrome on every zoomed
+  picture, against the design); and a key binding (the arrow keys and every chord belong to the
+  remote app, and the palette is no way to steer). Tests:
+  `the_mac_pans_a_zoomed_picture_at_the_edges_and_with_option_scroll`,
+  `screen::zoom::tests::the_pointer_pushes_at_the_edges`.
 
 - ✅ **⌘-scroll is the tile's, no longer held back for a zoom** (2026-09-28). The canvas zoomed
   on ⌘-scroll, so the terminal dropped a ⌘-wheel and a remote picture never sent one. The

@@ -15,6 +15,14 @@
 //! left untimed. Until a layer is attached, the newest picture waits here and goes to the first
 //! layer.
 //!
+//! A zoomed picture streams only its region (`slopty_proto::screen::Quality::region`): each
+//! picture says which region of the target it shows, and the view places the layer at that
+//! region's place in the whole picture. The newest picture of the whole target is kept
+//! ([`Glass::base`]): the view draws it under the region's layer, where it fills whatever of
+//! the view the region does not reach until a region that covers it comes. A picture of
+//! another region than the one the layer is placed for waits for the view to place it
+//! ([`Glass::place`]), as one of another seam does.
+//!
 //! A stream coded as two stripes decodes each on a session of its own
 //! (`slopty_client::screen::Stitched`), and each goes to a layer of its own with no copy
 //! between them: the view stacks the two layers, each clipped to the rows it shows. The glass
@@ -41,6 +49,7 @@ use gpui_apple::fast::video_layer::{VideoLayer, VideoLayerOptions};
 use parking_lot::Mutex;
 use slopty_client::Presentable;
 use slopty_client::pacing::{FrameStamp, GlassStats, Pace, Pacer, PacingStats, PaintRate};
+use slopty_proto::screen::Region;
 use tokio::sync::watch;
 
 use super::{Chroma, chroma_of};
@@ -65,6 +74,8 @@ pub(super) struct Shape {
     pub chroma: Chroma,
     /// Where a striped picture's two stripes meet; `None` for one picture.
     pub seam: Option<Seam>,
+    /// The part of the target the picture shows, in its native pixels; `None` for all of it.
+    pub region: Option<Region>,
 }
 
 /// How a striped picture's two pictures stack: each is its stripe's coded rows, which run past
@@ -94,7 +105,12 @@ impl Shape {
         let height = seam.map_or(top, |seam| {
             seam.top_rows.saturating_add(seam.lower.saturating_sub(seam.lower_from))
         });
-        Self { size: (width, height), chroma: chroma_of(picture.top.get_pixel_format()), seam }
+        Self {
+            size: (width, height),
+            chroma: chroma_of(picture.top.get_pixel_format()),
+            seam,
+            region: picture.region,
+        }
     }
 }
 
@@ -110,6 +126,8 @@ fn side(buffer: &CVPixelBuffer) -> (u32, u32) {
 pub(super) struct Picture {
     top: CVPixelBuffer,
     lower: Option<Lower>,
+    /// The part of the target it shows; `None` for all of it.
+    region: Option<Region>,
 }
 
 /// A striped picture's lower stripe.
@@ -133,7 +151,13 @@ impl Picture {
     /// A picture a test made.
     #[cfg(test)]
     pub(super) const fn new(buffer: CVPixelBuffer) -> Self {
-        Self { top: buffer, lower: None }
+        Self { top: buffer, lower: None, region: None }
+    }
+
+    /// A picture a test made of `region` of the target.
+    #[cfg(test)]
+    pub(super) const fn of_region(buffer: CVPixelBuffer, region: Region) -> Self {
+        Self { top: buffer, lower: None, region: Some(region) }
     }
 
     /// A striped picture a test made: `top` shows its first `top_rows`, `lower` its rows from
@@ -145,7 +169,11 @@ impl Picture {
         lower: CVPixelBuffer,
         lower_from: u32,
     ) -> Self {
-        Self { top, lower: Some(Lower { buffer: lower, top_rows, shown_from: lower_from }) }
+        Self {
+            top,
+            lower: Some(Lower { buffer: lower, top_rows, shown_from: lower_from }),
+            region: None,
+        }
     }
 
     /// The decoder's picture, in the wrapper GPUI and the layer take.
@@ -157,6 +185,7 @@ impl Picture {
                 top_rows: stitched.top_rows,
                 shown_from: stitched.lower_from,
             }),
+            region: frame.region,
         }
     }
 
@@ -168,6 +197,12 @@ impl Picture {
     /// The lower stripe's buffer; `None` for one picture.
     pub(super) fn lower(&self) -> Option<CVPixelBuffer> {
         self.lower.as_ref().map(|lower| lower.buffer.clone())
+    }
+
+    /// The part of the target it shows; `None` for all of it (tests).
+    #[cfg(test)]
+    pub(super) const fn region(&self) -> Option<Region> {
+        self.region
     }
 }
 
@@ -197,6 +232,8 @@ struct Slot {
     /// The newest picture the pacer took: a render that captures the window draws it, and a
     /// layer attached after it came shows it first.
     last: Option<Picture>,
+    /// The newest picture of the whole target, which the view draws under a region's layer.
+    base: Option<Picture>,
     /// `last` has not been put up on a layer yet.
     waiting: bool,
     generations: u64,
@@ -209,17 +246,19 @@ struct Slot {
 }
 
 /// How the view placed the layers: for pictures whose stripes meet at `seam`, or for pictures
-/// of one piece.
+/// of one piece, showing `region` of the target, or all of it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct Placed {
     pub seam: Option<Seam>,
+    pub region: Option<Region>,
 }
 
 impl Slot {
     /// Whether `last` can go up on the layers as the view placed them.
     fn fits(&self) -> bool {
         let Some(picture) = &self.last else { return false };
-        self.placed.is_none_or(|placed| placed.seam == Shape::of(picture).seam)
+        let shape = Shape::of(picture);
+        self.placed.is_none_or(|placed| placed == Placed { seam: shape.seam, region: shape.region })
     }
 }
 
@@ -317,6 +356,9 @@ impl Glass {
             *was = Some(shape);
             changed
         });
+        if picture.region.is_none() {
+            slot.base = Some(picture.clone());
+        }
         slot.last = Some(picture);
         slot.waiting = true;
         self.present(&mut slot);
@@ -446,6 +488,12 @@ impl Glass {
     /// The newest picture, for a render that draws it itself.
     pub(super) fn last(&self) -> Option<Picture> {
         self.slot.lock().last.clone()
+    }
+
+    /// The newest picture of the whole target, for the view to draw under a region's layer;
+    /// `None` before one came.
+    pub(super) fn base(&self) -> Option<Picture> {
+        self.slot.lock().base.clone()
     }
 
     /// Pictures put up on a layer so far.
@@ -644,23 +692,51 @@ mod tests {
         };
         let mut slot = Slot { last: Some(striped(576, 512, 560)), ..Slot::default() };
         assert!(slot.fits(), "nothing placed yet");
-        slot.placed = Some(Placed { seam: None });
+        slot.placed = Some(Placed { seam: None, region: None });
         assert!(!slot.fits(), "laid out for one picture");
-        slot.placed = Some(Placed { seam: Shape::of(&striped(576, 512, 560)).seam });
+        slot.placed = Some(Placed { seam: Shape::of(&striped(576, 512, 560)).seam, region: None });
         assert!(slot.fits());
         slot.last = Some(striped(640, 576, 560));
         assert!(!slot.fits(), "the seam moved");
         slot.last = Some(picture(64, 1024));
         assert!(!slot.fits(), "a whole picture on striped layers");
-        slot.placed = Some(Placed { seam: None });
+        slot.placed = Some(Placed { seam: None, region: None });
         assert!(slot.fits());
 
         let glass = Glass::new();
-        glass.place(Placed { seam: Shape::of(&striped(576, 512, 560)).seam });
+        glass.place(Placed { seam: Shape::of(&striped(576, 512, 560)).seam, region: None });
         glass.offer(picture(64, 1024), test_stamp(0));
         assert!(glass.slot.lock().waiting, "held for the layout");
-        glass.place(Placed { seam: None });
+        glass.place(Placed { seam: None, region: None });
         assert!(glass.slot.lock().waiting, "and still for a layer");
+    }
+
+    /// A picture of a region waits for the layers placed for that region, and one of the whole
+    /// target for layers placed for all of it; the newest picture of the whole target stays the
+    /// base under any number of region pictures.
+    #[test]
+    fn a_region_picture_waits_for_its_place_and_the_whole_one_stays_the_base() {
+        let region = |x| Region { x, y: 0, w: 64, h: 48 };
+        let of = |x| Picture::of_region(picture(64, 48).top, region(x));
+        let mut slot = Slot { last: Some(of(0)), ..Slot::default() };
+        slot.placed = Some(Placed { seam: None, region: Some(region(0)) });
+        assert!(slot.fits());
+        slot.last = Some(of(32));
+        assert!(!slot.fits(), "the region moved");
+        slot.last = Some(picture(640, 480));
+        assert!(!slot.fits(), "the whole target on a region's layer");
+        slot.placed = Some(Placed { seam: None, region: None });
+        assert!(slot.fits());
+
+        let glass = Glass::new();
+        assert!(glass.base().is_none(), "no picture yet");
+        glass.offer(picture(640, 480), test_stamp(0));
+        glass.offer(of(0), test_stamp(1));
+        glass.offer(of(32), test_stamp(2));
+        let base = glass.base().expect("the whole picture");
+        assert_eq!((base.top.get_width(), base.region()), (640, None));
+        assert_eq!(glass.last().and_then(|last| last.region()), Some(region(32)));
+        assert_eq!(glass.shapes().borrow().and_then(|shape| shape.region), Some(region(32)));
     }
 
     /// A capture whose two stripes the layers showed within [`SPLIT_AFTER`] of each other went

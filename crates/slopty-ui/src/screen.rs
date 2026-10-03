@@ -35,11 +35,12 @@ use gpui::{
     Animation, AnimationExt as _, App, Autocapitalize, Bounds, ContentMask, Context, CursorImage,
     CursorImageId, CursorStyle, DevicePixels, ElementInputHandler, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, Global, InteractiveElement as _, IntoElement, Keystroke,
-    LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Path, PathBuilder, PinchEvent, Pixels, Point, Render, RenderImage,
-    ScrollDelta, ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, TextInputAction, TextInputConfiguration, TouchDragEvent,
-    TouchPhase, UTF16Selection, Window, canvas, div, point, px, size,
+    LongPressEvent, Modifiers, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement as _, Path, PathBuilder, PinchEvent, Pixels, Point, Render,
+    RenderImage, ScrollDelta, ScrollWheelEvent, SharedString, Size,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, TextInputAction,
+    TextInputConfiguration, TouchDragEvent, TouchPhase, UTF16Selection, Window, canvas, div, point,
+    px, size,
 };
 use slopty_client::pacing::{PacingStats, PaintRate, Spread};
 use slopty_client::{CursorState, ScreenHandle, ScreenStats};
@@ -48,7 +49,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::drag::DragInput;
 use slopty_proto::input::{KeyAction, KeyCode, Mods, MouseButton as ProtoButton};
 use slopty_proto::screen::{
-    CaptureTarget, Chroma, CursorShape, Quality, RateVerdict, ScreenInput, ScreenRequest,
+    CaptureTarget, Chroma, CursorShape, Quality, RateVerdict, Region, ScreenInput, ScreenRequest,
     ScrollPhase, SourceState, TextField, VideoCodec,
 };
 use slopty_theme::Theme;
@@ -130,8 +131,14 @@ pub struct PasteAhead {
 /// Makes a client-side stream for an `Opened` event (wraps `WorkerLink::screen`).
 pub type ScreenFactory = Arc<dyn Fn(StreamId, VideoCodec) -> ScreenHandle + Send + Sync>;
 
-/// Quality change rate limit.
+/// Quality change rate limit, and how long a zoom holds still before the stream follows it.
 const QUALITY_COOLDOWN: Duration = Duration::from_millis(400);
+/// How fast this Mac's pointer pushing at an edge with all its weight pans a zoomed picture, in
+/// frames a second (`docs/decisions/input.md`, "A zoomed picture pans when the pointer pushes
+/// at the edge").
+const EDGE_PAN_FRAMES_PER_S: f32 = 1.5;
+/// How often the push moves the picture: a 120 Hz refresh.
+const EDGE_TICK: Duration = Duration::from_micros(8_333);
 /// Smallest scale the view asks for.
 const MIN_SCALE: f32 = 0.25;
 /// Messages the outbox holds while the outbound queue is full, past which input that lets go of
@@ -350,6 +357,9 @@ pub struct ScreenView {
     /// The same for a striped picture's lower stripe's layer (tests).
     #[cfg(test)]
     lower_at: LayerAt,
+    /// Where the last paint drew the whole target's picture under a region's layer (tests).
+    #[cfg(test)]
+    base_at: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// The stream size the worker maps input with: the size last asked for, or last told by
     /// `Geometry`. The worker takes a new scale in order with the input behind it, so frames
     /// still in flight at the old scale must not move it (unlike `size`, the picture's).
@@ -434,6 +444,15 @@ pub struct ScreenView {
     momentum_end: Option<Task<()>>,
     /// How the picture is drawn over the body: kept while the view lives, so per tile.
     zoom: Zoom,
+    /// Asks for the scale and region the zoom settled at, once it has ([`Self::settle_zoom`]).
+    settle: Option<Task<()>>,
+    /// Where this Mac's pointer is over the body while a zoomed picture is drawn there, for
+    /// the push at the edges ([`zoom::edge_push`]); `None` off the body.
+    edge_at: Option<Point<Pixels>>,
+    /// The pointer's push at the edges is panning the zoomed picture ([`Self::push_at_edges`]).
+    edge_panning: bool,
+    /// The trackpad scroll under way pans the zoomed picture here: it began with ⌥ held.
+    pan_scroll: bool,
     /// The body's width in device pixels at fit, as the workspace last reported it.
     painted: f32,
     /// The window's backing scale as last drawn, for one to one.
@@ -846,6 +865,7 @@ pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32, refresh_hz
         fps: stream_fps(prefs.fps, refresh_hz),
         bitrate_bps: prefs.max_bitrate_bps,
         scale,
+        region: None,
         codec: VideoCodec::Hevc,
         chroma: if prefs.sharp_text { Chroma::Full } else { Chroma::Subsampled },
     }
@@ -859,7 +879,10 @@ impl ScreenView {
         if self.theme == theme {
             return;
         }
-        let wanted = quality_of(theme.behaviour.stream, self.quality.scale, self.refresh_hz());
+        let wanted = Quality {
+            region: self.quality.region,
+            ..quality_of(theme.behaviour.stream, self.quality.scale, self.refresh_hz())
+        };
         if wanted != self.quality {
             self.quality = wanted;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
@@ -975,6 +998,8 @@ impl ScreenView {
             layer_at: Rc::default(),
             #[cfg(test)]
             lower_at: Rc::default(),
+            #[cfg(test)]
+            base_at: Rc::default(),
             laid_out: Rc::default(),
             mapped: size,
             out: Outbox::new(out, cx),
@@ -1011,6 +1036,10 @@ impl ScreenView {
             scrolling: Scrolling::Idle,
             momentum_end: None,
             zoom: Zoom::FIT,
+            settle: None,
+            edge_at: None,
+            edge_panning: false,
+            pan_scroll: false,
             painted: 0.0,
             scale_factor: 1.0,
             two: None,
@@ -1541,7 +1570,9 @@ impl ScreenView {
     /// downscaled at the worker when it is drawn small. Quantised to quarter steps and rate
     /// limited: a change inside the cooldown is taken when it ends, the latest width asked for
     /// winning. A picture narrower than its tile's aspect is drawn narrower than the tile, and a
-    /// picture zoomed inside the tile wider; each asks for the width it is drawn at.
+    /// picture zoomed inside the tile wider; each asks for the width it is drawn at. A zoomed
+    /// picture asks for its region with it ([`Self::wanted_region`]): what it shows and a margin
+    /// round it, at that scale.
     pub fn set_painted_width(&mut self, device_px: f32, cx: &Context<Self>) {
         self.painted = device_px;
         let body = f32::from(self.bounds.size.width);
@@ -1549,7 +1580,8 @@ impl ScreenView {
         let drawn = device_px * share * self.zoom.scale();
         let wanted = (drawn / self.native.0).clamp(MIN_SCALE, 1.0);
         let bucket = (wanted * 4.0).ceil() / 4.0;
-        if (bucket - self.quality.scale).abs() < f32::EPSILON {
+        let region = self.wanted_region();
+        if (bucket - self.quality.scale).abs() < f32::EPSILON && region == self.quality.region {
             self.wanted_width = None;
             return;
         }
@@ -1571,6 +1603,7 @@ impl ScreenView {
         }
         self.wanted_width = None;
         self.quality.scale = bucket;
+        self.quality.region = region;
         self.quality_changed = Instant::now();
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
         let side = |native: f32| ((native * bucket).round().max(2.0) as u32).next_multiple_of(2);
@@ -1623,7 +1656,10 @@ impl ScreenView {
         }
         let first = self.shape.is_none();
         self.shape = Some(shape);
-        self.size = shape.size;
+        // A region's picture is a part of the stream, whose size `Opened` and `Geometry` say.
+        if shape.region.is_none() {
+            self.size = shape.size;
+        }
         if first {
             cx.emit(ScreenViewEvent::Ready);
         }
@@ -1635,6 +1671,16 @@ impl ScreenView {
     #[cfg(test)]
     pub(crate) fn show_picture(&mut self, buffer: CVPixelBuffer, cx: &mut Context<Self>) {
         let picture = glass::Picture::new(buffer);
+        let shape = glass::Shape::of(&picture);
+        self.glass.offer(picture, glass::test_stamp(self.test_pictures));
+        self.test_pictures = self.test_pictures.saturating_add(1);
+        self.shaped(shape, cx);
+    }
+
+    /// Put a picture of `region` of the target up (tests).
+    #[cfg(test)]
+    fn show_region(&mut self, buffer: CVPixelBuffer, region: Region, cx: &mut Context<Self>) {
+        let picture = glass::Picture::of_region(buffer, region);
         let shape = glass::Shape::of(&picture);
         self.glass.offer(picture, glass::test_stamp(self.test_pictures));
         self.test_pictures = self.test_pictures.saturating_add(1);
@@ -1763,7 +1809,10 @@ impl ScreenView {
     }
 
     /// Draw the picture as `zoom` (held to its limits), say so, and ask the worker for the
-    /// scale it is now drawn at.
+    /// scale and the region it is now drawn at once the zoom settles: [`QUALITY_COOLDOWN`] after
+    /// its last change, so a pinch or a pan asks once, at its end, and not for every step on
+    /// the way (each new size of region is a new encoder session and a keyframe). A pan that
+    /// shows what the stream does not carry asks at once.
     fn set_zoom(&mut self, zoom: Zoom, cx: &mut Context<Self>) {
         let zoom = zoom.clamped(zoom::max_scale(self.one_to_one()));
         if zoom == self.zoom {
@@ -1773,11 +1822,68 @@ impl ScreenView {
         self.zoom = zoom;
         if scaled {
             self.show_readout(cx);
-            if self.painted > 0.0 {
+        }
+        if self.painted > 0.0 {
+            if !scaled && !self.streams_the_view() {
                 self.set_painted_width(self.painted, cx);
+            } else {
+                self.settle_zoom(cx);
             }
         }
         cx.notify();
+    }
+
+    /// Ask for the scale and the region the picture is drawn at [`QUALITY_COOLDOWN`] from now,
+    /// unless the zoom moves again before then.
+    fn settle_zoom(&mut self, cx: &Context<Self>) {
+        self.settle = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(QUALITY_COOLDOWN).await;
+            let _gone = this.update(cx, |this, cx| {
+                this.settle = None;
+                this.set_painted_width(this.painted, cx);
+            });
+        }));
+    }
+
+    /// The part of the picture the body shows, in fractions of the picture.
+    fn in_view(&self) -> zoom::Part {
+        let body = (f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
+        zoom::in_view(self.zoom, body, self.frame())
+    }
+
+    /// The region of the target this view wants streamed, in its native pixels: what it shows
+    /// and a margin round it ([`zoom::streamed`]); `None` at fit, before the view is laid out,
+    /// or when that is all of the target. A side is a function of the zoom alone, so a pan
+    /// asks for a region of the size in force, which the worker moves with no new session.
+    fn wanted_region(&self) -> Option<Region> {
+        if self.zoom.is_fit() || self.bounds.size.width <= px(0.0) {
+            return None;
+        }
+        let (left, top, right, bottom) = zoom::streamed(self.in_view())?;
+        let side = |from: f32, to: f32, native: f32| -> (u16, u16) {
+            #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+            let even = |v: f32| ((v / 2.0).round() * 2.0).clamp(0.0, 65_534.0) as u16;
+            let len = even((to - from) * native).max(2);
+            let start = even(from * native).min(even(native).saturating_sub(len));
+            (start, len)
+        };
+        let (x, w) = side(left, right, self.native.0);
+        let (y, h) = side(top, bottom, self.native.1);
+        Some(Region { x, y, w, h })
+    }
+
+    /// Whether what the body shows is all inside what the stream carries: the whole target,
+    /// or the region last asked for.
+    fn streams_the_view(&self) -> bool {
+        let Some(region) = self.quality.region else { return true };
+        let (w, h) = (self.native.0.max(1.0), self.native.1.max(1.0));
+        let part = (
+            f32::from(region.x) / w,
+            f32::from(region.y) / h,
+            f32::from(region.x.saturating_add(region.w)) / w,
+            f32::from(region.y.saturating_add(region.h)) / h,
+        );
+        zoom::covers(part, self.in_view())
     }
 
     /// Put the zoom readout up, and take it down after [`READOUT_HOLD`]: fading over
@@ -2211,6 +2317,11 @@ impl ScreenView {
         if precise && ev.touch_phase == TouchPhase::Started {
             self.end_momentum(x, y, mods, time_us);
         }
+        if self.scroll_pans(precise, ev) {
+            self.pan_by(ev.delta, cx);
+            cx.stop_propagation();
+            return;
+        }
         let (phase, momentum) = self.scroll_phases(precise, ev.touch_phase, ev.momentum_phase);
         self.input(ScreenInput::Scroll { dx, dy, precise, phase, momentum, x, y, mods, time_us });
         if precise {
@@ -2221,6 +2332,107 @@ impl ScreenView {
             }
         }
         cx.stop_propagation();
+    }
+
+    /// Whether this wheel event pans a zoomed picture here rather than scrolling the remote app:
+    /// ⌥ held on a zoomed picture under this Mac's pointer. A trackpad's gesture decides as it
+    /// begins and keeps its side to the end of its coast, as a pinch does, so letting go of ⌥
+    /// halfway leaves neither the pan nor the remote app's scroll without its end; a wheel's
+    /// notch decides on its own (`docs/decisions/input.md`, "A zoomed picture pans when the
+    /// pointer pushes at the edge").
+    fn scroll_pans(&mut self, precise: bool, ev: &ScrollWheelEvent) -> bool {
+        let asks = ev.modifiers.alt && !self.zoom.is_fit() && !self.touch;
+        if !precise {
+            return asks;
+        }
+        if ev.touch_phase == TouchPhase::Started && ev.momentum_phase.is_none() {
+            self.pan_scroll = asks;
+        }
+        self.pan_scroll
+    }
+
+    /// Pan the zoomed picture by a scroll's `delta`, the way the fingers moved; a wheel's line
+    /// is `spacing.xl`.
+    fn pan_by(&mut self, delta: ScrollDelta, cx: &mut Context<Self>) {
+        let by = delta.pixel_delta(px(self.theme.spacing.xl));
+        let (w, h) = self.frame_size();
+        let max = zoom::max_scale(self.one_to_one());
+        let panned = self.zoom.panned((f32::from(by.x) / w, f32::from(by.y) / h), max);
+        self.set_zoom(panned, cx);
+        self.follow_pointer(cx);
+    }
+
+    /// This Mac's pointer is at `position` in the window, over the tile or not: a zoomed
+    /// picture pans while it pushes at an edge of the body ([`zoom::edge_push`]), as Screen
+    /// Sharing's "When the cursor reaches an edge" does, and stops when it leaves the body.
+    fn track_edges(&mut self, position: Option<Point<Pixels>>, cx: &Context<Self>) {
+        let over = position.filter(|&at| !self.touch && self.bounds.contains(&at));
+        self.edge_at = over.filter(|_| !self.zoom.is_fit());
+        if self.edge_at.is_some() && !self.edge_panning && self.edge_push() != (0.0, 0.0) {
+            self.edge_panning = true;
+            Self::push_at_edges(cx);
+        }
+    }
+
+    /// How hard the pointer pushes at the body's edges now, each axis in `-1..=1`.
+    fn edge_push(&self) -> (f32, f32) {
+        let Some(at) = self.edge_at else { return (0.0, 0.0) };
+        let origin = self.bounds.origin;
+        let at = (f32::from(at.x - origin.x), f32::from(at.y - origin.y));
+        let body = (f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
+        zoom::edge_push(at, body, self.theme.spacing.xl)
+    }
+
+    /// Pan while the pointer pushes, a step every [`EDGE_TICK`] for the time it took.
+    fn push_at_edges(cx: &Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let executor = cx.background_executor().clone();
+            let mut last = executor.now();
+            loop {
+                executor.timer(EDGE_TICK).await;
+                let now = executor.now();
+                let seconds = now.saturating_duration_since(last).as_secs_f32();
+                last = now;
+                let going = this.update(cx, |view, cx| view.edge_step(seconds, cx));
+                if !matches!(going, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// One step of the push, `seconds` of it: the picture panned toward the edges pushed at,
+    /// harder the deeper the pointer is in the band, and the worker's pointer moved to what is
+    /// now under this Mac's. Whether to go on: not once nothing pushes or the picture's own edge
+    /// is reached.
+    fn edge_step(&mut self, seconds: f32, cx: &mut Context<Self>) -> bool {
+        let push = self.edge_push();
+        if push == (0.0, 0.0) || self.zoom.is_fit() {
+            self.edge_panning = false;
+            return false;
+        }
+        let step = |p: f32| -p * p.abs() * EDGE_PAN_FRAMES_PER_S * seconds;
+        let max = zoom::max_scale(self.one_to_one());
+        let panned = self.zoom.panned((step(push.0), step(push.1)), max);
+        if panned == self.zoom {
+            self.edge_panning = false;
+            return false;
+        }
+        self.set_zoom(panned, cx);
+        self.follow_pointer(cx);
+        true
+    }
+
+    /// The picture moved under this Mac's still pointer: the worker's pointer goes to what is
+    /// under it now.
+    fn follow_pointer(&mut self, cx: &mut Context<Self>) {
+        let Some(at) = self.edge_at.filter(|&at| self.inside(at)) else { return };
+        let now = cx.background_executor().now();
+        let (x, y) = self.to_stream(at);
+        self.place((x, y), now);
+        self.input(ScreenInput::Move { x, y });
+        self.redraw_pointer(now, cx);
     }
 
     /// The `phase` and `momentum` a worker `CGEvent` needs for this wheel event, moving the
@@ -2603,6 +2815,35 @@ fn stripe_places(at: Bounds<Pixels>, shape: glass::Shape) -> Option<[Place; 2]> 
     ])
 }
 
+/// Where a picture showing `region` of a target `native` pixels in size goes when the whole
+/// target is drawn at `whole`.
+fn region_bounds(whole: Bounds<Pixels>, region: Region, native: (f32, f32)) -> Bounds<Pixels> {
+    let (w, h) = (native.0.max(1.0), native.1.max(1.0));
+    let x = |v: u16| px(f32::from(v) / w * f32::from(whole.size.width));
+    let y = |v: u16| px(f32::from(v) / h * f32::from(whole.size.height));
+    Bounds {
+        origin: whole.origin + point(x(region.x), y(region.y)),
+        size: size(x(region.w), y(region.h)),
+    }
+}
+
+/// Draw `picture` at `at` in GPUI's own frame: both stripes of a striped one, each clipped to
+/// its rows.
+fn paint_picture(window: &mut Window, at: Bounds<Pixels>, picture: &glass::Picture) {
+    let Some([top, lower]) = stripe_places(at, glass::Shape::of(picture)) else {
+        window.paint_surface(at, picture.buffer());
+        return;
+    };
+    window.with_content_mask(Some(ContentMask { bounds: top.shown }), |window| {
+        window.paint_surface(top.layer, picture.buffer());
+    });
+    if let Some(buffer) = picture.lower() {
+        window.with_content_mask(Some(ContentMask { bounds: lower.shown }), |window| {
+            window.paint_surface(lower.layer, buffer);
+        });
+    }
+}
+
 /// Where the picture of `picture` pixels is drawn in a body at `body`: the frame it fits at
 /// ([`zoom::fit`]), or `zoom.scale()` times that with its top-left at `zoom.origin()` in the
 /// frame's fractions.
@@ -2872,7 +3113,16 @@ impl Render for ScreenView {
                 let leaving = handler.clone();
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
                     if phase == gpui::DispatchPhase::Capture {
-                        leaving.update(cx, |view, cx| view.drag_out_moved(event, cx));
+                        leaving.update(cx, |view, cx| {
+                            view.drag_out_moved(event, cx);
+                            view.track_edges(Some(event.position), cx);
+                        });
+                    }
+                });
+                let gone = handler.clone();
+                window.on_mouse_event(move |_event: &MouseExitEvent, phase, _window, cx| {
+                    if phase == gpui::DispatchPhase::Capture {
+                        gone.update(cx, |view, cx| view.track_edges(None, cx));
                     }
                 });
                 let dragger = handler.clone();
@@ -2906,24 +3156,41 @@ impl Render for ScreenView {
             (Some(shape), Some(host)) => {
                 let native = host.native.clone();
                 let lower_native = self.lower_host.as_ref().map(|host| host.native.clone());
-                let zoom = self.zoom;
+                let (zoom, whole, target) = (self.zoom, self.size, self.native);
                 let captured = capturing(cx).then(|| self.glass.last()).flatten();
+                // Under a region's layer, the newest picture of the whole target, drawn by GPUI:
+                // it fills what the region does not reach until a region that does comes.
+                let base = shape.region.and_then(|_| self.glass.base());
                 let (glass, laid_out) = (Arc::clone(&self.glass), Rc::clone(&self.laid_out));
                 #[cfg(test)]
-                let (layer_at, lower_at) = (Rc::clone(&self.layer_at), Rc::clone(&self.lower_at));
+                let (layer_at, lower_at, base_at) = (
+                    Rc::clone(&self.layer_at),
+                    Rc::clone(&self.lower_at),
+                    Rc::clone(&self.base_at),
+                );
                 // The layer goes where the picture is drawn, from the body as this frame lays
-                // it out, clipped by the body and whatever clips the tile. GPUI keeps the
-                // pointer over it (no hitbox): the view forwards it to the worker. A striped
-                // picture's two layers stack, each clipped to its rows.
+                // it out, clipped by the body and whatever clips the tile: a region's picture at
+                // its region's place in the whole. GPUI keeps the pointer over it (no hitbox):
+                // the view forwards it to the worker. A striped picture's two layers stack, each
+                // clipped to its rows.
                 canvas(
                     |_bounds, _window, _cx| {},
                     move |body, (), window, _cx| {
-                        let at = picture_bounds(body, shape.size, zoom);
-                        // Pictures of another seam wait until the layers are placed for them.
-                        let placed = glass::Placed { seam: shape.seam };
+                        let picture = picture_bounds(body, whole, zoom);
+                        let at = shape
+                            .region
+                            .map_or(picture, |region| region_bounds(picture, region, target));
+                        // Pictures of another seam or region wait until the layers are placed
+                        // for them.
+                        let placed = glass::Placed { seam: shape.seam, region: shape.region };
                         if laid_out.get() != Some(placed) {
                             laid_out.set(Some(placed));
                             glass.place(placed);
+                        }
+                        if let Some(base) = &base {
+                            paint_picture(window, picture, base);
+                            #[cfg(test)]
+                            base_at.set(Some(picture));
                         }
                         let Some([top, lower]) = stripe_places(at, shape) else {
                             window.paint_native(&native, at, gpui::Corners::default(), None);
@@ -5254,14 +5521,17 @@ mod tests {
             v.quality_changed = past_cooldown();
             v.set_zoom(Zoom::FIT.about((0.5, 0.5), 2.0, 8.0), cx);
         });
-        assert_eq!(scale(&mut rx), Some(0.5), "drawn twice as wide");
+        assert_eq!(scale(&mut rx), None, "not while the zoom may still move");
+        cx.executor().advance_clock(QUALITY_COOLDOWN);
+        cx.run_until_parked();
+        assert_eq!(scale(&mut rx), Some(0.5), "drawn twice as wide, once it settled");
         let state = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |v, _| v.readout);
         assert_eq!(state(cx), Some(Readout::Shown));
         assert!(
             view.read_with(cx, |v, _| v.readout())
                 .is_some_and(|r| r.ends_with('%') && !r.ends_with(" %"))
         );
-        cx.executor().advance_clock(READOUT_HOLD);
+        cx.executor().advance_clock(READOUT_HOLD.saturating_sub(QUALITY_COOLDOWN));
         cx.run_until_parked();
         assert!(matches!(state(cx), Some(Readout::Fading(_))), "{:?}", state(cx));
         cx.executor().advance_clock(kit::FADE);
@@ -5275,6 +5545,193 @@ mod tests {
         cx.executor().advance_clock(READOUT_HOLD);
         cx.run_until_parked();
         assert_eq!(state(cx), None, "gone at once, no fade");
+    }
+
+    /// The region a zoom asks for, from the quality asks it sends.
+    fn regions(rx: &mut mpsc::Receiver<ClientMsg>) -> Vec<(f32, Option<Region>)> {
+        sent(rx)
+            .into_iter()
+            .filter_map(|r| match r {
+                ScreenRequest::SetQuality { quality, .. } => Some((quality.scale, quality.region)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A zoom asks for what it shows and a quarter of it on every side, at the scale it is drawn
+    /// at, once it has held still for the cooldown, and not on the way there. A pan inside that
+    /// margin asks for the region moved, at its size, once it settles; one that shows what the
+    /// stream does not carry asks at once. Back at fit it asks for the whole target.
+    #[gpui::test]
+    fn a_zoom_asks_for_its_region_once_it_settles(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| {
+            v.native = (3200.0, 2400.0);
+            v.quality_changed = past_cooldown();
+            v.set_painted_width(800.0, cx);
+        });
+        assert_eq!(regions(&mut rx), [(0.25, None)], "fit: the whole target");
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(QUALITY_COOLDOWN);
+            cx.run_until_parked();
+        };
+        // Four times about the middle, in two steps: a quarter of each side in view.
+        view.update(cx, |v, cx| {
+            v.quality_changed = past_cooldown();
+            v.set_zoom(Zoom::FIT.about((0.5, 0.5), 2.0, 8.0), cx);
+            v.set_zoom(Zoom::FIT.about((0.5, 0.5), 4.0, 8.0), cx);
+        });
+        assert_eq!(regions(&mut rx), [], "the zoom may still move");
+        settle(cx);
+        let a = Region { x: 1000, y: 750, w: 1200, h: 900 };
+        assert_eq!(regions(&mut rx), [(1.0, Some(a))], "native, the view and its margin");
+
+        let pan = |cx: &mut gpui::VisualTestContext, by: f32| {
+            view.update(cx, |v, cx| {
+                v.quality_changed = past_cooldown();
+                v.set_zoom(v.zoom.panned((by, 0.0), 8.0), cx);
+            });
+        };
+        pan(cx, 0.05);
+        assert_eq!(regions(&mut rx), [], "inside the margin");
+        settle(cx);
+        assert_eq!(regions(&mut rx), [(1.0, Some(Region { x: 960, ..a }))], "moved, one size");
+        pan(cx, 0.5);
+        assert_eq!(regions(&mut rx), [(1.0, Some(Region { x: 560, ..a }))], "past it: at once");
+
+        view.update(cx, |v, cx| {
+            v.quality_changed = past_cooldown();
+            v.set_zoom(Zoom::FIT, cx);
+        });
+        settle(cx);
+        assert_eq!(regions(&mut rx), [(0.25, None)], "fit again");
+    }
+
+    /// A picture of a region goes where that region is drawn in the zoomed whole, over the
+    /// newest picture of the whole target, which GPUI draws under it; the stream's size is the
+    /// whole target's throughout. A picture of the whole target goes back over all of it, with
+    /// nothing under it.
+    #[gpui::test]
+    fn a_region_picture_goes_to_its_place_over_the_whole(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        let fit = rect(0., 0., 400., 300.);
+        assert_eq!(layer(&view, cx), Some((fit, fit)));
+        let base = |cx: &gpui::VisualTestContext| view.read_with(cx, |v, _| v.base_at.take());
+
+        // Twice about the middle: the whole picture at (-200, -150), 800 × 600 points, and the
+        // middle quarter of the target is the body.
+        let region = Region { x: 200, y: 150, w: 400, h: 300 };
+        view.update(cx, |v, cx| {
+            v.zoom = Zoom::FIT.about((0.5, 0.5), 2.0, 8.0);
+            v.show_region(picture(400, 300), region, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(layer(&view, cx), Some((fit, fit)), "the region's place");
+        assert_eq!(base(cx), Some(rect(-200., -150., 800., 600.)), "the whole under it");
+        assert_eq!(view.read_with(cx, |v, _| v.size), (800, 600), "the stream's own size");
+
+        // Panned a quarter of the frame right: the region's place moves with the picture.
+        view.update(cx, |v, cx| {
+            v.zoom = v.zoom.panned((0.25, 0.0), 8.0);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let moved = rect(100., 0., 400., 300.);
+        assert_eq!(layer(&view, cx), Some((moved, rect(100., 0., 300., 300.))), "clipped");
+        assert_eq!(base(cx), Some(rect(-100., -150., 800., 600.)));
+
+        view.update(cx, |v, cx| v.show_picture(picture(800, 600), cx));
+        cx.run_until_parked();
+        assert_eq!(layer(&view, cx), Some((rect(-100., -150., 800., 600.), fit)), "the whole");
+        assert_eq!(base(cx), None, "nothing under a picture of the whole");
+    }
+
+    /// This Mac's pointer pushing at an edge of a zoomed picture pans it toward that edge for
+    /// as long as it pushes, harder deeper in the band, and moves the worker's pointer to what
+    /// is now under it; away from the edges, off the body or at fit, nothing moves. ⌥ with a
+    /// scroll pans the zoomed picture here and sends no scroll, a plain scroll goes to the
+    /// worker, and a trackpad's gesture keeps the side it began on.
+    #[gpui::test]
+    fn the_mac_pans_a_zoomed_picture_at_the_edges_and_with_option_scroll(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, mut rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| {
+            v.touch = false;
+            v.show_picture(picture(800, 600), cx);
+        });
+        cx.run_until_parked();
+        let origin = |cx: &gpui::VisualTestContext| view.read_with(cx, |v, _| v.zoom.origin());
+        // A refresh at a time, as the push's own ticks come.
+        let wait = |cx: &mut gpui::VisualTestContext, ms: u64| {
+            for _ in 0..ms.div_ceil(8) {
+                cx.executor().advance_clock(Duration::from_millis(8));
+                cx.run_until_parked();
+            }
+        };
+        // At fit the edge pushes nothing.
+        cx.simulate_mouse_move(point(px(398.0), px(150.0)), None, Modifiers::default());
+        wait(cx, 100);
+        assert_eq!(origin(cx), (0.0, 0.0));
+
+        view.update(cx, |v, cx| v.set_zoom(Zoom::FIT.about((0.5, 0.5), 2.0, 8.0), cx));
+        cx.simulate_mouse_move(point(px(200.0), px(150.0)), None, Modifiers::default());
+        wait(cx, 100);
+        assert_eq!(origin(cx), (-0.5, -0.5), "the middle pushes nothing");
+        drop(inputs(&mut rx));
+
+        cx.simulate_mouse_move(point(px(398.0), px(150.0)), None, Modifiers::default());
+        wait(cx, 100);
+        let pushed = origin(cx);
+        assert!(pushed.0 < -0.55 && (pushed.1 + 0.5).abs() < 1e-6, "panned right: {pushed:?}");
+        let moves =
+            inputs(&mut rx).into_iter().filter(|i| matches!(i, ScreenInput::Move { .. })).count();
+        assert!(moves > 1, "the worker's pointer follows what is under this one: {moves}");
+        wait(cx, 2_000);
+        assert!((origin(cx).0 + 1.0).abs() < 1e-6, "to the picture's edge and no further");
+
+        // Off the window: the push stops.
+        cx.simulate_mouse_move(point(px(2.0), px(150.0)), None, Modifiers::default());
+        wait(cx, 50);
+        cx.simulate_event(MouseExitEvent {
+            position: point(px(-5.0), px(150.0)),
+            pressed_button: None,
+            modifiers: Modifiers::default(),
+        });
+        let left = origin(cx);
+        wait(cx, 200);
+        assert_eq!(origin(cx), left, "nothing pushes once the pointer has gone");
+        assert!(left.0 > -1.0, "it had pushed left while it was there");
+
+        // ⌥ with a trackpad's scroll pans here, to the gesture's end even once ⌥ is let go.
+        cx.simulate_mouse_move(point(px(200.0), px(150.0)), None, Modifiers::default());
+        drop(inputs(&mut rx));
+        let before = origin(cx);
+        let scroll = |cx: &mut gpui::VisualTestContext, dx: f32, alt: bool, phase| {
+            cx.simulate_event(ScrollWheelEvent {
+                position: point(px(200.0), px(150.0)),
+                delta: ScrollDelta::Pixels(point(px(dx), px(0.0))),
+                modifiers: Modifiers { alt, ..Modifiers::default() },
+                touch_phase: phase,
+                momentum_phase: None,
+            });
+            cx.run_until_parked();
+        };
+        scroll(cx, 20.0, true, TouchPhase::Started);
+        scroll(cx, 20.0, false, TouchPhase::Moved);
+        scroll(cx, 0.0, false, TouchPhase::Ended);
+        let after = origin(cx);
+        assert!((after.0 - before.0 - 0.1).abs() < 1e-5, "40 of the 400-point frame: {after:?}");
+        let scrolls = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            inputs(rx).into_iter().filter(|i| matches!(i, ScreenInput::Scroll { .. })).count()
+        };
+        assert_eq!(scrolls(&mut rx), 0, "nothing scrolled on the worker");
+        scroll(cx, 20.0, false, TouchPhase::Started);
+        scroll(cx, 0.0, true, TouchPhase::Ended);
+        assert_eq!(origin(cx), after, "a plain gesture is the worker's to its end");
+        assert_eq!(scrolls(&mut rx), 2);
     }
 
     /// Frame cost of the picture at fit, zoomed and still, and zoomed with a pinch moving it
@@ -5459,8 +5916,12 @@ mod tests {
     #[test]
     fn a_stripes_shown_rows_tile_the_picture() {
         let seam = glass::Seam { top: 1152, top_rows: 1088, lower: 1136, lower_from: 64 };
-        let shape =
-            glass::Shape { size: (3840, 2160), chroma: Chroma::Subsampled, seam: Some(seam) };
+        let shape = glass::Shape {
+            size: (3840, 2160),
+            chroma: Chroma::Subsampled,
+            seam: Some(seam),
+            region: None,
+        };
         for (at, scale) in [(rect(0., 0., 3840., 2160.), 1.0), (rect(10., 20., 960., 540.), 0.25)] {
             let [top, lower] = stripe_places(at, shape).expect("striped");
             let row = |rows: f32| at.origin.y + px(rows * scale);

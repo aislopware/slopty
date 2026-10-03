@@ -13900,3 +13900,63 @@ artifact the release job uploads came out and matched its `SHA256SUMS`.
 cargo xtask dist --ad-hoc --out target/dist-out > target/logs/dist.log 2>&1
 (cd target/dist-out && shasum -a 256 -c SHA256SUMS)
 ```
+
+## 2026-10-03 — a zoomed picture's region
+
+On mac-studio (M1 Max) while other sessions built (load 5–18), from a copy of a `dev`-profile
+test binary off the repository volume. The display is drawn, never captured. HEVC at 60 asked,
+the encoder's ceiling 30 Mbit/s, loopback, no loss. Two alternated rounds of 15 s each; the
+two figures in a cell are the two rounds (`docs/decisions/video.md`, "A zoomed picture's region
+at native resolution").
+
+**Before the build: a 5K display at native against the regions a phone streams of it.** A
+phone at one to one shows 2080 × 1170 device pixels of the display in landscape and 1170 × 658
+in portrait. With a quarter of its view on every side, the region is 3120 × 1756 or
+1756 × 988. Each region is drawn as a display of its own size with the 5K display's glyphs, so
+the encoder sees the same density.
+
+| stream | encode p50 / p95 | frames a second | wire Mbit/s (KiB a frame) | arrival → decoded p50 | capture → painted p50 | input sent → present p50 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 5K whole, 5120 × 2880 | 35.1 / 36.2, 35.1 / 35.3 ms | 27.9 | 1.62 (7.1) | 3.32 ms | 65.5, 55.2 ms | 82.9, 83.5 ms |
+| 5K in two stripes | 19.7 / 20.0, 19.8 / 20.0 ms | 48.3, 48.6 | 3.54 (8.9), 3.57 (9.0) | 1.35, 1.40 ms | 40.2, 51.6 ms | 55.4, 57.1 ms |
+| landscape region, 3120 × 1756 | 14.2 / 14.4, 14.3 / 14.5 ms | 59.5, 58.6 | 1.73 (3.6), 1.74 (3.6) | 1.69, 1.72 ms | 31.9, 30.8 ms | 40.7, 39.6 ms |
+| portrait region, 1756 × 988 | 5.84 / 5.99, 5.84 / 6.02 ms | 60.0, 59.8 | 1.03 (2.1), 1.01 (2.1) | 1.05 ms | 22.9, 22.6 ms | 33.2, 32.1 ms |
+
+The whole 5K display cannot be encoded at 60: one picture holds 28 a second, and two stripes
+hold 48. The portrait region encodes in a sixth of the whole display's time and holds the full
+60, with the picture painted about 40 ms sooner. The landscape region is 2.5 times quicker to
+encode and holds the full 60. The bits a frame follow the area, but bits a second do not
+fall as much, because the regions are sent twice as often.
+
+```sh
+cargo test --profile dev -p slopty-worker --lib --no-run
+cp target/debug/deps/slopty_worker-<hash> /tmp/slopty-region/slopty_worker
+(cd /tmp/slopty-region && SLOPTY_GLASS_SECONDS=15 SLOPTY_GLASS_ROUNDS=2 TMPDIR=/tmp nice \
+  ./slopty_worker --ignored --exact \
+  screen::synthetic::tests::a_region_against_the_whole_5k_display --nocapture) \
+  > target/logs/region-before.log 2>&1
+```
+
+**Built: from the ask for a region to the client's first decoded picture of it.** The same
+drawn 5K display at native, loopback, with a 3120 × 1756 region. `ask` is `set_quality`, with
+the sessions it builds waited for and put in, as the stream's loop does. Wire KiB is what the
+worker sent between the ask and that picture. Two runs, of 8 and 12 rounds.
+
+| change | ask → first picture p50 / p95 | wire KiB in between, p50 |
+| --- | --- | --- |
+| the whole display → a region (new sessions, a keyframe) | 119.5 / 176.8, 120.1 / 143.2 ms | 212, 241 |
+| the region moved at its size (no new session) | 36.4 / 58.1, 41.1 / 56.7 ms | 295, 294 |
+| the region → the whole display (new sessions, a keyframe) | 164.9 / 232.3, 148.2 / 183.9 ms | 421, 416 |
+
+A move at the region's size costs about two frames and no session. The move here is 600 × 338
+pixels, past what the encoder's motion search reaches, so its first frame is close to a
+keyframe in bytes. No capture was dropped as "between two regions" (`between_regions` 0): the
+drawn capture takes a configuration before its next beat. That a real ScreenCaptureKit stream
+delivers a frame promptly after a same-size `sourceRect` move on a still screen is a check
+still owed on hardware.
+
+```sh
+(cd /tmp/slopty-region && SLOPTY_REGION_ROUNDS=8 TMPDIR=/tmp nice ./slopty_worker --ignored \
+  --exact screen::synthetic::tests::measure_a_region_change --nocapture) \
+  > target/logs/region-change.log 2>&1
+```
