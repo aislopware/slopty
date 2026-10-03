@@ -134,6 +134,13 @@ pub(super) fn agent_status_word(agent: &AgentEvent) -> String {
     }
 }
 
+/// Whether an agent's state wears a pill in its tile's header: what calls for the person (waiting
+/// on them, failed, out of reach), and a turn paused on background work, whose pill says what it
+/// waits on. Working, at rest or finished, the header's leading mark says it alone.
+const fn wears_pill(status: Status) -> bool {
+    matches!(status, Status::NeedsYou | Status::Running | Status::Failed | Status::Away)
+}
+
 /// What a waiting agent asks, without the state word: "Bash · touch notes.txt", the question
 /// it put, the input it wants. `None` when it waits on nothing, or says nothing more than its
 /// state.
@@ -676,7 +683,9 @@ impl WorkspaceView {
     /// button that brings the terminal up so the TUI's own prompt can be answered there. Slopty
     /// never answers for the human. On a phone, which has no room for the detail, and beside a
     /// face, which shows it itself, the pill says the state alone; a screen reader still hears
-    /// all of it. An idle agent has no pill, its mark saying all there is.
+    /// all of it. An idle or a working agent has no pill ([`wears_pill`]): the slot's mark,
+    /// spinning while it works, says all there is, and a grey "Working" beside the spinner said it
+    /// twice.
     pub(super) fn agent_badge(
         &self,
         tile: TileRef,
@@ -687,11 +696,9 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let k = chrome.k;
-        // The pill's tone is its status mark's: busy states (thinking, a tool) recede into the
-        // muted tone, and the label says which. A finish is the leading slot's accent dot, and
-        // rest is nothing, so neither wears a pill.
-        let status =
-            Status::of_agent(agent).filter(|s| !matches!(s, Status::Idle | Status::Done))?;
+        // The pill's tone is its status mark's. Working, at rest or finished, the slot's mark
+        // is the statement.
+        let status = Status::of_agent(agent).filter(|s| wears_pill(*s))?;
         let (full, color) = (agent_status_text(agent), status.tone(theme));
         // The word alone: what is asked is the navigator's line and the pointer's, not a
         // second sentence in every header (a screen reader still hears it in full).
@@ -752,9 +759,9 @@ impl WorkspaceView {
     }
 
     /// The pill in a thread tile's header: where its thread stands, in the word and the tone a
-    /// terminal agent's pill would have ("Needs approval", "Working"), what it asks in its
-    /// hint. A thread driven over a protocol has no terminal to say it; at rest, or once done,
-    /// it wears none, as a terminal agent's tile does.
+    /// terminal agent's pill would have ("Needs approval", "Has a question"), what it asks in its
+    /// hint. A thread driven over a protocol has no terminal to say it; working, at rest, or once
+    /// done, it wears none, as a terminal agent's tile does.
     pub(super) fn thread_badge(
         &self,
         tile: TileRef,
@@ -763,7 +770,7 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         let theme = &self.theme;
         let k = chrome.k;
-        let status = stand.status().filter(|s| !matches!(s, Status::Idle | Status::Done))?;
+        let status = stand.status().filter(|s| wears_pill(*s))?;
         let label = stand.word()?;
         let item = tile.item;
         let ask = stand

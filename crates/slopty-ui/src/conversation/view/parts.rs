@@ -971,13 +971,15 @@ pub(super) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
     }
 }
 
-/// The share of the context window in use as a ring, `side` points round: the track in the
-/// quiet hairline, the used arc in the tone the share calls for (warn past 80 %, error past
-/// 95 %).
+/// The share of the context window in use as a ring, `side` points round: the whole track drawn
+/// in the muted ink at a tint, the used arc over it in the tone the share calls for (warn past
+/// 80 %, error past 95 %). On the hairline the track all but vanished, and a lone arc beside the
+/// stop button read as a spinner; a closed ring reads as a gauge.
 #[must_use]
 pub(in crate::conversation) fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
     let s = theme.surfaces;
-    let (track, arc) = (hsla(s.border), hsla(context_tone(theme, used_pct)));
+    let track = crate::colors::hsla_alpha(s.text_muted, slopty_theme::alpha::TINT);
+    let arc = hsla(context_tone(theme, used_pct));
     #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
     let share = (used_pct / 100.0).clamp(0.0, 1.0) as f32;
     canvas(

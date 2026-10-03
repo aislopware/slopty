@@ -1859,9 +1859,12 @@ impl WorkspaceView {
         match &item.kind {
             ItemKind::Terminal { session } => {
                 let session = *session;
-                // A phone's header has room for the tile's name and its state only.
+                // A phone's header has room for the tile's name and its state only. A thread
+                // view's composer says the changes and the context itself, a click from the
+                // review and the rate windows, so its header says neither a second time.
                 if self.face_shown(session)
                     && !self.layout.is_phone()
+                    && self.thread_face(session).is_none()
                     && let Some(view) = self.faces.views.get(&session)
                     && let Some(face) = self.face(session)
                 {

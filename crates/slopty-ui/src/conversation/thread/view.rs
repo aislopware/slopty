@@ -1448,8 +1448,9 @@ impl Render for ThreadView {
         let trail = self.trail_bar(cx);
         let rows = self.list_region(cx);
         // A subagent takes no messages: its thread is read, and answered from the bar.
-        let composer = (!self.in_subagent()).then(|| self.composer_box(cx));
-        let bar = self.activity_bar(composer.is_some(), window.viewport_size().height, cx);
+        let composes = !self.in_subagent();
+        let bar = self.activity_bar(composes, window.viewport_size().height, cx);
+        let composer = composes.then(|| self.composer_box(bar.is_some(), cx));
         div()
             .id("thread")
             .debug_selector(|| "thread".to_owned())

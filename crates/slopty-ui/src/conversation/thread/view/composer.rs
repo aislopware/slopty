@@ -147,7 +147,7 @@ impl ThreadView {
 
     /// In the composer's place while the agent's own TUI holds the session: where it is, and
     /// the way to take it back once it rests.
-    fn held_strip(&self, cx: &Context<Self>) -> AnyElement {
+    fn held_strip(&self, capped: bool, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let name = self.state(cx).map_or("the agent", |st| agent_name(&st.meta.agent));
@@ -162,7 +162,7 @@ impl ThreadView {
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.sm))
-            .rounded(self.z(theme.radii.lg))
+            .map(|el| self.card_corners(el, capped))
             .border_1()
             .border_color(hsla(s.border))
             .bg(hsla(s.elevated))
@@ -495,10 +495,18 @@ impl ThreadView {
         crate::a11y::tab_stop(el, s.accent).into_any_element()
     }
 
+    /// The composer card's corners: all round, or with the tray as its head only the foot's.
+    fn card_corners<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
+        let r = self.z(self.theme.radii.lg);
+        if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) }
+    }
+
     /// The composer card. While the agent's own TUI holds the session, where it is instead.
-    pub(super) fn composer_box(&self, cx: &Context<Self>) -> AnyElement {
+    /// `capped`: the tray stands on it as its head, so its top corners are square and its top
+    /// edge is the hairline between the two.
+    pub(super) fn composer_box(&self, capped: bool, cx: &Context<Self>) -> AnyElement {
         if self.tui_holds(cx) == Some(true) {
-            return self.held_strip(cx);
+            return self.held_strip(capped, cx);
         }
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -510,7 +518,7 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(self.z(theme.radii.lg))
+            .map(|el| self.card_corners(el, capped))
             .border_1()
             .border_color(hsla(s.border))
             .bg(hsla(s.elevated))

@@ -30,6 +30,9 @@ use crate::conversation::thread::rows::Row;
 use crate::icons::IconName;
 use crate::kit::{self, ButtonKind};
 
+/// The widest an answer's reach is drawn on its button, in ems of its text.
+const SCOPE_EMS: f32 = 14.0;
+
 /// What a frame drew from the list's scroll, to know when a scroll changes it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(super) struct Marks {
@@ -223,7 +226,10 @@ impl ThreadView {
                         .child(section)
                 }))
         });
-        let radius = self.z(theme.radii.md);
+        // Over the composer the tray is the card's head: as wide, its corners the composer's,
+        // and the composer's top edge the hairline between them, so one outline holds both and
+        // no row reads as cut by the composer. Alone, it is a card of its own.
+        let radius = self.z(if tucked { theme.radii.lg } else { theme.radii.md });
         Some(
             div()
                 .id("thread-activity")
@@ -237,11 +243,11 @@ impl ThreadView {
                 .border_t_1()
                 .border_l_1()
                 .border_r_1()
-                // A sheet tucked behind the composer: inset by the composer's corner, so its
-                // square foot meets the composer's straight top edge.
-                .when(tucked, |el| el.mx(self.z(theme.radii.lg)))
                 .when(!tucked, |el| {
-                    el.border_b_1().rounded_bl(radius).rounded_br(radius).mb(self.z(theme.spacing.xs))
+                    el.border_b_1()
+                        .rounded_bl(radius)
+                        .rounded_br(radius)
+                        .mb(self.z(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
                 .bg(hsla(s.raised))
@@ -312,6 +318,13 @@ impl ThreadView {
     /// where it has one in a terminal; a request that offers nothing here (a secret Codex
     /// keeps to its own terminal) makes that way its one solid.
     pub(super) fn answer_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
+        let mut answers = self.choice_buttons(request, cx);
+        answers.extend(self.release_button(request, cx));
+        answers
+    }
+
+    /// The answers `request` offers here, as buttons.
+    fn choice_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
         let ask = request.id.clone();
         let mut answers: Vec<AnyElement> = Vec::new();
         for (choice, kind) in request.options.iter().zip(answer_kinds(&request.options)) {
@@ -319,7 +332,7 @@ impl ThreadView {
             answers.push(
                 self.answer_button(
                     format!("answer-{}-{}", ask.0, choice.id),
-                    answer_label(choice),
+                    (choice.label.clone(), answer_scope(choice).map(str::to_owned)),
                     kind,
                     answer_mark(choice, kind, &self.theme),
                 )
@@ -329,33 +342,40 @@ impl ThreadView {
                 .into_any_element(),
             );
         }
-        // Only an agent whose own prompt runs in a terminal can take the request back there.
-        if self.state(cx).is_some_and(|st| st.meta.terminal.is_some()) {
-            let only_way = request.options.is_empty() && request.questions.is_empty();
-            let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
-            let release = ask;
-            answers.push(
-                self.answer_button(
-                    format!("release-{}", release.0),
-                    "Answer in the terminal".to_owned(),
-                    kind,
-                    Some((IconName::SquareTerminal, None)),
-                )
-                .on_click(cx.listener(move |this, _ev, _w, cx| {
-                    let _id = this.intent(Intent::Release { ask: release.clone() }, cx);
-                }))
-                .into_any_element(),
-            );
-        }
         answers
     }
 
+    /// The way back to the agent's own prompt: only an agent whose prompt runs in a terminal
+    /// can take the request back there. Its one solid when nothing else answers it here.
+    fn release_button(&self, request: &Request, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.state(cx).is_none_or(|st| st.meta.terminal.is_none()) {
+            return None;
+        }
+        let only_way = request.options.is_empty() && request.questions.is_empty();
+        let kind = if only_way { ButtonKind::Primary } else { ButtonKind::Ghost };
+        let release = request.id.clone();
+        Some(
+            self.answer_button(
+                format!("release-{}", release.0),
+                ("Answer in the terminal".to_owned(), None),
+                kind,
+                Some((IconName::SquareTerminal, None)),
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                let _id = this.intent(Intent::Release { ask: release.clone() }, cx);
+            }))
+            .into_any_element(),
+        )
+    }
+
     /// A button of a request's: its small mark (in its tone, or the button's own), then its
-    /// words.
+    /// words, then how far it reaches, muted. A rule can be long ("cargo test -p atlas-api
+    /// refresh"): it gives way to an ellipsis at [`SCOPE_EMS`], so the answers keep one row and
+    /// the button's hint and a screen reader still say all of it.
     fn answer_button(
         &self,
         id: String,
-        label: String,
+        (words, scope): (String, Option<String>),
         kind: ButtonKind,
         mark: Option<(IconName, Option<Rgb>)>,
     ) -> gpui::Stateful<Div> {
@@ -375,11 +395,23 @@ impl ThreadView {
             )
             .size(self.z(theme.typography.small()))
         });
-        self.button_frame(id, label.clone(), kind)
+        let label = answer_label(&words, scope.as_deref());
+        let scope = scope.map(|scope| {
+            div()
+                .min_w_0()
+                .max_w(self.z(theme.typography.small() * SCOPE_EMS))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_color(hsla(s.text_muted))
+                .child(SharedString::from(scope))
+        });
+        self.button_frame(id, label, kind)
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.sm))
             .children(mark)
-            .child(SharedString::from(label))
+            .child(div().flex_none().child(SharedString::from(words)))
+            .children(scope)
     }
 
     /// The request on show, in the tray: what it asks, its answers under a hairline, "2 of 5"
@@ -396,7 +428,8 @@ impl ThreadView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let answers = self.answer_buttons(request, cx);
+        let (choices, release) =
+            (self.choice_buttons(request, cx), self.release_button(request, cx));
         let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
         let (title, counter) = match asking {
             Some(asking) => {
@@ -460,13 +493,22 @@ impl ThreadView {
                 )
         });
         let id = request.id.0.clone();
-        let body = match asking {
-            Some(asking) => div()
-                .px(self.z(theme.spacing.md))
-                .pb(self.z(theme.spacing.md))
-                .child(asking.questions().element(theme, answers))
-                .into_any_element(),
-            None => self.answers_row(answers).into_any_element(),
+        // The way back to the agent's own prompt stands on the title's line, apart from the
+        // answers: it is not one of them, and a row of five wrapped. A request with nothing to
+        // answer here has only that line. A questionnaire keeps its buttons together.
+        let (inline, body) = match asking {
+            Some(asking) => {
+                let mut answers = choices;
+                answers.extend(release);
+                let body = div()
+                    .px(self.z(theme.spacing.md))
+                    .pb(self.z(theme.spacing.md))
+                    .child(asking.questions().element(theme, answers))
+                    .into_any_element();
+                (None, Some(body))
+            }
+            None if choices.is_empty() => (release, None),
+            None => (release, Some(self.answers_row(choices).into_any_element())),
         };
         div()
             .id(ElementId::Name(format!("request-{id}").into()))
@@ -500,7 +542,8 @@ impl ThreadView {
                             .child(SharedString::from(c))
                     }))
                     .children(back)
-                    .children(stepper),
+                    .children(stepper)
+                    .children(inline),
             )
             .children(text.map(|t| {
                 let el = div()
@@ -520,7 +563,7 @@ impl ThreadView {
                 }
                 .child(SharedString::from(tail(&t, PEEK_LINES)))
             }))
-            .child(body)
+            .children(body)
             .into_any_element()
     }
 
@@ -870,13 +913,18 @@ fn answer_kinds(options: &[Choice]) -> Vec<ButtonKind> {
 
 /// An answer's words on its button, with how far it reaches when its words do not say it
 /// already: "Always allow · Bash(cargo test:*)", but "Always allow" for an `always` scope.
-fn answer_label(choice: &Choice) -> String {
-    match choice.scope.as_deref().map(str::trim).filter(|scope| !scope.is_empty()) {
-        Some(scope) if !choice.label.to_lowercase().contains(&scope.to_lowercase()) => {
-            format!("{} \u{b7} {scope}", choice.label)
-        }
-        _ => choice.label.clone(),
-    }
+fn answer_label(words: &str, scope: Option<&str>) -> String {
+    scope.map_or_else(|| words.to_owned(), |scope| format!("{words} \u{b7} {scope}"))
+}
+
+/// How far an answer reaches, when its words do not say it already ([`answer_label`]).
+fn answer_scope(choice: &Choice) -> Option<&str> {
+    choice
+        .scope
+        .as_deref()
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .filter(|scope| !choice.label.to_lowercase().contains(&scope.to_lowercase()))
 }
 
 /// An answer's small mark: a check for a yes and a cross for a no, in their tones on a quiet
@@ -899,7 +947,7 @@ fn answer_mark(
 mod tests {
     use slopty_proto::thread::{Choice, Effect};
 
-    use super::{answer_kinds, answer_label};
+    use super::{answer_kinds, answer_label, answer_scope};
     use crate::kit::ButtonKind;
 
     /// An answer that reaches beyond this once says how far, unless its words already do.
@@ -912,12 +960,13 @@ mod tests {
             scope: scope.map(str::to_owned),
             stops: false,
         };
-        assert_eq!(answer_label(&choice("Allow", None)), "Allow");
+        let said = |c: Choice| answer_label(&c.label, answer_scope(&c));
+        assert_eq!(said(choice("Allow", None)), "Allow");
         assert_eq!(
-            answer_label(&choice("Always allow", Some("Bash(cargo test:*)"))),
+            said(choice("Always allow", Some("Bash(cargo test:*)"))),
             "Always allow \u{b7} Bash(cargo test:*)"
         );
-        assert_eq!(answer_label(&choice("Always Allow", Some("always"))), "Always Allow");
+        assert_eq!(said(choice("Always Allow", Some("always"))), "Always Allow");
     }
 
     /// An ACP agent may offer "always" first: the plain allow still leads as the one solid,

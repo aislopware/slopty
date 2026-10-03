@@ -205,6 +205,9 @@ pub fn rows() -> &'static [Row] {
 }
 
 /// `fields` as rows: those [`LAYOUT`] names in its order, then the rest on their [`home`] page.
+/// A key the layout does not name joins the group its table's title names, after that group's
+/// own keys, so a page never heads two groups alike; one whose title names no group there
+/// closes its page.
 fn rows_of(fields: &'static [Field]) -> Vec<Row> {
     let named = |name: &str| fields.iter().find(|f| format!("{}.{}", f.table, f.key) == name);
     let placed = |f: &Field| {
@@ -213,19 +216,25 @@ fn rows_of(fields: &'static [Field]) -> Vec<Row> {
     };
     let mut rows = Vec::with_capacity(fields.len());
     for section in Section::ALL {
-        for &(_, group, keys) in LAYOUT.iter().filter(|(s, ..)| *s == section) {
+        let groups: Vec<(&'static str, &[&str])> =
+            LAYOUT.iter().filter(|(s, ..)| *s == section).map(|&(_, g, keys)| (g, keys)).collect();
+        let unplaced = || fields.iter().filter(|f| !placed(f) && home(&f.table) == section);
+        for &(group, keys) in &groups {
             rows.extend(keys.iter().filter_map(|k| named(k)).map(|field| Row {
+                field,
+                section,
+                group,
+            }));
+            rows.extend(unplaced().filter(|f| f.table_title == group).map(|field| Row {
                 field,
                 section,
                 group,
             }));
         }
         rows.extend(
-            fields.iter().filter(|f| !placed(f) && home(&f.table) == section).map(|field| Row {
-                field,
-                section,
-                group: &field.table_title,
-            }),
+            unplaced()
+                .filter(|f| groups.iter().all(|(g, _)| f.table_title != *g))
+                .map(|field| Row { field, section, group: &field.table_title }),
         );
     }
     rows
@@ -573,7 +582,21 @@ mod tests {
         let rows = rows_of(Box::leak(fields.into_boxed_slice()));
         let row = rows.iter().find(|r| r.key() == "sound_on_connect").expect("its row");
         assert_eq!((row.section, row.group), (Section::Streams, "Remote windows and desktops"));
-        let last = rows.iter().rposition(|r| r.section == Section::Streams);
-        assert_eq!(last.and_then(|at| rows.get(at)).map(Row::key), Some("sound_on_connect"));
+        let last = rows.iter().rposition(|r| r.group == row.group);
+        let last = last.and_then(|at| rows.get(at)).map(Row::key);
+        assert_eq!(last, Some("sound_on_connect"), "last in its group, after the group's own keys");
+        let heads: Vec<(Section, &str)> = rows
+            .iter()
+            .enumerate()
+            .filter(|(ix, r)| {
+                ix.checked_sub(1).and_then(|p| rows.get(p)).is_none_or(|p| p.group != r.group)
+            })
+            .map(|(_, r)| (r.section, r.group))
+            .collect();
+        let mut once = heads.clone();
+        once.dedup();
+        once.sort_unstable_by_key(|(s, g)| (s.index(), *g));
+        once.dedup();
+        assert_eq!(once.len(), heads.len(), "no page heads two groups alike: {heads:?}");
     }
 }

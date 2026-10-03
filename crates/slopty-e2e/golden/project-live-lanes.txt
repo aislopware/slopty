@@ -59,7 +59,6 @@ Heading │ terminal #1 Read a pull request's checks
 Image │ Working
 Link │ Pull request 42, changes requested
 Label │ Worktree slopty-board-1 on worktree-slopty-board-1
-Status │ Read the checks with gh
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

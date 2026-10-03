@@ -5146,3 +5146,43 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     palette line after the session ended, a new shell in `/w/src`, the twenty-first closing
     ending the oldest's session); `a_closed_shell_can_be_taken_back` (an idle shell runs on
     past its notice, then is closed); `tiles::an_exited_shell_stays_until_it_is_closed`.
+
+- ✅ **A thread says each fact once, and the tray is the composer's head** (2026-10-03, design
+  review `.research/design-review-2026-10-03.md` #2, #3, #5, #6).
+  - **The composer holds the thread's changes and context.** An agent tile whose body is the
+    thread view drew the old conversation face's chips in its header: its changed lines
+    (`+24 −6`, a count the thread's own `+15 −6` in the composer contradicted) and the context
+    ring. Neither click did anything, since only the old face draws their panes. Over a thread
+    view the header now carries neither. The composer's context row says the changes, a click
+    from the review, and its meter says the context, with the plan's windows in its hint.
+    Over the old face, or a phone's header, nothing changed.
+  - **A working agent wears no pill.** The header said "working" twice: the leading slot's
+    spinner, then a grey "Working" pill (beside a ring that read as a third). A pill now says
+    only what the mark cannot (`agents::wears_pill`): that the agent needs the person, failed or
+    is out of reach, or what a turn paused on background work waits on ("Waiting on cargo
+    test"). Working, at rest and finished are the slot's mark alone, as rest already was.
+  - **The tray is the composer card's head.** It was a sheet tucked behind the composer, inset
+    by the composer's radius and with no foot of its own, so the composer's rounded top
+    seemed to cut its last row ("Edits · … Review"). Now it is as wide as the composer, with
+    the composer's radius on its top corners and the composer's top corners square under it.
+    The composer's top edge is the hairline between them, so one outline holds both. With no
+    composer (a subagent's thread), the tray is a card of its own, as before.
+  - **An answer's reach gives way.** "Always allow · cargo test -p atlas-api refresh" pushed
+    the last answer onto a second line. The reach is now muted and cut with an ellipsis at 14
+    ems (`SCOPE_EMS`), so the answers keep one row. The button's label still says all of it.
+  - **A settings page never heads two groups alike.** A key the layout does not name now joins
+    the group its table's title names, after that group's own keys. Before, it was appended
+    at the page's end under a second heading with the same name (`remote.sharp_text` under a
+    second "Remote windows and desktops"). Test: `a_row_comes_from_the_schema`.
+  - **The way to the terminal stands on the request's title line.** "Answer in the terminal" is
+    not an answer. In the row of answers it made five buttons, and they wrapped. It now sits at
+    the right of the request's title, and a request with nothing to answer here is that one
+    line. A questionnaire keeps its buttons together.
+  - **The context ring is closed.** Its track was the hairline and all but vanished, so the arc
+    beside the stop button read as a spinner. The whole track is now the muted ink at a tint
+    (`alpha::TINT`), so the ring reads as a gauge.
+  - Goldens retaken: `thread`, `thread-dark`, `thread-attachment`, `thread-phone`,
+    `thread-questions`, `thread-settled`, `thread-subagent` (.txt), `thread-work`,
+    `thread-work-open`, `inbox`, `inbox-dark`, `agent-needs-you`,
+    `agent-needs-you-navigator`, `project-live-lanes` and `project-live-tree` (.txt: the
+    working pill gone).

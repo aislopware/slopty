@@ -15,8 +15,6 @@ Button │ More
 Group │ Do these steps in order, using the named tools,…
 Heading │ terminal Do these steps in order, using the named tools,…
 Label │ ~
-Button │ Changes: 2 lines added, 0 removed
-Button │ Context 34% used
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile

@@ -15,7 +15,6 @@ Button │ More
 Group │ The header clips its chips on a narrow window,…
 Heading │ terminal The header clips its chips on a narrow window,…
 Label │ ~
-Button │ Context 34% used
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
