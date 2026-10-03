@@ -1,8 +1,8 @@
 Window │ Slopty (focused)
 Label │ Slopty
-Heading │ Use this Mac as a worker
-List │ Use this Mac as a worker
-ListItem │ Worker running
+Heading │ Use this Mac
+List │ Use this Mac
+ListItem │ Running
 Image │ Done
 ListItem │ Screen Recording
 Image │ Needs you

@@ -2,7 +2,7 @@ Window │ Slopty
 Label │ Slopty
 Heading │ Connect to a server
 Status │ Nothing answered on your tailnet
-Button │ Use this Mac as a worker
+Button │ Use this Mac
 TextInput │ Server address (focused)
 Button │ Connect
-Button │ Add a worker by address instead
+Button │ Add a machine by address instead

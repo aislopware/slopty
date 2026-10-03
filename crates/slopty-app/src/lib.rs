@@ -63,8 +63,8 @@ use slopty_ui::workspace::{
     Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
     WorkspaceEvent, WorkspaceView,
 };
-pub use ssh::actions::InstallOverSsh;
-pub use this_mac::actions::UseThisMac;
+pub use ssh::actions::{InstallOverSsh, RegisterWithServer, UpdateAllWorkers, UpdateServer};
+pub use this_mac::actions::{RestartThisMacWorker, UseThisMac};
 pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
 pub use window::{HELP_URL, show as show_main_window};
 pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant, DisconnectServer};
@@ -257,7 +257,7 @@ impl Panel {
     const fn field(self) -> &'static str {
         match self {
             Self::Server => "Server address",
-            Self::Worker => "Worker address",
+            Self::Worker => "Machine address",
         }
     }
 
@@ -287,7 +287,7 @@ struct Adding {
     /// Where the look on the tailnet stands; `None` where none is made (iOS, where no app can
     /// read Tailscale, and a server's panel while a server is set).
     search: Option<Search>,
-    /// "Use this Mac as a worker" under way: its checklist stands in for the address.
+    /// "Use this Mac" under way: its checklist stands in for the address.
     this_mac: Option<this_mac::Flow>,
     /// "Install on a machine over SSH": its form, then its steps, stand in for the address.
     ssh: Option<ssh::Sheet>,
@@ -311,18 +311,40 @@ enum Host {
     Worker,
 }
 
-/// A node that answered on the tailnet, by name and tailnet IP.
+/// A node that answered on the tailnet, by name and tailnet IP, and what it said.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Offer {
     /// Its `MagicDNS` name.
     name: String,
     /// Its tailnet IP, which the panel dials.
     at: String,
+    /// Its tailnet tags, which a grant for it names.
+    tags: Vec<String>,
+    /// What it answered: ready, on another build, or turning this device away.
+    answer: slopty_net::discover::Answer,
 }
 
 impl From<slopty_net::discover::Found> for Offer {
     fn from(found: slopty_net::discover::Found) -> Self {
-        Self { name: found.name, at: found.addr.ip().to_string() }
+        Self {
+            name: found.name,
+            at: found.addr.ip().to_string(),
+            tags: found.tags,
+            answer: found.answer.unwrap_or(slopty_net::discover::Answer::Ready),
+        }
+    }
+}
+
+impl Offer {
+    /// The grant that lets this device in as a client of it: by its tags when it has any, else
+    /// by its address.
+    fn grant(&self) -> String {
+        let dst: Vec<&str> = if self.tags.is_empty() {
+            vec![self.at.as_str()]
+        } else {
+            self.tags.iter().map(String::as_str).collect()
+        };
+        server::grant_to(&dst)
     }
 }
 
@@ -372,9 +394,7 @@ impl Search {
             (Self::Answered { .. }, Panel::Server) => {
                 Some("Start the Slopty server on a machine there.")
             }
-            (Self::Answered { .. }, Panel::Worker) => {
-                Some("Start the Slopty worker on a Mac or Linux machine there.")
-            }
+            (Self::Answered { .. }, Panel::Worker) => Some("Install Slopty on a machine there."),
         }
     }
 }
@@ -421,6 +441,10 @@ pub struct Workspace {
     theme: Theme,
     /// The user's `settings.toml` as last loaded (defaults when absent or broken).
     settings: Settings,
+    /// The server the offer to register earlier machines with was made for, once a server.
+    register_offered: Option<slopty_net::HostAddr>,
+    /// A file has been read since launch, so a change can be told from the first read.
+    settings_read: bool,
     /// The window's appearance is dark (`theme.appearance = "system"` follows it).
     window_dark: bool,
     /// The workspace view's events and changes, heard for as long as the app runs.
@@ -461,7 +485,7 @@ pub struct Workspace {
     split_view: Option<gpui::Size<gpui::Pixels>>,
     /// Where the key row is scrolled to.
     key_bar_scroll: ScrollHandle,
-    /// What "Use this Mac as a worker" does to this machine; `None` where it is not offered.
+    /// What "Use this Mac" does to this machine; `None` where it is not offered.
     this_mac: Option<Rc<dyn this_mac::Host>>,
     /// Runs of it so far, so an answer for one left behind is dropped.
     this_mac_runs: u64,
@@ -471,6 +495,10 @@ pub struct Workspace {
     ssh_runs: u64,
     /// Updates from the tiles of a worker on a different build, by host.
     updates: ssh::Updating,
+    /// This Mac's workers brought to this build unasked this launch: once each.
+    updated_unasked: std::collections::HashSet<WorkerId>,
+    /// The server being brought to this build ([`Workspace::update_server`]).
+    server_update: Option<gpui::Task<()>>,
     /// What reaches the system's notifications while the app is not in front.
     attention: Attention,
     /// The terminals whose finished commands [`Self::attention`] hears and whose progress the
@@ -574,6 +602,8 @@ impl Workspace {
             reduce_motion: slopty_platform::reduce_motion(),
             theme: Theme::default(),
             settings: Settings::default(),
+            settings_read: false,
+            register_offered: None,
             window_dark: true,
             subscriptions: vec![events, changes],
             window_subscriptions: Vec::new(),
@@ -596,6 +626,8 @@ impl Workspace {
             deployer,
             ssh_runs: 0,
             updates: ssh::Updating::new(),
+            updated_unasked: std::collections::HashSet::new(),
+            server_update: None,
             attention: Attention::new(Rc::new(slopty_platform::notify::Memory::default())),
             heard_terminals: std::collections::HashMap::new(),
             dock_progress: None,
@@ -607,6 +639,7 @@ impl Workspace {
             paste_key: None,
         };
         this.publish_updates(cx);
+        this.repoint_this_mac(cx);
         Self::watch_presence(cx);
         this
     }
@@ -714,6 +747,7 @@ impl Workspace {
         let editor = cx.new(|cx| {
             SettingsEditor::new(&text, &path, cfg!(target_os = "macos"), theme, window, cx)
         });
+        editor.update(cx, |e, cx| e.set_palette_words(app_palette_items(), cx));
         self.settings_editor_events =
             Some(cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
                 SettingsEditorEvent::Apply(text) => {
@@ -834,7 +868,14 @@ impl Workspace {
         }
         let server = loaded.settings.client.server.clone();
         let sharing = loaded.settings.clipboard.clone();
+        let waits = if self.settings_read {
+            slopty_settings::schema::restart_keys(&self.settings, &loaded.settings, "worker")
+        } else {
+            Vec::new()
+        };
+        self.settings_read = true;
         self.settings = loaded.settings;
+        self.tell_worker_waits(&waits, cx);
         self.view.update(cx, |v, cx| v.set_clipboard_sharing(sharing, cx));
         self.rebuild_theme(cx);
         self.apply_keymap(keymap, cx);
@@ -893,6 +934,41 @@ impl Workspace {
     }
 
     /// A word for the human, as a toast over the workspace.
+    /// Keys this Mac's worker reads only at its start changed: when a worker answers here,
+    /// say which wait for it and how to start it again.
+    fn tell_worker_waits(&self, keys: &[String], cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone().filter(|_| !keys.is_empty()) else { return };
+        let said = worker_waits(keys);
+        let doctor = host.doctor();
+        cx.spawn(async move |this, cx| {
+            if doctor.await.is_some() {
+                let _gone = this.update(cx, |ws, cx| ws.show_notice(said, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Start this Mac's worker again (the palette's line), and say when it answers.
+    fn restart_this_mac_worker(&self, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        cx.spawn(async move |this, cx| {
+            let answered = match host.doctor().await {
+                Some(_) => {
+                    host.restart().await;
+                    host.doctor().await.is_some()
+                }
+                None => false,
+            };
+            let said = if answered {
+                "slopty-worker started again on this Mac"
+            } else {
+                "slopty-worker does not run on this Mac. Use this Mac to set it up."
+            };
+            let _gone = this.update(cx, |ws, cx| ws.show_notice(said.to_owned(), cx));
+        })
+        .detach();
+    }
+
     fn show_notice(&self, text: String, cx: &mut Context<Self>) {
         self.view.update(cx, |v, cx| v.show_notice(text, cx));
     }
@@ -933,7 +1009,7 @@ impl Workspace {
     /// left the panel returns.
     fn forget_worker(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = net::forget_worker(id) {
-            self.show_notice(format!("Could not forget the worker: {e:#}"), cx);
+            self.show_notice(format!("Could not forget the machine: {e:#}"), cx);
             return;
         }
         if self.directory.get(id).is_some() {
@@ -1042,7 +1118,7 @@ impl Workspace {
         }
         entries.push(MenuEntry {
             group: MenuGroup::Connections,
-            label: "Add a worker".into(),
+            label: "Add a machine\u{2026}".into(),
             detail: hint(&AddWorker).into(),
             run: Rc::new(move |window, cx| {
                 let _gone = this.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
@@ -1162,8 +1238,8 @@ impl Workspace {
                     Err(failed) => {
                         let wrong_build = matches!(failed, net::DialFailed::WrongBuild(_));
                         let Ok(status) = this.update(cx, |ws, cx| {
-                            if wrong_build {
-                                ws.update_still_wrong(id, cx);
+                            if let net::DialFailed::WrongBuild(notice) = &failed {
+                                ws.heard_other_build(id, notice, cx);
                             }
                             ws.failure_status(id, failed)
                         }) else {
@@ -1442,9 +1518,12 @@ impl Workspace {
             .filter(|w| !listed.contains(&w.addr.ip()))
             .map(Offer::from)
             .collect();
+        let ready = |offers: &[Offer]| -> Option<usize> {
+            offers.iter().position(|o| o.answer == slopty_net::discover::Answer::Ready)
+        };
         let best = match adding.mode {
-            Panel::Server => servers.first(),
-            Panel::Worker => workers.first(),
+            Panel::Server => ready(&servers).and_then(|i| servers.get(i)),
+            Panel::Worker => ready(&workers).and_then(|i| workers.get(i)),
         };
         let empty = adding.address.read(cx).value().trim().is_empty();
         if let Some(best) = best.filter(|_| empty && !adding.busy) {
@@ -1453,6 +1532,31 @@ impl Workspace {
         }
         adding.search = Some(Search::Answered { servers, workers, running: found.running });
         cx.notify();
+    }
+
+    /// What pressing a node the tailnet found does, by what it answered: one that turns this
+    /// device away puts the grant that lets it in on the clipboard; a server on another build
+    /// opens the server's SSH sheet on it, to put this build there; anything else is connected
+    /// to or added ([`Self::connect_found`]), where a worker on another build goes on to its
+    /// own sheet.
+    fn press_found(
+        &mut self,
+        host: Host,
+        offer: &Offer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use slopty_net::discover::Answer;
+        match (&offer.answer, host) {
+            (Answer::NotGranted, _) => self.copy_grant_text(offer.grant(), cx),
+            (Answer::OtherBuild(_), Host::Server) => {
+                self.show_add_worker(Panel::Server, window, cx);
+                self.open_ssh_at(&offer.name, window, cx);
+            }
+            (Answer::Ready | Answer::OtherBuild(_), _) => {
+                self.connect_found(host, &offer.at, window, cx);
+            }
+        }
     }
 
     /// Connect to a server the tailnet found, or add a worker it found, at `at`: a worker turns
@@ -1599,10 +1703,21 @@ impl Workspace {
         .detach();
     }
 
-    /// "Use this Mac as a worker", from the panel, the palette or a failed line's "Try again":
+    /// "Use this Mac", from the panel, the palette or a failed line's "Try again":
     /// install the worker's services, then read its `doctor` as the panel's checklist. A run
     /// already installing or adding is left to finish.
     fn use_this_mac(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.install_this_mac(false, window, cx);
+    }
+
+    /// [`Self::use_this_mac`], going on where it ends sessions when `end_sessions`: the
+    /// person's "Update anyway" after the last try said so.
+    fn install_this_mac(
+        &mut self,
+        end_sessions: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(host) = self.this_mac.clone() else { return };
         if self.adding.is_none() {
             self.show_add_worker(Panel::Worker, window, cx);
@@ -1619,7 +1734,7 @@ impl Workspace {
         let run = self.this_mac_runs;
         adding.ssh = None;
         adding.this_mac = Some(this_mac::Flow::installing(run));
-        let install = host.install();
+        let install = host.install(end_sessions);
         cx.spawn_in(window, async move |this, cx| {
             let outcome = install.await;
             let _gone = this
@@ -1646,7 +1761,7 @@ impl Workspace {
     fn this_mac_installed(
         &mut self,
         run: u64,
-        outcome: Result<(), String>,
+        outcome: Result<(), this_mac::Stopped>,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
@@ -1656,7 +1771,11 @@ impl Workspace {
                 flow.worker = this_mac::Worker::Starting;
                 self.read_this_mac(run, false, window, cx);
             }
-            Err(why) => flow.worker = this_mac::Worker::Failed(why),
+            Err(this_mac::Stopped::Failed(why)) => flow.worker = this_mac::Worker::Failed(why),
+            Err(this_mac::Stopped::EndsSessions(plan)) => {
+                flow.worker = this_mac::Worker::EndsSessions(plan);
+            }
+            Err(this_mac::Stopped::Misplaced) => flow.worker = this_mac::Worker::Misplaced,
         }
         cx.notify();
     }
@@ -1767,7 +1886,58 @@ impl Workspace {
                 }
             }
             this_mac::Fix::Retry => self.use_this_mac(window, cx),
+            this_mac::Fix::EndSessions => self.install_this_mac(true, window, cx),
+            this_mac::Fix::MoveToApplications => self.move_to_applications(window, cx),
         }
+    }
+
+    /// Copy Slopty into Applications and open it from there, this copy quitting: the checklist
+    /// goes on in the new one.
+    fn move_to_applications(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let Some(run) = self.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.run)
+        else {
+            return;
+        };
+        if let Some(flow) = self.this_mac_flow(run) {
+            flow.worker = this_mac::Worker::Installing;
+        }
+        let moved = host.move_to_applications();
+        cx.spawn_in(window, async move |this, cx| {
+            let moved = moved.await;
+            let _gone = this.update(cx, |ws, cx| match moved {
+                Ok(to) => {
+                    tracing::info!(to = %to.display(), "moved to Applications; opening it there");
+                    cx.set_restart_path(to);
+                    cx.restart();
+                }
+                Err(why) => {
+                    if let Some(flow) = ws.this_mac_flow(run) {
+                        flow.worker =
+                            this_mac::Worker::Failed(format!("Could not move Slopty: {why}"));
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// At launch: this Mac's worker services run a copy of Slopty that is gone (it was moved,
+    /// or ran from a download a restart took away), so they are pointed at this one.
+    fn repoint_this_mac(&self, cx: &Context<Self>) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let repointed = host.repoint();
+        cx.spawn(async move |this, cx| {
+            let Some(done) = repointed.await else { return };
+            let said = match done {
+                Ok(()) => "This Mac shares from this copy of Slopty now".to_owned(),
+                Err(why) => why,
+            };
+            let _gone = this.update(cx, |ws, cx| ws.show_notice(said, cx));
+        })
+        .detach();
     }
 
     /// The app is in front again, perhaps from System Settings: a worker short of ready is
@@ -1818,7 +1988,7 @@ impl Workspace {
 
     /// The way in: the app's name, a heading and a line on what it is, what the tailnet
     /// answered as a list to press, the address with its one primary action, and the other ways
-    /// in as quiet links: the other panel, and on a Mac "Use this Mac as a worker", whose
+    /// in as quiet links: the other panel, and on a Mac "Use this Mac", whose
     /// checklist then stands in for the list and the address.
     ///
     /// On the first run it is the page, a third of the way down the content surface over a foot
@@ -1842,14 +2012,14 @@ impl Workspace {
         let (title, blurb, go, other, other_mode) = match adding.mode {
             Panel::Server => (
                 "Connect to a server",
-                "A server on your tailnet or VPN lists your workers.",
+                "A server on your tailnet or VPN lists your machines.",
                 "Connect",
-                "Add a worker by address instead",
+                "Add a machine by address instead",
                 Panel::Worker,
             ),
             Panel::Worker => (
-                "Add a worker",
-                "A Mac or Linux worker on your tailnet or VPN.",
+                "Add a machine",
+                "A Mac or Linux machine on your tailnet or VPN.",
                 "Add",
                 "Connect to a server instead",
                 Panel::Server,
@@ -1861,7 +2031,7 @@ impl Workspace {
         // to the panel they came from, named as that panel's own link names it.
         let back = match adding.mode {
             Panel::Server => "Connect to a server instead",
-            Panel::Worker => "Add a worker by address instead",
+            Panel::Worker => "Add a machine by address instead",
         };
         let (title, blurb, other) = match (flow, sheet) {
             (Some(_), _) => (this_mac::TITLE, this_mac::BLURB, back),
@@ -2187,9 +2357,9 @@ impl Workspace {
             return section.child(line).into_any_element();
         }
         let rows = search.offers(mode).into_iter().enumerate().map(|(ix, (host, offer))| {
-            let target = offer.at.clone();
+            let pressed = offer.clone();
             found_row(theme, ix, host, offer).on_click(cx.listener(move |this, _ev, window, cx| {
-                this.connect_found(host, &target, window, cx);
+                this.press_found(host, &pressed, window, cx);
             }))
         });
         // The rows' radius plus the pad round them, so the corners nest.
@@ -2763,6 +2933,9 @@ impl Render for Workspace {
             self.told = shown;
             self.view.update(cx, |v, cx| v.set_key_bar_shown(shown, cx));
         }
+        if let Some(sheet) = self.adding.as_mut().and_then(|a| a.ssh.as_mut()) {
+            sheet.follow_secure(window, cx);
+        }
         let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
         let root = match self.split_view {
             Some(size) => div().w(size.width).h(size.height),
@@ -2785,8 +2958,18 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
                 this.use_this_mac(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &RestartThisMacWorker, _window, cx| {
+                this.restart_this_mac_worker(cx);
+            }))
             .on_action(cx.listener(|this, _: &InstallOverSsh, window, cx| {
                 this.open_ssh(window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &UpdateAllWorkers, _window, cx| this.update_all_workers(cx)),
+            )
+            .on_action(cx.listener(|this, _: &UpdateServer, _window, cx| this.update_server(cx)))
+            .on_action(cx.listener(|this, _: &RegisterWithServer, _window, cx| {
+                this.register_with_server(cx);
             }))
             .on_action(cx.listener(|this, _: &ShowWorkersInFinder, _window, cx| {
                 this.show_workers_in_finder(cx);
@@ -2973,11 +3156,22 @@ fn panel_label(theme: &Theme, selector: &'static str, text: &'static str) -> gpu
 /// A server or a worker the tailnet found, as a row to press, the palette's: its kind's glyph,
 /// its name over what it is and its address, and a chevron that says the press goes on.
 fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::Stateful<gpui::Div> {
+    use slopty_net::discover::Answer;
     use slopty_ui::icons::{IconName, IconSize, icon};
     let s = theme.surfaces;
     let (glyph, what, verb) = match host {
         Host::Server => (IconName::Server, "Server", "Connect to"),
-        Host::Worker => (IconName::Monitor, "Worker", "Add"),
+        Host::Worker => (IconName::Monitor, "Machine", "Add"),
+    };
+    // What it answered decides what the press does, and the row says that.
+    let (verb, said) = match &offer.answer {
+        Answer::Ready => (verb.to_owned(), offer.at.clone()),
+        Answer::NotGranted => {
+            ("Copy the tailnet grant for".to_owned(), "needs a tailnet grant".to_owned())
+        }
+        Answer::OtherBuild(_) => {
+            ("Install this build on".to_owned(), "runs a different build".to_owned())
+        }
     };
     let glyph_size = px(theme.typography.icon());
     let row = kit::row(theme, kit::Row::Two)
@@ -2985,6 +3179,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
         .debug_selector(move || format!("add-worker-found-{ix}"))
         .role(Role::Button)
         .aria_label(SharedString::from(format!("{verb} {}", offer.name)))
+        .aria_description(SharedString::from(format!("{what}, {said}")))
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
         // On the list's `raised` step: the pointer washes a row one step up.
@@ -3008,7 +3203,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
                 )
                 .child(
                     kit::tabular(kit::meta(div(), theme))
-                        .child(SharedString::from(format!("{what} \u{b7} {}", offer.at))),
+                        .child(SharedString::from(format!("{what} \u{b7} {said}"))),
                 ),
         )
         .child(
@@ -3021,7 +3216,7 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
 /// The label over this Mac's row on the add panels.
 const THIS_MAC_LABEL: &str = "On this Mac";
 /// The label over this Mac's row and the SSH row together.
-const SET_UP_LABEL: &str = "Set up a worker";
+const SET_UP_LABEL: &str = "Set up a machine";
 /// The label over the server panel's rows: the server on this Mac, or over SSH.
 const SET_UP_SERVER_LABEL: &str = "Set up the server";
 
@@ -3077,6 +3272,31 @@ fn entry_row(
     tab_stop(row, s.accent)
 }
 
+/// What the toast says when `keys` (`table.key`) changed and this Mac's worker reads them
+/// only at its start: their titles, and the palette's way to start it.
+fn worker_waits(keys: &[String]) -> String {
+    let titles: Vec<&str> = keys
+        .iter()
+        .filter_map(|key| {
+            let (table, key) = key.split_once('.')?;
+            let field = slopty_settings::schema::fields()
+                .iter()
+                .find(|f| f.table == table && f.key == key)?;
+            Some(field.title.as_str())
+        })
+        .collect();
+    let what = match titles.as_slice() {
+        [] => "This change".to_owned(),
+        [one] => one.to_string(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+    };
+    let verb = if titles.len() > 1 { "take" } else { "takes" };
+    format!(
+        "{what} {verb} effect when slopty-worker restarts on this Mac. Run \u{201c}{}\u{201d} from the palette.",
+        this_mac::RESTART
+    )
+}
+
 /// The app's own commands, bound outside any view's context: its rows of the keymap's table
 /// (`[keys.app]`), which lives in `slopty_ui::keymap` beside the rest.
 fn app_commands() -> Vec<slopty_ui::keymap::Command> {
@@ -3087,9 +3307,13 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("connect_server", ConnectServer, &[]),
         app_command("disconnect_server", DisconnectServer, &[]),
         app_command("copy_tailnet_grant", CopyTailnetGrant, &[]),
+        app_command("update_all_workers", UpdateAllWorkers, &[]),
+        app_command("update_server", UpdateServer, &[]),
+        app_command("register_with_server", RegisterWithServer, &[]),
     ];
     if this_mac::OFFERED {
         commands.push(app_command("use_this_mac", UseThisMac, &[]));
+        commands.push(app_command("restart_this_mac_worker", RestartThisMacWorker, &[]));
     }
     if ssh::OFFERED {
         commands.push(app_command("install_over_ssh", InstallOverSsh, &[]));
@@ -3123,10 +3347,14 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
         item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
         item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
-        item("Add a worker", IconName::Plus, Box::new(AddWorker)),
+        item("Add a machine\u{2026}", IconName::Plus, Box::new(AddWorker)),
+        item(ssh::UPDATE_ALL, IconName::Download, Box::new(UpdateAllWorkers)),
+        item(server::UPDATE_SERVER, IconName::Download, Box::new(UpdateServer)),
+        item(ssh::REGISTER, IconName::Link, Box::new(RegisterWithServer)),
     ];
     if this_mac::OFFERED {
         items.push(item(this_mac::TITLE, IconName::Monitor, Box::new(UseThisMac)));
+        items.push(item(this_mac::RESTART, IconName::RotateCw, Box::new(RestartThisMacWorker)));
     }
     if ssh::OFFERED {
         items.push(item(ssh::TITLE, IconName::Terminal, Box::new(InstallOverSsh)));
@@ -3738,6 +3966,7 @@ mod tests {
             &self,
             _to: &ssh::Target,
             _server: Option<slopty_deploy::Server>,
+            _said: ssh::Said,
             _events: tokio::sync::mpsc::UnboundedSender<slopty_deploy::Event>,
         ) -> this_mac::Pending<Result<slopty_deploy::Deployed, slopty_deploy::Failure>> {
             panic!("this test deploys nothing")
@@ -3803,6 +4032,7 @@ mod tests {
             asked: std::cell::RefCell::default(),
             doctor: std::cell::RefCell::new(None),
             added: WorkerId::new(),
+            stops: std::cell::RefCell::default(),
         });
         ws.update(cx, |ws, _cx| {
             ws.deployer = Some(Rc::new(NoDeploys));
@@ -3998,6 +4228,29 @@ mod tests {
         assert!(only_shown.is_empty(), "painted with the old focus: {only_shown:#?}");
     }
 
+    /// The Keyboard page names the app's own commands as its palette does ("Update all
+    /// machines"), not by their names in the file.
+    #[gpui::test]
+    fn the_keyboard_page_names_the_app_s_commands_in_the_palette_s_words(cx: &mut TestAppContext) {
+        use slopty_ui::settings_form::schema::Section;
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.cancel_add_worker(window, cx)));
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_settings(window, cx)));
+        cx.run_until_parked();
+        let tab = format!("settings-section-{}", Section::Keyboard.index());
+        let at = cx.debug_bounds(Box::leak(tab.into_boxed_str())).expect("the Keyboard tab");
+        cx.simulate_click(at.center(), gpui::Modifiers::none());
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
+        let listed = |label: &str| tree.iter().any(|n| n.is("ListItem", Some(label)));
+        assert!(listed(ssh::UPDATE_ALL), "{tree:#?}");
+        assert!(listed(finder::TITLE) == finder::OFFERED, "{tree:#?}");
+        assert!(!listed("Update all workers"), "not its name in the file");
+    }
+
     /// Esc while an input method composes in the address field is the input method's: the
     /// panel stays. Once the word is committed, Esc closes it.
     #[gpui::test]
@@ -4077,6 +4330,8 @@ mod tests {
         let found = |name: &str, last: u8| slopty_net::discover::Found {
             name: name.to_owned(),
             addr: std::net::SocketAddr::from(([100, 64, 0, last], 7_000)),
+            tags: Vec::new(),
+            answer: Some(slopty_net::discover::Answer::Ready),
         };
         cx.update(|window, cx| {
             let servers = vec![found("home-server", 1), found("office-server", 2)];
@@ -4146,6 +4401,8 @@ mod tests {
         let found = |name: &str, last: u8| slopty_net::discover::Found {
             name: name.to_owned(),
             addr: std::net::SocketAddr::from(([100, 64, 0, last], 7_001)),
+            tags: Vec::new(),
+            answer: Some(slopty_net::discover::Answer::Ready),
         };
         let answer = |ws: &Entity<Workspace>, tailnet: net::Tailnet, cx: &mut VisualTestContext| {
             ws.update(cx, |ws, _cx| {
@@ -4224,6 +4481,71 @@ mod tests {
         assert_eq!(field(cx).as_deref(), Some("100.64.0.4"));
     }
 
+    /// A node that turned this device away, or answered on another build, is a row that says
+    /// so rather than nothing on the tailnet: the field takes the best node that is ready, a
+    /// refused one's press puts the grant for that node on the clipboard, by its tags or else its
+    /// address, and says where it goes.
+    #[gpui::test]
+    fn a_node_that_needs_a_grant_shows_and_copies_its_grant(cx: &mut TestAppContext) {
+        use slopty_net::discover::{Answer, Found};
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+        });
+        let found = |name: &str, last: u8, tags: &[&str], answer: Answer| Found {
+            name: name.to_owned(),
+            addr: std::net::SocketAddr::from(([100, 64, 0, last], 7_000)),
+            tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            answer: Some(answer),
+        };
+        let tailnet = net::Tailnet {
+            servers: vec![
+                found("hub", 1, &["tag:slopty-server"], Answer::NotGranted),
+                found("old-hub", 2, &[], Answer::OtherBuild("0.0.9+wire.0badf00d".to_owned())),
+                found("home", 3, &[], Answer::Ready),
+            ],
+            workers: vec![found("box", 4, &[], Answer::NotGranted)],
+            running: true,
+        };
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.offer_found(tailnet, window, cx)));
+        cx.run_until_parked();
+        let field = ws.read_with(cx, |ws, cx| {
+            ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
+        });
+        assert_eq!(field.as_deref(), Some("100.64.0.3"), "the field takes the one that is ready");
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let said = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
+        for (label, description) in [
+            ("Copy the tailnet grant for hub", "Server, needs a tailnet grant"),
+            ("Install this build on old-hub", "Server, runs a different build"),
+            ("Connect to home", "Server, 100.64.0.3"),
+            ("Copy the tailnet grant for box", "Machine, needs a tailnet grant"),
+        ] {
+            let node = said.iter().find(|n| n.label.as_deref() == Some(label));
+            let node = node.unwrap_or_else(|| panic!("no row {label:?} in {said:#?}"));
+            assert_eq!(node.description.as_deref(), Some(description), "{label}");
+        }
+
+        for (row, dst) in
+            [("add-worker-found-0", "tag:slopty-server"), ("add-worker-found-3", "100.64.0.4")]
+        {
+            let at = cx.debug_bounds(row).expect("the refused node's row");
+            cx.simulate_click(at.center(), gpui::Modifiers::none());
+            cx.run_until_parked();
+            let copied = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+            let grant: serde_json::Value = serde_json::from_str(&copied).unwrap();
+            assert_eq!(grant["dst"], serde_json::json!([dst]), "{row}");
+            assert_eq!(grant["app"][slopty_tailnet::policy::CAP][0]["roles"][0], "client");
+            let told = ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+            assert!(told.is_some_and(|t| t.contains("Access controls")), "where it goes");
+        }
+        let busy = ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.busy));
+        assert_eq!(busy, Some(false), "a refused node is not dialled");
+    }
+
     /// Over the workspace the panel is a dialog: Esc closes it, and so does a click outside
     /// it, while a click inside it does not.
     #[gpui::test]
@@ -4260,6 +4582,8 @@ mod tests {
         asked: std::cell::RefCell<Vec<String>>,
         doctor: std::cell::RefCell<Option<this_mac::Doctor>>,
         added: WorkerId,
+        /// What the next installs stop on, first first; an install with none left is done.
+        stops: std::cell::RefCell<std::collections::VecDeque<this_mac::Stopped>>,
     }
 
     impl StandIn {
@@ -4273,9 +4597,10 @@ mod tests {
     }
 
     impl this_mac::Host for StandIn {
-        fn install(&self) -> this_mac::Pending<Result<(), String>> {
-            self.ask("install".to_owned());
-            Box::pin(async { Ok(()) })
+        fn install(&self, end_sessions: bool) -> this_mac::Pending<Result<(), this_mac::Stopped>> {
+            self.ask(if end_sessions { "install end_sessions" } else { "install" }.to_owned());
+            let done = self.stops.borrow_mut().pop_front().map_or(Ok(()), Err);
+            Box::pin(async move { done })
         }
 
         fn doctor(&self) -> this_mac::Pending<Option<this_mac::Doctor>> {
@@ -4298,9 +4623,19 @@ mod tests {
         fn open(&self, pane: this_mac::Pane) {
             self.ask(format!("open {pane:?}"));
         }
+
+        fn move_to_applications(&self) -> this_mac::Pending<Result<std::path::PathBuf, String>> {
+            self.ask("move".to_owned());
+            Box::pin(async { Err("the test moves nothing".to_owned()) })
+        }
+
+        fn repoint(&self) -> this_mac::Pending<Option<Result<(), String>>> {
+            self.ask("repoint".to_owned());
+            Box::pin(async { None })
+        }
     }
 
-    /// "Use this Mac as a worker" on the first run installs through the host, then shows the
+    /// "Use this Mac" on the first run installs through the host, then shows the
     /// worker's `doctor` as the checklist: the missing grant's button opens its own pane. Back
     /// from System Settings the worker is started again and asked again, and once it may
     /// stream and take input this Mac is added over loopback and the panel gives way to its
@@ -4322,6 +4657,7 @@ mod tests {
             asked: std::cell::RefCell::default(),
             doctor: std::cell::RefCell::new(Some(lacking.clone())),
             added: WorkerId::new(),
+            stops: std::cell::RefCell::default(),
         });
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, cx| {
@@ -4369,8 +4705,12 @@ mod tests {
         #[derive(Debug)]
         struct Refusing;
         impl this_mac::Host for Refusing {
-            fn install(&self) -> this_mac::Pending<Result<(), String>> {
-                Box::pin(async { Err("launchctl bootstrap failed".to_owned()) })
+            fn install(
+                &self,
+                _end_sessions: bool,
+            ) -> this_mac::Pending<Result<(), this_mac::Stopped>> {
+                let failed = this_mac::Stopped::Failed("launchctl bootstrap failed".to_owned());
+                Box::pin(async { Err(failed) })
             }
 
             fn doctor(&self) -> this_mac::Pending<Option<this_mac::Doctor>> {
@@ -4386,6 +4726,16 @@ mod tests {
             }
 
             fn open(&self, _pane: this_mac::Pane) {}
+
+            fn move_to_applications(
+                &self,
+            ) -> this_mac::Pending<Result<std::path::PathBuf, String>> {
+                Box::pin(async { Err("no".to_owned()) })
+            }
+
+            fn repoint(&self) -> this_mac::Pending<Option<Result<(), String>>> {
+                Box::pin(async { None })
+            }
         }
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -4407,6 +4757,108 @@ mod tests {
         cx.simulate_click(back.center(), gpui::Modifiers::none());
         assert!(cx.debug_bounds("this-mac-checklist").is_none(), "left");
         assert!(cx.debug_bounds("add-worker-field").is_some(), "the address is back");
+    }
+
+    /// An install that would end this Mac's sessions stops before changing anything and
+    /// says so, with "Update anyway" as the one way on; one run from outside Applications
+    /// offers the move instead.
+    #[gpui::test]
+    fn this_mac_asks_before_it_ends_sessions_or_installs_from_a_download(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        let plan = "slopty-ptyd restarts, ending the 2 sessions it holds".to_owned();
+        let host = Rc::new(StandIn {
+            asked: std::cell::RefCell::default(),
+            doctor: std::cell::RefCell::new(None),
+            added: WorkerId::new(),
+            stops: std::cell::RefCell::new(
+                [this_mac::Stopped::EndsSessions(plan.clone()), this_mac::Stopped::Misplaced]
+                    .into(),
+            ),
+        });
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
+        let worker = |cx: &mut VisualTestContext| {
+            ws.read_with(cx, |ws, _| {
+                ws.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.worker.clone())
+            })
+        };
+        cx.dispatch_action(UseThisMac);
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["install"]);
+        assert_eq!(worker(cx), Some(this_mac::Worker::EndsSessions(plan.clone())));
+        let lines = this_mac::checklist(&this_mac::Worker::EndsSessions(plan), "");
+        assert_eq!(lines[0].fix, Some(this_mac::Fix::EndSessions));
+        assert!(lines[0].detail.contains("ending the 2 sessions"), "{}", lines[0].detail);
+        let anyway = cx.debug_bounds("this-mac-fix-running").expect("Update anyway");
+        cx.simulate_click(anyway.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["install end_sessions"], "the press is the yes");
+        assert_eq!(worker(cx), Some(this_mac::Worker::Misplaced));
+        let lines = this_mac::checklist(&this_mac::Worker::Misplaced, "");
+        assert_eq!(lines[0].fix.map(this_mac::Fix::label), Some("Move to Applications"));
+        let move_it = cx.debug_bounds("this-mac-fix-running").expect("the move");
+        cx.simulate_click(move_it.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["move"]);
+        assert_eq!(
+            worker(cx),
+            Some(this_mac::Worker::Failed(
+                "Could not move Slopty: the test moves nothing".to_owned()
+            )),
+            "a move that fails says why, and the app stays"
+        );
+    }
+
+    /// A change of a key this Mac's worker reads only at its start is told, naming it, when
+    /// a worker answers here; a key it applies live, and a launch's first read, are not. The
+    /// palette's line starts it again only when one answers.
+    #[gpui::test]
+    fn a_change_the_worker_reads_at_its_start_says_so_and_how(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        let up = this_mac::Doctor {
+            version: "0.3.0".to_owned(),
+            screen_recording: true,
+            accessibility: true,
+            tailnet: this_mac::Tailnet::Absent,
+        };
+        let host = Rc::new(StandIn {
+            asked: std::cell::RefCell::default(),
+            doctor: std::cell::RefCell::new(Some(up)),
+            added: WorkerId::new(),
+            stops: std::cell::RefCell::default(),
+        });
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
+        let toast =
+            |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
+        let load = |cx: &mut VisualTestContext, text: &str| {
+            ws.update(cx, |ws, cx| ws.apply_loaded(Settings::parse(text), cx));
+            cx.run_until_parked();
+        };
+        load(cx, "[worker]\nkeep_awake = \"attached\"\n");
+        let _first = host.asked();
+        load(cx, "[worker]\nkeep_awake = \"never\"\nallow = [\"10.8.0.0/24\"]\n");
+        assert_eq!(host.asked(), ["doctor"], "is a worker here to tell");
+        let said = toast(cx).unwrap_or_default();
+        assert!(said.starts_with("Keep awake takes effect when slopty-worker restarts"), "{said}");
+        assert!(said.contains(this_mac::RESTART), "{said}");
+
+        load(cx, "[worker]\nkeep_awake = \"never\"\nallow = []\n");
+        assert!(host.asked().is_empty(), "allow applies as the file changes");
+
+        cx.dispatch_action(RestartThisMacWorker);
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["doctor", "restart", "doctor"]);
+        assert_eq!(toast(cx).as_deref(), Some("slopty-worker started again on this Mac"));
+        *host.doctor.borrow_mut() = None;
+        cx.dispatch_action(RestartThisMacWorker);
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["doctor"], "nothing to restart");
     }
 
     /// The palette offers it on a Mac.

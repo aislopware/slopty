@@ -695,3 +695,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A received descriptor closes on exec from the start on Linux.** `Inbox::recv` asks for
     `MSG_CMSG_CLOEXEC` there; macOS has no such flag and keeps setting it right after
     (`a_received_descriptor_closes_on_exec`).
+
+- ✅ **Slopty sets this Mac up only from Applications, and follows the bundle when it moves**
+  (2026-10-04, readiness audit N26). The daemons run in place from the bundle on the home
+  volume. Opened from Downloads, the bundle runs from the read-only copy App Translocation
+  makes, which a restart removes. The LaunchAgents and the Claude Code hooks then point at a
+  path that is gone. A disk image is gone once it ejects.
+  - **Refused, with the way on.** "Use this Mac" and the install or server setup on this Mac
+    stop before changing anything when the bundle is outside `/Applications` and
+    `~/Applications` (`this_mac::misplaced`). The checklist offers "Move to Applications": `ditto`
+    copies the bundle to `/Applications`, or to `~/Applications` when this user may not write
+    there, after moving a copy already there to the Trash. The quarantine flag comes off the
+    copy, since this copy already passed Gatekeeper to run and a flagged copy would be
+    translocated again. The app then opens the copy and quits. A build run from a source tree
+    is no bundle and is never refused.
+  - **Re-pointed at launch.** When the worker's LaunchAgent runs a binary in another bundle and
+    that binary is gone, the app installs again from itself (`this_mac::repoints`). Its ptyd
+    keeps its sessions when its custody is the same. An install that would end sessions is said
+    and not done.
+  - Tests: `slopty-app` `this_mac::tests::slopty_runs_its_worker_only_from_applications`,
+    `this_mac_asks_before_it_ends_sessions_or_installs_from_a_download`.

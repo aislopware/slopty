@@ -1,13 +1,9 @@
 //! Settings on the app side: the file → a [`Theme`], and a watcher that reloads it.
 //!
-//! The watcher polls the file's modification time and size once a second on GPUI's
-//! executor instead of using `notify`. Editors save atomically (write a temp file, rename it
-//! over the old one), which invalidates a per-file FSEvents/kqueue watch and forces watching
-//! the directory and filtering; a 1 s `stat` handles create, replace and delete alike, costs
-//! nothing, and adds no dependency to the iOS build.
+//! The watcher looks at the file once every [`POLL`] on GPUI's executor, as every reader of
+//! the file does ([`slopty_settings::follow`]).
 
 use std::path::Path;
-use std::time::{Duration, SystemTime};
 
 use gpui::WindowAppearance;
 use slopty_settings::{
@@ -35,8 +31,7 @@ pub mod actions {
     );
 }
 
-/// Poll period of the file watcher.
-pub const POLL: Duration = Duration::from_secs(1);
+pub use slopty_settings::follow::{POLL, Seen};
 
 /// The text the in-app editor opens on: the file, or the commented defaults when there is
 /// none (or it cannot be read; saving then overwrites it, which is what fixing it means).
@@ -65,7 +60,7 @@ pub fn save(path: &Path, text: &str, seen: &mut Seen) -> Result<Loaded, String> 
     // Replaced whole: the daemons and the other clients' watchers read this file too.
     slopty_platform::fs::replace(path, text.as_bytes())
         .map_err(|e| format!("write {}: {e}", path.display()))?;
-    seen.0 = Stamp::of(path);
+    seen.saw(path);
     Ok(loaded)
 }
 
@@ -212,45 +207,6 @@ pub const fn bell_alerts(settings: &Settings, window_active: bool) -> bool {
 #[must_use]
 pub const fn agent_alerts(settings: &Settings, window_active: bool) -> bool {
     settings.terminal.agent_alert.sounds(window_active)
-}
-
-/// What the watcher compares between polls.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Stamp {
-    modified: Option<SystemTime>,
-    len: u64,
-    exists: bool,
-}
-
-impl Stamp {
-    /// The file's current stamp (a missing file has one too, so deletion is a change).
-    #[must_use]
-    pub fn of(path: &Path) -> Self {
-        std::fs::metadata(path).map_or_else(
-            |_| Self::default(),
-            |m| Self { modified: m.modified().ok(), len: m.len(), exists: true },
-        )
-    }
-}
-
-/// The file's stamp as the app last loaded or wrote it: what the watcher compares against.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Seen(Stamp);
-
-impl Seen {
-    /// The file at `path` as it is now, about to be loaded.
-    #[must_use]
-    pub fn of(path: &Path) -> Self {
-        Self(Stamp::of(path))
-    }
-
-    /// Whether the file at `path` changed since it was last seen; it is seen now either way.
-    pub fn changed(&mut self, path: &Path) -> bool {
-        let now = Stamp::of(path);
-        let changed = now != self.0;
-        self.0 = now;
-        changed
-    }
 }
 
 #[cfg(test)]
@@ -518,20 +474,6 @@ mod tests {
         assert!(!seen.changed(&path), "seen once");
         save(&path, "[font\n", &mut seen).unwrap_err();
         assert!(!seen.changed(&path), "a save that did not parse wrote nothing");
-    }
-
-    #[test]
-    fn stamp_tracks_writes_and_deletion() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
-        let missing = Stamp::of(&path);
-        std::fs::write(&path, "a").unwrap();
-        let one = Stamp::of(&path);
-        assert_ne!(missing, one);
-        std::fs::write(&path, "ab").unwrap();
-        assert_ne!(one, Stamp::of(&path));
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(Stamp::of(&path), missing);
     }
 
     /// A finger gets 44 pt targets and a pointer the compact rows; the Mac is always compact,

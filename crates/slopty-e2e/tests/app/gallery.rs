@@ -104,17 +104,17 @@ async fn the_first_run_offers_one_way_in() {
         assert!(!buttons.iter().any(|b| b == absent), "{absent} on the first run: {buttons:?}");
     }
     assert!(buttons.iter().any(|b| b == "Connect"), "{buttons:?}");
-    assert!(buttons.iter().any(|b| b == "Add a worker by address instead"), "{buttons:?}");
+    assert!(buttons.iter().any(|b| b == "Add a machine by address instead"), "{buttons:?}");
     assert!(buttons.iter().any(|b| b == THIS_MAC), "{buttons:?}");
 
     let switch = dump
-        .a11y_node("Button", Some("Add a worker by address instead"))
+        .a11y_node("Button", Some("Add a machine by address instead"))
         .expect("the switch")
         .bounds;
     drv.click(switch[0] + switch[2] / 2.0, switch[1] + switch[3] / 2.0).await.unwrap();
     let dump = drv
         .wait_for("the add-worker panel", STEP, |d| {
-            d.a11y_node("Heading", Some("Add a worker")).is_some()
+            d.a11y_node("Heading", Some("Add a machine")).is_some()
         })
         .await
         .unwrap();
@@ -131,7 +131,7 @@ async fn the_first_run_offers_one_way_in() {
 }
 
 /// The first run's way to make this Mac a worker, and its checklist's heading.
-const THIS_MAC: &str = "Use this Mac as a worker";
+const THIS_MAC: &str = "Use this Mac";
 
 /// This Mac's worker as the stand-in reports it: answering, with Accessibility granted, Screen
 /// Recording as `screen_recording` says, and on the tailnet.
@@ -189,7 +189,7 @@ async fn this_mac_walks_its_checklist() {
     let items = labels(&dump, "ListItem");
     assert_eq!(
         items,
-        ["Worker running", "Screen Recording", "Accessibility", "Reachable on your tailnet"],
+        ["Running", "Screen Recording", "Accessibility", "Reachable on your tailnet"],
         "{:#?}",
         dump.a11y
     );

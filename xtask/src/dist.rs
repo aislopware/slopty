@@ -100,6 +100,28 @@ pub enum Notarised {
     Skipped(String),
 }
 
+/// Whether a build may be published: one for a tag (`GITHUB_REF_TYPE=tag`, the release job's)
+/// must be signed with a Developer ID and notarised, since an ad hoc app asks again for every
+/// grant on each update and Gatekeeper stops its first open. A build that is not for a tag may
+/// be either, as a local `dist` is.
+///
+/// # Errors
+///
+/// For a tag, what it lacks.
+pub fn publishable(tag: bool, signing: &Signing, notarised: &Notarised) -> Result<()> {
+    if !tag {
+        return Ok(());
+    }
+    ensure!(
+        *signing != Signing::AdHoc,
+        "a release is signed with a Developer ID: set SLOPTY_SIGN_IDENTITY and the certificate"
+    );
+    if let Notarised::Skipped(why) = notarised {
+        bail!("a release is notarised, and this one was not: {why}");
+    }
+    Ok(())
+}
+
 /// Whether to notarise a bundle signed so, with these credentials: only a real identity can be,
 /// and only with credentials; the reason when not.
 pub fn plan_notary(
@@ -125,6 +147,7 @@ pub fn plan_notary(
 
 pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
     preflight(sh)?;
+    let tag = std::env::var("GITHUB_REF_TYPE").is_ok_and(|kind| kind == "tag");
     let root = repo_root()?;
     let version = crate::release::current_version(sh)?;
     let out = opts.out.clone().unwrap_or_else(|| root.join("target").join("dist-out"));
@@ -139,6 +162,10 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
         no_linux: false,
         out: Some(root.join("target").join("dist-bundle")),
     };
+    if tag {
+        // Before the long build: a tag without its identity fails now, not after it.
+        publishable(tag, &bundle::signing(sh, &bundle_opts), &Notarised::Done)?;
+    }
     let built = bundle::run(sh, &bundle_opts)?;
     let notary = Notary::from_env(|name| std::env::var(name).ok());
     let notarised = match plan_notary(&built.signing, notary.as_ref(), opts.no_notarize) {
@@ -149,6 +176,7 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
         }
         Err(why) => Notarised::Skipped(why),
     };
+    publishable(tag, &built.signing, &notarised)?;
 
     let mac = |name: &str| format!("{name}-{version}-macos-arm64");
     let zip = out.join(format!("{}.zip", mac(PRODUCT)));
@@ -356,6 +384,20 @@ mod tests {
             plan_notary(&Signing::AdHoc, Some(&profile), false).unwrap_err().contains("ad hoc")
         );
         assert_eq!(plan_notary(&id, Some(&profile), true), Err("--no-notarize".to_owned()));
+    }
+
+    /// A tag's build fails unless it is signed with a Developer ID and notarised; any other
+    /// build passes as it is.
+    #[test]
+    fn a_tag_is_published_only_signed_and_notarised() {
+        let id = Signing::Identity("Developer ID Application: A (AJ4R8GWM7A)".to_owned());
+        let skipped = Notarised::Skipped("no credentials".to_owned());
+        publishable(true, &id, &Notarised::Done).unwrap();
+        let ad_hoc = publishable(true, &Signing::AdHoc, &skipped).unwrap_err().to_string();
+        assert!(ad_hoc.contains("Developer ID"), "{ad_hoc}");
+        let unnotarised = publishable(true, &id, &skipped).unwrap_err().to_string();
+        assert!(unnotarised.contains("no credentials"), "{unnotarised}");
+        publishable(false, &Signing::AdHoc, &skipped).unwrap();
     }
 
     /// An API key's three parts, as the environment would hold them.

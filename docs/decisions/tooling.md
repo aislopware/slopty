@@ -981,3 +981,12 @@ more full-window layer.
     clippy-ios lane, the longest on the critical path.
   - Test: `gate::tests::ci_runs_the_linux_lane_on_linux`.
 
+
+- ✅ **A tag's release is signed with a Developer ID and notarised, or it fails** (2026-10-04,
+  readiness audit D1). `xtask dist` signed ad hoc when no identity was at hand, and skipped
+  notarisation when there were no credentials. That was right for a local build. For a tag, it
+  would publish an app that asks again for every grant on each update, and that Gatekeeper
+  stops at first open. Under the release job (`GITHUB_REF_TYPE=tag`), `dist` now fails before
+  the build when the signing is ad hoc, and after it when notarisation was skipped, naming what
+  is missing (`dist::publishable`). Any other `dist` builds as before. Test: `xtask`
+  `dist::tests::a_tag_is_published_only_signed_and_notarised`.

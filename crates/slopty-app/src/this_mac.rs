@@ -1,4 +1,4 @@
-//! "Use this Mac as a worker": the worker's services installed from this app, its `doctor` read
+//! "Use this Mac": the worker's services installed from this app, its `doctor` read
 //! as a checklist until it may stream and take input, then this Mac added over loopback.
 //!
 //! The install is `slopty worker install`'s own ([`slopty_platform::service::install_worker`]),
@@ -11,6 +11,7 @@
 //! permission prompt or opens System Settings (`docs/decisions/platform.md`, "This Mac as a
 //! worker").
 
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 
@@ -32,19 +33,26 @@ pub mod actions {
         [
             /// Install the worker on this Mac and walk its permissions until it is added.
             UseThisMac,
+            /// Start this Mac's worker again, so it reads what only its start reads.
+            RestartThisMacWorker,
         ]
     );
 }
 
 /// The entry's words, and the checklist's heading.
-pub const TITLE: &str = "Use this Mac as a worker";
+pub const TITLE: &str = "Use this Mac";
 /// What a missing grant's line says to do: its button opens the list to do it in, and shows
 /// the worker in Finder, since a background worker's request may leave it out of that list.
 pub const TURN_ON: &str = "Turn on slopty-worker there, or drag it in from Finder.";
 /// What the entry's row says under its words: what pressing it does.
-pub const ROW_META: &str = "Runs the worker here and adds this Mac";
+pub const ROW_META: &str = "Shares its shells and windows, and adds it here";
 /// The checklist's line under its heading.
-pub const BLURB: &str = "Slopty runs its worker here, then adds this Mac to your workspace.";
+pub const BLURB: &str = "Slopty shares this Mac's shells and windows, then adds it here.";
+/// Why Slopty moves before it installs: where it runs now is gone after a restart.
+pub const MISPLACED: &str =
+    "Slopty runs from outside Applications, so this Mac would stop sharing after a restart.";
+/// The palette's line that starts this Mac's worker again; its sessions stay with ptyd.
+pub const RESTART: &str = "Restart slopty-worker on this Mac";
 /// The address this Mac is added at: loopback, which every worker admits.
 pub const LOOPBACK: &str = "127.0.0.1";
 /// How many times the worker's control socket is asked before it counts as not answering.
@@ -56,10 +64,24 @@ pub const RETRY: std::time::Duration = std::time::Duration::from_millis(250);
 /// Mac) and is awaited on the foreground.
 pub type Pending<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
+/// Why an install of this Mac's worker stopped.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Stopped {
+    /// It would restart `slopty-ptyd`, ending the sessions it holds, as this sentence says;
+    /// nothing was changed. Installing again with `end_sessions` goes on.
+    EndsSessions(String),
+    /// Slopty runs from somewhere a restart or an eject takes away ([`misplaced`]); nothing
+    /// was installed.
+    Misplaced,
+    /// It failed, for this reason.
+    Failed(String),
+}
+
 /// What the flow does to this machine.
 pub trait Host: std::fmt::Debug {
-    /// Install and start the worker's services.
-    fn install(&self) -> Pending<Result<(), String>>;
+    /// Install and start the worker's services; with `end_sessions`, even where that restarts
+    /// `slopty-ptyd` and ends its sessions.
+    fn install(&self, end_sessions: bool) -> Pending<Result<(), Stopped>>;
     /// The worker's `doctor`; `None` while nothing answers on its control socket.
     fn doctor(&self) -> Pending<Option<Doctor>>;
     /// Start the worker again, so it reads a Screen Recording grant made while it ran.
@@ -68,6 +90,49 @@ pub trait Host: std::fmt::Debug {
     fn add(&self, address: &str) -> Pending<Result<net::Added, String>>;
     /// Open `pane` in System Settings, with the worker shown in Finder to drag into its list.
     fn open(&self, pane: Pane);
+    /// Copy Slopty into Applications ([`applications`]), the copy there before it to the
+    /// Trash, and say where it now is, to be opened from there.
+    fn move_to_applications(&self) -> Pending<Result<PathBuf, String>>;
+    /// Point this Mac's worker services at this copy of Slopty when they run another that is
+    /// gone (moved, or a translocated copy a restart took away): `None` when they need not.
+    fn repoint(&self) -> Pending<Option<Result<(), String>>>;
+}
+
+/// Whether Slopty, its binaries in `macos_dir`, runs from somewhere its services would lose
+/// it: an app bundle outside `/Applications` and `~/Applications`.
+///
+/// A download runs from a read-only copy App Translocation makes and a restart removes; a disk
+/// image ejects. A build run from a source tree is no bundle, and its daemons are copied out of
+/// it.
+#[must_use]
+pub fn misplaced(macos_dir: &Path, home: &Path) -> bool {
+    let Some(app) = bundle(macos_dir) else { return false };
+    !(app.starts_with("/Applications") || app.starts_with(home.join("Applications")))
+}
+
+/// The `.app` whose `Contents/MacOS` is `dir`.
+fn bundle(dir: &Path) -> Option<&Path> {
+    if !dir.ends_with("Contents/MacOS") {
+        return None;
+    }
+    let app = dir.parent()?.parent()?;
+    app.extension().is_some_and(|ext| ext == "app").then_some(app)
+}
+
+/// Where Slopty moves to: `/Applications` when this user may write there, else
+/// `~/Applications`, as Finder offers.
+#[must_use]
+pub fn applications(home: &Path, system_writable: bool) -> PathBuf {
+    if system_writable { PathBuf::from("/Applications") } else { home.join("Applications") }
+}
+
+/// Whether services that run `program` should be pointed at this copy, its binaries in
+/// `macos_dir`: they run another copy's binary, and that one is gone.
+#[must_use]
+pub fn repoints(program: &Path, macos_dir: &Path) -> bool {
+    bundle(macos_dir).is_some()
+        && program.parent().is_some_and(|dir| bundle(dir).is_some() && dir != macos_dir)
+        && !program.exists()
 }
 
 /// What the checklist reads from the worker's `doctor`.
@@ -134,6 +199,10 @@ pub enum Worker {
     Silent,
     /// The install failed, for this reason.
     Failed(String),
+    /// The install stopped before it changed anything: it would end sessions, as this says.
+    EndsSessions(String),
+    /// Slopty runs from somewhere its worker would lose it: it moves to Applications first.
+    Misplaced,
 }
 
 impl Worker {
@@ -197,7 +266,7 @@ impl Check {
     /// The line's name.
     pub const fn title(self) -> &'static str {
         match self {
-            Self::Running => "Worker running",
+            Self::Running => "Running",
             Self::ScreenRecording => "Screen Recording",
             Self::Accessibility => "Accessibility",
             Self::Tailnet => "Reachable on your tailnet",
@@ -247,6 +316,10 @@ pub enum Fix {
     Open(Pane),
     /// Install again.
     Retry,
+    /// Install again, ending the sessions the last try said it would.
+    EndSessions,
+    /// Move Slopty to Applications and open it from there.
+    MoveToApplications,
 }
 
 impl Fix {
@@ -255,6 +328,8 @@ impl Fix {
         match self {
             Self::Open(_) => "Open settings",
             Self::Retry => "Try again",
+            Self::EndSessions => "Update anyway",
+            Self::MoveToApplications => "Move to Applications",
         }
     }
 }
@@ -306,10 +381,24 @@ pub fn checklist(worker: &Worker, logs: &str) -> [Line; 4] {
             Some(Fix::Retry),
         ),
         Worker::Failed(why) => line(Check::Running, Mark::Missing, why, Some(Fix::Retry)),
+        Worker::EndsSessions(plan) => line(
+            Check::Running,
+            Mark::Missing,
+            &format!("Its shell keeper changed too: {plan}. Every shell and agent turn ends."),
+            Some(Fix::EndSessions),
+        ),
+        Worker::Misplaced => {
+            line(Check::Running, Mark::Missing, MISPLACED, Some(Fix::MoveToApplications))
+        }
     };
     let doctor = match worker {
         Worker::Up(d) => Some(d),
-        Worker::Installing | Worker::Starting | Worker::Silent | Worker::Failed(_) => None,
+        Worker::Installing
+        | Worker::Starting
+        | Worker::Silent
+        | Worker::Failed(_)
+        | Worker::EndsSessions(_)
+        | Worker::Misplaced => None,
     };
     // A missing grant's line is one line: the button opens the very list to turn it on in, so
     // naming the list ("Screen & System Audio Recording") only wrapped the line in two.
@@ -415,7 +504,7 @@ struct StandIn {
 
 #[cfg(all(target_os = "macos", feature = "e2e"))]
 impl Host for StandIn {
-    fn install(&self) -> Pending<Result<(), String>> {
+    fn install(&self, _end_sessions: bool) -> Pending<Result<(), Stopped>> {
         Box::pin(std::future::ready(Ok(())))
     }
 
@@ -432,6 +521,14 @@ impl Host for StandIn {
     }
 
     fn open(&self, _pane: Pane) {}
+
+    fn move_to_applications(&self) -> Pending<Result<PathBuf, String>> {
+        Box::pin(std::future::ready(Err("the self-test moves nothing".to_owned())))
+    }
+
+    fn repoint(&self) -> Pending<Option<Result<(), String>>> {
+        Box::pin(std::future::ready(None))
+    }
 }
 
 /// [`native`] where no worker runs: nothing.
@@ -444,12 +541,12 @@ pub const fn native(_runtime: &tokio::runtime::Handle) -> Option<Rc<dyn Host>> {
 mod mac {
     //! The flow on this Mac: `launchctl`, the worker's control socket and System Settings.
 
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use slopty_platform::service::{self, Layout, Session, WORKER, WorkerOpts};
     use slopty_proto::ctl::{CtlReply, CtlRequest};
 
-    use super::{Doctor, Host, Pane, Pending};
+    use super::{Doctor, Host, Pane, Pending, Stopped};
     use crate::net;
 
     /// This Mac, its networking runtime and the data directory the worker keeps.
@@ -474,19 +571,28 @@ mod mac {
     }
 
     impl Host for Native {
-        fn install(&self) -> Pending<Result<(), String>> {
+        fn install(&self, end_sessions: bool) -> Pending<Result<(), Stopped>> {
             let data = self.data.clone();
             self.run(
                 async move {
-                    slopty_settings::join_clients_server(&data)?;
-                    let source = service::sibling_dir().map_err(|e| e.to_string())?;
+                    let source =
+                        service::sibling_dir().map_err(|e| Stopped::Failed(e.to_string()))?;
+                    if super::misplaced(&source, &slopty_platform::dirs::home()) {
+                        return Err(Stopped::Misplaced);
+                    }
+                    slopty_settings::join_clients_server(&data).map_err(Stopped::Failed)?;
+                    let session = Session::native();
+                    let ptyd = session.ptyd_plan(&source, &data);
+                    if ptyd.ends_sessions() && !end_sessions {
+                        return Err(Stopped::EndsSessions(ptyd.to_string()));
+                    }
                     let opts = WorkerOpts::default();
-                    service::install_worker(&Session::native(), &opts, &source, &data)
+                    service::install_worker(&session, &opts, &source, &data, ptyd)
                         .await
                         .map(drop)
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| Stopped::Failed(e.to_string()))
                 },
-                Err("the install stopped".to_owned()),
+                Err(Stopped::Failed("the install stopped".to_owned())),
             )
         }
 
@@ -535,9 +641,98 @@ mod mac {
             let session = Session::native();
             let installed = service::installed_args(session.manager, &session.file(WORKER));
             if let Some(exe) = installed.as_ref().and_then(|args| args.first()) {
-                slopty_platform::web::reveal(std::path::Path::new(exe));
+                slopty_platform::web::reveal(Path::new(exe));
             }
         }
+
+        fn move_to_applications(&self) -> Pending<Result<PathBuf, String>> {
+            self.run(
+                async {
+                    let source = service::sibling_dir().map_err(|e| e.to_string())?;
+                    tokio::task::spawn_blocking(move || move_bundle(&source))
+                        .await
+                        .map_err(|e| e.to_string())?
+                },
+                Err("the move stopped".to_owned()),
+            )
+        }
+
+        fn repoint(&self) -> Pending<Option<Result<(), String>>> {
+            let data = self.data.clone();
+            self.run(
+                async move {
+                    let source = service::sibling_dir().ok()?;
+                    super::bundle(&source)?;
+                    let session = Session::native();
+                    let installed = service::installed_args(session.manager, &session.file(WORKER))?;
+                    let program = PathBuf::from(installed.first()?);
+                    if !super::repoints(&program, &source)
+                        || super::misplaced(&source, &slopty_platform::dirs::home())
+                    {
+                        return None;
+                    }
+                    tracing::info!(was = %program.display(), now = %source.display(), "repoint the worker");
+                    // Its ptyd ran the binary gone too: kept if it still runs, else started.
+                    let ptyd = session.ptyd_plan(&source, &data);
+                    if ptyd.ends_sessions() {
+                        return Some(Err(format!("Not moved to this copy of Slopty: {ptyd}")));
+                    }
+                    let done = service::install_worker(&session, &WorkerOpts::default(), &source, &data, ptyd).await;
+                    Some(done.map(drop).map_err(|e| e.to_string()))
+                },
+                None,
+            )
+        }
+    }
+
+    /// Copy the bundle `source` is the `Contents/MacOS` of into Applications with `ditto`,
+    /// a copy there before it to the Trash first, and give the copy's path.
+    ///
+    /// The copy loses the quarantine flag the download carried: this copy already passed
+    /// Gatekeeper to run, and a flagged copy would be translocated again.
+    fn move_bundle(source: &Path) -> Result<PathBuf, String> {
+        let app = super::bundle(source).ok_or("Slopty runs from no app bundle")?;
+        let name = app.file_name().ok_or("the bundle has no name")?;
+        let home = slopty_platform::dirs::home();
+        let dir = super::applications(&home, writable(Path::new("/Applications")));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let to = dir.join(name);
+        if to.exists() {
+            let trash = home.join(".Trash");
+            let stem = Path::new(name).file_stem().unwrap_or(name).to_string_lossy().into_owned();
+            let aside = (0_u32..1_000)
+                .map(|n| match n {
+                    0 => trash.join(name),
+                    n => trash.join(format!("{stem} {n}.app")),
+                })
+                .find(|at| !at.exists())
+                .ok_or("the Trash is full of Sloptys")?;
+            std::fs::rename(&to, &aside)
+                .map_err(|e| format!("{} to the Trash: {e}", to.display()))?;
+        }
+        let out = std::process::Command::new("/usr/bin/ditto")
+            .arg(app)
+            .arg(&to)
+            .output()
+            .map_err(|e| format!("ditto: {e}"))?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+        }
+        let unflagged = std::process::Command::new("/usr/bin/xattr")
+            .args(["-d", "-r", "com.apple.quarantine"])
+            .arg(&to)
+            .output();
+        if let Err(e) = unflagged {
+            tracing::warn!(error = %e, "xattr on the moved copy");
+        }
+        Ok(to)
+    }
+
+    /// Whether this user may make a file in `dir`: an admin may in `/Applications`.
+    fn writable(dir: &Path) -> bool {
+        let probe = dir.join(format!(".slopty-{}", std::process::id()));
+        let made = std::fs::OpenOptions::new().write(true).create_new(true).open(&probe);
+        made.is_ok_and(|_file| std::fs::remove_file(&probe).is_ok())
     }
 }
 
@@ -578,7 +773,7 @@ mod tests {
         let titles = checklist(&Worker::Silent, logs).map(|l| l.check.title());
         assert_eq!(
             titles,
-            ["Worker running", "Screen Recording", "Accessibility", "Reachable on your tailnet"]
+            ["Running", "Screen Recording", "Accessibility", "Reachable on your tailnet"]
         );
     }
 
@@ -684,5 +879,40 @@ mod tests {
         assert_eq!(marks(&lines)[3], Mark::Advisory, "a warning, not a stop");
         let health = slopty_proto::ctl::Health { tailscale: Tailscale::Absent, ..health };
         assert_eq!(Doctor::from(health).tailnet, Tailnet::Absent);
+    }
+
+    /// Slopty in an Applications folder runs its worker from there; a download's translocated
+    /// copy, a disk image or Downloads would lose it at a restart, and a build from a source
+    /// tree is no bundle (its daemons are copied out). Services that run a copy that is gone
+    /// are pointed at this one; ones that run this copy, or one that still exists, are not.
+    #[test]
+    fn slopty_runs_its_worker_only_from_applications() {
+        let home = Path::new("/Users/me");
+        let macos = |app: &str| PathBuf::from(app).join("Contents/MacOS");
+        assert!(!misplaced(&macos("/Applications/Slopty.app"), home));
+        assert!(!misplaced(&macos("/Applications/Tools/Slopty.app"), home));
+        assert!(!misplaced(&macos("/Users/me/Applications/Slopty.app"), home));
+        let translocated = "/private/var/folders/x1/T/AppTranslocation/0A1B/d/Slopty.app";
+        assert!(misplaced(&macos(translocated), home));
+        assert!(misplaced(&macos("/Users/me/Downloads/Slopty.app"), home));
+        assert!(misplaced(&macos("/Volumes/Slopty/Slopty.app"), home));
+        assert!(!misplaced(Path::new("/Users/me/src/slopty/target/release"), home), "a dev build");
+        assert!(!misplaced(Path::new("/Users/me/Contents/MacOS"), home), "no .app over it");
+
+        assert_eq!(applications(home, true), Path::new("/Applications"));
+        assert_eq!(applications(home, false), Path::new("/Users/me/Applications"));
+
+        let here = macos("/Applications/Slopty.app");
+        let gone = macos(translocated).join("slopty-worker");
+        assert!(repoints(&gone, &here), "a copy a restart took away");
+        assert!(!repoints(&here.join("slopty-worker"), &here), "this copy's own");
+        let dev = Path::new("/Users/me/src/slopty/target/release");
+        assert!(!repoints(&gone, dev), "a dev build points nothing at itself");
+        let dir = tempfile::tempdir().unwrap();
+        let there = dir.path().join("Other.app/Contents/MacOS");
+        std::fs::create_dir_all(&there).unwrap();
+        std::fs::write(there.join("slopty-worker"), b"").unwrap();
+        assert!(!repoints(&there.join("slopty-worker"), &here), "another copy that still runs");
+        assert!(!repoints(Path::new("/Users/me/.slopty/bin/slopty-worker"), &here), "copied out");
     }
 }

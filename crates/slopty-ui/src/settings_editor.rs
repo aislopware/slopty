@@ -106,6 +106,16 @@ pub struct SettingsEditor {
 }
 
 impl SettingsEditor {
+    /// The app's own palette lines, so the Keyboard page names its commands in the palette's
+    /// words ([`SettingsForm::set_palette_words`]).
+    pub fn set_palette_words(
+        &self,
+        words: Vec<crate::palette::PaletteItem>,
+        cx: &mut Context<Self>,
+    ) {
+        self.form.update(cx, |form, cx| form.set_palette_words(words, cx));
+    }
+
     /// An editor over `text`, the file at `path`, open on the form.
     pub fn new(
         text: &str,
@@ -789,26 +799,105 @@ mod tests {
         assert!(tree.iter().any(|n| n.is("Heading", Some("Streams"))), "{tree:#?}");
     }
 
-    /// Every row on a page stands one height, its line on what it does cut to one line, and
-    /// the page's first label stands on the search field's line, so the columns start together.
+    /// The page's first label stands on the search field's line, so the columns start together.
     #[gpui::test]
-    fn rows_hold_one_line_and_the_columns_start_together(cx: &mut TestAppContext) {
+    fn the_columns_start_together(cx: &mut TestAppContext) {
         let (_view, _events, cx) = editor(cx, "", false, Mode::Form);
         let search = cx.debug_bounds("settings-search").expect("the search");
         let label = cx.debug_bounds("settings-heading-0").expect("the first label");
         assert!(f32::from((search.top() - label.top()).abs()) < 0.5, "{search:?} {label:?}");
         assert!(f32::from((search.size.height - label.size.height).abs()) < 0.5);
-        let heights: Vec<f32> = rows()
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.section == Section::Appearance)
-            .map(|(ix, _)| {
-                let row = cx.debug_bounds(leak(format!("settings-row-{ix}"))).expect("a row");
-                f32::from(row.size.height)
-            })
-            .collect();
-        assert!(heights.len() > 4, "{heights:?}");
-        assert!(heights.iter().all(|h| (h - heights[0]).abs() < 0.5), "{heights:?}");
+    }
+
+    /// The widths a sheet is written for: a phone's, or an iPad's in Slide Over, and the
+    /// narrowest that still has the sidebar.
+    const NARROWEST: [f32; 2] = [320.0, crate::kit::Overlay::List.bounds().0];
+
+    /// Each row's description, at `width`, by section: its row, its words and the height they
+    /// take. A sheet as wide as a phone's lists every section in one column.
+    fn descriptions(cx: &mut VisualTestContext, width: f32) -> Vec<(usize, &'static str, f32)> {
+        cx.simulate_resize(gpui::size(px(width), px(900.0)));
+        cx.run_until_parked();
+        let mut seen: Vec<(usize, &'static str, f32)> = Vec::new();
+        for section in Section::ALL {
+            if let Some(tab) =
+                cx.debug_bounds(leak(format!("settings-section-{}", section.index())))
+            {
+                cx.simulate_click(tab.center(), gpui::Modifiers::default());
+                cx.run_until_parked();
+            }
+            for (ix, row) in rows().iter().enumerate().filter(|(_, r)| r.section == section) {
+                if seen.iter().any(|&(at, ..)| at == ix) {
+                    continue;
+                }
+                if let Some(meta) = cx.debug_bounds(leak(format!("settings-row-meta-{ix}"))) {
+                    seen.push((ix, row.meta(), f32::from(meta.size.height)));
+                }
+            }
+        }
+        seen
+    }
+
+    /// A description longer than its row wraps under the label rather than ending in an
+    /// ellipsis, in a column at most two thirds of the row on a sheet with the sidebar; its
+    /// control is told the whole of it, and the label and control share one line.
+    #[test]
+    fn a_description_wraps_and_never_cuts() {
+        let mut cx = real_text();
+        let (_view, _events, cx) = editor(&mut cx, "", false, Mode::Form);
+        let all = descriptions(cx, NARROWEST[1]);
+        let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);
+        let &(ix, words, height) =
+            all.iter().max_by_key(|&&(_, words, _)| words.len()).expect("a description");
+        assert!(height > 1.5 * line, "{words:?} stands {height} tall, one line is {line}");
+        click(cx, leak(format!("settings-section-{}", rows()[ix].section.index())));
+        let row = cx.debug_bounds(leak(format!("settings-row-{ix}"))).expect("its row");
+        let meta = cx.debug_bounds(leak(format!("settings-row-meta-{ix}"))).expect("its words");
+        let share = crate::settings_form::DESCRIPTION_SHARE;
+        assert!(f32::from(meta.size.width) <= f32::from(row.size.width).mul_add(share, 0.5));
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        let label = rows()[ix].label();
+        assert!(
+            tree.iter()
+                .any(|n| n.label.as_deref() == Some(label)
+                    && n.description.as_deref() == Some(words)),
+            "{label}: {tree:#?}"
+        );
+    }
+
+    /// Every description fits two lines at the narrowest sheets it is written for, so none is
+    /// a wall; one longer is a copy defect, named here with its length.
+    #[test]
+    fn every_description_fits_two_lines_at_the_narrowest_sheet() {
+        let mut cx = real_text();
+        let (_view, _events, cx) = editor(&mut cx, "", false, Mode::Form);
+        for width in NARROWEST {
+            let all = descriptions(cx, width);
+            assert!(all.len() > 20, "{width}: {} rows", all.len());
+            let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);
+            let long: Vec<String> = all
+                .iter()
+                .filter(|&&(_, _, h)| h > 2.0_f32.mul_add(line, 0.5))
+                .map(|&(ix, words, h)| {
+                    format!(
+                        "{} ({} chars, {:.1} lines): {words}",
+                        rows()[ix].label(),
+                        words.len(),
+                        h / line
+                    )
+                })
+                .collect();
+            assert!(long.is_empty(), "at {width} pt:\n{}", long.join("\n"));
+        }
+    }
+
+    /// A test app shaping with the platform's own text system, so a line wraps where it would.
+    fn real_text() -> TestAppContext {
+        TestAppContext::build_with_text_system(
+            gpui::TestDispatcher::new(0),
+            None,
+            gpui_platform::text_system(),
+        )
     }
 
     /// The pages beside the sections. Keyboard lists every command of the keymap, in the

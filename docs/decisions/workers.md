@@ -884,3 +884,205 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-deploy` `tests/guest.rs`
     (`the_app_s_deploy_trusts_a_new_guest_as_shown_and_puts_this_build_there`, live) and xtask
     `vm::tests::deploying_as_the_app_takes_a_fresh_guest`.
+
+- ✅ **An update keeps ptyd, and every session, unless ptyd's custody changed** (2026-10-04,
+  readiness audit N1). Every worker update stopped both services, so each app update that moved
+  the wire ended every shell and agent turn on every worker it was taken to. ptyd changes far
+  less often than the worker, and a worker that restarts already takes every session back from
+  it.
+  - **Custody.** What a running ptyd hands the new worker and its new shells is the protocol on
+    its socket and the shell integration scripts it wrote at start. `slopty-ptyd` hashes the
+    protocol's goldens (`apps/slopty-ptyd/tests/snapshots`, one per request, event and error,
+    each enum matched without a wildcard so a new variant needs its golden) and every file of
+    `slopty-pty`'s `assets/shell` into a fingerprint at build time. `slopty-ptyd --custody`
+    prints it, and a running ptyd writes `<pid> <fingerprint>` beside its socket
+    (`ptyd.custody`), removing it when it shuts down.
+  - **The plan.** `Session::ptyd_plan` keeps ptyd when the new build prints what the running one
+    wrote, read only under the pid the service manager runs. It restarts ptyd otherwise, counting
+    its child processes (`ps -A -o ppid=`), which are its sessions. A ptyd holding none restarts
+    even when it could stay, so the new build's own runs from then on. Spawn fixes are not in the
+    fingerprint: a kept ptyd's binary is replaced by a file renamed over it (never written in
+    place, which kills a running signed Mach-O), and runs from its next start. An older ptyd
+    writes no custody, so the first update to this build restarts it once.
+  - **Asked first.** `slopty worker install` refuses an install that would end sessions unless
+    given `--end-sessions`, and `--plan` says what it would do. A deploy's update asks the plan
+    after the upload and stops there, changing nothing, with "Updating ends N sessions on X"
+    (`DeployError::EndsSessions`). The next run with `Plan::end_sessions` tells the install to
+    go on. The deploy also reads `slopty worker service --json`, which says without changing
+    anything whether the services stop at logout (a Linux user that does not linger).
+  - Tests: `slopty-ptyd` `tests/custody.rs` (`every_request`, `every_event`,
+    `the_custody_is_the_goldens_and_the_scripts`,
+    `a_running_ptyd_says_its_custody_beside_its_socket`); `slopty-platform` `service`
+    (`an_install_keeps_a_ptyd_whose_custody_is_unchanged`,
+    `a_changed_or_unknown_custody_restarts_ptyd_and_counts_its_sessions`,
+    `a_systemd_install_keeps_ptyd_without_restarting_it`, `stops_at_logout_only_reads`);
+    `slopty-cli` `an_install_that_ends_sessions_needs_end_sessions`; `slopty-deploy`
+    `an_update_that_ends_sessions_stops_until_the_person_says_so`.
+  - **In the app, the yes is a press after the question.** A tile's update that stops on
+    `Failure::ends_sessions` shows "Updating ends N sessions on X", and pressing that tile's
+    Update again is the person's word (`Said::end_sessions`). It holds for that one run.
+    "Update all machines" and the update this Mac takes unasked never carry it, so neither ends
+    a session. "Use this Mac" asks the same way: the checklist's first line names the plan and
+    offers "Update anyway". Tests: `slopty-app` `ssh::tests`
+    `an_update_that_ends_sessions_goes_on_only_when_pressed_again`, and
+    `this_mac_asks_before_it_ends_sessions_or_installs_from_a_download`.
+
+- ✅ **A Slopty machine needs a logged-in session; automatic login is the documented way for a
+  headless Mac** (2026-10-04, `.research/rulings-2026-10-04.md` §1). The worker stays a per-user
+  Aqua `LaunchAgent`. Running before login was weighed and turned down: a system daemon gains
+  only a shell on a Mac nobody is logged into, where the keychain an agent's login lives in is
+  locked, capture and input have no window server, the App Store Tailscale is not up yet, and a
+  FileVault disk runs nothing at all until it is unlocked.
+  - **Said, not guessed.** The deploy's first step reads, on a Mac, who owns the console
+    (`stat -f %Su /dev/console`, `root` at the login window) and whether FileVault is on
+    (`fdesetup isactive`), neither needing an administrator, and carries both in
+    `Deployed::console`. The CLI's report and the app's sheet say "runs once someone is logged
+    in" with the way there: automatic login in Users & Groups with FileVault off, or with
+    FileVault on the disk unlocked over `ssh` after a restart and a login through Screen
+    Sharing. Slopty never turns automatic login on itself: that writes the person's password to
+    `/etc/kcpassword`.
+  - **Named, not quoted.** `slopty worker install` and `slopty server install` first check that
+    the user's GUI domain exists (`launchctl print gui/<uid>`) and stop before stopping, copying
+    or writing anything, in `NOBODY_LOGGED_IN`'s words. The deploy reads those words, and
+    `launchctl`'s own ("Domain does not support specified action", "Could not find domain for"),
+    as "Nobody is logged in at <host>" with that hint.
+  - Linux is unchanged: a lingering systemd user manager outlives the login.
+  - Tests: `slopty-deploy` `a_target_with_nobody_logged_in_says_so_and_how_to_fix_it`,
+    `a_missing_gui_domain_is_named_not_quoted`; `slopty-platform` `service`
+    `an_install_with_nobody_logged_in_says_so_and_changes_nothing`; `slopty-cli` `deploy`
+    `the_options_reach_the_plan_and_the_report_says_what_is_next`.
+  - **In the app.** The toast on an add says "<mac> runs Slopty once someone is logged in there"
+    when the console said so, and that a FileVault disk waits for its password after a restart.
+    The away tile's reason and "Unlock here" for a locked Mac belong to the workspace and the
+    screen (lanes W and F), not to this entry. Test: `slopty-app` `ssh::tests`
+    `an_add_says_what_keeps_the_machine_from_running_for_good`.
+
+- ✅ **A password-only host: asked once, never kept, then the key** (2026-10-04,
+  `.research/rulings-2026-10-04.md` §2, readiness D6). The app's `ssh` never asks
+  (`BatchMode=yes`), so a host that takes only a password was a dead end. A password the person
+  types to reach their own machine is the person acting, not Slopty touching a credential, as
+  long as Slopty keeps none and hands it only to the person's own `ssh`.
+  - **When.** A refusal whose list of ways in names `password` or `keyboard-interactive`
+    (`user@host: Permission denied (publickey,password).`) becomes `Failure::password`, whose
+    user, for the sheet's one secure field. A password the sign-in gave and the host refused
+    comes back with `refused`, "did not take that password".
+  - **How it travels.** `Plan::password` holds it in a `secrecy::SecretString`. The deploy signs
+    in once before its first step (`Runner::sign_in`, `Ssh::signed_in`): a background master
+    connection (`-f -N`, `ControlMaster=yes`, `ControlPersist=60`, `BatchMode=no`,
+    `NumberOfPasswordPrompts=1`) in a private directory of short name, with
+    `SSH_ASKPASS_REQUIRE=force` and `SSH_ASKPASS` the `slopty` beside the app. That `slopty`
+    sees the socket path in `SLOPTY_ASKPASS_SOCK` and becomes the helper before it parses any
+    argument, since `ssh` runs the askpass program with the question as its only argument. The
+    deploy's socket answers the first password question once and refuses everything else,
+    including a yes-or-no about a host key, which therefore always goes through the sheet's
+    own trust. Every later step runs over the master (`ControlPath`, `ControlMaster=no`) with
+    `BatchMode=yes` still on. The master ends (`ssh -O exit`) when the signed-in runner goes.
+    The password is in no argument, environment variable, file or log.
+  - **Then the key.** With `Plan::add_key`, the last step appends the person's public key to
+    `~/.ssh/authorized_keys` over the same connection, as `ssh-copy-id` does: the agent's first
+    key (`ssh-add -L`), else the newest `~/.ssh/id*.pub`, else the newest `*.pub`. Only `.pub`
+    files are opened, so no private key is ever read; a key already there under another comment
+    is left as one; a new `~/.ssh` is `0700` and a new file `0600`; a comment a shell would read
+    as more than words is dropped. `Deployed::key` says `Added`, `AlreadyThere`, `NoPublicKey`
+    (the sheet then points at `ssh-keygen` or Tailscale SSH) or `Failed`.
+  - **The host-key hint.** A key `ssh` could not show here now points at the sheet's Trust and
+    install, not at a terminal.
+  - Tests: `slopty-cli` `tests/askpass.rs` against a real `sshd` of this user's, whose key's
+    passphrase stands in for the password since no account's password can be known to a test:
+    `a_password_only_host_installs_on_one_password_and_then_takes_the_key` (one login however
+    many steps run, the key in once with its modes, the connection ended),
+    `a_wrong_password_says_so_and_asks_again` (refused once, never tried on the password login,
+    in no log or error), `askpass_prints_the_answer_and_fails_without_one`; `slopty-deploy`
+    `a_password_only_host_installs_on_one_password_and_then_takes_the_key` (the order of steps),
+    `the_password_never_reaches_argv_env_or_the_log`, `a_host_that_takes_a_password_is_asked_for_one`,
+    `a_key_goes_in_once_as_ssh_copy_id_puts_it`, `the_key_is_the_agent_s_first_else_the_newest_id_pub`,
+    `a_host_key_hint_points_at_the_sheet`, and `askpass` `the_password_answers_one_question_once`.
+  - **The sheet.** The field appears only when a run stopped on `Failure::password` for the
+    machine the fields still name. It is masked, has the kit's show toggle and takes paste. Secure
+    event input is on only while it has the keyboard in the app in front, and is off while a run
+    is under way. "Sign in and install" (or "set up") hands its text to that one run as a
+    `SecretString` and empties the field. An empty field runs nothing and says to type it. "Add
+    your key so <host> stops asking" is a box ticked by default. The server's setup over SSH
+    signs in the same way. Test: `slopty-app` `ssh::tests`
+    `a_password_only_machine_takes_the_password_once_and_the_key`.
+
+- ✅ **A server on another build says so, and its update installs this build** (2026-10-04,
+  readiness audit N3). A server that closed the link with `WRONG_BUILD` read as "unreachable",
+  which sent the person looking for a machine that was up. Its notice's command was a worker's.
+  - The client's server link reports `ServerEvent::WrongBuild(UpdateNotice)`, and the status bar
+    says "Server runs a different build". A notice says once per build how to bring it to this
+    one: "Update the server" in the palette on a Mac with the deploy, else the CLI's
+    `slopty server deploy <host>`. A server on this Mac uses `slopty server install`.
+  - "Update the server" puts this build on the machine through the SSH target it was set up
+    with (`Deployer::remember_server`, kept as "server <address>" with the other targets), else
+    its host. It relinks at the address in use first, then at the addresses the setup said. A
+    host key not yet trusted sends the person to the sheet that shows it.
+  - Tests: `slopty-client` `tests/wrong_build.rs`; `slopty-app`
+    `a_server_on_another_build_is_told_with_its_way_on`,
+    `the_palette_updates_a_server_on_another_build`.
+
+- ✅ **A machine the tailnet refuses this device is listed with its grant** (2026-10-04,
+  readiness audit N8). Discovery dropped a node that refused the device, and adding one by
+  address gave a raw error. Tailscale's grant is the person's to make.
+  - **On the wire.** A tailnet member that admission grants no role finishes the handshake and
+    is closed with `NOT_GRANTED` (`Verdict::Ungranted`), not dropped, so the dialer can tell a
+    missing grant from a dead host. Discovery's probe runs the prefix exchange and reads the
+    close: `Answer::Ready`, `OtherBuild(build)` or `NotGranted`. A probe closes with
+    `PROBE_REASON`, which the listener does not log as a failed peer.
+  - **In the panel.** A refused node is listed with "needs a tailnet grant", and pressing it
+    copies the grant for this device's clients to that node (`grant_to`). One on another build
+    is "runs a different build", and pressing it opens the SSH sheet on it. "Copy the tailnet
+    grant for Slopty's clients" names both tags, the server's and the machines'. An add by
+    address says "<host> needs a tailnet grant for this device" and where it goes.
+  - Tests: `slopty-net` `discover`
+    `a_node_that_refuses_this_device_or_runs_another_build_says_so`, `admission` and `listen`
+    tests; `slopty-app` `a_node_that_needs_a_grant_shows_and_copies_its_grant`.
+
+- ✅ **This Mac's daemons follow the app's build, and every machine updates from the palette**
+  (2026-10-04, readiness audit N4, N27). After an app update, this Mac's own worker and server
+  kept the old build until someone pressed Update, and machines installed before the server
+  never joined it.
+  - **Unasked, once a launch.** A worker or server on loopback that answers on another build is
+    brought to this build at once, but only where the app runs from an installed bundle
+    (`Deployer::installed`, the executable under `Contents/MacOS`). A build run from a source
+    tree leaves them alone. A failed run waits for the person.
+  - **"Update all machines"** starts each tile's update for every machine that answered on
+    another build. **"Register machines with the server"** installs this build again, with
+    `--server`, on every machine added here by address that the server's directory does not
+    list and whose SSH target was kept. The directory's first listing after a link says how
+    many there are, once a server. Each keeps its sessions (custody, above).
+  - Tests: `slopty-app` `ssh::tests`
+    `every_worker_on_another_build_is_updated_and_this_mac_s_unasked`,
+    `machines_added_before_the_server_are_registered_with_it`.
+
+- ✅ **The daemons follow `settings.toml` live where they can, and say what waits** (2026-10-04,
+  readiness audit N10, A25). Each daemon read its table once at start, and nothing said so.
+  - The worker and the server poll the file's stamp every second (`slopty_settings::follow`,
+    where the app's own watcher moved). The worker applies `allow` (admission's ranges, shared
+    by every clone) and `server` (it drops its registration and joins the new one, and new
+    shells get the new environment) as the file changes. The server applies `allow` and the
+    project bounds.
+  - A key read only at start is marked in the schema (`x-restarts = "worker"`), and
+    `schema::restart_keys` names the ones a change touched. The worker logs them. After a change,
+    when a worker answers on this Mac, the app says "<titles> takes effect when slopty-worker
+    restarts on this Mac" and offers "Restart slopty-worker on this Mac" in the palette. That
+    restarts the worker alone, so ptyd and every session stay.
+  - The worker and server tables are not listed on an iPhone or an iPad, which runs neither.
+  - Editing another machine's settings from a client needs the worker's settings path on the
+    wire (`HelloAck`) and a file tile for it. That belongs to the wire's owner.
+  - Tests: `slopty-settings` `a_change_the_worker_reads_only_at_its_start_is_named`, `follow`;
+    `slopty-workerd` `a_change_of_the_file_is_applied_or_said_to_wait`; `slopty-serverd`
+    `an_edit_of_the_file_is_applied_as_it_is_read`; `slopty-app`
+    `a_change_the_worker_reads_at_its_start_says_so_and_how`; `slopty-ui`
+    `a_phone_lists_no_daemon_table`.
+
+- ✅ **The person's word is "machine"** (2026-10-04, `.research/rulings-2026-10-04.md` §8).
+  Chrome said "worker", a role's jargon that also names another product, beside "machine" and
+  "Mac". Everything the person reads in this lane's files now says "machine": "Add a machine",
+  "Update all machines", "Show machines in Finder", "Register machines with the server", "Use
+  this Mac", the settings table "Share this Mac's shells and windows", and "This machine runs a
+  different build". Process names stay as the OS shows them (`slopty-worker` in Login Items and
+  the privacy panes, and in the restart's words). So do the CLI's verbs, code identifiers, wire
+  types, settings tables and keys, and these decision files. The Keyboard page names the app's
+  commands in the palette's words, not by their names in the file (test: `slopty-app`
+  `the_keyboard_page_names_the_app_s_commands_in_the_palette_s_words`).

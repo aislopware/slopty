@@ -120,7 +120,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     (Section::Network, "This app", &["client.server"]),
     (
         Section::Network,
-        "This Mac as a worker",
+        "Share this Mac's shells and windows",
         &[
             "worker.server",
             "worker.allow",
@@ -175,7 +175,7 @@ impl Row {
         &self.field.title
     }
 
-    /// The one line under the label.
+    /// What it does, under the label: two lines at most at the narrowest sheet.
     #[must_use]
     pub fn meta(&self) -> &'static str {
         &self.field.summary
@@ -200,16 +200,31 @@ impl Row {
 /// Every row the form shows, section by section in [`Section::ALL`]'s order.
 #[must_use]
 pub fn rows() -> &'static [Row] {
-    static ROWS: LazyLock<Vec<Row>> = LazyLock::new(|| rows_of(schema::fields()));
+    static ROWS: LazyLock<Vec<Row>> = LazyLock::new(|| {
+        let fields: Vec<&Field> =
+            schema::fields().iter().filter(|f| HOSTS_DAEMONS || !daemons(&f.table)).collect();
+        rows_of(&fields)
+    });
     &ROWS
+}
+
+/// Whether this platform runs `slopty-worker` and `slopty-server`: an iPhone or an iPad runs
+/// neither, so their tables would set nothing there.
+const HOSTS_DAEMONS: bool = !cfg!(target_os = "ios");
+
+/// Whether `table` is read by a daemon rather than by this app.
+fn daemons(table: &str) -> bool {
+    let root = table.split_once('.').map_or(table, |(root, _)| root);
+    matches!(root, "worker" | "server")
 }
 
 /// `fields` as rows: those [`LAYOUT`] names in its order, then the rest on their [`home`] page.
 /// A key the layout does not name joins the group its table's title names, after that group's
 /// own keys, so a page never heads two groups alike; one whose title names no group there
 /// closes its page.
-fn rows_of(fields: &'static [Field]) -> Vec<Row> {
-    let named = |name: &str| fields.iter().find(|f| format!("{}.{}", f.table, f.key) == name);
+fn rows_of(fields: &[&'static Field]) -> Vec<Row> {
+    let named =
+        |name: &str| fields.iter().copied().find(|f| format!("{}.{}", f.table, f.key) == name);
     let placed = |f: &Field| {
         let name = format!("{}.{}", f.table, f.key);
         LAYOUT.iter().any(|(_, _, keys)| keys.contains(&name.as_str()))
@@ -218,7 +233,8 @@ fn rows_of(fields: &'static [Field]) -> Vec<Row> {
     for section in Section::ALL {
         let groups: Vec<(&'static str, &[&str])> =
             LAYOUT.iter().filter(|(s, ..)| *s == section).map(|&(_, g, keys)| (g, keys)).collect();
-        let unplaced = || fields.iter().filter(|f| !placed(f) && home(&f.table) == section);
+        let unplaced =
+            || fields.iter().copied().filter(|f| !placed(f) && home(&f.table) == section);
         for &(group, keys) in &groups {
             rows.extend(keys.iter().filter_map(|k| named(k)).map(|field| Row {
                 field,
@@ -494,8 +510,9 @@ mod tests {
     #[test]
     fn every_key_is_a_row_once() {
         let fields = schema::fields();
-        assert_eq!(rows().len(), fields.len(), "a row per key");
-        for f in fields {
+        let shown = fields.iter().filter(|f| HOSTS_DAEMONS || !daemons(&f.table));
+        assert_eq!(rows().len(), shown.clone().count(), "a row per key");
+        for f in shown {
             let n = rows().iter().filter(|r| std::ptr::eq(r.field, f)).count();
             assert_eq!(n, 1, "{}.{}", f.table, f.key);
         }
@@ -579,7 +596,8 @@ mod tests {
         "sound_on_connect".clone_into(&mut extra.key);
         "Sound on connect".clone_into(&mut extra.title);
         fields.push(extra);
-        let rows = rows_of(Box::leak(fields.into_boxed_slice()));
+        let fields: &'static [Field] = fields.leak();
+        let rows = rows_of(&fields.iter().collect::<Vec<_>>());
         let row = rows.iter().find(|r| r.key() == "sound_on_connect").expect("its row");
         assert_eq!((row.section, row.group), (Section::Streams, "Remote windows and desktops"));
         let last = rows.iter().rposition(|r| r.group == row.group);
@@ -598,5 +616,16 @@ mod tests {
         once.sort_unstable_by_key(|(s, g)| (s.index(), *g));
         once.dedup();
         assert_eq!(once.len(), heads.len(), "no page heads two groups alike: {heads:?}");
+    }
+
+    /// An iPhone or an iPad runs no worker or server, so the form there lists no row of
+    /// theirs, and the app's own rows stay.
+    #[test]
+    fn a_phone_lists_no_daemon_table() {
+        let phone: Vec<&Field> = schema::fields().iter().filter(|f| !daemons(&f.table)).collect();
+        let phone = rows_of(&phone);
+        assert!(phone.iter().all(|r| !daemons(r.table())), "{phone:#?}");
+        assert!(phone.iter().any(|r| r.table() == "client"), "the app's own stay");
+        assert_eq!(rows().iter().any(|r| r.table() == "worker"), HOSTS_DAEMONS);
     }
 }

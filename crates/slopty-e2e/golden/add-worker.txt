@@ -1,8 +1,8 @@
 Window │ Slopty
 Label │ Slopty
-Heading │ Add a worker
+Heading │ Add a machine
 Status │ Nothing answered on your tailnet
-Button │ Use this Mac as a worker
-TextInput │ Worker address (focused)
+Button │ Use this Mac
+TextInput │ Machine address (focused)
 Button │ Add
 Button │ Connect to a server instead

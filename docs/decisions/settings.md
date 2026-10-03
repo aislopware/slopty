@@ -228,3 +228,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (slopty-platform): a page made with it on or off, then turned either way. It opens no
     window and no inspector.
 
+
+- ✅ **A description wraps to two lines and is never cut** (2026-10-04,
+  `.research/rulings-2026-10-04.md` §4c). Each row's description was cut to one line, with the
+  rest in a hover hint, so on a touch screen the rest could not be reached. The golden showed
+  "Any monospace; JetBrains Mono is b…". This supersedes "A row holds one line" (`ui.md`,
+  2026-09-28).
+  - A row is its label with its control on one line, the control centred on the label, and the
+    description under them. It is as tall as its words. Beside the sidebar the words keep to two
+    thirds of the row (`DESCRIPTION_SHARE`, as Zed's settings do), so they read as one column
+    down the page. On a phone's sheet, which has no sidebar, they take the row, since a third of
+    a phone's width left empty would force every description to half its words.
+  - The hover hint is gone, because every word is on the row. The control is still told the
+    whole description for VoiceOver.
+  - A description longer than two lines at the narrowest sheets it is written for is a copy
+    defect, and a test names it with its length. Those sheets are 320 pt (an iPad's Slide Over,
+    the narrowest iOS gives) and the List overlay's width, the narrowest that keeps the sidebar.
+    The copy pass that made them fit is in `slopty-settings`' doc comments' first lines.
+  - Tests: `slopty-ui` `settings_editor` `a_description_wraps_and_never_cuts`,
+    `every_description_fits_two_lines_at_the_narrowest_sheet`, both shaping with the platform's
+    own text system.

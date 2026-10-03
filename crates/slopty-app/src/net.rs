@@ -172,7 +172,7 @@ pub async fn add_worker(address: &str) -> Result<Added> {
     let endpoint = endpoint().map_err(anyhow::Error::msg)?;
     let conn = connect(&endpoint, &address, hello(me.client())).await.map_err(|e| {
         if matches!(e, slopty_net::NetError::NotGranted) {
-            anyhow!(Refusal::NotGranted.text())
+            anyhow!(not_granted(address.host()))
         } else if let Some(notice) =
             slopty_client::update::UpdateNotice::for_worker_dial(address.host(), &e)
         {
@@ -185,6 +185,12 @@ pub async fn add_worker(address: &str) -> Result<Added> {
     me.remember(KnownWorker { address, name: added.name.clone(), worker_id: added.id })?;
     conn.close();
     Ok(added)
+}
+
+/// What adding the worker at `host` says when it turns this device away: the tailnet grants
+/// it no client role there, and where the grant that does is copied from.
+pub fn not_granted(host: &str) -> String {
+    format!("{host} needs a tailnet grant for this device. {}", crate::server::GRANT_WHERE)
 }
 
 /// Why a dial to a worker failed.
@@ -207,7 +213,7 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
     let address = match (address, &added) {
         (Some(address), _) => address,
         (None, Some(added)) => added.address.clone(),
-        (None, None) => return Err(DialFailed::Other("worker forgotten".to_owned())),
+        (None, None) => return Err(DialFailed::Other("machine forgotten".to_owned())),
     };
     let endpoint = endpoint().map_err(DialFailed::Other)?;
     tracing::debug!(worker = %id, %address, "dialing");
@@ -225,7 +231,7 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
     let ack = conn.ack.clone();
     if ack.worker != id {
         conn.close();
-        return Err(DialFailed::Other(format!("{address} now answers as another worker")));
+        return Err(DialFailed::Other(format!("{address} now answers as another machine")));
     }
     tracing::debug!(worker = %id, name = %ack.name, sessions = ack.sessions.len(), "connected");
     // A worker added by address shows the stored name until the link is up; keep it current.
@@ -255,7 +261,8 @@ fn server_role() -> Role {
 pub async fn link_server(address: &HostAddr) -> Result<ServerLink> {
     let endpoint = endpoint().map_err(anyhow::Error::msg)?;
     slopty_net::server::connect(&endpoint, address, server_role()).await.map_err(|e| match e {
-        DialError::Refused(Refusal::NotGranted) => {
+        DialError::Refused(Refusal::NotGranted)
+        | DialError::Net(slopty_net::NetError::NotGranted) => {
             anyhow!("{}. {}", crate::server::NOT_GRANTED, crate::server::GRANT_WHERE)
         }
         DialError::Refused(why) => anyhow!(why.text()),

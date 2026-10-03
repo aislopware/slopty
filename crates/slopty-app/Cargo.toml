@@ -56,4 +56,6 @@ gpui_ios = { workspace = true, optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = [ "test-support" ] }
+# `a11y::tree`, for a test to read what a screen reader hears.
+slopty-ui = { workspace = true, features = [ "e2e" ] }
 tempfile.workspace = true

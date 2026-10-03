@@ -28,7 +28,7 @@ pub mod actions {
 }
 
 /// The palette's words for it.
-pub const TITLE: &str = "Show workers in Finder";
+pub const TITLE: &str = "Show machines in Finder";
 
 /// Whether the palette offers it.
 pub const OFFERED: bool = cfg!(target_os = "macos");
@@ -40,7 +40,7 @@ pub const SWITCH_ON: &str = "Turn on Slopty under File Providers, then try again
 /// One worker's domain, as the system has it: its worker and whether it is switched on.
 pub type Switched = (WorkerId, bool);
 
-/// What "Show workers in Finder" does.
+/// What "Show machines in Finder" does.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Step {
     /// Open System Settings where the person switches Slopty's place in Finder on.
@@ -63,7 +63,7 @@ impl Step {
         match self {
             Self::SwitchOn => Some(SWITCH_ON.to_owned()),
             Self::Open(_) => None,
-            Self::NoWorkers => Some("Connect to a server to see its workers in Finder".to_owned()),
+            Self::NoWorkers => Some("Connect to a server to see its machines in Finder".to_owned()),
             Self::Unsigned => Some("This build of Slopty has no Finder extension".to_owned()),
             Self::Failed(why) => Some(format!("Finder: {why}")),
         }
@@ -91,7 +91,7 @@ pub fn step(
 }
 
 impl crate::Workspace {
-    /// "Show workers in Finder": the system is asked on the networking runtime, and the step
+    /// "Show machines in Finder": the system is asked on the networking runtime, and the step
     /// is taken and said here.
     pub(crate) fn show_workers_in_finder(&self, cx: &Context<Self>) {
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -153,7 +153,7 @@ mod mac {
         }
     }
 
-    /// What "Show workers in Finder" does now, from the domains the system has.
+    /// What "Show machines in Finder" does now, from the domains the system has.
     pub(crate) async fn next_step() -> Step {
         let Some(shared) = files::container() else { return Step::Unsigned };
         match files::domains().await {

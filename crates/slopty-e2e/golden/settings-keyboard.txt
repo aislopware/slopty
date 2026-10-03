@@ -29,8 +29,8 @@ TabPanel │ Keyboard
 Heading │ General
 ListItem │ New terminal │ ⌘T, ⌘N
 Button │ Keys for New terminal │ ⌘T, ⌘N
-ListItem │ New agent │ ⇧⌘T
-Button │ Keys for New agent │ ⇧⌘T
+ListItem │ New agent… │ ⇧⌘T
+Button │ Keys for New agent… │ ⇧⌘T
 ListItem │ New note │ ⇧⌘N
 Button │ Keys for New note │ ⇧⌘N
 ListItem │ Add a window or display │ ⌘O
@@ -89,8 +89,8 @@ ListItem │ Mute sound in remote window │ ⌃⇧⌘M
 Button │ Keys for Mute sound in remote window │ ⌃⇧⌘M
 ListItem │ Stream stats in remote window │ ⌃⇧⌘I
 Button │ Keys for Stream stats in remote window │ ⌃⇧⌘I
-ListItem │ List workers
-Button │ Keys for List workers
+ListItem │ List machines
+Button │ Keys for List machines
 ListItem │ Forwarded ports
 Button │ Keys for Forwarded ports
 ListItem │ Name this tile │ ⌘E
@@ -125,20 +125,28 @@ ListItem │ Start a project here
 Button │ Keys for Start a project here
 ListItem │ Open settings │ ⌘,
 Button │ Keys for Open settings │ ⌘,
-ListItem │ Add worker │ ⇧⌘H
-Button │ Keys for Add worker │ ⇧⌘H
-ListItem │ Connect server
-Button │ Keys for Connect server
-ListItem │ Disconnect server
-Button │ Keys for Disconnect server
-ListItem │ Copy tailnet grant
-Button │ Keys for Copy tailnet grant
-ListItem │ Use this mac
-Button │ Keys for Use this mac
-ListItem │ Install over ssh
-Button │ Keys for Install over ssh
-ListItem │ Show workers in finder
-Button │ Keys for Show workers in finder
+ListItem │ Add a machine… │ ⇧⌘H
+Button │ Keys for Add a machine… │ ⇧⌘H
+ListItem │ Connect to a server
+Button │ Keys for Connect to a server
+ListItem │ Disconnect from the server
+Button │ Keys for Disconnect from the server
+ListItem │ Copy the tailnet grant for Slopty's clients
+Button │ Keys for Copy the tailnet grant for Slopty's clients
+ListItem │ Update all machines
+Button │ Keys for Update all machines
+ListItem │ Update the server
+Button │ Keys for Update the server
+ListItem │ Register machines with the server
+Button │ Keys for Register machines with the server
+ListItem │ Use this Mac
+Button │ Keys for Use this Mac
+ListItem │ Restart slopty-worker on this Mac
+Button │ Keys for Restart slopty-worker on this Mac
+ListItem │ Install on a machine over SSH
+Button │ Keys for Install on a machine over SSH
+ListItem │ Show machines in Finder
+Button │ Keys for Show machines in Finder
 Heading │ Layout
 ListItem │ Column to the left │ ⌥⌘←
 Button │ Keys for Column to the left │ ⌥⌘←

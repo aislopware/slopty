@@ -28,7 +28,6 @@
 //! where the project lives. A query finds commands too, by their words, keys or name in the
 //! file.
 
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,11 +45,16 @@ use slopty_theme::{Rgb, Theme, Typography};
 
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
+use crate::palette::PaletteItem;
 
 #[path = "settings_form_schema.rs"]
 pub mod schema;
 
 use schema::{KeyRow, Row, Section, rows};
+
+/// How much of a row's width its description may take: Zed's two thirds, so the words read as
+/// one column down the page whatever the control beside them.
+pub const DESCRIPTION_SHARE: f32 = 2.0 / 3.0;
 
 /// What the search field says before anything is typed.
 pub const SEARCH_PLACEHOLDER: &str = "Search settings";
@@ -112,8 +116,6 @@ pub enum SettingsFormEvent {
 /// The form over one `settings.toml` text.
 pub struct SettingsForm {
     theme: Theme,
-    /// The tokens a row's hint is drawn with, shared by every hint.
-    hint_theme: Rc<Theme>,
     /// The file's text as the rows last wrote it or the dialog last handed it over.
     text: String,
     /// The text last handed to the dialog to apply.
@@ -150,6 +152,8 @@ pub struct SettingsForm {
     narrow: bool,
     /// The Keyboard page's lines for the text, read again when the text changes.
     keys: Option<KeyPage>,
+    /// The app's palette lines beside the workspace's, whose words name its commands here.
+    words: Vec<PaletteItem>,
     /// One per command of the keymap, for its chords' control.
     key_handles: Vec<FocusHandle>,
     /// The command whose next chord is being recorded.
@@ -206,7 +210,6 @@ impl SettingsForm {
         }
         let handle = |cx: &mut Context<Self>| cx.focus_handle().tab_index(0).tab_stop(true);
         Self {
-            hint_theme: Rc::new(theme.clone()),
             theme,
             text: text.to_owned(),
             applied: text.to_owned(),
@@ -227,6 +230,7 @@ impl SettingsForm {
             placed: Vec::new(),
             narrow: false,
             keys: None,
+            words: Vec::new(),
             key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
             recording: None,
             scroll: ScrollHandle::new(),
@@ -297,7 +301,6 @@ impl SettingsForm {
     /// New tokens.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme != theme {
-            self.hint_theme = Rc::new(theme.clone());
             self.theme = theme;
             cx.notify();
         }
@@ -827,7 +830,15 @@ impl SettingsForm {
         if self.keys.as_ref().is_some_and(|page| page.text != self.text) {
             self.keys = None;
         }
-        self.keys.get_or_insert_with(|| KeyPage::read(&self.text))
+        self.keys.get_or_insert_with(|| KeyPage::read(&self.text, &self.words))
+    }
+
+    /// The app's own palette lines, so the Keyboard page names its commands as the palette
+    /// does rather than by their names in the file.
+    pub fn set_palette_words(&mut self, words: Vec<PaletteItem>, cx: &mut Context<Self>) {
+        self.words = words;
+        self.keys = None;
+        cx.notify();
     }
 
     /// Record the next chord typed as command `ix`'s, or stop recording it when it is.
@@ -1190,60 +1201,60 @@ impl SettingsForm {
             .into_any_element()
     }
 
-    /// A row: its label, and under it the line on what it does, or why the value typed was not
-    /// written, in the error's colour, until it is typed again.
+    /// A row: its label with its control beside it, centred on the label's line, and under them
+    /// what it does, or why the value typed was not written, in the error's colour, until it is
+    /// typed again.
+    ///
+    /// The words wrap and are never cut: a hover hint reaches no finger, and a cut sentence
+    /// tells nothing. Beside the sidebar they keep to [`DESCRIPTION_SHARE`] of the row, a
+    /// column read down the page; on a phone's sheet they take the row, which is narrow
+    /// enough. Each is written to fit two lines at the narrowest sheet, so a row is as tall as
+    /// its words.
     fn row(&self, ix: usize, row: &Row, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
+        let under = crate::kit::meta(div(), theme)
+            .w_full()
+            .min_w_0()
+            .when(!self.narrow, |el| el.max_w(gpui::relative(DESCRIPTION_SHARE)));
         let under = if let Some(error) = self.error(ix) {
-            crate::kit::meta(div(), theme)
+            under
                 .id(("settings-row-error", ix))
                 .debug_selector(move || format!("settings-row-error-{ix}"))
                 .role(gpui::accesskit::Role::Alert)
                 .aria_label(error.to_owned())
                 .text_color(hsla(s.error))
                 .child(SharedString::from(error.to_owned()))
-                .into_any_element()
         } else {
-            // One line, so every row stands as tall as the next; the whole of it is the line's
-            // hint.
-            let (meta, hint_theme) = (row.meta(), Rc::clone(&self.hint_theme));
-            crate::kit::meta(div(), theme)
+            under
                 .id(("settings-row-meta", ix))
                 .debug_selector(move || format!("settings-row-meta-{ix}"))
-                .truncate()
-                .child(meta)
-                .tooltip(move |_window, cx| {
-                    let theme = Rc::clone(&hint_theme);
-                    cx.new(|_| crate::kit::Hint::new(meta, "", theme)).into()
-                })
-                .into_any_element()
+                .child(row.meta())
         };
         div()
             .id(("settings-row", ix))
             .debug_selector(move || format!("settings-row-{ix}"))
             .flex()
-            .items_center()
-            .gap(px(spacing.md))
-            .min_h(px(theme.density.row_two_line))
+            .flex_col()
+            .gap(px(spacing.xxs))
             .py(px(spacing.xs))
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(spacing.xxs))
+                    .items_center()
+                    .gap(px(spacing.md))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .text_size(px(theme.typography.ui_size))
                             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                             .text_color(hsla(s.text))
                             .child(row.label()),
                     )
-                    .child(under),
+                    .child(div().flex_none().child(self.control(ix, row, cx))),
             )
-            .child(div().flex_none().child(self.control(ix, row, cx)))
+            .child(under)
             .into_any_element()
     }
 
@@ -1688,10 +1699,12 @@ struct KeyPage {
 }
 
 impl KeyPage {
-    fn read(text: &str) -> Self {
+    fn read(text: &str, words: &[PaletteItem]) -> Self {
         let keys = slopty_settings::Settings::parse(text).settings.keys;
         let keymap = crate::keymap::current().with_keys(&keys);
-        let rows = schema::key_rows(&keymap, &crate::workspace::palette_items());
+        let mut palette = crate::workspace::palette_items();
+        palette.extend_from_slice(words);
+        let rows = schema::key_rows(&keymap, &palette);
         Self { text: text.to_owned(), rows, said: keymap.diagnostics().to_vec() }
     }
 }
