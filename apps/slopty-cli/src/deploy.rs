@@ -31,6 +31,10 @@ pub struct DeployOpts {
     /// default it registers with the server every verb reaches (`--server` names another).
     #[arg(long)]
     no_server: bool,
+    /// Go on when the update restarts `slopty-ptyd` there, ending every shell and agent turn
+    /// it holds. Without it such an update stops before changing anything, and says so.
+    #[arg(long)]
+    end_sessions: bool,
 }
 
 impl DeployOpts {
@@ -62,7 +66,14 @@ pub async fn deploy(
 ) -> Result<Deployed> {
     let server = if opts.no_server { None } else { register_with(server, data_dir).await? };
     let ssh = Ssh::new(opts.ssh.clone(), opts.target.clone());
-    let plan = Plan { sources: sources(opts.bin_dir(), source), update: opts.update, server };
+    let plan = Plan {
+        sources: sources(opts.bin_dir(), source),
+        update: opts.update,
+        server,
+        end_sessions: opts.end_sessions,
+        password: None,
+        add_key: false,
+    };
     let target = &opts.target;
     let mut say = |event: Event| {
         if let Event::Step(Step::Upload { name }) = event {
@@ -150,7 +161,7 @@ pub fn served(target: &str, served: &Served) -> String {
 /// What the person reads once a deploy is done.
 #[must_use]
 pub fn report(target: &str, deployed: &Deployed) -> String {
-    let Deployed { platform, health, server } = deployed;
+    let Deployed { platform, health, server, ptyd, stops_at_logout, console, .. } = deployed;
     let mut out = vec![format!(
         "slopty-worker {} is up on {target} ({platform}), running {}",
         health.version, health.exe
@@ -182,6 +193,20 @@ pub fn report(target: &str, deployed: &Deployed) -> String {
             "no server to register with (pass --server); add it from a client with `slopty add \
              {address}`"
         )),
+    }
+    out.extend(ptyd.map(|ptyd| ptyd.to_string()));
+    out.extend(stops_at_logout.clone());
+    if console.logged_in == Some(false) {
+        let way = if console.filevault == Some(true) {
+            "FileVault is on there, so after a restart unlock its disk with `ssh` first, then log \
+             in through Screen Sharing"
+        } else {
+            "for a Mac nobody sits at, turn on automatic login in System Settings ▸ Users & \
+             Groups (FileVault must be off)"
+        };
+        out.push(format!(
+            "nobody is logged in at {target}, and Slopty runs once someone is: {way}"
+        ));
     }
     let mut text = out.join("\n");
     text.push('\n');

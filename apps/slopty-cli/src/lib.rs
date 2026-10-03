@@ -22,6 +22,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "a CLI; stdout is its UI")]
 #![forbid(unsafe_code)]
 
+mod askpass;
 mod attach;
 mod bench;
 mod client;
@@ -241,6 +242,9 @@ enum BenchCmd {
 
 /// The command line: `src/main.rs` is this and nothing else.
 pub fn main() -> Result<ExitCode> {
+    if let Some(answered) = askpass::from_env() {
+        return Ok(answered);
+    }
     slopty_crash::install(slopty_crash::Process::Cli, &slopty_platform::dirs::data_dir());
     // `attach` and the benches carry keys and echoes through every runtime thread; unclassed,
     // a loaded Mac held one for hundreds of milliseconds (MEASUREMENTS.md, "the keystroke path

@@ -7,7 +7,14 @@
 //! [`install_worker`] is what `slopty worker install` and the app's "Use this Mac as a worker"
 //! both run: stop the services, put the binaries where they will run from, write the definitions
 //! and start them again. Waiting for the daemon to answer is the caller's, over the worker's
-//! control socket ([`Layout::worker_socket`]). Every file an install writes goes under its
+//! control socket ([`Layout::worker_socket`]).
+//!
+//! ptyd holds every shell and agent turn, so an install leaves the running one alone whenever
+//! the new build keeps custody the same way ([`Session::ptyd_plan`], [`Ptyd::Kept`]): the same
+//! protocol and the same shell scripts, which ptyd says beside its socket
+//! ([`Layout::ptyd_custody`]). Only the worker restarts then, and takes every session back from
+//! ptyd. A ptyd that must restart ends the sessions it holds; the plan counts them, so the
+//! caller asks the person first. Every file an install writes goes under its
 //! [`Session`]'s home, data directory and definitions directory, and every command goes through
 //! its [`Runner`], so a test installs into a temporary directory with a runner that records what
 //! it was asked, and nothing reaches the real launchd.
@@ -27,6 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plist::{Dictionary, Value};
+use serde::{Deserialize, Serialize};
 
 /// One daemon to keep running.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -176,8 +184,10 @@ impl Runner for System {
     }
 }
 
-/// Whether a service is installed, and its process when it runs.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Whether a service is installed, and its process when it runs. As JSON: `{"running": 700}`,
+/// `"stopped"` or `"absent"`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum State {
     /// The manager runs it as this process.
     Running(u32),
@@ -196,6 +206,22 @@ impl std::fmt::Display for State {
         }
     }
 }
+
+/// A worker's services as `slopty --json worker service` reports them, which a deploy reads.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Report {
+    /// The PTY custodian.
+    pub ptyd: State,
+    /// The worker daemon.
+    pub worker: State,
+    /// What the person must do so the services outlive their last logout, when they do not
+    /// ([`Session::stops_at_logout`]).
+    pub stops_at_logout: Option<String>,
+}
+
+/// How an install says that nobody is logged in at the Mac, so there is no login session to
+/// start Slopty in ([`Session::logged_in`]); the deploy names the failure by these words.
+pub const NOBODY_LOGGED_IN: &str = "nobody is logged in at this Mac";
 
 /// Where services are installed and as whom: the manager, the user's home and uid, and what
 /// runs the manager's commands.
@@ -270,27 +296,53 @@ impl Session {
     /// it is off. launchd keeps a `LaunchAgent` for as long as the user is logged in at the Mac.
     #[must_use]
     pub fn keep_running(&self) -> Option<String> {
-        if self.manager == Manager::Launchd {
-            return None;
-        }
-        let uid = self.uid.to_string();
-        let lingers = || {
-            self.runner
-                .run("loginctl", &["show-user", &uid, "--property=Linger", "--value"])
-                .is_ok_and(|said| said.trim() == "yes")
-        };
-        if lingers() {
+        if self.manager == Manager::Launchd || self.lingers() {
             return None;
         }
         let turned_on = self.runner.run("loginctl", &["enable-linger"]);
-        if turned_on.is_ok() && lingers() {
+        if turned_on.is_ok() && self.lingers() {
             return None;
         }
         let why = turned_on.err().map(|e| format!(" ({e})")).unwrap_or_default();
-        Some(format!(
-            "it stops when you log out: run `sudo loginctl enable-linger $USER` there so it keeps \
-             running{why}"
-        ))
+        Some(stops_at_logout(&why))
+    }
+
+    /// What [`Self::keep_running`] would say, read without changing anything: `None` when the
+    /// services outlive the user's last logout, as they do under launchd.
+    #[must_use]
+    pub fn stops_at_logout(&self) -> Option<String> {
+        (self.manager == Manager::Systemd && !self.lingers()).then(|| stops_at_logout(""))
+    }
+
+    /// Whether the user's login session is there to start the services in. launchd keeps a
+    /// user's agents in the GUI domain their login opens, which a Mac nobody is logged in at
+    /// does not have: the install says so in [`NOBODY_LOGGED_IN`]'s words rather than as
+    /// `launchctl bootstrap`'s "Domain does not support specified action". systemd's user
+    /// manager needs no login once it lingers ([`Self::keep_running`]).
+    ///
+    /// # Errors
+    ///
+    /// When there is no GUI domain for the user.
+    pub fn logged_in(&self) -> io::Result<()> {
+        if self.manager != Manager::Launchd {
+            return Ok(());
+        }
+        let domain = format!("gui/{}", self.uid);
+        self.launchctl(&["print", &domain]).map(drop).map_err(|e| {
+            io::Error::other(format!(
+                "{NOBODY_LOGGED_IN}: launchd has no login session of uid {} to start Slopty in \
+                 ({e})",
+                self.uid
+            ))
+        })
+    }
+
+    /// Whether logind keeps this user's manager past their last logout.
+    fn lingers(&self) -> bool {
+        let uid = self.uid.to_string();
+        self.runner
+            .run("loginctl", &["show-user", &uid, "--property=Linger", "--value"])
+            .is_ok_and(|said| said.trim() == "yes")
     }
 
     /// `service` as this manager's definition of `job`. `gui`: it needs the login session's
@@ -452,6 +504,16 @@ impl Session {
         }
     }
 
+    /// The worker's services as they stand, read without changing anything.
+    #[must_use]
+    pub fn report(&self) -> Report {
+        Report {
+            ptyd: self.state(PTYD),
+            worker: self.state(WORKER),
+            stops_at_logout: self.stops_at_logout(),
+        }
+    }
+
     /// Write `job`'s definition.
     fn write_definition(&self, job: Job, service: &Service, gui: bool) -> io::Result<PathBuf> {
         let path = self.file(job);
@@ -489,6 +551,14 @@ impl Session {
             Err(e) => Err(context(&e, format_args!("remove {}", path.display()))),
         }
     }
+}
+
+/// What the person runs so the services outlive their last logout; `why` says what refused it.
+fn stops_at_logout(why: &str) -> String {
+    format!(
+        "it stops when you log out: run `sudo loginctl enable-linger $USER` there so it keeps \
+         running{why}"
+    )
 }
 
 /// How long [`Session::bootout`] waits for launchd to let go of an agent.
@@ -554,6 +624,13 @@ impl Layout {
     #[must_use]
     pub fn ptyd_socket(&self) -> PathBuf {
         self.run().join("ptyd.sock")
+    }
+
+    /// Where the running ptyd says its custody, `<pid> <fingerprint>`: beside its socket, as
+    /// `slopty-ptyd` writes it ([`Session::ptyd_plan`]).
+    #[must_use]
+    pub fn ptyd_custody(&self) -> PathBuf {
+        self.run().join("ptyd.custody")
     }
 
     /// The worker's control socket, where `doctor` is asked.
@@ -709,15 +786,20 @@ fn same_volume(a: &Path, b: &Path) -> bool {
 }
 
 /// Copy `names` from `source` into `bin_dir`, unless they run where they are.
+///
+/// Each lands beside its name and is renamed over it once whole, so a binary that still runs
+/// (a ptyd kept through the install) keeps its own file: written over in place, a signed
+/// Mach-O is killed at its next page-in.
 fn copy_binaries(names: &[&str], source: &Path, bin_dir: &Path) -> io::Result<()> {
     if bin_dir == source {
         return Ok(());
     }
     for name in names {
         let (from, to) = (source.join(name), bin_dir.join(name));
-        std::fs::copy(&from, &to).map_err(|e| {
-            context(&e, format_args!("copy {} to {}", from.display(), to.display()))
-        })?;
+        let part = bin_dir.join(format!("{name}.part"));
+        std::fs::copy(&from, &part).and_then(|_bytes| std::fs::rename(&part, &to)).map_err(
+            |e| context(&e, format_args!("copy {} to {}", from.display(), to.display())),
+        )?;
     }
     Ok(())
 }
@@ -736,6 +818,121 @@ fn check_binaries(names: &[&str], source: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// What an install does to the running ptyd, and so to every shell and agent turn it holds
+/// ([`Session::ptyd_plan`]).
+///
+/// As JSON it is `{"ptyd": "kept"}`, `{"ptyd": "starts"}` or
+/// `{"ptyd": "restarts", "sessions": 3}`, which `slopty --json worker install --plan` prints
+/// for a deploy to read.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "ptyd", rename_all = "snake_case")]
+pub enum Ptyd {
+    /// None runs: it starts, with nothing to end.
+    Starts,
+    /// The one running stays, and every session with it: the new build keeps custody the same
+    /// way. Its binary is replaced, to run from its next start.
+    Kept,
+    /// The one running is replaced, ending every session it holds.
+    Restarts {
+        /// How many it holds (its child processes), when they could be counted.
+        sessions: Option<u32>,
+    },
+}
+
+impl Ptyd {
+    /// Whether carrying it out ends sessions, or may: a restart of a ptyd that holds any, or
+    /// whose sessions could not be counted. A person is asked before that.
+    #[must_use]
+    pub const fn ends_sessions(self) -> bool {
+        matches!(self, Self::Restarts { sessions } if !matches!(sessions, Some(0)))
+    }
+}
+
+/// The plan as a sentence for the CLI.
+impl std::fmt::Display for Ptyd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Starts => f.write_str("slopty-ptyd starts"),
+            Self::Kept => f.write_str("slopty-ptyd keeps running, and every session with it"),
+            Self::Restarts { sessions: Some(0) } => {
+                f.write_str("slopty-ptyd restarts; it holds no sessions")
+            }
+            Self::Restarts { sessions: Some(1) } => {
+                f.write_str("slopty-ptyd restarts, ending the 1 session it holds")
+            }
+            Self::Restarts { sessions: Some(n) } => {
+                write!(f, "slopty-ptyd restarts, ending the {n} sessions it holds")
+            }
+            Self::Restarts { sessions: None } => {
+                f.write_str("slopty-ptyd restarts, ending every session it holds")
+            }
+        }
+    }
+}
+
+impl Session {
+    /// What installing the binaries in `source` over the worker whose data is in `data_dir`
+    /// does to its ptyd.
+    ///
+    /// None running: [`Ptyd::Starts`]. Kept when the new `slopty-ptyd --custody` says what the
+    /// running one wrote ([`Layout::ptyd_custody`]), trusted only while its pid is the one the
+    /// manager runs, and while it holds sessions: one that holds none is restarted all the same,
+    /// so the new build's own ptyd runs from now. Anything else restarts it, counting its child
+    /// processes, which are its sessions: an older ptyd says no custody, so it restarts once.
+    #[must_use]
+    pub fn ptyd_plan(&self, source: &Path, data_dir: &Path) -> Ptyd {
+        let Some(pid) = self.pid(PTYD) else { return Ptyd::Starts };
+        let running = std::fs::read_to_string(Layout::new(data_dir).ptyd_custody())
+            .ok()
+            .and_then(|said| custody_of(&said, pid));
+        let program = source.join(PTYD.program);
+        let new = self
+            .runner
+            .run(&program.to_string_lossy(), &["--custody"])
+            .map(|said| said.trim().to_owned())
+            .inspect_err(|e| tracing::debug!(error = %e, "the new ptyd's custody"))
+            .ok()
+            .filter(|said| !said.is_empty());
+        let sessions = self.children(pid);
+        if running.is_some() && running == new && sessions != Some(0) {
+            return Ptyd::Kept;
+        }
+        tracing::info!(?running, ?new, ?sessions, "slopty-ptyd restarts");
+        Ptyd::Restarts { sessions }
+    }
+
+    /// How many processes `pid` is the parent of, as `ps` lists them; `None` when it cannot.
+    fn children(&self, pid: u32) -> Option<u32> {
+        let listed = self
+            .runner
+            .run("ps", &["-A", "-o", "ppid="])
+            .inspect_err(|e| tracing::warn!(error = %e, "count ptyd's sessions"))
+            .ok()?;
+        let count = listed.lines().filter(|line| line.trim().parse() == Ok(pid)).count();
+        u32::try_from(count).ok()
+    }
+
+    /// A service left running through an install: its new definition is known to the manager
+    /// for its next start, and it still starts at login.
+    fn keep(&self, job: Job) -> io::Result<()> {
+        match self.manager {
+            // launchd reads the file again at the next login; loading it now would refuse a
+            // label already loaded.
+            Manager::Launchd => Ok(()),
+            Manager::Systemd => {
+                self.systemctl(&["daemon-reload"])?;
+                self.systemctl(&["enable", &format!("{}.service", job.program)]).map(drop)
+            }
+        }
+    }
+}
+
+/// The fingerprint in a custody file's `<pid> <fingerprint>`, when `pid` wrote it.
+fn custody_of(said: &str, pid: u32) -> Option<String> {
+    let (by, custody) = said.trim().split_once(' ')?;
+    (by.parse() == Ok(pid) && !custody.is_empty()).then(|| custody.to_owned())
+}
+
 /// What an install put where.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Installed {
@@ -743,12 +940,17 @@ pub struct Installed {
     pub bin_dir: PathBuf,
     /// Each service's definition, in start order.
     pub definitions: Vec<(Job, PathBuf)>,
+    /// What it did to ptyd.
+    pub ptyd: Ptyd,
 }
 
-/// Install the worker's two services in `session` from the binaries in `source`, and start them.
+/// Install the worker's two services in `session` from the binaries in `source`, and start them,
+/// carrying out `ptyd` ([`Session::ptyd_plan`], which the caller asked first).
 ///
-/// It stops both, put the binaries where they run from ([`run_dir`]), write the definitions
-/// and start ptyd, then the worker. Idempotent. The worker reads its settings and keeps its
+/// It stops the worker (and ptyd, unless [`Ptyd::Kept`]), puts the binaries where they run
+/// from ([`run_dir`]), writes the definitions and starts ptyd, then the worker. A kept ptyd is
+/// not stopped or started: its binary and definition are replaced for its next start, and the
+/// new worker takes its sessions back. Idempotent. The worker reads its settings and keeps its
 /// sockets under `data_dir`; whether it came up is asked of its control socket
 /// ([`Layout::worker_socket`]).
 ///
@@ -761,24 +963,30 @@ pub async fn install_worker(
     opts: &WorkerOpts,
     source: &Path,
     data_dir: &Path,
+    ptyd: Ptyd,
 ) -> io::Result<Installed> {
     check_binaries(&WORKER_BINARIES, source)?;
+    session.logged_in()?;
     let layout = Layout::new(data_dir);
     let bin_dir = run_dir(source, data_dir, &session.home);
     session.make_dirs(&[&layout.run(), &bin_dir])?;
-    // Stop first: the copy must not land on a running binary, and a stale socket file makes
-    // the daemon's bind fail (the manager would then loop on it).
+    let kept = |job: Job| job == PTYD && ptyd == Ptyd::Kept;
+    // Stop first: a stale socket file makes the daemon's bind fail (the manager would then
+    // loop on it).
     for job in [WORKER, PTYD] {
-        session.stop(job, false).await;
+        if !kept(job) {
+            session.stop(job, false).await;
+        }
     }
     copy_binaries(&WORKER_BINARIES, source, &bin_dir)?;
     let mut definitions = Vec::new();
     for (job, service) in worker_services(opts, &bin_dir, data_dir) {
         let path = session.write_definition(job, &service, true)?;
-        session.start(job).map_err(|e| context(&e, format_args!("start {}", job.program)))?;
+        let started = if kept(job) { session.keep(job) } else { session.start(job) };
+        started.map_err(|e| context(&e, format_args!("start {}", job.program)))?;
         definitions.push((job, path));
     }
-    Ok(Installed { bin_dir, definitions })
+    Ok(Installed { bin_dir, definitions, ptyd })
 }
 
 /// Stop the worker's two services and remove their definitions; each with whether it was
@@ -811,6 +1019,7 @@ pub async fn install_server(
 ) -> io::Result<PathBuf> {
     let binaries = [SERVER.program];
     check_binaries(&binaries, source)?;
+    session.logged_in()?;
     let bin_dir = run_dir(source, data_dir, &session.home);
     session.make_dirs(&[&bin_dir])?;
     session.stop(SERVER, false).await;
@@ -861,15 +1070,21 @@ mod tests {
     }
 
     /// A stand-in for `launchctl` and `systemctl`: it records each command line and succeeds,
-    /// except that nothing is ever loaded (`print` fails), so a bootout returns at once.
+    /// except that nothing is ever loaded (`print` of a service fails), so a bootout returns at
+    /// once. The user is logged in: their GUI domain prints.
     #[derive(Debug)]
     struct Recorder(mpsc::Sender<String>);
+
+    /// Whether `args` print a service (`print gui/501/<label>`), not a domain.
+    fn prints_a_service(args: &[&str]) -> bool {
+        args.first() == Some(&"print") && args.get(1).is_some_and(|t| t.matches('/').count() > 1)
+    }
 
     impl Runner for Recorder {
         fn run(&self, program: &str, args: &[&str]) -> io::Result<String> {
             let line = std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>();
             let _sent = self.0.send(line.join(" "));
-            if args.first() == Some(&"print") {
+            if prints_a_service(args) {
                 return Err(io::Error::other("Could not find service"));
             }
             Ok(String::new())
@@ -978,8 +1193,10 @@ mod tests {
         let data = root.path().join("data");
         let (session, calls) = stand_in(Manager::Launchd, &home);
 
+        let plan = session.ptyd_plan(&macos, &data);
+        assert_eq!(plan, Ptyd::Starts, "no ptyd runs");
         let installed =
-            install_worker(&session, &WorkerOpts::default(), &macos, &data).await.unwrap();
+            install_worker(&session, &WorkerOpts::default(), &macos, &data, plan).await.unwrap();
 
         assert_eq!(installed.bin_dir, macos, "run in place");
         assert!(!Layout::new(&data).bin().exists(), "nothing copied out of the bundle");
@@ -1009,6 +1226,8 @@ mod tests {
         assert_eq!(
             asked,
             [
+                "launchctl print gui/501/dev.aislopware.slopty.ptyd".to_owned(),
+                "launchctl print gui/501".to_owned(),
                 "launchctl bootout gui/501/dev.aislopware.slopty.worker".to_owned(),
                 "launchctl print gui/501/dev.aislopware.slopty.worker".to_owned(),
                 "launchctl bootout gui/501/dev.aislopware.slopty.ptyd".to_owned(),
@@ -1016,7 +1235,8 @@ mod tests {
                 format!("launchctl bootstrap gui/501 {}", ptyd.display()),
                 format!("launchctl bootstrap gui/501 {}", worker.display()),
             ],
-            "stop both, then start ptyd before the worker"
+            "asked whether ptyd runs and the user is logged in, stop both, then start ptyd \
+             before the worker"
         );
     }
 
@@ -1034,7 +1254,8 @@ mod tests {
         let (session, calls) = stand_in(Manager::Launchd, &home);
         let opts = WorkerOpts { port: Some(45551), ..WorkerOpts::default() };
 
-        let installed = install_worker(&session, &opts, &source, &data).await.unwrap();
+        let installed =
+            install_worker(&session, &opts, &source, &data, Ptyd::Starts).await.unwrap();
 
         let bin = data.join("bin");
         assert_eq!(installed.bin_dir, bin, "run from the data directory");
@@ -1078,13 +1299,59 @@ mod tests {
         let source = root.path().join("bin");
         binaries(&source, &["slopty-worker"]);
         let (session, calls) = stand_in(Manager::Launchd, root.path());
-        let err = install_worker(&session, &WorkerOpts::default(), &source, root.path())
-            .await
-            .unwrap_err();
+        let err =
+            install_worker(&session, &WorkerOpts::default(), &source, root.path(), Ptyd::Starts)
+                .await
+                .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
         assert!(err.to_string().contains("slopty-ptyd not found"), "{err}");
         assert_eq!(calls.try_iter().count(), 0, "launchd was not asked anything");
         assert!(!session.definitions.exists(), "nothing written");
+    }
+
+    /// A stand-in launchd with no login session for the user: their GUI domain does not
+    /// print, as on a Mac nobody is logged in at.
+    #[derive(Debug)]
+    struct NobodyHome(mpsc::Sender<String>);
+
+    impl Runner for NobodyHome {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<String> {
+            let _sent = self.0.send(format!("{program} {}", args.join(" ")));
+            if args.first() == Some(&"print") {
+                return Err(io::Error::other("Could not find domain for user gui: 501"));
+            }
+            Ok(String::new())
+        }
+    }
+
+    /// With nobody logged in at the Mac, an install of the worker or the server says so in
+    /// [`NOBODY_LOGGED_IN`]'s words before it stops, copies or writes anything; systemd asks
+    /// for no login.
+    #[tokio::test]
+    async fn an_install_with_nobody_logged_in_says_so_and_changes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("bin");
+        binaries(&source, &WORKER_BINARIES);
+        binaries(&source, &[SERVER.program]);
+        let data = root.path().join("data");
+        let (tx, calls) = mpsc::channel();
+        let session = Session {
+            runner: Arc::new(NobodyHome(tx)),
+            ..stand_in(Manager::Launchd, root.path()).0
+        };
+        let opts = WorkerOpts::default();
+        let err = install_worker(&session, &opts, &source, &data, Ptyd::Starts).await.unwrap_err();
+        assert!(err.to_string().starts_with(NOBODY_LOGGED_IN), "{err}");
+        assert!(err.to_string().contains("Could not find domain"), "launchd's words kept: {err}");
+        let err = install_server(&session, None, "info", &source, &data).await.unwrap_err();
+        assert!(err.to_string().starts_with(NOBODY_LOGGED_IN), "{err}");
+        let asked: Vec<String> = calls.try_iter().collect();
+        assert_eq!(asked, ["launchctl print gui/501", "launchctl print gui/501"], "nothing else");
+        assert!(!session.definitions.exists() && !data.exists(), "nothing written");
+
+        let (linux, _calls) = stand_in(Manager::Systemd, root.path());
+        let linux = Session { runner: Arc::new(NobodyHome(mpsc::channel().0)), ..linux };
+        linux.logged_in().unwrap();
     }
 
     /// A bundle is recognised by its shape; a directory that is not one is copied from.
@@ -1261,6 +1528,215 @@ mod tests {
         let (asker, daemon) = tokio::net::UnixStream::pair().unwrap();
         drop(daemon);
         ask_on(asker, b"{}\n").await.unwrap_err();
+    }
+
+    /// A machine where ptyd runs as pid 700 with `children` sessions: `launchctl print` and
+    /// `systemctl show` say so for ptyd only, the new `slopty-ptyd --custody` says `custody`,
+    /// and `ps` lists ptyd's children, or fails.
+    #[derive(Debug)]
+    struct Running {
+        asked: mpsc::Sender<String>,
+        custody: &'static str,
+        children: Option<usize>,
+    }
+
+    impl Runner for Running {
+        fn run(&self, program: &str, args: &[&str]) -> io::Result<String> {
+            let line = std::iter::once(program).chain(args.iter().copied()).collect::<Vec<_>>();
+            let _sent = self.asked.send(line.join(" "));
+            let ptyd = args.iter().any(|a| a.contains(PTYD.label) || a.contains(PTYD.program));
+            match (program, args.first().copied()) {
+                (_, Some("--custody")) => Ok(format!("{}\n", self.custody)),
+                ("ps", _) => {
+                    let n = self.children.ok_or_else(|| io::Error::other("ps: not found"))?;
+                    Ok(std::iter::repeat_n("  700\n", n).chain(["    1\n", "  701\n"]).collect())
+                }
+                ("launchctl", Some("print")) if ptyd => Ok("\tpid = 700\n".to_owned()),
+                ("launchctl", Some("print")) if prints_a_service(args) => {
+                    Err(io::Error::other("Could not find service"))
+                }
+                ("systemctl", _) if args.contains(&"MainPID") || args.contains(&"--value") => {
+                    Ok(if ptyd { "700\n" } else { "0\n" }.to_owned())
+                }
+                _ => Ok(String::new()),
+            }
+        }
+    }
+
+    /// A session on `manager` in `root`'s home with ptyd running as [`Running`] says, the
+    /// custody file `said` written beside its socket under `root/data`, and what it was asked.
+    fn running(
+        manager: Manager,
+        root: &Path,
+        said: Option<&str>,
+        custody: &'static str,
+        children: Option<usize>,
+    ) -> (Session, mpsc::Receiver<String>) {
+        let (mut session, _calls) = stand_in(manager, &root.join("home"));
+        std::fs::create_dir_all(&session.home).unwrap();
+        let (tx, asked) = mpsc::channel();
+        session.runner = Arc::new(Running { asked: tx, custody, children });
+        let run = Layout::new(&root.join("data")).run();
+        std::fs::create_dir_all(&run).unwrap();
+        if let Some(said) = said {
+            std::fs::write(Layout::new(&root.join("data")).ptyd_custody(), said).unwrap();
+        }
+        (session, asked)
+    }
+
+    /// The new build keeps custody as the running ptyd does, and it holds sessions: the plan
+    /// keeps it, and the install restarts only the worker. ptyd is neither taken out nor loaded
+    /// again, and its binary is replaced by a new file renamed over it, never written in place,
+    /// so the running one keeps its own.
+    #[tokio::test]
+    async fn an_install_keeps_a_ptyd_whose_custody_is_unchanged() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let (session, asked) =
+            running(Manager::Launchd, root.path(), Some("700 0123abcd\n"), "0123abcd", Some(3));
+        let source = root.path().join("new");
+        binaries(&source, &WORKER_BINARIES);
+        let bin = Layout::new(&data).bin();
+        binaries(&bin, &WORKER_BINARIES);
+        let before = std::fs::metadata(bin.join(PTYD.program)).unwrap().ino();
+
+        let plan = session.ptyd_plan(&source, &data);
+        assert_eq!(plan, Ptyd::Kept);
+        assert!(!plan.ends_sessions());
+        let installed =
+            install_worker(&session, &WorkerOpts::default(), &source, &data, plan).await.unwrap();
+
+        assert_eq!(installed.ptyd, Ptyd::Kept);
+        let after = std::fs::metadata(bin.join(PTYD.program)).unwrap().ino();
+        assert_ne!(before, after, "a new file, renamed over the running one's");
+        assert!(!bin.join("slopty-ptyd.part").exists(), "nothing half-copied is left");
+        let asked: Vec<String> = asked.try_iter().collect();
+        let touched_ptyd = asked
+            .iter()
+            .filter(|c| c.starts_with("launchctl") && !c.starts_with("launchctl print"))
+            .filter(|c| c.contains("ptyd"))
+            .collect::<Vec<_>>();
+        assert_eq!(touched_ptyd, Vec::<&String>::new(), "ptyd left running: {asked:?}");
+        assert!(
+            asked.iter().any(|c| c == "launchctl bootout gui/501/dev.aislopware.slopty.worker"),
+            "{asked:?}"
+        );
+        assert!(
+            asked.iter().any(|c| c.starts_with("launchctl bootstrap") && c.contains("worker")),
+            "the worker restarts: {asked:?}"
+        );
+    }
+
+    /// A new build that keeps custody another way restarts ptyd, counting the sessions that
+    /// ends; so does a custody file left by another process (a ptyd that died and came back),
+    /// an older ptyd that wrote none, and a new ptyd that says nothing. A ptyd holding nothing
+    /// restarts even when it could be kept, so the new build's own runs from now.
+    #[test]
+    fn a_changed_or_unknown_custody_restarts_ptyd_and_counts_its_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let (data, source) = (root.path().join("data"), root.path().join("new"));
+        let plan = |said: Option<&str>, custody, children| {
+            let (session, _asked) = running(Manager::Launchd, root.path(), said, custody, children);
+            if said.is_none() {
+                let _gone = std::fs::remove_file(Layout::new(&data).ptyd_custody());
+            }
+            session.ptyd_plan(&source, &data)
+        };
+        let two = Ptyd::Restarts { sessions: Some(2) };
+        assert_eq!(plan(Some("700 aaaa"), "bbbb", Some(2)), two, "another custody");
+        assert_eq!(plan(Some("699 aaaa"), "aaaa", Some(2)), two, "written by another pid");
+        assert_eq!(plan(None, "aaaa", Some(2)), two, "an older ptyd says none");
+        assert_eq!(plan(Some("700 aaaa"), "", Some(2)), two, "the new one says none");
+        assert!(two.ends_sessions());
+        let idle = plan(Some("700 aaaa"), "aaaa", Some(0));
+        assert_eq!(idle, Ptyd::Restarts { sessions: Some(0) }, "nothing to keep");
+        assert!(!idle.ends_sessions(), "and nothing ends");
+        let uncounted = plan(Some("700 aaaa"), "bbbb", None);
+        assert_eq!(uncounted, Ptyd::Restarts { sessions: None }, "ps failed");
+        assert!(uncounted.ends_sessions(), "sessions that could not be counted may end");
+
+        let (session, _asked) = stand_in(Manager::Launchd, root.path());
+        assert_eq!(session.ptyd_plan(&source, &data), Ptyd::Starts, "no ptyd runs");
+    }
+
+    /// Restarting ptyd stops and starts it as before.
+    #[tokio::test]
+    async fn an_install_that_restarts_ptyd_takes_it_out_and_loads_it_again() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let (session, asked) =
+            running(Manager::Launchd, root.path(), Some("700 aaaa"), "bbbb", Some(1));
+        let source = root.path().join("new");
+        binaries(&source, &WORKER_BINARIES);
+        let plan = session.ptyd_plan(&source, &data);
+        assert_eq!(plan, Ptyd::Restarts { sessions: Some(1) });
+        assert_eq!(plan.to_string(), "slopty-ptyd restarts, ending the 1 session it holds");
+        let _planning: Vec<String> = asked.try_iter().collect();
+        install_worker(&session, &WorkerOpts::default(), &source, &data, plan).await.unwrap();
+        let asked: Vec<String> = asked.try_iter().collect();
+        assert!(asked.iter().any(|c| c == "launchctl bootout gui/501/dev.aislopware.slopty.ptyd"));
+        assert!(asked.iter().any(|c| c.starts_with("launchctl bootstrap") && c.contains("ptyd")));
+    }
+
+    /// Under systemd a kept ptyd's unit is reloaded and stays enabled, and is never restarted;
+    /// the worker's is.
+    #[tokio::test]
+    async fn a_systemd_install_keeps_ptyd_without_restarting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let (session, asked) =
+            running(Manager::Systemd, root.path(), Some("700 cafe"), "cafe", Some(4));
+        let source = root.path().join("new");
+        binaries(&source, &WORKER_BINARIES);
+        let plan = session.ptyd_plan(&source, &data);
+        assert_eq!(plan, Ptyd::Kept);
+        let _planning: Vec<String> = asked.try_iter().collect();
+        install_worker(&session, &WorkerOpts::default(), &source, &data, plan).await.unwrap();
+        let asked: Vec<String> = asked.try_iter().collect();
+        assert_eq!(
+            asked,
+            [
+                "systemctl --user stop slopty-worker.service",
+                "systemctl --user daemon-reload",
+                "systemctl --user enable slopty-ptyd.service",
+                "systemctl --user daemon-reload",
+                "systemctl --user enable slopty-worker.service",
+                "systemctl --user restart slopty-worker.service",
+            ],
+            "ptyd reloaded and enabled, never stopped or restarted"
+        );
+    }
+
+    /// The plan reads back from the JSON the CLI prints for a deploy.
+    #[test]
+    fn the_plan_is_json_a_deploy_reads() {
+        for (plan, json) in [
+            (Ptyd::Kept, r#"{"ptyd":"kept"}"#),
+            (Ptyd::Starts, r#"{"ptyd":"starts"}"#),
+            (Ptyd::Restarts { sessions: Some(3) }, r#"{"ptyd":"restarts","sessions":3}"#),
+            (Ptyd::Restarts { sessions: None }, r#"{"ptyd":"restarts","sessions":null}"#),
+        ] {
+            assert_eq!(serde_json::to_string(&plan).unwrap(), json);
+            assert_eq!(serde_json::from_str::<Ptyd>(json).unwrap(), plan);
+        }
+    }
+
+    /// The read-only linger check says what the install would, and turns nothing on.
+    #[test]
+    fn stops_at_logout_only_reads() {
+        let (mut session, _calls) = stand_in(Manager::Systemd, Path::new("/home/me"));
+        let runner = Arc::new(Logind {
+            asked: parking_lot::Mutex::default(),
+            lingers: false.into(),
+            may_enable: true,
+        });
+        session.runner = Arc::<Logind>::clone(&runner);
+        let note = session.stops_at_logout().unwrap();
+        assert!(note.contains("sudo loginctl enable-linger"), "{note}");
+        assert_eq!(*runner.asked.lock(), ["loginctl show-user 501 --property=Linger --value"]);
+        let (session, _calls) = stand_in(Manager::Launchd, Path::new("/Users/me"));
+        assert_eq!(session.stops_at_logout(), None);
     }
 
     #[test]

@@ -92,6 +92,8 @@ impl Host {
             "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
              case $2 in\n\
              *'uname -sm'*) echo '{uname}' ;;\n\
+             *'--plan'*) echo '{KEPT}' ;;\n\
+             *'worker service'*) echo '{REPORT}' ;;\n\
              *'worker install'*) echo 'installed (fake)'; echo 'worker up' >&2; \
              exit {install_exit} ;;\n\
              *'worker doctor'*) printf '%s\\n' '{doctor}' ;;\n\
@@ -149,8 +151,20 @@ fn binaries(head: impl Fn(&str) -> Vec<u8>) -> tempfile::TempDir {
 }
 
 fn plan(source: &tempfile::TempDir, update: bool) -> Plan {
-    Plan { sources: vec![source.path().to_path_buf()], update, server: None }
+    Plan {
+        sources: vec![source.path().to_path_buf()],
+        update,
+        server: None,
+        end_sessions: false,
+        password: None,
+        add_key: false,
+    }
 }
+
+/// What the machine says an update does to its ptyd: keeps it.
+const KEPT: &str = r#"{"ptyd":"kept"}"#;
+/// What it says its services are: both running, outliving the person's logout.
+const REPORT: &str = r#"{"ptyd":{"running":700},"worker":{"running":701},"stops_at_logout":null}"#;
 
 /// Runs `deploy`, keeping what it said.
 async fn run(runner: &dyn Runner, plan: &Plan) -> (Result<Deployed, DeployError>, Vec<Event>) {
@@ -267,11 +281,13 @@ struct Scripted {
     answer: Answer,
     ran: std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
     local: bool,
+    /// The runner a sign-in gave: what it runs is kept as `signed: <script>`.
+    signed: bool,
 }
 
 impl Scripted {
     fn new(answer: Answer) -> Self {
-        Self { answer, ran: std::sync::Arc::default(), local: false }
+        Self { answer, ran: std::sync::Arc::default(), local: false, signed: false }
     }
 
     fn ran(&self) -> Vec<String> {
@@ -297,7 +313,9 @@ impl Runner for Scripted {
         job: Job<'a>,
         on: &'a mut OnEvent<'_>,
     ) -> Pending<'a, std::io::Result<Ran>> {
-        self.ran.lock().push(job.script.to_owned());
+        let said =
+            if self.signed { format!("signed: {}", job.script) } else { job.script.to_owned() };
+        self.ran.lock().push(said);
         let (code, stdout, stderr) = (self.answer)(job.script);
         if let Some((_file, len)) = &job.input {
             on(Event::Sent { sent: len / 2, total: *len });
@@ -315,11 +333,30 @@ impl Runner for Scripted {
             stderr: stderr.to_owned(),
         })))
     }
+
+    fn sign_in<'a>(
+        &'a self,
+        password: &'a SecretString,
+    ) -> Pending<'a, Result<Option<Box<dyn Runner>>, DeployError>> {
+        self.ran.lock().push(format!("sign in ({} characters)", password.expose_secret().len()));
+        let signed = Self {
+            answer: self.answer,
+            ran: std::sync::Arc::clone(&self.ran),
+            local: self.local,
+            signed: true,
+        };
+        let signed: Box<dyn Runner> = Box::new(signed);
+        Box::pin(std::future::ready(Ok(Some(signed))))
+    }
 }
 
 fn mini(script: &str) -> (i32, &'static str, &'static str) {
     if script.starts_with("uname -sm") {
         (0, "Darwin arm64\n100.64.0.2 51234 100.64.0.9 22\n", "")
+    } else if script.contains("--plan") {
+        (0, KEPT, "")
+    } else if script.contains("worker service") {
+        (0, REPORT, "")
     } else if script.contains("worker install") {
         (0, "installing\nup\n", "")
     } else if script.contains("worker doctor") {
@@ -428,7 +465,7 @@ async fn ssh_failures_say_what_went_wrong_and_what_to_do() {
 #[tokio::test]
 async fn a_failed_install_keeps_its_last_lines() {
     fn chatty(script: &str) -> (i32, &'static str, &'static str) {
-        if script.contains("worker install") {
+        if script.contains("worker install") && !script.contains("--plan") {
             (
                 1,
                 "1\n2\n3\n4\n5\n6\n7\n8\n9\nthe new worker did not come up; the previous one is back\n",
@@ -465,7 +502,8 @@ fn no_client(script: &str) -> (i32, &'static str, &'static str) {
 
 /// The install script a run ran.
 fn install_script(ran: &[String]) -> String {
-    ran.iter().find(|s| s.contains("worker install")).cloned().unwrap_or_default()
+    let install = |s: &&String| s.contains("worker install") && !s.contains("--plan");
+    ran.iter().find(install).cloned().unwrap_or_default()
 }
 
 /// The install saves the server the worker registers with, as the far side reaches it: a
@@ -578,9 +616,11 @@ async fn a_local_deploy_installs_in_place() {
     assert_eq!(
         runner.ran(),
         [
-            "uname -sm".to_owned(),
+            REACH.to_owned(),
+            format!("{bin}/slopty --json worker install --bin-dir {bin} --update --plan"),
             format!("{bin}/slopty worker install --bin-dir {bin} --update"),
             format!("{bin}/slopty --json worker doctor"),
+            format!("{bin}/slopty --json worker service"),
         ]
     );
     assert!(!events.iter().any(|e| matches!(e, Event::Step(Step::Upload { .. }))), "{events:?}");
@@ -592,7 +632,7 @@ async fn a_local_deploy_installs_in_place() {
     let runner = Scripted { local: true, ..Scripted::new(healthy) };
     let (done, _) = run(&runner, &Plan { sources: vec![odd.path().to_path_buf()], ..plan }).await;
     assert!(matches!(done, Err(DeployError::Path { .. })), "{done:?}");
-    assert_eq!(runner.ran(), ["uname -sm"], "nothing installed");
+    assert_eq!(runner.ran(), [REACH], "nothing installed");
 }
 
 /// [`Local`] runs each script under `sh` in its home and hands a watched one's lines back.
@@ -853,4 +893,397 @@ async fn an_unknown_host_key_is_offered_by_its_fingerprint_and_trusted_as_shown(
     let said = ssh.explain(&failed).await;
     assert_eq!((said.title.as_str(), said.trust), ("127.0.0.1's host key has changed", None));
     assert_eq!(std::fs::read_to_string(sshd.known_hosts()).unwrap(), changed, "left as it was");
+}
+
+/// A machine whose new build restarts ptyd, which holds two sessions, and on which the worker
+/// stops at logout.
+fn restarts(script: &str) -> (i32, &'static str, &'static str) {
+    if script.contains("--plan") {
+        (0, r#"{"ptyd":"restarts","sessions":2}"#, "")
+    } else if script.contains("worker service") {
+        let report = r#"{"ptyd":{"running":700},"worker":{"running":701},
+            "stops_at_logout":"it stops when you log out: run `sudo loginctl enable-linger $USER` there so it keeps running"}"#;
+        (0, report, "")
+    } else {
+        healthy(script)
+    }
+}
+
+/// An update asks the machine what it does to ptyd before installing. Kept, the install runs
+/// as before and the deploy says so. Restarted while it holds sessions, the deploy stops with
+/// how many, having run no install, until the plan says to end them; then the install is told
+/// to, and the linger note the machine gives comes back with the worker.
+#[tokio::test]
+async fn an_update_that_ends_sessions_stops_until_the_person_says_so() {
+    let source = binaries(mac_arm64);
+    let runner = Scripted::new(healthy);
+    let (done, events) = run(&runner, &plan(&source, true)).await;
+    let deployed = done.unwrap();
+    assert_eq!(deployed.ptyd, Some(Ptyd::Kept));
+    assert_eq!(deployed.stops_at_logout, None);
+    assert!(events.contains(&Event::Ptyd(Ptyd::Kept)), "{events:?}");
+    let install = install_script(&runner.ran());
+    assert!(install.ends_with("--update"), "no --end-sessions when nothing ends: {install}");
+
+    let runner = Scripted::new(restarts);
+    let (done, events) = run(&runner, &plan(&source, true)).await;
+    let stopped = done.unwrap_err();
+    assert_eq!(stopped.ends_sessions(), Some(Ptyd::Restarts { sessions: Some(2) }));
+    assert_eq!(install_script(&runner.ran()), "", "no install ran: {:?}", runner.ran());
+    assert!(!events.contains(&Event::Step(Step::Install)), "{events:?}");
+    let failure = stopped.failure();
+    assert_eq!(failure.title, "Updating ends 2 sessions on mini");
+    assert!(failure.hint.as_deref().is_some_and(|h| h.contains("Try again")), "{failure:?}");
+    assert!(stopped.to_string().contains("pass --end-sessions"), "{stopped}");
+
+    let told = Plan { end_sessions: true, ..plan(&source, true) };
+    let (done, _) = run(&runner, &told).await;
+    let deployed = done.unwrap();
+    assert!(install_script(&runner.ran()).ends_with("--update --end-sessions"));
+    assert_eq!(deployed.ptyd, Some(Ptyd::Restarts { sessions: Some(2) }));
+    let note = deployed.stops_at_logout.unwrap();
+    assert!(note.contains("enable-linger"), "{note}");
+
+    let fresh = Scripted::new(restarts);
+    let (done, _) = run(&fresh, &plan(&source, false)).await;
+    assert_eq!(done.unwrap().ptyd, None, "a fresh install asks nothing of ptyd");
+    assert!(!fresh.ran().iter().any(|s| s.contains("--plan")), "{:?}", fresh.ran());
+}
+
+/// A plan the machine cannot say, and an unknown count, read as such.
+#[tokio::test]
+async fn a_plan_that_is_not_one_fails_and_an_uncounted_restart_ends_every_session() {
+    let source = binaries(mac_arm64);
+    let garbled = |script: &str| {
+        if script.contains("--plan") {
+            (0, "error: unexpected --plan", "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(garbled), &plan(&source, true)).await;
+    let failed = done.unwrap_err();
+    assert!(matches!(failed, DeployError::Plan { .. }), "{failed}");
+    assert_eq!(failed.failure().title, "The new worker could not say what it changes");
+    let uncounted = |script: &str| {
+        if script.contains("--plan") {
+            (0, r#"{"ptyd":"restarts","sessions":null}"#, "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(uncounted), &plan(&source, true)).await;
+    let failed = done.unwrap_err();
+    assert_eq!(failed.ends_sessions(), Some(Ptyd::Restarts { sessions: None }));
+    assert_eq!(failed.failure().title, "Updating ends every session on mini");
+}
+
+/// A Mac at its login window with `FileVault` on says so after `uname`, and a Linux machine says
+/// nothing of either. An install there that finds no login session to start Slopty in is named
+/// for that, with the way to a logged-in session: automatic login, or the disk unlocked and a
+/// login through Screen Sharing.
+#[tokio::test]
+async fn a_target_with_nobody_logged_in_says_so_and_how_to_fix_it() {
+    let source = binaries(mac_arm64);
+    let at_login_window = |script: &str| {
+        if script.starts_with("uname -sm") {
+            (0, "Darwin arm64\n100.64.0.2 51234 100.64.0.9 22\nconsole=root\nfilevault=true\n", "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(at_login_window), &plan(&source, true)).await;
+    let console = done.unwrap().console;
+    assert_eq!(console, Console { logged_in: Some(false), filevault: Some(true) });
+    let at_desk = |script: &str| {
+        if script.starts_with("uname -sm") {
+            (0, "Darwin arm64\n\nconsole=me\nfilevault=false\n", "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(at_desk), &plan(&source, true)).await;
+    assert_eq!(done.unwrap().console, Console { logged_in: Some(true), filevault: Some(false) });
+    let (done, _) = run(&Scripted::new(healthy), &plan(&source, true)).await;
+    assert_eq!(done.unwrap().console, Console::default(), "a machine that said nothing");
+
+    let refused = |script: &str| {
+        if script.contains("worker install") && !script.contains("--plan") {
+            let said = "Error: nobody is logged in at this Mac: launchd has no login session of \
+                        uid 501 to start Slopty in (Could not find domain for user gui: 501)\n";
+            (1, said, "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(refused), &plan(&source, true)).await;
+    let failure = done.unwrap_err().failure();
+    assert_eq!(failure.title, "Nobody is logged in at mini");
+    let hint = failure.hint.unwrap();
+    for way in ["automatic login", "FileVault", "unlock its disk with ssh", "Screen Sharing"] {
+        assert!(hint.contains(way), "{way}: {hint}");
+    }
+    assert_eq!(failure.lines.len(), 1, "what the machine said is kept");
+}
+
+/// `launchctl`'s own words for a GUI domain that is not there, from an install or a step, are
+/// named as nobody logged in rather than quoted as the title.
+#[tokio::test]
+async fn a_missing_gui_domain_is_named_not_quoted() {
+    let source = binaries(mac_arm64);
+    let bootstrap = |script: &str| {
+        if script.contains("worker install") && !script.contains("--plan") {
+            (5, "Bootstrap failed: 125: Domain does not support specified action\n", "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(bootstrap), &plan(&source, true)).await;
+    let failure = done.unwrap_err().failure();
+    assert_eq!(failure.title, "Nobody is logged in at mini");
+    assert_eq!(failure.lines, ["Bootstrap failed: 125: Domain does not support specified action"]);
+    let plan_step = |script: &str| {
+        if script.contains("--plan") {
+            (1, "", "Could not find domain for user gui: 501\n")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(plan_step), &plan(&source, true)).await;
+    assert_eq!(done.unwrap_err().failure().title, "Nobody is logged in at mini");
+    let other = |script: &str| {
+        if script.contains("worker install") && !script.contains("--plan") {
+            (1, "Error: start slopty-worker: Input/output error\n", "")
+        } else {
+            healthy(script)
+        }
+    };
+    let (done, _) = run(&Scripted::new(other), &plan(&source, true)).await;
+    assert_eq!(done.unwrap_err().failure().title, "The install on mini failed", "only that");
+}
+
+/// A host key `ssh` could not show here points at the sheet's own trust, not at a terminal.
+#[tokio::test]
+async fn a_host_key_hint_points_at_the_sheet() {
+    let source = binaries(mac_arm64);
+    let unknown = |_: &str| (255, "", "Host key verification failed.\r\n");
+    let (done, _) = run(&Scripted::new(unknown), &plan(&source, false)).await;
+    let hint = done.unwrap_err().failure().hint.unwrap();
+    assert!(hint.contains("Trust and install"), "{hint}");
+    assert!(!hint.contains("terminal"), "{hint}");
+}
+
+/// A machine that names a password (or a keyboard-interactive login) among the ways in asks
+/// for one, as whose; a key-only refusal does not. A password the sign-in gave and the machine
+/// refused asks again; a sign-in that never ended says the machine did not answer.
+#[tokio::test]
+async fn a_host_that_takes_a_password_is_asked_for_one() {
+    let source = binaries(mac_arm64);
+    let password = |_: &str| (255, "", "me@mini: Permission denied (publickey,password).\r\n");
+    let (done, _) = run(&Scripted::new(password), &plan(&source, false)).await;
+    let failure = done.unwrap_err().failure();
+    assert_eq!(failure.title, "mini asks for me's password");
+    let ask = PasswordAsk { user: "me".to_owned(), host: "mini".to_owned(), refused: false };
+    assert_eq!(failure.password, Some(Box::new(ask)));
+    assert!(failure.hint.is_some_and(|h| h.contains("keeps nothing")));
+    let typed = |_: &str| (255, "", "root@mini: Permission denied (keyboard-interactive).\n");
+    let (done, _) = run(&Scripted::new(typed), &plan(&source, false)).await;
+    let failure = done.unwrap_err().failure();
+    assert_eq!(failure.password.map(|a| a.user), Some("root".to_owned()));
+    let key_only = |_: &str| (255, "", "me@mini: Permission denied (publickey).\n");
+    let (done, _) = run(&Scripted::new(key_only), &plan(&source, false)).await;
+    let failure = done.unwrap_err().failure();
+    assert_eq!(
+        (failure.title.as_str(), failure.password),
+        ("mini did not accept your SSH key", None)
+    );
+
+    let refused = DeployError::SignIn {
+        target: "mini".to_owned(),
+        status: Some(ExitStatus::from_raw(255 << 8)),
+        stderr: "me@mini: Permission denied (publickey,password).".to_owned(),
+    };
+    let failure = refused.failure();
+    assert_eq!(failure.title, "mini did not take that password");
+    assert!(failure.password.is_some_and(|a| a.refused && a.user == "me"));
+    let silent =
+        DeployError::SignIn { target: "mini".to_owned(), status: None, stderr: String::new() };
+    assert_eq!(silent.failure().title, "mini did not answer");
+    assert_eq!(silent.failure().password, None);
+}
+
+/// With a password the deploy signs in before its first step and every step rides that
+/// sign-in; with a key to add, the last step puts the person's key there, or says there is
+/// none. An update stopped at its sessions says so through the failure alone.
+#[tokio::test]
+async fn a_password_only_host_installs_on_one_password_and_then_takes_the_key() {
+    fn keyed(script: &str) -> (i32, &'static str, &'static str) {
+        if script.contains("authorized_keys") { (0, "added", "") } else { healthy(script) }
+    }
+    let source = binaries(mac_arm64);
+    let runner = Scripted::new(keyed);
+    let told = Plan {
+        password: Some(SecretString::from("correct horse")),
+        add_key: true,
+        ..plan(&source, true)
+    };
+    let (done, _) = run(&runner, &told).await;
+    let deployed = done.unwrap();
+    let ran = runner.ran();
+    assert_eq!(ran.first().map(String::as_str), Some("sign in (13 characters)"), "{ran:?}");
+    assert!(ran.iter().skip(1).all(|s| s.starts_with("signed: ")), "{ran:?}");
+    match public_key().await {
+        Some(_) => {
+            assert_eq!(deployed.key, Some(Key::Added));
+            assert!(ran.last().is_some_and(|s| s.contains("authorized_keys")), "{ran:?}");
+        }
+        None => assert_eq!(deployed.key, Some(Key::NoPublicKey)),
+    }
+    let no_key = Scripted::new(keyed);
+    let (done, _) = run(&no_key, &Plan { add_key: false, ..told.clone() }).await;
+    assert_eq!(done.unwrap().key, None, "not asked");
+    assert!(!no_key.ran().iter().any(|s| s.contains("authorized_keys")));
+
+    let (done, _) = run(&Scripted::new(restarts), &told).await;
+    let failure = done.unwrap_err().failure();
+    assert_eq!(failure.ends_sessions, Some(Ptyd::Restarts { sessions: Some(2) }));
+}
+
+/// The password is in no argument or environment variable of the `ssh` that signs in (only the
+/// socket's path is), and no plan or error prints it; that `ssh` takes its options ahead of the
+/// runner's own, which hold `BatchMode=yes`.
+#[test]
+fn the_password_never_reaches_argv_env_or_the_log() {
+    let secret = "correct horse battery staple";
+    let ssh = Ssh::unattended(&Target {
+        host: "mini".to_owned(),
+        user: Some("me".to_owned()),
+        port: None,
+    });
+    let dir = Path::new("/tmp/slopty-ssh-test");
+    let master = ssh.master(
+        &dir.join("c"),
+        Path::new("/Applications/Slopty.app/Contents/MacOS/slopty"),
+        &dir.join("a"),
+    );
+    let master = master.as_std();
+    let args: Vec<String> = master.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let envs: Vec<(String, String)> = master
+        .get_envs()
+        .map(|(k, v)| {
+            (
+                k.to_string_lossy().into_owned(),
+                v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert!(!args.iter().chain(envs.iter().map(|(_, v)| v)).any(|a| a.contains(secret)));
+    let named = |name: &str| envs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    assert_eq!(named(askpass::SOCK), Some("/tmp/slopty-ssh-test/a"));
+    assert_eq!(named("SSH_ASKPASS_REQUIRE"), Some("force"));
+    assert_eq!(named("SSH_ASKPASS"), Some("/Applications/Slopty.app/Contents/MacOS/slopty"));
+    let at = |option: &str| args.iter().position(|a| a == option).unwrap();
+    assert!(at("BatchMode=no") < at("BatchMode=yes"), "ssh takes the first: {args:?}");
+    assert!(at("ControlMaster=yes") < at("mini"), "{args:?}");
+    assert!(args.contains(&"NumberOfPasswordPrompts=1".to_owned()), "asked once: {args:?}");
+
+    let told = Plan {
+        password: Some(SecretString::from(secret)),
+        add_key: true,
+        ..plan(&binaries(mac_arm64), true)
+    };
+    assert!(!format!("{told:?}").contains(secret), "{told:?}");
+}
+
+/// A shell playing the machine in a home of the test's: `$HOME` and the working directory are
+/// both that home, never the person's.
+#[derive(Debug)]
+struct Shell {
+    home: tempfile::TempDir,
+}
+
+impl Runner for Shell {
+    fn target(&self) -> &'static str {
+        "mini"
+    }
+
+    fn program(&self) -> String {
+        "sh".to_owned()
+    }
+
+    fn run<'a>(
+        &'a self,
+        job: Job<'a>,
+        _on: &'a mut OnEvent<'_>,
+    ) -> Pending<'a, std::io::Result<Ran>> {
+        let mut sh = tokio::process::Command::new("sh");
+        sh.arg("-c").arg(job.script).current_dir(self.home.path()).env("HOME", self.home.path());
+        Box::pin(async move {
+            let out = sh.output().await?;
+            Ok(Ran {
+                status: out.status,
+                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            })
+        })
+    }
+}
+
+/// The key goes into `~/.ssh/authorized_keys` once, as `ssh-copy-id` puts it: the directory
+/// and the file made private when new, a last line with no end ended first, a key already
+/// there (under another comment) left as one, and a comment a shell would read as more than
+/// words dropped.
+#[tokio::test]
+async fn a_key_goes_in_once_as_ssh_copy_id_puts_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let shell = Shell { home: tempfile::tempdir().unwrap() };
+    let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBlah me@studio";
+    assert_eq!(add_key(&shell, key, &mut |_| {}).await, Key::Added);
+    let dir = shell.home.path().join(".ssh");
+    let file = dir.join("authorized_keys");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("{key}\n"));
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!((mode(&dir), mode(&file)), (0o700, 0o600));
+    let renamed = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBlah other@laptop";
+    assert_eq!(add_key(&shell, renamed, &mut |_| {}).await, Key::AlreadyThere);
+
+    std::fs::write(&file, "ssh-rsa AAAAB3Nza old").unwrap();
+    let odd = "ecdsa-sha2-nistp256 AAAAE2VjZHNh $(touch pwned) \"x\"";
+    assert_eq!(add_key(&shell, odd, &mut |_| {}).await, Key::Added);
+    let written = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(written, "ssh-rsa AAAAB3Nza old\necdsa-sha2-nistp256 AAAAE2VjZHNh\n");
+    assert!(!shell.home.path().join("pwned").exists());
+    assert_eq!(
+        add_key(&shell, "-----BEGIN OPENSSH PRIVATE KEY-----", &mut |_| {}).await,
+        Key::NoPublicKey
+    );
+}
+
+/// The agent's first key is the one, past a line that is not a key; with none there, the newest
+/// `id*.pub` beats any other `.pub`, and a private key file is never opened.
+#[test]
+fn the_key_is_the_agent_s_first_else_the_newest_id_pub() {
+    let dir = tempfile::tempdir().unwrap();
+    let listed = "The agent has no identities.\nssh-ed25519 AAAAagent card\nssh-rsa AAAAsecond\n";
+    assert_eq!(choose_key(listed, dir.path()).as_deref(), Some("ssh-ed25519 AAAAagent card"));
+    assert_eq!(choose_key("", dir.path()), None, "nothing to add");
+    let write = |name: &str, text: &str| std::fs::write(dir.path().join(name), text).unwrap();
+    write("work.pub", "ssh-ed25519 AAAAwork work\n");
+    write("id_ed25519", "ssh-ed25519 AAAAprivate-looking\n");
+    assert_eq!(choose_key("", dir.path()).as_deref(), Some("ssh-ed25519 AAAAwork work"));
+    write("id_rsa.pub", "ssh-rsa AAAAold old\n");
+    write("id_ed25519.pub", "ssh-ed25519 AAAAnew new\n");
+    let aged = |name: &str, secs: u64| {
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(dir.path().join(name))
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    };
+    aged("id_rsa.pub", 1_000);
+    aged("id_ed25519.pub", 2_000);
+    aged("work.pub", 3_000);
+    assert_eq!(choose_key("", dir.path()).as_deref(), Some("ssh-ed25519 AAAAnew new"));
 }

@@ -19,6 +19,8 @@ tracing.workspace = true
 plist.workspace = true
 # The wait for launchd to let go of an agent before it is loaded again (`service`).
 tokio.workspace = true
+# What an install does to ptyd (`service::Ptyd`), read by a deploy from the CLI's JSON.
+serde.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 objc2.workspace = true
@@ -134,7 +136,6 @@ objc2-file-provider = { workspace = true, features = [
 objc2-finder-sync.workspace = true
 # The signing team, which the shared container is named for (`files`).
 objc2-security = { workspace = true, features = [ "CSCommon", "SecCode" ] }
-serde.workspace = true
 serde_json.workspace = true
 slopty-core.workspace = true
 thiserror.workspace = true
@@ -193,6 +194,8 @@ objc2-web-kit = { workspace = true, features = [
 tempfile.workspace = true
 # The Linux service tests stand in for `loginctl` behind a lock.
 parking_lot.workspace = true
+# The install plan's JSON, as the CLI prints it for a deploy (`service::Ptyd`).
+serde_json.workspace = true
 
 # What only the main thread sees: Finder's view of a download's progress, which Foundation hands
 # to a subscriber there, and a browser page's Web Inspector. Its own harness, so its tests run

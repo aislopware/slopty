@@ -142,6 +142,8 @@ impl HostKey {
             hint: Some(format!("Trust its key only if the fingerprint below is its own.{check}")),
             lines: self.keys.iter().map(|k| format!("{} {}", k.kind, k.sha256)).collect(),
             trust: Some(Box::new(self)),
+            password: None,
+            ends_sessions: None,
         }
     }
 }
@@ -194,8 +196,9 @@ impl Ssh {
     /// When `ssh` or `ssh-keygen` cannot be run, `ssh` reaches no key exchange, or names no
     /// known-hosts file.
     pub async fn host_key(&self) -> Result<HostKey, TrustError> {
-        let dir = Scratch::new()?;
-        let probe = dir.0.join("known_hosts");
+        let dir = Scratch::new("slopty-host-key")
+            .map_err(|(path, source)| TrustError::File { path, source })?;
+        let probe = dir.path().join("known_hosts");
         let mut ssh = Command::new(&self.program);
         // `ssh` takes the first value given for each option: these go before the runner's own.
         for option in [
@@ -259,29 +262,36 @@ async fn fingerprints(file: &Path) -> Result<Vec<Fingerprint>, TrustError> {
 }
 
 /// A directory only this user can open, removed with everything in it when dropped.
-struct Scratch(PathBuf);
+#[derive(Debug)]
+pub struct Scratch(PathBuf);
 
 impl Scratch {
-    fn new() -> Result<Self, TrustError> {
+    /// A new one in the temporary directory, named from `prefix`; kept short, since a socket in
+    /// it must fit a socket address. The path it could not make, and why.
+    pub fn new(prefix: &str) -> Result<Self, (PathBuf, io::Error)> {
         static MADE: AtomicU64 = AtomicU64::new(0);
         let n = MADE.fetch_add(1, Ordering::Relaxed);
         let at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let name = format!("slopty-host-key-{}-{at}-{n}", std::process::id());
-        let path = std::env::temp_dir().join(name);
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&path)
-            .map_err(|source| TrustError::File { path: path.clone(), source })?;
-        Ok(Self(path))
+            .map_or(0, |d| d.subsec_nanos());
+        let path =
+            std::env::temp_dir().join(format!("{prefix}-{:x}-{at:x}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => Ok(Self(path)),
+            Err(e) => Err((path, e)),
+        }
+    }
+
+    /// Where it is.
+    pub fn path(&self) -> &Path {
+        &self.0
     }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
         if let Err(e) = std::fs::remove_dir_all(&self.0) {
-            tracing::warn!(path = %self.0.display(), error = %e, "remove the host key's scratch");
+            tracing::warn!(path = %self.0.display(), error = %e, "remove a scratch directory");
         }
     }
 }

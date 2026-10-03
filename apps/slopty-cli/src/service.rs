@@ -1,6 +1,6 @@
 //! `slopty worker install|uninstall` and `slopty server install|uninstall|status`: the worker
 //! daemons and the server as services of the user's session, through
-//! [`slopty_platform::service`], which the app's "Use this Mac as a worker" runs too.
+//! [`slopty_platform::service`], which the app's "Use this Mac" runs too.
 //!
 //! What is the CLI's own: where the binaries come from (`--bin-dir`, else beside this one), the
 //! server a worker registers with (the global `--server`, saved before the daemon starts), and
@@ -8,6 +8,11 @@
 //! data dir, reach, port and log level are baked into its definitions at install time; its
 //! sockets live under `<data dir>/run/` so the CLI can find them without the manager's
 //! environment.
+//!
+//! An install over a worker keeps the running `slopty-ptyd`, and every shell and agent turn it
+//! holds, unless the new build keeps custody another way ([`platform::Ptyd`]). Ending sessions
+//! takes `--end-sessions`; `--plan` says beforehand what the install would do, which is how a
+//! deploy asks the person first.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -17,7 +22,7 @@ use clap::{Args, Subcommand};
 use slopty_net::HostAddr;
 use slopty_net::endpoint::SERVER_PORT;
 use slopty_platform::service::{
-    self as platform, Layout, Manager, PTYD, SERVER, Session, WORKER, WorkerOpts,
+    self as platform, Layout, Manager, PTYD, Ptyd, SERVER, Session, WORKER, WorkerOpts,
 };
 use slopty_proto::ctl::{CtlReply, CtlRequest, Health};
 use slopty_proto::server::Role;
@@ -52,6 +57,14 @@ pub struct InstallOpts {
     /// Refuse when a worker is installed here already (`worker deploy` runs this).
     #[arg(long)]
     fresh: bool,
+    /// Say what the install would do to `slopty-ptyd` and the sessions it holds, as JSON with
+    /// `--json`, and change nothing.
+    #[arg(long)]
+    plan: bool,
+    /// Go on when the new build must restart `slopty-ptyd`, ending every shell and agent turn
+    /// it holds. Without it such an install refuses before changing anything.
+    #[arg(long)]
+    end_sessions: bool,
 }
 
 impl InstallOpts {
@@ -77,9 +90,31 @@ fn install_error(e: std::io::Error) -> anyhow::Error {
 }
 
 /// Install and start both services, then wait for the daemon. `server` (the global
-/// `--server`) is saved as the server the worker registers with.
-pub async fn install(opts: &InstallOpts, server: Option<&str>, data_dir: &Path) -> Result<()> {
-    install_in(&Session::native(), opts, server, data_dir, START_TIMEOUT).await
+/// `--server`) is saved as the server the worker registers with. With `--plan`, only say what
+/// that would do, as JSON with `json`.
+pub async fn install(
+    opts: &InstallOpts,
+    server: Option<&str>,
+    data_dir: &Path,
+    json: bool,
+) -> Result<()> {
+    let session = Session::native();
+    if opts.plan {
+        let source = binaries_source(opts.bin_dir.as_deref())?;
+        let plan = session.ptyd_plan(&source, data_dir);
+        if json {
+            println!("{}", serde_json::to_string(&plan)?);
+        } else {
+            println!("{plan}");
+        }
+        return Ok(());
+    }
+    install_in(&session, opts, server, data_dir, START_TIMEOUT).await
+}
+
+/// Why an install that would end `ptyd`'s sessions stopped, before it changed anything.
+fn ends_sessions(ptyd: Ptyd) -> anyhow::Error {
+    anyhow!("the new build restarts slopty-ptyd ({ptyd}); pass --end-sessions to go on")
 }
 
 /// [`install`] in `session`, giving the daemon `within` to answer as the one just installed.
@@ -95,6 +130,10 @@ async fn install_in(
     if opts.fresh && installed {
         bail!("a worker is installed here already; pass --update to replace it");
     }
+    let ptyd = session.ptyd_plan(&source, data_dir);
+    if ptyd.ends_sessions() && !opts.end_sessions {
+        return Err(ends_sessions(ptyd));
+    }
     let mut worker = opts.worker();
     let previous = if opts.update && installed {
         Some(keep_previous(session, data_dir, &mut worker)?)
@@ -107,12 +146,13 @@ async fn install_in(
     let registers_with =
         slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings.worker.server;
     let started = Instant::now();
-    let done = platform::install_worker(session, &worker, &source, data_dir)
+    let done = platform::install_worker(session, &worker, &source, data_dir, ptyd)
         .await
         .map_err(install_error)?;
     for (job, path) in &done.definitions {
         println!("installed {}  ({})", job.program, path.display());
     }
+    println!("{}", done.ptyd);
     let socket = Layout::new(data_dir).worker_socket();
     let expected = done.bin_dir.join(WORKER.program);
     let name = match come_up(&socket, within, |h| is_the_new_one(h, &expected, started)).await {
@@ -123,7 +163,9 @@ async fn install_in(
                 bail!("daemon did not come up ({e:#}); see {logs}");
             };
             println!("the new worker did not come up ({e:#}); putting the previous one back");
-            platform::install_worker(session, &previous.opts, &previous.dir, data_dir)
+            // Restoring: whatever it does to ptyd, the previous worker is what runs next.
+            let ptyd = session.ptyd_plan(&previous.dir, data_dir);
+            platform::install_worker(session, &previous.opts, &previous.dir, data_dir, ptyd)
                 .await
                 .map_err(install_error)?;
             return match come_up(&socket, within, |_| Ok(())).await {
@@ -142,7 +184,7 @@ async fn install_in(
         ),
         None => println!(
             "\n{name} is up on its own (pass --server to register it); add it from a client \
-             with `slopty add <this machine's tailnet name or IP>` or the app's \"Add a worker\""
+             with `slopty add <this machine's tailnet name or IP>` or the app's \"Add a machine\""
         ),
     }
     if let Some(note) = session.keep_running() {
@@ -250,12 +292,20 @@ fn say_removed(job: platform::Job, was: bool) {
     }
 }
 
-/// One line per service: installed or not, and its pid when it runs.
-pub fn status() {
-    let session = Session::native();
-    for job in [PTYD, WORKER] {
-        println!("{}  {}", job.program, session.state(job));
+/// One line per service: installed or not, and its pid when it runs; then whether they stop at
+/// logout. With `json`, the [`platform::Report`] a deploy reads.
+pub fn status(json: bool) -> Result<()> {
+    let report = Session::native().report();
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+        return Ok(());
     }
+    println!("{}  {}", PTYD.program, report.ptyd);
+    println!("{}  {}", WORKER.program, report.worker);
+    if let Some(note) = report.stops_at_logout {
+        println!("{note}");
+    }
+    Ok(())
 }
 
 /// `slopty server …`.
@@ -439,6 +489,8 @@ mod tests {
             log: "debug".to_owned(),
             update: false,
             fresh: false,
+            plan: false,
+            end_sessions: false,
         };
         assert_eq!(
             opts.worker(),
@@ -467,14 +519,20 @@ mod tests {
         assert_eq!(install_error(e).to_string(), "/x/slopty-ptyd not found; pass --bin-dir");
     }
 
-    /// Records the manager's commands and says no service is loaded, as a clean launchd would.
+    /// Records the manager's commands and says no service is loaded, as a clean launchd would,
+    /// with the user logged in: their GUI domain (`gui/<uid>`) prints.
     #[derive(Debug)]
     struct Recorder(std::sync::mpsc::Sender<String>);
+
+    /// Whether `args` print a service (`print gui/501/<label>`) rather than a domain.
+    fn prints_a_service(args: &[&str]) -> bool {
+        matches!(args, ["print", target] if target.matches('/').count() > 1)
+    }
 
     impl platform::Runner for Recorder {
         fn run(&self, program: &str, args: &[&str]) -> std::io::Result<String> {
             let _sent = self.0.send(format!("{program} {}", args.join(" ")));
-            if args.first() == Some(&"print") {
+            if prints_a_service(args) {
                 return Err(std::io::Error::other("Could not find service"));
             }
             Ok(String::new())
@@ -490,8 +548,34 @@ mod tests {
         health: tokio::sync::watch::Sender<Health>,
     }
 
+    /// [`Recorder`], except that ptyd runs as pid 700 with two sessions, wrote custody `old`
+    /// beside its socket, and the new `slopty-ptyd` says `new`.
+    #[derive(Debug)]
+    struct Busy(std::sync::mpsc::Sender<String>);
+
+    impl platform::Runner for Busy {
+        fn run(&self, program: &str, args: &[&str]) -> std::io::Result<String> {
+            let _sent = self.0.send(format!("{program} {}", args.join(" ")));
+            match (program, args) {
+                (_, ["--custody"]) => Ok("new\n".to_owned()),
+                ("ps", _) => Ok("700\n700\n1\n".to_owned()),
+                ("launchctl", ["print", target]) if target.ends_with(PTYD.label) => {
+                    Ok("\tpid = 700\n".to_owned())
+                }
+                _ if prints_a_service(args) => Err(std::io::Error::other("Could not find service")),
+                _ => Ok(String::new()),
+            }
+        }
+    }
+
     impl Stage {
         fn new() -> Self {
+            Self::on(|tx| std::sync::Arc::new(Recorder(tx)))
+        }
+
+        fn on(
+            runner: impl FnOnce(std::sync::mpsc::Sender<String>) -> std::sync::Arc<dyn platform::Runner>,
+        ) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let home = dir.path().join("home");
             let (tx, commands) = std::sync::mpsc::channel();
@@ -500,7 +584,7 @@ mod tests {
                 definitions: home.join("Library").join("LaunchAgents"),
                 home,
                 uid: 501,
-                runner: std::sync::Arc::new(Recorder(tx)),
+                runner: runner(tx),
             };
             let run = dir.path().join("data").join("run");
             std::fs::create_dir_all(&run).unwrap();
@@ -636,5 +720,33 @@ mod tests {
         let stale = stage.install(&Stage::opts(&new, true, false)).await.unwrap_err();
         assert!(format!("{stale:#}").contains("up since before the install"), "{stale:#}");
         assert_eq!(stage.installed("slopty-worker"), "slopty-worker old");
+    }
+
+    /// A new build that must restart ptyd, which holds two sessions, refuses before changing
+    /// anything unless told to end them, and says how; told, it goes on and restarts ptyd.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_install_that_ends_sessions_needs_end_sessions() {
+        let stage = Stage::on(|tx| std::sync::Arc::new(Busy(tx)));
+        std::fs::write(Layout::new(&stage.data()).ptyd_custody(), "700 old\n").unwrap();
+        stage.answer_as_installed();
+        let new = stage.binaries("new");
+        let refused = stage.install(&Stage::opts(&new, true, false)).await.unwrap_err();
+        let said = format!("{refused:#}");
+        assert!(said.contains("ending the 2 sessions it holds"), "{said}");
+        assert!(said.contains("pass --end-sessions"), "{said}");
+        let asked: Vec<String> = stage.commands.try_iter().collect();
+        assert!(
+            !asked.iter().any(|c| c.contains("bootout") || c.contains("bootstrap")),
+            "nothing stopped or started: {asked:?}"
+        );
+        assert!(!stage.data().join("bin").exists(), "nothing copied");
+
+        let told = InstallOpts { end_sessions: true, ..Stage::opts(&new, true, false) };
+        stage.install(&told).await.unwrap();
+        let asked: Vec<String> = stage.commands.try_iter().collect();
+        assert!(
+            asked.iter().any(|c| c == "launchctl bootout gui/501/dev.aislopware.slopty.ptyd"),
+            "ptyd restarted: {asked:?}"
+        );
     }
 }

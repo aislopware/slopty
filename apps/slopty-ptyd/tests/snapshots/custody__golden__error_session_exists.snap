@@ -1,0 +1,5 @@
+---
+source: apps/slopty-ptyd/tests/custody.rs
+expression: hex(&bytes)
+---
+03 00 00 00 05 00 00

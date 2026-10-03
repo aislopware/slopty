@@ -11,6 +11,7 @@ description = "Slopty worker deploys over the system ssh: the plan, its steps an
 workspace = true
 
 [dependencies]
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slopty-platform.workspace = true

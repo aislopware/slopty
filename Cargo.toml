@@ -96,6 +96,9 @@ hyper-util = { version = "0.1.20", features = [ "tokio" ] }
 # A response's whole body, for the LocalAPI client (`slopty_tailnet`).
 http-body-util = "0.1.5"
 camino = { version = "1.2.6", features = [ "serde1" ] }
+# A password the person types for an SSH host, held until `ssh`'s askpass takes it and wiped
+# when dropped; its `Debug` never shows it (`slopty_deploy`).
+secrecy = "0.10.3"
 
 # serialization
 serde = { version = "1.0.229", features = [ "derive", "rc" ] }

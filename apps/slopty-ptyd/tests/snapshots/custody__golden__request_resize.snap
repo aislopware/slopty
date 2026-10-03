@@ -1,0 +1,6 @@
+---
+source: apps/slopty-ptyd/tests/custody.rs
+expression: hex(&bytes)
+---
+16 00 00 00 04 10 01 02 03 04 05 06 07 08 09 0a
+0b 0c 0d 0e 0f 10 78 28 10 22

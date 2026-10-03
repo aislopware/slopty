@@ -33,10 +33,21 @@ struct State {
     shutdown: tokio::sync::Notify,
 }
 
-/// Bind and serve until `Shutdown`. `shell_dir` is where the shell integration scripts go.
-pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Result<()> {
+/// Bind and serve until `Shutdown`. `shell_dir` is where the shell integration scripts go;
+/// `custody` is said beside the socket ([`say_custody`]) for as long as this daemon serves.
+pub async fn run(
+    socket: &Path,
+    backlog_bytes: usize,
+    shell_dir: &Path,
+    custody: &str,
+) -> Result<()> {
     let listener = bind(socket).await?;
     tracing::info!(path = %socket.display(), pid = std::process::id(), "slopty-ptyd listening");
+    let said = custody_file(socket);
+    if let Err(e) = say_custody(&said, std::process::id(), custody) {
+        // An install that cannot read it restarts this daemon rather than keep it.
+        tracing::warn!(path = %said.display(), error = %e, "custody not written");
+    }
     let integration = match slopty_pty::shell_integration::install(shell_dir) {
         Ok(si) => {
             tracing::info!(dir = %si.zdotdir.display(), enabled = si.enabled, "shell integration installed");
@@ -97,7 +108,23 @@ pub async fn run(socket: &Path, backlog_bytes: usize, shell_dir: &Path) -> Resul
         let _ignored = s.signal(Signal::HUP);
     }
     let _ignored = std::fs::remove_file(socket);
+    let _ignored = std::fs::remove_file(&said);
     Ok(())
+}
+
+/// Where the daemon on `socket` says its custody: beside it, `ptyd.sock` → `ptyd.custody`
+/// (`slopty_platform::service::Layout::ptyd_custody`).
+fn custody_file(socket: &Path) -> std::path::PathBuf {
+    socket.with_extension("custody")
+}
+
+/// Write `<pid> <custody>` to `path`, whole or not at all: an install reads it to tell whether
+/// the new build can keep this daemon and its sessions, and trusts it only while `pid` is the
+/// process its service manager runs.
+fn say_custody(path: &Path, pid: u32, custody: &str) -> std::io::Result<()> {
+    let part = path.with_extension("custody.part");
+    std::fs::write(&part, format!("{pid} {custody}\n"))?;
+    std::fs::rename(&part, path)
 }
 
 /// Create the socket directory (0700) and bind, replacing a dead socket file.

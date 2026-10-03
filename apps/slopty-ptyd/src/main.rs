@@ -10,6 +10,8 @@
 mod daemon;
 mod session;
 
+include!(concat!(env!("OUT_DIR"), "/custody.rs"));
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -32,6 +34,11 @@ struct Args {
     /// `shell/` next to the socket). `SLOPTY_NO_SHELL_INTEGRATION=1` leaves shells untouched.
     #[arg(long)]
     shell_dir: Option<PathBuf>,
+    /// Print this build's custody fingerprint and exit: what a running ptyd hands a worker
+    /// (its protocol and the shell scripts it writes). An install keeps a running ptyd, and
+    /// every session it holds, when the new build prints what that one wrote beside its socket.
+    #[arg(long)]
+    custody: bool,
 }
 
 /// `--backlog-bytes`, refused past [`slopty_pty::protocol::MAX_BACKLOG_BYTES`].
@@ -46,6 +53,12 @@ fn backlog_bytes(text: &str) -> Result<usize, String> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let args = Args::parse();
+    if args.custody {
+        use std::io::Write as _;
+        writeln!(std::io::stdout().lock(), "{CUSTODY}")?;
+        return Ok(());
+    }
     // The custodian stays clear of the platform crate; its service always sets the data dir.
     if let Some(data_dir) = std::env::var_os("SLOPTY_DATA_DIR") {
         slopty_crash::install(slopty_crash::Process::Ptyd, Path::new(&data_dir));
@@ -57,7 +70,6 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
-    let args = Args::parse();
     let socket = args.socket.unwrap_or_else(slopty_pty::protocol::socket_path);
     let shell_dir = args.shell_dir.unwrap_or_else(|| {
         std::env::var_os("SLOPTY_DATA_DIR").map_or_else(
@@ -65,5 +77,5 @@ async fn main() -> Result<()> {
             |data| PathBuf::from(data).join("shell"),
         )
     });
-    daemon::run(&socket, args.backlog_bytes, &shell_dir).await
+    daemon::run(&socket, args.backlog_bytes, &shell_dir, CUSTODY).await
 }

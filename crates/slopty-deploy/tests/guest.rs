@@ -63,7 +63,14 @@ mod tests {
         let known_hosts = dir.path().join("known_hosts");
         let ssh = app_ssh(&known_hosts);
         let bins = PathBuf::from(var("SLOPTY_VM_BINS"));
-        let plan = Plan { sources: vec![bins.clone()], update: true, server: None };
+        let plan = Plan {
+            sources: vec![bins.clone()],
+            update: true,
+            server: None,
+            end_sessions: false,
+            password: None,
+            add_key: false,
+        };
 
         // 1. A machine this Mac's ssh has never seen: the first step stops, nothing asked.
         let started = Instant::now();

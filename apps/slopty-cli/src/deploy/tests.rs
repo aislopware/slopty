@@ -40,6 +40,9 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
         "#!/bin/sh\nprintf '%s %s\\n' \"$1\" \"$2\" >> '{log}'\ncd '{home}' || exit 1\n\
          case $2 in\n\
          *'uname -sm'*) echo 'Darwin arm64' ;;\n\
+         *'--plan'*) echo '{{\"ptyd\":\"restarts\",\"sessions\":2}}' ;;\n\
+         *'worker service'*) echo '{{\"ptyd\":\"absent\",\"worker\":\"absent\",\
+         \"stops_at_logout\":\"it stops when you log out\"}}' ;;\n\
          *'worker install'*) ;;\n\
          *'worker doctor'*) printf '%s\\n' '{doctor}' ;;\n\
          *) eval \"$2\" ;;\n\
@@ -60,8 +63,13 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
         bin_dir: None,
         ssh,
         no_server: false,
+        end_sessions: false,
     };
     let data = tempfile::tempdir().unwrap();
+    let refused = deploy(&opts, Some("hub.tail1234.ts.net"), data.path(), source.path());
+    let refused = format!("{:#}", refused.await.unwrap_err());
+    assert!(refused.contains("ending 2 sessions; pass --end-sessions"), "{refused}");
+    let opts = DeployOpts { end_sessions: true, ..opts };
     let deployed = deploy(&opts, Some("hub.tail1234.ts.net"), data.path(), source.path());
     let deployed = deployed.await.unwrap();
     let scripts = std::fs::read_to_string(&log).unwrap();
@@ -70,7 +78,7 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
         scripts.contains(" --server hub.tail1234.ts.net:45560 worker install --bin-dir"),
         "{scripts}"
     );
-    assert!(scripts.contains(" --update'\n"), "{scripts}");
+    assert!(scripts.contains(" --update --end-sessions'\n"), "{scripts}");
     assert_eq!(deployed.platform, Platform { os: Os::MacOs, arch: Arch::Arm64 });
     assert_eq!(deployed.server.as_deref(), Some("hub.tail1234.ts.net:45560"));
 
@@ -80,6 +88,8 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     assert!(!said.contains("Accessibility"), "granted already: {said}");
     assert!(said.contains("registers with the server at hub.tail1234.ts.net:45560"), "{said}");
     assert!(said.contains("lists studio.tail1234.ts.net"), "{said}");
+    assert!(said.contains("slopty-ptyd restarts, ending the 2 sessions"), "{said}");
+    assert!(said.contains("it stops when you log out"), "{said}");
 
     let alone = DeployOpts { no_server: true, ..opts };
     let deployed = deploy(&alone, Some("hub.tail1234.ts.net"), data.path(), source.path());
@@ -91,6 +101,15 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     let said = report("studio", &deployed);
     assert!(said.contains("no server to register with"), "{said}");
     assert!(said.contains("slopty add studio.tail1234.ts.net"), "{said}");
+    assert!(!said.contains("nobody is logged in"), "the machine said nothing of it: {said}");
+
+    let console = slopty_deploy::Console { logged_in: Some(false), filevault: Some(true) };
+    let said = report("studio", &Deployed { console, ..deployed.clone() });
+    assert!(said.contains("nobody is logged in at studio, and Slopty runs once someone is"));
+    assert!(said.contains("unlock its disk with `ssh` first"), "{said}");
+    let console = slopty_deploy::Console { filevault: Some(false), ..console };
+    let said = report("studio", &Deployed { console, ..deployed });
+    assert!(said.contains("turn on automatic login"), "{said}");
 }
 
 /// `slopty server deploy` sends the server and its CLI through the `ssh` given, runs `server

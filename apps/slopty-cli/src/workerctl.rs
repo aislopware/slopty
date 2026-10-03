@@ -58,12 +58,9 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         WorkerCmd::Doctor => CtlRequest::Doctor,
         WorkerCmd::Screens => CtlRequest::Screens,
         WorkerCmd::Wake => CtlRequest::Wake,
-        WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir).await,
+        WorkerCmd::Install(opts) => return service::install(&opts, server, data_dir, json).await,
         WorkerCmd::Uninstall => return service::uninstall().await,
-        WorkerCmd::Service => {
-            service::status();
-            return Ok(());
-        }
+        WorkerCmd::Service => return service::status(json),
         WorkerCmd::Deploy(opts) => {
             let source = service::binaries_source(opts.bin_dir())?;
             let deployed = deploy::deploy(&opts, server, data_dir, &source).await?;
