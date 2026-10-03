@@ -1571,7 +1571,7 @@ impl ScreenView {
     /// limited: a change inside the cooldown is taken when it ends, the latest width asked for
     /// winning. A picture narrower than its tile's aspect is drawn narrower than the tile, and a
     /// picture zoomed inside the tile wider; each asks for the width it is drawn at. A zoomed
-    /// picture asks for its region with it ([`Self::wanted_region`]): what it shows and a margin
+    /// picture asks for its region with it (`wanted_region`): what it shows and a margin
     /// round it, at that scale.
     pub fn set_painted_width(&mut self, device_px: f32, cx: &Context<Self>) {
         self.painted = device_px;

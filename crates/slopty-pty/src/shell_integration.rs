@@ -644,8 +644,11 @@ mod tests {
         // machine has the entry: a TERM the shell cannot look up leaves readline on a dumb
         // terminal, which drops the prompt's marks from a prompt wider than the tile. The
         // `sudo` wrapper is defined only with a TERMINFO.
+        // fish reads its config under XDG_CONFIG_HOME, which a CI runner sets to its own home.
+        let config = home.join(".config");
         let mut env = vec![
             pair("HOME", &home.to_string_lossy()),
+            pair("XDG_CONFIG_HOME", &config.to_string_lossy()),
             pair("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
             pair("TERM", crate::terminfo::NAMES[0]),
             pair("TERMINFO", &terminfo.to_string_lossy()),
