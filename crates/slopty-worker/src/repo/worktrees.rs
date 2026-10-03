@@ -1,8 +1,10 @@
-//! A finished task's worktree freed (`docs/decisions/projects.md`, "A finished task frees its
-//! worktree").
+//! A task's worktree made, and freed once the task is merged (`docs/decisions/projects.md`, "A
+//! merged task frees its worktree", "Any agent runs a task").
 //!
 //! An agent that writes works in a git worktree of its own under its clone's
-//! `.claude/worktrees/`, which outlives its task: a long project fills the disk with them. Once
+//! `.claude/worktrees/`. Claude Code makes its own; for any other agent the worker makes it as
+//! the task's thread starts ([`make`]), the way Claude Code would, but never moving a branch
+//! that is there already. It outlives its task: a long project fills the disk with them. Once
 //! the task settles, the server asks for it to go ([`remove`]). Nothing that is not saved
 //! elsewhere is lost: a worktree with anything not committed, or with a terminal still working
 //! in it, is kept and said, and its branch goes only when every commit on it landed.
@@ -55,6 +57,76 @@ pub struct Removed {
 
 /// How many of git's lines about what is not committed are kept to say so.
 const SAID_LINES: usize = 5;
+
+/// A worktree made, or found there already ([`make`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Made {
+    /// Where it is.
+    pub path: PathBuf,
+    /// Its branch: `worktree-<name>`.
+    pub branch: String,
+    /// The clone's root it was made from.
+    pub clone: PathBuf,
+    /// The branch the clone had checked out, if one.
+    pub clone_branch: Option<String>,
+}
+
+/// Make the worktree `name` of the clone rooted at `clone`, as Claude Code's `--worktree <name>`
+/// does.
+///
+/// It is `.claude/worktrees/<name>` on branch `worktree-<name>`, from `origin`'s default
+/// branch, else `HEAD`. One there already is reopened as it is. Unlike Claude Code's, a branch
+/// of that name there already is checked out where it is, never reset to the base, so the work
+/// of a task tried again is kept.
+///
+/// # Errors
+/// [`Failed::NotOne`] for a `clone` that is no clone's root or a `name` that is no single
+/// plain name, [`Failed::Other`] for a git that failed.
+pub async fn make(git: &Path, clone: &Path, name: &str) -> Result<Made, Failed> {
+    let plain = !name.is_empty()
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\'])
+        && branch_ref(&format!("worktree-{name}")).is_ok();
+    if !plain {
+        return Err(Failed::NotOne(format!("{name:?} is no worktree name")));
+    }
+    let clone = std::fs::canonicalize(clone)
+        .map_err(|e| Failed::NotOne(format!("{} is not there: {e}", clone.display())))?;
+    if super::root_of(&clone).as_deref() != Some(clone.as_path()) {
+        return Err(Failed::NotOne(format!("{} is no clone's root", clone.display())));
+    }
+    let branch = format!("worktree-{name}");
+    let path = AGENT_WORKTREES.iter().fold(clone.clone(), |dir, part| dir.join(part)).join(name);
+    let clone_branch = super::branch_of(&clone);
+    if path.exists() {
+        let (tree, of, _) = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || agent_worktree(&path))
+                .await
+                .map_err(|e| Failed::Other(e.to_string()))??
+        };
+        if of != clone {
+            return Err(Failed::NotOne(format!("{} is another clone's", tree.display())));
+        }
+        return Ok(Made { path: tree, branch, clone, clone_branch });
+    }
+    let path_text = path.to_string_lossy();
+    let exists = ["rev-parse", "--verify", "--quiet", "--end-of-options", &branch_ref(&branch)?];
+    let args: Vec<&str> = if bundle::run(git, &clone, &exists).await.is_ok() {
+        vec!["worktree", "add", "--end-of-options", &path_text, &branch]
+    } else {
+        let has_origin = ["rev-parse", "--verify", "--quiet", "origin/HEAD^{commit}"];
+        let base = if bundle::run(git, &clone, &has_origin).await.is_ok() {
+            "origin/HEAD"
+        } else {
+            "HEAD"
+        };
+        vec!["worktree", "add", "--no-track", "-b", &branch, "--end-of-options", &path_text, base]
+    };
+    bundle::run(git, &clone, &args).await?;
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    Ok(Made { path, branch, clone, clone_branch })
+}
 
 /// Remove the worktree at `worktree` from its clone.
 ///
@@ -229,6 +301,48 @@ mod tests {
         assert_eq!(kept, Removed { branch: Some(open_branch.clone()), branch_removed: false });
         assert!(!open.exists());
         assert!(has_branch(&clone, &open_branch), "its work is on its branch alone");
+    }
+
+    /// A worktree is made where Claude Code's `--worktree` makes one, on its branch from
+    /// `HEAD` with no `origin`; made again it is the same one, as it is; a branch of its name
+    /// left from before is checked out where it stands, never reset; and a name that is no
+    /// plain name, or a folder that is no clone's root, makes nothing.
+    #[tokio::test]
+    async fn a_worktree_is_made_as_claude_code_would_and_a_branch_there_is_kept() {
+        let Some(git) = crate::changes::git() else { return };
+        let tmp = tempfile::tempdir().expect("temp");
+        let clone = tmp.path().join("clone");
+        std::fs::create_dir_all(&clone).expect("mkdir");
+        git_in(&clone, &["init", "-q", "-b", "main"]);
+        git_in(&clone, &["commit", "-q", "--allow-empty", "-m", "c0"]);
+        let head = git_in(&clone, &["rev-parse", "HEAD"]);
+
+        let made = make(git, &clone, "slopty-p-1").await.expect("made");
+        let root = std::fs::canonicalize(&clone).expect("canonical");
+        assert_eq!(made.path, root.join(".claude/worktrees/slopty-p-1"));
+        assert_eq!(
+            (made.branch.as_str(), made.clone_branch.as_deref()),
+            ("worktree-slopty-p-1", Some("main"))
+        );
+        assert_eq!(git_in(&made.path, &["rev-parse", "HEAD"]), head);
+        std::fs::write(made.path.join("half.txt"), "kept").expect("write");
+        let again = make(git, &clone, "slopty-p-1").await.expect("found");
+        assert_eq!(again.path, made.path);
+        assert!(again.path.join("half.txt").exists(), "reopened as it is");
+
+        let (tree, branch) = agent_tree(&clone, "slopty-p-2");
+        let work = git_in(&tree, &["rev-parse", "HEAD"]);
+        git_in(&clone, &["worktree", "remove", "--force", &tree.to_string_lossy()]);
+        let tried_again = make(git, &clone, "slopty-p-2").await.expect("made");
+        assert_eq!(tried_again.branch, branch);
+        assert_eq!(git_in(&tried_again.path, &["rev-parse", "HEAD"]), work, "its work kept");
+
+        for name in ["", "../out", "a/b", ".hidden", "with space"] {
+            let refused = make(git, &clone, name).await;
+            assert!(matches!(refused, Err(Failed::NotOne(_))), "{name:?}: {refused:?}");
+        }
+        let inside = make(git, &clone.join(".claude"), "slopty-p-3").await;
+        assert!(matches!(inside, Err(Failed::NotOne(_))), "{inside:?}");
     }
 
     /// A worktree with a terminal in it, or anything not committed, is kept; the checkout

@@ -53,6 +53,7 @@ use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{
     CloseReason, OpenSession, SessionState, SessionSummary, TermRequest, TermSize,
 };
+use slopty_proto::thread::ThreadId;
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -127,6 +128,47 @@ pub trait Agents: Send + Sync {
         false
     }
 }
+
+/// A task's thread to start ([`TaskThreads::start`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TaskThread {
+    /// What to start, in the folder it works in.
+    pub start: slopty_proto::thread::wire::Start,
+    /// The id it is known by: its row's [`slopty_proto::project::SEAT_FACT`], the session its
+    /// Slopty tools speak as, and the terminal it runs in when its agent runs in one.
+    pub seat: SessionId,
+    /// Variables for the agent and its Slopty tools, from the server (its project and task).
+    pub env: Vec<(String, String)>,
+    /// What the agent is told it is for.
+    pub role: Option<String>,
+}
+
+/// The worker's thread host, as the server's tasks start threads in it
+/// ([`Verb::StartThread`]). The daemon gives it ([`Orchestrator::set_task_threads`]).
+pub trait TaskThreads: Send + Sync {
+    /// Start `thread`, answering its id once its row is in the table.
+    ///
+    /// Its row carries [`slopty_proto::project::SEAT_FACT`] naming the seat. Its Slopty tools
+    /// get `env` with what every terminal of the worker gets for that seat (the server, the
+    /// seat as its session, the token for it), through its agent's own door. The role goes
+    /// through that door too: a system prompt where the agent takes one, else ahead of its
+    /// first prompt. An agent that runs in a terminal runs in one opened under the seat. A
+    /// seat started already answers its thread, starting nothing.
+    ///
+    /// # Errors
+    /// [`ErrorCode::Unsupported`] for an agent it cannot start; any other failure as it is.
+    fn start(&self, thread: TaskThread) -> BoxFuture<'_, Result<ThreadId, Failure>>;
+
+    /// End the agent of the thread seated at `seat`, its session kept to take up again.
+    /// `Ok(false)` when no thread is seated there.
+    ///
+    /// # Errors
+    /// A thread there that could not be ended.
+    fn close(&self, seat: SessionId) -> BoxFuture<'_, Result<bool, Failure>>;
+}
+
+/// A boxed future a [`TaskThreads`] answers with.
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A verb that failed: the code and the words for whoever asked.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -203,6 +245,8 @@ struct Inner {
     cloner: crate::repo::cloning::Cloner,
     /// How they go ([`Orchestrator::clone_progress`]).
     clone_progress: broadcast::Sender<(u64, crate::repo::cloning::Progress)>,
+    /// The thread host the server's tasks start threads in, once the daemon gave it.
+    task_threads: std::sync::OnceLock<Arc<dyn TaskThreads>>,
 }
 
 /// What an agent the orchestrator starts is given.
@@ -247,8 +291,17 @@ impl Orchestrator {
             choosing: tokio::sync::Mutex::default(),
             cloner: crate::repo::cloning::Cloner::default(),
             clone_progress: broadcast::channel(CLONE_PROGRESS).0,
+            task_threads: std::sync::OnceLock::new(),
         };
         Self { inner: Arc::new(inner) }
+    }
+
+    /// Start the server's tasks' threads in `threads` from now on. The first one given
+    /// stays.
+    pub fn set_task_threads(&self, threads: Arc<dyn TaskThreads>) {
+        if self.inner.task_threads.set(threads).is_err() {
+            tracing::warn!("the task threads were given twice; the first stay");
+        }
     }
 
     /// Answer one verb, once per `key` when it changes something. Every failure is an
@@ -374,6 +427,13 @@ impl Orchestrator {
             }
             Verb::Close { term } => {
                 self.mine(term.worker)?;
+                // A task's thread with no terminal of its own is closed by its seat.
+                if inner.worker.get(term.session).is_err()
+                    && let Some(threads) = inner.task_threads.get()
+                    && threads.close(term.session).await?
+                {
+                    return Ok(Outcome::Done);
+                }
                 self.close(term.session).await?;
                 Ok(Outcome::Done)
             }
@@ -392,6 +452,22 @@ impl Orchestrator {
             | Verb::FastForward { .. }
             | Verb::RemoveWorktree { .. }
             | Verb::PullChecks { .. }) => Box::pin(self.repository(verb)).await,
+            Verb::StartThread { worker, start, seat, env, role, worktree } => {
+                self.mine(worker)?;
+                let threads = inner.task_threads.get().cloned().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker starts no task's thread")
+                })?;
+                let mut start = *start;
+                let made = match worktree {
+                    Some(name) => Some(self.worktree_for(&start.cwd, &name).await?),
+                    None => None,
+                };
+                if let Some(made) = &made {
+                    start.cwd = made.path.clone();
+                }
+                let thread = threads.start(TaskThread { start, seat, env, role }).await?;
+                Ok(Outcome::ThreadStarted { thread, worktree: made.map(Box::new) })
+            }
             Verb::WriteFile { worker, path, bytes } => {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
@@ -873,6 +949,42 @@ impl Orchestrator {
             }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }
+    }
+
+    /// The worktree `name` of the clone at `clone`, made or found there
+    /// ([`crate::repo::worktrees::make`]), trusted as the clones the server asked for are.
+    async fn worktree_for(
+        &self,
+        clone: &str,
+        name: &str,
+    ) -> Result<slopty_proto::agent::Worktree, Failure> {
+        let git = crate::changes::git()
+            .ok_or_else(|| Failure::new(ErrorCode::Unsupported, "this worker has no git"))?;
+        let clone = crate::file::expand_home(Path::new(clone));
+        let made = crate::repo::worktrees::make(git, &clone, name).await.map_err(|failed| {
+            use crate::repo::worktrees::Failed;
+            let code = match &failed {
+                Failed::NotOne(_) => ErrorCode::Invalid,
+                Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
+                Failed::Other(_) => ErrorCode::Failed,
+            };
+            Failure::new(code, failed.to_string())
+        })?;
+        let home = slopty_platform::dirs::home();
+        let at = made.path.clone();
+        blocking(move || {
+            crate::repo::cloning::trust(&home, &at);
+            Ok(())
+        })
+        .await?;
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        Ok(slopty_proto::agent::Worktree {
+            name: name.to_owned(),
+            path: text(&made.path),
+            branch: Some(made.branch),
+            original_cwd: text(&made.clone),
+            original_branch: made.clone_branch,
+        })
     }
 
     /// How the clones the server asked for go, as they move: the server's number for each,
