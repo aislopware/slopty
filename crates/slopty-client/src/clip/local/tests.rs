@@ -350,7 +350,9 @@ fn a_workers_file_names_never_go_on_this_pasteboard() {
     link.bytes.lock().insert(promised, b"file:///etc/passwd".to_vec());
     let link: Arc<dyn Remote> = Arc::new(link);
     let (_tx, now) = watch::channel(Some(link));
-    sync.receive(studio, &theirs, provider(now, &theirs, Duration::from_secs(1)), None);
+    let placeless =
+        sync.receive(studio, &theirs, provider(now, &theirs, Duration::from_secs(1)), None);
+    assert!(placeless, "its files have no place here to paste into Finder from: said");
     let types: Vec<String> = board.items().into_iter().flatten().collect();
     for bad in [FILE_URL_UTI, "com.apple.finder.node"] {
         assert!(types.iter().all(|t| t != bad), "{bad}: {types:?}");
@@ -359,7 +361,7 @@ fn a_workers_file_names_never_go_on_this_pasteboard() {
     assert_eq!(board.item_data(1, "public.url"), None, "nor one that a promise turns up");
 
     let only_files = worker_offer(7, vec![vec![lazy(ClipType::Format(ClipFormat::FileUrls))]]);
-    sync.receive(studio, &only_files, noop(), None);
+    assert!(!sync.receive(studio, &only_files, noop(), None), "said once per worker");
     assert_eq!(board.items().len(), 1, "one item, for the origin");
     assert!(board.types().iter().any(|t| t == ORIGIN_TYPE));
     assert!(matches!(sync.files(), Some(ClipFiles::Worker { .. })), "named for a paste");

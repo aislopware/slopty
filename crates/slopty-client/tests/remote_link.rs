@@ -335,7 +335,8 @@ mod tests {
         assert_eq!(std::fs::read(&expected).unwrap(), body);
         assert!(!PathBuf::from(format!("{}.partial", expected.display())).exists());
         let size = body.len() as u64;
-        assert_eq!(*brought.borrow(), Brought { done: size, total: size }, "seen as it went");
+        let seen = brought.borrow().clone();
+        assert_eq!((seen.done, seen.total), (size, size), "seen as it went");
     }
 
     /// The worker's word that `name` is sent, with the digest of all of it.
@@ -441,6 +442,50 @@ mod tests {
         let mtime = std::fs::metadata(&big_at).unwrap().modified().unwrap();
         let ms = mtime.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
         assert_eq!(ms, 1_700_000_000_000, "the worker's modification time");
+    }
+
+    /// A download an earlier run of the app began, taken up at the next launch with the
+    /// versions it had begun, names the partial file it left on its first fetch and goes on
+    /// from there; its watch carries each file's version, for the next run's ledger.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_taken_up_after_a_relaunch_resumes_from_its_partial_file() {
+        use slopty_client::xfer::{Version, Versions};
+        let (mut client, link, _events) = pair().await;
+        let into = tempfile::tempdir().unwrap();
+        let big: Vec<u8> = (0..2_000_000_u32).map(|i| (i % 247) as u8).collect();
+        let left = 1_200_000_usize;
+        std::fs::write(into.path().join("big.bin.partial"), &big[..left]).unwrap();
+        let version =
+            Version { size: big.len() as u64, mtime_ms: WallMs::from_millis(1_700_000_000_000) };
+        let resumed: Versions = [("big.bin".to_owned(), version)].into();
+        let (seen, brought) = tokio::sync::watch::channel(Brought::default());
+        let ask = Download {
+            seen: Some(seen),
+            resumed,
+            ..Download::new(XferId::new(), "~/big.bin".to_owned(), into.path().to_owned())
+        };
+        let remote = link.remote();
+        let waiting = std::thread::spawn(move || remote.download(ask));
+        let (xfer, held) = fetched(&mut client).await;
+        assert_eq!(held.len(), 1, "{held:?}");
+        assert_eq!(
+            (held[0].name.as_str(), held[0].bytes, held[0].size, held[0].mtime_ms),
+            ("big.bin", left as u64, version.size, version.mtime_ms),
+            "the first fetch names what the earlier run left"
+        );
+        let begin = XferMsg::Begin { xfer, dest: None, files: 1, bytes: big.len() as u64 };
+        client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
+        let header = download_header(xfer, "big.bin", big.len(), left as u64);
+        let mut send = streams::open_bulk(&client.conn, header).await.unwrap();
+        send.write_all(&big[left..]).await.unwrap();
+        send.finish().unwrap();
+        client.tx.send(&WorkerMsg::Xfer(done(xfer, "big.bin", &big))).await.unwrap();
+        let landed =
+            tokio::task::spawn_blocking(move || waiting.join().unwrap()).await.unwrap().unwrap();
+        let at = into.path().join("big.bin");
+        assert_eq!(landed, std::slice::from_ref(&at));
+        assert!(std::fs::read(&at).unwrap() == big, "whole across the relaunch");
+        assert_eq!(brought.borrow().versions.get("big.bin"), Some(&version));
     }
 
     /// A download whose link goes part way waits for the next link to its worker and goes on

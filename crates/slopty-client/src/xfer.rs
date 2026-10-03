@@ -14,7 +14,7 @@
 //! Either keeps running while the app is off screen, with the system's progress UI
 //! (`offscreen`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::Duration;
@@ -93,14 +93,29 @@ impl XferError {
     }
 }
 
-/// How far a transfer got: bytes landed of how many. `total` is 0 until the worker has said.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// How far a download got: bytes landed of how many (`total` is 0 until the worker has said),
+/// and the version of each file begun, which a later run resumes from ([`Download::resumed`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Brought {
     /// Bytes landed.
     pub done: u64,
     /// Bytes in it.
     pub total: u64,
+    /// Each file begun, by its name in the transfer.
+    pub versions: Versions,
 }
+
+/// A file's version as a download's header named it: what a resume claims to hold part of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Version {
+    /// Its size.
+    pub size: u64,
+    /// Its modification time.
+    pub mtime_ms: WallMs,
+}
+
+/// The files of a download begun, by name, each with its version.
+pub type Versions = BTreeMap<String, Version>;
 
 /// Where a download says how far it got, for a view that shows it.
 pub type Seen = watch::Sender<Brought>;
@@ -120,13 +135,17 @@ pub struct Download {
     pub shown_at: Option<PathBuf>,
     /// Told how far it got as it goes.
     pub seen: Option<Seen>,
+    /// The files an earlier run of the app began, whose partial files in `into` this one takes
+    /// up: the first fetch names what they hold, so each goes on from there while the worker
+    /// still has that version.
+    pub resumed: Versions,
 }
 
 impl Download {
     /// `path` into `into` as `xfer`, shown nowhere.
     #[must_use]
     pub const fn new(xfer: XferId, path: String, into: PathBuf) -> Self {
-        Self { xfer, path, into, shown_at: None, seen: None }
+        Self { xfer, path, into, shown_at: None, seen: None, resumed: Versions::new() }
     }
 }
 
@@ -340,10 +359,18 @@ impl Fetch {
     fn tell(&self, done: u64, total: u64) {
         if let Some(seen) = &self.seen {
             seen.send_if_modified(|was| {
-                let now = Brought { done, total };
-                let changed = *was != now;
-                *was = now;
+                let changed = (was.done, was.total) != (done, total);
+                (was.done, was.total) = (done, total);
                 changed
+            });
+        }
+    }
+
+    /// The view hears that `name` is begun at `version`.
+    fn versioned(&self, name: &str, version: Version) {
+        if let Some(seen) = &self.seen {
+            seen.send_if_modified(|was| {
+                was.versions.insert(name.to_owned(), version) != Some(version)
             });
         }
     }
@@ -1134,7 +1161,7 @@ pub async fn download(
     line: &Arc<Line>,
     ask: Download,
 ) -> Result<Vec<PathBuf>, XferError> {
-    let Download { xfer, path, into, shown_at, seen } = ask;
+    let Download { xfer, path, into, shown_at, seen, resumed } = ask;
     let mut following = line.follow(xfer);
     let cancel = {
         let line = Arc::downgrade(line);
@@ -1148,6 +1175,16 @@ pub async fn download(
     let shown = offscreen::download(&path, shown_at.as_deref(), cancel);
     let work = Some(Arc::clone(shown.work()));
     let fetch = Arc::new(Fetch { work, seen, ..Fetch::default() });
+    {
+        let mut state = fetch.state.lock();
+        for (name, version) in &resumed {
+            state.files.insert(name.clone(), None);
+            state.versions.insert(name.clone(), (version.size, version.mtime_ms));
+        }
+    }
+    for (name, version) in resumed {
+        fetch.versioned(&name, version);
+    }
     let on = On { line, stop: &mut following.stop, xfer, path: &path, into: &into };
     let landed = attempts(up.clone(), on, &fetch).await;
     shown.work().end(landed.is_ok());
@@ -1350,6 +1387,7 @@ async fn write_file(
         state.files.insert(header.name.clone(), None);
         state.versions.insert(header.name.clone(), (header.size, header.mtime_ms));
     }
+    fetch.versioned(&header.name, Version { size: header.size, mtime_ms: header.mtime_ms });
     let expected = header.size.saturating_sub(header.offset);
     let mut got = 0_u64;
     let cut_at =

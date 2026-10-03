@@ -23,9 +23,9 @@ use gpui::Context;
 use slopty_client::layout::WorkerKey;
 #[cfg(not(target_os = "ios"))]
 use slopty_client::remote::Remote;
-#[cfg(not(target_os = "ios"))]
-use slopty_client::xfer::Brought;
 use slopty_client::xfer::ledger::{Kept, Ledger, Way};
+#[cfg(not(target_os = "ios"))]
+use slopty_client::xfer::{Brought, Versions};
 use slopty_core::XferId;
 use tokio::sync::watch;
 
@@ -124,6 +124,8 @@ pub fn progress_words(done: u64, total: u64, pace: &Pace, now: Instant) -> Strin
 pub(in crate::workspace) struct Download {
     /// The worker it comes from.
     worker: WorkerKey,
+    /// Its path there.
+    source: String,
     /// Its name.
     name: String,
     /// Where it lands.
@@ -150,6 +152,8 @@ pub(in crate::workspace) struct Down {
     pub source: String,
     /// Where it lands here.
     pub dest: PathBuf,
+    /// The files an earlier run began, whose partial files it takes up.
+    pub versions: Versions,
 }
 
 /// One line of the transfers popover.
@@ -269,9 +273,9 @@ impl WorkspaceView {
                     remote.upload(kept.xfer, files, dest, true);
                 }
                 #[cfg(not(target_os = "ios"))]
-                Way::Down { source, dest } => {
+                Way::Down { source, dest, versions } => {
                     tracing::info!(xfer = %kept.xfer, %source, "a download taken up again");
-                    let down = Down { worker: key, xfer: kept.xfer, source, dest };
+                    let down = Down { worker: key, xfer: kept.xfer, source, dest, versions };
                     self.bring_down(down, Bringing::Download, cx);
                 }
                 #[cfg(target_os = "ios")]
@@ -299,7 +303,8 @@ impl WorkspaceView {
         let (seen, heard) = watch::channel(Brought::default());
         self.download_began(&down, bringing, Arc::clone(&remote), heard, cx);
         let task = cx.background_spawn(async move {
-            super::bring_down_seen(remote.as_ref(), &down.source, &down.dest, xfer, Some(seen))
+            let Down { source, dest, versions, .. } = down;
+            super::bring_down_seen(remote.as_ref(), &source, &dest, xfer, Some(seen), versions)
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
@@ -318,29 +323,46 @@ impl WorkspaceView {
         mut heard: watch::Receiver<Brought>,
         cx: &mut Context<Self>,
     ) {
-        let Down { worker, xfer, source, dest } = down.clone();
+        let Down { worker, xfer, source, dest, versions } = down.clone();
         let name = super::worker_name(&source).to_owned();
         // A drop's place may be another app's scratch, which nobody reads after this run.
         if bringing != Bringing::Drag {
-            let way = Way::Down { source, dest: dest.clone() };
+            let way = Way::Down { source: source.clone(), dest: dest.clone(), versions };
             self.keep_transfer(Kept { xfer, worker, way });
         }
         let at = cx.background_executor().now();
         let mut pace = Pace::new();
         pace.note(at, 0);
-        let download =
-            Download { worker, name, dest, bringing, brought: Brought::default(), pace, via };
+        let download = Download {
+            worker,
+            source,
+            name,
+            dest,
+            bringing,
+            brought: Brought::default(),
+            pace,
+            via,
+        };
         self.transfers.downloads.insert(xfer, download);
         cx.notify();
         // Ends when the download does, which drops the sender.
         cx.spawn(async move |this, cx| {
             while heard.changed().await.is_ok() {
-                let now = *heard.borrow_and_update();
+                let now = heard.borrow_and_update().clone();
                 let moved = this.update(cx, |this, cx| {
                     let at = cx.background_executor().now();
                     let Some(d) = this.transfers.downloads.get_mut(&xfer) else { return };
-                    d.brought = now;
                     d.pace.note(at, now.done);
+                    // A file begun is kept with its version, so the next run resumes it.
+                    let begun = (now.versions != d.brought.versions
+                        && d.bringing != Bringing::Drag)
+                        .then(|| (d.worker, d.source.clone(), d.dest.clone()));
+                    d.brought = now;
+                    if let Some((worker, source, dest)) = begun {
+                        let versions = d.brought.versions.clone();
+                        let way = Way::Down { source, dest, versions };
+                        this.keep_transfer(Kept { xfer, worker, way });
+                    }
                     cx.notify();
                 });
                 if moved.is_err() {
@@ -426,7 +448,7 @@ impl WorkspaceView {
             .downloads
             .iter()
             .map(|(xfer, d)| {
-                let Brought { done, total } = d.brought;
+                let Brought { done, total, .. } = d.brought;
                 #[expect(clippy::cast_precision_loss, reason = "a fraction for a bar")]
                 let fraction = (total > 0).then(|| (done as f32 / total as f32).clamp(0.0, 1.0));
                 let words = if total == 0 {

@@ -220,6 +220,12 @@ fn transfers_label(ups: usize, downs: usize, done: u64, total: u64) -> String {
     format!("{}{META_SEPARATOR}{percent}%", counted(count, one, many))
 }
 
+/// A host row's way to stop sharing the clipboard with its machine.
+const STOP_SHARING_CLIPBOARD: &str = "Unshare clipboard";
+
+/// A host row's way to share the clipboard with its machine again.
+const SHARE_CLIPBOARD: &str = "Share clipboard";
+
 /// What the transfers popover is called.
 const TRANSFERS: &str = "Transfers";
 
@@ -1247,6 +1253,13 @@ impl WorkspaceView {
         });
         let wake = actions.wake.map(|run| action(format!("hosts-wake-{key}"), "Wake", run));
         let forget = actions.forget.map(|run| action(format!("hosts-forget-{key}"), "Forget", run));
+        // The clipboard, shared with every machine unless the settings stop it, per machine.
+        let shared = self.clipboard_shared(key);
+        let share = super::actions::ShareClipboard { worker: key, share: !shared };
+        let share_run: MenuRun =
+            Rc::new(move |window, cx| window.dispatch_action(Box::new(share), cx));
+        let clip_label = if shared { STOP_SHARING_CLIPBOARD } else { SHARE_CLIPBOARD };
+        let clipboard = action(format!("hosts-clipboard-{key}"), clip_label, share_run);
         let hover_actions = div()
             .flex_none()
             .flex()
@@ -1255,6 +1268,7 @@ impl WorkspaceView {
             .children(update)
             .children(wake)
             .children(connect)
+            .child(clipboard)
             .children(forget);
         let label = SharedString::from(match health {
             Some((_, word)) => format!("{}, {word}", w.name),

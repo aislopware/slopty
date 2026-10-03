@@ -254,6 +254,16 @@ fn files_a_worker_copied_paste_into_its_shell_or_travel_to_another(cx: &mut Test
     view.update_in(cx, |v, _window, cx| {
         v.clip_message(key, ClipMsg::Offer(worker_copied_files(5)), cx);
     });
+    cx.run_until_parked();
+    // A test build has no Finder location for a worker: said once, the first time.
+    #[cfg(target_os = "macos")]
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some(
+            "Files copied on studio paste into shells, not Finder: studio has no location in \
+             Finder here"
+        )
+    );
     let here = SessionId::new();
     opens(&view, cx, &studio, here, studio.me, 1);
     studio.drain();
@@ -1419,7 +1429,8 @@ fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
     let dest = dir.path().join("out.txt");
     let rows = view.update_in(cx, |v, _window, cx| {
         let source = "~/out.txt".to_owned();
-        let asked = Down { worker: key, xfer: down, source, dest: dest.clone() };
+        let versions = slopty_client::xfer::Versions::new();
+        let asked = Down { worker: key, xfer: down, source, dest: dest.clone(), versions };
         v.bring_down(asked, Bringing::Download, cx);
         v.transfer_rows(cx.background_executor().now())
     });
@@ -1494,7 +1505,11 @@ fn transfers_in_flight_are_taken_up_at_the_next_launch(cx: &mut TestAppContext) 
             Kept {
                 xfer: down,
                 worker: key,
-                way: Way::Down { source: "~/out.txt".to_owned(), dest: dest.clone() },
+                way: Way::Down {
+                    source: "~/out.txt".to_owned(),
+                    dest: dest.clone(),
+                    versions: slopty_client::xfer::Versions::new(),
+                },
             },
         ],
     };

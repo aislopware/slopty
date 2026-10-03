@@ -1101,7 +1101,14 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - A machine the clipboard is not shared with carries a clipboard glyph in its navigator
     row, named for a screen reader. Shared machines carry nothing, since sharing is the
     default and the quiet state.
-  - Test: `the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette`
+  - The machine's row in the hosts popover offers the same under the pointer: "Unshare
+    clipboard" or "Share clipboard", which runs the palette's action.
+  - On macOS, files copied on a machine that has no location in Finder here (no File
+    Provider domain) paste into shells only. The first such copy from each machine says so,
+    so a paste in Finder that does nothing is not a mystery.
+    Tests: `a_workers_file_names_never_go_on_this_pasteboard` (client),
+    `files_a_worker_copied_paste_into_its_shell_or_travel_to_another` (ui).
+  - Test: `the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row`
     (`tests/bars.rs`), `the_clipboard_is_kept_off_for_one_machine_by_name` (`slopty-app`).
 
 - ✅ **A layout this build cannot read is set aside and said** (2026-10-04, readiness N29).
@@ -1156,8 +1163,10 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     the main thread, newest only, and goes when the last one ends. At the next launch each is
     listed as waiting for its machine. When the machine links, an upload begins again under
     its id with `again` set: every file first asks the worker what it holds, so it resumes
-    where the worker's partial file stands. A download fetches again into its staging
-    directory, named for the transfer, so the earlier run's directory is reused and cleaned.
+    where the worker's partial file stands. A download keeps the version (size and mtime) of
+    each file the worker named, and is fetched again into its staging directory, named for the
+    transfer. Each file of a kept version is asked from where its `.partial` stands, so it
+    resumes mid-file as an upload does. A file the worker changed since is sent whole.
     A taken-up upload says "a.txt reached studio" at its end, and types nothing: the shell's
     prompt has moved on since.
   - Tests: ui `the_transfers_list_shows_both_ways_and_stops_one`,
@@ -1165,6 +1174,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `a_transfers_rate_follows_its_last_seconds`, statusbar `the_readouts_say_what_they_count`;
     client `transfers_kept_come_back_and_the_file_goes_with_the_last`,
     `an_upload_begun_again_after_a_relaunch_sends_from_what_the_worker_holds`,
+    `a_download_taken_up_after_a_relaunch_resumes_from_its_partial_file`,
     `a_download_lands_in_place_and_answers_the_blocking_caller` (its watch ends at the size).
 
 - ✅ **A failed drag out says why; a file that never came says it waits for its machine**

@@ -505,7 +505,20 @@ impl WorkspaceView {
                 let place: Option<Place> = None;
                 let mut clip = clip.borrow_mut();
                 let provide = provider(clip.link(key), &offer, CLIP_WAIT);
-                clip.receive(key, &offer, provide, place.as_ref());
+                #[cfg_attr(
+                    not(target_os = "macos"),
+                    expect(unused_variables, reason = "only a Mac has a Finder to miss")
+                )]
+                let placeless = clip.receive(key, &offer, provide, place.as_ref());
+                drop(clip);
+                #[cfg(target_os = "macos")]
+                if placeless {
+                    let text = no_finder_place(&self.worker_name(key));
+                    cx.spawn(async move |this, cx| {
+                        let _gone = this.update(cx, |this, cx| this.show_notice(text, cx));
+                    })
+                    .detach();
+                }
             }
             ClipMsg::Fetch { rep, max, urgent } => {
                 let answer = clip.borrow().answer(&rep, max);
@@ -964,8 +977,13 @@ impl WorkspaceView {
                     let source = source.as_str();
                     let _gone = this.update(cx, |this, cx| match kept {
                         Promised::Began { xfer, dest, seen } => {
-                            let down =
-                                transfers::Down { worker, xfer, source: source.to_owned(), dest };
+                            let down = transfers::Down {
+                                worker,
+                                xfer,
+                                source: source.to_owned(),
+                                dest,
+                                versions: slopty_client::xfer::Versions::new(),
+                            };
                             this.download_began(&down, Bringing::Drag, via, seen, cx);
                         }
                         Promised::Ended { xfer, result } => this.download_over(xfer, result, cx),
@@ -1037,7 +1055,8 @@ impl WorkspaceView {
                 }
             };
             let _gone = this.update(cx, |this, cx| {
-                let down = transfers::Down { worker, xfer: XferId::new(), source, dest };
+                let versions = slopty_client::xfer::Versions::new();
+                let down = transfers::Down { worker, xfer: XferId::new(), source, dest, versions };
                 this.bring_down(down, bringing, cx);
             });
         })
@@ -1123,6 +1142,18 @@ impl WorkspaceView {
     }
 }
 
+/// What a Mac says the first time a worker's copied files cannot paste into Finder: the worker
+/// has no File Provider location here (the server does not list it, the location is switched
+/// off, or the build is not signed for the shared container). A paste into a shell still
+/// brings them.
+#[cfg(target_os = "macos")]
+fn no_finder_place(machine: &str) -> String {
+    format!(
+        "Files copied on {machine} paste into shells, not Finder: {machine} has no \
+         location in Finder here"
+    )
+}
+
 /// The last component of a worker path, a trailing `/` aside.
 fn worker_name(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
@@ -1162,7 +1193,8 @@ fn promise(
         let xfer = XferId::new();
         let (seen, heard) = tokio::sync::watch::channel(slopty_client::xfer::Brought::default());
         let _told = tell.send(Promised::Began { xfer, dest: dest.to_path_buf(), seen: heard });
-        let kept = bring_down_seen(remote.as_ref(), &source, dest, xfer, Some(seen));
+        let none = slopty_client::xfer::Versions::new();
+        let kept = bring_down_seen(remote.as_ref(), &source, dest, xfer, Some(seen), none);
         let _told = tell.send(Promised::Ended { xfer, result: kept.clone() });
         kept
     });
@@ -1240,7 +1272,7 @@ fn kept_both(sent: &[String], landed: &[String]) -> Option<String> {
 /// here.
 #[cfg(target_os = "macos")]
 fn bring_down_to(remote: &dyn Remote, source: &str, dest: &std::path::Path) -> Result<(), String> {
-    bring_down_seen(remote, source, dest, XferId::new(), None)
+    bring_down_seen(remote, source, dest, XferId::new(), None, slopty_client::xfer::Versions::new())
 }
 
 /// Bring the worker's `source` down to exactly `dest` as transfer `xfer`, telling `seen` how far
@@ -1254,6 +1286,7 @@ fn bring_down_seen(
     dest: &std::path::Path,
     xfer: XferId,
     seen: Option<slopty_client::xfer::Seen>,
+    resumed: slopty_client::xfer::Versions,
 ) -> Result<(), String> {
     let parent = dest.parent().ok_or_else(|| "no directory to put it in".to_owned())?;
     let staging = parent.join(format!(".slopty-{xfer}"));
@@ -1261,6 +1294,7 @@ fn bring_down_seen(
     let ask = Download {
         shown_at: Some(dest.to_path_buf()),
         seen,
+        resumed,
         ..Download::new(xfer, source.to_owned(), staging.clone())
     };
     let moved = remote

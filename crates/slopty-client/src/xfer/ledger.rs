@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use slopty_core::XferId;
 use slopty_proto::transfer::Dest;
 
+use super::Versions;
 use crate::layout::{TileRef, WorkerKey};
 
 /// The ledger's file in the client's data directory.
@@ -52,6 +53,8 @@ pub enum Way {
         source: String,
         /// Where it lands here.
         dest: PathBuf,
+        /// The files begun, each with its version, whose partial files the next run resumes.
+        versions: Versions,
     },
 }
 
@@ -152,6 +155,14 @@ mod tests {
             way: Way::Down {
                 source: "~/build/out.tar".to_owned(),
                 dest: PathBuf::from("/Users/me/Downloads/out.tar"),
+                versions: [(
+                    "out.tar".to_owned(),
+                    super::super::Version {
+                        size: 4_000,
+                        mtime_ms: slopty_core::WallMs::from_millis(1_700_000_000_000),
+                    },
+                )]
+                .into(),
             },
         };
         let mut ledger = Ledger::default();

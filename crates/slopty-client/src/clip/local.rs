@@ -167,6 +167,8 @@ pub struct ClipSync {
     ticked: Option<Instant>,
     /// The change count a focus left unread because reading would ask the person.
     deferred: Option<i64>,
+    /// The workers whose copied files were said to have no place here to paste from.
+    placeless: HashSet<WorkerKey>,
 }
 
 /// How often [`ClipSync::tick`] reads the change count.
@@ -214,6 +216,7 @@ impl ClipSync {
             links: HashMap::new(),
             ticked: None,
             deferred: None,
+            placeless: HashSet::new(),
         }
     }
 
@@ -479,13 +482,18 @@ impl ClipSync {
     /// the worker's `place` here, when this device shows one, which a paste in Finder takes as
     /// a file fetched as it is read ([`Place::urls_of`]). Its files also come by a paste into a
     /// worker, which moves them ([`ClipSync::files`]).
+    ///
+    /// `true` the first time a worker's copied files find no `place` here, so they cannot paste
+    /// into Finder: worth saying once, not with every copy.
     pub fn receive(
         &mut self,
         from: WorkerKey,
         offer: &Offer,
         provide: Provide,
         place: Option<&Place>,
-    ) {
+    ) -> bool {
+        let files = offer.reps().any(|(_, r)| uti_of_type(&r.kind) == FILE_URL_UTI);
+        let placeless = files && place.is_none() && self.placeless.insert(from);
         let inline: HashSet<(u16, &ClipType, Hash)> = offer
             .reps()
             .filter_map(|(n, r)| r.inline.as_ref().map(|b| (n, &r.kind, digest(b))))
@@ -502,7 +510,7 @@ impl ClipSync {
         self.heard = inline.iter().map(|(_, _, h)| *h).collect();
         if same {
             tracing::debug!(generation = offer.generation, "clipboard already holds it");
-            return;
+            return placeless;
         }
         let mut items = Vec::new();
         for entry in &offer.items {
@@ -549,6 +557,7 @@ impl ClipSync {
         self.held = Some(Held { count, offer: None, copied: now, read: HashMap::new() });
         self.wrote = Some(Wrote { count, from, offer: offer.clone(), at: now });
         tracing::debug!(generation = offer.generation, count, "clipboard from a worker");
+        placeless
     }
 
     /// A worker's link came up (`remote`) or went (`None`): the worker has heard nothing over

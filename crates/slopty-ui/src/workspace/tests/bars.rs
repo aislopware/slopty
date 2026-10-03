@@ -586,11 +586,13 @@ fn a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row(cx: &mut TestAp
     assert_eq!(woke.get(), 2, "and so did the row");
 }
 
-/// The palette stops sharing the clipboard with one machine and shares it again, by its
-/// name: the navigator marks the machine it is not shared with, the app is told to keep the
-/// choice, and the other machine is left as it was.
+/// The palette, or the machine's row in the hosts popover, stops sharing the clipboard with
+/// one machine and shares it again, by its name: the navigator marks the machine it is not
+/// shared with, the app is told to keep the choice, and the other machine is left as it was.
 #[gpui::test]
-fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette(cx: &mut TestAppContext) {
+fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row(
+    cx: &mut TestAppContext,
+) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
@@ -656,11 +658,29 @@ fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette(cx: &mu
     run(cx, "Share the clipboard with laptop");
     assert!(view.read_with(cx, |v, _| v.clipboard_shared(laptop_key)));
     assert!(!off(cx, laptop_key), "shared again, unmarked");
+
+    // The hosts popover's row says the same under the pointer.
+    let from_row = |cx: &mut VisualTestContext| {
+        toggle_hosts(&view, cx);
+        hover(cx, leak(format!("hosts-row-{studio_key}")));
+        click(cx, leak(format!("hosts-clipboard-{studio_key}")));
+    };
+    from_row(cx);
+    assert!(!view.read_with(cx, |v, _| v.clipboard_shared(studio_key)));
+    assert!(!view.read_with(cx, |v, _| v.hosts_open()), "and the popover goes");
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The clipboard is no longer shared with studio")
+    );
+    from_row(cx);
+    assert!(view.read_with(cx, |v, _| v.clipboard_shared(studio_key)));
     assert_eq!(
         events.borrow().as_slice(),
         [
             WorkspaceEvent::ClipboardShared { worker: laptop_key, share: false },
             WorkspaceEvent::ClipboardShared { worker: laptop_key, share: true },
+            WorkspaceEvent::ClipboardShared { worker: studio_key, share: false },
+            WorkspaceEvent::ClipboardShared { worker: studio_key, share: true },
         ],
         "the app keeps each choice"
     );
