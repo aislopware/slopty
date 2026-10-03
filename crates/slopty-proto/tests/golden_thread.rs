@@ -19,11 +19,11 @@ mod golden_thread {
     };
     use slopty_proto::thread::{
         Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
-        Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Fork, Image, IntentId, Item,
-        ItemBody, ItemId, Limit, Link, Liveness, Meters, Model, Notice, PartKey, Patch, Pending,
-        PendingState, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId,
-        ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn, TurnId, TurnState,
-        Usage, UserMessage, Wait, kind,
+        Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Editable, Effect, Fork, Image,
+        IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model, Notice,
+        PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Status,
+        Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn,
+        TurnId, TurnState, Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -78,6 +78,11 @@ mod golden_thread {
             drive: Drive::named(Drive::OBSERVED),
             caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
             models: vec![Model { id: "opus".to_owned(), label: "Opus".to_owned() }],
+            modes: vec![Mode {
+                id: "plan".to_owned(),
+                label: "Plan".to_owned(),
+                description: Some("Reads and plans, changes nothing".to_owned()),
+            }],
             facts: BTreeMap::from([("branch".to_owned(), "main".to_owned())]),
             created_ms: ms(1_000),
         }
@@ -197,6 +202,10 @@ mod golden_thread {
             ],
             questions: vec![],
             proposed: Some(patch()),
+            editable: vec![Editable {
+                field: "new_string".to_owned(),
+                text: "fn b() {}".to_owned(),
+            }],
             schema_json: None,
             url: None,
             state: RequestState::Open,
@@ -329,6 +338,17 @@ mod golden_thread {
                 ask: AskId("ask-1".to_owned()),
                 choice: "always".to_owned(),
                 message: Some("fine".to_owned()),
+            }),
+        );
+        snap(
+            "intent_answer_edited",
+            &send(Intent::Answer {
+                ask: AskId("ask-1".to_owned()),
+                choice: Editable::choice(&BTreeMap::from([(
+                    "new_string".to_owned(),
+                    "fn b() -> u8 { 1 }".to_owned(),
+                )])),
+                message: None,
             }),
         );
         snap("intent_release", &send(Intent::Release { ask: AskId("ask-1".to_owned()) }));

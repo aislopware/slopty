@@ -192,6 +192,7 @@ impl Driven {
     #[must_use]
     pub fn new(session: &str, version: &str, cwd: &str, now: WallMs) -> (Self, Vec<Action>) {
         let meta = ThreadMeta {
+            modes: Vec::new(),
             id: thread_of(session),
             agent: AgentId::named(AgentId::PI),
             agent_version: version.to_owned(),
@@ -926,6 +927,7 @@ impl Driven {
         };
         self.open.insert(ask.clone(), Open { asks, title: title.clone(), until });
         let request = Ask {
+            editable: Vec::new(),
             id: ask,
             item: None,
             kind: Ask::QUESTION.to_owned(),
@@ -950,6 +952,7 @@ impl Driven {
         let asks = Asks::Gate { call: gate.call.clone() };
         self.open.insert(ask.clone(), Open { asks, title: title.clone(), until: None });
         let request = Ask {
+            editable: Vec::new(),
             id: ask.clone(),
             item: Some(ItemId(gate.call.clone())),
             kind: Ask::APPROVAL.to_owned(),

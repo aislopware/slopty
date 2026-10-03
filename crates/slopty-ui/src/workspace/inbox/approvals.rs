@@ -294,6 +294,7 @@ mod tests {
 
     fn prompt(session: SessionId, ask: u64, tool: &str, detail: ToolDetail) -> PermissionPrompt {
         PermissionPrompt {
+            editable: Vec::new(),
             session,
             ask,
             tool: tool.to_owned(),

@@ -303,6 +303,9 @@ pub struct ThreadMeta {
     /// The models it can be switched to ([`wire::Intent::SetModel`]), from its adapter's
     /// catalogue; empty where it cannot be.
     pub models: Vec<Model>,
+    /// The modes it can be switched to ([`wire::Intent::SetMode`]), as its agent publishes
+    /// them (an ACP agent's session modes); empty where it publishes none.
+    pub modes: Vec<Mode>,
     /// Open facts about it: its project, task, branch, pull request, model.
     pub facts: BTreeMap<String, String>,
     /// When it began.
@@ -335,6 +338,18 @@ pub struct Model {
     pub id: String,
     /// Its name for people.
     pub label: String,
+}
+
+/// A mode a thread's agent can be switched to: how it asks before acting (`plan`, `ask`,
+/// `code`), by its own name.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Mode {
+    /// The agent's own name for it, as its switch takes it.
+    pub id: String,
+    /// Its name for people.
+    pub label: String,
+    /// What it does, in the agent's words, when it says.
+    pub description: Option<String>,
 }
 
 /// Where a subagent's thread hangs: the thread and the call that started it.
@@ -779,6 +794,9 @@ pub struct Request {
     pub questions: Vec<detail::Question>,
     /// The change it would make, for an approval of an edit.
     pub proposed: Option<Patch>,
+    /// The parts of the call's input the person may change before allowing it, where the
+    /// agent takes an allow with the input changed ([`Editable::choice`]).
+    pub editable: Vec<Editable>,
     /// For a form: its JSON schema.
     pub schema_json: Option<String>,
     /// For a form the person fills in elsewhere: where.
@@ -822,6 +840,46 @@ pub struct Choice {
     pub scope: Option<String>,
     /// It also stops the turn.
     pub stops: bool,
+}
+
+/// A part of a call's input the person may change before allowing it: an edit's new text, a
+/// written file's content.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Editable {
+    /// The input's field, as the agent names it (`new_string`, `content`).
+    pub field: String,
+    /// What the agent proposed for it.
+    pub text: String,
+}
+
+impl Editable {
+    /// The key of the JSON object an edited allow is ([`Editable::choice`]).
+    const EDITED: &'static str = "allow-edited";
+    /// The longest text offered for editing, in bytes: a longer proposal is allowed or denied
+    /// whole.
+    pub const TEXT_MAX: usize = 256 * 1024;
+
+    /// The choice of an [`Intent::Answer`](wire::Intent::Answer) that allows the call with
+    /// `fields` changed, each a field and its text as the person left it: a JSON object, which
+    /// no other choice is.
+    #[must_use]
+    pub fn choice(fields: &BTreeMap<String, String>) -> String {
+        let edited: BTreeMap<&str, &BTreeMap<String, String>> =
+            BTreeMap::from([(Self::EDITED, fields)]);
+        serde_json::to_string(&edited).unwrap_or_default()
+    }
+
+    /// The fields an edited allow's [`choice`](Self::choice) changes; `None` for any other
+    /// choice.
+    #[must_use]
+    pub fn read(choice: &str) -> Option<BTreeMap<String, String>> {
+        if !choice.starts_with('{') {
+            return None;
+        }
+        let mut edited: BTreeMap<String, BTreeMap<String, String>> =
+            serde_json::from_str(choice).ok()?;
+        edited.remove(Self::EDITED)
+    }
 }
 
 /// What an answer means, so a client can tell yes from no without knowing the agent.

@@ -190,6 +190,7 @@ fn an_at_asks_the_worker_and_a_pick_writes_the_path(cx: &mut TestAppContext) {
 fn question_prompt(view: &Entity<ConversationView>, cx: &VisualTestContext) -> PermissionPrompt {
     let choice = |label: &str| Choice { label: label.to_owned(), description: None };
     PermissionPrompt {
+        editable: Vec::new(),
         session: view.read_with(cx, |v, _| v.session()),
         ask: 5,
         tool: "AskUserQuestion".to_owned(),

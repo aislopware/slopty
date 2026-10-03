@@ -38,6 +38,7 @@ use serde_json::{Value, json};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::conversation::{Grant, PermissionPrompt, Suggestion, Verdict};
 use slopty_proto::ctl::Decision;
+use slopty_proto::thread::Editable;
 
 use crate::{Hook, HookEvent};
 
@@ -117,6 +118,10 @@ pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
             }
             Decision::Allow { updated_input: Some(input) }
         }
+        Verdict::AllowEdited { input: edited } => {
+            let tool = hook.tool_name.as_deref().unwrap_or_default();
+            Decision::Allow { updated_input: Some(edited_input(tool, input(), edited)) }
+        }
         Verdict::AllowAlways => Decision::AllowAlways {
             updated_permissions: hook
                 .permission_suggestions
@@ -136,6 +141,48 @@ pub fn decision(verdict: &Verdict, hook: &Hook) -> Decision {
     }
 }
 
+/// The fields of a tool's input a person may change before allowing it, by tool: what an edit
+/// puts in, what a write writes. Claude Code checks a changed input again against its rules.
+const EDITABLE: [(&str, &str); 2] = [("Edit", "new_string"), ("Write", "content")];
+
+/// The parts of `input`, the call of `tool`, a person may change before allowing it: an edit's
+/// `new_string`, a write's `content`, each within [`Editable::TEXT_MAX`].
+#[must_use]
+pub fn editable(tool: &str, input: &Value) -> Vec<Editable> {
+    EDITABLE
+        .iter()
+        .filter(|(named, _)| *named == tool)
+        .filter_map(|(_, field)| {
+            let text = input.get(*field)?.as_str()?;
+            (text.len() <= Editable::TEXT_MAX)
+                .then(|| Editable { field: (*field).to_owned(), text: text.to_owned() })
+        })
+        .collect()
+}
+
+/// `input`, the call of `tool`, with the person's `edited` fields laid over it: only a field
+/// offered for editing ([`editable`]) that the call holds as text is taken, so an edit never
+/// adds to a call, moves it to another file, or changes what is not text. An edit that is not
+/// a JSON object of texts changes nothing.
+fn edited_input(tool: &str, mut input: Value, edited: &str) -> Value {
+    let Ok(edited) = serde_json::from_str::<serde_json::Map<String, Value>>(edited) else {
+        return input;
+    };
+    let offered = |field: &str| EDITABLE.iter().any(|(t, f)| *t == tool && *f == field);
+    if let Some(fields) = input.as_object_mut() {
+        for (field, text) in edited {
+            if offered(&field)
+                && let Some(held) = fields.get_mut(&field)
+                && held.is_string()
+                && text.is_string()
+            {
+                *held = text;
+            }
+        }
+    }
+    input
+}
+
 /// The prompt a follower is shown for a `PermissionRequest` hook: the call as the conversation
 /// will show it ([`crate::conversation::proposed`]) and what "allow always" would grant.
 #[must_use]
@@ -152,6 +199,7 @@ pub fn prompt(
         session,
         ask,
         detail: crate::conversation::proposed(&tool, &input),
+        editable: editable(&tool, &input),
         tool,
         suggestions: hook.permission_suggestions.as_ref().map(suggestions).unwrap_or_default(),
         mode: hook.permission_mode.clone(),
@@ -215,6 +263,46 @@ mod tests {
     use slopty_proto::conversation::Answer;
 
     use super::*;
+
+    /// An edit's new text and a write's content are offered for the person to change; an
+    /// allow with them changed carries the call's own input with only those texts replaced,
+    /// so a field not offered (the path), one the call lacks, one that is not text, or words
+    /// that are not an object change nothing; what Claude Code is told is the hooks
+    /// reference's `updatedInput`.
+    #[test]
+    fn an_edited_allow_carries_the_edited_input() {
+        let input = json!({ "file_path": "/w/a.rs", "old_string": "a", "new_string": "b", "replace_all": false });
+        let hook = Hook {
+            tool_name: Some("Edit".to_owned()),
+            tool_input: Some(input.clone()),
+            ..Hook::default()
+        };
+        assert_eq!(
+            editable("Edit", &input),
+            [Editable { field: "new_string".to_owned(), text: "b".to_owned() }]
+        );
+        let write = json!({ "file_path": "/w/n.md", "content": "# N" });
+        assert_eq!(editable("Write", &write)[0].field, "content");
+        assert_eq!(editable("Bash", &json!({ "command": "ls" })), []);
+        let huge = json!({ "content": "x".repeat(Editable::TEXT_MAX + 1) });
+        assert_eq!(editable("Write", &huge), [], "too long to edit here");
+
+        let edited =
+            r#"{"new_string":"c","file_path":"/etc/hosts","replace_all":"yes","extra":"no"}"#;
+        let decision = decision(&Verdict::AllowEdited { input: edited.to_owned() }, &hook);
+        let changed = json!({ "file_path": "/w/a.rs", "old_string": "a", "new_string": "c", "replace_all": false });
+        assert_eq!(decision, Decision::Allow { updated_input: Some(changed.clone()) });
+        assert_eq!(
+            hook_output(&decision).map(|o| o["hookSpecificOutput"]["decision"].clone()),
+            Some(json!({ "behavior": "allow", "updatedInput": changed }))
+        );
+        let garbled = decision_of(&hook, "not json");
+        assert_eq!(garbled, Decision::Allow { updated_input: Some(input) }, "the call as asked");
+    }
+
+    fn decision_of(hook: &Hook, edited: &str) -> Decision {
+        decision(&Verdict::AllowEdited { input: edited.to_owned() }, hook)
+    }
 
     /// A decision prints what the hooks reference defines, and no decision prints nothing.
     /// (The socket lines are pinned beside `CtlRequest` in `slopty-proto`.)

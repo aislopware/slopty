@@ -20,6 +20,7 @@ mod threads {
 
     fn meta() -> ThreadMeta {
         ThreadMeta {
+            modes: Vec::new(),
             id: ThreadId::new(),
             agent: AgentId::named(AgentId::CLAUDE_CODE),
             agent_version: "2.1.286".to_owned(),

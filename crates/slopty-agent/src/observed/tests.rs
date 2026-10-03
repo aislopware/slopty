@@ -287,6 +287,7 @@ fn always_allow_says_a_mode_in_words() {
             .map(|grant| conv::Suggestion { grant, destination: None })
             .collect();
         let prompt = PermissionPrompt {
+            editable: Vec::new(),
             session: SessionId::nil(),
             ask: 1,
             tool: "Bash".to_owned(),

@@ -6,6 +6,7 @@ use super::*;
 
 fn meta() -> ThreadMeta {
     ThreadMeta {
+        modes: Vec::new(),
         id: ThreadId::from_uuid(Uuid::from_u128(1)),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: "2.1.286".to_owned(),
@@ -70,6 +71,7 @@ fn tool(id: &str, state: ToolState) -> Item {
 
 fn request(id: &str) -> Request {
     Request {
+        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),
@@ -416,4 +418,17 @@ fn a_subagents_thread_is_named_by_its_session_and_agent() {
     // Each part goes behind its length, so parts that join alike name different threads.
     assert_ne!(ThreadId::derived(&["ab", "c"]), ThreadId::derived(&["a", "bc"]));
     assert_eq!(main.subagent("a1b2").to_string(), "1fc1bce5-1343-8f7f-9a36-75875446afad");
+}
+
+/// An edited allow reads back as the fields the person changed, and no other choice reads as
+/// one: an option's id, a question's answers or its words.
+#[test]
+fn an_edited_allow_reads_back_and_nothing_else_does() {
+    let fields = BTreeMap::from([("new_string".to_owned(), "fn b() {}\n".to_owned())]);
+    let choice = Editable::choice(&fields);
+    assert_eq!(Editable::read(&choice), Some(fields));
+    let answers = r#"[{"question":"Which?","answer":"Split"}]"#;
+    for other in ["allow", "deny-stop", answers, "{ not json", r#"{"answers":{}}"#, ""] {
+        assert_eq!(Editable::read(other), None, "{other}");
+    }
 }

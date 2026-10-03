@@ -153,6 +153,7 @@ mod tests {
 
     fn request(kind: &str, options: Vec<Choice>) -> Request {
         Request {
+            editable: Vec::new(),
             id: AskId("a".to_owned()),
             item: None,
             kind: kind.to_owned(),

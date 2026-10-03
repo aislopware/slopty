@@ -200,6 +200,7 @@ impl Shared {
             ThreadMeta::PERSON
         };
         let meta = ThreadMeta {
+            modes: Vec::new(),
             id,
             agent: AgentId::named(AgentId::CODEX),
             agent_version: thread.cli_version.clone(),
@@ -597,6 +598,7 @@ impl Shared {
             Some((ThreadStatus::NotLoaded | ThreadStatus::SystemError, _)) => None,
         };
         let request = Request {
+            editable: Vec::new(),
             id: ask,
             item,
             kind: kind.to_owned(),

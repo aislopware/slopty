@@ -147,7 +147,9 @@ pub enum Intent {
         /// several picks of one question joined with `", "` and the words of one's own last
         /// ([`detail::Answer::JOIN`](super::detail::Answer::JOIN)). Claude Code takes the list
         /// as `AskUserQuestion`'s answers as they are; an adapter whose agent takes picks apart
-        /// splits them again ([`detail::Answer::parts`](super::detail::Answer::parts)).
+        /// splits them again ([`detail::Answer::parts`](super::detail::Answer::parts)). For an
+        /// approval whose call the person changed, the fields changed
+        /// ([`Editable::choice`](super::Editable::choice)).
         choice: String,
         /// Words to go with it, where the agent takes them.
         message: Option<String>,

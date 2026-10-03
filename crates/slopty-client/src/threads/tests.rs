@@ -12,6 +12,7 @@ use super::*;
 
 fn meta(id: ThreadId) -> ThreadMeta {
     ThreadMeta {
+        modes: Vec::new(),
         id,
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: String::new(),
@@ -58,6 +59,7 @@ fn said(id: &str, intent: Option<IntentId>) -> Action {
 
 fn request(id: &str) -> Action {
     Action::RequestOpened(Box::new(Request {
+        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

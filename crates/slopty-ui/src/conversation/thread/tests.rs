@@ -69,6 +69,7 @@ fn approval(id: &str) -> Request {
         stops: false,
     };
     Request {
+        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

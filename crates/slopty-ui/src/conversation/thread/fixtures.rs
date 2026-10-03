@@ -9,6 +9,7 @@ use slopty_proto::thread::{AgentId, Drive, ThreadId, ThreadMeta, ThreadState};
 /// A thread with nothing in it.
 pub(crate) fn empty() -> ThreadState {
     ThreadState::new(ThreadMeta {
+        modes: Vec::new(),
         id: ThreadId::new(),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: String::new(),

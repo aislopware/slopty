@@ -33,7 +33,7 @@ use slopty_proto::thread::detail::{
 };
 use slopty_proto::thread::{
     self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Delivery, Drive, Effect,
-    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Model, Notice, PartKey, Pending,
+    IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending,
     PendingState, Phase, Plan, RequestState, Status, Step, ThreadId, ThreadMeta, ThreadState,
     ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, UserMessage, Wait, kind,
 };
@@ -201,6 +201,7 @@ impl Session {
         now: WallMs,
     ) -> (Self, Vec<Action>) {
         let meta = ThreadMeta {
+            modes: Vec::new(),
             id: thread,
             agent,
             agent_version: String::new(),
@@ -569,6 +570,7 @@ impl Session {
         };
         self.asked.insert(ask.clone(), asked);
         let card = thread::Request {
+            editable: Vec::new(),
             id: ask.clone(),
             item: Some(ItemId(call.clone())),
             kind: thread::Request::APPROVAL.to_owned(),
@@ -1154,6 +1156,21 @@ impl Session {
                 .map(|(_, label)| label);
             meters.model_id = current;
         }
+        meta.modes = match &mode {
+            Some(option) => select_choices(option)
+                .into_iter()
+                .map(|(id, label)| Mode { id, label, description: None })
+                .collect(),
+            None => self
+                .modes
+                .iter()
+                .map(|m| Mode {
+                    id: m.id.0.to_string(),
+                    label: m.name.clone(),
+                    description: m.description.clone(),
+                })
+                .collect(),
+        };
         meters.mode = match &mode {
             Some(option) => {
                 let current = select_current(option);
