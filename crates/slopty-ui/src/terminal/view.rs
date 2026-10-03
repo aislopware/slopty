@@ -258,6 +258,13 @@ pub enum TerminalViewEvent {
         /// The line to land on.
         line: Option<u32>,
     },
+    /// ⌘-click on a link to a page the shell's machine serves on its loopback
+    /// (`http://localhost:3000`): the workspace opens it in a page tile on that machine, which
+    /// reaches the port where it is.
+    OpenPage {
+        /// The address as the program gave it.
+        url: String,
+    },
     /// ⌘-drag on a path: the workspace drags that file out of the app (a file promise the
     /// worker keeps), a relative path made absolute against the session's directory.
     DragOut {
@@ -945,6 +952,20 @@ impl TerminalView {
         cx.emit(TerminalViewEvent::ViewFile { path: span.path.clone(), line: span.line });
     }
 
+    /// ⌘-click on a link: opened for the machine the shell runs on ([`url::destination`]). A
+    /// `file://` link is a file tile of that machine's path, a page on its loopback a page tile
+    /// that reaches it through that machine, anything else this device's own handler.
+    fn open_link(link: &str, cx: &mut Context<Self>) {
+        tracing::info!(url = %link, "open link");
+        match url::destination(link) {
+            url::Destination::File(path) => {
+                cx.emit(TerminalViewEvent::ViewFile { path, line: None });
+            }
+            url::Destination::WorkerPage(url) => cx.emit(TerminalViewEvent::OpenPage { url }),
+            url::Destination::Here(url) => cx.open_url(&url),
+        }
+    }
+
     /// Where the link under a ⌘-hover goes: the OSC 8 target or the URL as printed, or the
     /// path (with its `:line`) — the text a click would act on, shown so an OSC 8 label
     /// cannot hide its destination.
@@ -1570,6 +1591,15 @@ impl TerminalView {
         self.state.block_head(top)
     }
 
+    /// Whether the tile's header already says `command`: it is the command running now, which
+    /// names the tile, or the title the program set. The block's row would say it again one
+    /// line under the header.
+    fn titled_by(&self, command: &str) -> bool {
+        let command = command.trim();
+        self.state.running_command().map(str::trim) == Some(command)
+            || self.title().map(str::trim) == Some(command)
+    }
+
     /// One row over the grid's top naming the command whose output the viewport is inside,
     /// so a long output is never anonymous; a click scrolls its prompt back to the top. It sits
     /// on the head surface the prompt rows had in the grid. Its
@@ -1583,6 +1613,9 @@ impl TerminalView {
     ) -> Option<gpui::AnyElement> {
         let metrics = self.metrics?;
         let command = block.command.clone()?;
+        if self.titled_by(&command) {
+            return None;
+        }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let prompt = block.prompt;
@@ -3387,10 +3420,7 @@ impl TerminalView {
         if event.button == MouseButton::Left && (event.modifiers.platform || armed) {
             let index = self.state.index_at_row(row);
             match self.under(index, col).map(|(_, under)| under) {
-                Some(Under::Link(span)) => {
-                    tracing::info!(url = %span.url, "open link");
-                    cx.open_url(&span.url);
-                }
+                Some(Under::Link(span)) => Self::open_link(&span.url, cx),
                 Some(Under::Path(span)) => self.path_press = Some((span, armed, event.position)),
                 None if armed => {
                     // The phone has no right button: the armed tap on a bare row is its menu.
@@ -4784,6 +4814,22 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(top_line(&view, cx), LineIndex(4), "a click scrolls to the prompt");
         assert!(cx.debug_bounds("block-header").is_none());
+    }
+
+    /// The sticky header names the block only when the tile's header does not already: under a
+    /// title that is the block's command it would say the same words one line lower.
+    #[gpui::test]
+    fn a_sticky_header_does_not_repeat_the_title(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-header").is_some(), "inside `seq 2`'s output");
+        view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Title("seq 2".into()), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-header").is_none(), "the title says `seq 2` already");
+        view.update_in(cx, |view, _window, cx| view.apply(TermEvent::Title("~/src".into()), cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("block-header").is_some(), "another title: the header names it");
     }
 
     /// What making the texture of a 12 MiB image (the largest the worker ships) costs the UI
@@ -7769,6 +7815,69 @@ mod tests {
         cx.simulate_click(cell(2, 1), gpui::Modifiers::default());
         cx.run_until_parked();
         assert_eq!(cx.opened_url().as_deref(), Some("http://a.b"), "one tap, one link");
+    }
+
+    /// ⌘-click on a program's link opens it for the machine the shell runs on: a `file://`
+    /// link as a file tile of its path, a page on its loopback as a page tile through it, and
+    /// nothing of either on this device.
+    #[gpui::test]
+    fn a_link_opens_on_the_machine_the_shell_runs_on(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        let seen = Rc::clone(&heard);
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| match event {
+                TerminalViewEvent::ViewFile { path, .. } => seen.borrow_mut().push(path.clone()),
+                TerminalViewEvent::OpenPage { url } => seen.borrow_mut().push(url.clone()),
+                _ => {}
+            })
+            .detach();
+        });
+        let rows = ["file:///tmp/a%20b.md", "http://localhost:3000/", "https://example.com/"];
+        view.update_in(cx, |view, _window, cx| {
+            view.apply(
+                TermEvent::Frame(Frame {
+                    seq: 1,
+                    full: true,
+                    epoch: 0,
+                    cols: 30,
+                    rows: 3,
+                    cursor: Cursor::default(),
+                    modes: TermModes::empty(),
+                    oldest_line: LineIndex(0),
+                    first_visible_line: LineIndex(0),
+                    total_lines: 3,
+                    input_ack: 0,
+                    above: None,
+                    blocks: None,
+                    images: Vec::new(),
+                    updates: rows
+                        .iter()
+                        .enumerate()
+                        .map(|(row, text)| RowUpdate {
+                            row: u16::try_from(row).unwrap(),
+                            line: Line::from_text(text, 30, Style::DEFAULT).into(),
+                        })
+                        .collect(),
+                }),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let metrics = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
+        let cell = |row: u16| {
+            metrics.origin
+                + point(metrics.cell_width * 2.5, metrics.line_height * (f32::from(row) + 0.5))
+        };
+        let command = gpui::Modifiers { platform: true, ..gpui::Modifiers::default() };
+        cx.simulate_click(cell(0), command);
+        cx.simulate_click(cell(1), command);
+        cx.run_until_parked();
+        assert_eq!(*heard.borrow(), ["/tmp/a b.md", "http://localhost:3000/"]);
+        assert_eq!(cx.opened_url(), None, "neither opens on this device");
+        cx.simulate_click(cell(2), command);
+        cx.run_until_parked();
+        assert_eq!(cx.opened_url().as_deref(), Some("https://example.com/"));
     }
 
     /// The key bar's ⌘ then a tap on a path at a prompt views the file as a file tile, not the

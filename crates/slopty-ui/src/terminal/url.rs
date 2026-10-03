@@ -286,6 +286,59 @@ fn trim_trailing(mut s: &str) -> &str {
     }
 }
 
+/// Where a link a program printed goes: links are opened for the machine the program runs on,
+/// since that is where its files and its servers are.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Destination {
+    /// A `file://` link: the path on that machine, percent-decoded. `ls --hyperlink`, `rg` and
+    /// `delta` name the host (`file://mini/…`), which is that machine too.
+    File(String),
+    /// A web page served on that machine (`localhost`, `127.0.0.0/8`, `[::1]`, `0.0.0.0`):
+    /// opened through it, where the port is.
+    WorkerPage(String),
+    /// Anywhere else: this device's own handler.
+    Here(String),
+}
+
+/// Where `url` goes ([`Destination`]).
+#[must_use]
+pub fn destination(url: &str) -> Destination {
+    use slopty_proto::handoff::{Wary, page};
+    if let Some(path) = file_url_path(url) {
+        return Destination::File(path);
+    }
+    if page(url).is_some_and(|p| p.wary == Some(Wary::Loopback)) {
+        return Destination::WorkerPage(url.to_owned());
+    }
+    Destination::Here(url.to_owned())
+}
+
+/// The path of a `file://` URL, its host (if any) dropped and its `%XX` escapes decoded; `None`
+/// for anything else, or one that names no absolute path.
+#[must_use]
+pub fn file_url_path(url: &str) -> Option<String> {
+    let scheme = url.get(..7).filter(|s| s.eq_ignore_ascii_case("file://"))?;
+    let rest = url.get(scheme.len()..)?;
+    let path = rest.get(rest.find('/')?..)?;
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&b) = bytes.get(at) {
+        let hex = |i: usize| bytes.get(i).and_then(|c| char::from(*c).to_digit(16));
+        if let (b'%', Some(hi), Some(lo)) =
+            (b, hex(at.saturating_add(1)), hex(at.saturating_add(2)))
+        {
+            out.push(u8::try_from(hi.saturating_mul(16).saturating_add(lo)).ok()?);
+            at = at.saturating_add(3);
+        } else {
+            out.push(b);
+            at = at.saturating_add(1);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 /// The URL in `text` that covers byte `offset`.
 #[cfg(test)]
 #[must_use]
@@ -453,5 +506,30 @@ mod tests {
         assert_eq!(url_at("x=https://a.b", 0), None);
         assert_eq!(url_at("x=https://a.b", 4), Some("https://a.b"));
         assert_eq!(url_at("mailto:a@b.c", 3), Some("mailto:a@b.c"));
+    }
+
+    /// A program's links go where the program runs: a `file://` link to its machine's path, with
+    /// or without the host `ls --hyperlink` names and with its escapes decoded; a page on its
+    /// loopback through it; anything else here.
+    #[test]
+    fn a_link_goes_to_the_machine_the_program_runs_on() {
+        assert_eq!(
+            destination("file:///Users/me/a%20b%25c%23d%3F%C3%A9.rs"),
+            Destination::File("/Users/me/a b%c#d?é.rs".to_owned())
+        );
+        assert_eq!(
+            destination("file://mini.local/home/me/notes.md"),
+            Destination::File("/home/me/notes.md".to_owned())
+        );
+        assert_eq!(destination("FILE:///tmp/x#frag"), Destination::File("/tmp/x".to_owned()));
+        for page in ["http://localhost:3000/", "http://127.0.0.1:8080/x", "http://[::1]:5173/"] {
+            assert_eq!(destination(page), Destination::WorkerPage(page.to_owned()), "{page}");
+        }
+        for here in ["https://example.com/", "http://10.0.0.2/", "mailto:a@b.c", "file:"] {
+            assert_eq!(destination(here), Destination::Here(here.to_owned()), "{here}");
+        }
+        assert_eq!(file_url_path("file://host"), None, "no path");
+        assert_eq!(file_url_path("file:///%FF"), None, "not UTF-8");
+        assert_eq!(file_url_path("file:///a%2"), Some("/a%2".to_owned()), "a lone % stays");
     }
 }

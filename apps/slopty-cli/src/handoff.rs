@@ -5,8 +5,9 @@
 //! absolute path), and an `open` (`xdg-open` on Linux) first on its `PATH`
 //! (`slopty_pty::shell_integration`); [`by_name`] tells them apart by `argv[0]`:
 //!
-//! * `open`/`xdg-open` with nothing but web addresses asks the worker to open them on the client;
-//!   anything else (a file, an application, a flag) goes to the system's own, untouched.
+//! * `open`/`xdg-open` with nothing but web addresses asks the worker to open them on the client,
+//!   and with one existing file shows it in a tile there (`open report.pdf`); anything else (an
+//!   application, a flag, a folder, a saved page) goes to the system's own, untouched.
 //! * `slopty-browser <url>` (`BROWSER`) is `slopty browse <url>`.
 //! * `slopty-editor [+line] <file>` (`EDITOR`) is `slopty edit --wait`: the file shows in a tile
 //!   beside the shell, and the command returns once the person is done with it, 0, or 1 when they
@@ -58,8 +59,16 @@ fn lossy(args: &[OsString]) -> Vec<String> {
     args.iter().map(|a| a.to_string_lossy().into_owned()).collect()
 }
 
-/// `open`: web addresses and nothing else go to the client; any other use is the system's.
+/// `open`: web addresses go to the client, and so does one file, shown in a tile beside the
+/// shell (a picture, a PDF, a text); any other use is the system's.
 async fn open_shim(data_dir: &Path, args: Vec<OsString>) -> Result<ExitCode> {
+    if let Some(file) = tile_file(&args) {
+        match edit(data_dir, false, vec![file.to_owned()]).await {
+            Ok(code) => return Ok(code),
+            Err(e) => eprintln!("slopty: {e}; opening {} here", Path::new(file).display()),
+        }
+        return Err(system_opener(&args));
+    }
     let urls: Option<Vec<String>> =
         args.iter().map(|a| a.to_str().filter(|u| is_openable(u)).map(str::to_owned)).collect();
     let here = match urls {
@@ -157,6 +166,19 @@ fn real_opener() -> Option<PathBuf> {
     found.or_else(|| cfg!(target_os = "macos").then(|| PathBuf::from("/usr/bin/open")))
 }
 
+/// The file `open`'s arguments name for a tile: one existing regular file and no flag. A web
+/// page saved as a file (`.html`) is not one: it wants a browser, not its source.
+fn tile_file(args: &[OsString]) -> Option<&OsString> {
+    let [file] = args else { return None };
+    let path = Path::new(file);
+    let page = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm"));
+    let flag = file.to_str().is_some_and(|f| f.starts_with('-'));
+    (!flag && !page && path.is_file()).then_some(file)
+}
+
 /// What an editor's command line names: `[+line] <file>`, the one shape every program that
 /// runs `$EDITOR` gives it.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -224,6 +246,30 @@ fn fallback(wait: bool, args: &[OsString], why: &str) -> Result<ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `open <file>` shows one existing file in a tile; a flag, a page, a folder, a file that
+    /// is not there and two files are the system opener's.
+    #[test]
+    fn open_shows_one_existing_file_in_a_tile() -> Result<(), std::io::Error> {
+        let dir = tempfile::tempdir()?;
+        let doc = dir.path().join("report.pdf");
+        let page = dir.path().join("index.HTML");
+        std::fs::write(&doc, b"%PDF-1.7")?;
+        std::fs::write(&page, b"<html>")?;
+        let arg = |p: &Path| OsString::from(p);
+        assert_eq!(tile_file(&[arg(&doc)]), Some(&arg(&doc)));
+        for other in [
+            vec![arg(&page)],
+            vec![arg(dir.path())],
+            vec![arg(&dir.path().join("gone.txt"))],
+            vec![arg(&doc), arg(&doc)],
+            vec![OsString::from("-a"), OsString::from("Safari")],
+            Vec::new(),
+        ] {
+            assert_eq!(tile_file(&other), None, "{other:?}");
+        }
+        Ok(())
+    }
 
     /// `$EDITOR`'s arguments are a file, or a `+line` and a file; anything else is not ours.
     #[test]

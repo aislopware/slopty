@@ -12,6 +12,12 @@
 #                  the terminal clears that row and keeps the ones above
 #   133;C          from a DEBUG trap: the first command after a prompt (our own tiny preexec)
 #   133;D;<status> from PROMPT_COMMAND, before the next prompt, only when a C is open
+#   OSC 7          the working directory, percent-encoded, before each prompt
+#
+# In a tmux pane every mark goes through tmux's passthrough (DCS `tmux;`, each ESC doubled),
+# since tmux keeps OSC 133 and OSC 7 to itself, and the pane allows it (`allow-passthrough`,
+# off by default since tmux 3.3; `on` passes only while the pane is visible, which is when its
+# marks match the screen Slopty draws).
 #
 # If bash-preexec is loaded, its preexec_functions / precmd_functions are used instead of our
 # trap. Written by slopty-ptyd on every start; edits here are lost. Opt out with
@@ -47,8 +53,51 @@ _slopty_running=0
 # 1 once the prompt is up: the next command the DEBUG trap sees is the user's.
 _slopty_armed=0
 
+# How an OSC starts and ends here, and the end as PS1 spells it (its backslash doubled). A
+# shell ptyd started is told TERM_PROGRAM=slopty, and tmux sets its own in a pane, so a TMUX
+# inherited from a daemon that ran under tmux does not count.
+if [ -n "${TMUX-}" ] && [ "${TERM_PROGRAM-}" != slopty ]; then
+    _slopty_osc=$'\ePtmux;\e\e]'
+    _slopty_st=$'\a\e\\'
+    _slopty_ps_st=$'\a\e\\\\'
+    command tmux set-option -p allow-passthrough on >/dev/null 2>&1
+else
+    _slopty_osc=$'\e]'
+    _slopty_st=$'\a'
+    _slopty_ps_st=$'\a'
+fi
+
 _slopty_mark() {
-    printf '\033]133;%s\007' "$1"
+    printf '%s133;%s%s' "$_slopty_osc" "$1" "$_slopty_st"
+}
+
+# The working directory as an OSC 7 URL's path: every byte but the unreserved ones and `/`
+# percent-encoded (RFC 3986), as a URL parser reads it back. Worked out again only when the
+# directory changed, and byte by byte only when something in it needs encoding.
+_slopty_cwd_url() {
+    [ "$PWD" = "${_slopty_cwd_of-}" ] && return 0
+    local LC_ALL=C _slopty_i=0 _slopty_c _slopty_h _slopty_out=
+    _slopty_cwd_of=$PWD
+    case $PWD in
+        *[!A-Za-z0-9/._~-]*) ;;
+        *)
+            _slopty_cwd_path=$PWD
+            return 0
+            ;;
+    esac
+    while [ "$_slopty_i" -lt "${#PWD}" ]; do
+        _slopty_c=${PWD:_slopty_i:1}
+        case $_slopty_c in
+            [A-Za-z0-9/._~-]) _slopty_out=$_slopty_out$_slopty_c ;;
+            *)
+                # bash 3.2 gives a byte past 0x7f as a negative number: its last two digits.
+                printf -v _slopty_h '%02X' "'$_slopty_c"
+                _slopty_out=$_slopty_out%${_slopty_h: -2}
+                ;;
+        esac
+        _slopty_i=$((_slopty_i + 1))
+    done
+    _slopty_cwd_path=$_slopty_out
 }
 
 # First in PROMPT_COMMAND, so $? is still the command's status.
@@ -77,15 +126,16 @@ _slopty_arm() {
                 ;;
         esac
     fi
-    local _slopty_dir=${PWD//%/%25}
-    printf '\033]7;file://%s%s\007' "$HOSTNAME" "${_slopty_dir// /%20}"
+    _slopty_cwd_url
+    printf '%s7;file://%s%s%s' "$_slopty_osc" "$HOSTNAME" "$_slopty_cwd_path" "$_slopty_st"
+    local _slopty_b='\['"${_slopty_osc}133;B${_slopty_ps_st}"'\]'
     case $PS1 in
         *'133;A'*) ;;
-        *) PS1='\[\033]133;A;redraw=last\007\]'"$PS1"'\[\033]133;B\007\]' ;;
+        *) PS1='\['"${_slopty_osc}133;A;redraw=last${_slopty_ps_st}"'\]'"$PS1$_slopty_b" ;;
     esac
     case $PS2 in
         *'133;A;k=s'*) ;;
-        *) PS2='\[\033]133;A;k=s\007\]'"$PS2"'\[\033]133;B\007\]' ;;
+        *) PS2='\['"${_slopty_osc}133;A;k=s${_slopty_ps_st}"'\]'"$PS2$_slopty_b" ;;
     esac
     _slopty_armed=1
 }

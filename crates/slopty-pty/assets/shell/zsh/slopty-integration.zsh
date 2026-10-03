@@ -6,7 +6,13 @@
 #   133;B  input starts (end of PS1)
 #   133;C  output starts (preexec)
 #   133;D;<status>  command ended (precmd, before the next prompt)
-#   OSC 7  the working directory (precmd), so the client can name where a shell is
+#   OSC 7  the working directory (precmd), percent-encoded, so the client can name where a
+#          shell is
+#
+# In a tmux pane every mark goes through tmux's passthrough (DCS `tmux;`, each ESC doubled),
+# since tmux keeps OSC 133 and OSC 7 to itself, and the pane allows it (`allow-passthrough`,
+# off by default since tmux 3.3; `on` passes only while the pane is visible, which is when its
+# marks match the screen Slopty draws).
 #
 # Before each prompt SLOPTY_BIN goes back to the front of the path: its `open` hands web pages to
 # the client, and the system's `/usr/bin/open` must not be found first.
@@ -20,11 +26,49 @@
 [[ -n "${TMUX-}" ]] && 'builtin' 'unset' CLAUDE_CLIENT_PRESENCE_FILE
 # 1 while a command runs (a C mark is open and needs its D).
 'builtin' 'typeset' -gi _slopty_running=0
+# How an OSC starts and ends here. A shell ptyd started is told TERM_PROGRAM=slopty, and tmux
+# sets its own in a pane, so a TMUX inherited from a daemon that ran under tmux does not count.
+if [[ -n "${TMUX-}" && "${TERM_PROGRAM-}" != slopty ]]; then
+    'builtin' 'typeset' -g _slopty_osc=$'\ePtmux;\e\e]' _slopty_st=$'\a\e\\'
+    'builtin' 'command' tmux set-option -p allow-passthrough on >/dev/null 2>&1
+else
+    'builtin' 'typeset' -g _slopty_osc=$'\e]' _slopty_st=$'\a'
+fi
+
+_slopty_mark() {
+    'builtin' 'print' -nr -- "${_slopty_osc}133;$1${_slopty_st}"
+}
+
+# The working directory as an OSC 7 URL's path: every byte but the unreserved ones and `/`
+# percent-encoded (RFC 3986), as a URL parser reads it back. Worked out again only when the
+# directory changed, and byte by byte only when something in it needs encoding.
+'builtin' 'typeset' -g _slopty_cwd_of= _slopty_cwd_path=
+_slopty_cwd_url() {
+    [[ "$PWD" == "$_slopty_cwd_of" ]] && 'builtin' 'return' 0
+    'builtin' 'emulate' -L zsh
+    'builtin' 'local' LC_ALL=C _slopty_c _slopty_h _slopty_out=
+    'builtin' 'local' -i _slopty_i
+    _slopty_cwd_of=$PWD
+    if [[ "$PWD" != *[^A-Za-z0-9/._~-]* ]]; then
+        _slopty_cwd_path=$PWD
+        'builtin' 'return' 0
+    fi
+    for (( _slopty_i = 1; _slopty_i <= ${#PWD}; _slopty_i++ )); do
+        _slopty_c=$PWD[_slopty_i]
+        if [[ "$_slopty_c" == [A-Za-z0-9/._~-] ]]; then
+            _slopty_out+=$_slopty_c
+        else
+            'builtin' 'printf' -v _slopty_h '%%%02X' "'$_slopty_c"
+            _slopty_out+=$_slopty_h
+        fi
+    done
+    _slopty_cwd_path=$_slopty_out
+}
 
 _slopty_precmd() {
     'builtin' 'local' -i _slopty_last=$?
     if (( _slopty_running )); then
-        'builtin' 'print' -n -- $'\e]133;D;'"$_slopty_last"$'\a'
+        _slopty_mark "D;$_slopty_last"
         _slopty_running=0
     fi
     # Slopty's `open`, BROWSER and EDITOR first on the path (SLOPTY_BIN): /etc/zprofile's
@@ -32,14 +76,14 @@ _slopty_precmd() {
     if [[ -n "${SLOPTY_BIN-}" && "${path[1]-}" != "$SLOPTY_BIN" ]]; then
         path=("$SLOPTY_BIN" "${(@)path:#$SLOPTY_BIN}")
     fi
-    'builtin' 'local' _slopty_dir=${PWD//\%/%25}
-    'builtin' 'print' -n -- $'\e]7;file://'"${HOST}${_slopty_dir// /%20}"$'\a'
+    _slopty_cwd_url
+    'builtin' 'print' -nr -- "${_slopty_osc}7;file://${HOST}${_slopty_cwd_path}${_slopty_st}"
     # Marks inside PS1/PS2 so zle redraws keep them; %{ %} hides them from width counting.
     if [[ "$PS1" != *$'\e]133;A'* ]]; then
-        PS1=$'%{\e]133;A;redraw=1\a%}'"$PS1"$'%{\e]133;B\a%}'
+        PS1="%{${_slopty_osc}133;A;redraw=1${_slopty_st}%}$PS1%{${_slopty_osc}133;B${_slopty_st}%}"
     fi
     if [[ -n "$PS2" && "$PS2" != *$'\e]133;A;k=s'* ]]; then
-        PS2=$'%{\e]133;A;k=s\a%}'"$PS2"$'%{\e]133;B\a%}'
+        PS2="%{${_slopty_osc}133;A;k=s${_slopty_st}%}$PS2%{${_slopty_osc}133;B${_slopty_st}%}"
     fi
     # Run after every other precmd hook so a prompt theme cannot rebuild PS1 behind us.
     if [[ "${precmd_functions[-1]}" != _slopty_precmd ]]; then
@@ -56,7 +100,8 @@ _slopty_precmd() {
 
 _slopty_preexec() {
     # The cursor is the program's shape again before the command runs.
-    'builtin' 'print' -n -- $'\e[0 q\e]133;C\a'
+    'builtin' 'print' -n -- $'\e[0 q'
+    _slopty_mark C
     _slopty_running=1
 }
 
@@ -81,7 +126,8 @@ _slopty_zle_cursor() {
 # fresh line, the prompt is already drawn) and `B` the input, so blocks and click-to-move hold.
 _slopty_zle_marks() {
     if [[ "$PS1" != *$'\e]133;A'* ]]; then
-        'builtin' 'print' -n -- $'\e]133;P;k=i\a\e]133;B\a'
+        _slopty_mark 'P;k=i'
+        _slopty_mark B
     fi
 }
 _slopty_zle_hooks() {

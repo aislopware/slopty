@@ -14,6 +14,14 @@
 #   133;C          on fish_preexec
 #   133;D;<status> on fish_postexec, only when a C is open
 #
+# The working directory goes as OSC 7 before each prompt, percent-encoded.
+#
+# In a tmux pane every mark goes through tmux's passthrough (DCS `tmux;`, each ESC doubled),
+# since tmux keeps OSC 133 and OSC 7 to itself, and the pane allows it (`allow-passthrough`,
+# off by default since tmux 3.3; `on` passes only while the pane is visible, which is when its
+# marks match the screen Slopty draws). fish 4's own marks are kept by tmux too, so there the
+# prompt is wrapped as on fish 3.
+#
 # Written by slopty-ptyd on every start; edits here are lost. Opt out with
 # SLOPTY_NO_SHELL_INTEGRATION=1.
 
@@ -27,11 +35,26 @@ if status is-interactive; and not set -q __slopty_integrated
     set -g __slopty_integrated 1
 end
 
-if status is-interactive; and test "$__slopty_integrated" = 1; and not string match -rq '^[4-9]\.' -- $version
+# How an OSC starts and ends here. A shell ptyd started is told TERM_PROGRAM=slopty, and tmux
+# sets its own in a pane, so a TMUX inherited from a daemon that ran under tmux does not count.
+if test -n "$TMUX"; and test "$TERM_PROGRAM" != slopty
+    set -g __slopty_osc \e'Ptmux;'\e\e']'
+    set -g __slopty_st \a\e'\\'
+    if status is-interactive; and test "$__slopty_integrated" = 1
+        command tmux set-option -p allow-passthrough on >/dev/null 2>&1
+    end
+else
+    set -g __slopty_osc \e']'
+    set -g __slopty_st \a
+end
+
+if status is-interactive; and test "$__slopty_integrated" = 1; and begin
+        not string match -rq '^[4-9]\.' -- $version; or test "$__slopty_osc" != \e']'
+    end
     set -g __slopty_integrated wrapped
 
     function __slopty_mark
-        printf '\e]133;%s\a' $argv[1]
+        printf '%s133;%s%s' $__slopty_osc $argv[1] $__slopty_st
     end
 
     function __slopty_wrap_prompt --on-event fish_prompt
@@ -85,8 +108,8 @@ end
 # The working directory (OSC 7) before each prompt, so the client can name where a shell is.
 if status is-interactive
     function __slopty_cwd --on-event fish_prompt
-        set -l dir (string replace -a % %25 -- $PWD | string replace -a ' ' %20)
-        printf '\e]7;file://%s%s\a' $hostname $dir
+        set -l dir (string escape --style=url -- $PWD)
+        printf '%s7;file://%s%s%s' $__slopty_osc $hostname $dir $__slopty_st
     end
 end
 

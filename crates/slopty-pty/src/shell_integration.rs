@@ -662,9 +662,21 @@ mod tests {
             env,
             size,
         };
-        let mut child = pty.spawn_with(&spec, Some(&si)).unwrap().child;
+        let child = pty.spawn_with(&spec, Some(&si)).unwrap().child;
+        let text = drive(pty, child, None, input).await;
+        let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
+        text
+    }
+
+    /// Type `input` into `child` on `pty`, once it has written `ready` when that is given, and
+    /// return everything written there until it exits, answering a terminal's questions on the
+    /// way.
+    async fn drive(pty: Pty, mut child: crate::Child, ready: Option<&[u8]>, input: &str) -> String {
         let master = PtyMaster::new(pty.into_master()).unwrap();
-        master.write_all(input.as_bytes()).await.unwrap();
+        let mut typed = ready.is_none();
+        if typed {
+            master.write_all(input.as_bytes()).await.unwrap();
+        }
         let mut out = Vec::new();
         let mut buf = [0_u8; 4096];
         let mut answered = 0;
@@ -688,9 +700,12 @@ mod tests {
                 master.write_all(b"\x1b[?62;22c\x1b[1;1R").await.unwrap();
             }
             answered = asked;
+            if !typed && ready.is_some_and(|ready| out.windows(ready.len()).any(|w| w == ready)) {
+                typed = true;
+                master.write_all(input.as_bytes()).await.unwrap();
+            }
         }
         let _status: io::Result<std::process::ExitStatus> = child.wait().await;
-        let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
         String::from_utf8_lossy(&out).into_owned()
     }
 
@@ -1121,5 +1136,180 @@ mod tests {
                 run_shell_with(&format!("tile-{n}"), interactive, &[], &[presence], input).await;
             assert!(text.contains("p=[/p/session]"), "{shell} in a tile: {text:?}");
         }
+    }
+
+    /// A directory named with a space, `%`, `#`, `?` and a letter past ASCII, made in a test
+    /// shell's home before it starts (typed, a byte past ASCII would meet readline's meta keys).
+    const ODD_DIR: &str = "a b%c#d?é";
+    /// How OSC 7 spells [`ODD_DIR`]: every byte but the unreserved ones and `/` encoded.
+    const ODD_DIR_URL: &str = "a%20b%25c%23d%3F%C3%A9";
+
+    /// The paths of the OSC 7 URLs in `text` that start `osc` and end `st`.
+    fn reported_paths(text: &str, osc: &str, st: &str) -> Vec<String> {
+        let start = format!("{osc}7;file://");
+        text.split(start.as_str())
+            .skip(1)
+            .filter_map(|rest| rest.split_once(st))
+            .filter_map(|(url, _)| url.split_once('/').map(|(_host, path)| format!("/{path}")))
+            .collect()
+    }
+
+    /// `path` with each `%XX` read back as its byte, as a URL parser reads it.
+    fn decoded(path: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut bytes = path.bytes();
+        while let Some(b) = bytes.next() {
+            if b == b'%' {
+                let hex: String = bytes.by_ref().take(2).map(char::from).collect();
+                out.push(u8::from_str_radix(&hex, 16).unwrap());
+            } else {
+                out.push(b);
+            }
+        }
+        out
+    }
+
+    /// Every shell this machine has, each with the line that moves it into [`ODD_DIR`] (by a
+    /// glob: it is the only entry of its home that starts `a`) and its rc file's name.
+    fn every_shell() -> Vec<(&'static str, &'static str)> {
+        let mut shells = vec![("/bin/zsh", "cd ~/a*\n")];
+        shells.extend(bashes().into_iter().map(|b| (b, "cd ~/a*\n")));
+        if let Some(fish) = fish() {
+            shells.push((fish, "cd ~/a*\n"));
+        } else {
+            slopty_testkit::live::skip("fish is not installed (brew install fish)");
+        }
+        shells
+    }
+
+    /// Each shell reports a directory whose name a URL would misread (a `%`, a `#`, a `?`, a
+    /// space, UTF-8) with every such byte percent-encoded, so it reads back as the directory.
+    #[tokio::test]
+    async fn every_shell_percent_encodes_its_directory() {
+        let keep = format!("{ODD_DIR}/.keep");
+        for (n, (shell, cd)) in every_shell().into_iter().enumerate() {
+            let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+            let input = format!("{cd}exit\n");
+            let tag = format!("cwd-{n}");
+            let text = run_shell_with(&tag, interactive, &[(keep.as_str(), "")], &[], &input).await;
+            let paths = reported_paths(&text, "\x1b]", "\x07");
+            let odd = paths.iter().find(|p| p.ends_with(&format!("/{ODD_DIR_URL}")));
+            let odd = odd.unwrap_or_else(|| panic!("{shell} reports {ODD_DIR_URL}: {paths:?}"));
+            assert!(
+                decoded(odd).ends_with(format!("/{ODD_DIR}").as_bytes()),
+                "{shell}: {odd} reads back as the directory"
+            );
+            let unsafe_byte = |b: u8| !(b.is_ascii_alphanumeric() || b"/._~-%".contains(&b));
+            assert!(!odd.bytes().any(unsafe_byte), "{shell}: nothing left unencoded in {odd}");
+        }
+    }
+
+    /// In a tmux pane (tmux says `TERM_PROGRAM=tmux` there) every mark and the directory go
+    /// through tmux's passthrough, each ESC doubled; a shell Slopty started directly says
+    /// `TERM_PROGRAM=slopty` and marks plainly, even with a `TMUX` inherited from a daemon that ran
+    /// under tmux. No tmux runs here: its socket names nothing.
+    #[tokio::test]
+    async fn a_tmux_pane_wraps_its_marks_and_a_tile_does_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = format!("{},1,0", tmp.path().join("no-tmux").display());
+        let (wrap, st) = ("\x1bPtmux;\x1b\x1b]", "\x07\x1b\\");
+        for (n, (shell, _)) in every_shell().into_iter().enumerate() {
+            let interactive = Shell { program: shell, args: &["-i"], arg0: None };
+            let input = "false\nexit\n";
+            let pane = [("TMUX", socket.as_str()), ("TERM_PROGRAM", "tmux")];
+            let text = run_shell_with(&format!("pane-{n}"), interactive, &[], &pane, input).await;
+            for mark in ["A", "B", "C", "D;1"] {
+                let wrapped = format!("{wrap}133;{mark}");
+                assert!(text.contains(&wrapped), "{shell} wraps {mark}: {text:?}");
+            }
+            assert!(text.contains(&format!("{wrap}133;D;1{st}")), "{shell} ends with ST: {text:?}");
+            assert!(!reported_paths(&text, wrap, st).is_empty(), "{shell} wraps OSC 7: {text:?}");
+            // fish 4 marks on its own too, bare, which a real tmux keeps to itself.
+            if !shell.ends_with("fish") {
+                let wrapped = text.matches(format!("{wrap}133;").as_str()).count();
+                let all = text.matches("\x1b]133;").count();
+                assert_eq!(all, wrapped, "{shell}: no mark left bare in a pane: {text:?}");
+            }
+            let tile = [("TMUX", socket.as_str())];
+            let text = run_shell_with(&format!("tile-{n}"), interactive, &[], &tile, input).await;
+            assert!(!text.contains("Ptmux;"), "{shell} in a tile: {text:?}");
+            assert_marks(&text, shell);
+        }
+    }
+
+    /// tmux, when installed: Homebrew's, or the distribution's on Linux.
+    fn tmux() -> Option<&'static str> {
+        ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+    }
+
+    /// Each shell in a pane of a real tmux (its own server, no config, so `allow-passthrough` is
+    /// off as tmux ships it): the shell turns passthrough on for its pane, and its marks and
+    /// its directory reach the terminal outside tmux as plain OSC 133 and OSC 7, encoded.
+    #[tokio::test]
+    async fn marks_cross_a_real_tmux_to_the_terminal_outside() {
+        let Some(tmux) = tmux() else {
+            slopty_testkit::live::skip("tmux is not installed (brew install tmux)");
+            return;
+        };
+        for (n, (shell, cd)) in every_shell().into_iter().enumerate() {
+            let input = format!("{cd}false\nexit\n");
+            let text = run_in_tmux(&format!("tmux-real-{n}"), tmux, shell, &input).await;
+            assert!(!text.contains("Ptmux;"), "{shell}: tmux unwrapped them: {text:?}");
+            assert!(has_mark(&text, "A"), "{shell} prompt mark through tmux: {text:?}");
+            assert!(has_mark(&text, "D;1"), "{shell} status of `false` through tmux: {text:?}");
+            let paths = reported_paths(&text, "\x1b]", "\x07");
+            assert!(
+                paths.iter().any(|p| p.ends_with(&format!("/{ODD_DIR_URL}"))),
+                "{shell} directory through tmux: {paths:?} in {text:?}"
+            );
+        }
+    }
+
+    /// `shell`, integrated as ptyd would start it, in the one pane of a tmux server of its own
+    /// on a PTY: `input` typed once the pane's first prompt shows outside tmux, and everything
+    /// tmux wrote returned. The server goes with the test.
+    async fn run_in_tmux(tag: &str, tmux: &str, shell: &str, input: &str) -> String {
+        let tmp = std::env::temp_dir().join(format!("slopty-shell-{tag}-{}", std::process::id()));
+        let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
+        let si = install(&tmp.join("shell")).unwrap();
+        let si = ShellIntegration {
+            original_zdotdir: None,
+            original_xdg_data_dirs: None,
+            cli: None,
+            bin: None,
+            ..si
+        };
+        let home = tmp.join("home");
+        fs::create_dir_all(home.join(ODD_DIR)).unwrap();
+        let terminfo = tmp.join("terminfo");
+        compile_terminfo(&terminfo).await;
+        let socket = tmp.join("tmux.sock").to_string_lossy().into_owned();
+        // The pane's shell, as ptyd would have started it: its injected arguments and
+        // variables, which the server hands every pane from the client that started it.
+        let injection = si.apply(shell, &strings(&["-i"]), None, &[]);
+        let tmux_dir = Path::new(tmux).parent().unwrap().to_string_lossy().into_owned();
+        let mut env = vec![
+            pair("HOME", &home.to_string_lossy()),
+            pair("XDG_CONFIG_HOME", &home.join(".config").to_string_lossy()),
+            pair("PATH", &format!("{tmux_dir}:/usr/bin:/bin:/usr/sbin:/sbin")),
+            pair("TERM", crate::terminfo::NAMES[0]),
+            pair("TERMINFO", &terminfo.to_string_lossy()),
+        ];
+        env.extend(injection.env);
+        let command: Vec<String> = [tmux, "-S", &socket, "-f", "/dev/null", "new-session", shell]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(injection.args)
+            .collect();
+        let size = TermSize { cols: 80, rows: 24, metrics: CellMetrics::default() };
+        let pty = Pty::open(size).unwrap();
+        let spec = SpawnSpec { command, cwd: Some(home.clone()), env, size };
+        let child = pty.spawn_with(&spec, None).unwrap().child;
+        let text = drive(pty, child, Some(b"\x1b]133;B"), input).await;
+        let _gone = std::process::Command::new(tmux).args(["-S", &socket, "kill-server"]).output();
+        let _removed: io::Result<()> = fs::remove_dir_all(&tmp);
+        text
     }
 }
