@@ -962,7 +962,8 @@ mod tests {
     }
 
     /// A file behind a file tile is watched: a write on the worker reaches the client as a
-    /// fresh `WorkerMsg::File` unasked, its removal too, and an emptied watch list stops it.
+    /// fresh `WorkerMsg::File` unasked, its removal too (as a file to make, since its folder is
+    /// still there), and an emptied watch list stops it.
     #[tokio::test]
     async fn a_watched_file_is_read_again_when_it_changes() {
         use slopty_proto::file::FileRead;
@@ -984,7 +985,7 @@ mod tests {
         assert!(matches!(&read, FileRead::Text { text, .. } if text == "two"), "{read:?}");
         std::fs::remove_file(&path).unwrap();
         let read = next_file(&mut worker, &name).await;
-        assert!(matches!(read, FileRead::Missing { .. }), "{read:?}");
+        assert!(matches!(read, FileRead::Absent { .. }), "a file to make: {read:?}");
 
         worker.tx.send(&ClientMsg::WatchFiles { paths: Vec::new() }).await.unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
