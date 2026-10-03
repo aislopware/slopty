@@ -36,6 +36,9 @@ jobs:
   gate:
     name: gate (${{ matrix.lane }}${{ matrix.shard && format(' {0}', matrix.shard) || '' }})
     runs-on: ${{ matrix.os }}
+    # The longest lane takes about 20 min; a hung one held the queue for an hour (run
+    # 37134085979), and runs on `gate` wait for each other.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -140,6 +143,7 @@ jobs:
   linux:
     name: gate (linux)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "false"
       SLOPTY_DISK_FLOOR_GB: 5

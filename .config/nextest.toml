@@ -33,7 +33,9 @@ store-failure-output = true
 inherits = "gate"
 slow-timeout = { period = "60s", terminate-after = 3, grace-period = "10s" }
 fail-fast = false
-status-level = "fail"
+# A test past its first minute is named as it runs, so a run that stops making progress says
+# which test it is in (run 37134085979 sat 27 min after its doctests with nothing printed).
+status-level = "slow"
 # The tests that read hardware a hosted runner's virtual Mac does not have. nextest lists them
 # as skipped here, and every local gate runs them. Each is named with what it lacks; only
 # missing hardware puts a test here, never timing and never a pattern.
