@@ -1418,7 +1418,13 @@ mod tests {
     #[test]
     fn head_is_listed_as_the_index_is() {
         let sh = xshell::Shell::new().expect("a shell");
+        // `land` runs this inside its HEAD snapshot (`target/gate/tree`), which is no checkout of
+        // its own: git answers there for the repository around it, and from that ignored folder
+        // `ls-files` would list nothing. The listings are compared at the repository's top.
         sh.change_dir(repo_root().expect("repo root"));
+        let top =
+            xshell::cmd!(sh, "git rev-parse --show-toplevel").quiet().read().expect("a checkout");
+        sh.change_dir(top);
         let entries = |source| {
             let listed = list(&sh, source).expect("git lists it");
             assert!(listed.status.success(), "{source:?}: {listed:?}");
@@ -1439,7 +1445,8 @@ mod tests {
             );
         }
         let shared = head.intersection(&index).count();
-        assert!(shared * 10 > head.len() * 9, "{shared} of {} entries alike", head.len());
+        let alike = shared.saturating_mul(10) > head.len().saturating_mul(9);
+        assert!(alike, "{shared} of {} entries alike", head.len());
     }
 
     const FORK: &str = "git+https://github.com/aislopware/gpui-fast.git#58fb4674";
