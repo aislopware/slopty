@@ -214,24 +214,53 @@ fn a_path_opens_as_what_it_is(cx: &mut TestAppContext) {
     assert!(kinds.contains(&ItemKind::File { path: "/w/proj/b.rs".into() }), "{kinds:?}");
 }
 
+/// A file tile whose machine went away before the text came says it opens when the machine
+/// is back, not that it is still reading; the read the next link brings fills it.
+#[gpui::test]
+fn a_file_whose_machine_went_away_unread_says_it_waits_for_it(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.open_file_on(Some(key), "/w/notes.md", None, cx));
+    cx.run_until_parked();
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    cx.run_until_parked();
+    let said = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, cx| {
+            v.files.values().map(|f| f.read(cx).summary(cx)).collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(said(cx), [crate::file::OPENS_WHEN_BACK]);
+
+    let read = slopty_proto::file::FileRead::Text {
+        text: "# Notes".to_owned(),
+        size: 8,
+        modified_ms: WallMs::from_millis(1_000),
+        final_newline: true,
+        editorconfig: Vec::new(),
+    };
+    view.update_in(cx, |v, _w, cx| v.file_read(key, "/w/notes.md", &read, cx));
+    cx.run_until_parked();
+    let now = said(cx);
+    assert!(now.first().is_some_and(|s| s.starts_with("1 line")), "{now:?}");
+}
+
 /// Records the uploads the workspace starts.
 #[derive(Debug)]
 struct Uploads(mpsc::UnboundedSender<(XferId, Dest)>);
 
 impl Remote for Uploads {
-    fn upload(&self, xfer: XferId, _files: Vec<PathBuf>, dest: Dest) {
+    fn upload(&self, xfer: XferId, _files: Vec<PathBuf>, dest: Dest, _again: bool) {
         self.0.send((xfer, dest)).unwrap();
     }
 
     fn cancel(&self, _xfer: XferId) {}
 
     /// Writes a file named as the path's last part, whose text is the path.
-    fn download(
-        &self,
-        path: String,
-        into: PathBuf,
-        _shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError> {
+    fn download(&self, ask: slopty_client::xfer::Download) -> Result<Vec<PathBuf>, XferError> {
+        let (path, into) = (ask.path, ask.into);
         let name =
             path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?;
         let file = into.join(name);

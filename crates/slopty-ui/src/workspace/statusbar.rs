@@ -8,8 +8,9 @@
 //! what is wrong with the link when something is, what the focused tile says of itself (a
 //! file's language and caret; a page's host is its header's), the plan's windows the focused
 //! machine's agents last published (`5h 23% · 7d 41%`, in `warn` from 80 %, which list every
-//! machine's when clicked), the ports forwarded here (which list them when clicked), the uploads in
-//! flight to tiles other than the focused one (whose header says its own), the count of workers
+//! machine's when clicked), the ports forwarded here (which list them when clicked), the transfers
+//! in flight both ways while one is not the focused tile's own upload (whose header says it; they
+//! list every transfer with its rate, time left and stop when clicked), the count of workers
 //! only while one of them is not up (which opens the hosts popover: each worker's link, connect and
 //! forget), and each worker's agents: working, waiting, blocked and to review (a turn that ended
 //! unseen), each a faint "·" from the next. Who waits on the human is counted once, on the bell.
@@ -117,6 +118,8 @@ pub(super) struct Bar {
     hovered: bool,
     /// The plan windows' popover is up.
     plans_open: bool,
+    /// The transfers' popover is up.
+    transfers_open: bool,
 }
 
 impl std::fmt::Debug for Bar {
@@ -203,13 +206,22 @@ fn agents_label(theme: &Theme, counts: &[(String, AgentCounts)]) -> String {
         .join("; ")
 }
 
-/// Uploads in flight at a glance: `1 upload · 42%`.
+/// Transfers in flight at a glance, `ups` up and `downs` down: `1 upload · 42%`,
+/// `2 downloads · 10%`, `3 transfers · 40%`.
 #[must_use]
-fn transfers_label(count: usize, done: u64, total: u64) -> String {
-    let noun = if count == 1 { "upload" } else { "uploads" };
+fn transfers_label(ups: usize, downs: usize, done: u64, total: u64) -> String {
+    let count = ups.saturating_add(downs);
+    let (one, many) = match (ups, downs) {
+        (_, 0) => ("upload", "uploads"),
+        (0, _) => ("download", "downloads"),
+        _ => ("transfer", "transfers"),
+    };
     let percent = done.saturating_mul(100).checked_div(total).unwrap_or(0).min(100);
-    format!("{count} {noun} · {percent}%")
+    format!("{}{META_SEPARATOR}{percent}%", counted(count, one, many))
 }
+
+/// What the transfers popover is called.
+const TRANSFERS: &str = "Transfers";
 
 /// The round trip's slot, in ems of the bar's text: wide enough for `999 ms`, the most a link
 /// that is up shows, in tabular figures.
@@ -516,18 +528,7 @@ impl WorkspaceView {
                 this.list_ports(&super::actions::ListPorts, window, cx);
             }))
         });
-        // The focused tile's upload is its header's to say, with the way to stop it; the bar
-        // counts the rest.
-        let focused_tile = self.focused();
-        let elsewhere: Vec<&super::remote::Upload> =
-            self.uploads.values().filter(|u| Some(u.tile) != focused_tile).collect();
-        let transfers = (!phone && !elsewhere.is_empty()).then(|| {
-            let (done, total) = elsewhere.iter().fold((0_u64, 0_u64), |(d, t), u| {
-                (d.saturating_add(u.done), t.saturating_add(u.total))
-            });
-            let text: SharedString = transfers_label(elsewhere.len(), done, total).into();
-            spaced(tabular(readout("status-transfers", text.clone())), &text, theme)
-        });
+        let transfers = (!phone).then(|| self.transfers_button(cx)).flatten();
         let clock = cx.background_executor().now();
         let link_readout = link.filter(|w| w.status.is_up()).and_then(|w| {
             let path = w.relay.path().map(path_label);
@@ -613,6 +614,8 @@ impl WorkspaceView {
             .children(right_parts);
         let hosts = (self.bar.hosts_open && !phone).then(|| self.render_hosts(window, cx));
         let plans = (self.bar.plans_open && !phone).then(|| self.render_plans(window, cx));
+        let transfer_list = (self.bar.transfers_open && !phone && self.transfers_in_flight())
+            .then(|| self.render_transfers(window, cx));
         let statusbar = self.chrome.statusbar.entity_id();
         let bar = div()
             .id("statusbar")
@@ -641,6 +644,7 @@ impl WorkspaceView {
             .child(right)
             .children(hosts)
             .children(plans)
+            .children(transfer_list)
             .into_any_element()
     }
 
@@ -788,6 +792,194 @@ impl WorkspaceView {
             this.bar.plans_open = !this.bar.plans_open;
             cx.notify();
         })))
+    }
+
+    /// Every transfer in flight at a glance, both ways, while one is not the focused tile's own
+    /// upload (its header says that one, with its stop): how many and how far, together.
+    /// Clicked, the list of them.
+    fn transfers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let rows = self.transfer_rows(cx.background_executor().now());
+        let focused = self.focused();
+        let own =
+            self.uploads.values().filter(|u| Some(u.tile) == focused && u.drag.is_none()).count();
+        if rows.len() <= own {
+            return None;
+        }
+        let ups = rows.iter().filter(|r| r.up).count();
+        let (done, total) = rows.iter().fold((0_u64, 0_u64), |(d, t), r| {
+            (d.saturating_add(r.done), t.saturating_add(r.total))
+        });
+        let text = transfers_label(ups, rows.len().saturating_sub(ups), done, total);
+        let el =
+            spaced(tabular(button("status-transfers", text.clone().into(), theme)), &text, theme)
+                .when(self.bar.transfers_open, |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+        Some(tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| {
+            this.bar.transfers_open = !this.bar.transfers_open;
+            cx.notify();
+        })))
+    }
+
+    /// Close the transfers popover: nothing is left in it.
+    pub(in crate::workspace) const fn close_transfers(&mut self) {
+        self.bar.transfers_open = false;
+    }
+
+    /// Every transfer in flight, both ways: what goes, to or from which machine, how far, how
+    /// fast and how long it has left, with its stop under the pointer or the keyboard. A click
+    /// anywhere else closes it.
+    fn render_transfers(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let spacing = theme.spacing;
+        let safe = window.insets().effective();
+        let rows: Vec<gpui::AnyElement> = self
+            .transfer_rows(cx.background_executor().now())
+            .into_iter()
+            .map(|row| self.transfer_row(row, cx))
+            .collect();
+        let panel = kit::elevate(div(), theme)
+            .id("transfers")
+            .debug_selector(|| "transfers".to_owned())
+            .role(Role::Dialog)
+            .aria_label(TRANSFERS)
+            .occlude()
+            .absolute()
+            .bottom(px(STATUSBAR_H + spacing.xs) + safe.bottom)
+            .right(px(spacing.md) + safe.right)
+            .w(px(HOSTS_W))
+            .flex()
+            .flex_col()
+            .pb(px(spacing.xs))
+            .rounded(px(theme.radii.lg))
+            .text_size(px(theme.typography.ui_size))
+            .font_family(theme.typography.ui_family.clone())
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .child(section_heading(theme, "transfers-heading".into(), TRANSFERS))
+            .children(rows);
+        let viewport = window.viewport_size();
+        gpui::deferred(
+            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+                div()
+                    .id("transfers-away")
+                    .relative()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.bar.transfers_open = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(kit::fade_in(panel, "transfers-fade", cx)),
+            ),
+        )
+        .with_priority(crate::palette::Layer::Popover.priority())
+        .into_any_element()
+    }
+
+    /// One transfer in the popover: its way's mark, its name over its machine and progress, a
+    /// hairline of how far it got, and its stop.
+    fn transfer_row(
+        &self,
+        row: super::remote::transfers::TransferRow,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let xfer = row.xfer;
+        let group = SharedString::from(format!("transfers-row-{xfer}"));
+        let (mark, way) =
+            if row.up { (IconName::Upload, "to") } else { (IconName::Download, "from") };
+        let detail = format!("{}{META_SEPARATOR}{}", row.machine, row.words);
+        let label =
+            SharedString::from(format!("{}, {way} {}, {}", row.name, row.machine, row.words));
+        let stop_id = format!("transfers-cancel-{xfer}");
+        let stop_selector = stop_id.clone();
+        let stop = div()
+            .id(ElementId::Name(stop_id.into()))
+            .debug_selector(move || stop_selector)
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("Cancel {}", row.name)))
+            .flex_none()
+            .px(px(spacing.xs))
+            .rounded(px(theme.radii.xs))
+            .cursor_pointer()
+            .text_size(px(theme.typography.small()))
+            .text_color(hsla(s.text_secondary))
+            .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+            .child("Cancel");
+        let stop = tab_stop(stop, s.accent)
+            .invisible()
+            .group_hover(group.clone(), gpui::Styled::visible)
+            .in_focus(gpui::Styled::visible)
+            .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).visible())
+            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                cx.stop_propagation();
+                this.cancel_transfer(xfer, cx);
+            }));
+        // How far it got, as a hairline under the words: the figure says it, the line shows it.
+        let progress = row.fraction.map(|fraction| {
+            div()
+                .debug_selector(move || format!("transfers-bar-{xfer}"))
+                .mt(px(spacing.xxs))
+                .h(px(1.0))
+                .w_full()
+                .bg(hsla(s.border_subtle))
+                .child(div().h_full().w(gpui::relative(fraction)).bg(hsla(s.accent_fill)))
+        });
+        div()
+            .id(ElementId::Name(format!("transfers-row-{xfer}").into()))
+            .debug_selector(move || format!("transfers-row-{xfer}"))
+            .group(group)
+            .role(Role::Label)
+            .aria_label(label)
+            .flex_none()
+            .h(px(kit::Row::Two.height(theme)))
+            .mx(px(spacing.xs))
+            .px(px(spacing.xs))
+            .flex()
+            .items_center()
+            .gap(px(spacing.sm))
+            .rounded(px(theme.radii.sm))
+            .hover(move |el| el.bg(hsla(s.raised)))
+            .child(
+                div()
+                    .flex_none()
+                    .size(px(theme.typography.icon_large()))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(theme, mark, IconSize::Inline, hsla(s.text_muted))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(row.name)),
+                    )
+                    .child(
+                        meta(tabular(div()), theme)
+                            .debug_selector(move || format!("transfers-words-{xfer}"))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(SharedString::from(detail)),
+                    )
+                    .children(progress),
+            )
+            .child(stop)
+            .into_any_element()
     }
 
     /// Every plan reading the machines' agents published, by machine and agent, with its age.
@@ -1278,8 +1470,10 @@ mod tests {
         rest.add(Status::Idle);
         rest.add(Status::Done);
         assert!(rest.is_empty(), "an agent at rest is not counted");
-        assert_eq!(transfers_label(1, 42, 100), "1 upload · 42%");
-        assert_eq!(transfers_label(2, 0, 0), "2 uploads · 0%");
+        assert_eq!(transfers_label(1, 0, 42, 100), "1 upload \u{b7} 42%");
+        assert_eq!(transfers_label(2, 0, 0, 0), "2 uploads \u{b7} 0%");
+        assert_eq!(transfers_label(0, 2, 1, 10), "2 downloads \u{b7} 10%");
+        assert_eq!(transfers_label(1, 2, 2, 5), "3 transfers \u{b7} 40%");
         assert_eq!(counted(1, "port", "ports"), "1 port");
         assert_eq!(counted(3, "worker", "workers"), "3 workers");
         assert_eq!(sentence("server unreachable"), "Server unreachable");

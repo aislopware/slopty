@@ -240,7 +240,7 @@ impl WorkspaceView {
                 FolderViewEvent::Browse(path) => this.browse_folder(worker, id, path, cx),
                 FolderViewEvent::OpenFile(path) => this.open_file_beside(id, path, cx),
                 FolderViewEvent::DragOut(path) => {
-                    this.drag_out(worker, path);
+                    this.drag_out(worker, path, cx);
                 }
                 FolderViewEvent::UploadHere => {
                     if let Some(tile) = this.tile_of(id) {
@@ -489,7 +489,11 @@ impl WorkspaceView {
         let source = path.to_owned();
         let fetch: Fetch = Arc::new(move |into: &Path| {
             let landed = remote
-                .download(source.clone(), into.to_path_buf(), None)
+                .download(slopty_client::xfer::Download::new(
+                    slopty_core::XferId::new(),
+                    source.clone(),
+                    into.to_path_buf(),
+                ))
                 .map_err(|e| e.to_string())?;
             out::landed_top(&landed, into)
         });

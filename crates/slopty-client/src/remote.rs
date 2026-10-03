@@ -16,7 +16,7 @@ use crate::clip::{ClipCache, Fetched, fits_inline};
 #[cfg(target_vendor = "apple")]
 use crate::dnd::out::{DragOuts, Shared};
 use crate::tunnel::Forwards;
-use crate::xfer::{self, Line, Uplink, XferError};
+use crate::xfer::{self, Download, Line, Uplink, XferError};
 
 /// Files and clipboard bytes to and from one worker.
 pub trait Remote: Send + Sync + std::fmt::Debug {
@@ -24,25 +24,19 @@ pub trait Remote: Send + Sync + std::fmt::Debug {
     /// Returns at once; the worker's `Progress`, `Done` and `Finished` arrive on the link, and a
     /// failure here as [`crate::LinkEvent::XferFailed`]. A link that goes meanwhile does not end
     /// it: it goes on over the worker's next link from what the worker holds
-    /// ([`crate::xfer::upload`]), and its end arrives there.
-    fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest);
+    /// ([`crate::xfer::upload`]), and its end arrives there. One begun `again`, by an earlier run
+    /// of the app, sends each file from what the worker holds of it.
+    fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest, again: bool);
 
     /// Stop transfer `xfer`, on whichever link it is by then or while it waits for one; what
     /// the worker holds of it stays for a resume.
     fn cancel(&self, xfer: XferId);
 
-    /// Bring the worker's `path` (a file, or a directory as its files) into the directory
-    /// `into`, blocking until every file has landed. Never call it on the main thread.
-    /// `shown_at` is the file the person sees it become (a drop into Finder), where the system
-    /// shows its progress and a cancel; `None` for a download nobody watches land. A link that
-    /// goes meanwhile does not end it: it goes on over the worker's next link from what it holds
-    /// ([`crate::xfer::Line`]).
-    fn download(
-        &self,
-        path: String,
-        into: PathBuf,
-        shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError>;
+    /// Bring the worker's file or directory into a directory here as `ask` says, blocking
+    /// until every file has landed. Never call it on the main thread. [`Self::cancel`] with
+    /// its transfer stops it. A link that goes meanwhile does not end it: it goes on over the
+    /// worker's next link from what it holds ([`crate::xfer::Line`]).
+    fn download(&self, ask: Download) -> Result<Vec<PathBuf>, XferError>;
 
     /// Representation `rep` of the worker's clipboard offer, capped at `max`, waiting at most
     /// `wait` for it. Blocks: this is what a pasteboard's data provider calls.
@@ -122,9 +116,10 @@ impl LinkRemote {
 }
 
 impl Remote for LinkRemote {
-    fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest) {
+    fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest, again: bool) {
         let (up, line) = (self.up.clone(), Arc::clone(&self.line));
-        self.runtime.spawn(async move { xfer::upload(&up, &line, xfer, &files, dest).await });
+        self.runtime
+            .spawn(async move { xfer::upload(&up, &line, xfer, &files, dest, again).await });
     }
 
     fn cancel(&self, xfer: XferId) {
@@ -135,15 +130,8 @@ impl Remote for LinkRemote {
         }
     }
 
-    fn download(
-        &self,
-        path: String,
-        into: PathBuf,
-        shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError> {
-        let xfer = XferId::new();
-        let landed = xfer::download(&self.up, &self.line, xfer, path, into, shown_at.as_deref());
-        self.runtime.block_on(landed)
+    fn download(&self, ask: Download) -> Result<Vec<PathBuf>, XferError> {
+        self.runtime.block_on(xfer::download(&self.up, &self.line, ask))
     }
 
     fn clip_fetch(&self, rep: &RepRef, max: Option<u64>, wait: Duration) -> Fetched {

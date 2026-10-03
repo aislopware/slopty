@@ -133,6 +133,8 @@ pub(crate) const NOT_ON_DISK: &str = "Not on disk: saving makes it";
 pub const COLOURED_BYTES: usize = 2 << 20;
 /// What a file tile says while its first read is out, once the wait is worth a word.
 pub(crate) const READING: &str = "Reading…";
+/// The body of a file tile not read yet while its machine is away.
+pub(crate) const OPENS_WHEN_BACK: &str = "Opens when the machine is back";
 /// What a file tile says of a file past the cap a tile holds.
 pub(crate) const TOO_LARGE: &str = "Too large to open here";
 /// What a file tile says of a file that is not text.
@@ -393,6 +395,9 @@ pub struct FileView {
     path: String,
     /// What the worker last said, `None` until it answers.
     read: Option<FileRead>,
+    /// The worker's link is down: a tile not read yet says it waits for the machine, not that
+    /// it is reading.
+    away: bool,
     /// The version the edit started from, once there is text.
     base: Option<Version>,
     /// The text sent to be written, until the worker answers.
@@ -505,6 +510,7 @@ impl FileView {
             worker,
             path: path.to_owned(),
             read: None,
+            away: false,
             base: None,
             saving: None,
             trouble: None,
@@ -702,6 +708,7 @@ impl FileView {
 
     /// The worker read the file (the first time, after a change on disk, or on "Reload").
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
+        self.away = false;
         if !matches!(read, FileRead::Streamed { .. })
             && let Some(kept) = self.restoring.take()
         {
@@ -935,9 +942,14 @@ impl FileView {
         cx.notify();
     }
 
-    /// The link a save went out on dropped before the worker answered: the tile stops waiting
-    /// and says the edit may not be on disk, so ⌘S can send it again once the worker is back.
+    /// The worker's link dropped, or was down when the tile opened. A save that went out on it
+    /// stops waiting and says the edit may not be on disk, so ⌘S can send it again once the
+    /// worker is back; a tile not read yet says it opens then. The next read ends it.
     pub fn link_lost(&mut self, cx: &mut Context<Self>) {
+        if !self.away {
+            self.away = true;
+            cx.notify();
+        }
         if self.saving.take().is_some() {
             tracing::info!(path = %self.path, "save unanswered: link lost");
             self.trouble = Some(Trouble::Failed(LINK_LOST.to_owned()));
@@ -1218,6 +1230,7 @@ impl FileView {
     #[must_use]
     pub fn summary(&self, cx: &gpui::App) -> String {
         match &self.read {
+            None if self.away => OPENS_WHEN_BACK.to_owned(),
             None | Some(FileRead::Streamed { .. }) => READING.to_owned(),
             Some(FileRead::Text { .. } | FileRead::Absent { .. }) => {
                 let n = self.line_count(cx);
@@ -1560,9 +1573,10 @@ impl Render for FileView {
         let body = match &self.read {
             _ if let Some(comparing) = compared => self.render_compare(comparing),
             // Blank while a read in time would fill it; past the grace, a word.
-            None if !crate::screen::past_grace("file-reading", window, cx) => {
+            None if !self.away && !crate::screen::past_grace("file-reading", window, cx) => {
                 div().size_full().into_any_element()
             }
+            None if self.away => self.notice(IconName::File, OPENS_WHEN_BACK, None, None),
             None => self.notice(IconName::File, READING, None, None),
             Some(FileRead::TooLarge { size }) if self.base.is_none() => self.too_large(*size, cx),
             Some(FileRead::Binary { size }) if self.base.is_none() => {

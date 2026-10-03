@@ -31,6 +31,7 @@ use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::LinkEvent;
 
+pub mod ledger;
 mod offscreen;
 
 /// Bytes read from disk per write to a bulk stream.
@@ -89,6 +90,43 @@ impl XferError {
     #[must_use]
     pub const fn worth_retrying(&self) -> bool {
         matches!(self, Self::Cut(_) | Self::Mismatch(_) | Self::Worker(_) | Self::Unanswered(_))
+    }
+}
+
+/// How far a transfer got: bytes landed of how many. `total` is 0 until the worker has said.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Brought {
+    /// Bytes landed.
+    pub done: u64,
+    /// Bytes in it.
+    pub total: u64,
+}
+
+/// Where a download says how far it got, for a view that shows it.
+pub type Seen = watch::Sender<Brought>;
+
+/// A download asked of a worker: its `path` there (a file, or a directory as its files) into
+/// the directory `into` here, as transfer `xfer`.
+#[derive(Debug)]
+pub struct Download {
+    /// The transfer it begins as, which [`Line::cancel`] stops.
+    pub xfer: XferId,
+    /// The worker's path.
+    pub path: String,
+    /// The directory it lands in.
+    pub into: PathBuf,
+    /// The file the person sees it become (a drop into Finder), where the system shows its
+    /// progress and a cancel; `None` for a download nobody watches land there.
+    pub shown_at: Option<PathBuf>,
+    /// Told how far it got as it goes.
+    pub seen: Option<Seen>,
+}
+
+impl Download {
+    /// `path` into `into` as `xfer`, shown nowhere.
+    #[must_use]
+    pub const fn new(xfer: XferId, path: String, into: PathBuf) -> Self {
+        Self { xfer, path, into, shown_at: None, seen: None }
     }
 }
 
@@ -262,6 +300,8 @@ struct Fetch {
     changed: Notify,
     /// The download's work off screen, told what has landed.
     work: Option<Arc<slopty_platform::continued::Work>>,
+    /// Told what has landed, for a view of its own.
+    seen: Option<Seen>,
 }
 
 #[derive(Debug, Default)]
@@ -282,15 +322,30 @@ struct FetchState {
 }
 
 impl Fetch {
-    /// `name` now holds `bytes`; the work off screen hears the whole download's count.
+    /// `name` now holds `bytes`; the work off screen and the view hear the whole download's
+    /// count.
     fn received(&self, name: &str, bytes: u64) {
-        let Some(work) = &self.work else { return };
         let mut state = self.state.lock();
         let before = state.held.insert(name.to_owned(), bytes).unwrap_or_default();
         state.received = state.received.saturating_sub(before).saturating_add(bytes);
         let (received, total) = (state.received, state.total);
         drop(state);
-        work.progress(received, total);
+        if let Some(work) = &self.work {
+            work.progress(received, total);
+        }
+        self.tell(received, total);
+    }
+
+    /// The view hears `done` of `total`.
+    fn tell(&self, done: u64, total: u64) {
+        if let Some(seen) = &self.seen {
+            seen.send_if_modified(|was| {
+                let now = Brought { done, total };
+                let changed = *was != now;
+                *was = now;
+                changed
+            });
+        }
     }
 }
 
@@ -435,6 +490,9 @@ impl Table {
                     d.expected = Some(*files);
                     let mut state = d.fetch.state.lock();
                     state.total = state.total.max(*bytes);
+                    let (received, total) = (state.received, state.total);
+                    drop(state);
+                    d.fetch.tell(received, total);
                 }
                 let whole = take_if_whole(&mut inner, *xfer);
                 drop(inner);
@@ -678,12 +736,30 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
 /// worker has not said landed, from what the worker holds of it. A local file that changed
 /// meanwhile is sent from its start. [`Line::cancel`] with `xfer` stops it, waiting or not. The
 /// drop of a drag ends with its link, since the drag on the worker does.
-pub async fn upload(up: &Uplink, line: &Arc<Line>, xfer: XferId, files: &[PathBuf], dest: Dest) {
+///
+/// An upload begun `again` (by an earlier run of this app, which quit before it ended) begins
+/// as on a later link, every file from what the worker holds of it.
+pub async fn upload(
+    up: &Uplink,
+    line: &Arc<Line>,
+    xfer: XferId,
+    files: &[PathBuf],
+    dest: Dest,
+    again: bool,
+) {
     let mut following = line.follow(xfer);
-    let (now, ended) = carry(up.clone(), line, &mut following.stop, xfer, files, dest).await;
+    let to = To { xfer, dest, again };
+    let (now, ended) = carry(up.clone(), line, &mut following.stop, files, to).await;
     if let Err(error) = ended {
         let _gone = now.events.send(LinkEvent::XferFailed { xfer, error }).await;
     }
+}
+
+/// Where an upload goes, as which transfer, and whether an earlier run of the app began it.
+struct To {
+    xfer: XferId,
+    dest: Dest,
+    again: bool,
 }
 
 /// An upload's sending, the first link `up`: the link it ended on, and how.
@@ -691,10 +767,10 @@ async fn carry(
     mut up: Uplink,
     line: &Arc<Line>,
     stop: &mut watch::Receiver<bool>,
-    xfer: XferId,
     files: &[PathBuf],
-    dest: Dest,
+    to: To,
 ) -> (Uplink, Result<(), XferError>) {
+    let To { xfer, dest, again } = to;
     // The walk of a dropped tree is blocking I/O: off the runtime that carries the keystrokes.
     let walked = files.to_vec();
     let found = tokio::task::spawn_blocking(move || entries(&walked))
@@ -713,7 +789,11 @@ async fn carry(
     let shown = offscreen::upload(line, xfer, &list);
     shown.work().progress(0, bytes);
     let sending = Arc::new(Sending::default());
-    let mut relinked = false;
+    if again {
+        // What the worker holds of each is asked for, as after a relink.
+        sending.update(|s| s.started.extend(list.iter().map(|e| e.name.clone())));
+    }
+    let mut relinked = again;
     loop {
         let sent =
             Sent { work: Arc::clone(shown.work()), total: bytes, sending: Arc::clone(&sending) };
@@ -1036,11 +1116,12 @@ async fn send_file(
     })
 }
 
-/// Ask the worker for `path` (a file, or a directory sent as its files) as transfer `xfer`, and
-/// wait until every file of it has landed in `into`. Returns the files landed.
+/// Ask the worker for `ask.path` (a file, or a directory sent as its files) as transfer
+/// `ask.xfer`, and wait until every file of it has landed in `ask.into`. Returns the files
+/// landed.
 ///
-/// `shown_at` is the file the person sees it become, where the system shows its progress and a
-/// cancel (Finder, on macOS), when it lands in one.
+/// The system shows its progress and a cancel (Finder, on macOS) on `ask.shown_at` when it
+/// lands as that file, and `ask.seen` hears how far it got.
 ///
 /// An attempt cut short (a stream ended early, a digest that does not match, the worker's
 /// `Failed`) is given up and fetched again under a new transfer, naming what is held of each
@@ -1051,11 +1132,9 @@ async fn send_file(
 pub async fn download(
     up: &Uplink,
     line: &Arc<Line>,
-    xfer: XferId,
-    path: String,
-    into: PathBuf,
-    shown_at: Option<&Path>,
+    ask: Download,
 ) -> Result<Vec<PathBuf>, XferError> {
+    let Download { xfer, path, into, shown_at, seen } = ask;
     let mut following = line.follow(xfer);
     let cancel = {
         let line = Arc::downgrade(line);
@@ -1066,8 +1145,9 @@ pub async fn download(
             }
         }
     };
-    let shown = offscreen::download(&path, shown_at, cancel);
-    let fetch = Arc::new(Fetch { work: Some(Arc::clone(shown.work())), ..Fetch::default() });
+    let shown = offscreen::download(&path, shown_at.as_deref(), cancel);
+    let work = Some(Arc::clone(shown.work()));
+    let fetch = Arc::new(Fetch { work, seen, ..Fetch::default() });
     let on = On { line, stop: &mut following.stop, xfer, path: &path, into: &into };
     let landed = attempts(up.clone(), on, &fetch).await;
     shown.work().end(landed.is_ok());

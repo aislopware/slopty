@@ -26,6 +26,8 @@ use crate::conversation::composer::Attachment;
 #[derive(Debug)]
 enum Call {
     Upload(XferId, Vec<PathBuf>, Dest),
+    /// An upload an earlier run began, taken up again.
+    UploadAgain(XferId, Vec<PathBuf>, Dest),
     Cancel(XferId),
     SendClip(RepRef, Fetched, bool),
     Forward(u16),
@@ -47,20 +49,17 @@ const PROXY: u16 = 1080;
 const WORKER_FILES: [&[u8]; 2] = [b"file:///Users/w/a%20b.txt", b"file:///Users/w/c.txt"];
 
 impl Remote for Recorder {
-    fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest) {
-        self.0.send(Call::Upload(xfer, files, dest)).unwrap();
+    fn upload(&self, xfer: XferId, files: Vec<PathBuf>, dest: Dest, again: bool) {
+        let call = if again { Call::UploadAgain } else { Call::Upload };
+        self.0.send(call(xfer, files, dest)).unwrap();
     }
 
     fn cancel(&self, xfer: XferId) {
         self.0.send(Call::Cancel(xfer)).unwrap();
     }
 
-    fn download(
-        &self,
-        path: String,
-        into: PathBuf,
-        _shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError> {
+    fn download(&self, ask: slopty_client::xfer::Download) -> Result<Vec<PathBuf>, XferError> {
+        let (path, into) = (ask.path, ask.into);
         let name =
             path.rsplit('/').next().ok_or_else(|| XferError::Worker("no name".to_owned()))?;
         let file = into.join(name);
@@ -586,16 +585,11 @@ fn a_copy_on_one_worker_is_relayed_to_the_next_one_focused(cx: &mut TestAppConte
 struct Serves(&'static [u8], Arc<std::sync::atomic::AtomicUsize>);
 
 impl Remote for Serves {
-    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest) {}
+    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest, _again: bool) {}
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(
-        &self,
-        _path: String,
-        _into: PathBuf,
-        _shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError> {
+    fn download(&self, _ask: slopty_client::xfer::Download) -> Result<Vec<PathBuf>, XferError> {
         Err(XferError::Worker("clipboard only".to_owned()))
     }
 
@@ -1294,6 +1288,47 @@ fn a_drag_out_going_on_here_is_heard_by_the_link(cx: &mut TestAppContext) {
     assert!(matches!(calls.try_recv(), Ok(Call::WatchDragOut(d)) if d == drag));
 }
 
+/// A file dragged out of a folder tile is fetched when the drop asks for it: a fetch that fails
+/// says so with why, rather than leaving only the Finder's bare error, and one that lands says
+/// nothing. A machine that is away is said at once and nothing is dragged.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn a_drag_out_that_fails_says_why(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let (studio, _calls, _board) = connect_remote(&view, cx);
+    let parked = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Rc::clone(&parked);
+    view.update_in(cx, |v, _w, _cx| {
+        v.set_drag_sink(Rc::new(move |promises| {
+            sink.borrow_mut().extend(promises);
+            true
+        }));
+    });
+    let toast = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_text());
+    let key = studio.key;
+    assert!(view.update_in(cx, |v, _w, cx| v.drag_out(key, "/Users/w/a.txt", cx)));
+    let promise = parked.borrow_mut().pop().expect("the file goes on as a promise");
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_folder = dir.path().join("plain");
+    std::fs::write(&not_a_folder, b"x").unwrap();
+
+    (promise.keep)(&dir.path().join("a.txt")).unwrap();
+    cx.run_until_parked();
+    assert_eq!(toast(cx), None, "a drop that lands says nothing");
+    (promise.keep)(&not_a_folder.join("a.txt")).unwrap_err();
+    cx.run_until_parked();
+    let said = toast(cx).unwrap_or_default();
+    assert!(said.starts_with("a.txt was not dragged out: "), "{said}");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    assert!(!view.update_in(cx, |v, _w, cx| v.drag_out(key, "/Users/w/a.txt", cx)));
+    cx.run_until_parked();
+    assert_eq!(toast(cx).as_deref(), Some("studio is away; a.txt was not dragged out"));
+    assert_eq!(parked.borrow().len(), 0, "nothing is dragged");
+}
+
 /// A drag out of a worker's app that comes back over a tile of that worker names the worker's
 /// own files by their paths there: nothing goes up, and the drop is taken as it is, with no
 /// promise called in. Any other drag over the tile reads its pasteboard and sends its files up.
@@ -1350,4 +1385,145 @@ fn a_drag_out_back_over_its_worker_names_its_files_there(cx: &mut TestAppContext
     let named = items[0].file.as_ref().map(|f| (f.name.as_str(), f.path.is_none()));
     assert_eq!(named, Some(("here.txt", true)), "this Mac's file, to go up");
     assert!(matches!(calls.try_recv(), Ok(Call::Upload(..))), "and it goes up");
+}
+
+/// Every transfer in flight is on the status bar's list, both ways: an upload with how far it
+/// got, its rate and its time left, a download as it begins; the bar counts them together, and
+/// a transfer's stop on the list stops it. The list closes once nothing is left in it.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn the_transfers_list_shows_both_ways_and_stops_one(cx: &mut TestAppContext) {
+    use crate::workspace::remote::Bringing;
+    use crate::workspace::remote::transfers::Down;
+    let (view, cx) = workspace(cx);
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    let key = studio.key;
+    let shell = SessionId::new();
+    let tile = opens(&view, cx, &studio, shell, studio.me, 1);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.bin");
+    std::fs::write(&file, vec![b'x'; 1000]).unwrap();
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&file), cx));
+    let Call::Upload(up, ..) = calls.try_recv().expect("an upload") else { panic!("upload") };
+    view.update_in(cx, |v, _window, cx| {
+        v.xfer_message(XferMsg::Progress { xfer: up, done: 420 }, cx);
+    });
+    cx.executor().advance_clock(Duration::from_secs(2));
+    view.update_in(cx, |v, _window, cx| {
+        v.xfer_message(XferMsg::Progress { xfer: up, done: 820 }, cx);
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-transfers").is_none(), "the focused tile's own says it");
+
+    let down = XferId::new();
+    let dest = dir.path().join("out.txt");
+    let rows = view.update_in(cx, |v, _window, cx| {
+        let source = "~/out.txt".to_owned();
+        let asked = Down { worker: key, xfer: down, source, dest: dest.clone() };
+        v.bring_down(asked, Bringing::Download, cx);
+        v.transfer_rows(cx.background_executor().now())
+    });
+    let said: Vec<(bool, &str, &str, &str)> = rows
+        .iter()
+        .map(|r| (r.up, r.name.as_str(), r.machine.as_str(), r.words.as_str()))
+        .collect();
+    assert_eq!(
+        said,
+        [
+            (true, "big.bin", "studio", "82% \u{b7} 410 B/s \u{b7} 1 s left"),
+            (false, "out.txt", "studio", "Starting"),
+        ]
+    );
+    assert_eq!(rows.first().and_then(|r| r.fraction), Some(0.82));
+    cx.run_until_parked();
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "~/out.txt", "it landed");
+    let notice = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert!(notice.starts_with("Downloaded ") && notice.ends_with("out.txt"), "{notice}");
+
+    // Another tile focused: the bar counts the upload, and its list stops it.
+    let other = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
+    view.update_in(cx, |v, _window, cx| v.focus_tile(other, cx));
+    cx.run_until_parked();
+    let button = cx.debug_bounds("status-transfers").expect("the bar counts it");
+    let listed = view.read_with(cx, |v, cx| v.transfer_rows(cx.background_executor().now()).len());
+    assert_eq!(listed, 1, "the download landed: only the upload is left");
+    cx.simulate_click(button.center(), Modifiers::none());
+    cx.run_until_parked();
+    let row = cx.debug_bounds(format!("transfers-row-{up}").leak()).expect("listed");
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    cx.run_until_parked();
+    let stop = cx.debug_bounds(format!("transfers-cancel-{up}").leak()).expect("its stop");
+    cx.simulate_click(stop.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert!(matches!(calls.try_recv(), Ok(Call::Cancel(x)) if x == up), "the upload stops");
+    assert!(cx.debug_bounds("transfers").is_none(), "nothing left: the list closes");
+    assert!(cx.debug_bounds("status-transfers").is_none());
+}
+
+/// Transfers in flight are kept in the ledger and taken up at the next launch: listed as
+/// waiting for their machine until it links, then an upload goes on from what the worker holds
+/// and a download to where it was going; each leaves the ledger as it ends, and the file goes
+/// with the last.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn transfers_in_flight_are_taken_up_at_the_next_launch(cx: &mut TestAppContext) {
+    use slopty_client::xfer::ledger::{Kept, Ledger, Way};
+    let (view, cx) = workspace(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(slopty_client::xfer::ledger::FILE);
+    let file = dir.path().join("a.txt");
+    std::fs::write(&file, b"abc").unwrap();
+    let key = WorkerKey::new(7);
+    let (up, down) = (XferId::new(), XferId::new());
+    let shell = SessionId::new();
+    let tile = TileRef { worker: key, item: ItemId::new() };
+    let dest = dir.path().join("out.txt");
+    let left = Ledger {
+        kept: vec![
+            Kept {
+                xfer: up,
+                worker: key,
+                way: Way::Up {
+                    tile,
+                    files: vec![file.clone()],
+                    dest: Dest::SessionCwd(shell),
+                    total: 3,
+                    scratch: None,
+                },
+            },
+            Kept {
+                xfer: down,
+                worker: key,
+                way: Way::Down { source: "~/out.txt".to_owned(), dest: dest.clone() },
+            },
+        ],
+    };
+    left.save(&path).unwrap();
+
+    view.update_in(cx, |v, _window, cx| v.set_transfer_ledger(path.clone(), cx));
+    cx.run_until_parked();
+    let rows = view.update_in(cx, |v, _w, cx| v.transfer_rows(cx.background_executor().now()));
+    let words: Vec<&str> = rows.iter().map(|r| r.words.as_str()).collect();
+    assert_eq!(words, ["Waiting for the machine", "Waiting for the machine"]);
+
+    let (studio, mut calls, _board) = connect_remote(&view, cx);
+    assert_eq!(studio.key, key);
+    cx.run_until_parked();
+    let Ok(Call::UploadAgain(again, files, to)) = calls.try_recv() else { panic!("taken up") };
+    assert_eq!((again, files, to), (up, vec![file.clone()], Dest::SessionCwd(shell)));
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "~/out.txt", "the download landed");
+    assert_eq!(Ledger::load(&path).kept.iter().map(|k| k.xfer).collect::<Vec<_>>(), [up]);
+
+    let paths = vec!["/Users/w/a.txt".to_owned()];
+    view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer: up, paths }, cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some("a.txt reached studio"));
+    assert!(!path.exists(), "nothing in flight: the ledger goes");
+
+    // A drop on a shell is kept as it starts; a paste or a drag would not be.
+    let tile = opens(&view, cx, &studio, shell, studio.me, 1);
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, std::slice::from_ref(&file), cx));
+    let Ok(Call::Upload(fresh, ..)) = calls.try_recv() else { panic!("an upload") };
+    cx.run_until_parked();
+    assert_eq!(Ledger::load(&path).kept.iter().map(|k| k.xfer).collect::<Vec<_>>(), [fresh]);
 }

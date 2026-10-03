@@ -386,7 +386,8 @@ impl WorkerLink {
         path: String,
         into: std::path::PathBuf,
     ) -> Result<Vec<std::path::PathBuf>, XferError> {
-        crate::xfer::download(&self.up, &self.line, xfer, path, into, None).await
+        crate::xfer::download(&self.up, &self.line, crate::xfer::Download::new(xfer, path, into))
+            .await
     }
 
     /// Resolves once the connection is closed, from either end.

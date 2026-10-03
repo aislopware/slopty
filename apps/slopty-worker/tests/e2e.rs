@@ -4169,7 +4169,7 @@ mod tests {
         let link = slopty_client::WorkerLink::start(first);
         let xfer = XferId::new();
         let dest = Dest::Path(into.to_string_lossy().into_owned());
-        link.remote().upload(xfer, vec![local], dest);
+        link.remote().upload(xfer, vec![local], dest, false);
         let partial = into.join("big.bin.partial");
         let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
         while std::fs::metadata(&partial).map_or(0, |m| m.len()) < 1_000_000 {

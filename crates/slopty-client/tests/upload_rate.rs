@@ -79,7 +79,7 @@ mod tests {
                 path
             })
             .collect();
-        link.remote().upload(XferId::new(), paths, Dest::SessionCwd(SessionId::new()));
+        link.remote().upload(XferId::new(), paths, Dest::SessionCwd(SessionId::new()), false);
         loop {
             let msg = tokio::time::timeout(WAIT, client.rx.recv()).await.unwrap().unwrap();
             if matches!(msg, ClientMsg::Xfer(XferMsg::Begin { .. })) {
@@ -188,7 +188,7 @@ mod tests {
         std::fs::write(&path, b"secret").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
         let xfer = XferId::new();
-        link.remote().upload(xfer, vec![path], Dest::SessionCwd(SessionId::new()));
+        link.remote().upload(xfer, vec![path], Dest::SessionCwd(SessionId::new()), false);
 
         let error = tokio::time::timeout(WAIT, async {
             loop {

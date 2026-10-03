@@ -22,16 +22,12 @@ struct Files {
 }
 
 impl Remote for Files {
-    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest) {}
+    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest, _again: bool) {}
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(
-        &self,
-        path: String,
-        into: PathBuf,
-        _shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError> {
+    fn download(&self, ask: slopty_client::xfer::Download) -> Result<Vec<PathBuf>, XferError> {
+        let (path, into) = (ask.path, ask.into);
         self.asked.send(path.clone()).map_err(|e| XferError::Worker(e.to_string()))?;
         let bytes = self
             .held

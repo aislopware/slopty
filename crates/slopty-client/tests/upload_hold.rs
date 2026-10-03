@@ -60,7 +60,7 @@ mod tests {
     ) -> RawRecv {
         let path = dir.path().join(format!("{xfer}.bin"));
         std::fs::write(&path, vec![7_u8; SIZE]).unwrap();
-        link.remote().upload(xfer, vec![path], Dest::SessionCwd(SessionId::new()));
+        link.remote().upload(xfer, vec![path], Dest::SessionCwd(SessionId::new()), false);
         loop {
             let msg = tokio::time::timeout(WAIT, client.rx.recv()).await.unwrap().unwrap();
             if matches!(msg, ClientMsg::Xfer(XferMsg::Begin { .. })) {

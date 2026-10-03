@@ -12,7 +12,8 @@ use slopty_client::clip::{Answer, Fetched, Place, relay};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::remote::Remote;
 use slopty_client::tunnel::Forward;
-use slopty_client::xfer::{RELINK_WAIT, paste_paths};
+use slopty_client::xfer::ledger::{Kept, Way};
+use slopty_client::xfer::{Download, RELINK_WAIT, paste_paths};
 use slopty_core::{SessionId, XferId};
 use slopty_platform::pasteboard::Pasteboard;
 use slopty_proto::ClientMsg;
@@ -26,6 +27,7 @@ mod drag_out;
 #[cfg(target_os = "macos")]
 pub(super) use drag_out::DragsOut;
 mod drop_in;
+pub mod transfers;
 
 #[cfg(target_os = "macos")]
 pub use drop_in::Carried;
@@ -77,6 +79,11 @@ pub struct Upload {
     /// Since when its worker is away, while it is; the upload waits for the next link
     /// ([`RELINK_WAIT`]).
     pub away_since: Option<std::time::Instant>,
+    /// How fast it goes.
+    pub pace: transfers::Pace,
+    /// An earlier run of the app began it, and this one took it up again: its end is said,
+    /// whatever it was dropped on.
+    pub taken_up: bool,
 }
 
 impl Upload {
@@ -96,6 +103,8 @@ impl Upload {
             via: None,
             names: Vec::new(),
             away_since: None,
+            pace: transfers::Pace::new(),
+            taken_up: false,
         }
     }
 
@@ -115,6 +124,8 @@ impl Upload {
             via: None,
             names: Vec::new(),
             away_since: None,
+            pace: transfers::Pace::new(),
+            taken_up: false,
         }
     }
 
@@ -136,6 +147,17 @@ impl Upload {
     #[must_use]
     pub fn to_folder(tile: TileRef, dir: String) -> Self {
         Self { dir: Some(dir), ..Self::to_staging(tile) }
+    }
+
+    /// An earlier run's upload to `dest`, dropped on `tile`, taken up again: a folder's lists
+    /// it again once done; a shell's types nothing, its prompt having moved on since.
+    #[must_use]
+    pub fn taken_up(tile: TileRef, dest: &Dest) -> Self {
+        let dir = match dest {
+            Dest::Path(dir) => Some(dir.clone()),
+            Dest::SessionCwd(_) | Dest::Staging | Dest::Attachment | Dest::Drag(_) => None,
+        };
+        Self { dir, taken_up: true, ..Self::to_staging(tile) }
     }
 
     /// How far along, 0 to 1.
@@ -416,8 +438,9 @@ impl WorkspaceView {
                 let name = path.file_name().ok_or_else(|| "a file with no name".to_owned())?;
                 let dir = into.join(n.to_string());
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+                let path = path.to_string_lossy().into_owned();
                 remote
-                    .download(path.to_string_lossy().into_owned(), dir.clone(), None)
+                    .download(Download::new(XferId::new(), path, dir.clone()))
                     .map_err(|e| e.to_string())?;
                 landed.push(dir.join(name));
             }
@@ -667,8 +690,23 @@ impl WorkspaceView {
             .filter_map(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
             .collect();
+        upload.pace.note(cx.background_executor().now(), 0);
+        // A drop on a shell or a folder still means something to the next run of the app; a
+        // paste, an attachment or a drag ends with this one.
+        let kept = upload.paste.is_none()
+            && matches!(dest, Dest::SessionCwd(_) | Dest::Path(_) if upload.attach.is_none());
+        if kept {
+            let way = Way::Up {
+                tile,
+                files: paths.to_vec(),
+                dest: dest.clone(),
+                total: upload.total,
+                scratch: upload.scratch.clone(),
+            };
+            self.keep_transfer(Kept { xfer, worker: tile.worker, way });
+        }
         self.uploads.insert(xfer, upload);
-        remote.upload(xfer, paths.to_vec(), dest);
+        remote.upload(xfer, paths.to_vec(), dest, false);
         cx.notify();
         true
     }
@@ -700,9 +738,16 @@ impl WorkspaceView {
         self.uploads.iter().find(|(_, u)| u.tile == tile).map(|(x, u)| (*x, u))
     }
 
+    /// Upload `xfer` ends, however it does: it leaves the list and the ledger.
+    fn take_upload(&mut self, xfer: XferId) -> Option<Upload> {
+        let upload = self.uploads.remove(&xfer)?;
+        self.transfer_over(xfer);
+        Some(upload)
+    }
+
     /// Stop an upload, while its worker is away too; what the worker holds of it stays there.
     pub fn cancel_upload(&mut self, xfer: XferId, cx: &mut Context<Self>) {
-        let Some(upload) = self.uploads.remove(&xfer) else { return };
+        let Some(upload) = self.take_upload(xfer) else { return };
         self.terminal_upload_failed(&upload, cx);
         if let Some(remote) = self.remote(upload.tile.worker).or_else(|| upload.via.clone()) {
             remote.cancel(xfer);
@@ -719,6 +764,7 @@ impl WorkspaceView {
                     && upload.done != done
                 {
                     upload.done = done;
+                    upload.pace.note(cx.background_executor().now(), done);
                     if let Some((composer, id)) = upload.attach.clone() {
                         composer.progress(id, upload.fraction(), cx);
                     }
@@ -726,7 +772,17 @@ impl WorkspaceView {
                 }
             }
             XferMsg::Finished { xfer, paths } => {
-                let Some(upload) = self.uploads.remove(&xfer) else { return };
+                let Some(upload) = self.take_upload(xfer) else { return };
+                if upload.taken_up {
+                    let machine = self.worker_name(upload.tile.worker);
+                    self.show_notice(format!("{} reached {machine}", sent(&upload.names)), cx);
+                    if upload.dir.is_some() {
+                        self.refresh_folder(upload.tile.item, cx);
+                    }
+                    Self::upload_ended(upload, cx);
+                    cx.notify();
+                    return;
+                }
                 match upload.session {
                     // The shell types their paths, or a program that took the drop reads them.
                     Some(session) if let Some(view) = self.terminals.get(&session).cloned() => {
@@ -765,7 +821,7 @@ impl WorkspaceView {
             // it gives up. Only the whole transfer's failure ends it from the worker's word.
             XferMsg::Failed { xfer, name: None, error } => self.xfer_failed(xfer, &error, cx),
             XferMsg::Cancel { xfer } => {
-                if let Some(upload) = self.uploads.remove(&xfer) {
+                if let Some(upload) = self.take_upload(xfer) {
                     self.terminal_upload_failed(&upload, cx);
                     Self::upload_ended(upload, cx);
                     cx.notify();
@@ -782,7 +838,7 @@ impl WorkspaceView {
 
     /// An upload failed, here or on the worker.
     pub fn xfer_failed(&mut self, xfer: XferId, error: &str, cx: &mut Context<Self>) {
-        if let Some(upload) = self.uploads.remove(&xfer) {
+        if let Some(upload) = self.take_upload(xfer) {
             self.terminal_upload_failed(&upload, cx);
             let machine = self
                 .workers
@@ -885,12 +941,38 @@ impl WorkspaceView {
 
     /// Drag the worker's file at `path` out of the app, from the mouse event being handled: a
     /// file promise, kept by bringing the file down when something takes the drop. Returns
-    /// whether a drag began.
-    pub fn drag_out(&self, worker: WorkerKey, path: &str) -> bool {
-        let Some(remote) = self.remote(worker) else { return false };
+    /// whether a drag began. A worker that is away, or a file that could not be brought down
+    /// once dropped, is said in a notice: the drop's app shows only a bare error.
+    pub fn drag_out(&mut self, worker: WorkerKey, path: &str, cx: &mut Context<Self>) -> bool {
+        let name = worker_name(path).to_owned();
+        let Some(remote) = self.remote(worker) else {
+            let machine = self.workers.get(&worker).map_or("The machine", |w| w.name.as_str());
+            let text = format!("{machine} is away; {name} was not dragged out");
+            self.show_notice(text, cx);
+            return false;
+        };
         #[cfg(target_os = "macos")]
         {
-            let Some(promise) = promise(remote, path) else { return false };
+            let (tell, mut heard) = tokio::sync::mpsc::unbounded_channel::<Promised>();
+            let via = Arc::clone(&remote);
+            let Some(promise) = promise(remote, path, Some(tell)) else { return false };
+            let source = path.to_owned();
+            // Ends when the promise goes with its drag, which drops its sender.
+            cx.spawn(async move |this, cx| {
+                while let Some(kept) = heard.recv().await {
+                    let via = Arc::clone(&via);
+                    let source = source.as_str();
+                    let _gone = this.update(cx, |this, cx| match kept {
+                        Promised::Began { xfer, dest, seen } => {
+                            let down =
+                                transfers::Down { worker, xfer, source: source.to_owned(), dest };
+                            this.download_began(&down, Bringing::Drag, via, seen, cx);
+                        }
+                        Promised::Ended { xfer, result } => this.download_over(xfer, result, cx),
+                    });
+                }
+            })
+            .detach();
             match &self.drag_sink {
                 Some(sink) => sink(vec![promise]),
                 None => slopty_platform::drag::drag_out(vec![promise]),
@@ -898,7 +980,7 @@ impl WorkspaceView {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _unsupported = (remote, path);
+            let _unsupported = (remote, cx);
             false
         }
     }
@@ -936,10 +1018,10 @@ impl WorkspaceView {
         bringing: Bringing,
         cx: &mut Context<Self>,
     ) {
-        let Some(remote) = self.remote(worker) else {
+        if self.remote(worker).is_none() {
             self.show_notice(format!("The machine is away; nothing was {}", bringing.done()), cx);
             return;
-        };
+        }
         let name = worker_name(&source).to_owned();
         let downloads = slopty_platform::web::downloads_dir(&slopty_platform::dirs::home());
         let chosen = cx.prompt_for_new_path(&downloads, Some(&name));
@@ -954,16 +1036,10 @@ impl WorkspaceView {
                     return;
                 }
             };
-            let to = dest.clone();
-            let saved = cx
-                .background_spawn(async move { bring_down_to(remote.as_ref(), &source, &to) })
-                .await;
-            let text = match (saved, bringing) {
-                (Ok(()), Bringing::Copy) => format!("Saved a copy of {name}"),
-                (Ok(()), Bringing::Download) => format!("Downloaded {}", tildes(&dest)),
-                (Err(e), _) => format!("{name} was not {}: {e}", bringing.done()),
-            };
-            let _gone = this.update(cx, |this, cx| this.show_notice(text, cx));
+            let _gone = this.update(cx, |this, cx| {
+                let down = transfers::Down { worker, xfer: XferId::new(), source, dest };
+                this.bring_down(down, bringing, cx);
+            });
         })
         .detach();
     }
@@ -1009,9 +1085,12 @@ impl WorkspaceView {
             waiting |= !linked;
         }
         for xfer in dragged {
-            if let Some(upload) = self.uploads.remove(&xfer) {
+            if let Some(upload) = self.take_upload(xfer) {
                 Self::upload_ended(upload, cx);
             }
+        }
+        if linked {
+            self.take_up_kept(key, cx);
         }
         if waiting {
             cx.spawn(async move |this, cx| {
@@ -1045,33 +1124,61 @@ impl WorkspaceView {
 }
 
 /// The last component of a worker path, a trailing `/` aside.
-#[cfg(not(target_os = "ios"))]
 fn worker_name(path: &str) -> &str {
     let trimmed = path.trim_end_matches('/');
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
-/// The promise of one worker file, kept by a download into the drop's directory.
+/// What a drag out's promise tells the view of the download that keeps it, which runs on the
+/// thread the drop's app asked on.
 #[cfg(target_os = "macos")]
-fn promise(remote: Arc<dyn Remote>, path: &str) -> Option<slopty_platform::drag::Promise> {
+#[derive(Debug)]
+enum Promised {
+    /// It began, as `xfer`, to land at `dest`; `seen` says how far it got.
+    Began {
+        xfer: XferId,
+        dest: PathBuf,
+        seen: tokio::sync::watch::Receiver<slopty_client::xfer::Brought>,
+    },
+    /// It ended.
+    Ended { xfer: XferId, result: Result<(), String> },
+}
+
+/// The promise of one worker file, kept by a download into the drop's directory; the download
+/// is told to `tell`, when given, as it begins and ends.
+#[cfg(target_os = "macos")]
+fn promise(
+    remote: Arc<dyn Remote>,
+    path: &str,
+    tell: Option<tokio::sync::mpsc::UnboundedSender<Promised>>,
+) -> Option<slopty_platform::drag::Promise> {
     let name = worker_name(path).to_owned();
     if name.is_empty() {
         return None;
     }
     let source = path.to_owned();
-    let keep: slopty_platform::drag::Keep =
-        Arc::new(move |dest: &std::path::Path| bring_down_to(remote.as_ref(), &source, dest));
+    let keep: slopty_platform::drag::Keep = Arc::new(move |dest: &std::path::Path| {
+        let Some(tell) = &tell else { return bring_down_to(remote.as_ref(), &source, dest) };
+        let xfer = XferId::new();
+        let (seen, heard) = tokio::sync::watch::channel(slopty_client::xfer::Brought::default());
+        let _told = tell.send(Promised::Began { xfer, dest: dest.to_path_buf(), seen: heard });
+        let kept = bring_down_seen(remote.as_ref(), &source, dest, xfer, Some(seen));
+        let _told = tell.send(Promised::Ended { xfer, result: kept.clone() });
+        kept
+    });
     Some(slopty_platform::drag::Promise { name, keep })
 }
 
-/// Why a worker's file comes down through the save panel, for what the person is told.
+/// Why a worker's file comes down, for what the person is told.
 #[cfg(not(target_os = "ios"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Bringing {
+pub(in crate::workspace) enum Bringing {
     /// "Save a copy…" of a file tile's file.
     Copy,
-    /// "Download…" of a folder tile's selected entry.
+    /// "Download…" of a folder tile's selected entry, or a download an earlier run left.
     Download,
+    /// Dragged out of a folder tile or a shell and dropped here.
+    Drag,
 }
 
 #[cfg(not(target_os = "ios"))]
@@ -1081,6 +1188,7 @@ impl Bringing {
         match self {
             Self::Copy => "saved",
             Self::Download => "downloaded",
+            Self::Drag => "dragged out",
         }
     }
 }
@@ -1128,15 +1236,35 @@ fn kept_both(sent: &[String], landed: &[String]) -> Option<String> {
     (!said.is_empty()).then(|| said.join("; "))
 }
 
-/// Bring the worker's `source` down to exactly `dest`: into a hidden directory beside it
-/// first, then renamed into place, so a half-arrived file never sits under the chosen name.
-#[cfg(not(target_os = "ios"))]
+/// Bring the worker's `source` down to exactly `dest` ([`bring_down_seen`]), seen by nobody
+/// here.
+#[cfg(target_os = "macos")]
 fn bring_down_to(remote: &dyn Remote, source: &str, dest: &std::path::Path) -> Result<(), String> {
+    bring_down_seen(remote, source, dest, XferId::new(), None)
+}
+
+/// Bring the worker's `source` down to exactly `dest` as transfer `xfer`, telling `seen` how far
+/// it got: into a hidden directory beside it first, named for the transfer, then renamed into
+/// place, so a half-arrived file never sits under the chosen name. A transfer an earlier run
+/// left takes up its directory again.
+#[cfg(not(target_os = "ios"))]
+fn bring_down_seen(
+    remote: &dyn Remote,
+    source: &str,
+    dest: &std::path::Path,
+    xfer: XferId,
+    seen: Option<slopty_client::xfer::Seen>,
+) -> Result<(), String> {
     let parent = dest.parent().ok_or_else(|| "no directory to put it in".to_owned())?;
-    let staging = parent.join(format!(".slopty-{}", XferId::new()));
+    let staging = parent.join(format!(".slopty-{xfer}"));
     std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let ask = Download {
+        shown_at: Some(dest.to_path_buf()),
+        seen,
+        ..Download::new(xfer, source.to_owned(), staging.clone())
+    };
     let moved = remote
-        .download(source.to_owned(), staging.clone(), Some(dest.to_path_buf()))
+        .download(ask)
         .map_err(|e| e.to_string())
         .and_then(|landed| slopty_platform::file_drop::out::landed_top(&landed, &staging))
         .and_then(|top| std::fs::rename(top, dest).map_err(|e| e.to_string()));

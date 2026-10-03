@@ -52,16 +52,11 @@ struct FakeRemote {
 }
 
 impl Remote for FakeRemote {
-    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest) {}
+    fn upload(&self, _xfer: XferId, _files: Vec<PathBuf>, _dest: Dest, _again: bool) {}
 
     fn cancel(&self, _xfer: XferId) {}
 
-    fn download(
-        &self,
-        _path: String,
-        _into: PathBuf,
-        _shown_at: Option<PathBuf>,
-    ) -> Result<Vec<PathBuf>, XferError> {
+    fn download(&self, _ask: crate::xfer::Download) -> Result<Vec<PathBuf>, XferError> {
         Ok(Vec::new())
     }
 

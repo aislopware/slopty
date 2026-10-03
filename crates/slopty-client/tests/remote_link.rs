@@ -11,6 +11,7 @@ mod tests {
     use std::time::Duration;
 
     use slopty_client::clip::Fetched;
+    use slopty_client::xfer::{Brought, Download};
     use slopty_client::{LinkEvent, WorkerLink};
     use slopty_core::{ClientId, SessionId, WallMs, WorkerId, XferId};
     use slopty_net::admission::Admission;
@@ -105,7 +106,7 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
         let session = SessionId::new();
         let xfer = XferId::new();
-        link.remote().upload(xfer, vec![path], Dest::SessionCwd(session));
+        link.remote().upload(xfer, vec![path], Dest::SessionCwd(session), false);
 
         let (dest, files, bytes) = expect(&mut client, |m| match m {
             ClientMsg::Xfer(XferMsg::Begin { dest, files, bytes, .. }) => {
@@ -140,6 +141,33 @@ mod tests {
         assert!(held == content, "the file arrives whole across the cut");
     }
 
+    /// An upload an earlier run of the app began, begun again at the next launch, asks what the
+    /// worker holds of its file before a byte goes, and sends the rest from there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_upload_begun_again_after_a_relaunch_sends_from_what_the_worker_holds() {
+        let (mut client, link, _events) = pair().await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.bin");
+        let content: Vec<u8> = (0..2_000_000_u32).map(|i| (i % 241) as u8).collect();
+        std::fs::write(&path, &content).unwrap();
+        let xfer = XferId::new();
+        let dest = Dest::Path("~/in".to_owned());
+        link.remote().upload(xfer, vec![path], dest.clone(), true);
+        assert_eq!(begun(&mut client, xfer).await, (Some(dest), 1, 2_000_000));
+        let name = expect(&mut client, |m| match m {
+            ClientMsg::Xfer(XferMsg::Resume { xfer: x, name }) if x == xfer => Some(name),
+            _ => None,
+        })
+        .await;
+        assert_eq!(name, "big.bin");
+        let durable = 1_250_000_u64;
+        client.tx.send(&WorkerMsg::Xfer(XferMsg::Offset { xfer, name, durable })).await.unwrap();
+        let (header, mut rx) = bulk(&client).await;
+        assert_eq!((header.xfer, header.offset), (xfer, durable), "from what the worker holds");
+        let rest = drain(&mut rx).await;
+        assert!(rest == content[1_250_000..], "the rest, byte for byte");
+    }
+
     /// The next `Begin` of `xfer` the client sends: where to, how many files and bytes.
     async fn begun(client: &mut AcceptedClient, xfer: XferId) -> (Option<Dest>, u32, u64) {
         expect(client, |m| match m {
@@ -165,7 +193,7 @@ mod tests {
         std::fs::write(&path, &content).unwrap();
         let xfer = XferId::new();
         let dest = Dest::Path("~/in".to_owned());
-        link.remote().upload(xfer, vec![path], dest.clone());
+        link.remote().upload(xfer, vec![path], dest.clone(), false);
         assert_eq!(begun(&mut client, xfer).await, (Some(dest.clone()), 1, 4_000_000));
         let (header, mut rx) = bulk(&client).await;
         assert_eq!((header.name.as_str(), header.offset), ("big.bin", 0));
@@ -239,7 +267,7 @@ mod tests {
         let path = dir.path().join("a.bin");
         std::fs::write(&path, vec![5_u8; 2_000_000]).unwrap();
         let xfer = XferId::new();
-        link.remote().upload(xfer, vec![path], Dest::Staging);
+        link.remote().upload(xfer, vec![path], Dest::Staging, false);
         begun(&mut client, xfer).await;
         let (_header, mut rx) = bulk(&client).await;
         rx.chunk(64 << 10).await.unwrap().unwrap();
@@ -270,16 +298,20 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting = std::thread::spawn(move || {
-            remote.download("~/notes/todo.txt".to_owned(), target, None)
-        });
+        let (seen, brought) = tokio::sync::watch::channel(Brought::default());
+        let asked = XferId::new();
+        let ask = Download {
+            seen: Some(seen),
+            ..Download::new(asked, "~/notes/todo.txt".to_owned(), target)
+        };
+        let waiting = std::thread::spawn(move || remote.download(ask));
         let (xfer, path, held) = expect(&mut client, |m| match m {
             ClientMsg::Xfer(XferMsg::Fetch { xfer, path, held }) => Some((xfer, path, held)),
             _ => None,
         })
         .await;
         assert!(held.is_empty(), "a first fetch holds nothing");
-        assert_eq!(path, "~/notes/todo.txt");
+        assert_eq!((xfer, path.as_str()), (asked, "~/notes/todo.txt"), "as the transfer asked");
         let body = b"milk\neggs\n";
         let header = BulkHeader {
             xfer,
@@ -302,6 +334,8 @@ mod tests {
         assert_eq!(landed, std::slice::from_ref(&expected));
         assert_eq!(std::fs::read(&expected).unwrap(), body);
         assert!(!PathBuf::from(format!("{}.partial", expected.display())).exists());
+        let size = body.len() as u64;
+        assert_eq!(*brought.borrow(), Brought { done: size, total: size }, "seen as it went");
     }
 
     /// The worker's word that `name` is sent, with the digest of all of it.
@@ -339,7 +373,9 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting = std::thread::spawn(move || remote.download("~/out".to_owned(), target, None));
+        let waiting = std::thread::spawn(move || {
+            remote.download(Download::new(XferId::new(), "~/out".to_owned(), target))
+        });
         let (first, held) = fetched(&mut client).await;
         assert_eq!(held, []);
         let small = b"landed first".to_vec();
@@ -417,8 +453,9 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting =
-            std::thread::spawn(move || remote.download("~/big.bin".to_owned(), target, None));
+        let waiting = std::thread::spawn(move || {
+            remote.download(Download::new(XferId::new(), "~/big.bin".to_owned(), target))
+        });
         let (first, held) = fetched(&mut client).await;
         assert_eq!(held, []);
         let big: Vec<u8> = (0..4_000_000_u32).map(|i| (i % 241) as u8).collect();
@@ -484,8 +521,9 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting =
-            std::thread::spawn(move || remote.download("~/a.bin".to_owned(), target, None));
+        let waiting = std::thread::spawn(move || {
+            remote.download(Download::new(XferId::new(), "~/a.bin".to_owned(), target))
+        });
         let (xfer, _held) = fetched(&mut client).await;
         let body = vec![7_u8; 500_000];
         let mut send =
@@ -516,8 +554,9 @@ mod tests {
         let into = tempfile::tempdir().unwrap();
         let remote = link.remote();
         let target = into.path().to_owned();
-        let waiting =
-            std::thread::spawn(move || remote.download("~/a.txt".to_owned(), target, None));
+        let waiting = std::thread::spawn(move || {
+            remote.download(Download::new(XferId::new(), "~/a.txt".to_owned(), target))
+        });
         for _attempt in 0..3 {
             let (xfer, _held) = fetched(&mut client).await;
             let begin = XferMsg::Begin { xfer, dest: None, files: 1, bytes: 3 };

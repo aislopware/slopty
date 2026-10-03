@@ -77,7 +77,7 @@ impl WorkspaceView {
         for offer in shared.offers() {
             match offer {
                 Offer::File { path: Some(path), .. } => {
-                    files.extend(promise(Arc::clone(&remote), &path));
+                    files.extend(promise(Arc::clone(&remote), &path, None));
                 }
                 Offer::File { name, path: None, promise: Some(n) } => {
                     let (remote, shared) = (Arc::clone(&remote), Arc::clone(shared));
