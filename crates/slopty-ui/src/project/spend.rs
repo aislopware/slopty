@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::project::TaskId;
+use slopty_proto::project::{Budget, TaskId};
 use slopty_proto::thread::{Limit, Meters};
 
 use super::model::{Board, Node};
@@ -66,6 +66,9 @@ pub struct ProjectSpend {
     pub tasks_cost: Option<u64>,
     /// The plan's rate windows, the fullest that any of its agents reports for each.
     pub limits: Vec<Limit>,
+    /// What the server tallied from every thread that worked for the project: every
+    /// assignment a task was given and every subagent, which this client may never have heard.
+    pub tallied_cost: u64,
 }
 
 impl ProjectSpend {
@@ -75,10 +78,13 @@ impl ProjectSpend {
         self.orchestrator_ms.saturating_add(self.tasks_ms)
     }
 
-    /// Cost in all, when any thread says.
+    /// Cost in all, when any thread says: what this client heard, or the server's tally
+    /// when that is more, as it is once an agent was replaced or worked unheard.
     #[must_use]
     pub fn total_cost(&self) -> Option<u64> {
-        add(self.orchestrator_cost, self.tasks_cost)
+        let heard = add(self.orchestrator_cost, self.tasks_cost);
+        let tallied = (self.tallied_cost > 0).then_some(self.tallied_cost);
+        heard.max(tallied)
     }
 }
 
@@ -152,8 +158,39 @@ impl Board {
                 }
             }
         }
+        for (name, used_bp) in &self.project.spend.windows {
+            match limits.iter_mut().find(|l| l.name == *name) {
+                Some(held) => held.used_bp = held.used_bp.max(*used_bp),
+                None => {
+                    limits.push(Limit { name: name.clone(), used_bp: *used_bp, resets_ms: None });
+                }
+            }
+        }
         spend.limits = limits;
+        spend.tallied_cost = self.project.spend.cost_micro_usd;
         spend
+    }
+
+    /// What says the project's agents spent a cap of its budget, while they have, by the
+    /// server's tally: no task starts until the person raises it.
+    #[must_use]
+    pub fn over_budget(&self) -> Option<String> {
+        let (budget, spend) = (self.project.limits.budget.as_ref()?, &self.project.spend);
+        let meter = budget.reached(spend)?;
+        let cap = Budget::figure(&meter, *budget.0.get(&meter)?);
+        Some(if meter == Budget::USD {
+            let used = Budget::figure(&meter, spend.cost_micro_usd);
+            format!(
+                "Spent an estimated {used} of its {cap} budget: no task starts until you raise it"
+            )
+        } else {
+            let used = spend.windows.get(&meter).copied().map_or(0, u64::from);
+            format!(
+                "At {} of the {}, its budget {cap}: no task starts until you raise it",
+                Budget::figure(&meter, used),
+                meter_words(&meter)
+            )
+        })
     }
 
     /// Every task split from `task`, at any depth.
@@ -196,7 +233,7 @@ pub fn worked(ms: u64) -> String {
 /// A budget's meter in words: the estimated cost, or a plan window by its name ("five-hour").
 #[must_use]
 pub fn meter_words(meter: &str) -> String {
-    if meter == slopty_proto::project::Budget::USD {
+    if meter == Budget::USD {
         "cost".to_owned()
     } else {
         format!("{} window", meter.replace(['-', '_'], " "))

@@ -810,6 +810,22 @@ impl WorkspaceView {
                 ProjectEvent::SetAsk(ask) => {
                     this.send_to_server(set_project(&asked, None, Some(*ask)), |_, _| (), cx);
                 }
+                ProjectEvent::SetBudget(budget) => {
+                    let limits =
+                        LimitsChange { budget: Some(budget.clone()), ..LimitsChange::default() };
+                    let verb = Verb::ProjectSet {
+                        project: asked.clone(),
+                        orchestrator: None,
+                        review: None,
+                        verifier: None,
+                        push: None,
+                        ask_to_start: None,
+                        limits,
+                        metadata: None,
+                        members: None,
+                    };
+                    this.send_to_server(verb, |_, _| (), cx);
+                }
                 ProjectEvent::StartAll => this.start_all(&asked, cx),
                 ProjectEvent::Delete => {
                     this.send_to_server(

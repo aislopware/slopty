@@ -297,7 +297,7 @@ mod tests {
                 }),
             ),
             hook("TaskCreated", &json!({ "task_id": "1", "task_subject": "Read main.rs" })),
-            hook("Statusline", &json!({ "worktree": worktree })),
+            hook("Statusline", &json!({ "worktree": worktree, "meters": { "cost_usd": 1.25 } }),),
         ]);
         let calls = json!([
             { "name": "project_status", "arguments": {} },
@@ -401,6 +401,44 @@ mod tests {
         assert!(moments.iter().any(|m| matches!(m, Moment::Assigned { spawned: true, .. })));
         assert!(moments.iter().any(|m| matches!(m, Moment::Branch { .. })), "{moments:?}");
         assert!(moments.iter().any(|m| matches!(m, Moment::Reported { .. })), "{moments:?}");
+
+        // What its status line said it cost reaches the project through its thread, and the
+        // person's budget below it holds the project: no task starts, and the CLI says why.
+        until("the agent's cost reaches the project", async || {
+            let spent = status(&hub, &project).await.project.spend.cost_micro_usd;
+            (spent == 1_250_000).then_some(())
+        })
+        .await;
+        let addr = server.quic_addr();
+        slopty(&root, addr, &["project", "update", "demo", "--budget", "usd=1"]).await;
+        let said = slopty(&root, addr, &["project", "status", "demo"]).await;
+        assert!(said.contains("budget  usd $1.25 of $1.00 (125%) (estimated)"), "{said}");
+        let held = status(&hub, &project).await;
+        let reached = held.timeline.iter().any(
+            |e| matches!(&e.what, Moment::Budget { meter, share_bp: 12_500 } if meter == "usd"),
+        );
+        assert!(reached, "{:?}", held.timeline);
+        let next = hub
+            .dispatch(Verb::TaskCreate {
+                project: project.clone(),
+                spec: Box::new(TaskSpec { title: "More".to_owned(), ..TaskSpec::default() }),
+            })
+            .await;
+        let Outcome::Task(next) = next else { panic!("{next:?}") };
+        let launch = TaskLaunch {
+            pin: None,
+            cwd: root.to_string_lossy().into_owned(),
+            run: Runner::Command { argv: vec!["true".to_owned()] },
+            env: Vec::new(),
+            size: None,
+            ignore_dependencies: false,
+        };
+        let refused =
+            hub.dispatch(Verb::TaskSpawn { project: project.clone(), task: next.id, launch }).await;
+        assert!(
+            matches!(&refused, Outcome::Error { message, .. } if message.contains("raises the budget")),
+            "{refused:?}"
+        );
 
         server.shutdown().await;
     }

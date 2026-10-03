@@ -2168,7 +2168,6 @@ impl Projects {
                 | AgentReport::PermissionMode { .. }
                 | AgentReport::Loosened { .. }
                 | AgentReport::Delivered { .. }
-                | AgentReport::Spent { .. }
         );
         if !held && !leafless {
             self.hold_unclaimed(term, report, now);
@@ -2221,19 +2220,16 @@ impl Projects {
         let budget = project.limits.budget.as_ref()?;
         let meter = budget.reached(&project.spend)?;
         let cap = *budget.0.get(&meter)?;
-        Some(if meter == Budget::USD {
-            format!(
-                "project {id} spent an estimated {} of its {} budget",
-                tally::figure(&meter, project.spend.cost_micro_usd),
-                tally::figure(&meter, cap)
-            )
+        let used = if meter == Budget::USD {
+            project.spend.cost_micro_usd
         } else {
-            let used = project.spend.windows.get(&meter).copied().unwrap_or_default();
-            format!(
-                "project {id} is at {}, its budget {}%",
-                tally::figure(&meter, used.into()),
-                cap / 100
-            )
+            project.spend.windows.get(&meter).copied().map_or(0, u64::from)
+        };
+        let (used, cap) = (Budget::figure(&meter, used), Budget::figure(&meter, cap));
+        Some(if meter == Budget::USD {
+            format!("project {id} spent an estimated {used} of its {cap} budget")
+        } else {
+            format!("project {id} is at {used} of the {meter} window, its budget {cap}")
         })
     }
 
@@ -2342,8 +2338,7 @@ fn leaf(report: &AgentReport, natives: &mut Natives, now: WallMs) -> Option<Nati
         AgentReport::Branch(_)
         | AgentReport::PermissionMode { .. }
         | AgentReport::Loosened { .. }
-        | AgentReport::Delivered { .. }
-        | AgentReport::Spent { .. } => return None,
+        | AgentReport::Delivered { .. } => return None,
         AgentReport::SubagentStarted { agent, kind, .. } => Native::Agent(NativeAgent {
             id: clipped(agent, REF_MAX),
             kind: clipped(kind, KIND_MAX),

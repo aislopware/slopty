@@ -231,6 +231,7 @@ async fn observe(
         commands_for: None,
         title: String::new(),
         hooks: 0,
+        meters: seen.borrow().meters.clone(),
     };
     // The hook that brought the session here was heard before this watched for changes.
     let heard = seen.borrow().cwd.clone();
@@ -317,6 +318,8 @@ struct Session {
     /// The terminal's title.
     title: String,
     hooks: u64,
+    /// The status line's latest meters, for a thread begun after they came.
+    meters: Option<slopty_proto::conversation::Meters>,
 }
 
 impl Session {
@@ -363,6 +366,9 @@ impl Session {
             if let Some(meters) = &seen.meters {
                 take(&self.host, observed.meters(meters));
             }
+        }
+        self.meters.clone_from(&seen.meters);
+        if let Some(observed) = self.observed.as_mut() {
             take(&self.host, observed.live(&seen.live, Instant::now(), WallMs::now()));
         }
         if seen.hooks != self.hooks {
@@ -437,6 +443,9 @@ impl Session {
         take(&self.host, observed.title(&self.title));
         if self.hooks > 0 {
             take(&self.host, observed.hooked());
+        }
+        if let Some(meters) = &self.meters {
+            take(&self.host, observed.meters(meters));
         }
         if let Some(status) = &self.status {
             take(&self.host, observed.status(status));

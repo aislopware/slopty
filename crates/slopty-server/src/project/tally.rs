@@ -1,5 +1,5 @@
 //! What a project's agents spent, tallied from their threads' own meters, and the moments its
-//! budget passes (`docs/decisions/projects.md`, "A project's budget pauses its work").
+//! budget passes (`docs/decisions/projects.md`, "A project may have a budget per meter").
 //!
 //! Each thread that ever worked for the project keeps its latest figures: the agent says its
 //! whole cost for the thread each time, so a later figure replaces the earlier one, and an
@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
 use slopty_proto::items::FACT_KEY_MAX;
-use slopty_proto::project::{Budget, Moment, SPENT_WINDOWS_MAX, Spend};
+use slopty_proto::project::{Budget, Moment, Spend};
 use slopty_proto::thread::{Limit, ThreadId};
 
 /// Threads a project keeps apart. Past it, the least recently heard is folded into the settled
@@ -20,6 +20,8 @@ pub(crate) const READINGS_KEPT: usize = 512;
 /// How often a tally that crossed no threshold is written. The readings between are only
 /// pushed: after a restart each agent's next figure, whole, puts its thread right.
 pub(crate) const WRITE_EVERY_MS: u64 = 60_000;
+/// The most plan windows of one thread the tally keeps.
+const WINDOWS_MAX: usize = 8;
 /// A whole cap, in hundredths of a percent.
 const WHOLE_BP: u64 = 10_000;
 
@@ -40,7 +42,7 @@ struct Reading {
 
 impl Tally {
     /// Take `thread`'s latest figures at `now`: a cost its agent does not say keeps the one it
-    /// said before. Windows past [`SPENT_WINDOWS_MAX`], or named past
+    /// said before. Windows past [`WINDOWS_MAX`], or named past
     /// [`FACT_KEY_MAX`], are left out. Whether anything changed.
     pub(crate) fn take(
         &mut self,
@@ -52,7 +54,7 @@ impl Tally {
         let windows: Vec<Limit> = windows
             .iter()
             .filter(|w| (1..=FACT_KEY_MAX).contains(&w.name.chars().count()))
-            .take(SPENT_WINDOWS_MAX)
+            .take(WINDOWS_MAX)
             .map(|w| Limit { used_bp: w.used_bp.min(10_000), ..w.clone() })
             .collect();
         let had = self.readings.get(&thread);
@@ -112,17 +114,6 @@ pub(crate) fn passed(before: &[(String, u64)], after: &[(String, u64)]) -> Vec<M
         })
         .map(|(meter, share)| Moment::Budget { meter: meter.clone(), share_bp: *share })
         .collect()
-}
-
-/// `meter`'s figure for people: dollars for the cost, a share for a plan window.
-#[must_use]
-pub(crate) fn figure(meter: &str, amount: u64) -> String {
-    if meter == Budget::USD {
-        let cents = amount / 10_000;
-        format!("${}.{:02}", cents / 100, cents % 100)
-    } else {
-        format!("{}% of the {meter} window", amount / 100)
-    }
 }
 
 #[cfg(test)]
@@ -201,8 +192,5 @@ mod tests {
         assert_eq!(passed(&shares(1_000), &shares(12_000)), [budget(12_000)], "one moment");
         assert_eq!(passed(&shares(12_000), &shares(3_000)), Vec::<Moment>::new());
         assert_eq!(passed(&[], &shares(10_000)), [budget(10_000)], "a budget set at its cap");
-        assert_eq!(figure(Budget::USD, 50_000_000), "$50.00");
-        assert_eq!(figure(Budget::USD, 1_234_567), "$1.23");
-        assert_eq!(figure("five-hour", 8_000), "80% of the five-hour window");
     }
 }

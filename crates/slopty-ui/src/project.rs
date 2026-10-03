@@ -79,6 +79,8 @@ gpui::actions!(
         TellOrchestrator,
         /// Set the project's verifier command and whether a reviewer reads each task's work.
         EditChecks,
+        /// Set what the project's agents may spend.
+        EditBudget,
         /// Make a project of the focused terminal's directory, with that terminal as its
         /// orchestrator.
         StartProject,
@@ -116,6 +118,7 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
         Command::new(Scope::Project, "edit_checks", EditChecks, &[], BOARD),
+        Command::new(Scope::Project, "edit_budget", EditBudget, &[], BOARD),
         Command::new(Scope::Workspace, "start_project", StartProject, &[], WORKSPACE),
     ]
 }
@@ -154,6 +157,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
         line("Tell the orchestrator\u{2026}", IconName::MessageSquare, Box::new(TellOrchestrator)),
         line("Verifier and review\u{2026}", IconName::ListChecks, Box::new(EditChecks)),
+        line("Budget\u{2026}", IconName::Activity, Box::new(EditBudget)),
         line("Delete the project", IconName::X, Box::new(DeleteProject)),
     ]
 }

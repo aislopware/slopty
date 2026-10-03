@@ -298,3 +298,55 @@ async fn a_failed_subagent_waits_for_its_family_to_rest() {
     let heard = desk.notices();
     assert_eq!(heard.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::NeedsYou]);
 }
+
+/// What a project's agents spent comes with the thread table every worker publishes, the
+/// whole table again at each registration: each thread's own figure under the terminal its
+/// family runs in, so a subagent's counts on its root's task, and a thread in no project's
+/// terminal counts for none. A figure published again counts once.
+#[tokio::test]
+async fn a_project_s_spend_comes_with_its_threads_rows() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (orchestrating, building, elsewhere) =
+        (SessionId::new(), SessionId::new(), SessionId::new());
+    let worker = WorkerId::new();
+    let sessions = vec![summary(orchestrating), summary(building), summary(elsewhere)];
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
+    let term = |session| TermRef { worker, session };
+    create(&hub, Some(term(orchestrating))).await;
+    let build = task(&hub, None).await;
+    let verb = Verb::TaskAssign { project: project(), task: build, term: term(building) };
+    assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
+
+    let costing = |terminal, cost| {
+        let mut row = row(Phase::Working, 10, terminal);
+        row.meters.cost_micro_usd = Some(cost);
+        row
+    };
+    let orchestrator = costing(Some(orchestrating), 1_000_000);
+    let builder = costing(Some(building), 2_000_000);
+    let subagent = under(costing(None, 500_000), &builder);
+    let stranger = costing(Some(elsewhere), 9_000_000);
+    let mut windowed = costing(None, 0);
+    windowed.meters.limits = vec![slopty_proto::thread::Limit {
+        name: "five-hour".to_owned(),
+        used_bp: 4_200,
+        resets_ms: None,
+    }];
+    let windowed = under(windowed, &orchestrator);
+    let rows = vec![orchestrator.clone(), builder, subagent, stranger, windowed];
+    lease.handle(snapshot(rows.clone()));
+    let spend = || hub.inner.state.lock().projects.project(&project()).unwrap().spend.clone();
+    assert_eq!(spend().cost_micro_usd, 3_500_000);
+    assert_eq!(spend().windows.get("five-hour"), Some(&4_200));
+    lease.handle(snapshot(rows));
+    assert_eq!(spend().cost_micro_usd, 3_500_000, "the same figures again");
+    lease.handle(delta(vec![costing(Some(orchestrating), 1_500_000)]));
+    assert_eq!(spend().cost_micro_usd, 5_000_000, "a new thread of the orchestrator's adds");
+    let orchestrator = ThreadRow {
+        meters: Meters { cost_micro_usd: Some(1_200_000), ..Meters::default() },
+        ..orchestrator
+    };
+    lease.handle(delta(vec![orchestrator]));
+    assert_eq!(spend().cost_micro_usd, 5_200_000, "a later figure replaces its own");
+}

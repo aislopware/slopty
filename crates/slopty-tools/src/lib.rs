@@ -18,6 +18,7 @@
     reason = "`unreachable_pub` is on, so an item shared from a private module is `pub(crate)`"
 )]
 
+pub mod budget;
 pub mod bulk;
 pub mod mcp;
 pub mod ops;

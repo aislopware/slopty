@@ -1379,7 +1379,7 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     }
     let said = labels(&view, cx);
     assert!(
-        said.iter().any(|l| l == "$1.25 spent: tasks $1.25, orchestrator not heard"),
+        said.iter().any(|l| l == "An estimated $1.25 spent: tasks $1.25, orchestrator not heard"),
         "{said:?}"
     );
     assert!(said.iter().any(|l| l == "5-hour 81%"), "{said:?}");

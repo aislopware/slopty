@@ -112,8 +112,6 @@ pub const SAFE_MODES: [&str; 4] = ["default", "manual", "plan", "dontAsk"];
 pub const LOOSENED_MAX: usize = 16;
 /// The longest item of an [`AgentReport::Loosened`], in bytes.
 pub const LOOSENED_ITEM_MAX: usize = 256;
-/// The most plan windows one [`AgentReport::Spent`] names.
-pub const SPENT_WINDOWS_MAX: usize = 8;
 
 /// The longest placement expression, in bytes: a rule, not a program.
 pub const EXPR_MAX: usize = 1024;
@@ -360,11 +358,48 @@ impl Budget {
         shares
     }
 
+    /// `text` as a cap of `meter`, as a person writes it: dollars to the cent for
+    /// [`Self::USD`] (`12.50`, `$12.50`), a percent to the hundredth for a plan window (`80`,
+    /// `80%`), at most the whole window. `None` for anything else, nothing included.
+    #[must_use]
+    pub fn cap_of(meter: &str, text: &str) -> Option<u64> {
+        let text = text.trim();
+        if meter == Self::USD {
+            hundredths(text.strip_prefix('$').unwrap_or(text)).map(|c| c.saturating_mul(10_000))
+        } else {
+            hundredths(text.strip_suffix('%').unwrap_or(text)).filter(|bp| *bp <= 10_000)
+        }
+    }
+
+    /// `amount` of `meter` for people: dollars to the cent for [`Self::USD`] (`$3.50`), a
+    /// percent for a plan window (`80.00%`).
+    #[must_use]
+    pub fn figure(meter: &str, amount: u64) -> String {
+        if meter == Self::USD {
+            let cents = amount / 10_000;
+            format!("${}.{:02}", cents / 100, cents % 100)
+        } else {
+            format!("{}.{:02}%", amount / 100, amount % 100)
+        }
+    }
+
     /// The meter at or past its cap, the fullest first, when one is.
     #[must_use]
     pub fn reached(&self, spend: &Spend) -> Option<String> {
         self.against(spend).into_iter().find(|(_, bp)| *bp >= 10_000).map(|(name, _)| name)
     }
+}
+
+/// A positive decimal with up to two places, in hundredths.
+fn hundredths(text: &str) -> Option<u64> {
+    let (whole, part) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |s: &str| s.chars().all(|c| c.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || part.len() > 2 || !digits(part) {
+        return None;
+    }
+    let part: u64 = format!("{part:0<2}").parse().ok()?;
+    let n = whole.parse::<u64>().ok()?.checked_mul(100)?.checked_add(part)?;
+    (n > 0).then_some(n)
 }
 
 /// What a project's agents spent by their own meters.
@@ -1968,19 +2003,6 @@ pub enum AgentReport {
         /// Each thing that loosens, as a reader would name it.
         found: Vec<String>,
     },
-    /// What one thread of the agent in a session says it has spent so far, sent when it
-    /// changes. A subagent's thread is sent under the session its root agent runs in. The
-    /// figures are the agent's own, whole for the thread, so the latest replaces the last.
-    Spent {
-        /// The session.
-        session: SessionId,
-        /// The thread.
-        thread: crate::thread::ThreadId,
-        /// Its estimated cost, in millionths of a US dollar, when its agent says one.
-        cost_micro_usd: Option<u64>,
-        /// The plan's rate windows as it last read them, at most [`SPENT_WINDOWS_MAX`].
-        windows: Vec<crate::thread::Limit>,
-    },
 }
 
 impl AgentReport {
@@ -1994,8 +2016,7 @@ impl AgentReport {
             | Self::PermissionMode { session, .. }
             | Self::Loosened { session, .. }
             | Self::NativeTask { session, .. }
-            | Self::Delivered { session, .. }
-            | Self::Spent { session, .. } => *session,
+            | Self::Delivered { session, .. } => *session,
         }
     }
 }
@@ -2025,6 +2046,14 @@ mod tests {
         assert_eq!(budget.reached(&spend).as_deref(), Some("five-hour"));
         let under = Spend { cost_micro_usd: 49_999_999, windows: BTreeMap::new() };
         assert_eq!(budget.reached(&under), None);
+        assert_eq!(Budget::cap_of(Budget::USD, "$12.5"), Some(12_500_000));
+        assert_eq!(Budget::cap_of("five-hour", "80%"), Some(8_000));
+        assert_eq!(Budget::cap_of("five-hour", "33.33"), Some(3_333));
+        for bad in ["0", "1.234", "-3", "ten", "", "101"] {
+            assert_eq!(Budget::cap_of("five-hour", bad), None, "{bad}");
+        }
+        assert_eq!(Budget::figure(Budget::USD, 1_234_567), "$1.23");
+        assert_eq!(Budget::figure("five-hour", 8_000), "80.00%");
         assert!(budget.fits());
         for bad in [
             Budget(BTreeMap::from([(Budget::USD.to_owned(), 0)])),

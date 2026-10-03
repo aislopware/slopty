@@ -48,6 +48,19 @@ pub(super) struct Board {
     wake: Arc<Notify>,
 }
 
+/// What one thread says it spent so far, under the terminal its agent runs in.
+#[derive(Debug)]
+pub(super) struct Figures {
+    /// The terminal.
+    pub term: TermRef,
+    /// The thread.
+    pub thread: ThreadId,
+    /// Its estimated cost, in millionths of a US dollar, when its agent says one.
+    pub cost_micro_usd: Option<u64>,
+    /// The plan's rate windows as it last read them.
+    pub windows: Vec<slopty_proto::thread::Limit>,
+}
+
 /// A person's client link.
 #[derive(Debug)]
 struct Sitting {
@@ -60,20 +73,41 @@ struct Sitting {
 
 impl Board {
     /// Take in a worker's table frame. A snapshot replaces what it published before.
-    pub(super) fn take(&mut self, worker: WorkerId, frame: TableFrame) {
+    ///
+    /// Answers what each thread the frame names says it spent, under the terminal its agent
+    /// runs in: a subagent's under its root's, since the project knows the root's terminal.
+    /// A thread whose family runs in no terminal says nothing.
+    pub(super) fn take(&mut self, worker: WorkerId, frame: TableFrame) -> Vec<Figures> {
         let table = self.tables.entry(worker).or_default();
-        match frame {
+        let named: Vec<ThreadId> = match frame {
             TableFrame::Snapshot { rows, .. } => {
                 *table = rows.into_iter().map(|r| (r.id, r)).collect();
+                table.keys().copied().collect()
             }
             TableFrame::Delta { rows, removed, .. } => {
                 for gone in removed {
                     table.remove(&gone);
                 }
+                let named = rows.iter().map(|r| r.id).collect();
                 table.extend(rows.into_iter().map(|r| (r.id, r)));
+                named
             }
-        }
+        };
         self.wake.notify_one();
+        named
+            .into_iter()
+            .filter_map(|id| {
+                let row = table.get(&id)?;
+                let root = table.get(&root_of(table, row))?;
+                let session = row.terminal.or(root.terminal)?;
+                Some(Figures {
+                    term: TermRef { worker, session },
+                    thread: id,
+                    cost_micro_usd: row.meters.cost_micro_usd,
+                    windows: row.meters.limits.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Where the person is on every client that said.

@@ -623,8 +623,17 @@ pub const fn report_word(kind: ReportKind) -> &'static str {
 }
 
 fn limits_text(l: &Limits) -> String {
+    let budget = l.budget.as_ref().map_or_else(String::new, |b| {
+        let caps: Vec<String> =
+            b.0.iter()
+                .map(|(meter, cap)| {
+                    format!("{meter} {}", slopty_proto::project::Budget::figure(meter, *cap))
+                })
+                .collect();
+        format!(", budget {}", caps.join(", "))
+    });
     format!(
-        "{} agents per worker, {} in all, {} deep, {} entries kept",
+        "{} agents per worker, {} in all, {} deep, {} entries kept{budget}",
         l.live_per_worker, l.live_per_project, l.depth, l.timeline_kept
     )
 }
@@ -796,6 +805,16 @@ pub fn status_text<S: std::hash::BuildHasher>(
         p.target,
         limits_text(&p.limits)
     );
+    if let Some(budget) = &p.limits.budget {
+        let _infallible =
+            writeln!(out, "  budget  {} (estimated)", crate::budget::text(budget, &p.spend));
+    } else if p.spend.cost_micro_usd > 0 {
+        let spent = slopty_proto::project::Budget::figure(
+            slopty_proto::project::Budget::USD,
+            p.spend.cost_micro_usd,
+        );
+        let _infallible = writeln!(out, "  spent  {spent} (estimated), no budget");
+    }
     let (b, live) = (&s.bounds, &s.live);
     let _infallible = writeln!(
         out,

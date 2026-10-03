@@ -22,8 +22,8 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, RunOn, StepKind, StepState, TaskCard,
-    TaskId, TaskState, TaskStep, VerifierRun,
+    Budget, Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, RunOn, StepKind, StepState,
+    TaskCard, TaskId, TaskState, TaskStep, VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -35,12 +35,14 @@ use super::model::{
 use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
-    AddressComments, ApproveTask, CancelTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask,
-    OpenNode, PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious,
-    ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask,
-    StopTaskAgent, TellOrchestrator, ToggleAskToStart, TogglePush,
+    AddressComments, ApproveTask, CancelTask, DeleteProject, EditBudget, EditChecks, FixCi, Lens,
+    MergeTask, OpenNode, PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext,
+    SelectPrevious, ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed,
+    StartTask, StopTaskAgent, TellOrchestrator, ToggleAskToStart, TogglePush,
 };
 use crate::a11y::tab_stop;
+
+mod budget;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
 use crate::palette::{Plate, age_label, dotted, sentence_case};
@@ -125,6 +127,8 @@ pub enum ProjectEvent {
     Act(TaskId, TaskAction),
     /// Push the target after each merge, or stop.
     SetPush(bool),
+    /// Cap what the project's agents may spend; an empty budget takes it away.
+    SetBudget(Budget),
     /// Check each task's work by this command, and have a reviewer read it with this brief;
     /// an empty one is none.
     SetChecks {
@@ -303,6 +307,8 @@ pub struct ProjectView {
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
     checks: Option<Checks>,
+    /// The project's budget being set, while that panel is open.
+    budget: Option<budget::BudgetPanel>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -346,6 +352,7 @@ impl ProjectView {
             composer: None,
             refused: None,
             checks: None,
+            budget: None,
             #[cfg(test)]
             renders: 0,
         }
@@ -1200,15 +1207,24 @@ impl ProjectView {
                 s.text_secondary,
             ));
         }
-        if let Some(cost) = spend.total_cost() {
+        let cap = board.project.limits.budget.as_ref().and_then(|b| b.0.get(Budget::USD).copied());
+        if let Some(cost) = spend.total_cost().or_else(|| cap.map(|_| 0)) {
             let part = |c: Option<u64>| c.map_or_else(|| "not heard".to_owned(), dollars);
             let hint = format!(
-                "{} spent: tasks {}, orchestrator {}",
+                "An estimated {} spent: tasks {}, orchestrator {}",
                 dollars(cost),
                 part(spend.tasks_cost),
                 part(spend.orchestrator_cost)
             );
-            out.push(readout("project-cost", dollars(cost), Some(hint), s.text_secondary));
+            let (text, tone) = match cap {
+                Some(cap) => {
+                    let near = cost.saturating_mul(10_000) >= cap.saturating_mul(Budget::NEAR_BP);
+                    let tone = if near { s.warn } else { s.text_secondary };
+                    (format!("{} of {}", dollars(cost), dollars(cap)), tone)
+                }
+                None => (dollars(cost), s.text_secondary),
+            };
+            out.push(readout("project-cost", text, Some(hint), tone));
         }
         let ids = ["project-limit-0", "project-limit-1", "project-limit-2"];
         for (limit, id) in spend.limits.iter().zip(ids) {
@@ -1337,7 +1353,8 @@ impl ProjectView {
         if self.lens != Lens::Board {
             nodes.extend(board.needs_you().into_iter().map(Some));
         }
-        if nodes.is_empty() {
+        let spent = self.budget_row(board, cx);
+        if nodes.is_empty() && spent.is_none() {
             return None;
         }
         let theme = &self.theme;
@@ -1360,6 +1377,7 @@ impl ProjectView {
                 .pb(self.z(theme.spacing.xxs))
                 .bg(hsla(s.raised))
                 .child(self.heading("project-needs-heading", NEEDS_YOU, Some(s.warn)))
+                .children(spent)
                 .children(rows),
         )
     }
@@ -3471,6 +3489,9 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &EditChecks, window, cx| {
                 this.open_checks(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &EditBudget, window, cx| {
+                this.open_budget(window, cx);
+            }))
             .flex_1()
             .min_h_0()
             .flex()
@@ -3531,6 +3552,7 @@ impl Render for ProjectView {
         // orchestrator sits under them: a letter typed into a field there is a letter.
         root.child(self.header(&board, cx))
             .children(self.checks_panel(cx))
+            .children(self.budget_panel(cx))
             .child(keys)
             .children(composer)
     }

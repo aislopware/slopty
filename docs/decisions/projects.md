@@ -1644,14 +1644,20 @@ stopped or cancelled from its card.** ✅ 2026-10-04 (readiness #16, N17)
   server refuses one that does not fit, and an empty one takes the budget away.
 - `Project::spend` is what the server tallies (`Spend`), and `Moment::Budget` the timeline's
   near (80 %, `Budget::NEAR_BP`) and reached moments.
-- **The server tallies and enforces it** (N21, 2026-10-04). A worker says what each thread
-  spent (`AgentReport::Spent`: the thread's whole estimated cost and the plan windows it
-  read), sending a subagent's under its root's session. The server keeps every thread's
-  latest figure on the project it works for, as its orchestrator or on a task (`Tally`). A
-  later figure replaces the earlier one, a task given again or a subagent adds its own
-  thread, and a terminal working for no project counts for none. The cost is the sum; a
-  window is the fullest any thread read that has not reset since. Past 512 threads the least
-  recently heard folds into a settled sum, so the total stays whole.
+- **The server tallies and enforces it** (N21, 2026-10-04). The figures come with the thread
+  table every worker already publishes to the server (`ToServer::Threads`). Each row carries
+  its thread's meters, and the whole table goes again at each registration, so a figure said
+  while the link was down is not lost. A first cut sent a report of its own per thread
+  (`AgentReport::Spent`); it only repeated the rows, so it was taken out.
+  - The server counts each thread's figure under the terminal its family runs in: its own,
+    or for a subagent its root's. It keeps every thread's latest figure on the project that
+    terminal works for, as its orchestrator or on a task (`Tally`). A later figure replaces
+    the earlier one; a task given again, or a subagent, adds a thread of its own; a terminal
+    working for no project counts for none. The cost is the sum. A window is the fullest any
+    thread read that has not reset since. Past 512 threads the least recently heard folds
+    into a settled sum, so the total stays whole.
+  - Claude Code's thread takes the status line's meters heard before the thread began
+    (before Claude Code named its session), not only those heard after.
   - Rising past 80 % of a cap, and past the whole, is each a timeline moment, written. The
     figures between are pushed and written at most once a minute: after a restart, each
     agent's next figure puts its thread right. A cap lowered under the spend says it is
@@ -1663,13 +1669,40 @@ stopped or cancelled from its card.** ✅ 2026-10-04 (readiness #16, N17)
     delivery loop wakes at the next reset of a capped window.
   - Turns under way finish, so the spend may pass the cap by up to one turn per live agent.
   - Only the person sets a budget: an agent's `project_update` naming one is refused, as
-    pushing and ask-to-start are.
-  - Next: the worker's sender of `Spent` from its thread table, Codex's cost from its usage,
-    and setting the budget from the board, the CLI and the tools.
-  - Tests: `a_project_at_its_budget_starts_nothing_until_it_is_raised`,
-    `every_thread_counts_its_latest_figure_once`, `a_thread_past_those_kept_still_counts`,
-    `a_meter_says_each_line_it_rises_past_once`, `a_held_project_hears_only_the_person`
-    (`slopty-server`), golden `report_spent`.
+    pushing and ask-to-start are. The CLI takes `--budget usd=50 --budget five-hour=80%`
+    (`none` takes it away) on `project create` and `project update`; `project status` says
+    each meter against its cap, fullest first, marked estimated. The parsing and the figures
+    are `Budget::cap_of` and `Budget::figure`, one place for the CLI, the board and the
+    server's words.
+  - The board's header shows the cost against its cap, warning from 80 %, and counts what the
+    server tallied when that is more than this client heard: an agent replaced, or one it
+    never followed (the old undercount). At the cap, *Needs you* says what was spent of what,
+    with *Raise budget*. The panel ("Budget…" in the palette) takes the cost cap in dollars
+    and the windows as `five-hour 80%, seven-day 50%`, so a window an agent names later needs
+    no new field.
+  - **No `--max-budget-usd`.** Claude Code's flag works in print mode only, and Slopty runs
+    Claude Code in its TUI; no other agent Slopty starts takes a dollar cap. The server's hold
+    is the cap.
+  - **Codex's cost is not filled yet.** Codex reports tokens only. Its own estimate
+    (`account/usage/read`, `estimatedUsageUsdMicros` for a thread) answers ChatGPT sign-ins
+    alone, and comes from OpenAI's backend. A price table kept here would go stale, and could
+    not see Fast mode's double rate. The next step is to read Codex's own estimate. That needs
+    `account/usage/read` added to the generated Codex protocol (`xtask/src/codex/generate.rs`).
+    Until then, a Codex project caps by its plan windows.
+  - Tests:
+    - `slopty-server`: `a_project_at_its_budget_starts_nothing_until_it_is_raised`,
+      `every_thread_counts_its_latest_figure_once`, `a_thread_past_those_kept_still_counts`,
+      `a_meter_says_each_line_it_rises_past_once`, `a_held_project_hears_only_the_person`,
+      `a_project_s_spend_comes_with_its_threads_rows`.
+    - `meters_heard_before_the_thread_begins_are_its_own` (`slopty-worker`).
+    - `slopty-tools`: `a_budget_is_written_in_dollars_and_percents`,
+      `a_budget_reads_back_fullest_first`.
+    - `slopty-ui`: `the_panel_reads_dollars_and_windows_by_name`,
+      `a_spent_budget_needs_you_and_is_raised_from_the_board`,
+      `a_budget_under_its_cap_is_quiet_and_set_from_the_palette`.
+    - End to end, `an_agent_started_for_a_task_has_the_tools_and_grows_the_tree`
+      (`slopty-cli`): a stand-in agent's status-line cost reaches the project through its
+      thread, the CLI caps it below, `project status` says so, and the next start is refused.
 - Tests: `a_budget_weighs_each_capped_meter_and_says_which_is_reached` (`slopty-proto`) and
   the goldens `project_create` and `project_event_pushed`.
 

@@ -33,17 +33,27 @@ pub struct LimitArgs {
     /// How many timeline entries it keeps.
     #[arg(long)]
     timeline_kept: Option<u32>,
+    /// What its agents may spend, a meter at a time: `usd=50` caps the estimated cost in
+    /// dollars, `five-hour=80%` a plan window. At a cap it starts no task until it is raised.
+    /// `none` takes the budget away. Yours to set: an agent's is refused.
+    #[arg(long, value_name = "METER=CAP")]
+    budget: Vec<String>,
 }
 
 impl LimitArgs {
-    const fn change(&self) -> LimitsChange {
-        LimitsChange {
+    fn change(&self) -> Result<LimitsChange> {
+        let budget = if self.budget.is_empty() {
+            None
+        } else {
+            Some(slopty_tools::budget::parse(&self.budget)?)
+        };
+        Ok(LimitsChange {
             live_per_worker: self.live_per_worker,
             live_per_project: self.live_per_project,
             depth: self.depth,
             timeline_kept: self.timeline_kept,
-            budget: None,
-        }
+            budget,
+        })
     }
 }
 
@@ -507,7 +517,7 @@ pub async fn project(
                 push,
                 ask_to_start,
                 orchestrator,
-                limits: limits.change(),
+                limits: limits.change()?,
                 metadata,
             };
             let status = ops::project_create(&mut res, spec, key).await?;
@@ -523,7 +533,7 @@ pub async fn project(
             limits,
             metadata,
         } => {
-            let limits = limits.change();
+            let limits = limits.change()?;
             let edit = ProjectEdit {
                 orchestrator,
                 verifier,

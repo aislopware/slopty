@@ -1446,13 +1446,6 @@ impl Lease {
                         hub.loosened(&mut state, term, found);
                         return;
                     }
-                    AgentReport::Spent { thread, cost_micro_usd, windows, .. } => {
-                        let now = WallMs::now();
-                        let moved =
-                            state.projects.spent(term, *thread, *cost_micro_usd, windows, now);
-                        hub.projects_moved(&mut state, moved);
-                        return;
-                    }
                     AgentReport::SubagentStarted { .. }
                     | AgentReport::SubagentStopped { .. }
                     | AgentReport::NativeTask { .. } => {}
@@ -1460,7 +1453,20 @@ impl Lease {
                 let moved = state.projects.report(worker, &report, WallMs::now());
                 hub.projects_moved(&mut state, moved);
             }
-            ToServer::Threads(frame) => state.board.take(worker, frame),
+            ToServer::Threads(frame) => {
+                let now = WallMs::now();
+                let mut moved = Vec::new();
+                for f in state.board.take(worker, frame) {
+                    moved.extend(state.projects.spent(
+                        f.term,
+                        f.thread,
+                        f.cost_micro_usd,
+                        &f.windows,
+                        now,
+                    ));
+                }
+                hub.projects_moved(&mut state, moved);
+            }
             ToServer::Hello { .. } | ToServer::Request { .. } | ToServer::Presence(_) => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
             }
@@ -1784,6 +1790,7 @@ pub(crate) mod tests {
             version: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
+            writes_failing: None,
         }
     }
 

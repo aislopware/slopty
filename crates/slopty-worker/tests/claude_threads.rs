@@ -453,4 +453,21 @@ mod claude_threads {
         rig.seen.seen.send_modify(|seen| seen.cwd = Some("/work/sub".to_owned()));
         until(&host, provisional, |s| s.meta.cwd == "/work/sub").await;
     }
+
+    /// The status line's meters heard before the session's thread begins are its first: a
+    /// cost said once, before Claude Code named its session, is not lost until the next.
+    #[tokio::test]
+    async fn meters_heard_before_the_thread_begins_are_its_own() {
+        let rig = Rig::new();
+        let host = rig.host();
+        let _observer = rig.observe(&host);
+        let meters = slopty_proto::conversation::Meters {
+            cost_usd: Some(1.25),
+            ..slopty_proto::conversation::Meters::default()
+        };
+        rig.seen.seen.send_modify(|seen| seen.meters = Some(meters));
+        rig.status(AgentStatus::Working);
+        let state = until(&host, thread_of(NATIVE), |s| s.meters.cost_micro_usd.is_some()).await;
+        assert_eq!(state.meters.cost_micro_usd, Some(1_250_000));
+    }
 }
