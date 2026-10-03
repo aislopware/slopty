@@ -51,6 +51,18 @@ mod threads {
         addr: SocketAddr,
     }
 
+    impl Daemons {
+        /// End the daemons and wait for each to exit, so nothing still holds the test's output
+        /// when it returns (a kill alone left that to a loaded Mac's scheduler, past nextest's
+        /// leak window).
+        async fn stop(mut self) {
+            for mut child in std::mem::take(&mut self.children) {
+                let _killed = child.start_kill();
+                let _exited = child.wait().await;
+            }
+        }
+    }
+
     impl Drop for Daemons {
         fn drop(&mut self) {
             for child in &mut self.children {
@@ -400,5 +412,8 @@ mod threads {
 
         b.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         drop(file);
+        drop(b);
+        drop(witness);
+        daemons.stop().await;
     }
 }
