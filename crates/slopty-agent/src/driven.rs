@@ -48,6 +48,18 @@ pub fn title_of(text: &str) -> String {
     }
 }
 
+/// When the usage windows in `limits` that are full have all reset: the latest of their
+/// resets. `None` when none is full, or a full one says no reset.
+#[must_use]
+pub fn reset_of_full(limits: &[slopty_proto::thread::Limit]) -> Option<WallMs> {
+    let full: Vec<Option<WallMs>> =
+        limits.iter().filter(|l| l.used_bp >= 10_000).map(|l| l.resets_ms).collect();
+    if full.is_empty() || full.iter().any(Option::is_none) {
+        return None;
+    }
+    full.into_iter().flatten().max()
+}
+
 /// Dollars as millionths of one, rounded; nothing below zero.
 #[must_use]
 pub fn micro_usd(dollars: f64) -> u64 {

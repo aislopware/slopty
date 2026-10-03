@@ -656,6 +656,10 @@ pub struct Discovery {
 /// process of the terminal it reports on, so one probe never means the agent is gone.
 const ABSENT_BEFORE_GONE: u8 = 4;
 
+/// Probes in a row whose title says idle, after a prompt the transcript never took, before the
+/// prompt is taken as gone back to Claude Code's input ([`Tracker::observe`]).
+const TAKEN_BACK_PROBES: u8 = 4;
+
 /// Per-session agent state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tracker {
@@ -692,6 +696,9 @@ pub struct Tracker {
     mode_ms: WallMs,
     /// What in `argv` loosens the agent's permissions ([`loosening::loosening`]), once judged.
     loosened: Option<Vec<String>>,
+    /// After a prompt (`UserPromptSubmit`) the transcript has not taken yet: how many probes in a
+    /// row the title has said idle since.
+    unwritten: Option<u8>,
 }
 
 /// `found` cut to what one [`AgentReport::Loosened`] carries.
@@ -739,6 +746,7 @@ impl Default for Tracker {
             permission_mode: None,
             mode_ms: WallMs::ZERO,
             loosened: None,
+            unwritten: None,
         }
     }
 }
@@ -795,6 +803,7 @@ impl Tracker {
             return None;
         }
         self.hooked = true;
+        self.unwritten = (hook.event == HookEvent::UserPromptSubmit).then_some(0);
         if hook.session_id.is_some() {
             self.agent_session.clone_from(&hook.session_id);
         }
@@ -898,6 +907,9 @@ impl Tracker {
         if obs.cwd.is_some() {
             self.cwd.clone_from(&obs.cwd);
         }
+        if let Some(event) = self.taken_back(session, obs.title.as_deref()) {
+            return Some(event);
+        }
         if self.source >= AgentSource::Transcript {
             return None;
         }
@@ -920,6 +932,7 @@ impl Tracker {
         session: SessionId,
         progress: &Progress,
     ) -> Option<AgentEvent> {
+        self.unwritten = None;
         if self.hooked {
             let interrupted = progress.status == AgentStatus::Idle
                 && matches!(
@@ -932,6 +945,29 @@ impl Tracker {
             self.blocks.clear();
         }
         self.set(session, progress.status.clone(), progress.detail.clone(), AgentSource::Transcript)
+    }
+
+    /// A prompt Claude Code took back: Esc right after Enter puts it back in its input, writes
+    /// nothing to the transcript and fires no `Stop`, which would leave the agent working for
+    /// ever. Its own title says it is at rest again, so once the title has said idle for
+    /// [`TAKEN_BACK_PROBES`] probes in a row with the transcript still silent since the prompt,
+    /// the agent is idle, by its title. The next hook speaks for it again.
+    fn taken_back(&mut self, session: SessionId, title: Option<&str>) -> Option<AgentEvent> {
+        let quiet = self.unwritten.as_mut()?;
+        if self.status != AgentStatus::Working || self.source != AgentSource::Hook {
+            self.unwritten = None;
+            return None;
+        }
+        if title.and_then(title::signal) != Some(TitleSignal::Idle) {
+            *quiet = 0;
+            return None;
+        }
+        *quiet = quiet.saturating_add(1);
+        if *quiet < TAKEN_BACK_PROBES {
+            return None;
+        }
+        self.unwritten = None;
+        self.set(session, AgentStatus::Idle, None, AgentSource::Title)
     }
 
     /// Move to a state a signal weaker than a hook reported; `None` when nothing visible
@@ -1998,6 +2034,38 @@ mod tests {
         SystemTime::UNIX_EPOCH
             .checked_add(std::time::Duration::from_secs(1_000_000))
             .expect("a time in range")
+    }
+
+    /// A prompt Claude Code takes back (Esc right after Enter) leaves no transcript row and fires
+    /// no `Stop`: once its title has said idle for [`TAKEN_BACK_PROBES`] probes in a row, the agent
+    /// is idle. A spinner in between starts the count again, and a prompt the transcript took is
+    /// never taken as gone back, however long its title rests.
+    #[test]
+    fn a_prompt_taken_back_leaves_the_agent_idle_by_its_title() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        t.observe(sid, &seen("claude", Some("✳ Claude Code")));
+        let prompt = hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#);
+        assert_eq!(t.apply(sid, &prompt).map(|e| e.status), Some(AgentStatus::Working));
+        let idle = seen("claude", Some("✳ Claude Code"));
+        for _probe in 1..TAKEN_BACK_PROBES {
+            assert_eq!(t.observe(sid, &idle), None);
+        }
+        assert_eq!(t.observe(sid, &seen("claude", Some("✶ Claude Code"))), None, "it works");
+        for _probe in 1..TAKEN_BACK_PROBES {
+            assert_eq!(t.observe(sid, &idle), None, "counted again");
+        }
+        let e = t.observe(sid, &idle).expect("taken back");
+        assert_eq!((e.status, e.source), (AgentStatus::Idle, AgentSource::Title));
+        assert!(!e.attention, "the person did it");
+        assert_eq!(t.apply(sid, &prompt).map(|e| e.status), Some(AgentStatus::Working));
+
+        let written = Progress { status: AgentStatus::Working, detail: None };
+        t.observe_progress(sid, &written);
+        for _probe in 0..TAKEN_BACK_PROBES.saturating_mul(2) {
+            assert_eq!(t.observe(sid, &idle), None, "the transcript took it");
+        }
+        assert_eq!(t.status(), &AgentStatus::Working);
     }
 
     #[test]

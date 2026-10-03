@@ -24,10 +24,10 @@
 //! - **Forms.** An MCP server's form ([`super::form`]) is a request whose questions are its fields,
 //!   with declining and cancelling as its answers; its answers go back as the form's content. A
 //!   page to open or a device check is left to Codex's own terminal.
-//! - **The queue.** A message queued while a turn runs waits here, where it can be changed or taken
-//!   back, and goes as the next turn once Codex says the turn under way ended
-//!   ([`Shared::next_queued`]): Codex's own TUI queues in itself, and the app-server has no queue
-//!   of its own.
+//! - **The queue.** A message queued while a turn runs waits here, where it can be changed, taken
+//!   back, moved in the queue or sent at once as a steer. Otherwise it goes as the next turn once
+//!   Codex says the turn under way ended ([`Shared::next_queued`]): Codex's own TUI queues in
+//!   itself, and the app-server has no queue of its own.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -105,16 +105,42 @@ pub fn resumed(args: &[String]) -> Option<&str> {
     }
 }
 
+/// What a Slopty terminal tells the programs in it of itself: which terminal it is, its proof,
+/// and the project task it runs.
+pub const TERMINAL_ENV: [&str; 4] = [
+    slopty_proto::ctl::SESSION_ENV,
+    slopty_proto::ctl::SESSION_TOKEN_ENV,
+    slopty_proto::project::PROJECT_ENV,
+    slopty_proto::project::TASK_ENV,
+];
+
+/// The configuration every thread Slopty starts, takes up again or forks is loaded with: each of
+/// [`TERMINAL_ENV`] set empty in the commands it runs (`shell_environment_policy.set`).
+///
+/// Codex's daemon runs every thread's commands with its own environment, which is that of
+/// whatever started it, a Codex TUI in a Slopty terminal among them. Without this, every thread's
+/// tools would claim that terminal and its project task. Set empty, the variables name no
+/// terminal, so Slopty's CLI in such a command speaks as an agent, never for the person. Each is
+/// its own key, so it adds to the person's own policy and replaces none of it.
+#[must_use]
+pub fn unclaimed() -> BTreeMap<String, Value> {
+    TERMINAL_ENV
+        .iter()
+        .map(|var| (format!("shell_environment_policy.set.{var}"), Value::String(String::new())))
+        .collect()
+}
+
 /// What asks the app-server for a new thread in `cwd` (`thread/start`).
 ///
-/// It names `model` when one is given, and nothing else: the approval policy, the sandbox and
-/// the rest are the person's own Codex configuration's, so a thread Slopty starts is loosened in
-/// nothing.
+/// It names `model` when one is given and [`unclaimed`], and nothing else: the approval policy,
+/// the sandbox and the rest are the person's own Codex configuration's, so a thread Slopty starts
+/// is loosened in nothing.
 #[must_use]
 pub fn start(cwd: &str, model: Option<&str>) -> p::ThreadStartParams {
     p::ThreadStartParams {
         cwd: Some(cwd.to_owned()),
         model: model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_owned),
+        config: Some(unclaimed()),
         ..p::ThreadStartParams::default()
     }
 }
@@ -393,7 +419,12 @@ impl Shared {
                     turn: self.turn(&error.turn_id),
                     at_ms: now,
                     body: ItemBody::Notice(Notice {
-                        kind: Notice::API_ERROR.to_owned(),
+                        kind: if retry.is_none() && limited(error.error.codex_error_info) {
+                            Notice::LIMIT
+                        } else {
+                            Notice::API_ERROR
+                        }
+                        .to_owned(),
                         text: Clipped::whole(&error.error.message),
                         retry,
                     }),
@@ -763,6 +794,34 @@ impl Shared {
         Some(vec![self.pending_now()])
     }
 
+    /// The message held for `intent`, sent now: into the turn under way as a steer, or as a
+    /// turn of its own when none is. What goes to the app-server and the actions that take it
+    /// off the queue; `None` when none is held.
+    pub fn promote(&mut self, intent: IntentId) -> Option<(Send, Vec<Action>)> {
+        let at = self.queued.iter().position(|(p, _)| p.intent == intent)?;
+        let (held, attached) = self.queued.remove(at)?;
+        let send = self.send(&held.text, attached, Delivery::Steer, intent);
+        Some((send, vec![self.pending_now()]))
+    }
+
+    /// Move the message held for `intent` to just before the one held for `before`, or to the
+    /// end; `None` when either is not held.
+    pub fn reorder(&mut self, intent: IntentId, before: Option<IntentId>) -> Option<Vec<Action>> {
+        let queued = self.queued.make_contiguous();
+        Pending::reorder(queued, |(p, _)| p.intent, intent, before)
+            .then(|| vec![self.pending_now()])
+    }
+
+    /// Whether the thread rests: no turn under way, nothing asked of the person, no message
+    /// held, and Codex not saying it works on it.
+    #[must_use]
+    pub fn rests(&self) -> bool {
+        self.current.is_none()
+            && self.open.is_empty()
+            && self.queued.is_empty()
+            && !matches!(self.said, Some((ThreadStatus::Active { .. }, _)))
+    }
+
     /// The next message held, as the turn that sends it and the actions that take it off the
     /// queue, once no turn is under way.
     pub fn next_queued(&mut self) -> Option<(Box<p::TurnStartParams>, Vec<Action>)> {
@@ -802,6 +861,7 @@ impl Shared {
         Ok(p::ThreadForkParams {
             thread_id: self.meta.native.clone(),
             last_turn_id: last,
+            config: Some(unclaimed()),
             ..p::ThreadForkParams::default()
         })
     }
@@ -863,6 +923,10 @@ impl Shared {
             (TurnStatus::Interrupted, _) => TurnState::Interrupted,
             (TurnStatus::Failed, error) => TurnState::Failed {
                 error: error.as_ref().map_or_else(String::new, |e| e.message.clone()),
+                until_ms: error
+                    .as_ref()
+                    .filter(|e| limited(e.codex_error_info))
+                    .and_then(|_| crate::driven::reset_of_full(&self.meters.limits)),
             },
             _ => TurnState::Complete,
         };
@@ -1329,6 +1393,14 @@ fn title_of(thread: &p::Thread) -> String {
         .clone()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| thread.preview.lines().next().unwrap_or_default().to_owned())
+}
+
+/// Whether Codex says a turn stopped on the account's usage or rate limit.
+const fn limited(info: Option<p::CodexErrorInfo>) -> bool {
+    matches!(
+        info,
+        Some(p::CodexErrorInfo::UsageLimitExceeded | p::CodexErrorInfo::RateLimitExceeded)
+    )
 }
 
 /// A call's title for command `run`: "Run" and its first line, as every agent's command reads.

@@ -271,6 +271,8 @@ pub struct Note {
     pub text: Clipped,
     /// For an API error Claude Code retries: which attempt comes next, and when.
     pub retry: Option<Retry>,
+    /// For an API error Claude Code gave up on, which ends its turn: why.
+    pub stop: Option<Stop>,
 }
 
 /// Kinds of [`Note`].
@@ -284,6 +286,27 @@ pub enum NoteKind {
     Info,
     /// A hook failed or stopped the turn (the text is what it said).
     Hook,
+}
+
+/// The API error that ended a turn, as Claude Code records it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stop {
+    /// Claude Code's kind of error ([`Stop::RATE_LIMIT`], `invalid_request`,
+    /// `authentication_failed`, `server_error`, …); `unknown` when it names none.
+    pub error: String,
+    /// For a usage limit, when it resets, where Claude Code was told.
+    pub until_ms: Option<WallMs>,
+}
+
+impl Stop {
+    /// A usage or rate limit refused the request.
+    pub const RATE_LIMIT: &str = "rate_limit";
+
+    /// Whether a limit refused the request.
+    #[must_use]
+    pub fn limited(&self) -> bool {
+        self.error == Self::RATE_LIMIT
+    }
 }
 
 /// Claude Code retrying a request the API refused.

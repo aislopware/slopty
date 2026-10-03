@@ -167,6 +167,9 @@ struct Mapped {
     items: HashMap<String, (TurnId, Changed)>,
     /// Turns an interrupt ended.
     interrupted: HashSet<TurnId>,
+    /// Turns an API error Claude Code gave up on ended, with what it said: a turn the model
+    /// went on in after one is not among them.
+    stopped: HashMap<TurnId, (conv::Stop, String)>,
     /// Turns whose end was sent.
     ended: HashSet<TurnId>,
     /// Each turn as last sent.
@@ -186,6 +189,7 @@ impl Mapped {
             prompts: HashMap::new(),
             items: HashMap::new(),
             interrupted: HashSet::new(),
+            stopped: HashMap::new(),
             ended: HashSet::new(),
             turns: HashMap::new(),
             background: HashMap::new(),
@@ -264,6 +268,8 @@ pub struct Observed {
     hooked: bool,
     /// The slash commands as last told.
     commands: Vec<thread::Command>,
+    /// The main thread's last turn ended failed, so its agent's done is a failure.
+    failed: bool,
 }
 
 impl Observed {
@@ -349,6 +355,7 @@ impl Observed {
             named: false,
             hooked: false,
             commands: Vec::new(),
+            failed: false,
         }
     }
 
@@ -396,8 +403,14 @@ impl Observed {
 
     /// What the transcript's `changes` (and the background commands' `outputs`) make of the
     /// threads; live blocks the changes settle go after them.
+    ///
+    /// A turn's record goes after the batch's entries: the decoder keeps one record a turn per
+    /// batch, where the turn first changed, so the entries that ended it (an interrupt, the
+    /// error it stopped on) come after it.
     pub fn transcript(&mut self, changes: &[Change], outputs: &[conv::Output]) -> Vec<Out> {
-        for change in changes {
+        let (turns, entries): (Vec<&Change>, Vec<&Change>) =
+            changes.iter().partition(|c| matches!(c, Change::Turn { .. }));
+        for change in entries.into_iter().chain(turns) {
             match change {
                 Change::Reset { thread } => self.reset(thread.as_ref()),
                 Change::Upsert { thread, entry } => self.entry(thread, entry),
@@ -474,6 +487,7 @@ impl Observed {
                 (Phase::Waiting, Some(Wait { kind: "task".to_owned(), text }), Liveness::Live)
             }
         };
+        let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
         let status = Status { phase, wait, liveness, since_ms: event.since_ms };
         self.status = Some(status.clone());
         self.push(self.meta.id, Action::Status(status.clone()));
@@ -741,6 +755,7 @@ impl Observed {
             };
             self.out.push(Out::Begin(Box::new(meta)));
             if thread == conv::ThreadId::Main {
+                self.failed = false;
                 self.again();
             }
         }
@@ -790,6 +805,7 @@ impl Observed {
         }
         let Some(mapped) = self.threads.get_mut(thread) else { return };
         let mut actions = Vec::new();
+        let mut began = false;
         let turn = match (&entry.body, mapped.items.get(&entry.id)) {
             (_, Some((turn, _))) => *turn,
             (Body::Prompt(_), None) => {
@@ -810,12 +826,22 @@ impl Observed {
                 };
                 mapped.turns.insert(turn, started.clone());
                 actions.push(Action::TurnStarted(started));
+                began = *thread == conv::ThreadId::Main;
                 turn
             }
             (_, None) => mapped.turn,
         };
-        if matches!(entry.body, Body::Interrupted { .. }) {
-            mapped.interrupted.insert(turn);
+        match &entry.body {
+            Body::Interrupted { .. } => {
+                mapped.interrupted.insert(turn);
+            }
+            Body::Note(conv::Note { stop: Some(stop), text, .. }) => {
+                mapped.stopped.insert(turn, (stop.clone(), text.text.clone()));
+            }
+            Body::Text(_) | Body::Thinking(_) | Body::Tool(_) => {
+                mapped.stopped.remove(&turn);
+            }
+            _ => {}
         }
         let changed = changed_by(&entry.body);
         let had = mapped.items.insert(entry.id.clone(), (turn, changed)).map(|(_, c)| c);
@@ -841,6 +867,10 @@ impl Observed {
         for action in actions {
             self.push(id, action);
         }
+        // A new prompt leaves the failure behind: its own turn's end says how it went.
+        if began {
+            self.failed = false;
+        }
     }
 
     fn remove(&mut self, thread: &conv::ThreadId, entry: &str) {
@@ -860,6 +890,7 @@ impl Observed {
             mapped.turns.retain(|t, _| *t < turn);
             mapped.ended.retain(|t| *t < turn);
             mapped.interrupted.retain(|t| *t < turn);
+            mapped.stopped.retain(|t, _| *t < turn);
             actions.push(Action::Truncated { after: Some(after) });
         }
         for action in actions {
@@ -871,10 +902,18 @@ impl Observed {
         let id = self.ensure(thread);
         let Some(mapped) = self.threads.get_mut(thread) else { return };
         let Some(&turn) = mapped.prompts.get(&record.prompt) else { return };
-        let state = match record.ended_ms {
-            None => TurnState::Active,
-            Some(_) if mapped.interrupted.contains(&turn) => TurnState::Interrupted,
-            Some(_) => TurnState::Complete,
+        let state = match (record.ended_ms, mapped.stopped.get(&turn)) {
+            (None, _) => TurnState::Active,
+            (Some(_), _) if mapped.interrupted.contains(&turn) => TurnState::Interrupted,
+            (Some(_), Some((stop, error))) => TurnState::Failed {
+                error: error.clone(),
+                until_ms: stop.until_ms.or_else(|| {
+                    stop.limited()
+                        .then(|| crate::driven::reset_of_full(&self.meters.limits))
+                        .flatten()
+                }),
+            },
+            (Some(_), None) => TurnState::Complete,
         };
         let usage = usage(&record.usage);
         let mut updated = mapped.turns.get(&turn).cloned().unwrap_or_else(|| Turn {
@@ -901,14 +940,35 @@ impl Observed {
             mapped.turns.insert(turn, updated.clone());
             actions.push(Action::TurnStarted(updated));
         }
+        let mut failed = None;
         if let Some(ended_ms) = record.ended_ms
             && mapped.ended.insert(turn)
         {
+            failed = Some(matches!(state, TurnState::Failed { .. }));
             actions.push(Action::TurnEnded { turn, state, usage, ended_ms });
         }
         for action in actions {
             self.push(id, action);
         }
+        if *thread == conv::ThreadId::Main
+            && let Some(failed) = failed
+        {
+            self.failed = failed;
+            self.settle_failed();
+        }
+    }
+
+    /// A status of done after a turn that failed is a failure: tell it again as one.
+    fn settle_failed(&mut self) {
+        let Some(status) = self.status.as_mut() else { return };
+        let phase = match status.phase {
+            Phase::Done if self.failed => Phase::Failed,
+            Phase::Failed if !self.failed => Phase::Done,
+            _ => return,
+        };
+        status.phase = phase;
+        let status = status.clone();
+        self.push(self.meta.id, Action::Status(status));
     }
 
     fn output(&mut self, output: &conv::Output) {
@@ -1009,6 +1069,9 @@ impl Observed {
             )),
             Body::Note(note) => ItemBody::Notice(Notice {
                 kind: match note.kind {
+                    NoteKind::ApiError if note.stop.as_ref().is_some_and(conv::Stop::limited) => {
+                        Notice::LIMIT
+                    }
                     NoteKind::ApiError => Notice::API_ERROR,
                     NoteKind::Command => Notice::COMMAND,
                     NoteKind::Info => Notice::INFO,

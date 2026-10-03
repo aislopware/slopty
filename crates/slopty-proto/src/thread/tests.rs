@@ -432,3 +432,53 @@ fn an_edited_allow_reads_back_and_nothing_else_does() {
         assert_eq!(Editable::read(other), None, "{other}");
     }
 }
+
+/// A reordered message lands just before the one named, or last; the rest keep their order;
+/// a message not in the list, or before one not in it, moves nothing.
+#[test]
+fn a_message_moves_before_another_or_to_the_end() {
+    let ids: Vec<IntentId> = (1..=4).map(|n| IntentId::from_uuid(Uuid::from_u128(n))).collect();
+    let [a, b, c, d] = [ids[0], ids[1], ids[2], ids[3]];
+    let moved = |which, before| {
+        let mut list = ids.clone();
+        let done = Pending::reorder(&mut list, |id| *id, which, before);
+        (done, list)
+    };
+    assert_eq!(moved(d, Some(b)), (true, vec![a, d, b, c]), "earlier");
+    assert_eq!(moved(a, Some(c)), (true, vec![b, a, c, d]), "later");
+    assert_eq!(moved(b, None), (true, vec![a, c, d, b]), "last");
+    assert_eq!(moved(b, Some(b)), (true, ids.clone()), "before itself");
+    let gone = IntentId::from_uuid(Uuid::from_u128(9));
+    assert_eq!(moved(gone, Some(a)), (false, ids.clone()));
+    assert_eq!(moved(a, Some(gone)), (false, ids.clone()));
+}
+
+proptest! {
+    /// Any move keeps every message once, and puts the one moved right before its mark.
+    #[test]
+    fn a_reorder_is_a_move(len in 1_u128..8, which in 0_u128..8, before in proptest::option::of(0_u128..8)) {
+        let ids: Vec<IntentId> = (0..len).map(|n| IntentId::from_uuid(Uuid::from_u128(n))).collect();
+        let id = |n: u128| IntentId::from_uuid(Uuid::from_u128(n));
+        let mut list = ids.clone();
+        let done = Pending::reorder(&mut list, |i| *i, id(which), before.map(id));
+        prop_assert_eq!(done, which < len && before.is_none_or(|b| b < len));
+        let mut sorted = list.clone();
+        sorted.sort();
+        let mut want = ids.clone();
+        want.sort();
+        prop_assert_eq!(sorted, want);
+        if done {
+            let at = list.iter().position(|i| *i == id(which)).unwrap_or(usize::MAX - 1);
+            match before.filter(|b| *b != which) {
+                Some(b) => prop_assert_eq!(list.get(at.saturating_add(1)), Some(&id(b))),
+                None if before.is_none() => prop_assert_eq!(list.last(), Some(&id(which))),
+                None => prop_assert_eq!(&list, &ids),
+            }
+            let rest: Vec<IntentId> = list.iter().copied().filter(|i| *i != id(which)).collect();
+            let was: Vec<IntentId> = ids.iter().copied().filter(|i| *i != id(which)).collect();
+            prop_assert_eq!(rest, was);
+        } else {
+            prop_assert_eq!(list, ids);
+        }
+    }
+}

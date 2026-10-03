@@ -292,7 +292,6 @@ mod golden_thread {
             "client_expand",
             &ThreadRequest::Expand { thread: thread(), content: ContentRef("r1#2".to_owned()) },
         );
-        snap("client_approvals", &ThreadRequest::Approvals { on: true });
         snap(
             "client_sessions",
             &ThreadRequest::Sessions {
@@ -355,6 +354,14 @@ mod golden_thread {
         snap(
             "intent_edit",
             &send(Intent::Edit { pending: intent(), text: "then the README".to_owned() }),
+        );
+        snap("intent_promote", &send(Intent::Promote { pending: intent() }));
+        snap(
+            "intent_reorder",
+            &send(Intent::Reorder {
+                pending: intent(),
+                before: Some(IntentId::from_uuid(Uuid::from_u128(8))),
+            }),
         );
         snap("intent_interrupt", &send(Intent::Interrupt));
         snap(
@@ -473,7 +480,7 @@ mod golden_thread {
             Action::TurnStarted(turn()),
             Action::TurnEnded {
                 turn: TurnId(1),
-                state: TurnState::Failed { error: "overloaded".to_owned() },
+                state: TurnState::Failed { error: "overloaded".to_owned(), until_ms: None },
                 usage: usage(),
                 ended_ms: ms(5),
             },

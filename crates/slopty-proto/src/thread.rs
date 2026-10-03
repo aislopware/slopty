@@ -492,6 +492,8 @@ pub enum TurnState {
     Failed {
         /// What went wrong.
         error: String,
+        /// When what stopped it lifts, where the agent says: the reset of a usage limit it hit.
+        until_ms: Option<WallMs>,
     },
 }
 
@@ -638,7 +640,7 @@ pub struct Compaction {
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Notice {
     /// Open: [`Notice::API_ERROR`], [`Notice::COMMAND`], [`Notice::INFO`], [`Notice::HOOK`],
-    /// [`Notice::INTERRUPTED`], [`Notice::REWOUND`].
+    /// [`Notice::INTERRUPTED`], [`Notice::LIMIT`], [`Notice::REWOUND`].
     pub kind: String,
     /// What it says.
     pub text: Clipped,
@@ -668,6 +670,8 @@ impl Notice {
     pub const INFO: &'static str = "info";
     /// The person stopped the agent.
     pub const INTERRUPTED: &'static str = "interrupted";
+    /// The agent stopped on a usage limit: its words, and the turn says when it resets.
+    pub const LIMIT: &'static str = "limit";
     /// The person went back to an earlier message; what came after it is gone.
     pub const REWOUND: &'static str = "rewound";
 
@@ -936,6 +940,36 @@ pub struct Pending {
     pub delivery: Delivery,
     /// Where it is.
     pub state: PendingState,
+}
+
+impl Pending {
+    /// Move the message of intent `which` in `list` to just before the one of `before`, or to
+    /// the end when `before` is `None` ([`wire::Intent::Reorder`]); `id` names each entry's
+    /// intent. Whether both were there: when not, `list` is as it was.
+    pub fn reorder<T>(
+        list: &mut [T],
+        id: impl Fn(&T) -> IntentId,
+        which: IntentId,
+        before: Option<IntentId>,
+    ) -> bool {
+        let Some(from) = list.iter().position(|t| id(t) == which) else { return false };
+        let to = match before {
+            None => list.len(),
+            Some(before) => match list.iter().position(|t| id(t) == before) {
+                Some(to) => to,
+                None => return false,
+            },
+        };
+        // Moved right, it lands before what was at `to`, which shifts left as it leaves.
+        if from < to {
+            if let Some(run) = list.get_mut(from..to) {
+                run.rotate_left(1);
+            }
+        } else if let Some(run) = list.get_mut(to..=from) {
+            run.rotate_right(1);
+        }
+        true
+    }
 }
 
 /// When a message goes to the agent.

@@ -77,12 +77,6 @@ pub enum ThreadRequest {
         /// What to do.
         intent: Intent,
     },
-    /// Whether this client answers requests: while one does, the worker holds a request for
-    /// the person instead of giving it straight back to the agent's own prompt.
-    Approvals {
-        /// On or off.
-        on: bool,
-    },
     /// What changed in the working tree of a followed thread over `scope`, sent on its
     /// stream as a [`ThreadFrame::Review`].
     Review {
@@ -146,6 +140,20 @@ pub enum Intent {
         pending: IntentId,
         /// What it says now.
         text: String,
+    },
+    /// Send a queued message now, into the turn under way, as a steer would go
+    /// ([`Cap::STEER`]); with no turn under way it starts one.
+    Promote {
+        /// The intent that sent it.
+        pending: IntentId,
+    },
+    /// Move a message that has not gone yet to just before another, or to the end of the list
+    /// ([`Cap::QUEUE`]): queued messages go in the list's order.
+    Reorder {
+        /// The intent that sent it.
+        pending: IntentId,
+        /// The intent of the message it goes before; `None` for the end.
+        before: Option<IntentId>,
     },
     /// Stop the turn under way.
     Interrupt,
@@ -232,10 +240,11 @@ impl Intent {
     #[must_use]
     pub const fn needs(&self) -> &'static str {
         match self {
-            Self::Send { delivery: Delivery::Steer, .. } => Cap::STEER,
+            Self::Send { delivery: Delivery::Steer, .. } | Self::Promote { .. } => Cap::STEER,
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
-            | Self::Edit { .. } => Cap::QUEUE,
+            | Self::Edit { .. }
+            | Self::Reorder { .. } => Cap::QUEUE,
             Self::Interrupt => Cap::INTERRUPT,
             Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,

@@ -5,7 +5,8 @@
 //! flags it was started with that shape the session: the model, the permission mode, the tools
 //! and directories it may use. Nothing else of the command line is kept. The prompt was sent
 //! already, and `--settings`, `--mcp-config`, `--agents` and the system prompts can carry
-//! tokens, so none of them is ever written down.
+//! tokens, so none of them is ever written down. Nor is `--worktree`: Claude Code records the
+//! worktree a session runs in and enters it again on a resume, where the flag would make another.
 //!
 //! What Slopty itself put on the command line is noted instead, to be given afresh: its hook
 //! relay, its tools, and the lock on the mode that asks no permission. One system prompt is
@@ -425,6 +426,21 @@ mod tests {
             invocation(&words("--model opus -- --model sonnet")).args,
             words("--model opus")
         );
+    }
+
+    /// A session started in a worktree of its own is resumed without `--worktree`, which would
+    /// make another: Claude Code records the worktree in the session and enters it again on a
+    /// resume. Its `--tmux` goes with it, whatever the spelling.
+    #[test]
+    fn a_worktree_is_entered_again_by_claude_code_not_made_again() {
+        for line in [
+            "--worktree --model opus",
+            "--worktree fix-login --model opus",
+            "-w fix-login --tmux --model opus",
+            "--worktree=fix-login --tmux=classic --model opus",
+        ] {
+            assert_eq!(invocation(&words(line)).args, words("--model opus"), "{line}");
+        }
     }
 
     /// A kept flag whose value holds a control character is left out with it, a list keeping

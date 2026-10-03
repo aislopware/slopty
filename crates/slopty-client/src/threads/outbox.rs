@@ -70,6 +70,8 @@ impl Sent {
                 }
             }
             Intent::Withdraw { .. }
+            | Intent::Promote { .. }
+            | Intent::Reorder { .. }
             | Intent::SetModel { .. }
             | Intent::SetMode { .. }
             | Intent::Compact

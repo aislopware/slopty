@@ -538,7 +538,7 @@ impl Driven {
         }
         if self.turn_open && !self.last_message_ended_run() {
             self.last_end = Some(match why {
-                Some(why) => TurnState::Failed { error: why.to_owned() },
+                Some(why) => TurnState::Failed { error: why.to_owned(), until_ms: None },
                 None => TurnState::Interrupted,
             });
         }
@@ -889,12 +889,13 @@ impl Driven {
                     Some("error") if self.aborting || error_message.as_deref() == Some(ABORTED) => {
                         Some(TurnState::Interrupted)
                     }
-                    Some("error") => {
-                        Some(TurnState::Failed { error: error_message.clone().unwrap_or_default() })
-                    }
+                    Some("error") => Some(TurnState::Failed {
+                        error: error_message.clone().unwrap_or_default(),
+                        until_ms: None,
+                    }),
                     Some(_) => Some(TurnState::Complete),
                 };
-                if let Some(TurnState::Failed { error }) = &self.last_end
+                if let Some(TurnState::Failed { error, .. }) = &self.last_end
                     && !error.is_empty()
                 {
                     let error = error.clone();

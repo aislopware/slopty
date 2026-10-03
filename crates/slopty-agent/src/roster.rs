@@ -71,6 +71,18 @@ pub fn parse(json: &str) -> Result<Vec<Listed>, serde_json::Error> {
     serde_json::from_str(json)
 }
 
+/// The conversations `listed` runs in the background (`claude --bg`) now: `claude --resume`
+/// refuses one of them while it runs, and `claude attach <id>` opens it.
+pub fn background(listed: &[Listed]) -> impl Iterator<Item = &str> {
+    listed
+        .iter()
+        .filter(|l| l.kind.as_deref() == Some("background") && l.pid.is_some())
+        .filter_map(|l| l.session_id.as_deref())
+}
+
+/// The subcommand that opens a background session in this terminal (`claude attach <id>`).
+pub const ATTACH: &str = "attach";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +107,21 @@ mod tests {
         );
         assert_eq!(listed("dreaming", None).status(), None);
         assert_eq!(Listed::default().status(), None, "a background session whose process ended");
+    }
+
+    /// Only a live background session is one to attach to: an interactive one, one whose
+    /// process is gone, and one that names no conversation are not.
+    #[test]
+    fn background_sessions_are_the_live_ones_run_with_bg() {
+        let listed = parse(
+            r#"[
+                {"pid": 10, "sessionId": "bg-1", "kind": "background", "status": "idle"},
+                {"sessionId": "bg-gone", "kind": "background"},
+                {"pid": 11, "sessionId": "tty-1", "kind": "interactive"},
+                {"pid": 12, "kind": "background"}
+            ]"#,
+        )
+        .unwrap();
+        assert_eq!(background(&listed).collect::<Vec<_>>(), ["bg-1"]);
     }
 }

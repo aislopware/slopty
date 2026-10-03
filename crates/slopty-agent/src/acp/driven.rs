@@ -587,7 +587,7 @@ impl Session {
                                 "The agent refused to go on.",
                                 now,
                             ));
-                            TurnState::Failed { error: "refused".to_owned() }
+                            TurnState::Failed { error: "refused".to_owned(), until_ms: None }
                         }
                         acp::StopReason::MaxTokens => {
                             actions.extend(self.notice(
@@ -611,14 +611,14 @@ impl Session {
                 Err(e) => {
                     let why = format!("The agent's answer did not read: {e}");
                     actions.extend(self.notice(Notice::INFO, &why, now));
-                    TurnState::Failed { error: why }
+                    TurnState::Failed { error: why, until_ms: None }
                 }
             },
             Err(_) if self.cancelling => TurnState::Interrupted,
             Err(error) => {
                 let why = said(error);
                 actions.extend(self.notice(Notice::API_ERROR, &why, now));
-                TurnState::Failed { error: why }
+                TurnState::Failed { error: why, until_ms: None }
             }
         };
         self.last_end = Some(end);
@@ -792,6 +792,13 @@ impl Session {
         Some(vec![self.pending_now()])
     }
 
+    /// Move the message held for `intent` to just before the one held for `before`, or to the
+    /// end; `None` when either is not held.
+    pub fn reorder(&mut self, intent: IntentId, before: Option<IntentId>) -> Option<Vec<Action>> {
+        let queued = self.queued.make_contiguous();
+        Pending::reorder(queued, |p| p.intent, intent, before).then(|| vec![self.pending_now()])
+    }
+
     /// The next message held, taken off the queue, once no turn is under way: its intent, its
     /// words and its files.
     pub fn next_queued(&mut self) -> Option<(Pending, Vec<Action>)> {
@@ -851,7 +858,7 @@ impl Session {
         }
         if self.turn_open {
             self.last_end = Some(match why {
-                Some(why) => TurnState::Failed { error: why.to_owned() },
+                Some(why) => TurnState::Failed { error: why.to_owned(), until_ms: None },
                 None => TurnState::Interrupted,
             });
         }

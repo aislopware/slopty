@@ -59,9 +59,9 @@ pub use slopty_proto::conversation::{
     AgentDetail, AgentRun, Answer, BashDetail, Body, Cap, Change, Choice, Clipped, Compact,
     EditDetail, Entry, GlobDetail, GrepDetail, Hunk, IMAGE_BYTES, Image, Link, McpDetail, Note,
     NoteKind, Origin, Output, Part, Patch, Prompt, Question, QuestionDetail, ReadDetail,
-    ResultStatus, Retry, ShellStatus, Task, TaskCreateDetail, TaskUpdateDetail, TextRef, ThreadId,
-    ThreadState, ToolCall, ToolDetail, ToolResult, Turn, Usage, WebFetchDetail, WebSearchDetail,
-    WriteDetail, WriteKind,
+    ResultStatus, Retry, ShellStatus, Stop, Task, TaskCreateDetail, TaskUpdateDetail, TextRef,
+    ThreadId, ThreadState, ToolCall, ToolDetail, ToolResult, Turn, Usage, WebFetchDetail,
+    WebSearchDetail, WriteDetail, WriteKind,
 };
 
 use crate::transcript::Tail;
@@ -499,6 +499,7 @@ impl Conversation {
                     kind: NoteKind::Command,
                     text: Clipped::head(&output, OUTPUT, Some(reference())),
                     retry: None,
+                    stop: None,
                 })
             } else if text.trim_start().starts_with('<') || text.trim().is_empty() || prompt_made {
                 // Text Claude Code injects for the model (reminders, caveats) is not the person's.
@@ -602,10 +603,21 @@ impl Conversation {
         let Some(content) = message.get("content") else { return };
         if bool_at(record, "isApiErrorMessage") {
             let text = content_text(content);
+            // Claude Code records the error it gave up on with its kind, and a refusal for a
+            // usage limit with the quota it hit (`quotaLimits.resetsAt`, in seconds).
+            let until_ms = record
+                .get("quotaLimits")
+                .and_then(|q| u64_at(q, "resetsAt"))
+                .map(|s| WallMs::from_millis(s.saturating_mul(1000)));
+            let stop = Stop {
+                error: string_at(record, "error").unwrap_or_else(|| "unknown".to_owned()),
+                until_ms,
+            };
             let body = Body::Note(Note {
                 kind: NoteKind::ApiError,
                 text: Clipped::head(text.trim(), OUTPUT, None),
                 retry: None,
+                stop: Some(stop),
             });
             self.add(ctx, ctx.uuid.to_owned(), body, batch);
             return;
@@ -700,6 +712,7 @@ impl Conversation {
                     kind: NoteKind::ApiError,
                     text: Clipped::head(&text, OUTPUT, None),
                     retry,
+                    stop: None,
                 })
             }
             Some("stop_hook_summary" | "turn_duration") => {
@@ -729,6 +742,7 @@ impl Conversation {
                     kind: NoteKind::Hook,
                     text: Clipped::head(&strip_ansi(&said.join("\n")), OUTPUT, None),
                     retry: None,
+                    stop: None,
                 })
             }
             Some("local_command") => {
@@ -744,12 +758,14 @@ impl Conversation {
                     kind: NoteKind::Command,
                     text: Clipped::head(&text, OUTPUT, None),
                     retry: None,
+                    stop: None,
                 })
             }
             Some("informational") if !content.trim().is_empty() => Body::Note(Note {
                 kind: NoteKind::Info,
                 text: Clipped::head(content.trim(), OUTPUT, None),
                 retry: None,
+                stop: None,
             }),
             _ => return,
         };

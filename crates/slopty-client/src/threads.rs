@@ -70,7 +70,6 @@ pub struct Threads {
     reviews: HashMap<ThreadId, Arc<Review>>,
     /// Expansions asked for and not come yet.
     asked: HashSet<ContentRef>,
-    approvals: bool,
     linked: bool,
     outbox_changed: bool,
 }
@@ -152,9 +151,6 @@ impl Threads {
         self.linked = true;
         let have = self.heard_table.then_some(self.table.cursor);
         let mut out = vec![ClientMsg::Thread(ThreadRequest::Table { have })];
-        if self.approvals {
-            out.push(ClientMsg::Thread(ThreadRequest::Approvals { on: true }));
-        }
         out.extend(self.mirrors.iter().map(|(thread, mirror)| follow(*thread, mirror)));
         out.extend(self.outbox.unanswered().map(intent_msg));
         out
@@ -168,15 +164,6 @@ impl Threads {
         for mirror in self.mirrors.values_mut() {
             mirror.lost();
         }
-    }
-
-    /// Whether this client answers requests ([`ThreadRequest::Approvals`]); what to send.
-    pub fn set_approvals(&mut self, on: bool) -> Option<ClientMsg> {
-        if self.approvals == on {
-            return None;
-        }
-        self.approvals = on;
-        self.linked.then_some(ClientMsg::Thread(ThreadRequest::Approvals { on }))
     }
 
     /// Open `thread` here, drawn at once from `cached` when the cache kept it; what to send to

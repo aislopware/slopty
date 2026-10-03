@@ -2454,8 +2454,8 @@ mod conversation {
         GlobDetail, Grant, GrepDetail, Hunk, Image, Link, Live, LiveId, LiveKind, McpDetail,
         Meters, Note, NoteKind, Output, Part, Patch, PermissionEvent, PermissionPrompt, Prompt,
         Question, QuestionDetail, RateWindow, ReadDetail, ResultStatus, Retry, Settled,
-        ShellStatus, SlashCommand, Suggestion, Task, TaskCreateDetail, TaskUpdateDetail, TextRef,
-        ThreadId, ToolCall, ToolDetail, ToolResult, Turn, Usage, Verdict, WebFetchDetail,
+        ShellStatus, SlashCommand, Stop, Suggestion, Task, TaskCreateDetail, TaskUpdateDetail,
+        TextRef, ThreadId, ToolCall, ToolDetail, ToolResult, Turn, Usage, Verdict, WebFetchDetail,
         WebSearchDetail, WriteDetail, WriteKind,
     };
     use slopty_proto::transfer::UniHead;
@@ -2802,19 +2802,47 @@ mod conversation {
                         kind: NoteKind::ApiError,
                         text: text("529"),
                         retry: Some(Retry { attempt: 2, max: 10, in_ms: 1_100 }),
+                        stop: None,
+                    }),
+                ),
+                entry(
+                    "u5s",
+                    Body::Note(Note {
+                        kind: NoteKind::ApiError,
+                        text: text("limit"),
+                        retry: None,
+                        stop: Some(Stop {
+                            error: Stop::RATE_LIMIT.to_owned(),
+                            until_ms: Some(WallMs::from_millis(1_800_000_000_000)),
+                        }),
                     }),
                 ),
                 entry(
                     "u6",
-                    Body::Note(Note { kind: NoteKind::Command, text: text("ok"), retry: None }),
+                    Body::Note(Note {
+                        kind: NoteKind::Command,
+                        text: text("ok"),
+                        retry: None,
+                        stop: None,
+                    }),
                 ),
                 entry(
                     "u7",
-                    Body::Note(Note { kind: NoteKind::Info, text: text("fyi"), retry: None }),
+                    Body::Note(Note {
+                        kind: NoteKind::Info,
+                        text: text("fyi"),
+                        retry: None,
+                        stop: None,
+                    }),
                 ),
                 entry(
                     "u8",
-                    Body::Note(Note { kind: NoteKind::Hook, text: text("no"), retry: None }),
+                    Body::Note(Note {
+                        kind: NoteKind::Hook,
+                        text: text("no"),
+                        retry: None,
+                        stop: None,
+                    }),
                 ),
                 entry("u9", Body::Rewound { dropped: 6 }),
                 Change::Remove { thread: ThreadId::Agent("a1".to_owned()), id: "u0".to_owned() },

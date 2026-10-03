@@ -448,6 +448,8 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Send { .. } => "Not sent".to_owned(),
         Intent::Edit { .. } => "Not changed".to_owned(),
         Intent::Withdraw { .. } => "Couldn't take the message back".to_owned(),
+        Intent::Promote { .. } => "Couldn't send the message now".to_owned(),
+        Intent::Reorder { .. } => "Couldn't move the message".to_owned(),
         Intent::Interrupt => "Couldn't stop".to_owned(),
         Intent::Answer { .. } => "The answer didn't go".to_owned(),
         Intent::Release { .. } => "Couldn't hand the request back".to_owned(),

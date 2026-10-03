@@ -662,7 +662,7 @@ mod tests {
             for (why, turn, phase) in [
                 (
                     Some("pi ended: boom"),
-                    TurnState::Failed { error: "pi ended: boom".into() },
+                    TurnState::Failed { error: "pi ended: boom".into(), until_ms: None },
                     Phase::Failed,
                 ),
                 (None, TurnState::Interrupted, Phase::Stopped),

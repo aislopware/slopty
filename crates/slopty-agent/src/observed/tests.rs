@@ -601,6 +601,137 @@ fn an_api_error_it_retries_says_the_attempt() {
     assert_eq!(notice.retry, Some(Retry { attempt: 2, max: Some(10), in_ms: Some(1_085) }));
 }
 
+/// A transcript of `records`, one JSON object a line, read whole by the decoder.
+fn read(records: &[serde_json::Value]) -> Vec<Change> {
+    let scratch = tempfile::tempdir().expect("a temp dir");
+    let path = scratch.path().join("s.jsonl");
+    let text: String = records.iter().map(|r| format!("{r}\n")).collect::<Vec<_>>().concat();
+    std::fs::write(&path, text).expect("written");
+    Transcripts::default().read(&path, &[])
+}
+
+/// A prompt, then the API error Claude Code gave up on (`error`, with `quota` as its
+/// `quotaLimits` when it has them), then its end-of-turn record.
+fn stopped_turn(error: &str, quota: Option<serde_json::Value>) -> Vec<serde_json::Value> {
+    let mut refusal = serde_json::json!({"type": "assistant", "uuid": "e1", "parentUuid": "p1",
+        "timestamp": "2026-09-27T03:15:40.000Z", "isApiErrorMessage": true, "error": error,
+        "message": {"role": "assistant", "model": "<synthetic>",
+            "content": [{"type": "text", "text": "You've hit your limit · resets 6pm"}]}});
+    if let Some(quota) = quota {
+        refusal["quotaLimits"] = quota;
+    }
+    vec![
+        serde_json::json!({"type": "user", "uuid": "p1", "parentUuid": null,
+            "timestamp": "2026-09-27T03:15:25.849Z",
+            "message": {"role": "user", "content": "Fix the build"}}),
+        refusal,
+        serde_json::json!({"type": "system", "subtype": "turn_duration", "uuid": "d1",
+            "parentUuid": "e1", "timestamp": "2026-09-27T03:15:41.000Z", "durationMs": 15_000}),
+    ]
+}
+
+fn done() -> AgentEvent {
+    AgentEvent {
+        session: SessionId::nil(),
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Done,
+        agent_session: None,
+        detail: None,
+        attention: false,
+        source: AgentSource::Hook,
+        since_ms: WallMs::from_millis(3),
+        mode: None,
+    }
+}
+
+/// A turn a usage limit stopped fails with when the limit resets, as Claude Code recorded the
+/// quota it hit; its notice is a limit, and the agent's done is a failure, whichever of the
+/// status and the transcript comes first.
+#[test]
+fn a_turn_a_usage_limit_stopped_fails_until_it_resets() {
+    let quota = serde_json::json!({"status": "rejected", "resetsAt": 1_790_020_000_u64,
+        "rateLimitType": "five_hour"});
+    let changes = read(&stopped_turn(conv::Stop::RATE_LIMIT, Some(quota)));
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    host.take(observed.status(&done()));
+    assert_eq!(host.thread(observed.main()).status.phase, Phase::Done, "nothing failed yet");
+    host.take(observed.transcript(&changes, &[]));
+    let thread = host.thread(observed.main());
+    let [turn] = thread.turns.as_slice() else { panic!("one turn: {:#?}", thread.turns) };
+    assert_eq!(
+        turn.state,
+        TurnState::Failed {
+            error: "You've hit your limit · resets 6pm".to_owned(),
+            until_ms: Some(WallMs::from_millis(1_790_020_000_000)),
+        }
+    );
+    let kinds: Vec<&str> = thread
+        .items
+        .iter()
+        .filter_map(|i| match &i.body {
+            ItemBody::Notice(n) => Some(n.kind.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(kinds, [Notice::LIMIT]);
+    assert_eq!(thread.status.phase, Phase::Failed, "the done before it is told again");
+    host.take(observed.status(&done()));
+    assert_eq!(host.thread(observed.main()).status.phase, Phase::Failed, "and one after it");
+    let next = read(&[serde_json::json!({"type": "user", "uuid": "p2", "parentUuid": "d1",
+        "timestamp": "2026-09-27T05:00:00.000Z",
+        "message": {"role": "user", "content": "Try again"}})]);
+    host.take(observed.transcript(&next, &[]));
+    host.take(observed.status(&done()));
+    assert_eq!(host.thread(observed.main()).status.phase, Phase::Done, "a new prompt starts over");
+}
+
+/// A limit stop with no quota recorded resets when the status line's full window does; any
+/// other error that ended a turn fails it with no reset, as an API error; and a turn the
+/// model went on in after an error completes.
+#[test]
+fn a_stopped_turn_fails_by_what_stopped_it() {
+    let full = conv::Meters {
+        five_hour: Some(conv::RateWindow { used_pct: 100.0, resets_at: Some(1_790_030_000) }),
+        seven_day: Some(conv::RateWindow { used_pct: 40.0, resets_at: Some(1_790_500_000) }),
+        ..conv::Meters::default()
+    };
+    let ended = |records: &[serde_json::Value]| {
+        let mut observed = observed();
+        let mut host = Host::default();
+        host.take(observed.drain());
+        host.take(observed.meters(&full));
+        host.take(observed.transcript(&read(records), &[]));
+        let thread = host.thread(observed.main());
+        let notice = thread.items.iter().find_map(|i| match &i.body {
+            ItemBody::Notice(n) => Some(n.kind.clone()),
+            _ => None,
+        });
+        (thread.turns.first().map(|t| t.state.clone()), notice)
+    };
+    let (state, notice) = ended(&stopped_turn(conv::Stop::RATE_LIMIT, None));
+    assert!(
+        matches!(state, Some(TurnState::Failed { until_ms: Some(at), .. })
+            if at == WallMs::from_millis(1_790_030_000_000)),
+        "{state:?}"
+    );
+    assert_eq!(notice.as_deref(), Some(Notice::LIMIT));
+    let (state, notice) = ended(&stopped_turn("server_error", None));
+    assert!(matches!(state, Some(TurnState::Failed { until_ms: None, .. })), "{state:?}");
+    assert_eq!(notice.as_deref(), Some(Notice::API_ERROR));
+    let mut went_on = stopped_turn("server_error", None);
+    went_on.insert(
+        2,
+        serde_json::json!({"type": "assistant", "uuid": "a1", "parentUuid": "e1",
+            "timestamp": "2026-09-27T03:15:40.500Z",
+            "message": {"id": "m1", "role": "assistant", "model": "claude-opus-5-5",
+                "content": [{"type": "text", "text": "Done."}]}}),
+    );
+    let (state, _) = ended(&went_on);
+    assert_eq!(state, Some(TurnState::Complete));
+}
+
 /// A command Claude Code runs in the background is in the thread's background work, by the
 /// task id Claude Code gave it, from its call to its end, which its queued notice stamps.
 #[test]

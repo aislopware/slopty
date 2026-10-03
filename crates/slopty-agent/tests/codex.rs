@@ -14,8 +14,8 @@ mod tests {
     use slopty_agent::codex::shared::{self, Shared};
     use slopty_core::WallMs;
     use slopty_proto::thread::{
-        Action, AgentId, Answerer, Drive, Effect, ItemBody, Phase, Request, RequestState, Status,
-        ThreadState, ToolDetail, ToolState, TurnId, TurnState,
+        Action, AgentId, Answerer, Drive, Effect, ItemBody, Notice, Phase, Request, RequestState,
+        Status, ThreadState, ToolDetail, ToolState, TurnId, TurnState,
     };
 
     /// The notifications Slopty passes over: the app-server's remote-control state, its
@@ -529,7 +529,7 @@ mod tests {
         }
     }
 
-    fn notices(state: &ThreadState) -> Vec<slopty_proto::thread::Notice> {
+    fn notices(state: &ThreadState) -> Vec<Notice> {
         state
             .items
             .iter()
@@ -567,6 +567,54 @@ mod tests {
         );
         let retry = notices(&state)[0].retry.unwrap();
         assert_eq!((retry.max, retry.in_ms), (None, None), "Codex says neither");
+    }
+
+    /// A turn a usage limit stopped fails with when the full window resets, its error a limit
+    /// notice; a turn any other error ended fails with no reset.
+    #[test]
+    fn a_turn_a_usage_limit_stopped_fails_until_it_resets() {
+        let stopped = |info: &str| {
+            let (mut shared, mut state) = begun();
+            let turn = turn_begun(&mut shared, &mut state);
+            let thread = shared.meta().native.clone();
+            hear(
+                &mut shared,
+                &mut state,
+                "account/rateLimits/updated",
+                &json!({"rateLimits": {
+                "primary": {"usedPercent": 100, "windowDurationMins": 300, "resetsAt": 1_800_000_000},
+                "secondary": {"usedPercent": 30, "windowDurationMins": 10_080, "resetsAt": 1_800_500_000}}}),
+            );
+            let error = json!({"message": "You've hit your usage limit.", "codexErrorInfo": info});
+            hear(
+                &mut shared,
+                &mut state,
+                "error",
+                &json!({"threadId": thread, "turnId": turn, "willRetry": false, "error": error}),
+            );
+            hear(
+                &mut shared,
+                &mut state,
+                "turn/completed",
+                &json!({"threadId": thread, "turn": {"completedAt": 2, "durationMs": 1,
+                    "error": error, "id": turn, "items": [], "itemsView": "notLoaded",
+                    "startedAt": 0, "status": "failed"}}),
+            );
+            let kinds: Vec<String> = notices(&state).into_iter().map(|n| n.kind).collect();
+            (state.turns.last().unwrap().state.clone(), kinds)
+        };
+        let (state, kinds) = stopped("usageLimitExceeded");
+        assert_eq!(
+            state,
+            TurnState::Failed {
+                error: "You've hit your usage limit.".to_owned(),
+                until_ms: Some(WallMs::from_millis(1_800_000_000_000)),
+            }
+        );
+        assert_eq!(kinds, [Notice::LIMIT]);
+        let (state, kinds) = stopped("serverOverloaded");
+        assert!(matches!(state, TurnState::Failed { until_ms: None, .. }), "{state:?}");
+        assert_eq!(kinds, [Notice::API_ERROR]);
     }
 
     /// A request open on an active thread waits on the person, though Codex flagged no wait
@@ -828,6 +876,48 @@ mod tests {
     /// The recorded notification `method` of `name`'s fixture, as its params.
     fn recorded_note(name: &str, method: &str) -> Value {
         fixture(name).into_iter().find(|l| l.msg["method"] == method).unwrap().msg["params"].clone()
+    }
+
+    /// Messages held while a turn runs keep the order the person gives them, and one promoted
+    /// leaves the queue and goes into the turn under way as a steer, the rest still held.
+    #[test]
+    fn a_held_message_moves_in_the_queue_or_steers_the_turn() {
+        use slopty_proto::thread::{Delivery, IntentId};
+        let (mut shared, mut state) = begun();
+        hear(
+            &mut shared,
+            &mut state,
+            "turn/started",
+            &recorded_note("question.jsonl", "turn/started"),
+        );
+        let turn = shared.current().unwrap().to_owned();
+        let ids = [IntentId::new(), IntentId::new(), IntentId::new()];
+        for (intent, text) in ids.iter().zip(["one", "two", "three"]) {
+            let shared::Send::Held(actions) = shared.send(text, vec![], Delivery::Queue, *intent)
+            else {
+                panic!("held while the turn runs")
+            };
+            for action in &actions {
+                state.apply(action);
+            }
+        }
+        let order =
+            |state: &ThreadState| state.pending.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
+        for action in &shared.reorder(ids[2], Some(ids[0])).unwrap() {
+            state.apply(action);
+        }
+        assert_eq!(order(&state), ["three", "one", "two"]);
+        assert!(shared.reorder(ids[0], Some(IntentId::new())).is_none(), "before nothing held");
+
+        let (send, actions) = shared.promote(ids[0]).unwrap();
+        for action in &actions {
+            state.apply(action);
+        }
+        let shared::Send::Steer(steer) = send else { panic!("a steer: {send:?}") };
+        assert_eq!(steer.expected_turn_id, turn);
+        assert_eq!(serde_json::to_value(&steer.input).unwrap()[0]["text"], "one");
+        assert_eq!(order(&state), ["three", "two"], "the rest still held");
+        assert!(shared.promote(ids[0]).is_none(), "gone once");
     }
 
     /// A message queued while a turn runs is held by the thread, not sent: it shows waiting,
