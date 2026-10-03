@@ -32,6 +32,29 @@ const PMSET_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most of an agent command's output kept: `claude agents --json` lists every session.
 const OUTPUT_CAP: usize = 4 << 20;
 
+/// What the worker could not keep on its own disk, by what it keeps, while each fails: a
+/// full or read-only volume costs a restart its terminals' screens and the agents' threads,
+/// and says so only in the log otherwise. Process-wide, as the disk is.
+static NOT_WRITTEN: std::sync::LazyLock<parking_lot::Mutex<BTreeMap<&'static str, String>>> =
+    std::sync::LazyLock::new(parking_lot::Mutex::default);
+
+/// `what` (`"Thread logs"`) was written: it no longer fails.
+pub fn wrote(what: &'static str) {
+    NOT_WRITTEN.lock().remove(what);
+}
+
+/// `what` (`"Thread logs"`) could not be written, for `error`; said in [`WorkerCaps`] until
+/// it is written again.
+pub fn not_written(what: &'static str, error: &dyn std::fmt::Display) {
+    NOT_WRITTEN.lock().insert(what, format!("{what} cannot be written: {error}"));
+}
+
+/// The first of what fails to be written, in words, while anything does.
+#[must_use]
+pub fn writes_failing() -> Option<String> {
+    NOT_WRITTEN.lock().values().next().cloned()
+}
+
 /// The agents with an adapter of their own, by the program [`crate::facts::agents`] names.
 const ADAPTED: [(&str, &str); 3] =
     [("claude", AgentId::CLAUDE_CODE), ("codex", AgentId::CODEX), ("pi", AgentId::PI)];
@@ -120,6 +143,7 @@ pub fn probe(agents: &[InstalledAgent], wake_on_lan: Option<bool>) -> WorkerCaps
         version: env!("CARGO_PKG_VERSION").to_owned(),
         lan: slopty_tailnet::lan::ports(),
         wake_on_lan,
+        writes_failing: writes_failing(),
     }
 }
 
@@ -341,6 +365,26 @@ fn sysctl_u64(name: &CStr) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A write that fails is said in the caps until the same kind of write goes through
+    /// again; another kind failing beside it is said once the first is fixed.
+    #[test]
+    fn a_failing_write_is_said_until_one_goes_through() {
+        const WHAT: &str = "Test writes";
+        const OTHER: &str = "Test writes too";
+        not_written(WHAT, &"No space left on device");
+        let said = writes_failing().expect("said");
+        assert!(said.starts_with("Test writes"), "{said}");
+        assert_eq!(probe(&[], None).writes_failing.as_deref(), Some(said.as_str()));
+        not_written(OTHER, &"Read-only file system");
+        wrote(WHAT);
+        assert_eq!(
+            writes_failing().as_deref(),
+            Some("Test writes too cannot be written: Read-only file system")
+        );
+        wrote(OTHER);
+        assert_eq!(writes_failing(), None);
+    }
 
     /// What a machine can start is every agent with an adapter its facts found, by the name its
     /// threads carry, then each ACP agent found, the one that says no version listed with none;

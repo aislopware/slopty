@@ -1090,6 +1090,14 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     grant the app derives for this device on the clipboard when the policy turns it away, and
     says where it goes. A button the app cannot run is not drawn.
   - Test: `the_away_pill_says_why_and_offers_the_way_back` (`tests/away.rs`).
+  - **A worker whose own writes fail says so.** A full or read-only disk cost a restart its
+    terminals' kept screens and its agents' thread logs, and showed only in the worker's log.
+    Each kind of write marks itself failing or written (`slopty_worker::caps::not_written`,
+    `wrote`). The first that fails, with its error, goes out in `WorkerCaps::writes_failing`
+    at the next 5 s probe, and clears once that kind of write goes through again.
+    The worker's doctor prints it as a ✘ line. Tests:
+    `a_failing_write_is_said_until_one_goes_through` (`slopty-worker`),
+    `doctor_report_names_the_binary_and_flags_missing_permissions` (`slopty-cli`).
 
 - ✅ **The clipboard is shared or stopped per machine from the palette** (2026-10-04,
   readiness N25). Sharing per machine was a settings key, so stopping it for one machine meant

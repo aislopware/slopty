@@ -211,6 +211,7 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
         ],
         grants,
         wake_line(h.caps.wake_on_lan).into_iter().collect(),
+        h.caps.writes_failing.iter().map(|why| format!("✘ {why}")).collect(),
         vec![format!("{} clients connected, {} sessions", h.clients, h.sessions)],
     ]
     .concat();
@@ -338,6 +339,15 @@ mod tests {
             ..h.clone()
         };
         assert!(doctor_report(&wakes, true).contains("✔ Wake for network access"));
+        let full = slopty_proto::ctl::Health {
+            caps: WorkerCaps {
+                writes_failing: Some("Thread logs cannot be written: disk full".to_owned()),
+                ..h.caps.clone()
+            },
+            ..h.clone()
+        };
+        assert!(doctor_report(&full, true).contains("✘ Thread logs cannot be written: disk full"));
+        assert!(!doctor_report(&wakes, true).contains("cannot be written"));
         let linux = doctor_report(&h, false);
         assert!(!linux.contains("Screen Recording") && !linux.contains("Accessibility"), "{linux}");
         assert!(linux.contains("no desktop to stream here"), "{linux}");

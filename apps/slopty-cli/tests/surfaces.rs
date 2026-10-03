@@ -57,6 +57,7 @@ mod tests {
                 version: "0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
+                writes_failing: None,
             },
             sessions: vec![SessionSummary {
                 id: shell(),

@@ -58,6 +58,7 @@ mod tests {
                 version: "0.1.0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
+                writes_failing: None,
             },
             load: 0.5,
             last_seen_ms: WallMs::from_millis(1),

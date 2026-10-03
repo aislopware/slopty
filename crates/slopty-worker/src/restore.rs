@@ -483,9 +483,15 @@ async fn write_screen(
     .and_then(|written| written);
     match written {
         Ok(()) => write_recipe(dir, id, &recipe).await,
-        Err(e) => tracing::warn!(session = %id, error = %e, "screen not kept"),
+        Err(e) => {
+            tracing::warn!(session = %id, error = %e, "screen not kept");
+            crate::caps::not_written(KEPT, &e);
+        }
     }
 }
+
+/// What the terminals' kept screens are called when they cannot be written.
+const KEPT: &str = "Terminals' kept screens";
 
 async fn write_recipe(dir: &Path, id: SessionId, recipe: &Recipe) {
     let path = recipe_path(dir, id);
@@ -498,8 +504,12 @@ async fn write_recipe(dir: &Path, id: SessionId, recipe: &Recipe) {
         }
         Err(e) => Err(io::Error::other(e)),
     };
-    if let Err(e) = written {
-        tracing::warn!(session = %id, error = %e, "recipe not kept");
+    match written {
+        Ok(()) => crate::caps::wrote(KEPT),
+        Err(e) => {
+            tracing::warn!(session = %id, error = %e, "recipe not kept");
+            crate::caps::not_written(KEPT, &e);
+        }
     }
 }
 

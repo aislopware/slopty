@@ -402,6 +402,7 @@ mod golden {
             version: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
+            writes_failing: None,
         };
         snap(
             "worker_hello_ack",
@@ -1851,6 +1852,7 @@ mod golden {
             version: "0.1.0".to_owned(),
             lan: Vec::new(),
             wake_on_lan: None,
+            writes_failing: None,
         };
         snap(
             "server_worker_hello",
@@ -2367,6 +2369,7 @@ mod orchestration {
         let caps = WorkerCaps {
             lan: vec![en0.clone()],
             wake_on_lan: Some(true),
+            writes_failing: None,
             ..WorkerCaps::bare(Os::MacOs)
         };
         snap("server_caps_lan", &ToServer::Caps(caps));
@@ -3100,6 +3103,7 @@ mod ctl {
                 version: "0.1.0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
+                writes_failing: None,
             },
             listen: "[::]:45550".to_owned(),
             allow: vec!["10.0.0.0/8".to_owned()],

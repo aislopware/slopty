@@ -135,6 +135,10 @@ pub struct WorkerCaps {
     /// Whether it wakes for a magic packet (macOS "Wake for network access"), `None` where it
     /// cannot tell.
     pub wake_on_lan: Option<bool>,
+    /// What it cannot keep on its own disk, in words, while it cannot (a full or read-only
+    /// volume): its terminals' kept screens, its agents' thread logs. `None` while every
+    /// write goes through.
+    pub writes_failing: Option<String>,
 }
 
 impl WorkerCaps {
@@ -157,6 +161,7 @@ impl WorkerCaps {
             version: String::new(),
             lan: Vec::new(),
             wake_on_lan: None,
+            writes_failing: None,
         }
     }
 }

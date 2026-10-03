@@ -238,6 +238,7 @@ mod tests {
                 version: "0".to_owned(),
                 lan: Vec::new(),
                 wake_on_lan: None,
+                writes_failing: None,
             },
             load: 0.0,
             last_seen_ms: WallMs::ZERO,

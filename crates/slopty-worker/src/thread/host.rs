@@ -466,6 +466,9 @@ fn create(inner: &mut Inner, meta: ThreadMeta) -> io::Result<Cursor> {
     Ok(cursor)
 }
 
+/// What the threads' logs are called when they cannot be written.
+const LOGS: &str = "Thread logs";
+
 fn apply(
     hosted: &mut Hosted,
     table: &mut Table,
@@ -475,8 +478,12 @@ fn apply(
     hosted.own.mark(&mut actions);
     let first = hosted.log.cursor();
     let was_working = hosted.log.state().status.phase == Phase::Working;
-    if let Err(e) = hosted.log.append(&actions) {
-        tracing::warn!(thread = %hosted.log.id(), "a thread's log could not be written: {e}");
+    match hosted.log.append(&actions) {
+        Ok(()) => crate::caps::wrote(LOGS),
+        Err(e) => {
+            tracing::warn!(thread = %hosted.log.id(), "a thread's log could not be written: {e}");
+            crate::caps::not_written(LOGS, &e);
+        }
     }
     table.put(hosted.log.state().row(WallMs::now()));
     let thread = hosted.log.id();
