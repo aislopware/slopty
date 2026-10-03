@@ -1,8 +1,9 @@
 //! The one link a client keeps to the server, dialled at start and redialled forever after it
 //! drops.
 //!
-//! A server on a different build is said so ([`UpdateNotice`]) and asked again only after
-//! [`slopty_net::redial::WRONG_BUILD`].
+//! A server on a different build is said so ([`ServerEvent::WrongBuild`]) and asked again only
+//! after [`slopty_net::redial::WRONG_BUILD`]. One that turns this device away, whether after
+//! its hello or at the handshake, is [`ServerEvent::Refused`].
 //!
 //! Every message it carries is handed on as a [`ServerEvent`], and verbs go up it through a
 //! [`ServerCaller`] ([`ServerCaller::wake`] wakes a sleeping worker).
@@ -42,12 +43,14 @@ pub enum ServerEvent {
     },
     /// A message from it: the directory, a worker's change, an event.
     Message(Box<FromServer>),
-    /// A dial failed or the link dropped; the next attempt is on its way. A server on a
-    /// different build is one of these, `why` being its [`UpdateNotice`].
+    /// A dial failed or the link dropped; the next attempt is on its way.
     Unlinked {
         /// Why.
         why: String,
     },
+    /// The server answered on a different build: it is there, and this build cannot talk to
+    /// it until one of them is updated. Asked again after [`slopty_net::redial::WRONG_BUILD`].
+    WrongBuild(UpdateNotice),
     /// The server answered and turned this dialer away. The next attempt is on its way all the
     /// same: a change to the tailnet policy can let it in.
     Refused(Refusal),
@@ -213,10 +216,12 @@ async fn run(
                 ServerEvent::Unlinked { why }
             }
             Err(DialError::Refused(why)) => ServerEvent::Refused(why),
+            // A tailnet node the policy grants no role at all is closed at the handshake,
+            // before any hello: the same refusal, said sooner.
+            Err(DialError::Net(NetError::NotGranted)) => ServerEvent::Refused(Refusal::NotGranted),
             Err(DialError::Net(NetError::WrongBuild(wrong))) => {
                 another_build = true;
-                let notice = UpdateNotice::server(addr.host(), &wrong);
-                ServerEvent::Unlinked { why: notice.to_string() }
+                ServerEvent::WrongBuild(UpdateNotice::server(addr.host(), &wrong))
             }
             Err(DialError::Net(e)) => ServerEvent::Unlinked { why: e.to_string() },
         };
@@ -224,6 +229,7 @@ async fn run(
         let why = match &event {
             ServerEvent::Unlinked { why } => why.clone(),
             ServerEvent::Refused(refusal) => refusal.text().to_owned(),
+            ServerEvent::WrongBuild(notice) => notice.to_string(),
             ServerEvent::Linked { .. } | ServerEvent::Message(_) => String::new(),
         };
         if tx.send(event).await.is_err() {

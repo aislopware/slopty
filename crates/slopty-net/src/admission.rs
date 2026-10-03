@@ -11,14 +11,18 @@
 //!   (`slopty_tailnet::policy`). Where no Tailscale this process can read is running, a tailnet
 //!   address is let in by address, as before there was a daemon to ask.
 //!
-//! Anything else is refused before the handshake, so it costs one packet and no state.
+//! A node the tailnet names but grants no role here finishes the handshake only to be closed
+//! with `NOT_GRANTED` ([`Verdict::Ungranted`]): its owner learns that a grant is what is
+//! missing, and a probe from it tells the person so, where a refused packet looked like
+//! nothing listening. Anything else is refused before the handshake, so it costs one packet and
+//! no state.
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use slopty_tailnet::{Grant, LocalApi};
 use tokio::time::Instant;
@@ -119,14 +123,19 @@ const OWNER_TTL: Duration = Duration::from_secs(60);
 pub enum Verdict {
     /// Let in, in the roles the grant gives.
     Admit(Grant),
+    /// A node the tailnet names, granted no role here: told so once the handshake is done.
+    Ungranted,
     /// Refused, and why, for the log.
     Refuse(&'static str),
 }
 
 /// Who may connect: loopback always, the listed ranges, and the tailnet by its word.
+///
+/// Its clones share one list of ranges, so a listener's follows [`Admission::set_ranges`]: a
+/// daemon applies an edit of its `allow` without a restart.
 #[derive(Clone, Debug)]
 pub struct Admission {
-    allow: Vec<Cidr>,
+    allow: Arc<RwLock<Vec<Cidr>>>,
     tailnet: Tailnet,
 }
 
@@ -201,13 +210,16 @@ impl Admission {
     /// every `relook` while it finds none.
     fn finding(allow: Vec<Cidr>, find: fn() -> Option<LocalApi>, relook: Duration) -> Self {
         let machine = Machine { find, relook, lookup: Mutex::default() };
-        Self { allow, tailnet: Tailnet::new(Source::Machine(Arc::new(machine))) }
+        Self {
+            allow: Arc::new(allow.into()),
+            tailnet: Tailnet::new(Source::Machine(Arc::new(machine))),
+        }
     }
 
     /// Loopback, `allow`, and the tailnet through `api`; without one, no tailnet peer.
     #[must_use]
     pub fn with_tailnet(allow: Vec<Cidr>, api: Option<LocalApi>) -> Self {
-        Self { allow, tailnet: Tailnet::new(Source::Fixed(api)) }
+        Self { allow: Arc::new(allow.into()), tailnet: Tailnet::new(Source::Fixed(api)) }
     }
 
     /// The local Tailscale this admission asks, when one is running that this process can
@@ -219,8 +231,14 @@ impl Admission {
 
     /// The ranges let in by address besides loopback and the tailnet.
     #[must_use]
-    pub fn ranges(&self) -> &[Cidr] {
-        &self.allow
+    pub fn ranges(&self) -> Vec<Cidr> {
+        self.allow.read().clone()
+    }
+
+    /// Let in `allow` by address from now on, in place of the ranges before: every clone of this
+    /// admission, a listener's included, checks the next peer against them.
+    pub fn set_ranges(&self, allow: Vec<Cidr>) {
+        *self.allow.write() = allow;
     }
 
     /// Whether the peer at `peer` may connect, and as what. A tailnet address is let in only
@@ -228,7 +246,7 @@ impl Admission {
     /// on the same LAN could forge.
     pub async fn check(&self, peer: SocketAddr) -> Verdict {
         let ip = peer.ip().to_canonical();
-        if ip.is_loopback() || self.allow.iter().any(|c| c.contains(ip)) {
+        if ip.is_loopback() || self.allow.read().iter().any(|c| c.contains(ip)) {
             return Verdict::Admit(Grant::ALL);
         }
         if !on_tailnet(ip) {
@@ -299,7 +317,7 @@ impl Tailnet {
                     Verdict::Admit(grant)
                 } else {
                     tracing::info!(%peer, node = %who.node.name, user = %who.user_profile.login_name, "the tailnet grants no role");
-                    Verdict::Refuse("the tailnet grants it no role here")
+                    Verdict::Ungranted
                 }
             }
             Ok(None) => Verdict::Refuse("no node of the tailnet has this address"),
@@ -403,8 +421,9 @@ mod tests {
     }
 
     /// Through the daemon: the owner's other machine gets every role, another user's machine
-    /// none, a tagged node what its grant names, an address no node has nothing, and a daemon
-    /// that fails refuses rather than lets in. Loopback never asks.
+    /// none (told so after the handshake), a tagged node what its grant names, an address no
+    /// node has nothing, and a daemon that fails refuses rather than lets in. Loopback never
+    /// asks.
     #[tokio::test]
     async fn the_tailnet_says_who_is_calling_and_what_they_may_do() {
         let a = Admission::with_tailnet(Vec::new(), Some(daemon().await));
@@ -413,7 +432,7 @@ mod tests {
             Verdict::Admit(Grant::ALL),
             "the owner's laptop"
         );
-        assert!(matches!(a.check(at("100.64.0.5")).await, Verdict::Refuse(_)), "another user");
+        assert_eq!(a.check(at("100.64.0.5")).await, Verdict::Ungranted, "another user's node");
         let Verdict::Admit(ci) = a.check(at("100.64.0.6")).await else {
             panic!("the granted node")
         };
@@ -453,6 +472,20 @@ mod tests {
         assert_eq!(a.check(at("127.0.0.1")).await, Verdict::Admit(Grant::ALL));
         assert!(on_tailnet(ip("100.127.255.254")) && !on_tailnet(ip("100.128.0.0")));
         assert!(on_tailnet(ip("::ffff:100.64.0.1")) && !on_tailnet(ip("100.63.255.255")));
+    }
+
+    /// A range set on one clone holds for every clone, as a listener's does once its daemon
+    /// reads a changed `allow`: the next peer is checked against the new ranges.
+    #[tokio::test]
+    async fn new_ranges_hold_for_every_clone_at_once() {
+        let a = Admission::with_tailnet(Vec::new(), None);
+        let listener = a.clone();
+        assert!(matches!(listener.check(at("10.1.2.3")).await, Verdict::Refuse(_)));
+        a.set_ranges(vec!["10.0.0.0/8".parse().unwrap()]);
+        assert_eq!(listener.check(at("10.1.2.3")).await, Verdict::Admit(Grant::ALL), "let in");
+        assert_eq!(listener.ranges(), a.ranges());
+        a.set_ranges(Vec::new());
+        assert!(matches!(listener.check(at("10.1.2.3")).await, Verdict::Refuse(_)), "and out");
     }
 
     #[test]

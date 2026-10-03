@@ -51,11 +51,11 @@ impl UpdateNotice {
         }
     }
 
-    /// The line: "This worker runs a different build".
+    /// The line: "This machine runs a different build".
     #[must_use]
     pub const fn title(&self) -> &'static str {
         match self.of {
-            Of::Worker => "This worker runs a different build",
+            Of::Worker => "This machine runs a different build",
             Of::Server => "The server runs a different build",
         }
     }
@@ -67,23 +67,24 @@ impl UpdateNotice {
         format!("It runs {}; this build is {BUILD}.", peer.peer_build())
     }
 
-    /// What updates it, to copy: a deploy from this machine for a worker, an install on the
-    /// server's own machine for the server.
+    /// What updates it, to copy and run on this machine, which has this build: a deploy over
+    /// `ssh` for a worker or a server elsewhere, and an install in place for a server on this
+    /// machine. An install typed on the server's own machine would put back the build already
+    /// there, beside its own CLI.
     #[must_use]
     pub fn command(&self) -> String {
         match self.of {
             Of::Worker => format!("slopty worker deploy {} --update", self.host),
-            Of::Server => "slopty server install".to_owned(),
+            Of::Server if self.here() => "slopty server install".to_owned(),
+            Of::Server => format!("slopty server deploy {}", self.host),
         }
     }
 
-    /// Where [`Self::command`] runs, when not on this machine.
+    /// Whether the host is this machine, dialled on loopback.
     #[must_use]
-    pub fn runs_on(&self) -> Option<&str> {
-        match self.of {
-            Of::Worker => None,
-            Of::Server => Some(&self.host),
-        }
+    pub fn here(&self) -> bool {
+        let host = self.host.trim_start_matches('[').trim_end_matches(']');
+        host == "localhost" || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
     }
 }
 
@@ -91,10 +92,7 @@ impl UpdateNotice {
 impl std::fmt::Display for UpdateNotice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{} runs a different build. {}", self.host, self.detail())?;
-        match self.runs_on() {
-            None => write!(f, "Update it: {}", self.command()),
-            Some(host) => write!(f, "Update it: run `{}` on {host}", self.command()),
-        }
+        write!(f, "Update it: {}", self.command())
     }
 }
 
@@ -112,7 +110,7 @@ mod tests {
     #[test]
     fn a_worker_notice_names_both_builds_and_the_deploy() {
         let notice = UpdateNotice::worker("mini", &wrong("0.0.9+wire.0badf00d"));
-        assert_eq!(notice.title(), "This worker runs a different build");
+        assert_eq!(notice.title(), "This machine runs a different build");
         assert_eq!(notice.detail(), format!("It runs 0.0.9+wire.0badf00d; this build is {BUILD}."));
         assert_eq!(notice.command(), "slopty worker deploy mini --update");
         assert_eq!(
@@ -124,12 +122,22 @@ mod tests {
         );
     }
 
+    /// A server elsewhere is brought to this build from here, over `ssh`, never by an install
+    /// on its own machine, which would put its own build back; one on this machine is installed
+    /// in place. An older build is said so.
     #[test]
-    fn a_server_notice_says_where_to_install_and_an_older_build_is_said_so() {
+    fn a_server_notice_deploys_this_build_and_an_older_build_is_said_so() {
         let notice = UpdateNotice::server("hub", &wrong(""));
         assert_eq!(notice.title(), "The server runs a different build");
         assert_eq!(notice.detail(), format!("It runs an older one; this build is {BUILD}."));
-        assert!(notice.to_string().ends_with("Update it: run `slopty server install` on hub"));
+        assert_eq!(notice.command(), "slopty server deploy hub");
+        assert!(notice.to_string().ends_with("Update it: slopty server deploy hub"));
+        for here in ["127.0.0.1", "::1", "[::1]", "localhost"] {
+            let notice = UpdateNotice::server(here, &wrong("0.0.9+wire.0badf00d"));
+            assert!(notice.here(), "{here}");
+            assert_eq!(notice.command(), "slopty server install", "{here}");
+        }
+        assert!(!notice.here(), "hub is another machine");
     }
 
     #[test]

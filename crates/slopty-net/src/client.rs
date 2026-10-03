@@ -85,7 +85,9 @@ pub async fn connect_addr(
     greet(conn, addr, hello).await
 }
 
-/// The QUIC handshake alone, on `config` or the endpoint's default client config.
+/// The QUIC handshake alone, on `config` or the endpoint's default client config. A peer that
+/// closes as the handshake ends, to say the tailnet grants this device nothing there or that it
+/// runs another build, fails as that ([`NetError::NotGranted`], [`NetError::WrongBuild`]).
 pub(crate) async fn dial(
     endpoint: &Endpoint,
     addr: SocketAddr,
@@ -100,7 +102,10 @@ pub(crate) async fn dial(
     tokio::time::timeout(HANDSHAKE_TIMEOUT, connecting)
         .await
         .map_err(|_elapsed| NetError::Connect(format!("{addr}: no answer")))?
-        .map_err(|e| NetError::Connect(format!("{addr}: {e}")))
+        .map_err(|e| match NetError::stream(&e) {
+            said @ (NetError::NotGranted | NetError::WrongBuild(_)) => said,
+            _ => NetError::Connect(format!("{addr}: {e}")),
+        })
 }
 
 /// `Hello` on a fresh control stream after this build's wire prefix, and the worker's prefix

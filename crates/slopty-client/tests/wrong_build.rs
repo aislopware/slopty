@@ -61,12 +61,13 @@ mod tests {
         let err = dialled.await.unwrap().unwrap_err();
         let notice = UpdateNotice::for_worker_dial(addr.host(), &err).expect("a wrong build");
         assert_eq!(notice.peer, OTHER);
-        assert_eq!(notice.title(), "This worker runs a different build");
+        assert_eq!(notice.title(), "This machine runs a different build");
         assert_eq!(notice.command(), "slopty worker deploy 127.0.0.1 --update");
     }
 
-    /// The server link says a server on another build once, with its notice, and does not dial
-    /// it again on the fast backoff.
+    /// The server link says a server on another build once, as that and not as a server that
+    /// is down, with its notice and the command that brings it to this build from here; it does
+    /// not dial it again on the fast backoff.
     #[tokio::test]
     async fn a_server_on_another_build_is_said_once_and_not_redialled() {
         let (addr, dials) = another_build(true);
@@ -76,9 +77,10 @@ mod tests {
             spawn(&tokio::runtime::Handle::current(), endpoint, addr, role, None);
 
         let event = tokio::time::timeout(WAIT, events.recv()).await.unwrap().unwrap();
-        let ServerEvent::Unlinked { why } = event else { panic!("{event:?}") };
-        assert!(why.starts_with("127.0.0.1 runs a different build. It runs 0.0.9"), "{why}");
-        assert!(why.ends_with("run `slopty server install` on 127.0.0.1"), "{why}");
+        let ServerEvent::WrongBuild(notice) = event else { panic!("{event:?}") };
+        assert_eq!(notice.peer, OTHER);
+        assert_eq!(notice.title(), "The server runs a different build");
+        assert_eq!(notice.command(), "slopty server install", "loopback: this machine");
 
         let more = tokio::time::timeout(NO_REDIAL, events.recv()).await;
         assert!(more.is_err(), "nothing more to say: {more:?}");
