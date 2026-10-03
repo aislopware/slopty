@@ -157,15 +157,15 @@ impl Board {
         table.values().find(|r| seat_fact(r) == Some(term.session)).map(|r| r.id)
     }
 
-    /// Every task's thread with no terminal of its own whose agent is there, by its seat:
-    /// it counts as a live terminal does.
+    /// Every task's thread with no terminal of its own whose agent runs, by its seat: it
+    /// counts as a live terminal does. One asleep does not, since its agent ended.
     pub(super) fn live_seats(&self) -> Vec<TermRef> {
         self.tables
             .iter()
             .flat_map(|(worker, table)| {
                 table
                     .values()
-                    .filter(|r| r.terminal.is_none() && there(r))
+                    .filter(|r| r.terminal.is_none() && awake(r))
                     .filter_map(|r| Some(TermRef { worker: *worker, session: seat_fact(r)? }))
             })
             .collect()
@@ -237,7 +237,7 @@ impl Board {
         for (id, session, row) in &now {
             let at_work =
                 matches!(row.status.phase, Phase::Working | Phase::Waiting | Phase::NeedsYou);
-            let stopped = !there(row) || !at_work;
+            let stopped = !awake(row) || !at_work;
             let said = self.natives_said.insert((worker, *id), (*session, stopped));
             let agent = id.to_string();
             if said.is_none() {
@@ -459,9 +459,16 @@ fn seat_fact(row: &ThreadRow) -> Option<SessionId> {
     row.facts.get(SEAT_FACT)?.parse().ok()
 }
 
-/// Whether `row`'s agent is there: its process has not ended.
+/// Whether `row`'s thread is still to be had: its process has not ended, or it sleeps on the
+/// person's word with its session kept, to wake on the next message.
 const fn there(row: &ThreadRow) -> bool {
     !matches!(row.status.liveness, Liveness::Exited { .. })
+}
+
+/// Whether `row`'s agent runs now: there, and not put to sleep, so it takes a place among
+/// the live agents.
+const fn awake(row: &ThreadRow) -> bool {
+    there(row) && !matches!(row.status.liveness, Liveness::Asleep { .. })
 }
 
 /// `row`'s phase as an agent's status reads, for a task's thread with no hooks: a request

@@ -2089,3 +2089,12 @@ follow-up)
 - A family whose root is Claude Code adds none, because Claude Code's hooks report its
   subagents already, under their own ids.
 - Test: `a_thread_s_subagents_are_its_task_s_natives` (`slopty-server`).
+
+**A task's thread put to sleep holds no place, but stays its task's.** ✅ 2026-10-04
+- An agent put to sleep has ended, with its session kept so the next message wakes it. Its
+  task's thread therefore no longer counts against the live limits (`Board::live_seats`
+  skips it), and a subagent put to sleep has stopped as a native.
+- It is not gone. Its row stays in the table, so its assignment holds and the task keeps
+  its agent. Waking takes the place back.
+- Tests: `an_asleep_thread_counts_as_no_live_agent_and_stays_on_its_task` and
+  `a_thread_s_subagents_are_its_task_s_natives` (`slopty-server`).

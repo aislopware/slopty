@@ -207,11 +207,59 @@ async fn a_thread_s_subagents_are_its_task_s_natives() {
     assert!(gone.iter().all(|a| a.stopped_ms.is_some()), "a row gone has stopped: {gone:?}");
     assert_eq!(gone.len(), 2);
 
+    // One put to sleep mid-turn has stopped too: its agent ended.
+    let mut sleeper = child.clone();
+    sleeper.id = ThreadId::new();
+    lease.handle(snapshot(vec![root.clone(), sleeper.clone()]));
+    assert_eq!(natives().await.iter().filter(|a| a.stopped_ms.is_none()).count(), 1);
+    sleeper.status.liveness =
+        slopty_proto::thread::Liveness::Asleep { since_ms: WallMs::from_millis(3) };
+    lease.handle(snapshot(vec![root.clone(), sleeper]));
+    let all = natives().await;
+    assert!(all.iter().all(|a| a.stopped_ms.is_some()), "asleep has stopped: {all:?}");
+
     // Claude Code's own hooks say its subagents.
     let mut claude_root = root.clone();
     claude_root.agent = AgentId::named(AgentId::CLAUDE_CODE);
     let mut third = child.clone();
     third.id = ThreadId::new();
     lease.handle(snapshot(vec![claude_root, third]));
-    assert_eq!(natives().await.len(), 2, "no native from a hooked agent's rows");
+    assert_eq!(natives().await.len(), 3, "no native from a hooked agent's rows");
+}
+
+/// A task's thread put to sleep counts as no live agent, since its agent ended, but stays its
+/// task's: waking it takes the place back.
+#[tokio::test]
+async fn an_asleep_thread_counts_as_no_live_agent_and_stays_on_its_task() {
+    use slopty_proto::thread::Liveness;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    lease.handle(ToServer::Facts(installed(&["pi"])));
+    create(&hub, None).await;
+    let task = new_task(&hub, Placement::default()).await;
+    let pi = AgentId::named(AgentId::PI);
+    let launch = as_thread(pi.clone(), &[]);
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+    let thread = ThreadId::new();
+    answer(&lease, id, Outcome::ThreadStarted { thread, worktree: None });
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    let mut seated = row(Phase::Idle, 1, None);
+    seated.id = thread;
+    seated.agent = pi;
+    seated.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+    lease.handle(snapshot(vec![seated.clone()]));
+    assert_eq!(status(&hub).await.live.project, 1);
+
+    let mut asleep = seated.clone();
+    asleep.status.liveness = Liveness::Asleep { since_ms: WallMs::from_millis(2) };
+    lease.handle(snapshot(vec![asleep]));
+    assert_eq!(status(&hub).await.live.project, 0, "its agent ended");
+    let kept = card(&hub, task).await.assignment.expect("still on its task");
+    assert_eq!(kept.ended_ms, None, "asleep, not gone");
+
+    lease.handle(snapshot(vec![seated]));
+    assert_eq!(status(&hub).await.live.project, 1, "awake again");
 }
