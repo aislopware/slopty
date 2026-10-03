@@ -36,8 +36,8 @@ use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
     AddressComments, ApproveTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask, OpenNode,
-    ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard, ShowMachines,
-    ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, TellOrchestrator,
+    PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard,
+    ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed, StartTask, TellOrchestrator,
     ToggleAskToStart, TogglePush,
 };
 use crate::a11y::tab_stop;
@@ -941,6 +941,7 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::FixCi => "fix",
         TaskAction::AddressComments => "address",
         TaskAction::ResolveConflicts => "resolve",
+        TaskAction::PushAgain => "push again",
     }
 }
 
@@ -3439,6 +3440,9 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &ResolveConflicts, _w, cx| {
                 this.act_on_picked(TaskAction::ResolveConflicts, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PushTask, _w, cx| {
+                this.act_on_picked(TaskAction::PushAgain, cx);
             }))
             .on_action(cx.listener(|this, _: &TogglePush, _w, cx| this.toggle_push(cx)))
             .on_action(cx.listener(|_this, _: &ShowTerminal, _w, cx| {

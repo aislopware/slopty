@@ -732,6 +732,22 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
         "a task at work has nothing to merge"
     );
 
+    let mut unpushed = card(6, "Pushed late", TaskState::Merged, None);
+    unpushed.merge = Some(slopty_proto::project::Merge::Merged {
+        target: "main".into(),
+        head: "abcdef0123".into(),
+        at_ms: fixtures::AT,
+        pushed: false,
+        push_failed: Some("could not read Username".into()),
+    });
+    view.update_in(cx, |v, _w, cx| v.project_update(13, task_changed("board", unpushed, None), cx));
+    cx.run_until_parked();
+    click(cx, "project-row-push-again-6");
+    assert_eq!(
+        sent(&mut queue, cx, done),
+        [Verb::TaskPush { project: project.clone(), task: TaskId(6) }]
+    );
+
     click(cx, "project-row-approve-4");
     let refused = |_: &Verb| Outcome::Error {
         code: ErrorCode::Conflict,
@@ -1313,6 +1329,7 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
         pending: 2,
         skipped: 0,
         failing: Vec::new(),
+        why: None,
         at_ms: fixtures::AT,
     });
     done.natives = NativeCounts { agents: 0, running: 0, todos: 1, done: 0 };

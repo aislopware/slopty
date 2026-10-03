@@ -2331,14 +2331,21 @@ impl Hub {
             number: watch.number,
             merge_request: watch.merge_request,
         };
-        let checks = match self.forward(None, verb).await {
-            Outcome::Checks(checks) => checks,
+        let (checks, again) = match self.forward(None, verb).await {
+            Outcome::Checks(checks) => {
+                let running = checks.state == slopty_proto::project::ChecksState::Pending;
+                (checks, if running { CHECKS_RUNNING } else { CHECKS_SETTLED })
+            }
+            // The forge's command missing or not signed in there: the card says so, rather
+            // than showing a pull request whose checks never come.
+            Outcome::Error { code: ErrorCode::Unsupported | ErrorCode::Failed, message } => {
+                (unknown_checks(message), CHECKS_FAILED)
+            }
             other => {
                 tracing::debug!(project = %watch.project, task = %watch.task, ?other, "no checks");
                 return CHECKS_FAILED;
             }
         };
-        let running = checks.state == slopty_proto::project::ChecksState::Pending;
         let mut state = self.inner.state.lock();
         let set = state.projects.set_checks(&watch.project, watch.task, checks, WallMs::now());
         match set {
@@ -2346,7 +2353,21 @@ impl Hub {
             Err(refused) => tracing::debug!(?refused, "checks not kept"),
         }
         drop(state);
-        if running { CHECKS_RUNNING } else { CHECKS_SETTLED }
+        again
+    }
+}
+
+/// Checks that could not be read, and `why` in the worker's words.
+const fn unknown_checks(why: String) -> slopty_proto::project::Checks {
+    slopty_proto::project::Checks {
+        state: slopty_proto::project::ChecksState::Unknown,
+        passed: 0,
+        failed: 0,
+        pending: 0,
+        skipped: 0,
+        failing: Vec::new(),
+        why: Some(why),
+        at_ms: WallMs::ZERO,
     }
 }
 

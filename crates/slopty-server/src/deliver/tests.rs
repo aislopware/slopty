@@ -112,7 +112,7 @@ fn a_batch_stays_until_it_is_handed_over() {
     assert_eq!(second[0].reports, 2, "the outstanding one folds into the next");
     assert_eq!(d.acked(to, first[0].number), None, "replaced");
     d.closed(to);
-    assert!(d.outstanding_on(to.worker).is_empty());
+    assert_eq!(d.outstanding_on(to.worker), Vec::<Batch>::new());
     let next = term();
     let again = d.take(t0, |_| Some(next));
     assert_eq!((again[0].term, again[0].reports), (next, 2), "the next terminal gets them");

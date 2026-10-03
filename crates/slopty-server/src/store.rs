@@ -427,7 +427,7 @@ mod tests {
         let store = ProjectStore::in_dir(dir.path());
         for bad in [&b"{ not json"[..], b"[1, 2"] {
             std::fs::write(store.path(), bad).unwrap();
-            assert!(store.load().await.unwrap().projects.is_empty());
+            assert_eq!(store.load().await.unwrap().projects, Vec::<crate::project::Record>::new());
             assert!(!store.path().exists());
         }
         let mut kept = set_aside(dir.path(), PROJECTS_FILE);
@@ -440,7 +440,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::in_dir(dir.path());
         std::fs::write(store.path(), b"{ not json").unwrap();
-        assert!(store.load().await.unwrap().is_empty());
+        assert_eq!(store.load().await.unwrap(), Vec::<WorkerInfo>::new());
         assert_eq!(set_aside(dir.path(), FILE), [b"{ not json".to_vec()]);
         assert!(!store.path().exists());
     }

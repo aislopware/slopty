@@ -103,6 +103,7 @@ const fn none(at_ms: WallMs) -> Checks {
         pending: 0,
         skipped: 0,
         failing: Vec::new(),
+        why: None,
         at_ms,
     }
 }

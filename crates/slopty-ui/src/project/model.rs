@@ -66,7 +66,16 @@ fn checks_words(checks: &Checks) -> Option<(String, bool)> {
         ChecksState::Pending => (format!("{} of {all} checks running", checks.pending), false),
         ChecksState::Passing => ("checks pass".to_owned(), false),
         ChecksState::Failing => (format!("{} of {all} checks fail", checks.failed), true),
+        ChecksState::Unknown => (unknown_words(checks), false),
     })
+}
+
+/// Checks that could not be read, as a row says them: why, in the forge's first line.
+fn unknown_words(checks: &Checks) -> String {
+    match checks.why.as_deref().map(crate::kit::first_line).filter(|w| !w.trim().is_empty()) {
+        Some(why) => format!("checks unknown: {why}"),
+        None => "checks unknown".to_owned(),
+    }
 }
 
 /// How many of a review's findings the person's "Address comments" names; the agent reads
@@ -247,6 +256,8 @@ pub enum TaskAction {
     AddressComments,
     /// Tell its agent, as the person, to resolve the conflicts its rebase met.
     ResolveConflicts,
+    /// Push its target to the forge again, after the push that went with its merge failed.
+    PushAgain,
 }
 
 impl TaskAction {
@@ -262,6 +273,7 @@ impl TaskAction {
             Self::FixCi => "Fix CI",
             Self::AddressComments => "Address comments",
             Self::ResolveConflicts => "Resolve conflicts",
+            Self::PushAgain => "Push again",
         }
     }
 
@@ -283,6 +295,7 @@ impl TaskAction {
             Self::FixCi => "fix-ci",
             Self::AddressComments => "address-comments",
             Self::ResolveConflicts => "resolve-conflicts",
+            Self::PushAgain => "push-again",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -852,12 +865,17 @@ impl Board {
     /// - resolve the conflicts its rebase onto the target met.
     ///
     /// Checking a failure again unchanged would fail the same way, so a failed verifier or
-    /// rebase offers Retry only when no agent runs to fix it. A task that only reads, or is
-    /// merged, has nothing to merge.
+    /// rebase offers Retry only when no agent runs to fix it. A task that only reads has
+    /// nothing to merge, and a merged one only a push again, when its push failed.
     #[must_use]
     pub fn actions(&self, task: TaskId) -> Vec<TaskAction> {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
-        if card.read_only || card.state == TaskState::Merged {
+        if card.state == TaskState::Merged {
+            let push_failed =
+                matches!(card.merge, Some(Merge::Merged { push_failed: Some(_), .. }));
+            return if push_failed { vec![TaskAction::PushAgain] } else { Vec::new() };
+        }
+        if card.read_only {
             return Vec::new();
         }
         let failed = card.step.as_ref().filter(|s| matches!(s.state, StepState::Failed { .. }));
@@ -979,7 +997,8 @@ impl Board {
             | TaskAction::Retry
             | TaskAction::Approve
             | TaskAction::RunOn
-            | TaskAction::Start => None,
+            | TaskAction::Start
+            | TaskAction::PushAgain => None,
         }
     }
 
@@ -1251,6 +1270,10 @@ pub fn moment_line(
             ChecksState::Failing => {
                 format!("The pull request's checks fail: {}", checks.failing.join(", "))
             }
+            ChecksState::Unknown => match checks.why.as_deref().map(crate::kit::first_line) {
+                Some(why) => format!("The pull request's checks could not be read: {why}"),
+                None => "The pull request's checks could not be read".to_owned(),
+            },
         },
         Moment::Reviewed(run) => review_line(run),
         Moment::AgentGone { .. } => "Agent ended".to_owned(),

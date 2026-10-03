@@ -61,6 +61,8 @@ gpui::actions!(
         AddressComments,
         /// Tell the agent of the task the keyboard stands on to resolve its conflicts.
         ResolveConflicts,
+        /// Push the target again for the task the keyboard stands on, whose push failed.
+        PushTask,
         /// Push the target after each merge, or stop.
         TogglePush,
         /// Turn the orchestrator's tile back to its terminal.
@@ -95,6 +97,7 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "fix_ci", FixCi, &[], BOARD),
         Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
         Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
+        Command::new(Scope::Project, "push_task", PushTask, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
         Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
@@ -131,6 +134,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
             IconName::GitBranch,
             Box::new(ResolveConflicts),
         ),
+        line("Push the task's merge again", IconName::Upload, Box::new(PushTask)),
         line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
         line("Start the task", IconName::CircleDot, Box::new(StartTask)),
         line("Start every proposed task", IconName::ListChecks, Box::new(StartProposed)),

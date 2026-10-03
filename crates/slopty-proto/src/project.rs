@@ -145,6 +145,8 @@ pub const NOTE_MAX: usize = SUMMARY_MAX;
 pub const CHECKS_NAMED: usize = 5;
 /// The longest name of a check a card keeps.
 pub const CHECK_NAME_MAX: usize = 128;
+/// The longest reason a pull request's checks could not be read ([`Checks::why`]), in bytes.
+pub const CHECKS_WHY_MAX: usize = 256;
 /// The most artifacts one [`Report`] names.
 pub const ARTIFACTS_MAX: usize = 32;
 
@@ -1207,18 +1209,25 @@ pub struct Checks {
     /// The names of those that failed, at most [`CHECKS_NAMED`], each at most
     /// [`CHECK_NAME_MAX`] bytes.
     pub failing: Vec<String>,
+    /// Why they could not be read, for [`ChecksState::Unknown`]: the forge's command missing
+    /// or not signed in, in its words, at most [`CHECKS_WHY_MAX`] bytes.
+    pub why: Option<String>,
     /// When the forge said so, by the server's clock.
     pub at_ms: WallMs,
 }
 
 impl Checks {
     /// The most it takes on the wire.
-    pub const MAX_BYTES: usize = CHECKS_NAMED * (CHECK_NAME_MAX + 2) + 40;
+    pub const MAX_BYTES: usize = CHECKS_NAMED * (CHECK_NAME_MAX + 2) + CHECKS_WHY_MAX + 44;
 
     /// About how many bytes it takes on the wire, never less.
     #[must_use]
     pub fn approx_bytes(&self) -> usize {
-        self.failing.iter().map(|n| n.len().saturating_add(10)).fold(40, usize::saturating_add)
+        self.failing
+            .iter()
+            .map(|n| n.len().saturating_add(10))
+            .fold(40, usize::saturating_add)
+            .saturating_add(self.why.as_deref().map_or(0, str::len))
     }
 
     /// Whether it says the same as `other`, whenever each was read.
@@ -1239,6 +1248,9 @@ pub enum ChecksState {
     Passing,
     /// At least one failed.
     Failing,
+    /// The forge could not be asked: its command is missing or not signed in on the machine
+    /// the work is on ([`Checks::why`]). Asked again later; nothing is known meanwhile.
+    Unknown,
 }
 
 /// What following an agent's status did to its [`Spent`].

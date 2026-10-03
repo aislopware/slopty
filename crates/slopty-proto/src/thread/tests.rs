@@ -358,7 +358,7 @@ fn one_answer_answers_every_question() {
     assert_eq!(given[1].parts(&asked[1]), ["Terminal", "Editor", "Logs"], "one's own words last");
     assert_eq!(answer("Which panes?", "Files, Terminal").parts(&asked[1]), ["Files, Terminal"]);
     assert_eq!(answer("Which panes?", "Files, Editor").parts(&asked[1]), ["Files", "Editor"]);
-    assert!(answer("Which panes?", "").parts(&asked[1]).is_empty());
+    assert_eq!(answer("Which panes?", "").parts(&asked[1]), Vec::<String>::new());
 
     assert_eq!(Answer::read(&asked, &Answer::choice(&asked, &given[..1])), None, "one unanswered");
     let stray = [given[0].clone(), given[1].clone(), answer("Why?", "No")];

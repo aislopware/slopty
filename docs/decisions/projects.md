@@ -1591,9 +1591,29 @@ N16)
   and that the person pushes again. The task's row says "push failed: <git's first line>", and
   its pipeline shows a Push stage that holds (the stronger ink, as every holding stage), which
   the row then leaves to it.
-- "Push again" on the card is next. It needs a verb that pushes the target from the clone.
-- Tests: `a_merge_whose_push_failed_says_so` (`slopty-ui::project`) and the golden
-  `task_merged_unpushed_card`.
+- "Push again" on the card and in the palette sends `Verb::TaskPush`, the person's alone. The
+  server pushes the target as the orchestrator's clone has it now (`FastForward` from and to
+  `refs/heads/<target>`, which moves nothing): what the queue merged since sits on top of the
+  task's work, and a push of the older head alone would be refused as behind. The card's merge
+  keeps its head and takes the new push's outcome, with a Merge step on the timeline. A merge
+  already pushed is answered as it is, so a resent word asks nothing of the worker.
+- Tests: `a_merge_whose_push_failed_says_so` (`slopty-ui::project`),
+  `a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word` (`slopty-server`),
+  `the_boards_actions_reach_the_server` (`slopty-ui::workspace`), and the goldens
+  `task_merged_unpushed_card` and `task_push`.
+
+**Checks that cannot be read say why, and never hide a reading.** ✅ 2026-10-04 (readiness #16)
+- A worker with no `gh` or `glab`, or one not signed in, used to leave a pull request whose
+  checks never came, with nothing said.
+- `ChecksState::Unknown` with `Checks::why` (the worker's words, at most `CHECKS_WHY_MAX`)
+  is what the server keeps when the worker answers `PullChecks` with `Unsupported` or `Failed`.
+  It is asked again at the failed pace. The row says "checks unknown: <why>", holding nothing
+  and offering no Fix CI, and the timeline says it once.
+- A reading the card already has stands over a later failure to read: the last known state is
+  still the most that is known, and a passing card flickering to unknown and back says nothing.
+- Tests: `checks_that_cannot_be_read_say_why_and_never_hide_a_reading` (`slopty-server`),
+  `checks_that_could_not_be_read_say_why_and_ask_nothing` (`slopty-ui::project`), and the
+  goldens `outcome_checks` and `moment_checks`.
 
 **A project may have a budget per meter.** ✅ wire 2026-10-04 (rulings §5d; the gate to follow)
 - `Limits::budget` is an open map of a meter's name to its cap (`Budget`). `usd` caps the

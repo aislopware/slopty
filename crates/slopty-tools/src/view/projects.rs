@@ -522,6 +522,7 @@ fn checks(c: &slopty_proto::project::Checks) -> ChecksView<'_> {
         ChecksState::Pending => "pending",
         ChecksState::Passing => "passing",
         ChecksState::Failing => "failing",
+        ChecksState::Unknown => "unknown",
     };
     ChecksView {
         state,
@@ -548,6 +549,10 @@ fn checks_text(checks: &slopty_proto::project::Checks) -> String {
         ChecksState::Failing => {
             format!("its pull request's checks fail ({}): {counts}", checks.failing.join(", "))
         }
+        ChecksState::Unknown => format!(
+            "its pull request's checks could not be read: {}",
+            checks.why.as_deref().unwrap_or("the forge did not answer")
+        ),
     }
 }
 

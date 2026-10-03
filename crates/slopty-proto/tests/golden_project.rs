@@ -412,6 +412,7 @@ mod golden_project {
             &request(Verb::TaskReport { project: project_id(), task: TaskId(3), report: report() }),
         );
         snap("task_merge", &request(Verb::TaskMerge { project: project_id(), task: TaskId(3) }));
+        snap("task_push", &request(Verb::TaskPush { project: project_id(), task: TaskId(3) }));
     }
 
     /// What the server asks of the orchestrator's worker to verify a task and merge it: a
@@ -584,6 +585,7 @@ mod golden_project {
             pending: 0,
             skipped: 2,
             failing: vec!["clippy (macos)".to_owned()],
+            why: None,
             at_ms: at(),
         };
         snap("outcome_checks", &reply(Outcome::Checks(checks.clone())));

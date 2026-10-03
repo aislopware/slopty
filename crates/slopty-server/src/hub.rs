@@ -853,6 +853,7 @@ impl Hub {
             Verb::TaskReview { project, task, verdict } => {
                 self.task_review(caller, from, (&project, task), verdict)
             }
+            Verb::TaskPush { project, task } => self.task_push(caller, (&project, task)).await,
             Verb::ProjectDelete { .. } if caller == Caller::Agent => {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
@@ -1668,6 +1669,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WorkingOn { .. }
         | Verb::TaskReport { .. }
         | Verb::TaskMerge { .. }
+        | Verb::TaskPush { .. }
         | Verb::TaskReview { .. }
         | Verb::ProjectDelete { .. } => None,
         Verb::OpenTerminal { worker, .. }
@@ -2487,7 +2489,7 @@ pub(crate) mod tests {
         let mut links = hub.subscribe();
         let (_, from, _) = events(&hub, None, 0).await;
         assert_eq!(hub.dispatch(Verb::ForgetWorker { worker }).await, Outcome::Done);
-        assert!(hub.directory().is_empty());
+        assert_eq!(hub.directory(), Vec::<WorkerInfo>::new());
         assert!(persisted.borrow_and_update().is_empty(), "the state file loses it");
         assert!(
             matches!(next_listing(&mut links).await, FromServer::Directory(list) if list.is_empty())
@@ -2686,7 +2688,7 @@ pub(crate) mod tests {
         drop(lease);
         let code = |outcome: Outcome| match outcome {
             Outcome::Error { code, message } => {
-                assert!(!message.is_empty());
+                assert_ne!(message, "");
                 code
             }
             other => panic!("{other:?}"),

@@ -532,6 +532,7 @@ async fn a_pull_request_s_checks_are_read_where_its_work_is() {
         pending: 0,
         skipped: 1,
         failing: vec!["lint".to_owned()],
+        why: None,
         at_ms: WallMs::now(),
     };
     for round in 0..2 {
@@ -556,4 +557,170 @@ async fn a_pull_request_s_checks_are_read_where_its_work_is() {
     let s = status(&hub).await;
     let said: Vec<_> = s.timeline.iter().filter(|e| matches!(e.what, Moment::Checks(_))).collect();
     assert_eq!(said.len(), 1, "{said:?}");
+}
+
+/// Checks that cannot be read (the forge's command missing or not signed in where the work
+/// is) put that on the card, once, and are asked again later; a reading replaces them, and a
+/// forge that stops answering afterwards leaves that reading standing.
+#[tokio::test]
+async fn checks_that_cannot_be_read_say_why_and_never_hide_a_reading() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    let pr = slopty_proto::agent::PullRequest {
+        number: 7,
+        url: "https://example.com/o/demo/pull/7".to_owned(),
+        review: None,
+        merge_request: false,
+    };
+    let worktree = slopty_proto::agent::Worktree {
+        name: "slopty-slopty-1".to_owned(),
+        path: TREE.to_owned(),
+        branch: Some(BRANCH.to_owned()),
+        original_cwd: "/w/demo".to_owned(),
+        original_branch: Some("main".to_owned()),
+    };
+    let branch = AgentBranch { session: agent.session, pr: Some(pr), worktree: Some(worktree) };
+    studio.lease.handle(ToServer::Report(AgentReport::Branch(branch)));
+    let _card = task_now(&hub, task).await;
+    let passing = Checks {
+        state: ChecksState::Passing,
+        passed: 2,
+        failed: 0,
+        pending: 0,
+        skipped: 0,
+        failing: Vec::new(),
+        why: None,
+        at_ms: WallMs::now(),
+    };
+    let missing = || Outcome::Error {
+        code: ErrorCode::Unsupported,
+        message: "this worker has no gh".to_owned(),
+    };
+    for (round, said) in
+        [missing(), missing(), Outcome::Checks(passing.clone()), missing()].into_iter().enumerate()
+    {
+        let watcher = hub.clone();
+        let read = tokio::spawn(async move {
+            let mut due = HashMap::new();
+            watcher.read_due_checks(&mut due).await;
+            due.len()
+        });
+        let (id, verb) = studio.request().await;
+        assert!(matches!(verb, Verb::PullChecks { number: 7, .. }), "round {round}: {verb:?}");
+        answer(&studio.lease, id, said);
+        assert_eq!(read.await.unwrap(), 1, "round {round}: due again later");
+        let kept = task_now(&hub, task).await.checks.expect("its checks");
+        if round < 2 {
+            assert_eq!(
+                (kept.state, kept.why.as_deref()),
+                (ChecksState::Unknown, Some("this worker has no gh")),
+                "round {round}"
+            );
+        } else {
+            assert_eq!((kept.state, kept.why), (ChecksState::Passing, None), "round {round}");
+        }
+    }
+    let s = status(&hub).await;
+    let said: Vec<_> = s
+        .timeline
+        .iter()
+        .filter_map(|e| match &e.what {
+            Moment::Checks(c) => Some(c.state),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(said, [ChecksState::Unknown, ChecksState::Passing]);
+}
+
+/// A merge whose push failed is pushed again on the person's word: the target as the
+/// orchestrator's clone has it, from where it is, with how it went on the card and the
+/// timeline. Pushed, it is answered as it is with nothing asked of the worker; an agent may
+/// not push, and a task not merged has nothing to push.
+#[tokio::test]
+async fn a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    let push = move || Verb::TaskPush { project: project(), task };
+    let unmerged = hub.dispatch(push()).await;
+    assert!(matches!(unmerged, Outcome::Error { code: ErrorCode::Invalid, .. }), "{unmerged:?}");
+    done(&hub, task, agent).await;
+    let asked = studio.request().await;
+    studio.ran(&asked, 0, ('a', 'b'));
+    let (id, verb) = studio.past_screens(&["ok"]).await;
+    assert!(matches!(verb, Verb::Close { .. }), "{verb:?}");
+    answer(&studio.lease, id, Outcome::Done);
+    let (id, _rebase) = studio.request().await;
+    answer(&studio.lease, id, Outcome::Rebased { head: commit('a'), onto: commit('b') });
+    let (id, _forward) = studio.request().await;
+    let rejected = Some("rejected: fetch first".to_owned());
+    let moved = Outcome::FastForwarded { head: commit('a'), pushed: false, push_failed: rejected };
+    answer(&studio.lease, id, moved);
+    until_state(&hub, task, TaskState::Merged).await;
+
+    let by_agent = hub.dispatch_as(Speaker::Proven(agent.session), None, push()).await;
+    assert!(matches!(by_agent, Outcome::Error { code: ErrorCode::Forbidden, .. }), "{by_agent:?}");
+    let merge_of = |outcome: Outcome| match outcome {
+        Outcome::Task(card) => match card.merge {
+            Some(Merge::Merged { head, pushed, push_failed, .. }) => (head, pushed, push_failed),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    };
+    for (round, (said, want)) in [
+        (Some("could not read Username"), (false, Some("could not read Username"))),
+        (None, (true, None)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pushing = hub.clone();
+        let pushed = tokio::spawn(async move { pushing.dispatch(push()).await });
+        let (id, verb) = studio.request().await;
+        let Verb::FastForward { repo, target, from, to, push, .. } = &verb else {
+            panic!("round {round}: {verb:?}")
+        };
+        assert_eq!(
+            (repo.as_str(), target.as_str(), from.as_str(), to.as_str(), *push),
+            ("/w/demo", "main", "refs/heads/main", "refs/heads/main", true),
+            "round {round}: the target from where it is"
+        );
+        let went = Outcome::FastForwarded {
+            head: commit('c'),
+            pushed: said.is_none(),
+            push_failed: said.map(str::to_owned),
+        };
+        answer(&studio.lease, id, went);
+        let (head, pushed, failed) = merge_of(pushed.await.unwrap());
+        assert_eq!(
+            (head, (pushed, failed.as_deref())),
+            (commit('a'), want),
+            "round {round}: the merge is the same one"
+        );
+    }
+    let again = merge_of(hub.dispatch(push()).await);
+    assert_eq!(again, (commit('a'), true, None));
+    let nothing = tokio::time::timeout(Duration::from_millis(200), studio.request()).await;
+    assert!(nothing.is_err(), "nothing asked once pushed: {nothing:?}");
+    let steps: Vec<String> = status(&hub)
+        .await
+        .timeline
+        .into_iter()
+        .filter_map(|e| match e.what {
+            Moment::Step(s) => match s.state {
+                StepState::Done { detail } => Some(detail),
+                StepState::Failed { why } => Some(why),
+                StepState::Running { .. } => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        steps.get(steps.len().saturating_sub(2)..),
+        Some(
+            &[
+                "main not pushed: could not read Username".to_owned(),
+                "main at ccccccc pushed to origin".to_owned()
+            ][..]
+        )
+    );
 }

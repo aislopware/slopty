@@ -163,7 +163,7 @@ fn the_person_asks_for_a_merge_and_the_queue_takes_only_what_is_done() {
     bare.advance(&id(), b, queued(5), at(5)).unwrap();
     bare.advance(&id(), b, merged, at(6)).unwrap();
     assert!(bare.ask_merge(&id(), b, at(7)).is_err(), "merged already");
-    assert!(bare.queue(&id()).is_empty());
+    assert_eq!(bare.queue(&id()), Vec::<TaskId>::new());
 
     let spec = TaskSpec { title: "Look".to_owned(), read_only: true, ..TaskSpec::default() };
     let look = bare.create_task(&id(), spec, at(8)).unwrap().0.id;

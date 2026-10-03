@@ -28,8 +28,8 @@ use slopty_proto::project::{
 use slopty_proto::terminal::SessionState;
 
 use super::steps::{Onto, said};
-use super::{Hub, State};
-use crate::project::{Advance, Job, Queue};
+use super::{Hub, State, error};
+use crate::project::{Advance, Caller, Job, Queue};
 
 /// How often a running verifier's last line is read for its step.
 const PROGRESS_EVERY: Duration = Duration::from_secs(2);
@@ -785,6 +785,91 @@ impl Hub {
         state.deliveries.notice((project.clone(), parent), task, kind, &words, at);
         drop(state);
         self.inner.deliver.notify_one();
+    }
+
+    /// The person pushes `task`'s target to `origin` again after the push that went with its
+    /// merge failed ([`Verb::TaskPush`]). The target goes as it is in the orchestrator's clone:
+    /// the merge put the task's work there, and what the queue merged since went on top of it.
+    pub(super) async fn task_push(
+        &self,
+        caller: Caller,
+        (project, task): (&ProjectId, TaskId),
+    ) -> Outcome {
+        if caller == Caller::Agent {
+            return error(
+                ErrorCode::Forbidden,
+                "whether merged work is pushed to the forge is the person's choice, so only the \
+                 person pushes it again",
+            );
+        }
+        let card = {
+            let state = self.inner.state.lock();
+            state.projects.task(project, task).cloned()
+        };
+        let card = match card {
+            Ok(card) => card,
+            Err(refused) => return error(ErrorCode::Invalid, &said(&refused)),
+        };
+        let Some(Merge::Merged { target, head, at_ms, pushed, push_failed }) = card.merge.clone()
+        else {
+            return error(ErrorCode::Invalid, &format!("task {task} is not merged"));
+        };
+        if push_failed.is_none() {
+            return Outcome::Task(Box::new(card));
+        }
+        let place = match self.lane_place(project, task) {
+            Ok(place) => place,
+            Err(why) => return error(ErrorCode::Invalid, &why),
+        };
+        let at = (project, task);
+        let worker = place.worker;
+        let step = |state| TaskStep {
+            kind: StepKind::Merge,
+            worker,
+            state,
+            since_ms: WallMs::now(),
+            term: None,
+        };
+        let phase = format!("Pushing {target} to origin");
+        self.progress(at, step(StepState::Running { phase, percent: None }));
+        let branch = format!("refs/heads/{target}");
+        let push = Verb::FastForward {
+            worker,
+            repo: place.clone,
+            target: target.clone(),
+            from: branch.clone(),
+            to: branch,
+            push: true,
+        };
+        let (now_pushed, now_failed, detail) = match self.forward(None, push).await {
+            Outcome::FastForwarded { head: now, pushed: true, .. } => {
+                (true, None, format!("{target} at {} pushed to origin", short(&now)))
+            }
+            Outcome::FastForwarded { push_failed, .. } => {
+                let why = push_failed.unwrap_or_else(|| "git did not push".to_owned());
+                (pushed, Some(why.clone()), format!("{target} not pushed: {why}"))
+            }
+            other => {
+                let why = said(&other);
+                (pushed, Some(why.clone()), format!("{target} not pushed: {why}"))
+            }
+        };
+        let done = match &now_failed {
+            None => step(StepState::Done { detail }),
+            Some(_) => step(StepState::Failed { why: detail }),
+        };
+        let merge =
+            Merge::Merged { target, head, at_ms, pushed: now_pushed, push_failed: now_failed };
+        let advance = Advance {
+            moment: Some(Moment::Step(done.clone())),
+            step: Some(done),
+            merge: Queue::Set(merge),
+            ..Advance::default()
+        };
+        match self.advance(at, advance) {
+            Some(card) => Outcome::Task(Box::new(card)),
+            None => error(ErrorCode::Invalid, &format!("task {task} is not there any more")),
+        }
     }
 }
 

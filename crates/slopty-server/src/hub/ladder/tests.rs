@@ -237,7 +237,7 @@ async fn notices_go_where_the_person_is_and_a_subagent_speaks_through_its_parent
     rank(vec![moved(&child, Phase::Working, 3_000)]);
     mac.at(&hub, Seat::Desk, false, Vec::new());
     rank(vec![asking(moved(&child, Phase::NeedsYou, 4_000), "Again?")]);
-    assert!(mac.notices().is_empty());
+    assert_eq!(mac.notices(), Vec::<Notice>::new());
     assert_eq!(phone.notices().len(), 1, "the phone, when only it is in hand");
 
     rank(vec![moved(&child, Phase::Done, 5_000)]);

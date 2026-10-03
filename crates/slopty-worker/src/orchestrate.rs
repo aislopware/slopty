@@ -277,6 +277,7 @@ impl Orchestrator {
             | Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
             | Verb::TaskMerge { .. }
+            | Verb::TaskPush { .. }
             | Verb::TaskReview { .. }
             | Verb::ProjectDelete { .. }
             | Verb::TaskStart { .. }

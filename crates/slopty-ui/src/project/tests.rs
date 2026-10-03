@@ -369,7 +369,7 @@ fn short_lanes_stack_so_every_lane_stands_in_the_first_screenful() {
     assert_eq!(stack_lanes(&showcase, 0), [6], "before the first layout");
     assert_eq!(stack_lanes(&[5, 5, 5], 2), [1, 2], "a tie keeps the first split");
     assert_eq!(stack_lanes(&[1, 1, 30], 2), [2, 1], "the tall one stands alone");
-    assert!(stack_lanes(&[], 3).is_empty());
+    assert_eq!(stack_lanes(&[], 3), Vec::<usize>::new());
     for columns in 1..=7 {
         let sizes = stack_lanes(&[4, 2, 7, 1, 9, 3, 5], columns);
         assert_eq!(sizes.len(), columns);
@@ -855,6 +855,7 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
         pending: 0,
         skipped: 0,
         failing: vec!["clippy (macos)".into()],
+        why: None,
         at_ms: AT,
     });
     let piped = on(piped, worker, SessionId::new());
@@ -891,13 +892,13 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
 }
 
 /// A merge whose push to `origin` failed says so on its row and as a stage that holds, in
-/// git's first line, rather than reading as a merge like any other; one pushed, or never asked
-/// to be, has nothing more to say once merged.
+/// git's first line, rather than reading as a merge like any other, and offers Push again; one
+/// pushed, or never asked to be, has nothing more to say or do once merged.
 #[test]
 fn a_merge_whose_push_failed_says_so() {
     use slopty_proto::project::Merge;
 
-    use super::model::{StageKind, merged_words};
+    use super::model::{StageKind, TaskAction, merged_words};
 
     let merged = |n, pushed, push_failed: Option<&str>| {
         let mut c = card(n, "Merged", TaskState::Merged, None);
@@ -930,6 +931,9 @@ fn a_merge_whose_push_failed_says_so() {
     assert_eq!(words(3).as_deref(), Some("into main at abcdef0"));
     let beside_its_stage = merge(1).and_then(|m| merged_words(m, true));
     assert_eq!(beside_its_stage.as_deref(), Some("into main at abcdef0"), "said once");
+    assert_eq!(b.actions(TaskId(1)), [TaskAction::PushAgain], "pushed again on the person's word");
+    assert_eq!(b.actions(TaskId(2)), Vec::<TaskAction>::new(), "pushed: nothing left to do");
+    assert_eq!(b.actions(TaskId(3)), Vec::<TaskAction>::new(), "never asked to push");
 }
 
 /// Each node says where it is: the orchestrator and a running task where their agents run, an
@@ -1025,5 +1029,52 @@ fn a_need_says_what_it_covers_and_what_it_asks() {
     assert_eq!(
         need_words(&linux),
         ("Every task".to_owned(), r#"Prefers os == "linux" -5"#.to_owned())
+    );
+}
+
+/// Checks that could not be read say why on the pull request's stage, in the first line, and
+/// hold nothing: no Fix CI is offered for a forge that did not answer. The timeline says it as
+/// a sentence.
+#[test]
+fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
+    use slopty_proto::agent::PullRequest;
+    use slopty_proto::project::{Checks, ChecksState};
+
+    use super::model::{StageKind, TaskAction};
+
+    let mut c =
+        on(card(1, "Its pull request", TaskState::Done, None), WorkerId::new(), SessionId::new());
+    c.pr = Some(PullRequest {
+        number: 42,
+        url: "https://github.com/o/r/pull/42".into(),
+        review: None,
+        merge_request: false,
+    });
+    let unknown = Checks {
+        state: ChecksState::Unknown,
+        passed: 0,
+        failed: 0,
+        pending: 0,
+        skipped: 0,
+        failing: Vec::new(),
+        why: Some("this worker has no gh\nsee https://cli.github.com".into()),
+        at_ms: AT,
+    };
+    c.checks = Some(unknown.clone());
+    let mirror = one(vec![c]);
+    let b = board(&mirror);
+    let checks: Vec<_> = b
+        .pipeline(TaskId(1))
+        .into_iter()
+        .filter(|s| s.kind == StageKind::Checks)
+        .map(|s| (s.words, s.holds))
+        .collect();
+    assert_eq!(checks, [("checks unknown: this worker has no gh".to_owned(), false)]);
+    assert!(!b.actions(TaskId(1)).contains(&TaskAction::FixCi), "{:?}", b.actions(TaskId(1)));
+    let name = |_: WorkerId| "studio".to_owned();
+    let agent = |_: TermRef| "an agent".to_owned();
+    assert_eq!(
+        moment_line(&entry(1, Some(1), Moment::Checks(unknown)), name, agent),
+        "The pull request's checks could not be read: this worker has no gh"
     );
 }

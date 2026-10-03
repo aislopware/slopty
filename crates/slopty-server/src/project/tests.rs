@@ -395,7 +395,7 @@ fn a_terminal_works_on_one_task_and_a_task_has_one_live_terminal() {
     let (a, b) = (task(&mut p, "A", &[]), task(&mut p, "B", &[]));
     let at = term();
     assign(&mut p, a, at).unwrap();
-    assert!(assign(&mut p, a, at).unwrap().1.is_empty());
+    assert_eq!(assign(&mut p, a, at).unwrap().1, Vec::<Change>::new());
     let other = term();
     let both = HashSet::from([at, other]);
     let second = p.assign(&id(), a, who(other, false, None), &both, now());
@@ -574,7 +574,10 @@ fn a_branch_lands_on_the_task_its_agent_works_on() {
         p.assign(&id(), t, who(at, false, Some(&branch)), &terminals, now()).unwrap();
     assert_eq!(assigned.branch.as_deref(), Some("worktree-rows"));
     assert_eq!(assigned.worktree.as_deref(), Some("/w/.claude/worktrees/rows"));
-    assert!(p.report(at.worker, &AgentReport::Branch(branch.clone()), now()).is_empty());
+    assert_eq!(
+        p.report(at.worker, &AgentReport::Branch(branch.clone()), now()),
+        Vec::<Change>::new()
+    );
     let pr = slopty_proto::agent::PullRequest {
         number: 7,
         url: "https://github.com/o/r/pull/7".to_owned(),

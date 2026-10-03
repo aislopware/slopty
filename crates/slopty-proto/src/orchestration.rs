@@ -859,6 +859,18 @@ pub enum Verb {
         /// Every need, at most [`crate::project::Need::MAX`].
         needs: Vec<crate::project::Need>,
     },
+    /// Push a merged task's target to its clone's `origin` again after the push that went
+    /// with its merge failed, the person's word. The target goes as the merge left it, so a
+    /// target moved on since is pushed from where it is instead. Answered with
+    /// [`Outcome::Task`], the card saying how the push went; a task whose merge was pushed is
+    /// answered as it is, one not merged is [`ErrorCode::Invalid`], and an agent is
+    /// [`ErrorCode::Forbidden`].
+    TaskPush {
+        /// In which project.
+        project: ProjectId,
+        /// Which.
+        task: TaskId,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -942,6 +954,7 @@ impl Verb {
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }
             | Self::TaskMerge { .. }
+            | Self::TaskPush { .. }
             | Self::TaskReview { .. }
             | Self::ReviewCheckout { .. }
             | Self::ProjectDelete { .. }

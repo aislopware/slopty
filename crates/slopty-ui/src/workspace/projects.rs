@@ -709,6 +709,7 @@ impl WorkspaceView {
         let project = project.clone();
         let verb = match action {
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
+            TaskAction::PushAgain => Verb::TaskPush { project, task },
             TaskAction::Approve => Verb::TaskReview {
                 project,
                 task,

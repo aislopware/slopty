@@ -17,11 +17,11 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
-    ARTIFACTS_MAX, AgentReport, Assignment, Budget, CHECK_NAME_MAX, CHECKS_NAMED, Checks,
-    DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment,
-    NOTE_MAX, Native, NativeAgent, NativeChange, Natives, Need, NodeDetail, NodeNatives, Placed,
-    Project, ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX,
-    SUMMARY_MAX, Spent, StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE,
+    ARTIFACTS_MAX, AgentReport, Assignment, Budget, CHECK_NAME_MAX, CHECKS_NAMED, CHECKS_WHY_MAX,
+    Checks, ChecksState, DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Matcher,
+    Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, Need, NodeDetail,
+    NodeNatives, Placed, Project, ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn,
+    STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE,
     TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry,
     VerifierRun,
 };
@@ -1846,9 +1846,16 @@ impl Projects {
         for name in &mut checks.failing {
             *name = clipped(name, CHECK_NAME_MAX);
         }
+        checks.why = checks.why.map(|why| clipped(&why, CHECKS_WHY_MAX));
         let record = self.record(id)?;
         let t = record.task_mut(task)?;
         let was = t.checks.as_ref().map(|c| c.state);
+        // A forge that stops answering leaves the last reading standing: it is still the most
+        // that is known, and a passing card flickering to unknown and back says nothing.
+        let read_before = was.is_some_and(|s| s != ChecksState::Unknown);
+        if checks.state == ChecksState::Unknown && read_before {
+            return Ok(Vec::new());
+        }
         if t.checks.as_ref().is_some_and(|c| c.says_as(&checks)) {
             t.checks = Some(checks);
             return Ok(Vec::new());
@@ -2248,7 +2255,6 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
                 natives.agents.remove(at);
             }
             natives.agents.push(agent.clone());
-            true
         }
         Native::Todo(task) => {
             if let Some(known) = natives.tasks.iter_mut().find(|t| t.id == task.id) {
@@ -2262,9 +2268,9 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
                 natives.tasks.remove(0);
             }
             natives.tasks.push(task.clone());
-            true
         }
     }
+    true
 }
 
 #[cfg(test)]
