@@ -2630,14 +2630,16 @@ mod worker_tests {
         for d in packetize_ltr(&mut packetizer, true, Some(7), 1_000) {
             h.route(d);
         }
-        h.wait_for("the rejection", FOR_THE_MACHINE, |handle| handle.stats().decode_errors == 1);
-        let refreshes = h.handle.stats().refreshes;
+        // The decoder counts the rejection and then the refresh it asks for: wait for both.
+        h.wait_for("the rejection and its refresh", FOR_THE_MACHINE, |handle| {
+            let stats = handle.stats();
+            stats.decode_errors == 1 && stats.refreshes >= 1
+        });
         for d in packetize_ltr(&mut packetizer, false, Some(8), 2_000) {
             h.route(d);
         }
         let settled = h.settle();
         assert_eq!(settled.frames, 1, "the P-frame waits for a picture it can be decoded from");
-        assert!(refreshes >= 1, "{settled:?}");
         let feedback = Arc::clone(&h.feedback);
         assert!(
             feedback.lock().iter().any(|fb| matches!(fb, Feedback::Refresh { .. })),

@@ -22,9 +22,9 @@ use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentif
 use objc2_core_foundation::{CFArray, CFString};
 use objc2_core_services::{
     ConstFSEventStreamRef, FSEventStreamContext, FSEventStreamCreate, FSEventStreamEventId,
-    FSEventStreamFlushSync, FSEventStreamInvalidate, FSEventStreamRef, FSEventStreamRelease,
+    FSEventStreamGetLatestEventId, FSEventStreamInvalidate, FSEventStreamRef, FSEventStreamRelease,
     FSEventStreamSetDispatchQueue, FSEventStreamStart, FSEventStreamStop,
-    kFSEventStreamCreateFlagFileEvents, kFSEventStreamCreateFlagNoDefer,
+    FSEventsGetCurrentEventId, kFSEventStreamCreateFlagFileEvents, kFSEventStreamCreateFlagNoDefer,
     kFSEventStreamCreateFlagWatchRoot, kFSEventStreamEventIdSinceNow,
 };
 pub use objc2_core_services::{
@@ -77,9 +77,11 @@ unsafe impl Sync for Stream {}
 impl Stream {
     /// Start a stream over `paths` that gathers events for `latency` seconds before it calls
     /// `handler`, on a serial queue named `label`; `None` when `FSEvents` refuses it or a path
-    /// is not UTF-8.
+    /// is not UTF-8. It hears what happens from its start on, or every event after `after`
+    /// when given, those before its start replayed from `FSEvents`' history first.
     pub fn start(
         paths: &[&Path],
+        after: Option<FSEventStreamEventId>,
         latency: f64,
         label: &str,
         handler: Box<Handler>,
@@ -107,7 +109,7 @@ impl Stream {
                 Some(callback),
                 &raw mut context,
                 names.as_opaque(),
-                kFSEventStreamEventIdSinceNow,
+                after.unwrap_or(kFSEventStreamEventIdSinceNow),
                 latency,
                 flags,
             )
@@ -131,83 +133,80 @@ impl Stream {
     }
 }
 
-/// A stream started off the caller's thread, which hears what happens once it is up and says
-/// when that is. Dropping it stops the stream, up or not, and one dropped before its start
-/// began is never started.
+/// A stream started off the caller's thread, which says when it is up. It hears every event
+/// after the last one the stream it takes over from had heard, or what happens from the moment
+/// its start begins when it takes over from none, so the two leave no gap between them. Dropping
+/// it stops the stream, up or not, and one dropped before its start began is never started.
 #[derive(Debug)]
 pub struct Starting {
     /// The stream once up, which lives as long as this does.
     stream: Arc<Mutex<Option<Stream>>>,
 }
 
+/// The stream a [`Starting`] asks for, as [`Stream::start`] takes it.
+pub struct Wanted {
+    /// The paths it watches.
+    pub paths: Vec<PathBuf>,
+    /// Seconds it gathers events for before it calls.
+    pub latency: f64,
+    /// Its queue's name.
+    pub label: &'static str,
+    /// What it calls for each event.
+    pub handler: Box<Handler>,
+}
+
 impl Starting {
-    /// Ask for a stream over `paths` as [`Stream::start`] makes one, started on a global
-    /// dispatch queue, which then calls `up` unless the stream was dropped first. A stream
-    /// `FSEvents` refuses is said in the log, and `up` is not called.
-    pub fn spawn(
-        paths: Vec<PathBuf>,
-        latency: f64,
-        label: &'static str,
-        handler: Box<Handler>,
-        up: Box<dyn FnOnce() + Send>,
-    ) -> Self {
+    /// Ask for the stream `wanted`, taking over from `after`, started on a global dispatch
+    /// queue, which then calls `up` unless the stream was dropped first. A stream `FSEvents`
+    /// refuses is said in the log, and `up` is not called.
+    pub fn spawn(wanted: Wanted, after: Option<&Self>, up: Box<dyn FnOnce() + Send>) -> Self {
         let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::UserInitiated);
-        Self::spawn_on(&DispatchQueue::global_queue(queue), paths, latency, label, handler, up)
+        Self::spawn_on(&DispatchQueue::global_queue(queue), wanted, after, up)
     }
 
     /// [`Starting::spawn`] on `queue`.
     fn spawn_on(
         queue: &DispatchQueue,
-        paths: Vec<PathBuf>,
-        latency: f64,
-        label: &'static str,
-        handler: Box<Handler>,
+        wanted: Wanted,
+        after: Option<&Self>,
         up: Box<dyn FnOnce() + Send>,
     ) -> Self {
+        let Wanted { paths, latency, label, handler } = wanted;
         let slot = Arc::new(Mutex::new(None));
-        let wanted = Arc::downgrade(&slot);
+        let kept = Arc::downgrade(&slot);
+        let before = after.map(|b| Arc::downgrade(&b.stream));
         queue.exec_async(move || {
-            if wanted.strong_count() == 0 {
+            if kept.strong_count() == 0 {
                 return;
             }
+            // Read here, off the caller's thread: both calls wait for any other stream of the
+            // process starting.
+            let heard = before
+                .and_then(|b| b.upgrade())
+                .and_then(|b| b.lock().as_ref().map(Stream::latest));
+            // SAFETY: `FSEventsGetCurrentEventId` takes nothing and returns an id (FSEvents.h).
+            let after = heard.unwrap_or_else(|| unsafe { FSEventsGetCurrentEventId() });
             let roots: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-            let Some(stream) = Stream::start(&roots, latency, label, handler) else {
+            let Some(stream) = Stream::start(&roots, Some(after), latency, label, handler) else {
                 tracing::info!(label, "no FSEvents stream");
                 return;
             };
             // Dropped meanwhile, the stream is stopped here as it goes out of scope.
-            let Some(slot) = wanted.upgrade() else { return };
+            let Some(slot) = kept.upgrade() else { return };
             *slot.lock() = Some(stream);
             drop(slot);
             up();
         });
         Self { stream: slot }
     }
-
-    /// Let it go once every event that already happened has reached its handler, so a stream
-    /// that takes over from this one misses none still held back by the latency. Done on a
-    /// global queue, since the flush waits for any other stream of the process starting.
-    pub fn retire(self) {
-        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::Utility);
-        DispatchQueue::global_queue(queue).exec_async(move || {
-            let up = self.stream.lock();
-            if let Some(stream) = up.as_ref() {
-                stream.flush();
-            }
-            drop(up);
-            drop(self);
-        });
-    }
 }
 
 impl Stream {
-    /// Hand the handler every event that happened before this call (FSEvents.h).
-    fn flush(&self) {
-        // SAFETY: a started stream, not yet invalidated: only `drop` does that. The callback
-        // runs on the stream's own queue, which this does not hold.
-        unsafe {
-            FSEventStreamFlushSync(self.raw);
-        }
+    /// The id of the last event this stream handed its handler, or the one it was started
+    /// after while none has come (FSEvents.h, `FSEventStreamGetLatestEventId`).
+    fn latest(&self) -> FSEventStreamEventId {
+        // SAFETY: a stream made in `start` and not yet released: only `drop` does that.
+        unsafe { FSEventStreamGetLatestEventId(self.raw) }
     }
 }
 
@@ -288,12 +287,15 @@ mod tests {
         let (said, up) = mpsc::sync_channel(1);
         let asked = Instant::now();
         let _starting = Starting::spawn(
-            vec![dir.clone()],
-            0.01,
-            "io.slopty.fsevents.test",
-            Box::new(move |path: &Path, flags: Flags| {
-                let _sent = heard.send((path.to_path_buf(), flags));
-            }),
+            Wanted {
+                paths: vec![dir.clone()],
+                latency: 0.01,
+                label: "io.slopty.fsevents.test",
+                handler: Box::new(move |path: &Path, flags: Flags| {
+                    let _sent = heard.send((path.to_path_buf(), flags));
+                }),
+            },
+            None,
             Box::new(move || {
                 let _sent = said.try_send(());
             }),
@@ -305,6 +307,55 @@ mod tests {
         let made = std::iter::from_fn(|| events.recv_timeout(UP).ok())
             .find(|(path, flags)| *path == file && flags & kFSEventStreamEventFlagItemCreated != 0);
         assert!(made.is_some(), "the file made once the stream was up is heard");
+    }
+
+    /// A stream that takes over from another hears what happened after the last event that
+    /// one heard, though it happened before its own start: here a file made in a folder only
+    /// it watches, after the stream before (over a quiet folder) was up and before it began.
+    #[test]
+    fn a_stream_taking_over_hears_what_happened_since_the_last_one_heard() {
+        let root = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(root.path()).unwrap();
+        let (quiet, busy) = (root.join("quiet"), root.join("busy"));
+        for dir in [&quiet, &busy] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let (said, up) = mpsc::sync_channel(2);
+        let first_up = said.clone();
+        let before = Starting::spawn(
+            Wanted {
+                paths: vec![quiet],
+                latency: 0.01,
+                label: "io.slopty.fsevents.test.before",
+                handler: Box::new(|_: &Path, _: Flags| {}),
+            },
+            None,
+            Box::new(move || {
+                let _sent = first_up.try_send(());
+            }),
+        );
+        up.recv_timeout(UP).unwrap();
+        let file = busy.join("made.txt");
+        std::fs::write(&file, "x").unwrap();
+        let (heard, events) = mpsc::channel();
+        let _after = Starting::spawn(
+            Wanted {
+                paths: vec![busy],
+                latency: 0.01,
+                label: "io.slopty.fsevents.test.after",
+                handler: Box::new(move |path: &Path, flags: Flags| {
+                    let _sent = heard.send((path.to_path_buf(), flags));
+                }),
+            },
+            Some(&before),
+            Box::new(move || {
+                let _sent = said.try_send(());
+            }),
+        );
+        up.recv_timeout(UP).unwrap();
+        let made = std::iter::from_fn(|| events.recv_timeout(UP).ok())
+            .find(|(path, flags)| *path == file && flags & kFSEventStreamEventFlagItemCreated != 0);
+        assert!(made.is_some(), "the file made before this stream began is heard");
     }
 
     #[test]
@@ -322,12 +373,15 @@ mod tests {
         });
         let starting = Starting::spawn_on(
             &queue,
-            vec![dir],
-            0.01,
-            "io.slopty.fsevents.test",
-            Box::new(move |_: &Path, _: Flags| {
-                let _held = &guard;
-            }),
+            Wanted {
+                paths: vec![dir],
+                latency: 0.01,
+                label: "io.slopty.fsevents.test",
+                handler: Box::new(move |_: &Path, _: Flags| {
+                    let _held = &guard;
+                }),
+            },
+            None,
             Box::new(move || {
                 let _sent = said.try_send(());
             }),

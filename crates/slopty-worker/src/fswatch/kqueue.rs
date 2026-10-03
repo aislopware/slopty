@@ -24,7 +24,7 @@ use rustix::event::kqueue::{
 use rustix::fs::{Mode, OFlags};
 
 use super::{DirWatch, Hit};
-use crate::fsevents::{self, Starting};
+use crate::fsevents::{self, Starting, Wanted};
 
 /// A watch is its descriptor.
 pub(super) type WatchId = RawFd;
@@ -129,10 +129,11 @@ impl Queue {
 
     /// Follow the contents of `folders`, each with its own directory's watch: one stream over
     /// them all, started again when the set changes. It starts off this thread, so the stream
-    /// over the folders before is kept until it is up, then retired once what it already heard
-    /// is handed over. Once it is, the folders new to it are
-    /// listed again for what changed inside them while it started. Unfollowed on an empty set,
-    /// and not at all when `FSEvents` refuses (their entries are still followed by kqueue).
+    /// over the folders before is kept until it is up; it hears every event after the last one
+    /// that stream heard, so a write in a kept folder is heard by one or both. Once it is up,
+    /// the folders new to it are listed again for what changed inside them before. Unfollowed
+    /// on an empty set, and not at all when `FSEvents` refuses (their entries are still
+    /// followed by kqueue).
     pub(super) fn follow_contents(&mut self, folders: Vec<(PathBuf, RawFd)>) {
         let folders: HashMap<PathBuf, RawFd> = folders
             .into_iter()
@@ -155,23 +156,27 @@ impl Queue {
         let (kq, noted, followed) =
             (Arc::clone(&self.fd), Arc::clone(&self.heard), folders.keys().cloned().collect());
         let (rung, said) = (Arc::clone(&self.fd), Arc::clone(&self.heard));
-        let stream = Starting::spawn(
-            paths,
-            CONTENTS_LATENCY,
-            "io.slopty.fswatch.contents",
-            Box::new(move |path: &Path, flags: fsevents::Flags| {
-                hear(&kq, &noted, &followed, path, flags);
-            }),
-            Box::new(move || {
-                said.lock().push(Heard::Up(ask));
-                ring(&rung);
-            }),
-        );
         let (covering, whole) = match before {
             Some(b) if b.settled => (Some(b.stream), b.folders.into_keys().collect()),
             Some(b) => (b.covering, b.whole),
             None => (None, HashSet::new()),
         };
+        let wanted = Wanted {
+            paths,
+            latency: CONTENTS_LATENCY,
+            label: "io.slopty.fswatch.contents",
+            handler: Box::new(move |path: &Path, flags: fsevents::Flags| {
+                hear(&kq, &noted, &followed, path, flags);
+            }),
+        };
+        let stream = Starting::spawn(
+            wanted,
+            covering.as_ref(),
+            Box::new(move || {
+                said.lock().push(Heard::Up(ask));
+                ring(&rung);
+            }),
+        );
         self.contents = Some(Contents { folders, stream, ask, covering, whole, settled: false });
     }
 
@@ -277,9 +282,7 @@ impl Queue {
                             hits.push(Hit::Dir { id: *id, name: None, done: false, content: true });
                         }
                     }
-                    if let Some(before) = contents.covering.take() {
-                        before.retire();
-                    }
+                    contents.covering = None;
                     contents.whole.clear();
                     contents.settled = true;
                 }

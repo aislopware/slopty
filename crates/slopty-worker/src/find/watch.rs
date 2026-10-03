@@ -61,6 +61,7 @@ mod imp {
             let top = shared.top().to_path_buf();
             let stream = Stream::start(
                 &[&top],
+                None,
                 LATENCY,
                 "io.slopty.find.watch",
                 Box::new(move |path: &std::path::Path, flags: crate::fsevents::Flags| {
