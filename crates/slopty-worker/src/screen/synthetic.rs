@@ -3037,11 +3037,15 @@ mod tests {
     }
 
     /// A new stream's first two seconds: frames encoded in each, the lowest ceiling its encoder
-    /// watch set and when the ceiling was back at the rung, for the drawn screen at a quarter
-    /// (the size the stream tests use) or at `SLOPTY_SCALE`, its first frame `SLOPTY_COLD_MS`
-    /// slower ([`ColdStart`]), or with `SLOPTY_WHOLE=1` this Mac's display drawn at its own
-    /// size. Run each in a process of its own, so the first keyframe meets a cold encoder as
-    /// a worker's first stream does (`docs/MEASUREMENTS.md`, "a keyframe charged to the rung").
+    /// watch set and when the ceiling was back at the rung, and when each frame's first datagram
+    /// left (the longest gap, and every gap over 25 ms). For the drawn screen at a quarter (the
+    /// size the stream tests use) or at `SLOPTY_SCALE`, its first frame `SLOPTY_COLD_MS` slower
+    /// ([`ColdStart`]); with `SLOPTY_WIDE=1` a 2560 × 1600 display at its own size, where
+    /// `SLOPTY_TIME_AT_OPEN=1` times the stripes beside the open as the open once did; or with
+    /// `SLOPTY_WHOLE=1` this Mac's display drawn at its own size. Run each in a process of its
+    /// own, so the first keyframe meets a cold encoder as a worker's first stream does
+    /// (`docs/MEASUREMENTS.md`, "a keyframe charged to the rung" and "the stripe timing beside
+    /// a new stream").
     #[test]
     #[ignore = "measurement"]
     fn measure_a_new_streams_first_seconds() {
@@ -3056,6 +3060,9 @@ mod tests {
                 };
                 let display = displays.first().expect("a display").id;
                 first_seconds::<Drawn>(CaptureTarget::Display(display), Quality::default()).await;
+            } else if std::env::var("SLOPTY_WIDE").is_ok_and(|v| v == "1") {
+                let quality = Quality { scale: 1.0, ..Quality::default() };
+                first_seconds::<WideCold>(CaptureTarget::Display(DISPLAY.id), quality).await;
             } else {
                 let scale =
                     std::env::var("SLOPTY_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(0.25);
@@ -3063,6 +3070,111 @@ mod tests {
                 first_seconds::<ColdStart>(CaptureTarget::Display(DISPLAY.id), quality).await;
             }
         });
+    }
+
+    /// The stripe timings [`Counted`] was asked for.
+    static STRIPES_TIMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// VideoToolbox, counting the stripe timings asked of it rather than running them.
+    struct Counted(slopty_codec::VideoToolbox);
+
+    impl slopty_codec::VideoEncoder for Counted {
+        type Image = PixelBuffer;
+
+        fn new(
+            config: slopty_codec::EncoderConfig,
+            sink: impl Fn(slopty_codec::EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, slopty_codec::CodecError> {
+            slopty_codec::VideoToolbox::new(config, sink).map(Self)
+        }
+
+        fn side_by_side(
+            _width: u32,
+            _height: u32,
+            _chroma: Chroma,
+        ) -> Result<Option<slopty_codec::stripes::SideBySide>, slopty_codec::CodecError> {
+            STRIPES_TIMED.fetch_add(1, Ordering::Relaxed);
+            Ok(None)
+        }
+
+        fn encode(
+            &self,
+            image: &PixelBuffer,
+            pts_us: u64,
+            options: &slopty_codec::FrameOptions,
+        ) -> Result<(), slopty_codec::CodecError> {
+            self.0.encode(image, pts_us, options)
+        }
+
+        fn set_bitrate(&self, bps: u32) -> Result<(), slopty_codec::CodecError> {
+            self.0.set_bitrate(bps)
+        }
+
+        fn set_frame_rate(&self, fps: u16) -> Result<(), slopty_codec::CodecError> {
+            self.0.set_frame_rate(fps)
+        }
+
+        fn set_temporal_layers(&self, on: bool) -> Result<bool, slopty_codec::CodecError> {
+            self.0.set_temporal_layers(on)
+        }
+
+        fn frames_dropped(&self) -> u64 {
+            self.0.frames_dropped()
+        }
+    }
+
+    /// The drawn screen at 2560 × 1600, a size whose stripes are timed, on [`Counted`].
+    enum WideCounted {}
+
+    impl Platform for WideCounted {
+        type Audio = slopty_codec::Opus;
+        type Capture = StudioAt<60, 1280, 800>;
+        type Input = Poke;
+        type Video = Counted;
+    }
+
+    /// A stream opened at a size whose stripes are not yet timed codes its first keyframe and
+    /// its first second without the engines being timed beside it: the open takes the size's
+    /// verdict only when it is known (`stripes::pays`), and a moving picture never leaves the
+    /// engines idle for the geometry tick to time them.
+    #[test]
+    fn a_new_stream_codes_its_first_frames_with_the_engines_to_itself() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let wire = Arc::new(Wire::new(ScreenRouter::new(), None, None));
+            let quality = Quality { scale: 1.0, ..Quality::default() };
+            let target = CaptureTarget::Display(DISPLAY.id);
+            let opened = Pipeline::<WideCounted>::open(STREAM, target, quality, wire, |_e| {});
+            let (mut stream, opened) = opened.await.unwrap();
+            let ScreenEvent::Opened { width, height, .. } = opened else { panic!("{opened:?}") };
+            assert_eq!((width, height), (2560, 1600));
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let first = loop {
+                assert!(Instant::now() < deadline, "no frame: {:?}", stream.stats());
+                if stream.stats().encoded > 0 {
+                    break Instant::now();
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            };
+            while first.elapsed() < Duration::from_secs(1) {
+                let probe = tokio::task::spawn_blocking(stream.prober()).await.unwrap();
+                assert!(stream.check_geometry(&probe).is_none(), "nothing to rebuild");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            assert_eq!(STRIPES_TIMED.load(Ordering::Relaxed), 0, "{:?}", stream.stats());
+            stream.close().await;
+        });
+    }
+
+    /// [`ColdStart`] on a 2560 × 1600 display, the size the app's stream tests draw.
+    enum WideCold {}
+
+    impl Platform for WideCold {
+        type Audio = slopty_codec::Opus;
+        type Capture = StudioAt<60, 1280, 800>;
+        type Input = Poke;
+        type Video = Cold;
     }
 
     /// The drawn screen whose sessions each spend `SLOPTY_COLD_MS` (default none) more on their
@@ -3133,10 +3245,48 @@ mod tests {
     /// this process whose loss feedback the stream answers, as the stream tests run it.
     async fn first_seconds<P: Platform>(target: CaptureTarget, quality: Quality) {
         let router = ScreenRouter::new();
-        let wire = Arc::new(Wire::new(router.clone(), None, None));
+        let (line_tx, mut line) = mpsc::unbounded_channel::<(Instant, Vec<Bytes>)>();
+        let wire = Arc::new(Wire::new(router.clone(), Some(line_tx), None));
+        // Each video frame's first datagram as it left, routed on to the client.
+        let departures = Arc::new(Mutex::new(Vec::<(Instant, u32)>::new()));
+        let forward = tokio::spawn({
+            let (router, departures) = (router.clone(), Arc::clone(&departures));
+            async move {
+                while let Some((at, batch)) = line.recv().await {
+                    let mut departures = departures.lock();
+                    for datagram in &batch {
+                        let Some((header, _)) = slopty_proto::media::MediaHeader::parse(datagram)
+                        else {
+                            continue;
+                        };
+                        let frame = header.frame.get();
+                        let video = header.kind() == Some(slopty_proto::media::Kind::VideoData);
+                        if video && departures.last().is_none_or(|(_, last)| *last != frame) {
+                            departures.push((at, frame));
+                        }
+                    }
+                    drop(departures);
+                    router.route_many(batch, at);
+                }
+            }
+        });
+        // The stripe timing where a stream's open used to start it, beside the first keyframe:
+        // `SLOPTY_TIME_AT_OPEN=1` on the 2560 × 1600 display (`SLOPTY_WIDE=1`).
+        let time_at_open = std::env::var("SLOPTY_TIME_AT_OPEN").is_ok_and(|v| v == "1");
+        let timed_beside = time_at_open.then(|| {
+            tokio::task::spawn_blocking(|| {
+                use slopty_codec::VideoEncoder as _;
+                let at = Instant::now();
+                let chroma = Chroma::Subsampled;
+                let gate = slopty_codec::VideoToolbox::side_by_side(2560, 1600, chroma);
+                (gate.ok().flatten(), at.elapsed())
+            })
+        });
+        let open_at = Instant::now();
         let (stream, opened) =
             Pipeline::<P>::open(STREAM, target, quality, wire, |_event| {}).await.unwrap();
         let ScreenEvent::Opened { codec, width, height, .. } = opened else { panic!("{opened:?}") };
+        let open_took = open_at.elapsed();
         let control = stream.control();
         let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
         let drain = tokio::spawn(async move { while reports.recv().await.is_some() {} });
@@ -3172,9 +3322,38 @@ mod tests {
             worker.latency_max_us as f64 / 1e3,
             handle.stats().frames,
         );
+        let departures = departures.lock().clone();
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        let gaps: Vec<(f64, f64)> = departures
+            .windows(2)
+            .filter_map(|pair| {
+                let [(was, _), (at, _)] = pair else { return None };
+                Some((ms(at.duration_since(open_at)), ms(at.duration_since(*was))))
+            })
+            .collect();
+        let worst = gaps.iter().copied().fold((0.0, 0.0), |w, g| if g.1 > w.1 { g } else { w });
+        let first = departures.first().map(|(at, _)| ms(at.duration_since(open_at)));
+        let late: Vec<String> = gaps
+            .iter()
+            .filter(|(_, gap)| *gap > 25.0)
+            .map(|(at, gap)| format!("{gap:.0} ms at {at:.0} ms"))
+            .collect();
+        eprintln!(
+            "MEASURE departures: the open took {:.0} ms, first frame {first:.0?} ms after it began, {} frames in 2 s, longest gap {:.1} ms ending {:.0} ms after the open, gaps over 25 ms: [{}]",
+            ms(open_took),
+            departures.len(),
+            worst.1,
+            worst.0,
+            late.join(", "),
+        );
+        if let Some(timed) = timed_beside {
+            let (gate, took) = timed.await.unwrap();
+            eprintln!("MEASURE the stripe timing beside the open: {gate:?}, {:.0} ms", ms(took));
+        }
         drop(handle);
         drain.abort();
         stream.close().await;
+        forward.abort();
     }
 
     /// The audio datagrams on `line`, as (when, media stream, sequence), from batches sent since

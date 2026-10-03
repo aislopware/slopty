@@ -14092,3 +14092,43 @@ The input path gains one `Option` check per request for the marker the driver is
 cargo test -p slopty-worker --test session_actor -- silent_driver --nocapture
 cargo test -p slopty-client --test server_link -- resume --nocapture
 ```
+
+## 2026-10-04 — the stripe timing beside a new stream
+
+The 66 ms stall about 450 ms into a new stream ("the stream goldens and the late beats", above)
+was left as the transport's. One thing beside it was the worker's own: a stream's open asked
+`stripes::pays` for its size, and for a size not yet timed (from 3024 × 1968 × 2/3 pixels up,
+so 2560 × 1600 too) that started `VideoEncoder::side_by_side` at once. That is 13 frames on a
+whole-picture session and 13 on two stripe sessions of its own, coded beside the stream's first
+keyframe and first frames. Now the timing starts only from the geometry tick, once no session of
+the worker has coded anything for a second (`engines::Engines::quiet`), and the open takes a
+size's verdict only when it is already known.
+
+Measured on the M1 Max (macOS 27.0, load average 5–6), release, the drawn 2560 × 1600 display
+at its own size, each run in a fresh process, the two alternated 8 times. "Before" runs the
+timing at the open as the open did (`SLOPTY_TIME_AT_OPEN=1`); "after" is the stream alone, as it
+now opens. The longest gap between two frames' first datagrams leaving, over the stream's first
+2 s:
+
+| | longest gap, median (range) | when, after the open began | frames in 2 s |
+| --- | --- | --- | --- |
+| before | 48.6 ms (33.4–54.5) | 42–55 ms at 491–543 ms in 6 of 8 | 108–112 |
+| after | 36.0 ms (33.4–36.1) | the 33–36 ms gaps every run has | 109–111 |
+
+The timing beside the stream took 670–710 ms, against about 310 ms of encodes for its 26
+frames at its own medians, and timed the size as whole 10.8–11.6 ms and striped 12.5–12.7 ms,
+so it never paid. The extra gap falls at
+the point the stall was seen. On a loaded Mac, with the first keyframe still in QUIC, a 50 ms
+hole in the worker's sending is enough to read as a link stall at the client. The 33 ms gaps
+left in both are the first frames at 30 a second while the encoder warms up and the encoder
+watch's window boundaries (36 ms at 1.06 s and 2.06 s); they are not the timing's.
+
+```sh
+cargo test --release -p slopty-worker --lib --no-run
+# the binary it names, each run on its own:
+SLOPTY_WIDE=1 SLOPTY_TIME_AT_OPEN=1 target/release/deps/slopty_worker-<hash> --ignored --exact \
+  --nocapture screen::synthetic::tests::measure_a_new_streams_first_seconds   # before
+SLOPTY_WIDE=1 target/release/deps/slopty_worker-<hash> --ignored --exact \
+  --nocapture screen::synthetic::tests::measure_a_new_streams_first_seconds   # after
+cargo test -p slopty-worker --lib -- engines:: stripes:: a_new_stream_codes_its_first_frames
+```

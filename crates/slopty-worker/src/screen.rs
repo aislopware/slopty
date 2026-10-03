@@ -2526,6 +2526,7 @@ impl<P: Platform> Shared<P> {
             }
             *told = self.tell(&mut lives, i, fps);
             coder.submitted(Submitted { pts_us: pts, at_us: now, stripes, region: shown });
+            engines::ENGINES.busy(now);
             // Marked in flight before the submit, as the callback that clears the mark may run
             // inside it: marked after, a keyframe already out read as one still being encoded
             // and the refreshes of the next 400 ms went unanswered.
@@ -2863,6 +2864,7 @@ impl<P: Platform> Shared<P> {
         let refined_at =
             coder.refine.lock().returned(packet.pts_us, packet.mse.map(|mse| mse.luma), bytes);
         let returned = coder.returned(packet.pts_us, now);
+        engines::ENGINES.busy(now);
         let (took, stripes, region) = returned
             .map_or((None, 0, None), |(took, frame)| (Some(took), frame.stripes, frame.region));
         if let Some(took) = took.filter(|_| !packet.keyframe) {
@@ -3850,20 +3852,23 @@ fn asked(quality: &Quality) -> Chroma {
 
 /// The stripes a stream capturing as `capture`, carrying `chroma`, is coded as: always under
 /// the knob's `On`, never under `Off`, and otherwise when stripes pay at the stream's size
-/// ([`stripes::pays`]) and the spend says stripes (`spend`; `None` before the stream has spent
+/// ([`stripes::pays`], which times the engines for a size not yet known only where `may_time`
+/// says they are idle) and the spend says stripes (`spend`; `None` before the stream has spent
 /// anything, when the size alone decides). `None` for one picture.
 fn striping<P: Platform>(
     knob: stripes::Knob,
     spend: Option<bool>,
     capture: &CaptureConfig,
     chroma: Chroma,
+    may_time: bool,
 ) -> Option<[CodedStripe; 2]> {
     let (width, height) = capture.surface();
     let wanted = match knob {
         stripes::Knob::On => true,
         stripes::Knob::Off => false,
         stripes::Knob::Auto => {
-            spend.unwrap_or(true) && stripes::pays::<P::Video>(width, height, chroma) == Some(true)
+            spend.unwrap_or(true)
+                && stripes::pays::<P::Video>(width, height, chroma, may_time) == Some(true)
         }
     };
     if wanted { slopty_codec::stripes::layout(height) } else { None }
@@ -4157,7 +4162,7 @@ impl<P: Platform> Pipeline<P> {
         let t_encoder = Instant::now();
         let sessions = [shared.next_session(), shared.next_session()];
         let shown = (capture_config.width, capture_config.height);
-        let mut layout = striping::<P>(knob, None, &capture_config, encoder_config.chroma);
+        let mut layout = striping::<P>(knob, None, &capture_config, encoder_config.chroma, false);
         let weak = Arc::downgrade(&shared);
         let built = match build_encoder(&weak, encoder_config, shown, sessions, layout).await {
             Err(e) if chroma == Chroma::Full => {
@@ -4165,7 +4170,7 @@ impl<P: Platform> Pipeline<P> {
                 shared.chroma.lock().refuse();
                 (capture_config, encoder_config) =
                     carrying(Chroma::Subsampled, (capture_config, encoder_config));
-                layout = striping::<P>(knob, None, &capture_config, encoder_config.chroma);
+                layout = striping::<P>(knob, None, &capture_config, encoder_config.chroma, false);
                 build_encoder(&weak, encoder_config, shown, sessions, layout).await?
             }
             Err(e) if layout.is_some() => {
@@ -4510,8 +4515,9 @@ impl<P: Platform> Pipeline<P> {
     /// when that is not what the sessions in force code: new sessions, so keyframes, and a
     /// `Geometry` for the client once they are in.
     fn follow_stripes(&mut self, spend: bool) -> Option<Rebuild<P>> {
-        let layout =
-            striping::<P>(self.stripes, Some(spend), &self.desired, self.encoder_config.chroma);
+        let idle = engines::ENGINES.quiet(now::<P>());
+        let config = &self.encoder_config;
+        let layout = striping::<P>(self.stripes, Some(spend), &self.desired, config.chroma, idle);
         if layout == self.layout {
             return None;
         }
@@ -4572,7 +4578,7 @@ impl<P: Platform> Pipeline<P> {
         let sessions = [self.shared.next_session(), self.shared.next_session()];
         let shown = (desired.width, desired.height);
         let spend = self.gate.spend().map(|_| self.gate.on());
-        let layout = striping::<P>(self.stripes, spend, &desired, config.chroma);
+        let layout = striping::<P>(self.stripes, spend, &desired, config.chroma, false);
         let encoder = start_encoder(&Arc::downgrade(&self.shared), config, shown, sessions, layout);
         Rebuild { encoder, sessions, native, desired, config, layout, resized: false }
     }

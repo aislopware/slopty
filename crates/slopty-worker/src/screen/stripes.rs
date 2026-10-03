@@ -132,9 +132,18 @@ static TIMED: Mutex<Option<HashMap<Size, Option<bool>>>> = Mutex::new(None);
 
 /// Whether stripes pay for a `width` × `height` surface carrying `chroma` on this Mac: the
 /// engines code them side by side, and the whole picture takes over [`WHOLE_OVER`]. `None`
-/// until it is known: the first ask starts the timing off the runtime
-/// ([`VideoEncoder::side_by_side`]), which each size takes once.
-pub(super) fn pays<V: VideoEncoder>(width: u32, height: u32, chroma: Chroma) -> Option<bool> {
+/// until it is known.
+///
+/// The timing ([`VideoEncoder::side_by_side`]) codes 26 frames on three sessions of its own,
+/// about 300 ms of the engines at 2560 × 1600, so it starts only where `may_time` says the
+/// engines are idle (`engines::Engines::quiet`), off the runtime, once per size. Asked at a
+/// stream's open it would code beside the stream's first keyframe.
+pub(super) fn pays<V: VideoEncoder>(
+    width: u32,
+    height: u32,
+    chroma: Chroma,
+    may_time: bool,
+) -> Option<bool> {
     if u64::from(width).saturating_mul(u64::from(height)) < TIMED_FROM {
         return Some(false);
     }
@@ -142,6 +151,7 @@ pub(super) fn pays<V: VideoEncoder>(width: u32, height: u32, chroma: Chroma) -> 
     let mut timed = TIMED.lock();
     let asked = match timed.get_or_insert_with(HashMap::new).entry(key) {
         Entry::Occupied(known) => Some(*known.get()),
+        Entry::Vacant(_) if !may_time => return None,
         Entry::Vacant(slot) => {
             slot.insert(None);
             None
@@ -217,6 +227,76 @@ mod tests {
         assert!(feed(&mut gate, 0.9, 2), "over, not for the hold yet");
         assert!(!feed(&mut gate, 0.9, 3), "over for the hold: off");
         assert!(gate.spend().is_some_and(|s| s > OFF_OVER));
+    }
+
+    /// How many times [`Timed`] was timed.
+    static TIMINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// An encoder whose engines code two stripes in half the whole picture's 20 ms, and that
+    /// counts its timings.
+    struct Timed;
+
+    impl VideoEncoder for Timed {
+        type Image = ();
+
+        fn new(
+            _config: slopty_codec::EncoderConfig,
+            _sink: impl Fn(slopty_codec::EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, slopty_codec::CodecError> {
+            Ok(Self)
+        }
+
+        fn side_by_side(
+            _width: u32,
+            _height: u32,
+            _chroma: Chroma,
+        ) -> Result<Option<slopty_codec::stripes::SideBySide>, slopty_codec::CodecError> {
+            TIMINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let (whole, striped) = (Duration::from_millis(20), Duration::from_millis(10));
+            Ok(Some(slopty_codec::stripes::SideBySide { whole, striped }))
+        }
+
+        fn encode(
+            &self,
+            _image: &(),
+            _pts_us: u64,
+            _options: &slopty_codec::FrameOptions,
+        ) -> Result<(), slopty_codec::CodecError> {
+            Ok(())
+        }
+
+        fn set_bitrate(&self, _bps: u32) -> Result<(), slopty_codec::CodecError> {
+            Ok(())
+        }
+
+        fn set_frame_rate(&self, _fps: u16) -> Result<(), slopty_codec::CodecError> {
+            Ok(())
+        }
+    }
+
+    /// A size not yet timed is timed only where the engines are said to be idle: asked
+    /// otherwise, as a stream's open asks, it is not known and nothing is coded for it. Once
+    /// asked where they are idle it is timed once, off the runtime, and known from then on,
+    /// idle or not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_engines_are_timed_only_where_they_are_idle() {
+        let (width, height, chroma) = (5120, 2880, Chroma::Subsampled);
+        for _ in 0..3 {
+            assert_eq!(pays::<Timed>(width, height, chroma, false), None);
+        }
+        assert_eq!(TIMINGS.load(std::sync::atomic::Ordering::Relaxed), 0, "nothing timed");
+
+        assert_eq!(pays::<Timed>(width, height, chroma, true), None, "timing off the runtime");
+        let deadline = Instant::now().checked_add(Duration::from_secs(10)).expect("a deadline");
+        while pays::<Timed>(width, height, chroma, false).is_none() {
+            assert!(Instant::now() < deadline, "the timing never ended");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(pays::<Timed>(width, height, chroma, false), Some(true));
+        assert_eq!(pays::<Timed>(width, height, chroma, true), Some(true));
+        assert_eq!(TIMINGS.load(std::sync::atomic::Ordering::Relaxed), 1, "once per size");
+        assert_eq!(pays::<Timed>(1920, 1080, chroma, true), Some(false), "too small to time");
+        assert_eq!(TIMINGS.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     /// The knob reads `on` and `off`, and anything else leaves it to the gate.

@@ -1966,8 +1966,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the rate is the limit they lost 7–10 dB at the same spend.
   - So stripes are a mode for a link with room, not a default. They are on only when all of
     these hold:
-    - this machine's two engines are shown to run side by side (timed once per boot at the
-      stream's stripe size, as `warm_up` already does one capture);
+    - this machine's two engines are shown to run side by side (timed once per process at the
+      stream's stripe size, while the engines are idle: "The stripe timing waits for idle
+      engines", below);
     - the whole picture's encode is over 12 ms (3024 × 1968 and up);
     - the encoder spends well under half its target, so twice a scroll still fits.
     Switching mode rebuilds the sessions, so the gate holds for seconds, not report windows.
@@ -2673,3 +2674,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     for slopty-worker in its System Settings."), worded by `screen::failure_text`. The tile's
     own body with Retry and Close is the workspace's to draw from `failed_opens`.
 
+- ✅ **The stripe timing waits for idle engines** (2026-10-04, MEASUREMENTS "the stripe timing
+  beside a new stream"). A stream's open asked whether stripes pay at its size, and a size not
+  yet timed was timed at once. The timing codes 26 frames on three sessions of its own, so it
+  ran beside the stream's first keyframe and first frames. At 2560 × 1600 it put a 42–55 ms
+  gap in the stream's sending about 500 ms in (6 runs of 8), where the 66 ms stall was seen.
+  The timing took 670–710 ms beside a stream, against about 310 ms of encodes at its own
+  medians, and its verdict at that size was false anyway.
+  - The open takes a size's verdict only when it is known. A size not yet known opens as one
+    picture, which is what it opened as while the timing ran.
+  - The geometry tick starts the timing, once per size and process, only once no session of
+    the worker has put a frame in or taken one out for a second (`engines::Engines::quiet`).
+    That is after a still picture's last refinements and past any frame a session holds at
+    60 frames a second. Stripes are wanted when the spend is low, which a still or slow
+    picture gives, so the verdict comes when it can be used.
+  - A picture that starts moving while the timing runs shares the engines with it for those
+    300 ms, once per size. Before the worker's first frame nothing counts as idle.
+  - Not taken: timing every display size at the worker's start. Windows come in any size,
+    the scale moves the size too, and a client often opens its first stream as the worker
+    starts.
+  - Not taken: deriving the verdict from the stream's own encode time. The whole picture's
+    half could come from it, but whether two stripes run side by side cannot be seen without
+    coding two stripes.
+  - Tests: `the_engines_are_timed_only_where_they_are_idle` (`stripes`),
+    `the_engines_are_quiet_a_second_after_the_last_frame` (`engines`), and
+    `a_new_stream_codes_its_first_frames_with_the_engines_to_itself` (`synthetic`, a 2560 ×
+    1600 stream on an encoder that counts its timings: one with the old open, none now).

@@ -41,6 +41,11 @@ pub(super) const SETTLE_US: u64 = 1_000_000;
 /// another: at under 60 frames a second a window is longer than [`SETTLE_US`].
 pub(super) const SETTLE_WINDOWS: u32 = 2;
 
+/// How long no session of this worker may have coded anything before the engines count as
+/// idle ([`Engines::quiet`]): past a still picture's last refinements, and past any frame a
+/// session still holds at 60 frames a second.
+pub(super) const QUIET_US: u64 = 1_000_000;
+
 /// What a stream lends the others.
 pub(super) trait Contender: Send + Sync {
     /// A client has this stream's tile focused.
@@ -67,6 +72,9 @@ pub(super) struct Engines {
     streams: Mutex<Vec<Weak<dyn Contender>>>,
     /// `host_now_us()` of the last give-way, `0` before one.
     gave_at_us: AtomicU64,
+    /// The clock's time a frame last went into or came out of any session, `0` before the
+    /// first.
+    busy_us: AtomicU64,
 }
 
 /// This process's engines: one worker, one Mac.
@@ -74,7 +82,23 @@ pub(super) static ENGINES: Engines = Engines::new();
 
 impl Engines {
     const fn new() -> Self {
-        Self { streams: Mutex::new(Vec::new()), gave_at_us: AtomicU64::new(0) }
+        Self {
+            streams: Mutex::new(Vec::new()),
+            gave_at_us: AtomicU64::new(0),
+            busy_us: AtomicU64::new(0),
+        }
+    }
+
+    /// A frame went into a session, or came out of one, at `now_us`.
+    pub(super) fn busy(&self, now_us: u64) {
+        self.busy_us.fetch_max(now_us.max(1), Ordering::Relaxed);
+    }
+
+    /// Whether no session has coded anything for [`QUIET_US`] by `now_us`: never before the
+    /// first frame went in, while a new stream's first keyframe is still to be coded.
+    pub(super) fn quiet(&self, now_us: u64) -> bool {
+        let busy = self.busy_us.load(Ordering::Relaxed);
+        busy != 0 && now_us.saturating_sub(busy) >= QUIET_US
     }
 
     /// A stream opened; it leaves by being dropped.
@@ -129,6 +153,22 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU16};
 
     use super::*;
+
+    /// The engines are idle only once a frame has gone in and nothing has gone in or come out
+    /// for [`QUIET_US`]; a frame out of any session starts the wait again.
+    #[test]
+    fn the_engines_are_quiet_a_second_after_the_last_frame() {
+        let engines = Engines::new();
+        assert!(!engines.quiet(5_000_000), "nothing coded yet: a first keyframe is to come");
+        engines.busy(5_000_000);
+        assert!(!engines.quiet(5_999_999));
+        assert!(engines.quiet(6_000_000));
+        engines.busy(4_900_000);
+        assert!(engines.quiet(6_000_000), "an earlier stamp from another stream moves nothing");
+        engines.busy(6_100_000);
+        assert!(!engines.quiet(6_200_000), "a frame came out again");
+        assert!(engines.quiet(7_100_000));
+    }
 
     /// A stream on the ladder 60, 30, 15.
     struct Stream {
