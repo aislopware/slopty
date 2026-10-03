@@ -131,6 +131,8 @@ ListItem │ Connect server
 Button │ Keys for Connect server
 ListItem │ Disconnect server
 Button │ Keys for Disconnect server
+ListItem │ Copy tailnet grant
+Button │ Keys for Copy tailnet grant
 ListItem │ Use this mac
 Button │ Keys for Use this mac
 ListItem │ Install over ssh
