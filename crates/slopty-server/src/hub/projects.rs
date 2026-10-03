@@ -2149,6 +2149,7 @@ impl Hub {
         let (respent, reset) = state.projects.windows_due(wall);
         self.projects_moved(state, respent);
         let (terminals, _) = live(state);
+        Self::reword_outcomes(state);
         let projects = &state.projects;
         let now = tokio::time::Instant::now();
         let batches = state.deliveries.take(

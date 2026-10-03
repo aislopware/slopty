@@ -237,6 +237,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   when its worker announces that id the terminal goes on its task as if the answer had come.
   An agent cannot name another's terminal as its own start.
 - A command task counts like an agent, since it may be another agent's CLI.
+- Since 2026-10-03 one exception: the agent of a task merged or given up counts against no
+  limit while it rests, and counts again as soon as it works ("A finished task's agent stops
+  counting", below).
 - The fleet bound counts every live terminal with an agent in it, in a project or not, plus
   every start in flight. A plain `spawn_agent` is refused at the bound as a task's start is.
 - A project's orchestrator counts only while its terminal is live.
@@ -1561,6 +1564,78 @@ Tests:
   `an_item_fact_is_kept_and_broadcast`, `a_thread_row_names_its_repository_once_known`;
   `slopty-server` `a_project_without_an_orchestrator_is_kept_and_listed`,
   `members_name_clones_and_folders`.
+
+## What a task's agent came to, and finished tasks settle (2026-10-03)
+
+From the T3 Code orchestrator study (`.research/t3code-orchestrator-2026-10-03.md`, R1 and
+R2).
+
+**A task's outcome reaches the node above it without a report.** ✅ 2026-10-03
+- Before: the node that split a task off heard of it only through the agent's own
+  `task_report` or the merge queue's notices. Agents often end a turn with the answer in their
+  last words and no report, exit, or stop on a permission, and then the orchestrator idled
+  with nothing delivered until it polled `project_status`.
+- Prior art: T3 Code publishes a child's last assistant message, or its error, to the parent
+  when the child's run ends, and holds the task open while the child's own children work.
+  Claude Code's agent teams tell the lead when a teammate stops, with its final answer. T3's
+  open #13343 adds telling the parent when a child waits for input.
+- The server follows each task's agent through its turns (`project::turns`), from the same
+  statuses the task's state follows, and the node above hears, as a server notice:
+  - **it ended its turn without a word of its own.** A need, a block or a finish reported
+    during the turn is its word; a checkpoint is progress and is not. The rest is held while
+    any task under it still works, since the result is not in yet, and heard once they rest,
+    the deepest task first. It is delivered as a finish is, after `DONE_SETTLE`, with the
+    agent's last line from its thread's row (`ThreadRow::last_line`, at most 2 KiB), read
+    again until it goes, since the row with the final line can come after the status that
+    ended the turn;
+  - **it waits on the person**, naming the open request's title, or the permission or
+    question when its thread names none. Heard once per wait, after it has lasted
+    `WAIT_SETTLE` (30 s), so a permission the person answers at once wakes nobody, and paced as
+    a need. The words say only the person answers it: the orchestrator is told so it stops
+    waiting blindly, and nothing ever answers for the person;
+  - **it exited, or its terminal closed**, while its task still followed it. Heard once, at
+    once, paced as a block, with its last words.
+- When the agent goes back to work, what was waiting to be said of it is taken back. The
+  agent's own report replaces it, and its next outcome does too. One that says again the same
+  words of the same kind as the last sent for that task is dropped as it falls due, so an
+  agent that flips between idle and working says nothing new. A task verifying, done, merged
+  or given up is the merge queue's or the person's to speak of, and is not heard of here.
+- It goes through the reports' own delivery: hooks and the inbox socket, held while the
+  project is at its budget, and a `Delivered` moment on the timeline once handed over. Nothing
+  is typed, and only published doors (hook statuses and the thread table the adapters build)
+  are read. No wire change: the full final message (`ThreadRow::last_said`) waits for a proto
+  change that every adapter fills.
+- Kept in memory only. After a restart, an agent's next status starts its turn afresh, and a
+  terminal gone meanwhile is heard as an exit.
+- Tests: `the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing`,
+  `a_rest_is_heard_once_the_tasks_under_it_rest` (`slopty-server::project`),
+  `the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own` (`slopty-server::deliver`) and
+  `a_task_s_outcome_reaches_the_orchestrator_without_a_report` (`slopty-server`, through a
+  worker's link on a paused clock).
+
+**A finished task's agent stops counting, and is closed once it rests.** ✅ 2026-10-03
+- Before: merging closed only the verifier's and the reviewer's terminals. A merged task's
+  agent idled at its prompt, counted against the per-worker and per-project caps (4 and 12 by
+  default), and a long project filled its caps with finished agents until every start was
+  refused. T3 Code's settlement detaches idle sessions and closes terminals idle at a prompt,
+  and its #15146 shows the cost of never freeing what finished work holds.
+- A task merged or given up (`Failed`, whoever said it) whose agent is not at work counts
+  against no limit: not the project's, not the person's per worker, not the fleet's. Its
+  terminal stays open and its assignment stays, so the board still links it and the person can
+  look back or carry on. An agent that works again counts again, so an agent that gives up its
+  own task and goes on working frees nothing.
+- Once that agent has rested `SETTLE_AFTER` (10 min) at its prompt, with no request open on
+  its threads, no background work or scheduled prompt, and its tile on no client's screen, the
+  server closes its terminal through the worker's `Close` (`Hub::settle_finished`, looked at
+  every 30 s). The wait starts again whenever any of that stops holding. The agent's session
+  stays, so it can be taken up again, as "Stop its agent" relies on. The timeline says why in
+  a note before the terminal's end says it is gone. Only a terminal the server started for the
+  task is closed: one the person put on a task is theirs.
+- Freeing the task's worktree is left for a later change, since it needs a worker verb (a
+  `slopty-proto` change) that removes a clean, merged worktree under `.claude/worktrees/` and
+  keeps a dirty or unmerged one.
+- Tests: `a_finished_task_s_agent_counts_only_while_it_works` (`slopty-server::project`) and
+  `a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests` (`slopty-server`).
 
 ## Phases
 

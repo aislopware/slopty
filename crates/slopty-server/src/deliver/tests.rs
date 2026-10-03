@@ -214,3 +214,46 @@ fn a_held_project_hears_only_the_person() {
     let context = &batches.first().expect("the report goes").context;
     assert!(context.contains("which API?"), "{context}");
 }
+
+/// What the server says of an agent that did not report waits as the report it stands for:
+/// a rest settles, a wait on the person settles a little, and its words are read again until
+/// it goes. The agent's own report replaces it, and so does its next outcome; going back to
+/// work takes it back; the same words again are not sent twice, unless the first was never
+/// read. It never replaces the server's other notices, nor the agent's report.
+#[test]
+fn the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own() {
+    let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    let (one, two) = (TaskId(1), TaskId(2));
+    let after = |wait: Duration| t0.checked_add(wait).unwrap();
+    d.outcome(orchestrator(), one, ReportKind::Done, "task 1 rested", t0);
+    d.notice(orchestrator(), one, ReportKind::Checkpoint, "task 1 merged", t0);
+    assert_eq!(d.len(), 2, "beside the server's notice");
+    d.add(orchestrator(), Some(one), report(ReportKind::Checkpoint, "half way"), t0);
+    assert_eq!(d.len(), 2, "the agent's own word replaced it");
+
+    d.outcome(orchestrator(), two, ReportKind::NeedsInput, "task 2 waits on Bash", t0);
+    assert_eq!(d.next_due(), Some(after(WAIT_SETTLE)), "a wait settles first");
+    d.outcome(orchestrator(), two, ReportKind::Done, "task 2 rested", t0);
+    assert_eq!(d.len(), 3, "its next outcome replaced it");
+    d.moved_on(&orchestrator(), two);
+    assert_eq!(d.len(), 2, "back at work");
+
+    d.outcome(orchestrator(), two, ReportKind::Done, "task 2 rested", t0);
+    d.reword(|_, task, kind| (task == two && kind == ReportKind::Done).then(|| "said X".into()));
+    let settled = after(DONE_SETTLE);
+    let batches = d.take(settled, |_| Some(to), |_| false);
+    let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+    assert!(batch.context.contains("said X") && !batch.context.contains("task 2 rested"));
+    assert!(batch.context.contains("half way") && batch.context.contains("task 1 merged"));
+    assert!(d.acked(to, batch.number).is_some());
+
+    d.outcome(orchestrator(), two, ReportKind::Done, "said X", settled);
+    let later = settled.checked_add(DONE_SETTLE).unwrap();
+    assert!(d.take(later, |_| Some(to), |_| false).is_empty(), "nothing new");
+    assert_eq!(d.len(), 0);
+    d.outcome(orchestrator(), two, ReportKind::Stuck, "said X", later);
+    assert_eq!(d.take(later, |_| Some(to), |_| false).len(), 1, "another kind is news");
+    d.closed(to);
+    let again = d.take(later, |_| Some(term()), |_| false);
+    assert_eq!(again.len(), 1, "never read, so it goes again: {again:?}");
+}

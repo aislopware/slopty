@@ -61,9 +61,11 @@ use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starti
 
 mod codex;
 mod ladder;
+mod outcomes;
 mod projects;
 mod queue;
 mod review;
+mod settle;
 mod steps;
 
 pub use ladder::Seated;
@@ -1180,6 +1182,7 @@ impl Hub {
     /// state lock, as [`Self::happen`] is, so the store and every link see the changes in the
     /// order they were made.
     fn projects_moved(&self, state: &mut State, changes: Vec<Change>) {
+        self.hear(state);
         if changes.is_empty() {
             return;
         }
@@ -1378,13 +1381,16 @@ impl Lease {
                 // A known session reports a change (a resize, a new directory): no event of its
                 // own, but for its program exiting.
                 if let Some(known) = entry.sessions.iter_mut().find(|s| s.id == summary.id) {
-                    if let (SessionState::Running, SessionState::Exited { status }) =
-                        (known.state, summary.state)
-                    {
-                        let term = TermRef { worker, session: summary.id };
-                        hub.happen(Happening::SessionExited { term, status });
-                    }
+                    let was = known.state;
                     known.clone_from(&summary);
+                    if let (SessionState::Running, SessionState::Exited { status }) =
+                        (was, summary.state)
+                    {
+                        hub.happen(Happening::SessionExited { term, status });
+                        // The program in a task's terminal ended: the node above hears.
+                        state.projects.exited(term);
+                        hub.hear(&mut state);
+                    }
                 } else {
                     entry.sessions.push(summary.clone());
                     let term = TermRef { worker, session: summary.id };
@@ -1764,6 +1770,9 @@ fn run_seed() -> u64 {
 
 #[cfg(test)]
 mod project_tests;
+
+#[cfg(test)]
+mod outcome_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

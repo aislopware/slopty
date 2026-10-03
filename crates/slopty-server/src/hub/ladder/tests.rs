@@ -16,7 +16,7 @@ use super::super::project_tests::{create, project};
 use super::super::tests::{registration, summary};
 use super::*;
 
-fn row(phase: Phase, since: u64, terminal: Option<SessionId>) -> ThreadRow {
+pub(in crate::hub) fn row(phase: Phase, since: u64, terminal: Option<SessionId>) -> ThreadRow {
     ThreadRow {
         id: ThreadId::new(),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
@@ -45,7 +45,7 @@ fn row(phase: Phase, since: u64, terminal: Option<SessionId>) -> ThreadRow {
     }
 }
 
-fn asking(mut row: ThreadRow, title: &str) -> ThreadRow {
+pub(in crate::hub) fn asking(mut row: ThreadRow, title: &str) -> ThreadRow {
     row.requests.push(RequestCard {
         id: AskId("1".to_owned()),
         item: None,
@@ -68,7 +68,7 @@ fn under(mut child: ThreadRow, parent: &ThreadRow) -> ThreadRow {
     child
 }
 
-fn snapshot(rows: Vec<ThreadRow>) -> ToServer {
+pub(in crate::hub) fn snapshot(rows: Vec<ThreadRow>) -> ToServer {
     ToServer::Threads(TableFrame::Snapshot { cursor: Cursor::default(), rows })
 }
 
@@ -166,18 +166,18 @@ async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
 }
 
 /// A seated client and where its notices arrive.
-struct Client {
+pub(in crate::hub) struct Client {
     seated: Seated,
     rx: mpsc::Receiver<FromServer>,
 }
 
 impl Client {
-    fn sit(hub: &Hub, name: &str) -> Self {
+    pub(in crate::hub) fn sit(hub: &Hub, name: &str) -> Self {
         let (tx, rx) = mpsc::channel(8);
         Self { seated: hub.seat(hub.number_link(), name.to_owned(), tx), rx }
     }
 
-    fn at(&self, hub: &Hub, seat: Seat, active: bool, showing: Vec<TermRef>) {
+    pub(in crate::hub) fn at(&self, hub: &Hub, seat: Seat, active: bool, showing: Vec<TermRef>) {
         let presence = Presence { seat, active, workspace: None, showing, focus: None };
         hub.presence(self.seated.link(), presence);
     }

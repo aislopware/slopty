@@ -15,6 +15,11 @@
 //! per pacing interval, not one per report. Every report is on the timeline at once whatever
 //! waits here.
 //!
+//! What the server says of a task's agent that did not report ([`Deliveries::outcome`]: it came
+//! to rest, waits on the person, or exited) is paced as the report it stands for, a wait on the
+//! person once it has lasted [`WAIT_SETTLE`]. The agent's own report replaces it, and so does
+//! its next outcome; the agent going back to work takes it back ([`Deliveries::moved_on`]).
+//!
 //! A batch goes to the node's live terminal, whose worker hands it to the agent through its
 //! hooks and says so ([`Deliveries::acked`]). Until then it stays outstanding: sent again when
 //! the worker registers again, folded into the next batch when more falls due, and put back to
@@ -38,6 +43,9 @@ pub(crate) const CHECKPOINT_WAIT: Duration = Duration::from_hours(1);
 pub(crate) const STUCK_EVERY: Duration = Duration::from_mins(3);
 /// How often one task's need may interrupt.
 pub(crate) const NEED_EVERY: Duration = Duration::from_mins(1);
+/// How long a task's agent waits on the person before the node above it hears so: a
+/// permission the person answers at once wakes nobody.
+pub(crate) const WAIT_SETTLE: Duration = Duration::from_secs(30);
 /// The longest batch, in bytes: Claude Code takes up to 10 000 characters of a hook's
 /// context.
 pub(crate) const CONTEXT_MAX: usize = 9_000;
@@ -55,6 +63,9 @@ enum By {
     Server,
     /// The person, to the node's own agent: their words, which go at once and are all kept.
     Person,
+    /// The server, of what a task's agent came to when it did not report: its last words
+    /// with it, read again until it goes ([`Deliveries::reword`]).
+    Outcome,
 }
 
 /// What waits for a node: a task's report, the server's own words, or the person's.
@@ -92,6 +103,9 @@ impl Item {
             next.map_or(self.at, |next| next.max(self.at))
         };
         match self.report.kind {
+            ReportKind::NeedsInput if self.by == By::Outcome => {
+                paced(NEED_EVERY).max(after(WAIT_SETTLE))
+            }
             ReportKind::NeedsInput => paced(NEED_EVERY),
             ReportKind::Stuck => paced(STUCK_EVERY),
             ReportKind::Done => after(DONE_SETTLE),
@@ -157,6 +171,16 @@ fn reports_in(items: &[Item]) -> u16 {
 pub(crate) struct Deliveries {
     queues: BTreeMap<Node, Queue>,
     next_batch: u64,
+    /// What the server last sent each node of each task's agent, by its kind and words: the
+    /// same again says nothing new and is not sent.
+    told: HashMap<(Node, TaskId), (ReportKind, u64)>,
+}
+
+/// An outcome's kind and words, to know it again.
+fn fingerprint(item: &Item) -> (ReportKind, u64) {
+    let mut hasher = std::hash::DefaultHasher::new();
+    std::hash::Hash::hash(&item.report.note, &mut hasher);
+    (item.report.kind, std::hash::Hasher::finish(&hasher))
 }
 
 impl Deliveries {
@@ -182,6 +206,47 @@ impl Deliveries {
         let note = plain(note);
         let report = Report { kind, note, artifacts: Vec::new(), branch: None, pr: None };
         self.push(node, Item { task: Some(task), report, at, by: By::Server });
+    }
+
+    /// What the server says of `task`'s agent, which did not report, for `node`: `note`, paced
+    /// as a report of `kind`. It replaces what it said of the agent before still waiting, and
+    /// the agent's own report replaces it.
+    pub(crate) fn outcome(
+        &mut self,
+        node: Node,
+        task: TaskId,
+        kind: ReportKind,
+        note: &str,
+        at: Instant,
+    ) {
+        let report =
+            Report { kind, note: plain(note), artifacts: Vec::new(), branch: None, pr: None };
+        self.push(node, Item { task: Some(task), report, at, by: By::Outcome });
+    }
+
+    /// `task`'s agent went back to work: what the server was to say of it for `node`, and has
+    /// not sent, no longer holds.
+    pub(crate) fn moved_on(&mut self, node: &Node, task: TaskId) {
+        if let Some(queue) = self.queues.get_mut(node) {
+            queue.waiting.retain(|i| i.by != By::Outcome || i.task != Some(task));
+        }
+        self.prune();
+    }
+
+    /// Read again what the server says of each agent that did not report, as it waits:
+    /// `words` gives the note for its node, task and kind now, or keeps it when it gives none.
+    pub(crate) fn reword(
+        &mut self,
+        mut words: impl FnMut(&Node, TaskId, ReportKind) -> Option<String>,
+    ) {
+        for (node, queue) in &mut self.queues {
+            for item in queue.waiting.iter_mut().filter(|i| i.by == By::Outcome) {
+                let kind = item.report.kind;
+                if let Some(note) = item.task.and_then(|task| words(node, task, kind)) {
+                    item.report.note = plain(&note);
+                }
+            }
+        }
     }
 
     /// The person's `words` to the agent of `task` itself, or to the orchestrator when it is
@@ -213,9 +278,11 @@ impl Deliveries {
             // Every word the person says is kept: a second message is not a newer first.
             let replaced = match item.by {
                 By::Person => false,
-                By::Server => i.by == item.by,
+                By::Server | By::Outcome => i.by == item.by,
+                // The agent's own word stands for what the server would say of it.
                 By::Agent => {
-                    i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind))
+                    (i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind)))
+                        || (i.by == By::Outcome && task.is_some())
                 }
             };
             i.task != task || !replaced
@@ -252,6 +319,16 @@ impl Deliveries {
             if queue.due().is_none_or(|due| due > now) {
                 continue;
             }
+            // An outcome that says again what was sent of the agent last is dropped as it
+            // falls due, after its words were read for the last time.
+            let told = &self.told;
+            queue.waiting.retain(|i| {
+                i.by != By::Outcome
+                    || i.task.is_none_or(|t| told.get(&(node.clone(), t)) != Some(&fingerprint(i)))
+            });
+            if queue.due().is_none_or(|due| due > now) {
+                continue;
+            }
             let holding = held(&node.0);
             let term = term_of(node)
                 .filter(|_| !holding || queue.waiting.iter().any(|i| i.by == By::Person));
@@ -278,6 +355,11 @@ impl Deliveries {
             queue.fresh = false;
             for key in items.iter().filter_map(Item::paced) {
                 queue.paced_last.insert(key, now);
+            }
+            for item in items.iter().filter(|i| i.by == By::Outcome) {
+                if let Some(task) = item.task {
+                    self.told.insert((node.clone(), task), fingerprint(item));
+                }
             }
             self.next_batch = self.next_batch.wrapping_add(1);
             let batch = self.next_batch;
@@ -333,12 +415,18 @@ impl Deliveries {
     /// `term` closed: what it was sent and never handed over waits for the node's next
     /// terminal, due at once, since no agent read it.
     pub(crate) fn closed(&mut self, term: TermRef) {
-        for queue in self.queues.values_mut() {
+        for (node, queue) in &mut self.queues {
             if queue.outstanding.as_ref().is_some_and(|o| o.term == term)
                 && let Some(o) = queue.outstanding.take()
             {
                 for key in o.items.iter().filter_map(Item::paced) {
                     queue.paced_last.remove(&key);
+                }
+                // Never read, so not yet told: it is no repeat when it goes again.
+                for item in o.items.iter().filter(|i| i.by == By::Outcome) {
+                    if let Some(task) = item.task {
+                        self.told.remove(&(node.clone(), task));
+                    }
                 }
                 let mut items = o.items;
                 items.append(&mut queue.waiting);

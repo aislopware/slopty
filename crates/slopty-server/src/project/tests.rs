@@ -1,6 +1,6 @@
 use slopty_core::SessionId;
 use slopty_proto::agent::Worktree;
-use slopty_proto::project::{NativeTask, Placement, VerifierRun};
+use slopty_proto::project::{NativeTask, Placement, ReportKind, VerifierRun};
 
 use super::*;
 
@@ -827,4 +827,124 @@ fn a_project_at_its_budget_starts_nothing_until_it_is_raised() {
         )),
         "a cap lowered under the spend says it is reached: {lowered:?}"
     );
+}
+
+/// What the node above each task heard, the takings back left out.
+fn upshots(p: &mut Projects) -> Vec<(TaskId, Option<TaskId>, Upshot)> {
+    p.heard()
+        .into_iter()
+        .filter(|h| h.upshot != Upshot::Moved)
+        .map(|h| (h.task, h.parent, h.upshot))
+        .collect()
+}
+
+fn report_of(kind: ReportKind) -> Report {
+    Report { kind, note: "said".to_owned(), artifacts: Vec::new(), branch: None, pr: None }
+}
+
+/// A task's agent that ends its turn without a word of its own is heard of by the node above
+/// it, once per turn; a need, a block or a finish it reported is its own word, a checkpoint is
+/// not. Waiting on the person is heard once per wait, and taken back when it works again. Its
+/// exit is heard once, and a terminal whose agent never showed says nothing of one.
+#[test]
+fn the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing() {
+    let mut p = project(Some(term()));
+    let t = task(&mut p, "Work", &[]);
+    let at = term();
+    assign(&mut p, t, at).unwrap();
+    p.agent_status(at, &AgentStatus::None, now());
+    assert_eq!(upshots(&mut p), [], "no agent seen there, so none left");
+
+    p.agent_status(at, &AgentStatus::Working, now());
+    p.agent_status(at, &AgentStatus::Tool { tool: "Bash".to_owned() }, now());
+    p.agent_status(at, &AgentStatus::Idle, now());
+    assert_eq!(upshots(&mut p), [(t, None, Upshot::Rested)]);
+    p.agent_status(at, &AgentStatus::Done, now());
+    assert_eq!(upshots(&mut p), [], "one rest per turn");
+
+    for (kind, heard) in [(ReportKind::NeedsInput, false), (ReportKind::Checkpoint, true)] {
+        p.agent_status(at, &AgentStatus::Working, now());
+        p.report_task(&id(), t, &report_of(kind), now()).unwrap();
+        p.agent_status(at, &AgentStatus::Blocked(BlockReason::IdlePrompt), now());
+        let want = if heard { vec![(t, None, Upshot::Rested)] } else { Vec::new() };
+        assert_eq!(upshots(&mut p), want, "{kind:?}");
+    }
+
+    let bash = BlockReason::Permission { tool: "Bash".to_owned() };
+    p.agent_status(at, &AgentStatus::Working, now());
+    p.agent_status(at, &AgentStatus::Blocked(bash.clone()), now());
+    assert_eq!(upshots(&mut p), [(t, None, Upshot::Waits(bash))]);
+    p.agent_status(at, &AgentStatus::Blocked(BlockReason::Question), now());
+    assert_eq!(upshots(&mut p), [], "still the one wait");
+    p.agent_status(at, &AgentStatus::Working, now());
+    let back = p.heard();
+    assert!(back.iter().any(|h| h.task == t && h.upshot == Upshot::Moved), "{back:?}");
+    p.agent_status(at, &AgentStatus::Waiting { tasks: 2, crons: 0 }, now());
+    assert_eq!(upshots(&mut p), [], "its own background work is no rest");
+
+    p.agent_status(at, &AgentStatus::None, now());
+    assert_eq!(upshots(&mut p), [(t, None, Upshot::Exited)]);
+    p.session_ended(at, now());
+    assert_eq!(upshots(&mut p), [], "heard once");
+}
+
+/// A task whose agent rests while a task split from it still works is heard of only once that
+/// one rests too, after it; a task the merge queue or the person moved on is not heard of.
+#[test]
+fn a_rest_is_heard_once_the_tasks_under_it_rest() {
+    let mut p = project(Some(term()));
+    let parent = task(&mut p, "Parent", &[]);
+    let child = p
+        .create_task(&id(), TaskSpec { parent: Some(parent), ..spec("Child", &[]) }, now())
+        .unwrap()
+        .0
+        .id;
+    let (above, below) = (term(), term());
+    assign(&mut p, parent, above).unwrap();
+    assign(&mut p, child, below).unwrap();
+    p.agent_status(below, &AgentStatus::Working, now());
+    p.agent_status(above, &AgentStatus::Working, now());
+    p.agent_status(above, &AgentStatus::Idle, now());
+    assert_eq!(upshots(&mut p), [], "its child still works");
+    p.agent_status(below, &AgentStatus::Idle, now());
+    assert_eq!(
+        upshots(&mut p),
+        [(child, Some(parent), Upshot::Rested), (parent, None, Upshot::Rested)]
+    );
+
+    p.agent_status(below, &AgentStatus::Working, now());
+    p.update_task(&id(), child, to(TaskState::Failed), Caller::Person, now()).unwrap();
+    p.agent_status(below, &AgentStatus::Idle, now());
+    p.session_ended(below, now());
+    assert_eq!(upshots(&mut p), [], "given up, it is the person's to speak of");
+}
+
+/// The agent of a task merged or given up counts against no limit while it rests, though its
+/// terminal is open, and counts again as soon as it works: giving up its own task frees no
+/// agent that goes on working.
+#[test]
+fn a_finished_task_s_agent_counts_only_while_it_works() {
+    let mut fleet = Fleet::default();
+    let mut p = Projects::default();
+    let one = LimitsChange { live_per_project: Some(1), ..LimitsChange::default() };
+    p.create(new_project(None, one), &fleet.running(), now()).unwrap();
+    let (a, b) = (task(&mut p, "A", &[]), task(&mut p, "B", &[]));
+    let at = fleet.open();
+    p.assign(&id(), a, who(at, true, None), &fleet.terminals, now()).unwrap();
+    p.agent_status(at, &AgentStatus::Working, now());
+    p.update_task(&id(), a, to(TaskState::Done), Caller::Person, now()).unwrap();
+    p.update_task(&id(), a, to(TaskState::Merged), Caller::Person, now()).unwrap();
+    let full = p.may_start(&id(), b, false, &fleet.running()).unwrap_err();
+    assert_eq!(code(&full), ErrorCode::Limit, "it still works");
+    assert_eq!(p.fleet(&fleet.running()), 1);
+
+    p.agent_status(at, &AgentStatus::Idle, now());
+    p.may_start(&id(), b, false, &fleet.running()).unwrap();
+    let live = p.status(&id(), None, &fleet.running()).unwrap().live;
+    assert_eq!((live.project, live.fleet), (0, 0), "at rest, merged");
+    assert_eq!(p.live_on_worker(at.worker, &fleet.running()), 0);
+    assert_eq!(p.finished_agents(&fleet.terminals), [], "the person's own terminal stays");
+
+    p.agent_status(at, &AgentStatus::Working, now());
+    assert_eq!(p.status(&id(), None, &fleet.running()).unwrap().live.project, 1, "at work again");
 }

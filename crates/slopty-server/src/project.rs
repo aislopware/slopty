@@ -4,7 +4,8 @@
 //! other live task holds, its dependencies never lead back to it, its tree stays within the
 //! project's depth, a merged task stays merged, and one terminal works on a task at a time.
 //! How many agents run is counted from the terminals that are live, never from what a task's
-//! state says, so nothing that runs escapes the limits.
+//! state says alone, so nothing that runs escapes the limits: only the agent of a task merged
+//! or given up counts no more while it rests, and counts again as soon as it works.
 //!
 //! Every change answers with the `Change`s it made, in order: the hub pushes each to clients
 //! as a [`ProjectUpdate`] and hands the store what it must keep ([`Kept`]). A refused change
@@ -377,6 +378,8 @@ pub(crate) struct Projects {
     /// Natives of sessions no node holds, the oldest first: a spawned agent's first hooks can
     /// come before its task takes it on.
     unclaimed: VecDeque<(TermRef, Natives)>,
+    /// Each task's agent's turn, and what the nodes above are to hear of it.
+    turns: turns::Turns,
 }
 
 fn refuse(code: ErrorCode, message: impl Into<String>) -> Refused {
@@ -560,9 +563,10 @@ impl Record {
             })
     }
 
-    /// The terminals of the project that are live: its tasks' and its orchestrator's.
+    /// The terminals of the project that are live and count: its tasks' and its
+    /// orchestrator's, but not those of tasks [`finished`].
     fn live_terms<'a>(&'a self, terminals: &'a HashSet<TermRef>) -> impl Iterator<Item = TermRef> {
-        let tasks = self.tasks.iter().filter_map(open_term);
+        let tasks = self.tasks.iter().filter(|t| !finished(t)).filter_map(open_term);
         tasks.chain(self.project.orchestrator).filter(|t| terminals.contains(t))
     }
 
@@ -629,6 +633,13 @@ impl Record {
 /// The terminal a task's open assignment names.
 fn open_term(t: &Task) -> Option<TermRef> {
     t.assignment.as_ref().filter(|a| a.open()).map(|a| a.term)
+}
+
+/// Whether a task's work is over (merged, or given up) and its agent is not at work: its
+/// terminal counts against no limit, though it may still be open. An agent that works again
+/// counts again, so giving up its own task frees no agent that goes on working.
+const fn finished(t: &Task) -> bool {
+    matches!(t.state, TaskState::Merged | TaskState::Failed) && t.spent.since_ms.is_none()
 }
 
 fn count(n: usize) -> u16 {
@@ -1000,6 +1011,11 @@ impl Projects {
         let mut terms: HashSet<TermRef> = running.agents.clone();
         for record in self.records.values() {
             terms.extend(record.live_terms(running.terminals));
+        }
+        for record in self.records.values() {
+            for term in record.tasks.iter().filter(|t| finished(t)).filter_map(open_term) {
+                terms.remove(&term);
+            }
         }
         terms.extend(running.starting.iter().map(|s| s.term));
         terms
@@ -1605,6 +1621,7 @@ impl Projects {
                 record.task_update(&task_now, Some(entry))
             })
             .collect();
+        self.answered(id, task, report.kind);
         Ok(((task_now, parent), updates))
     }
 
@@ -2026,6 +2043,7 @@ impl Projects {
             let durable = entry.is_some() || stretch == Some(Stretch::Ended);
             updates.push(Change { durable, ..record.task_update(&task, entry) });
         }
+        self.turn(term, status);
         updates
     }
 
@@ -2082,6 +2100,8 @@ impl Projects {
     /// The terminal `term` closed: what worked in it is gone.
     pub(crate) fn session_ended(&mut self, term: TermRef, now: WallMs) -> Vec<Change> {
         self.unclaimed.retain(|(t, _)| *t != term);
+        self.exited(term);
+        self.forget_turn(term);
         let mut updates = Vec::new();
         for record in self.records.values_mut() {
             let ended: Vec<Task> = record
@@ -2109,6 +2129,43 @@ impl Projects {
             }
         }
         updates
+    }
+
+    /// The live terminals the server started for tasks that are [`finished`], with their
+    /// project and task: each closes once its agent has rested long enough.
+    pub(crate) fn finished_agents(
+        &self,
+        terminals: &HashSet<TermRef>,
+    ) -> Vec<(ProjectId, TaskId, TermRef)> {
+        self.records
+            .values()
+            .flat_map(|r| {
+                r.tasks.iter().filter(|t| finished(t)).filter_map(|t| {
+                    let a = t.assignment.as_ref().filter(|a| a.open() && a.placed.is_some())?;
+                    terminals.contains(&a.term).then(|| (r.project.id.clone(), t.id, a.term))
+                })
+            })
+            .collect()
+    }
+
+    /// The server closes the agent of `task`, which is finished and rested `rested_mins`: the
+    /// timeline says why, before the terminal's end says it is gone.
+    pub(crate) fn settled(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+        rested_mins: u64,
+        now: WallMs,
+    ) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let Ok(t) = record.task(task).cloned() else { return Vec::new() };
+        let over = if t.state == TaskState::Merged { "merged" } else { "given up" };
+        let text = format!(
+            "The server closed its agent, at rest {rested_mins} min after the task was {over}; \
+             its session can be taken up again."
+        );
+        let entry = record.log(Some(task), Moment::Note { text }, now);
+        vec![record.task_update(&t, Some(entry))]
     }
 
     /// A worker registered with `sessions` open: every assignment on it to a terminal it no
@@ -2413,6 +2470,8 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
 mod cost;
 mod merge;
 mod tally;
+mod turns;
 pub(crate) use merge::{Advance, Job, Queue, bounded as bounded_review};
+pub(crate) use turns::{Heard, Upshot};
 #[cfg(test)]
 mod tests;

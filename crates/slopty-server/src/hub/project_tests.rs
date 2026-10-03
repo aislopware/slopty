@@ -59,7 +59,7 @@ pub(super) fn installed(agents: &[&str]) -> BTreeMap<String, Fact> {
     BTreeMap::from([("agents".to_owned(), Fact::Map(agents.collect()))])
 }
 
-async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsChange) {
+pub(super) async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsChange) {
     let made = hub
         .dispatch(Verb::ProjectCreate {
             project: project(),
@@ -112,7 +112,7 @@ pub(super) async fn task_now(hub: &Hub, task: TaskId) -> TaskCard {
     status(hub).await.tasks.into_iter().find(|t| t.id == task).unwrap()
 }
 
-fn claude(args: &[&str]) -> TaskLaunch {
+pub(super) fn claude(args: &[&str]) -> TaskLaunch {
     TaskLaunch {
         pin: None,
         cwd: "~/src/slopty".to_owned(),
@@ -126,12 +126,12 @@ fn claude(args: &[&str]) -> TaskLaunch {
     }
 }
 
-fn spawn(hub: &Hub, verb: Verb) -> tokio::task::JoinHandle<Outcome> {
+pub(super) fn spawn(hub: &Hub, verb: Verb) -> tokio::task::JoinHandle<Outcome> {
     let hub = hub.clone();
     tokio::spawn(async move { hub.dispatch(verb).await })
 }
 
-async fn request(rx: &mut mpsc::Receiver<FromServer>) -> (RequestId, Verb) {
+pub(super) async fn request(rx: &mut mpsc::Receiver<FromServer>) -> (RequestId, Verb) {
     match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
         Ok(Some(FromServer::Request { id, verb, .. })) => (id, verb),
         other => panic!("no request: {other:?}"),
@@ -140,7 +140,7 @@ async fn request(rx: &mut mpsc::Receiver<FromServer>) -> (RequestId, Verb) {
 
 /// The worker opens the terminal it was asked for, under the id the server chose, with an agent
 /// in it, and answers.
-fn opened(lease: &Lease, (id, verb): &(RequestId, Verb)) -> TermRef {
+pub(super) fn opened(lease: &Lease, (id, verb): &(RequestId, Verb)) -> TermRef {
     let (worker, session) = chosen(verb);
     let started = AgentEvent {
         session,
@@ -170,7 +170,7 @@ fn chosen(verb: &Verb) -> (WorkerId, SessionId) {
     }
 }
 
-fn refused(outcome: &Outcome, code: ErrorCode) -> &str {
+pub(super) fn refused(outcome: &Outcome, code: ErrorCode) -> &str {
     match outcome {
         Outcome::Error { code: c, message } if *c == code => message,
         other => panic!("not {code:?}: {other:?}"),
@@ -661,7 +661,7 @@ async fn a_suggestion_ranks_the_workers_by_their_reported_facts_with_reasons() {
     refused(&hub.dispatch(verb).await, ErrorCode::BadExpression);
 }
 
-fn agent(session: SessionId, status: AgentStatus) -> ToServer {
+pub(super) fn agent(session: SessionId, status: AgentStatus) -> ToServer {
     ToServer::Agent(AgentEvent {
         session,
         kind: AgentKind::ClaudeCode,
@@ -808,7 +808,7 @@ async fn a_client_is_told_the_projects_with_the_fleet_as_of_one_event() {
 }
 
 /// A terminal the worker says it opened, with or without an agent in it.
-fn announce(lease: &Lease, session: SessionId, agent: bool) {
+pub(super) fn announce(lease: &Lease, session: SessionId, agent: bool) {
     let running = AgentEvent {
         session,
         kind: AgentKind::ClaudeCode,

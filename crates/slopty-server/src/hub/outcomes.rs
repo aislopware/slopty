@@ -1,0 +1,111 @@
+//! What a task's agent came to, said to the node above it when the agent did not report
+//! (`docs/decisions/projects.md`, "A task's outcome reaches the node above it without a
+//! report"): the server's words, with the agent's last words from its thread's row.
+//!
+//! The rest of a turn settles before it goes ([`crate::deliver::DONE_SETTLE`]), so its words
+//! are read again until then: the row with the agent's final line may come after the status
+//! that ended the turn.
+
+use slopty_proto::agent::BlockReason;
+use slopty_proto::orchestration::TermRef;
+use slopty_proto::project::{ReportKind, TaskId};
+
+use super::{Hub, State};
+use crate::project::{Heard, Upshot, clipped};
+
+/// The most of an agent's last words an outcome carries, in bytes.
+pub(super) const LAST_WORDS_MAX: usize = 2048;
+
+impl Hub {
+    /// Hand what the nodes above tasks are to hear to the deliveries.
+    pub(super) fn hear(&self, state: &mut State) {
+        let heard = state.projects.heard();
+        if heard.is_empty() {
+            return;
+        }
+        let at = tokio::time::Instant::now();
+        for Heard { project, task, parent, term, upshot } in heard {
+            let node = (project, parent);
+            let Some(kind) = upshot.kind() else {
+                state.deliveries.moved_on(&node, task);
+                continue;
+            };
+            let words = words(state, task, term, &upshot);
+            state.deliveries.outcome(node, task, kind, &words, at);
+        }
+        self.inner.deliver.notify_one();
+    }
+
+    /// Read again the words of every rest and wait still waiting: the row with the agent's
+    /// last line, or with the request it waits on, may have come after its status.
+    pub(super) fn reword_outcomes(state: &mut State) {
+        let (projects, board) = (&state.projects, &state.board);
+        state.deliveries.reword(|(project, _), task, kind| {
+            let term = projects.task(project, task).ok()?.assignment.as_ref()?.term;
+            match kind {
+                ReportKind::Done => Some(rested_words(task, &board.last_words(term)?)),
+                ReportKind::NeedsInput => Some(waits_words(task, &board.asking(term)?)),
+                ReportKind::Stuck | ReportKind::Checkpoint => None,
+            }
+        });
+    }
+}
+
+/// What the node above `task` reads of what its agent in `term` came to.
+fn words(state: &State, task: TaskId, term: TermRef, upshot: &Upshot) -> String {
+    let last = state.board.last_words(term);
+    match upshot {
+        Upshot::Rested => rested_words(task, last.as_deref().unwrap_or_default()),
+        Upshot::Waits(reason) => {
+            waits_words(task, &state.board.asking(term).unwrap_or_else(|| waits_on(reason)))
+        }
+        Upshot::Exited => {
+            let mut words = format!(
+                "task {task}'s agent exited, or its terminal was closed, before it reported; \
+                 nothing runs for it now."
+            );
+            push_last(&mut words, last.as_deref().unwrap_or_default());
+            words
+        }
+        Upshot::Moved => String::new(),
+    }
+}
+
+/// What a turn that came to rest with no report reads as, with the agent's `last` words.
+fn rested_words(task: TaskId, last: &str) -> String {
+    let mut words =
+        format!("task {task} ended its turn without a task_report; its agent waits at its prompt.");
+    push_last(&mut words, last);
+    words
+}
+
+/// What a wait on the person reads as, naming `what` it waits on.
+fn waits_words(task: TaskId, what: &str) -> String {
+    format!(
+        "task {task} waits on the person: {}. Only the person answers it; if it holds you up, \
+         say so to the person rather than wait on it.",
+        clipped(what.trim(), LAST_WORDS_MAX)
+    )
+}
+
+fn push_last(words: &mut String, last: &str) {
+    let last = last.trim();
+    if last.is_empty() {
+        return;
+    }
+    words.push_str(" Its last words:");
+    for line in clipped(last, LAST_WORDS_MAX).lines() {
+        words.push_str("\n  ");
+        words.push_str(line);
+    }
+}
+
+/// What an agent blocked for `reason` waits on, when its thread names no request.
+fn waits_on(reason: &BlockReason) -> String {
+    match reason {
+        BlockReason::Permission { tool } => format!("a permission to use {tool}"),
+        BlockReason::Question => "a question it asked".to_owned(),
+        BlockReason::Elicitation => "a form a tools server asked it to fill".to_owned(),
+        BlockReason::IdlePrompt => "its prompt".to_owned(),
+    }
+}

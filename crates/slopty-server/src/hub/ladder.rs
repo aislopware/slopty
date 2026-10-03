@@ -110,6 +110,47 @@ impl Board {
             .collect()
     }
 
+    /// The thread whose TUI runs in `term` and hangs from no other, the latest to change when
+    /// there were several.
+    fn thread_in(&self, term: TermRef) -> Option<&ThreadRow> {
+        let table = self.tables.get(&term.worker)?;
+        table
+            .values()
+            .filter(|r| r.terminal == Some(term.session) && root_of(table, r) == r.id)
+            .max_by_key(|r| (r.updated_ms, r.id))
+    }
+
+    /// The last line the agent in `term` wrote, as its thread's row says.
+    pub(super) fn last_words(&self, term: TermRef) -> Option<String> {
+        self.thread_in(term)?.last_line.clone().filter(|l| !l.trim().is_empty())
+    }
+
+    /// What the agent in `term` asks the person, as the first open request on its thread's
+    /// row names it.
+    pub(super) fn asking(&self, term: TermRef) -> Option<String> {
+        let row = self.thread_in(term)?;
+        row.requests.first().map(|r| r.title.clone()).filter(|t| !t.trim().is_empty())
+    }
+
+    /// Whether any thread in `term`, or under one there, has a request open.
+    pub(super) fn asks(&self, term: TermRef) -> bool {
+        self.tables.get(&term.worker).is_some_and(|table| {
+            table.values().any(|r| {
+                !r.requests.is_empty()
+                    && table.get(&root_of(table, r)).and_then(|root| root.terminal)
+                        == Some(term.session)
+            })
+        })
+    }
+
+    /// Whether `term`'s tile is on screen, or has the keyboard, on any client.
+    pub(super) fn shown(&self, term: TermRef) -> bool {
+        self.seats
+            .values()
+            .filter_map(|s| s.presence.as_ref())
+            .any(|p| p.showing.contains(&term) || p.focus == Some(term))
+    }
+
     /// Where the person is on every client that said.
     fn present(&self) -> Vec<Present> {
         self.seats
@@ -474,4 +515,4 @@ fn route(seats: &BTreeMap<u64, Sitting>, notice: &Notice) -> Vec<u64> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
