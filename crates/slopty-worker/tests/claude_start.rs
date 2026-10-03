@@ -21,10 +21,10 @@ mod claude_start {
     };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
-    use slopty_worker::thread::Host;
     use slopty_worker::thread::claude::{self, Sources};
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::terminals::{Pending, Terminals};
+    use slopty_worker::thread::{Host, Seated};
     use tokio::sync::{broadcast, watch};
 
     /// Long enough for any step on a loaded machine; the tests judge the state, not the time.
@@ -58,6 +58,17 @@ mod claude_start {
             let session = SessionId::new();
             self.opened.lock().push((command, cwd, env, session));
             Box::pin(std::future::ready(Ok(session)))
+        }
+
+        fn open_at(
+            &self,
+            seat: SessionId,
+            command: Vec<String>,
+            cwd: String,
+            env: Vec<(String, String)>,
+        ) -> Pending<'_, Result<SessionId, String>> {
+            self.opened.lock().push((command, cwd, env, seat));
+            Box::pin(std::future::ready(Ok(seat)))
         }
 
         fn exited(&self, _session: SessionId) -> Pending<'static, ()> {
@@ -246,6 +257,48 @@ mod claude_start {
         rig.write("edit");
         let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
+    }
+
+    /// A server task's thread opens Claude Code in a terminal under the seat, with the seat's
+    /// variables beside the `PATH` and its role added to the system prompt; the first message
+    /// goes as written. Its row names the seat, kept through what the transcript says, and a
+    /// start repeated at the seat opens nothing.
+    #[tokio::test]
+    async fn a_seated_start_opens_claude_under_the_seat_with_its_role() {
+        let rig = Rig::new();
+        let prompt = first_message("edit");
+        let seat = SessionId::new();
+        let variable = ("SLOPTY_SESSION".to_owned(), seat.to_string());
+        let seated = Seated {
+            seat,
+            env: vec![variable.clone()],
+            role: Some("You review.".to_owned()),
+            relay: None,
+        };
+        let outcome = rig.starter.start_seated(rig.start(Some(&prompt)), seated.clone()).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let again = rig.starter.start_seated(rig.start(Some(&prompt)), seated).await;
+        assert_eq!(again, outcome, "one thread a seat");
+
+        let opened = rig.opened();
+        assert_eq!(opened.len(), 1, "one terminal");
+        let (command, _, env, terminal) = &opened[0];
+        assert_eq!(*terminal, seat, "the terminal is the seat");
+        assert_eq!(command[1], "--append-system-prompt=You review.");
+        assert_eq!(command[2..4], ["--session-id".to_owned(), thread_native(&rig, thread)]);
+        assert_eq!(command.last(), Some(&prompt), "the first message as written");
+        assert!(env.contains(&variable), "{env:?}");
+        assert_eq!(rig.host.seated_at(seat), Some(thread));
+
+        rig.write("edit");
+        let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
+        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        assert_eq!(fact, Some(&seat.to_string()), "kept through the transcript");
+    }
+
+    /// The Claude Code session `thread` is of.
+    fn thread_native(rig: &Rig, thread: ThreadId) -> String {
+        rig.host.state(thread).map(|(state, _)| state.meta.native).unwrap_or_default()
     }
 
     /// Claude Code in `terminal` says it is gone from session `native`, as the worker's tracker

@@ -67,8 +67,8 @@ use tokio::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::Host;
 use super::terminals::Terminals;
+use super::{Host, Seated};
 
 /// How long the worker waits before it tries the daemon again.
 pub const RETRY: Duration = Duration::from_secs(2);
@@ -155,6 +155,7 @@ enum Ask {
     Start {
         id: IntentId,
         start: Box<Start>,
+        seated: Option<Box<Seated>>,
         reply: oneshot::Sender<Outcome>,
     },
     Release {
@@ -177,6 +178,12 @@ enum Ask {
     Wake {
         thread: ThreadId,
     },
+    /// A server task's thread is settled: its turn is stopped and Codex lets it go, its
+    /// thread kept to take up again, and its seat forgotten.
+    Close {
+        thread: ThreadId,
+        done: oneshot::Sender<()>,
+    },
 }
 
 impl Ask {
@@ -193,7 +200,8 @@ impl Ask {
             | Self::Release { thread, .. }
             | Self::Fork { thread, .. }
             | Self::Wake { thread } => Some(*thread),
-            Self::Start { .. } | Self::Sessions { .. } => None,
+            // A thread let go is not taken up again to be closed.
+            Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } => None,
         }
     }
 }
@@ -396,7 +404,28 @@ impl Codex {
     /// prompt, sent as that intent.
     pub async fn start(&self, id: IntentId, start: Start) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask::Start { id, start: Box::new(start), reply }).is_err() {
+        if self.0.send(Ask::Start { id, start: Box::new(start), seated: None, reply }).is_err() {
+            return refused("Codex threads are not served here".to_owned());
+        }
+        outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
+    }
+
+    /// End thread `thread` for its settled task: its turn is stopped and Codex lets it go.
+    pub async fn close(&self, thread: ThreadId) {
+        let (done, closed) = oneshot::channel();
+        if self.0.send(Ask::Close { thread, done }).is_ok() {
+            let _done = closed.await;
+        }
+    }
+
+    /// Start a server task's thread as `start` says, once per seat: Codex loads it with the
+    /// seat's variables in its commands and Slopty's tools among its MCP servers
+    /// ([`slopty_agent::codex::shared::seated`]), and the role as its developer instructions
+    /// (`developerInstructions`). Taken up again after Codex let it go, it is loaded the same.
+    pub async fn start_seated(&self, start: Start, seated: Seated) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        let (id, seated) = (seated.intent(), Some(Box::new(seated)));
+        if self.0.send(Ask::Start { id, start: Box::new(start), seated, reply }).is_err() {
             return refused("Codex threads are not served here".to_owned());
         }
         outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
@@ -478,6 +507,7 @@ pub fn spawn(
     Asks { mut asks, rest }: Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let seats = Seats::default();
         let mut socket = socket;
         let (said, mut hear) = mpsc::unbounded_channel();
         let mut open = Opened { launch, said, running: HashMap::new(), waiting: HashMap::new() };
@@ -488,7 +518,8 @@ pub fn spawn(
             match connect(&socket).await {
                 Ok(ws) => {
                     bringing = Bringing::Idle;
-                    let mut session = Session::new(host.clone(), ws, open, rest);
+                    let mut session =
+                        Session::new(host.clone(), ws, open, rest, Arc::clone(&seats));
                     session.held = std::mem::take(&mut held);
                     let ended = session.run(&mut asks, &mut hear).await;
                     session.exited();
@@ -514,12 +545,12 @@ pub fn spawn(
                 tokio::select! {
                     () = tokio::time::sleep(RETRY) => break,
                     ask = asks.recv() => match ask {
-                        Some(Ask::Start { id, start, reply }) => {
+                        Some(Ask::Start { id, start, seated, reply }) => {
                             if let Some(first) = host.started(id) {
                                 let _gone = reply.send(first);
                                 continue;
                             }
-                            held.push(Ask::Start { id, start, reply });
+                            held.push(Ask::Start { id, start, seated, reply });
                             if bringing != Bringing::Idle {
                                 continue;
                             }
@@ -648,10 +679,12 @@ enum Waiting {
     Usage {
         native: String,
     },
-    /// A thread started for intent `id`, whose first turn is `prompt`.
+    /// A thread started for intent `id`, whose first turn is `prompt`, at a server task's
+    /// seat when it has one.
     Start {
         id: IntentId,
         prompt: Option<String>,
+        seated: Option<Box<Seated>>,
     },
     /// A thread branched off `from` through `turn` for intent `id`.
     Fork {
@@ -714,10 +747,21 @@ struct Session {
     asleep: HashSet<String>,
     /// What was asked of each thread let go, sent once it is followed again.
     waking: HashMap<String, Vec<Ask>>,
+    /// The seat of each server task's thread, by Codex's id: kept across connections, so a
+    /// thread taken up again is loaded as it was started.
+    seats: Seats,
+}
+
+/// The seat of each server task's thread, by Codex's id.
+type Seats = Arc<parking_lot::Mutex<HashMap<String, Seated>>>;
+
+/// What a server task's thread is loaded with: the seat's variables and Slopty's tools.
+fn tools(seated: &Seated) -> std::collections::BTreeMap<String, Value> {
+    slopty_agent::codex::shared::seated(&seated.env, seated.relay.as_deref())
 }
 
 impl Session {
-    fn new(host: Host, ws: Socket, tuis: Opened, rest: Duration) -> Self {
+    fn new(host: Host, ws: Socket, tuis: Opened, rest: Duration, seats: Seats) -> Self {
         Self {
             host,
             ws,
@@ -737,6 +781,7 @@ impl Session {
             rest,
             asleep: HashSet::new(),
             waking: HashMap::new(),
+            seats,
         }
     }
 
@@ -847,6 +892,22 @@ impl Session {
             .collect();
         for native in resting {
             self.threads.remove(&native);
+            self.asleep.insert(native.clone());
+            let params = p::ThreadUnsubscribeParams { thread_id: native.clone() };
+            self.request(&params, Waiting::Unsubscribe { native }).await?;
+        }
+        Ok(())
+    }
+
+    /// End thread `thread` for its settled task: its turn is stopped, Codex lets it go, and its
+    /// seat is forgotten. A thread let go already has nothing to end.
+    async fn close(&mut self, thread: ThreadId) -> Result<(), String> {
+        let Some(native) = self.native.get(&thread).cloned() else { return Ok(()) };
+        self.seats.lock().remove(&native);
+        if let Some(params) = self.followed(thread).and_then(|f| f.shared.interrupt()) {
+            self.request(&params, Waiting::Turn { thread }).await?;
+        }
+        if self.threads.remove(&native).is_some() {
             self.asleep.insert(native.clone());
             let params = p::ThreadUnsubscribeParams { thread_id: native.clone() };
             self.request(&params, Waiting::Unsubscribe { native }).await?;
@@ -973,15 +1034,24 @@ impl Session {
             (Waiting::Turn { thread }, Err(e)) => {
                 tracing::debug!(%thread, "Codex refused a turn: {e}");
             }
-            (Waiting::Start { id, prompt }, Ok(result)) => {
+            (Waiting::Start { id, prompt, seated }, Ok(result)) => {
                 let outcome = match rpc::response::<p::ThreadStartParams>(result) {
                     Ok(started) => {
+                        let seat = seated.as_ref().map(|seated| seated.seat);
+                        if let Some(seated) = seated {
+                            self.seats.lock().insert(started.thread.id.clone(), *seated);
+                        }
                         if !self.threads.contains_key(&started.thread.id) {
                             self.follow(&started.thread);
                         }
                         self.settled(&started.thread.id, started.approval_policy, &started.sandbox);
                         match self.threads.get(&started.thread.id) {
-                            Some(followed) => Outcome::Started { thread: followed.id },
+                            Some(followed) => {
+                                if let Some(seat) = seat {
+                                    self.host.seated(followed.id, seat);
+                                }
+                                Outcome::Started { thread: followed.id }
+                            }
                             None => refused("Codex's thread could not be kept here".to_owned()),
                         }
                     }
@@ -1072,9 +1142,13 @@ impl Session {
             return Ok(());
         }
         self.resuming.insert(native.clone(), true);
+        let seated = self.seats.lock().get(&native).cloned();
         let params = p::ThreadResumeParams {
             thread_id: native.clone(),
-            config: Some(slopty_agent::codex::shared::unclaimed()),
+            config: Some(
+                seated.as_ref().map_or_else(slopty_agent::codex::shared::unclaimed, tools),
+            ),
+            developer_instructions: seated.and_then(|s| s.role),
             ..p::ThreadResumeParams::default()
         };
         self.request(&params, Waiting::Resume { native }).await
@@ -1257,6 +1331,11 @@ impl Session {
         }
         match ask {
             Ask::Wake { .. } => Ok(()),
+            Ask::Close { thread, done } => {
+                let result = self.close(thread).await;
+                let _gone = done.send(());
+                result
+            }
             Ask::Fork { thread, id, after, reply } => {
                 if let Some(first) = self.host.outcome(thread, id) {
                     let _gone = reply.send(first);
@@ -1289,7 +1368,7 @@ impl Session {
                 let params = slopty_agent::codex::shared::list(&cwd, limit);
                 self.request(&params, Waiting::List { reply }).await
             }
-            Ask::Start { id, start, reply } => {
+            Ask::Start { id, start, seated, reply } => {
                 if let Some(first) = self.host.started(id) {
                     let _gone = reply.send(first);
                     return Ok(());
@@ -1299,14 +1378,18 @@ impl Session {
                     return Ok(());
                 }
                 if !self.ready {
-                    self.held.push(Ask::Start { id, start, reply });
+                    self.held.push(Ask::Start { id, start, seated, reply });
                     return Ok(());
                 }
                 self.starting.insert(id, vec![reply]);
                 match checked(&start) {
-                    Ok(Begin::New(params)) => {
+                    Ok(Begin::New(mut params)) => {
+                        if let Some(seated) = seated.as_deref() {
+                            params.config = Some(tools(seated));
+                            params.developer_instructions.clone_from(&seated.role);
+                        }
                         let prompt = start.prompt.filter(|p| !p.trim().is_empty());
-                        self.request(params.as_ref(), Waiting::Start { id, prompt }).await
+                        self.request(params.as_ref(), Waiting::Start { id, prompt, seated }).await
                     }
                     Ok(Begin::Resume(native)) => {
                         if let Some(thread) = self.threads.get(&native).map(|f| f.id) {

@@ -254,6 +254,28 @@ async fn session(
                         let _sent = out.send(ToServer::Reply { id, outcome }).await;
                     });
                 }
+                // A task's thread that runs in no terminal is sent the reports as a message.
+                Ok(FromServer::Deliver { session, batch, context })
+                    if daemon
+                        .threads
+                        .as_ref()
+                        .is_some_and(|t| t.seated_without_terminal(session).is_some()) =>
+                {
+                    let sent = daemon.threads.as_ref().map(|t| t.deliver(session, batch, &context));
+                    match sent {
+                        Some(
+                            slopty_proto::thread::wire::Outcome::Done
+                            | slopty_proto::thread::wire::Outcome::Accepted,
+                        ) => {
+                            tracing::debug!(%session, batch, "reports sent to the seat's thread");
+                            let report = AgentReport::Delivered { session, batch };
+                            if out.send(ToServer::Report(report)).await.is_err() {
+                                break "the writer stopped";
+                            }
+                        }
+                        other => tracing::warn!(%session, batch, ?other, "reports not sent"),
+                    }
+                }
                 Ok(FromServer::Deliver { session, batch, context }) => {
                     let (dir, turn) =
                         (daemon.deliveries.clone(), Arc::clone(&daemon.reports_turn));

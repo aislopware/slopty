@@ -130,6 +130,37 @@ pub fn unclaimed() -> BTreeMap<String, Value> {
         .collect()
 }
 
+/// The name Slopty's tools go by among a thread's MCP servers.
+pub const TOOLS: &str = "slopty";
+
+/// The configuration a server task's thread is loaded with, in place of [`unclaimed`].
+///
+/// Each of [`TERMINAL_ENV`] is set in the commands it runs to the seat's value, so Slopty's CLI
+/// there speaks as the seat as it would in the seat's terminal; and, with `relay`, Slopty's tools
+/// are among its MCP servers (`<relay> mcp`), given the seat's variables (`env`) as their own.
+///
+/// Codex hands an MCP server only the variables its configuration names, and the daemon's
+/// environment is nobody's seat, so the values go as the server's own `env`, not `env_vars`.
+#[must_use]
+pub fn seated(env: &[(String, String)], relay: Option<&str>) -> BTreeMap<String, Value> {
+    let value = |name: &str| env.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone());
+    let mut config: BTreeMap<String, Value> = TERMINAL_ENV
+        .iter()
+        .map(|var| {
+            let set = Value::String(value(var).unwrap_or_default());
+            (format!("shell_environment_policy.set.{var}"), set)
+        })
+        .collect();
+    if let Some(relay) = relay {
+        let vars: serde_json::Map<String, Value> =
+            env.iter().map(|(n, v)| (n.clone(), Value::String(v.clone()))).collect();
+        config.insert(format!("mcp_servers.{TOOLS}.command"), Value::String(relay.to_owned()));
+        config.insert(format!("mcp_servers.{TOOLS}.args"), serde_json::json!(["mcp"]));
+        config.insert(format!("mcp_servers.{TOOLS}.env"), Value::Object(vars));
+    }
+    config
+}
+
 /// What asks the app-server for a new thread in `cwd` (`thread/start`).
 ///
 /// It names `model` when one is given and [`unclaimed`], and nothing else: the approval policy,
@@ -1650,6 +1681,26 @@ fn question(asked: &p::ToolRequestUserInputQuestion) -> Question {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A seat's thread runs its commands as the seat and gets Slopty's tools with the seat's
+    /// variables as their own; without Slopty's CLI it gets the variables alone.
+    #[test]
+    fn a_seats_thread_is_loaded_with_its_variables_and_slopty_tools() {
+        let env = [("SLOPTY_SESSION", "seat-1"), ("SLOPTY_TASK", "t-1"), ("SLOPTY_SERVER", "s:1")]
+            .map(|(n, v)| (n.to_owned(), v.to_owned()));
+        let config = seated(&env, Some("/bin/slopty"));
+        let set = |var: &str| config[&format!("shell_environment_policy.set.{var}")].clone();
+        assert_eq!(set("SLOPTY_SESSION"), "seat-1");
+        assert_eq!(set("SLOPTY_TASK"), "t-1");
+        assert_eq!(set("SLOPTY_PROJECT"), "", "a variable the seat lacks names nothing");
+        assert_eq!(config["mcp_servers.slopty.command"], "/bin/slopty");
+        assert_eq!(config["mcp_servers.slopty.args"], serde_json::json!(["mcp"]));
+        let vars = serde_json::json!({"SLOPTY_SESSION": "seat-1", "SLOPTY_TASK": "t-1",
+            "SLOPTY_SERVER": "s:1"});
+        assert_eq!(config["mcp_servers.slopty.env"], vars);
+        let bare = seated(&env, None);
+        assert!(bare.keys().all(|k| k.starts_with("shell_environment_policy.")), "{bare:?}");
+    }
 
     /// The shell Codex wraps a command in is taken off, its quoting undone; a command it did
     /// not wrap, or one that is not one word to the shell, is as it was.

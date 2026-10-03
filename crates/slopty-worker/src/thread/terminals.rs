@@ -20,6 +20,19 @@ pub trait Terminals: Send + Sync + 'static {
         env: Vec<(String, String)>,
     ) -> Pending<'_, Result<SessionId, String>>;
 
+    /// [`Self::open`], under session `seat`: a server's task names the terminal its agent runs
+    /// in before it opens. Terminals that cannot choose a session's id say so.
+    fn open_at(
+        &self,
+        seat: SessionId,
+        command: Vec<String>,
+        cwd: String,
+        env: Vec<(String, String)>,
+    ) -> Pending<'_, Result<SessionId, String>> {
+        drop((seat, command, cwd, env));
+        Box::pin(async { Err("These terminals open under no id given them".to_owned()) })
+    }
+
     /// Done once `session`'s program has exited, or at once when there is no such session.
     fn exited(&self, session: SessionId) -> Pending<'static, ()>;
 

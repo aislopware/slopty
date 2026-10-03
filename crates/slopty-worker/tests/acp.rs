@@ -12,15 +12,15 @@ mod acp {
     use std::time::Duration;
 
     use serde_json::Value;
-    use slopty_core::ClientId;
+    use slopty_core::{ClientId, SessionId};
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
         AgentId, Answerer, Cap, Delivery, Drive, Fork, IntentId, ItemBody, Liveness, Phase,
         RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, TurnState,
     };
-    use slopty_worker::thread::Host;
     use slopty_worker::thread::acp::{self, Acp};
     use slopty_worker::thread::log::Limits;
+    use slopty_worker::thread::{Host, Seated};
 
     const WAIT: Duration = Duration::from_secs(30);
 
@@ -509,6 +509,57 @@ mod acp {
         let record = rig.record();
         assert_eq!(record["heard"][2]["params"]["prompt"], prompt["params"]["prompt"]);
         assert_eq!(record["unexpected"], serde_json::json!([]));
+    }
+
+    /// A server task's thread on an ACP agent is given Slopty's tools as an MCP server of its
+    /// session, `slopty mcp` with the seat's variables, and its role ahead of the first message,
+    /// since ACP has no system prompt of its own. Its row names the seat, kept whatever the
+    /// agent says of the thread, and a start repeated at the seat answers with the same thread.
+    #[tokio::test]
+    async fn a_seated_acp_thread_gets_the_seat_its_tools_and_its_role() {
+        let rig = Rig::new();
+        let session = "ses_00000000000000000000000001";
+        let first = "You review.\n\nSay hello.";
+        let prompt = serde_json::json!({"dir": "in", "msg": {"id": 3, "jsonrpc": "2.0",
+            "method": "session/prompt", "params": {"sessionId": session,
+                "prompt": [{"type": "text", "text": first}]}}});
+        let ended =
+            r#"{"dir":"out","msg":{"id":3,"jsonrpc":"2.0","result":{"stopReason":"end_turn"}}}"#;
+        let mut recording = lines("turns.jsonl")[..4].to_vec();
+        recording.extend([prompt.to_string(), ended.to_owned()]);
+        rig.replay_lines(&recording);
+        let (acp, _served) = rig.serve();
+        let seat = SessionId::new();
+        let relay = "/opt/slopty/bin/slopty";
+        let seated = Seated {
+            seat,
+            env: vec![
+                ("SLOPTY_SESSION".to_owned(), seat.to_string()),
+                ("SLOPTY_TASK".to_owned(), "task-1".to_owned()),
+            ],
+            role: Some("You review.".to_owned()),
+            relay: Some(relay.to_owned()),
+        };
+        let outcome =
+            acp.start_seated(rig.start("acp:opencode", "Say hello."), seated.clone()).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let again = acp.start_seated(rig.start("acp:opencode", "Say hello."), seated).await;
+        assert_eq!(again, outcome, "one thread a seat");
+        assert_eq!(rig.host.threads(), [thread]);
+        assert_eq!(rig.host.seated_at(seat), Some(thread));
+
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        assert_eq!(fact, Some(&seat.to_string()), "kept over what the agent says of the thread");
+        let record = rig.record();
+        assert_eq!(record["unexpected"], serde_json::json!([]), "{record:#}");
+        let opened = &record["heard"][1];
+        assert_eq!(opened["method"], "session/new");
+        let tools = serde_json::json!([{"name": "slopty", "command": relay, "args": ["mcp"],
+            "env": [{"name": "SLOPTY_SESSION", "value": seat.to_string()},
+                {"name": "SLOPTY_TASK", "value": "task-1"}]}]);
+        assert_eq!(opened["params"]["mcpServers"], tools);
+        assert_eq!(record["heard"][2]["params"]["prompt"][0]["text"], first, "the role first");
     }
 
     /// A fork runs the agent afresh, which forks the thread's session (`session/fork`) and then

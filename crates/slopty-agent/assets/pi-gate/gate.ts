@@ -4,13 +4,24 @@
 // through the RPC extension UI. The worker decides what to ask and what to let through; this
 // only asks. It fails closed: anything but an allow blocks the call, and pi blocks a call whose
 // handler throws.
+//
+// For a server task's thread the worker also hands it Slopty's tools (SLOPTY_PI_TOOLS, an mcp.json
+// server entry), which it registers as one of pi's MCP servers. Their calls come through the gate
+// like any other.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // What the worker reads the dialog's title as: the gate's protocol and the call it is about.
 const GATE = "slopty-gate/1";
 
+// The name Slopty's tools go by: their tools are `mcp__slopty__…`.
+const MCP_SERVER = "slopty";
+
 export default function (pi: ExtensionAPI) {
+	const tools = process.env.SLOPTY_PI_TOOLS;
+	if (tools) {
+		pi.registerMcpServer(MCP_SERVER, JSON.parse(tools));
+	}
 	pi.on("tool_call", async (event, ctx) => {
 		if (ctx.mode !== "rpc") {
 			return { block: true, reason: "Slopty's gate answers only over RPC" };

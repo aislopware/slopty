@@ -27,16 +27,19 @@ pub(super) struct Process {
     stderr: JoinHandle<Vec<String>>,
 }
 
-/// Run pi on session `session` in `cwd`, with the thread's own `args`.
+/// Run pi on session `session` in `cwd`, with the thread's own `args`, and `env` over the
+/// worker's own.
 pub(super) fn start_pi(
     launch: &Launcher,
     session: &str,
     cwd: &str,
     args: &[String],
+    env: &[(String, String)],
 ) -> Result<(ChildStdin, Process), String> {
     let mut command = tokio::process::Command::new(&launch.pi.program);
     command
         .args(slopty_agent::pi::args(&launch.gate, session, args))
+        .envs(env.iter().map(|(n, v)| (n, v)))
         .current_dir(cwd)
         .env("PATH", &launch.pi.path)
         .stdin(Stdio::piped())

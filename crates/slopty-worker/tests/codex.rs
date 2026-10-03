@@ -11,13 +11,14 @@ mod codex {
     use futures_util::{SinkExt as _, StreamExt as _};
     use serde_json::{Value, json};
     use slopty_agent::codex::shared;
+    use slopty_core::SessionId;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
         AgentId, Delivery, Fork, IntentId, ItemBody, ThreadId, ThreadMeta, ThreadState, TurnState,
     };
-    use slopty_worker::thread::Host;
     use slopty_worker::thread::codex::{self, Codex};
     use slopty_worker::thread::log::Limits;
+    use slopty_worker::thread::{Host, Seated};
     use tokio::net::UnixListener;
     use tokio::sync::mpsc;
     use tokio_tungstenite::tungstenite::Message;
@@ -253,6 +254,70 @@ mod codex {
             sent.iter().filter(|m| m["method"] == "account/usage/read").collect();
         assert_eq!(reads.len(), 1, "read once, as the turn ended: {sent:?}");
         assert_eq!(reads[0]["params"], json!({ "threadId": native }));
+    }
+
+    /// A server task's thread is asked of Codex with the seat's variables set in the commands it
+    /// runs, Slopty's tools among its MCP servers with those variables, and the role as its
+    /// developer instructions; the first message goes as written. Its row names the seat, kept
+    /// whatever Codex says of the thread, and a start repeated at the seat answers with the
+    /// thread the first one started.
+    #[tokio::test]
+    async fn a_seated_start_gives_codex_the_seat_its_tools_and_its_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let server = tokio::spawn(daemon(listener, tx));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let served = codex::spawn(host.clone(), socket, None, asks);
+
+        let seat = SessionId::new();
+        let env = vec![
+            ("SLOPTY_SESSION".to_owned(), seat.to_string()),
+            ("SLOPTY_TASK".to_owned(), "task-1".to_owned()),
+        ];
+        let relay = "/opt/slopty/bin/slopty";
+        let seated = Seated {
+            seat,
+            env: env.clone(),
+            role: Some("You review.".to_owned()),
+            relay: Some(relay.to_owned()),
+        };
+        let outcome = handle.start_seated(start(&work, "Say hello."), seated.clone()).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let again = handle.start_seated(start(&work, "Say hello."), seated).await;
+        assert_eq!(again, outcome, "one thread a seat");
+        assert_eq!(host.seated_at(seat), Some(thread));
+        let state = until(&host, thread, |s| {
+            s.turns.first().is_some_and(|t| t.state == TurnState::Complete)
+        })
+        .await;
+        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        assert_eq!(fact, Some(&seat.to_string()), "kept over what Codex says of the thread");
+
+        served.abort();
+        let _done = tokio::time::timeout(BOUND, server).await;
+        let mut sent = Vec::new();
+        while let Ok(msg) = heard.try_recv() {
+            sent.push(msg);
+        }
+        let starts: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/start").collect();
+        assert_eq!(starts.len(), 1, "one thread asked for: {sent:?}");
+        let config = shared::seated(&env, Some(relay));
+        assert_eq!(config["shell_environment_policy.set.SLOPTY_TASK"], "task-1");
+        assert_eq!(config["mcp_servers.slopty.env"]["SLOPTY_SESSION"], seat.to_string().as_str());
+        let want = json!({
+            "cwd": work.to_string_lossy(),
+            "config": config,
+            "developerInstructions": "You review.",
+        });
+        assert_eq!(starts[0]["params"], want);
+        let turns: Vec<&Value> = sent.iter().filter(|m| m["method"] == "turn/start").collect();
+        assert_eq!(turns[0]["params"]["input"][0]["text"], "Say hello.", "the role went apart");
     }
 
     /// With no Codex daemon running, a start is refused in words, and Slopty starts none.

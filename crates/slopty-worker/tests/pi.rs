@@ -20,10 +20,10 @@ mod pi {
         AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase, RequestState,
         ThreadId, ThreadState, ToolState, TurnId, TurnState,
     };
-    use slopty_worker::thread::Host;
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::pi::tui::{Pending, Terminals};
     use slopty_worker::thread::pi::{self, Pi};
+    use slopty_worker::thread::{Host, Seated};
     use tokio::process::ChildStdin;
     use tokio::sync::watch;
 
@@ -386,6 +386,38 @@ mod pi {
         assert_eq!(answers, ["allow", "deny\nKeep the file."]);
     }
 
+    /// A server task's thread runs pi with its role added to the system prompt, kept with the
+    /// thread's own flags so a pi started again for it has it too; the first message goes as
+    /// written. Its row names the seat, kept whatever pi says of the thread, and a start repeated
+    /// at the seat answers with the thread the first one started.
+    #[tokio::test]
+    async fn a_seated_pi_thread_gets_the_seat_and_its_role() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let seat = SessionId::new();
+        let seated = Seated {
+            seat,
+            env: vec![("SLOPTY_SESSION".to_owned(), seat.to_string())],
+            role: Some("You review.".to_owned()),
+            relay: Some("/opt/slopty/bin/slopty".to_owned()),
+        };
+        let outcome = pi.start_seated(rig.start("Say hello."), seated.clone()).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        assert_eq!(pi.start_seated(rig.start("Say hello."), seated).await, outcome, "once");
+        assert_eq!(rig.host.threads(), [thread]);
+        assert_eq!(rig.host.seated_at(seat), Some(thread));
+
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+        assert_eq!(fact, Some(&seat.to_string()), "kept over what pi says of the thread");
+        assert_eq!(users(&state)[0].0, "Say hello.", "the role went apart");
+        let record = rig.record();
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        assert_eq!(argv[6..], ["--offline", "--append-system-prompt", "You review."]);
+        assert_eq!(record["unexpected"], serde_json::json!([]), "{record:#}");
+    }
+
     /// A thread whose pi is gone is exited and resumable; the next message starts pi again on
     /// the same session, reads the thread again from the session's own record, keeps the intent
     /// of a message it knew, and then sends the message.
@@ -613,7 +645,11 @@ mod pi {
         assert_eq!(sent, Outcome::Done);
         let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
         assert_eq!(users(&state), [("Say hello.".to_owned(), Some(id))]);
-        let record = rig.record();
+        // The stand-in writes what it heard after it answers, so the turn can end first.
+        let prompted = |r: &Value| {
+            r["heard"].as_array().is_some_and(|h| h.iter().any(|c| c["type"] == "prompt"))
+        };
+        let record = rig.record_once(prompted).await;
         let prompt =
             record["heard"].as_array().unwrap().iter().find(|c| c["type"] == "prompt").unwrap();
         let picture = slopty_agent::attach::Attached::Picture {

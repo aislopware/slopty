@@ -33,8 +33,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use super::Driver;
-use crate::thread::Host;
 use crate::thread::terminals::Terminals;
+use crate::thread::{Host, Seated};
 
 /// What is asked of the starts.
 #[derive(Debug)]
@@ -47,8 +47,8 @@ struct Ask {
 /// What a start begins.
 #[derive(Debug)]
 enum What {
-    /// A thread as the start says.
-    Start(Start),
+    /// A thread as the start says, at a server task's seat when it has one.
+    Start(Start, Option<Box<Seated>>),
     /// A thread branched off this one through this turn, or all of it.
     Fork { from: ThreadId, after: Option<TurnId> },
 }
@@ -72,7 +72,21 @@ impl Starter {
     /// Start the thread of intent `id` as `start` says, once.
     pub async fn start(&self, id: IntentId, start: Start) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask { id, what: What::Start(start), reply }).is_err() {
+        if self.0.send(Ask { id, what: What::Start(start, None), reply }).is_err() {
+            return refused("Claude Code threads are not started here");
+        }
+        outcome.await.unwrap_or_else(|_| refused("the Claude Code starts stopped"))
+    }
+
+    /// Start a server task's thread as `start` says, once per seat: Claude Code runs in a
+    /// terminal opened under the seat, so the worker gives it the seat's hooks, tools and
+    /// variables as it does any terminal's, and the role as its system prompt's addition
+    /// (`--append-system-prompt`).
+    pub async fn start_seated(&self, start: Start, seated: Seated) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        let id = seated.intent();
+        if self.0.send(Ask { id, what: What::Start(start, Some(Box::new(seated))), reply }).is_err()
+        {
             return refused("Claude Code threads are not started here");
         }
         outcome.await.unwrap_or_else(|_| refused("the Claude Code starts stopped"))
@@ -103,14 +117,12 @@ pub fn spawn(
             let outcome = if let Some(first) = host.started(id) {
                 first
             } else {
-                let terminals = terminals.as_ref();
+                let claude = Claude { driver: &driver, terminals: terminals.as_ref(), path: &path };
                 let outcome = match &what {
-                    What::Start(start) => {
-                        begin(&host, &driver, terminals, path.clone(), id, start).await
+                    What::Start(start, seated) => {
+                        begin(&host, &claude, id, start, seated.as_deref()).await
                     }
-                    What::Fork { from, after } => {
-                        fork(&host, &driver, terminals, path.clone(), *from, *after).await
-                    }
+                    What::Fork { from, after } => fork(&host, &claude, *from, *after).await,
                 };
                 host.record_start(id, outcome)
             };
@@ -119,13 +131,20 @@ pub fn spawn(
     })
 }
 
+/// What opening the person's `claude` takes: the driver that observes it, the terminals it
+/// runs in, and the `PATH` it is looked for on alone when there is one.
+struct Claude<'a> {
+    driver: &'a Driver,
+    terminals: &'a dyn Terminals,
+    path: &'a Option<OsString>,
+}
+
 async fn begin(
     host: &Host,
-    driver: &Driver,
-    terminals: &dyn Terminals,
-    path: Option<OsString>,
+    claude: &Claude<'_>,
     id: IntentId,
     start: &Start,
+    seated: Option<&Seated>,
 ) -> Outcome {
     if !start.agent.is(AgentId::CLAUDE_CODE) {
         return refused(&format!("{} is not Claude Code", start.agent.0));
@@ -134,7 +153,7 @@ async fn begin(
         return refused("Claude Code runs in its own terminal, observed");
     }
     let (model, prompt) = (start.model.as_deref(), start.prompt.as_deref());
-    let (args, native) = match start.args.as_slice() {
+    let (mut args, native) = match start.args.as_slice() {
         [] => slopty_agent::resume::started(model, prompt),
         [flag, session] if flag == slopty_agent::resume::RESUME_FLAG => {
             let Some(args) = slopty_agent::resume::resumed(session, model, prompt) else {
@@ -150,10 +169,16 @@ async fn begin(
     if !Path::new(&start.cwd).is_dir() {
         return refused(&format!("There is no folder {} here", start.cwd));
     }
-    let thread = match open(driver, terminals, path, args, native, &start.cwd).await {
+    if let Some(role) = seated.and_then(|s| s.role.as_deref()).filter(|r| !r.trim().is_empty()) {
+        args.insert(0, format!("--append-system-prompt={role}"));
+    }
+    let thread = match open(claude, args, native, &start.cwd, seated).await {
         Ok(thread) => thread,
         Err(why) => return refused(&why),
     };
+    if let Some(seated) = seated {
+        host.seated(thread, seated.seat);
+    }
     if let Some(prompt) = start.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         host.typed(thread, id, prompt);
     }
@@ -162,14 +187,7 @@ async fn begin(
 
 /// Open Claude Code on a new conversation branched off the whole of thread `from`'s, in a
 /// terminal of its own, and observe it as a thread that says where it came from.
-async fn fork(
-    host: &Host,
-    driver: &Driver,
-    terminals: &dyn Terminals,
-    path: Option<OsString>,
-    from: ThreadId,
-    after: Option<TurnId>,
-) -> Outcome {
+async fn fork(host: &Host, claude: &Claude<'_>, from: ThreadId, after: Option<TurnId>) -> Outcome {
     let Some((state, _)) = host.state(from).filter(|(s, _)| s.meta.agent.is(AgentId::CLAUDE_CODE))
     else {
         return refused("There is no such Claude Code thread here");
@@ -186,7 +204,7 @@ async fn fork(
         return refused(&format!("{} is no Claude Code session", state.meta.native));
     };
     let cwd = state.meta.cwd.clone();
-    let thread = match open(driver, terminals, path, args, native, &cwd).await {
+    let thread = match open(claude, args, native, &cwd, None).await {
         Ok(thread) => thread,
         Err(why) => return refused(&why),
     };
@@ -197,23 +215,26 @@ async fn fork(
 /// Open the person's `claude` with `args` in folder `cwd`, in a terminal of its own, and begin
 /// the thread of its conversation `native`; why not, in words.
 async fn open(
-    driver: &Driver,
-    terminals: &dyn Terminals,
-    path: Option<OsString>,
+    Claude { driver, terminals, path }: &Claude<'_>,
     args: Vec<String>,
     native: String,
     cwd: &str,
+    seated: Option<&Seated>,
 ) -> Result<ThreadId, String> {
-    let claude = crate::facts::installed("claude", path)
+    let installed = crate::facts::installed("claude", (*path).clone())
         .await
         .ok_or_else(|| "Claude Code is not installed".to_owned())?;
     let command =
-        std::iter::once(claude.program.to_string_lossy().into_owned()).chain(args).collect();
-    let env = vec![("PATH".to_owned(), claude.path.to_string_lossy().into_owned())];
-    let terminal = terminals
-        .open(command, cwd.to_owned(), env)
-        .await
-        .map_err(|e| format!("Its terminal did not open: {e}"))?;
+        std::iter::once(installed.program.to_string_lossy().into_owned()).chain(args).collect();
+    let mut env = vec![("PATH".to_owned(), installed.path.to_string_lossy().into_owned())];
+    let opened = match seated {
+        Some(seated) => {
+            env.extend(seated.env.iter().cloned());
+            terminals.open_at(seated.seat, command, cwd.to_owned(), env).await
+        }
+        None => terminals.open(command, cwd.to_owned(), env).await,
+    };
+    let terminal = opened.map_err(|e| format!("Its terminal did not open: {e}"))?;
     tracing::info!(%terminal, native, cwd, "started Claude Code");
     driver
         .begin(terminal, native, cwd.to_owned())

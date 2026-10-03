@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use slopty_core::WallMs;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
     Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, PendingState, Phase, ThreadId,
@@ -122,6 +122,9 @@ struct Own {
     /// Where the thread branched, when the worker forked it: an agent that records a fork names
     /// only the thread it came from, or nothing.
     fork: Option<Fork>,
+    /// The seat a server's task started it at ([`slopty_proto::project::SEAT_FACT`]): an adapter
+    /// that tells the thread's metadata again knows nothing of it.
+    seat: Option<String>,
 }
 
 /// Messages typed whose items are waited for; past it the oldest is given up.
@@ -144,7 +147,8 @@ impl Own {
             .map(|t| (t.id, (t.before.clone(), t.after.clone())))
             .collect();
         let fork = state.meta.forked_from;
-        Self { typed: VecDeque::new(), sent, trees, fork }
+        let seat = state.meta.facts.get(slopty_proto::project::SEAT_FACT).cloned();
+        Self { typed: VecDeque::new(), sent, trees, fork, seat }
     }
 
     /// `meta` with where the worker branched it, unless its agent says more: an agent that
@@ -162,7 +166,13 @@ impl Own {
     fn mark(&mut self, actions: &mut [Action]) {
         for action in actions {
             match action {
-                Action::Meta(meta) => self.branched(meta),
+                Action::Meta(meta) => {
+                    self.branched(meta);
+                    if let Some(seat) = &self.seat {
+                        meta.facts
+                            .insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.clone());
+                    }
+                }
                 Action::ItemStarted(item)
                 | Action::ItemUpdated(item)
                 | Action::ItemCompleted(item) => {
@@ -358,6 +368,30 @@ impl Host {
             hosted.log.state().meta.clone()
         };
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
+    }
+
+    /// `thread` was started at `seat` for a server's task: its row says so
+    /// ([`slopty_proto::project::SEAT_FACT`]) from now on, whatever its adapter tells of it.
+    pub fn seated(&self, thread: ThreadId, seat: SessionId) {
+        let meta = {
+            let mut inner = self.inner.lock();
+            let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+            hosted.own.seat = Some(seat.to_string());
+            hosted.log.state().meta.clone()
+        };
+        self.apply(thread, vec![Action::Meta(Box::new(meta))]);
+    }
+
+    /// The thread started at `seat`, if one is.
+    #[must_use]
+    pub fn seated_at(&self, seat: SessionId) -> Option<ThreadId> {
+        let seat = seat.to_string();
+        let inner = self.inner.lock();
+        inner
+            .threads
+            .iter()
+            .find(|(_, hosted)| hosted.own.seat.as_deref() == Some(seat.as_str()))
+            .map(|(thread, _)| *thread)
     }
 
     /// Message `text` was typed for intent `id` into `thread`'s agent: the item the agent

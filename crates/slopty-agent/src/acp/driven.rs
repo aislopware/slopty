@@ -256,6 +256,8 @@ pub struct Session {
     replaying: bool,
     last_end: Option<TurnState>,
     phase: (Phase, WallMs),
+    /// The MCP servers the client gives every session it opens, made, loaded or forked.
+    tools: Vec<acp::McpServer>,
 }
 
 impl Session {
@@ -334,6 +336,7 @@ impl Session {
             replaying: false,
             last_end: None,
             phase: (Phase::Idle, now),
+            tools: Vec::new(),
         }
     }
 
@@ -387,10 +390,22 @@ impl Session {
         Ok(vec![Action::Meta(Box::new(self.meta.clone()))])
     }
 
+    /// Give every session it opens from now on Slopty's tools: `<relay> mcp` on stdio, with
+    /// `env` (a server task's seat) as its environment. Every agent takes a stdio MCP server
+    /// (ACP, `session/new` `mcpServers`), and each open names them again, since an agent keeps
+    /// them only for the session it opened.
+    pub fn serve_tools(&mut self, relay: &str, env: &[(String, String)]) {
+        let env = env.iter().map(|(n, v)| acp::EnvVariable::new(n.clone(), v.clone())).collect();
+        let server = acp::McpServerStdio::new(crate::hooks::MCP_SERVER_NAME, relay)
+            .args(vec!["mcp".to_owned()])
+            .env(env);
+        self.tools = vec![acp::McpServer::Stdio(server)];
+    }
+
     /// `session/new` for the thread's folder.
     #[must_use]
     pub fn session_new(&self) -> acp::NewSessionRequest {
-        acp::NewSessionRequest::new(self.meta.cwd.clone())
+        acp::NewSessionRequest::new(self.meta.cwd.clone()).mcp_servers(self.tools.clone())
     }
 
     /// `session/fork` of the agent's session `from` into this thread's folder: the fork is this
@@ -398,6 +413,7 @@ impl Session {
     #[must_use]
     pub fn session_fork(&self, from: &str) -> acp::ForkSessionRequest {
         acp::ForkSessionRequest::new(from.to_owned(), self.meta.cwd.clone())
+            .mcp_servers(self.tools.clone())
     }
 
     /// This thread branched off another as `fork` says: it says so from its start.
@@ -419,7 +435,10 @@ impl Session {
             return None;
         }
         self.replaying = true;
-        Some(acp::LoadSessionRequest::new(self.meta.native.clone(), self.meta.cwd.clone()))
+        Some(
+            acp::LoadSessionRequest::new(self.meta.native.clone(), self.meta.cwd.clone())
+                .mcp_servers(self.tools.clone()),
+        )
     }
 
     /// The session is made or loaded: named `session` (when the agent named it), with its

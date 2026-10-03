@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
+use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
     Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, TableFrame, ThreadFrame,
     ThreadRequest,
@@ -23,7 +24,7 @@ use slopty_proto::thread::{
 };
 use slopty_worker::conversation::Seen;
 use slopty_worker::manager::Worker;
-use slopty_worker::orchestrate::{self, Agents, Conversations as _};
+use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
 use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
 use slopty_worker::thread::claude::{self, Driver, Sources};
@@ -33,7 +34,7 @@ use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
-use slopty_worker::thread::{Composer, Follower, Host};
+use slopty_worker::thread::{Composer, Follower, Host, Seated};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
@@ -94,6 +95,7 @@ pub struct Threads {
     composer: Composer,
     snapshots: Snapshots,
     history: History,
+    worker: Worker,
 }
 
 /// Open the threads kept under `dir`, and what [`start`] needs to observe into them.
@@ -115,7 +117,8 @@ pub fn open(
             let (pi, pi_asks) = Pi::channel();
             let (acp, acp_asks) = Acp::channel();
             let terminals = Arc::new(AgentTerminals(worker.clone()));
-            let typing = Typing { worker, agents: crate::server::DaemonAgents(agents) };
+            let typing =
+                Typing { worker: worker.clone(), agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
@@ -141,6 +144,7 @@ pub fn open(
                 composer,
                 snapshots,
                 history,
+                worker,
             };
             Some((threads, observing))
         }
@@ -165,16 +169,21 @@ impl AgentTerminalsTrait for AgentTerminals {
         env: Vec<(String, String)>,
     ) -> Pending<'_, Result<SessionId, String>> {
         Box::pin(async move {
-            let program = command.first().map(|p| p.rsplit('/').next().unwrap_or(p).to_owned());
-            let open = slopty_proto::terminal::OpenSession {
-                size: slopty_proto::terminal::TermSize::default(),
-                cwd: Some(cwd),
-                command,
-                env,
-                title: program,
-                attach: false,
-            };
+            let open = opening(command, cwd, env);
             self.0.open(&open).await.map(|session| session.id()).map_err(|e| e.to_string())
+        })
+    }
+
+    fn open_at(
+        &self,
+        seat: SessionId,
+        command: Vec<String>,
+        cwd: String,
+        env: Vec<(String, String)>,
+    ) -> Pending<'_, Result<SessionId, String>> {
+        Box::pin(async move {
+            let open = opening(command, cwd, env);
+            self.0.open_as(seat, &open).await.map(|session| session.id()).map_err(|e| e.to_string())
         })
     }
 
@@ -902,5 +911,133 @@ impl Threads {
             Some(session) => self.claude.expand(session, content).await,
             None => Expanded::Gone,
         }
+    }
+}
+
+/// A terminal for an agent's own TUI: `command` in `cwd`, with `env`, titled by its program
+/// until the program titles it.
+fn opening(
+    command: Vec<String>,
+    cwd: String,
+    env: Vec<(String, String)>,
+) -> slopty_proto::terminal::OpenSession {
+    let program = command.first().map(|p| p.rsplit('/').next().unwrap_or(p).to_owned());
+    slopty_proto::terminal::OpenSession {
+        size: slopty_proto::terminal::TermSize::default(),
+        cwd: Some(cwd),
+        command,
+        env,
+        title: program,
+        attach: false,
+    }
+}
+
+/// A server's tasks start their threads here ([`slopty_worker::orchestrate::Verb::StartThread`]),
+/// each through its agent's own adapter, at the seat the server chose.
+impl orchestrate::TaskThreads for Threads {
+    fn start(
+        &self,
+        thread: orchestrate::TaskThread,
+    ) -> orchestrate::BoxFuture<'_, Result<ThreadId, Failure>> {
+        Box::pin(async move {
+            let orchestrate::TaskThread { start, seat, env, role } = thread;
+            let relay = slopty_agent::hooks::relay_beside_this_binary()
+                .map(|relay| relay.to_string_lossy().into_owned());
+            let env = self.worker.seat_env(seat, &env);
+            let seated = Seated { seat, env, role, relay };
+            let agent = start.agent.clone();
+            tracing::info!(%seat, agent = %agent.0, cwd = start.cwd, "start a task's thread");
+            let outcome = if agent.is(AgentId::PI) {
+                self.pi.start_seated(Box::new(start), seated).await
+            } else if agent.is(AgentId::CLAUDE_CODE) {
+                self.claude_start.start_seated(start, seated).await
+            } else if agent.is(AgentId::CODEX) {
+                self.codex.start_seated(start, seated).await
+            } else if slopty_agent::acp::name_of(&agent).is_some() {
+                self.acp.start_seated(Box::new(start), seated).await
+            } else {
+                let why = format!("{} is no agent this machine can start", agent.0);
+                return Err(Failure::new(ErrorCode::Unsupported, why));
+            };
+            match outcome {
+                Outcome::Started { thread } => Ok(thread),
+                Outcome::Unsupported { cap } => {
+                    let why = format!("{} cannot {} through Slopty", agent.0, cap.0);
+                    Err(Failure::new(ErrorCode::Unsupported, why))
+                }
+                Outcome::Refused { reason } => Err(Failure::new(ErrorCode::Failed, reason)),
+                Outcome::Done | Outcome::Accepted => {
+                    let why = format!("{} started no thread", agent.0);
+                    Err(Failure::new(ErrorCode::Failed, why))
+                }
+            }
+        })
+    }
+
+    fn close(&self, seat: SessionId) -> orchestrate::BoxFuture<'_, Result<bool, Failure>> {
+        Box::pin(async move {
+            let Some(thread) = self.host.seated_at(seat) else { return Ok(false) };
+            let Some((state, _)) = self.host.state(thread) else { return Ok(false) };
+            tracing::info!(%seat, %thread, "end a task's thread");
+            if codex::is_shared(&state) {
+                self.codex.close(thread).await;
+            } else if pi::is_pi(&state) {
+                self.pi.close(thread).await;
+            } else if acp::is_acp(&state) {
+                self.acp.close(thread).await;
+            } else if let Some(terminal) = state.meta.terminal {
+                // An agent in a terminal ends with it, as a seat's terminal is closed.
+                if let Err(e) = self.worker.close(terminal).await {
+                    return Err(Failure::new(ErrorCode::Failed, e.to_string()));
+                }
+            }
+            Ok(true)
+        })
+    }
+}
+
+impl Threads {
+    /// The thread a server task started at `seat`, when one runs in no terminal of its own:
+    /// what the server delivers to the seat goes to it as a message.
+    #[must_use]
+    pub fn seated_without_terminal(&self, seat: SessionId) -> Option<ThreadId> {
+        let thread = self.host.seated_at(seat)?;
+        let (state, _) = self.host.state(thread)?;
+        state.meta.terminal.is_none().then_some(thread)
+    }
+
+    /// Send `text` to the thread seated at `seat`, once for delivery `batch`: queued behind the
+    /// turn under way where its agent queues, else steered into it. The words are the reports
+    /// block a terminal agent's hooks hand it.
+    pub fn deliver(&self, seat: SessionId, batch: u64, text: &str) -> Outcome {
+        let Some(thread) = self.host.seated_at(seat) else {
+            return refused("no thread is seated there".to_owned());
+        };
+        let id = IntentId::from_uuid(
+            *ThreadId::derived(&["seat delivery", &seat.to_string(), &batch.to_string()]).as_uuid(),
+        );
+        let decided = self.host.intent(thread, id, |state| {
+            let delivery =
+                if state.meta.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer };
+            let intent = Intent::Send { text: text.to_owned(), delivery, attachments: Vec::new() };
+            if !state.meta.can(intent.needs()) {
+                return (Outcome::Unsupported { cap: Cap::named(intent.needs()) }, Vec::new());
+            }
+            let by = slopty_proto::thread::Answerer { client: None, name: "Slopty".to_owned() };
+            let outcome = if codex::is_shared(state) {
+                self.codex.send(thread, text.to_owned(), Vec::new(), delivery, id);
+                Outcome::Done
+            } else if pi::is_pi(state) {
+                self.pi.decide(state, id, &intent, by)
+            } else if acp::is_acp(state) {
+                self.acp.decide(state, id, &intent, by)
+            } else {
+                return self.composer.decide(state, id, &intent).unwrap_or_else(|| {
+                    (refused("its agent takes no message here".to_owned()), Vec::new())
+                });
+            };
+            (outcome, Vec::new())
+        });
+        decided.unwrap_or_else(|| refused("no such thread".to_owned()))
     }
 }

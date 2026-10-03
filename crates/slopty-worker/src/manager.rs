@@ -337,6 +337,14 @@ impl Worker {
         *self.inner.relay.lock() = relay;
     }
 
+    /// What a terminal opened under `seat` would find in its environment, with `extra` under
+    /// the worker's own: for a server task's thread that runs in no terminal, whose agent and
+    /// Slopty tools speak as the seat all the same.
+    #[must_use]
+    pub fn seat_env(&self, seat: SessionId, extra: &[(String, String)]) -> Vec<(String, String)> {
+        self.env_for(seat, extra)
+    }
+
     /// What session `id` is spawned with: the request's `extra`, then every session's
     /// variables, then its own id, token and presence file. The later wins, so no request moves
     /// what the worker tells its sessions (its control socket, its server, its mod): a hook

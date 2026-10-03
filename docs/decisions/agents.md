@@ -1265,3 +1265,42 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_agent_without_a_record_says_why` (`slopty-worker/tests/history.rs`);
     `past_prompts_are_found_across_agents_with_the_words_that_resume_them` (the worker daemon);
     goldens `client_sessions_search` and `link_worker_sessions_found`.
+
+- ✅ **A server task's thread starts at its seat, through each agent's own door** (2026-10-04,
+  for the orchestrator's `StartThread`). The server picks a seat (a session id) for the task and
+  hands it with the task's variables and a role (`TaskThread`). The worker starts the thread as
+  `Seated`: the intent is derived from the seat, so a start repeated after a dropped link
+  answers with the thread the first one started. The thread's row carries the seat as the fact
+  `slopty.seat`, which the host re-applies over whatever the adapter later says of the meta, so
+  it survives a restart and a fresh read from the agent.
+  - **The variables.** The seat's variables are the server's (project, task) and the worker's
+    for that seat (the server, the seat as `SLOPTY_SESSION`, its token), built by
+    `Worker::seat_env` exactly as a terminal opened at the seat gets them.
+  - **Each agent's door.**
+    - Claude Code runs in a terminal opened under the seat id, so its hooks and tools are the
+      seat's as for any terminal. The role goes as `--append-system-prompt`.
+    - Codex gets the variables in the commands it runs (`shell_environment_policy.set`) and
+      Slopty's tools as an MCP server in the `thread/start` config. The values go in the
+      server's own `env`, since the daemon's environment belongs to no seat. The role goes as
+      `developerInstructions`, and both are given again on `thread/resume`.
+    - ACP gets `slopty mcp` with the variables in the `mcpServers` of `session/new`, `load` and
+      `fork`; every agent must take stdio. ACP has no system prompt, so the role goes ahead of
+      the first message.
+    - pi runs with the variables. The gate registers Slopty's tools when the worker hands them
+      over in `SLOPTY_PI_TOOLS` (`pi.registerMcpServer`). The role goes as
+      `--append-system-prompt`, kept among the thread's own flags so a pi started again has it.
+  - **Ending.** `TaskThreads::close(seat)` ends the seated thread through its adapter, or closes
+    its terminal, and says false when no thread sits there.
+  - **Reports.** A seat with no terminal of its own takes the server's delivered reports as a
+    message (`Intent::Send`), queued where the agent queues and steered where it does not, once
+    per batch. It is acknowledged only when the message went.
+  - **Not yet.** The adapters hold a seat's variables in memory, so after the worker restarts, a
+    seated Codex, ACP or pi thread taken up again runs without the seat's tools until it is
+    started at the seat again. The seat fact itself is kept.
+  - Tests: `a_seated_start_opens_claude_under_the_seat_with_its_role`,
+    `a_seated_start_gives_codex_the_seat_its_tools_and_its_role`,
+    `a_seated_acp_thread_gets_the_seat_its_tools_and_its_role`,
+    `a_seated_pi_thread_gets_the_seat_and_its_role` (`slopty-worker/tests`);
+    `a_seated_pi_runs_with_the_seat_and_its_tools` (`slopty-worker::thread::pi`);
+    `a_seats_thread_is_loaded_with_its_variables_and_slopty_tools` and
+    `the_tools_are_an_mcp_server_entry_the_gate_registers` (`slopty-agent`).

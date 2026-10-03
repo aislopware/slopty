@@ -28,6 +28,21 @@ pub const GATE_PROTOCOL: &str = "slopty-gate/1";
 /// The gate's one file.
 pub const GATE: (&str, &str) = ("gate.ts", include_str!("../assets/pi-gate/gate.ts"));
 
+/// The variable that hands the gate Slopty's tools to register, for a server task's thread.
+///
+/// Its value is an `mcp.json` server entry in JSON ([`tools`]). pi connects a server an extension
+/// registers (`pi.registerMcpServer`, pi's `docs/extensions.md`, "MCP servers") as one of its own.
+pub const TOOLS_ENV: &str = "SLOPTY_PI_TOOLS";
+
+/// The MCP server entry that serves Slopty's tools through `<relay> mcp` on stdio, with `env`
+/// (a seat's variables) as its environment, in the shape of an `mcp.json` `mcpServers` entry.
+#[must_use]
+pub fn tools(relay: &str, env: &[(String, String)]) -> serde_json::Value {
+    let env: serde_json::Map<String, serde_json::Value> =
+        env.iter().map(|(n, v)| (n.clone(), serde_json::Value::String(v.clone()))).collect();
+    serde_json::json!({ "command": relay, "args": ["mcp"], "env": env })
+}
+
 /// The flag that loads an extension.
 pub const EXTENSION_FLAG: &str = "--extension";
 
@@ -154,6 +169,20 @@ pub fn args(gate: &Path, session: &str, args: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Slopty's tools for pi are an `mcp.json` server entry over `slopty mcp`, the seat's
+    /// variables its environment; the gate registers what it is handed.
+    #[test]
+    fn the_tools_are_an_mcp_server_entry_the_gate_registers() {
+        let env = [("SLOPTY_SESSION".to_owned(), "seat-1".to_owned())];
+        assert_eq!(
+            tools("/bin/slopty", &env),
+            serde_json::json!({"command": "/bin/slopty", "args": ["mcp"],
+                "env": {"SLOPTY_SESSION": "seat-1"}})
+        );
+        assert!(GATE.1.contains(&format!("process.env.{TOOLS_ENV}")), "the gate reads it");
+        assert!(GATE.1.contains("pi.registerMcpServer("));
+    }
 
     /// Written once, read back whole; a second install finds it; a damaged file is rewritten,
     /// and no staging file is left behind.

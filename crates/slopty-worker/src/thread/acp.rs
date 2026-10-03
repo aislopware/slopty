@@ -46,7 +46,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use self::task::{Opening, Task, start_agent};
-use super::Host;
+use super::{Host, Seated};
 
 /// How long an agent has to end once its stdin closes, before it is killed.
 pub const SHUTDOWN: Duration = Duration::from_secs(5);
@@ -61,10 +61,34 @@ type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>)>;
 /// What a client asks of the ACP threads.
 #[derive(Debug)]
 enum Ask {
-    Start { id: IntentId, start: Box<Start>, reply: oneshot::Sender<Outcome> },
-    Thread { thread: ThreadId, ask: ThreadAsk },
-    Fork { thread: ThreadId, id: IntentId, after: Option<TurnId>, reply: oneshot::Sender<Outcome> },
-    Sessions { agent: AgentId, cwd: String, limit: u32, reply: Listed },
+    Start {
+        id: IntentId,
+        start: Box<Start>,
+        seated: Option<Box<Seated>>,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Thread {
+        thread: ThreadId,
+        ask: ThreadAsk,
+    },
+    /// A server task's thread is settled: its agent ends, its session kept, and its seat is
+    /// forgotten.
+    Close {
+        thread: ThreadId,
+        done: oneshot::Sender<()>,
+    },
+    Fork {
+        thread: ThreadId,
+        id: IntentId,
+        after: Option<TurnId>,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Sessions {
+        agent: AgentId,
+        cwd: String,
+        limit: u32,
+        reply: Listed,
+    },
 }
 
 /// Where a list of an agent's sessions goes, or why there is none.
@@ -103,7 +127,28 @@ impl Acp {
     /// first outcome.
     pub async fn start(&self, id: IntentId, start: Box<Start>) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        if self.0.send(Ask::Start { id, start, reply }).is_err() {
+        if self.0.send(Ask::Start { id, start, seated: None, reply }).is_err() {
+            return refused("ACP threads are not served here");
+        }
+        outcome.await.unwrap_or_else(|_| refused("the ACP threads stopped"))
+    }
+
+    /// End thread `thread`'s agent for its settled task, its session kept to take up again.
+    pub async fn close(&self, thread: ThreadId) {
+        let (done, closed) = oneshot::channel();
+        if self.0.send(Ask::Close { thread, done }).is_ok() {
+            let _done = closed.await;
+        }
+    }
+
+    /// Start a server task's thread as `start` says, once per seat: every session the agent
+    /// opens for it is given Slopty's tools with the seat's variables (`session/new`
+    /// `mcpServers`), the agent runs with them too, and the role goes ahead of its first prompt,
+    /// since ACP has no system prompt of the client's.
+    pub async fn start_seated(&self, start: Box<Start>, seated: Seated) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        let (id, seated) = (seated.intent(), Some(Box::new(seated)));
+        if self.0.send(Ask::Start { id, start, seated, reply }).is_err() {
             return refused("ACP threads are not served here");
         }
         outcome.await.unwrap_or_else(|_| refused("the ACP threads stopped"))
@@ -260,8 +305,14 @@ pub fn is_acp(state: &ThreadState) -> bool {
 pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks) -> JoinHandle<()> {
     tokio::spawn(async move {
         let (ended_tx, mut ended) = mpsc::unbounded_channel();
-        let mut served =
-            Served { host: host.clone(), path, own, running: HashMap::new(), ended: ended_tx };
+        let mut served = Served {
+            host: host.clone(),
+            path,
+            own,
+            running: HashMap::new(),
+            ended: ended_tx,
+            seats: HashMap::new(),
+        };
         for thread in host.threads() {
             let Some((state, _)) = host.state(thread) else { continue };
             if is_acp(&state) && state.status.liveness == Liveness::Live {
@@ -271,11 +322,17 @@ pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks)
         loop {
             tokio::select! {
                 ask = asks.recv() => match ask {
-                    Some(Ask::Start { id, start, reply }) => {
-                        let outcome = served.begin(id, &start).await;
+                    Some(Ask::Start { id, start, seated, reply }) => {
+                        let outcome = served.begin(id, &start, seated.map(|s| *s)).await;
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
+                    Some(Ask::Close { thread, done }) => {
+                        // Its task ends its agent once nothing can ask it more.
+                        served.running.remove(&thread);
+                        served.seats.remove(&thread);
+                        let _gone = done.send(());
+                    }
                     Some(Ask::Fork { thread, id, after, reply }) => {
                         let outcome = served.fork(thread, id, after).await;
                         let _gone = reply.send(outcome);
@@ -315,6 +372,8 @@ struct Served {
     running: HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>,
     /// Told by a task when its agent has ended.
     ended: Ended,
+    /// The seat of each server task's thread: each run of its agent is given it.
+    seats: HashMap<ThreadId, Seated>,
 }
 
 impl Served {
@@ -334,7 +393,7 @@ impl Served {
     /// Start the thread of intent `id` as `start` says, once. A start that names one of the
     /// agent's sessions (`resume <session>`) takes it up again: in the thread this worker keeps
     /// of it when there is one, else in a new thread that loads it.
-    async fn begin(&mut self, id: IntentId, start: &Start) -> Outcome {
+    async fn begin(&mut self, id: IntentId, start: &Start, seated: Option<Seated>) -> Outcome {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
         }
@@ -385,11 +444,16 @@ impl Served {
         };
         let thread = *thread;
         self.host.apply(thread, actions);
-        let first = start
-            .prompt
-            .clone()
-            .filter(|p| !p.trim().is_empty())
-            .map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id });
+        let prompt = match &seated {
+            Some(seated) => seated.ahead(start.prompt.as_deref()),
+            None => start.prompt.clone().filter(|p| !p.trim().is_empty()),
+        };
+        if let Some(seated) = seated {
+            self.host.seated(thread, seated.seat);
+            self.seats.insert(thread, seated);
+        }
+        let first =
+            prompt.map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id });
         let opening = if resumed.is_some() {
             Opening::Load
         } else {
@@ -526,7 +590,12 @@ impl Served {
     ) {
         let mut session = session;
         let cwd = session.meta().cwd.clone();
-        match start_agent(launch, &cwd, thread.to_string()) {
+        let seated = self.seats.get(&thread);
+        if let Some((seated, relay)) = seated.and_then(|s| Some((s, s.relay.as_deref()?))) {
+            session.serve_tools(relay, &seated.env);
+        }
+        let env = seated.map(|s| s.env.as_slice()).unwrap_or_default();
+        match start_agent(launch, &cwd, thread.to_string(), env) {
             Ok((stdin, agent)) => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let task = Task::new(self.host.clone(), thread, session, stdin, opening, first);

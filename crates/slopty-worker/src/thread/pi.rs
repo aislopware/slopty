@@ -51,7 +51,7 @@ use tokio::task::JoinHandle;
 
 use self::driven::{Ready, Task, start_pi};
 use self::tui::{Terminals, Watch};
-use super::Host;
+use super::{Host, Seated};
 use crate::facts::Installed;
 
 /// How long pi has to end once its stdin closes, before it is killed.
@@ -75,9 +75,28 @@ type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>, Next)>;
 /// What a client asks of the driven pi threads.
 #[derive(Debug)]
 enum Ask {
-    Start { id: IntentId, start: Box<Start>, reply: oneshot::Sender<Outcome> },
-    Fork { thread: ThreadId, id: IntentId, after: Option<TurnId>, reply: oneshot::Sender<Outcome> },
-    Thread { thread: ThreadId, ask: ThreadAsk },
+    Start {
+        id: IntentId,
+        start: Box<Start>,
+        seated: Option<Box<Seated>>,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Fork {
+        thread: ThreadId,
+        id: IntentId,
+        after: Option<TurnId>,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Thread {
+        thread: ThreadId,
+        ask: ThreadAsk,
+    },
+    /// A server task's thread is settled: its agent ends, its session kept, and its seat is
+    /// forgotten.
+    Close {
+        thread: ThreadId,
+        done: oneshot::Sender<()>,
+    },
 }
 
 /// What a client asks of one thread.
@@ -112,8 +131,29 @@ impl Pi {
     /// first outcome.
     pub async fn start(&self, id: IntentId, start: Box<Start>) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        let ask = Ask::Start { id, start, reply };
+        let ask = Ask::Start { id, start, seated: None, reply };
         if self.0.send(ask).is_err() {
+            return refused("pi threads are not served here");
+        }
+        outcome.await.unwrap_or_else(|_| refused("the pi threads stopped"))
+    }
+
+    /// End thread `thread`'s agent for its settled task, its session kept to take up again.
+    pub async fn close(&self, thread: ThreadId) {
+        let (done, closed) = oneshot::channel();
+        if self.0.send(Ask::Close { thread, done }).is_ok() {
+            let _done = closed.await;
+        }
+    }
+
+    /// Start a server task's thread as `start` says, once per seat: pi runs with the seat's
+    /// variables, Slopty's gate registers Slopty's tools among its MCP servers
+    /// ([`slopty_agent::pi::TOOLS_ENV`]), and the role goes as pi's own addition to its system
+    /// prompt (`--append-system-prompt`), kept with the thread's flags for every later run.
+    pub async fn start_seated(&self, start: Box<Start>, seated: Seated) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        let (id, seated) = (seated.intent(), Some(Box::new(seated)));
+        if self.0.send(Ask::Start { id, start, seated, reply }).is_err() {
             return refused("pi threads are not served here");
         }
         outcome.await.unwrap_or_else(|_| refused("the pi threads stopped"))
@@ -248,6 +288,7 @@ pub fn spawn(
             launcher: None,
             running: HashMap::new(),
             ended: ended_tx,
+            seats: HashMap::new(),
         };
         for thread in host.threads() {
             let Some((state, _)) = host.state(thread) else { continue };
@@ -263,8 +304,8 @@ pub fn spawn(
         loop {
             tokio::select! {
                 ask = asks.recv() => match ask {
-                    Some(Ask::Start { id, start, reply }) => {
-                        let outcome = served.begin(id, &start).await;
+                    Some(Ask::Start { id, start, seated, reply }) => {
+                        let outcome = served.begin(id, &start, seated.map(|s| *s)).await;
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Fork { thread, id, after, reply }) => {
@@ -272,6 +313,12 @@ pub fn spawn(
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
+                    Some(Ask::Close { thread, done }) => {
+                        // Its task ends its agent once nothing can ask it more.
+                        served.running.remove(&thread);
+                        served.seats.remove(&thread);
+                        let _gone = done.send(());
+                    }
                     None => return,
                 },
                 Some((thread, left, next)) = ended.recv() => {
@@ -304,6 +351,8 @@ struct Served {
     running: HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>,
     /// Told by a task when its pi or TUI has ended.
     ended: Ended,
+    /// The seat of each server task's thread: each run of its pi is given it.
+    seats: HashMap<ThreadId, Seated>,
 }
 
 impl Served {
@@ -324,10 +373,11 @@ impl Served {
     /// Start the thread of intent `id` as `start` says, once. A start that names one of pi's
     /// sessions (`--session <id>`) takes it up again: in the thread this worker keeps of it when
     /// there is one, else in a new thread read from the session's entries.
-    async fn begin(&mut self, id: IntentId, start: &Start) -> Outcome {
+    async fn begin(&mut self, id: IntentId, start: &Start, seated: Option<Seated>) -> Outcome {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
         }
+        let role = seated.as_ref().and_then(|s| s.role.clone()).filter(|r| !r.trim().is_empty());
         let first: Vec<ThreadAsk> = start
             .prompt
             .clone()
@@ -358,7 +408,9 @@ impl Served {
             if start.drive.as_ref().is_some_and(|d| !d.is(Drive::DRIVEN)) {
                 return Err("pi is only driven over RPC".to_owned());
             }
-            let args = slopty_agent::pi::checked(own)?.to_vec();
+            let mut args = slopty_agent::pi::checked(own)?.to_vec();
+            // The role is the thread's own flag, kept with the others for every later run.
+            args.extend(role.iter().flat_map(|r| ["--append-system-prompt".to_owned(), r.clone()]));
             if !Path::new(&start.cwd).is_dir() {
                 return Err(format!("There is no folder {} here", start.cwd));
             }
@@ -379,6 +431,10 @@ impl Served {
         let thread = *thread;
         self.host.apply(thread, actions);
         let mut args = args;
+        if let Some(seated) = seated {
+            self.host.seated(thread, seated.seat);
+            self.seats.insert(thread, seated);
+        }
         if let Some((provider, model)) = start.model.as_deref().and_then(|m| m.split_once('/')) {
             args.extend(["--provider".to_owned(), provider.to_owned()]);
             args.extend(["--model".to_owned(), model.to_owned()]);
@@ -554,7 +610,8 @@ impl Served {
     ) {
         let mut driven = driven;
         let (native, cwd) = (driven.meta().native.clone(), driven.meta().cwd.clone());
-        match start_pi(launch, &native, &cwd, args) {
+        let env = self.seats.get(&thread).map(seat_env).unwrap_or_default();
+        match start_pi(launch, &native, &cwd, args, &env) {
             Ok((stdin, pi)) => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let task = Task::new(self.host.clone(), thread, driven, stdin);
@@ -646,4 +703,41 @@ async fn ends(path: &Path, size: u64) -> std::io::Result<(String, String)> {
         file.take(sessions::READ).read_to_end(&mut tail).await?;
     }
     Ok((String::from_utf8_lossy(&head).into_owned(), String::from_utf8_lossy(&tail).into_owned()))
+}
+
+/// What a seated thread's pi runs with: the seat's variables, and Slopty's tools for the gate to
+/// register ([`slopty_agent::pi::TOOLS_ENV`]) where Slopty's CLI is found.
+fn seat_env(seated: &Seated) -> Vec<(String, String)> {
+    let mut env = seated.env.clone();
+    if let Some(relay) = seated.relay.as_deref() {
+        let tools = slopty_agent::pi::tools(relay, &seated.env);
+        env.push((slopty_agent::pi::TOOLS_ENV.to_owned(), tools.to_string()));
+    }
+    env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A seated pi runs with the seat's variables, and with Slopty's tools for the gate only
+    /// where Slopty's CLI was found.
+    #[test]
+    fn a_seated_pi_runs_with_the_seat_and_its_tools() {
+        let seat = slopty_core::SessionId::new();
+        let mut seated = Seated {
+            seat,
+            env: vec![("SLOPTY_SESSION".to_owned(), seat.to_string())],
+            role: None,
+            relay: None,
+        };
+        assert_eq!(seat_env(&seated), seated.env, "no tools without the CLI");
+        seated.relay = Some("/bin/slopty".to_owned());
+        let env = seat_env(&seated);
+        assert_eq!(env[..1], seated.env);
+        let (name, tools) = &env[1];
+        assert_eq!(name, slopty_agent::pi::TOOLS_ENV);
+        let tools: serde_json::Value = serde_json::from_str(tools).unwrap_or_default();
+        assert_eq!(tools, slopty_agent::pi::tools("/bin/slopty", &seated.env));
+    }
 }

@@ -34,3 +34,43 @@ pub mod terminals;
 pub use compose::Composer;
 pub use follow::Follower;
 pub use host::Host;
+
+/// A task's thread as the server seats it ([`crate::orchestrate::TaskThread`]).
+///
+/// The seat it is known by, what its Slopty tools are told, and the role it plays. Each adapter
+/// hands these to its agent through the agent's own door.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Seated {
+    /// The seat: the session its Slopty tools speak as, and the terminal an agent that runs
+    /// in one runs in.
+    pub seat: slopty_core::SessionId,
+    /// Every variable of the seat: the server's (its project and task) and the worker's for it
+    /// (the server, the seat as the session, the token that proves it).
+    pub env: Vec<(String, String)>,
+    /// What the agent is told it is for.
+    pub role: Option<String>,
+    /// Slopty's CLI, whose `mcp` serves the tools; `None` where it is not found.
+    pub relay: Option<String>,
+}
+
+impl Seated {
+    /// The intent a start at this seat is acted on as: one per seat, so a start repeated after
+    /// a dropped link answers with the thread the first one started.
+    #[must_use]
+    pub fn intent(&self) -> slopty_proto::thread::IntentId {
+        let derived =
+            slopty_proto::thread::ThreadId::derived(&["task seat", &self.seat.to_string()]);
+        slopty_proto::thread::IntentId::from_uuid(*derived.as_uuid())
+    }
+
+    /// The first message of an agent that takes no role of its own: the role ahead of `prompt`.
+    #[must_use]
+    pub fn ahead(&self, prompt: Option<&str>) -> Option<String> {
+        let prompt = prompt.map(str::trim).filter(|p| !p.is_empty());
+        match (self.role.as_deref().map(str::trim).filter(|r| !r.is_empty()), prompt) {
+            (Some(role), Some(prompt)) => Some(format!("{role}\n\n{prompt}")),
+            (Some(role), None) => Some(role.to_owned()),
+            (None, prompt) => prompt.map(str::to_owned),
+        }
+    }
+}

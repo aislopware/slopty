@@ -29,15 +29,18 @@ pub(super) struct Process {
     stderr: JoinHandle<Vec<String>>,
 }
 
-/// Run the agent `launch` says in `cwd`, for `thread` (what its log lines are told by).
+/// Run the agent `launch` says in `cwd`, for `thread` (what its log lines are told by), with
+/// `env` over the worker's own.
 pub(super) fn start_agent(
     launch: &Launcher,
     cwd: &str,
     thread: String,
+    env: &[(String, String)],
 ) -> Result<(ChildStdin, Process), String> {
     let mut command = tokio::process::Command::new(&launch.program);
     command
         .args(&launch.args)
+        .envs(env.iter().map(|(n, v)| (n, v)))
         .current_dir(cwd)
         .env("PATH", &launch.path)
         .stdin(Stdio::piped())
@@ -528,7 +531,7 @@ pub(super) async fn list(
     limit: u32,
 ) -> Result<Vec<slopty_proto::thread::wire::PastSession>, String> {
     let (stdin, Process { mut child, stdout, stderr }) =
-        start_agent(launch, cwd, format!("sessions in {cwd}"))?;
+        start_agent(launch, cwd, format!("sessions in {cwd}"), &[])?;
     let mut asking = Asking { stdin, lines: BufReader::new(stdout).split(b'\n'), next: 0 };
     let listed = tokio::time::timeout(LIST_WAIT, asking.sessions(agent, cwd, limit)).await;
     drop(asking);
