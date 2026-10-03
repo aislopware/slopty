@@ -882,6 +882,43 @@ pub enum ScreenEvent {
         /// The field.
         field: Option<TextField>,
     },
+    /// An [`ScreenRequest::Open`] or [`ScreenRequest::OpenDisplay`] that made no stream. It
+    /// names what was asked, since the client learns a stream's id only from its `Opened`.
+    OpenFailed {
+        /// What was asked for.
+        asked: OpenAsk,
+        /// Why it did not open.
+        why: ScreenFailure,
+    },
+    /// A [`ScreenRequest::List`] the worker could not answer with a [`Self::Listing`].
+    ListFailed {
+        /// Why.
+        why: ScreenFailure,
+    },
+}
+
+/// What an open asked for, as [`ScreenEvent::OpenFailed`] names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum OpenAsk {
+    /// A window or a display, by its id ([`ScreenRequest::Open`]).
+    Target(CaptureTarget),
+    /// A display made for the client, by its key ([`ScreenRequest::OpenDisplay`]).
+    Made(DisplayKey),
+}
+
+/// Why the worker could not open a stream or list what it can stream. Each kind is one the
+/// client answers differently; anything else is the worker's own words.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ScreenFailure {
+    /// The worker may not record its screen: its Screen Recording grant is off, and only
+    /// someone at that Mac can turn it on.
+    NotPermitted,
+    /// What was asked for is not there any more: the window closed, the display went.
+    Gone,
+    /// The worker has no screen to stream (a Linux machine).
+    Unsupported,
+    /// Anything else, in the worker's words.
+    Failed(String),
 }
 
 /// A text field that has the keyboard on the worker ([`ScreenEvent::Field`]).

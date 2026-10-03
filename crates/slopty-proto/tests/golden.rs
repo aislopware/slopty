@@ -409,6 +409,7 @@ mod golden {
                 worker: WorkerId::from_uuid(Uuid::from_u128(0x77)),
                 name: "mac-studio".to_owned(),
                 home: "/Users/w".to_owned(),
+                settings: "/Users/w/Library/Application Support/Slopty/settings.toml".to_owned(),
                 caps: caps.clone(),
                 load: 2.5,
                 sessions: Vec::new(),
@@ -786,6 +787,15 @@ mod golden {
             &WorkerMsg::File {
                 path: "/w/gone".to_owned(),
                 read: slopty_proto::file::FileRead::Missing { error: "No such file".to_owned() },
+            },
+        );
+        snap(
+            "worker_file_absent",
+            &WorkerMsg::File {
+                path: "/w/new.md".to_owned(),
+                read: slopty_proto::file::FileRead::Absent {
+                    editorconfig: vec![("indent_size".to_owned(), "2".to_owned())],
+                },
             },
         );
         snap(
@@ -1339,6 +1349,30 @@ mod golden {
             &WorkerMsg::Screen(ScreenEvent::Source {
                 stream: StreamId(7),
                 state: slopty_proto::screen::SourceState::Away,
+            }),
+        );
+        snap(
+            "worker_screen_open_failed",
+            &WorkerMsg::Screen(ScreenEvent::OpenFailed {
+                asked: slopty_proto::screen::OpenAsk::Target(
+                    slopty_proto::screen::CaptureTarget::Window(slopty_core::WindowId(42)),
+                ),
+                why: slopty_proto::screen::ScreenFailure::NotPermitted,
+            }),
+        );
+        snap(
+            "worker_screen_open_failed_made",
+            &WorkerMsg::Screen(ScreenEvent::OpenFailed {
+                asked: slopty_proto::screen::OpenAsk::Made(slopty_proto::screen::DisplayKey(
+                    *b"slopty-ipad-pro!",
+                )),
+                why: slopty_proto::screen::ScreenFailure::Failed("no display to stream".to_owned()),
+            }),
+        );
+        snap(
+            "worker_screen_list_failed",
+            &WorkerMsg::Screen(ScreenEvent::ListFailed {
+                why: slopty_proto::screen::ScreenFailure::Gone,
             }),
         );
         snap(
@@ -2278,6 +2312,7 @@ mod orchestration {
                 detail: ToolDetail::Other { input: text("{}") },
                 suggestions: Vec::new(),
                 mode: Some("default".to_owned()),
+                editable: Vec::new(),
                 asked_ms: WallMs::from_millis(1_790_000_000_000),
                 until_ms: WallMs::from_millis(1_790_000_595_000),
             }],
@@ -2583,6 +2618,7 @@ mod conversation {
     fn permissions() {
         let session = session();
         let prompt = PermissionPrompt {
+            editable: Vec::new(),
             session,
             ask: 3,
             tool: "Edit".to_owned(),

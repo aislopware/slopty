@@ -1795,7 +1795,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     last only until the window follows.
   - Tests: `a_picture_of_another_aspect_is_letterboxed_and_the_pointer_follows` and
     `fit_keeps_the_pictures_aspect_and_centres_it` in `slopty-ui`. The stream goldens check
-    that the bars are bare surface.
+    that the bars are bare surface. (The bars' colour is superseded 2026-10-04: "Remote
+    pictures sit on a dark stage".)
 
 - ✅ **Frames nothing refers to are skipped, not refreshed; the encoder writes them while the
   link loses, on a session that has settled** (2026-09-29, M1 Max, macOS 27.0; MEASUREMENTS
@@ -2621,3 +2622,54 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `an_encode_that_never_comes_back_is_given_up_and_the_stream_goes_on`,
     `nothing_but_an_encode_waits_on_one`,
     `a_submit_that_never_comes_back_is_given_up_and_the_pictures_go_on` (worker).
+
+- ✅ **Remote pictures sit on a dark stage** (2026-10-04, `.research/rulings-2026-10-04.md` §4a).
+  The bars round a picture of another aspect were the tile's content colour, so in the light
+  appearance a dark desktop sat between wide white bands and its edge was lost.
+  - The body behind a picture is `surfaces.stage`: a neutral near-black (`STAGE`, #0a0a0a) in
+    both appearances, and black under Increase Contrast. Every remote-desktop client checked
+    letterboxes on black (RustDesk, Moonlight, Jump Desktop), as the HIG's video guidance does.
+  - Only the body is the stage. The header stays on the theme, and a tile still waiting for its
+    first picture is the page its words are on, since muted text does not read on near-black
+    in the light appearance.
+  - It is one token and no extra quad. No setting.
+  - Test: `a_letterbox_is_the_stage_in_both_appearances` (`slopty-ui`), reading the body's fill
+    from the painted quads before and after the first picture, in both variants; the theme's
+    `the_stage_is_the_same_near_black_in_both_variants_and_black_at_more_contrast`. The stream
+    goldens moved with it.
+
+- ✅ **A locked Mac can be unlocked from its stream** (2026-10-04, rulings §1, readiness A23).
+  The notice over a locked Mac's picture asked for nothing, since unlocking was not built,
+  though the lock screen already took the keys a stream sends.
+  - The card offers "Unlock here". It lifts the scrim to a slim line at the top, "Type the
+    Mac's password, then Return", and gives the stream the keyboard. The person types their own
+    password, which goes as keystrokes, as any other key would. Slopty never keeps, fills or
+    types a password.
+  - The worker's word ends it: any change of `SourceState` takes the line away, so an unlock
+    brings the picture back and a lock again brings the card back.
+  - The login window, or another user's session, offers nothing of the kind. The worker's
+    session is not the one on the screens then, and the keys it posts do not reach them.
+  - Test: `unlock_here_hands_the_keys_to_the_lock_screen` (`slopty-ui`), replacing the
+    assertion that nothing was offered.
+
+- ✅ **An open the worker refuses is told, not left opening** (2026-10-04, readiness N7). On a
+  failed open the worker sent `Closed` for a stream id the client had never heard, so the
+  pending open was never cleared and the tile said "Opening…" for good. Screen Recording off,
+  a window closed mid-open and a restored window id that did not survive all ended there, with
+  the reason only in the worker's log. A failed listing was only logged too, so ⌘O waited on a
+  picker that never came.
+  - *Wire.* `ScreenEvent::OpenFailed { asked, why }` names what was asked (`OpenAsk::Target`
+    for an `Open`, `OpenAsk::Made` with the key for an `OpenDisplay`), since the client learns a
+    stream's id only from `Opened`. `ScreenEvent::ListFailed { why }` answers a `List` that
+    could not be. `ScreenFailure` is `NotPermitted`, `Gone`, `Unsupported` or the worker's own
+    words, so the client can say what to do. `ScreenError::failure` maps the worker's errors:
+    ScreenCaptureKit's -3801 and the preflight are `NotPermitted`, a window gone or a target
+    not listed is `Gone`. Goldens `worker_screen_open_failed`,
+    `worker_screen_open_failed_made` and `worker_screen_list_failed`; nothing else moved.
+  - *The client.* The pending open is dropped and the tile is not asked for again until the
+    next link (`failed_opens`), so a refused open does not loop. A made display that could not
+    be made goes back to the physical one, as one that closes does. The person hears why in a
+    notice ("Window 7 did not open. studio may not record its screen. Turn on Screen Recording
+    for slopty-worker in its System Settings."), worded by `screen::failure_text`. The tile's
+    own body with Retry and Close is the workspace's to draw from `failed_opens`.
+

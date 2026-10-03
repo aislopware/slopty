@@ -437,6 +437,9 @@ pub struct ScreenView {
     /// What the worker says its capture target is doing (`ScreenEvent::Source`). A target that
     /// has drawn nothing is not a broken stream, and the placeholder should not claim it is.
     source: SourceState,
+    /// "Unlock here" was pressed on a locked Mac's notice: the scrim is lifted and the keys go
+    /// to the lock screen, until the Mac says otherwise.
+    unlocking: bool,
     /// Where the scroll gesture over the picture has got to.
     scrolling: Scrolling,
     /// Fires [`MOMENTUM_GAP`] after the last momentum event to close the fling. Replaced (so
@@ -685,13 +688,15 @@ pub const fn waiting_text(source: SourceState) -> &'static str {
 ///
 /// A title and a line under it, for a locked Mac or one whose screens another session has; an
 /// empty title otherwise (`docs/decisions/video.md`, "The client is told when the Mac is
-/// locked"). It says what is so and when it ends, and asks nothing: unlocking is done at the
-/// Mac.
+/// locked"). It says what is so and when it ends. A locked Mac also offers [`UNLOCK_HERE`]:
+/// its lock screen takes the keys the stream sends, so the person types their own password.
+/// The login window does not: the worker's session is not the one on the screen, and its keys
+/// do not reach it.
 #[must_use]
 pub const fn console_notice(source: SourceState) -> (&'static str, &'static str) {
     match source {
         SourceState::Locked => {
-            ("The Mac is locked", "The picture returns when someone signs in at it.")
+            ("The Mac is locked", "The picture returns once it is unlocked, here or at the Mac.")
         }
         SourceState::Away => (
             "The Mac is at the login window",
@@ -700,6 +705,34 @@ pub const fn console_notice(source: SourceState) -> (&'static str, &'static str)
         SourceState::Idle | SourceState::Live => ("", ""),
     }
 }
+
+/// Why a remote window or display did not open, or why the machine could not list what it
+/// shares, in words: what is so, then what to do where something can be done.
+#[must_use]
+pub fn failure_text(failure: &slopty_proto::screen::ScreenFailure, machine: &str) -> String {
+    use slopty_proto::screen::ScreenFailure;
+    match failure {
+        ScreenFailure::NotPermitted => format!(
+            "{machine} may not record its screen. Turn on Screen Recording for slopty-worker \
+             in its System Settings."
+        ),
+        ScreenFailure::Gone => "It is not there any more.".to_owned(),
+        ScreenFailure::Unsupported => format!("{machine} has no screen to share."),
+        ScreenFailure::Failed(why) => {
+            let why = why.trim_end_matches('.');
+            let mut chars = why.chars();
+            let why: String = chars
+                .next()
+                .map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect());
+            format!("{why}.")
+        }
+    }
+}
+
+/// A locked Mac's notice's way to unlock it from here.
+pub const UNLOCK_HERE: &str = "Unlock here";
+/// What the slim notice says once [`UNLOCK_HERE`] is pressed.
+pub const TYPE_THE_PASSWORD: &str = "Type the Mac's password, then Return";
 
 /// How long a body waits on its worker before it says it is waiting: "Opening…",
 /// "Reading…", "Attaching…".
@@ -1033,6 +1066,7 @@ impl ScreenView {
                 .then(|| slopty_platform::Activity::display_awake("Slopty remote window")),
             rate: None,
             source: SourceState::Live,
+            unlocking: false,
             scrolling: Scrolling::Idle,
             momentum_end: None,
             zoom: Zoom::FIT,
@@ -1482,6 +1516,7 @@ impl ScreenView {
     pub fn set_source_state(&mut self, state: SourceState, cx: &mut Context<Self>) {
         if self.source != state {
             self.source = state;
+            self.unlocking = false;
             self.handle.set_source_live(state == SourceState::Live);
             cx.notify();
         }
@@ -3292,7 +3327,7 @@ impl Render for ScreenView {
         });
 
         let hud = self.hud_text().map(|(summary, text)| self.hud_panel(&summary, &text, cx));
-        let console = self.console_overlay();
+        let console = self.console_overlay(cx);
         // While the view has the keys, the workspace's own chords stand back (`!Screen`); with
         // system shortcuts sent, so do the app's ⌘Q and ⌘H (`!SystemKeys`).
         let mut key_context = gpui::KeyContext::new_with_defaults();
@@ -3309,9 +3344,13 @@ impl Render for ScreenView {
             .relative()
             .size_full()
             .overflow_hidden()
-            // The tile's body surface: a picture of another aspect sits on the page it would
-            // be, not in a grey well.
-            .bg(hsla(self.theme.content()))
+            // A picture sits on the stage, dark in both appearances as media is, so its edge
+            // reads as a screen's; until there is one, the body is the page its words are on.
+            .bg(hsla(if self.shape.is_some() {
+                self.theme.surfaces.stage
+            } else {
+                self.theme.content()
+            }))
             .cursor(styled)
             .on_key_down(cx.listener(Self::key_down))
             .on_key_up(cx.listener(Self::key_up))
@@ -3352,29 +3391,43 @@ impl ScreenView {
     /// a lifted card that says so ([`console_notice`]). A status, so a screen reader hears the
     /// change. Nothing moves in or out: it comes and goes with the worker's word.
     ///
-    /// The pointer and keys still reach the worker through it, as they would reach the lock
-    /// screen at the Mac: unlocking from here is not built, and nothing stops it either.
-    fn console_overlay(&self) -> Option<gpui::AnyElement> {
+    /// A locked Mac's card offers [`UNLOCK_HERE`]: the scrim lifts to a slim line at the top
+    /// saying what to type, and the keyboard goes to the stream, whose keys reach the lock
+    /// screen as they would at the Mac. Slopty forwards the keystrokes and nothing else: it
+    /// never keeps, fills or types a password.
+    fn console_overlay(&self, cx: &Context<Self>) -> Option<gpui::AnyElement> {
         let (title, detail) = console_notice(self.source);
         if title.is_empty() {
             return None;
         }
         let theme = &self.theme;
+        if self.unlocking {
+            return Some(self.unlock_line());
+        }
         let icon = match self.source {
             SourceState::Away => crate::icons::IconName::MonitorOff,
             _ => crate::icons::IconName::Lock,
         };
+        let unlock = (self.source == SourceState::Locked).then(|| {
+            kit::button(theme, "screen-unlock-here", UNLOCK_HERE, kit::ButtonKind::Secondary)
+                .debug_selector(|| "screen-unlock-here".to_owned())
+                .mt(px(theme.spacing.md))
+                .on_click(cx.listener(|this, _ev, window, cx| this.unlock_here(window, cx)))
+        });
         let card = kit::elevate(div(), theme)
             .rounded(px(theme.radii.lg))
             .py(px(theme.spacing.lg))
             .max_w(px(kit::Overlay::List.bounds().0 / 2.0))
-            .child(kit::notice(
-                theme,
-                1.0,
-                kit::notice_mark(theme, icon, 1.0),
-                title,
-                Some(SharedString::new_static(detail)),
-            ));
+            .child(
+                kit::notice(
+                    theme,
+                    1.0,
+                    kit::notice_mark(theme, icon, 1.0),
+                    title,
+                    Some(SharedString::new_static(detail)),
+                )
+                .children(unlock),
+            );
         Some(
             div()
                 .id("screen-console")
@@ -3391,6 +3444,55 @@ impl ScreenView {
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// "Unlock here": the scrim lifts and the stream takes the keyboard, so what is typed goes
+    /// to the locked Mac's lock screen.
+    pub fn unlock_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.source != SourceState::Locked {
+            return;
+        }
+        self.unlocking = true;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Whether "Unlock here" lifted the scrim.
+    #[must_use]
+    pub const fn unlocking(&self) -> bool {
+        self.unlocking
+    }
+
+    /// The slim line over a locked Mac's picture once "Unlock here" is pressed: what to type,
+    /// on a lifted pill at the top, the rest of the body the stream's.
+    fn unlock_line(&self) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let pill = kit::elevate(kit::pill_frame(theme, 1.0), theme)
+            .child(
+                crate::icons::icon(
+                    theme,
+                    crate::icons::IconName::Lock,
+                    crate::icons::IconSize::Inline,
+                    hsla(theme.surfaces.text_muted),
+                )
+                .size(px(theme.typography.icon())),
+            )
+            .text_color(hsla(theme.surfaces.text_secondary))
+            .font_family(theme.typography.ui_family.clone())
+            .child(TYPE_THE_PASSWORD);
+        div()
+            .id("screen-unlocking")
+            .debug_selector(|| "screen-unlocking".to_owned())
+            .role(gpui::accesskit::Role::Status)
+            .aria_label(TYPE_THE_PASSWORD)
+            .absolute()
+            .top(px(theme.spacing.xs))
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(pill)
+            .into_any_element()
     }
 
     /// The stats overlay: a lifted panel at the picture's top right with the plain line (a
@@ -4399,11 +4501,53 @@ mod tests {
         for state in [SourceState::Locked, SourceState::Away] {
             let (title, detail) = console_notice(state);
             assert!(title.starts_with("The Mac is"), "{title}");
-            // Unlocking from here is not offered, so nothing reads as though it were.
-            let offers = detail.to_lowercase().contains("unlock");
-            assert!(detail.ends_with('.') && !offers, "{detail}");
+            assert!(detail.ends_with('.'), "{detail}");
             assert_eq!(waiting_text(state), title);
         }
+        // Only a locked Mac can be unlocked from here, so only its notice speaks of it.
+        assert!(console_notice(SourceState::Locked).1.contains("unlocked, here"));
+        assert!(!console_notice(SourceState::Away).1.to_lowercase().contains("unlock"));
+    }
+
+    /// "Unlock here" on a locked Mac's notice lifts the scrim to a line saying what to type and
+    /// gives the stream the keyboard, so the keys reach the lock screen; the login window offers
+    /// nothing of the kind, and the Mac back on its session takes the line away.
+    #[gpui::test]
+    fn unlock_here_hands_the_keys_to_the_lock_screen(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed(cx);
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Away, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-unlock-here").is_none(), "not at the login window");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Locked, cx));
+        cx.run_until_parked();
+        let unlock = cx.debug_bounds("screen-unlock-here").expect("offered on a locked Mac");
+        cx.update(Window::blur);
+        cx.simulate_click(unlock.center(), Modifiers::default());
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-console").is_none(), "the scrim lifted");
+        assert!(cx.debug_bounds("screen-unlocking").is_some(), "the line says what to type");
+        assert!(view.read_with(cx, |v, _| v.unlocking()));
+        let focused = cx.update(|window, cx| view.read(cx).focus.is_focused(window));
+        assert!(focused, "the stream has the keyboard");
+        let _before = sent(&mut rx);
+        cx.simulate_keystrokes("a");
+        let keys = sent(&mut rx)
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    ScreenRequest::Input {
+                        input: ScreenInput::Key { .. } | ScreenInput::Text { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(keys > 0, "a typed key goes to the worker");
+        view.update(cx, |v, cx| v.set_source_state(SourceState::Live, cx));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("screen-unlocking").is_none(), "unlocked: the line goes");
+        assert!(!view.read_with(cx, |v, _| v.unlocking()));
     }
 
     /// The `Focused` requests the worker was sent for the test views' stream.
@@ -5857,6 +6001,35 @@ mod tests {
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds { origin: point(px(x), px(y)), size: size(px(w), px(h)) }
+    }
+
+    /// A picture of another aspect than its body letterboxes on the stage, the same near-black
+    /// in the light appearance as in the dark; before its first picture the body is the page
+    /// its words are on.
+    #[gpui::test]
+    fn a_letterbox_is_the_stage_in_both_appearances(cx: &mut gpui::TestAppContext) {
+        let (view, _rx, cx) = windowed(cx);
+        let body = |cx: &mut gpui::VisualTestContext| {
+            let (scale, quads) =
+                cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
+            quads
+                .iter()
+                .filter(|q| 400.0_f32.mul_add(-scale, q.bounds.size.width.0).abs() < 0.5)
+                .filter(|q| 300.0_f32.mul_add(-scale, q.bounds.size.height.0).abs() < 0.5)
+                .filter_map(|q| q.background.as_solid())
+                .collect::<Vec<_>>()
+        };
+        for variant in [slopty_theme::Variant::Dark, slopty_theme::Variant::Light] {
+            let theme = Theme::new(variant);
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
+            cx.run_until_parked();
+            if variant == slopty_theme::Variant::Dark {
+                assert_eq!(body(cx), [hsla(theme.content())], "no picture yet: the page");
+                view.update(cx, |v, cx| v.show_picture(picture(800, 400), cx));
+                cx.run_until_parked();
+            }
+            assert_eq!(body(cx), [hsla(slopty_theme::STAGE)], "{variant:?}: the stage");
+        }
     }
 
     /// The layer goes where the picture is drawn: at fit its aspect kept and centred in the

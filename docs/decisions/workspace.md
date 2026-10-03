@@ -924,3 +924,92 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   `a_placed_tile_never_moves_when_its_project_changes`,
   `a_tile_with_no_project_joins_its_machines_work`; the UI's view of it is in
   `docs/decisions/ui.md`, "The navigator groups by project; the machine is a facet".
+
+- ✅ **A folder made again is reported at once, whatever its stream costs to start**
+  (2026-10-03). On this Mac (macOS 27.0.1, 26A434) `a_folder_deleted_and_made_again_is_followed`
+  failed: the folder came back, but its report did not within 3 s. kqueue was not the cause. A
+  probe of a directory deleted and made again saw what macOS 26 gives: `NOTE_DELETE | NOTE_LINK`
+  on the old descriptor and `NOTE_WRITE | NOTE_LINK` on the parent's, once for each step. The
+  time went to `FSEventStreamStart`. The follower starts the folders' contents stream again
+  whenever the set of folders changes, and it did so inside the look that sends the report. On
+  macOS 27 a start took 0.3 to 2.7 s, and no flag, path, volume or `sinceWhen` changed that. A
+  macOS 26.6.2 CI runner ran the whole test, two starts included, in 134 ms. The FSEvents.h
+  of the 26.5 and 27.0 SDKs is the same, so nothing documents the change. While one start is
+  in flight, every other `FSEvents` call of the process waits for it, even
+  `FSEventsGetCurrentEventId` (0.27 to 0.6 s, against 0.08 ms alone). `FSEventStreamStop`
+  does not wait.
+  - **The stream starts off the follower** (`fsevents::Starting`). It starts on a global
+    dispatch queue, which rings the kqueue once it is up, so no kqueue report waits for it on
+    either OS. A folder made again is now reported in 52 ms, which is `HOLD` after its
+    "gone" report. Before, it took 0.6 to 0.9 s when the report came at all.
+  - **No gap while it starts.** The stream over the folders before stays until the new one is
+    up, so a kept folder is heard the whole time. Once the new stream is up, each folder new to
+    it is listed again, for whatever changed inside it meanwhile. Replaying from an event id
+    taken when the stream was asked for (`sinceWhen`) was tried first and dropped: taking the
+    id waits for any start in flight, and a volume that keeps no `FSEvents` history (FAT)
+    replays nothing.
+  - Linux is untouched: inotify's watch on the folder hears the writes inside its files, and
+    there is no stream to start.
+  - Numbers in MEASUREMENTS.md, 2026-10-03, "a folder tile's contents stream start". Tests:
+    worker `fsevents` (`a_stream_says_when_it_is_up_and_hears_what_happens_then`,
+    `a_stream_dropped_before_it_is_up_is_stopped_and_never_says_up`), and `tests/fswatch.rs`
+    `a_folder_deleted_and_made_again_is_followed` (now also back within 500 ms, and its files'
+    sizes followed anew) and `a_folder_kept_is_heard_while_the_stream_for_a_new_one_starts`.
+
+- ✅ **⌘P opens a file** (2026-10-04, readiness N20). "Open file…" had no chord, and a test kept
+  ⌘P free. ⌘P is the quick open of every editor in the Zed and VS Code school, so it is bound
+  to `OpenFile` in the workspace (not in a remote window, whose app keeps its own ⌘P). Test:
+  `a_chords_words_come_with_the_keymap`.
+
+- ✅ **A file that is not there opens as a new one** (2026-10-04, readiness N20). A missing file
+  showed "Cannot read" with no editor, so `$EDITOR new.md` in a worker's shell hung its program
+  until "Give up", though the worker can make the file.
+  - *Wire.* `FileRead::Absent { editorconfig }`: nothing at the path, in a folder that is there.
+    It carries the `.editorconfig` the new file would have. A missing folder, a directory or a
+    refusal stays `Missing` with the OS's word. Golden `worker_file_absent`.
+  - *The tile.* An empty editor, its bar saying "Not on disk: saving makes it" (or the
+    waiting program's line, whose "Done" makes it). ⌘S and "Done" save it unedited too, as
+    `vi` writes an empty buffer; left empty it is made empty, with no newline, as `touch`
+    makes it. The save is based on the epoch, so the worker writes it while nothing is there
+    and calls it a conflict once something made the file meanwhile, rather than writing over
+    it. An unsaved new file kept over a relaunch comes back without a conflict while the file
+    is still absent.
+  - *Deleted under a clean tile.* The text stays, unsaved, under the same bar, and ⌘S makes the
+    file again with its line endings, from the epoch. Under an edit it is the usual conflict,
+    which Compare shows as every line removed.
+  - Tests: worker `a_missing_file_in_a_folder_is_one_to_make_and_is_made_by_its_save`;
+    `slopty-ui` `a_missing_file_opens_as_a_new_one_and_its_save_makes_it`,
+    `done_on_a_new_file_makes_it_then_answers` and
+    `a_file_deleted_under_the_tile_keeps_its_text_and_a_save_makes_it_again`.
+
+- ✅ **A conflict can be compared before it is settled** (2026-10-04, design B9). "Changed on
+  disk" offered only Reload, which drops the edit, and Overwrite, which drops the disk's text,
+  with no way to see what either loses.
+  - "Compare" shows the disk's text against the edit as the thread view and the review tile
+    draw a diff (`conversation::lines`, three lines of context, git's hunk headings), the disk
+    as the old side, so what saving would change reads as additions. "Back to edit" returns.
+  - The diff is worked out off the UI thread and redone only when the edit or the disk moves.
+    When the disk's text is not in hand (a save refused without a read), Compare reads the file
+    again with the edit kept.
+  - Tests: `a_patch_is_the_hunks_from_the_disk_to_the_edit` and the file tile's compare test.
+
+- ✅ **A program's links open for the machine it runs on** (2026-10-04, readiness N19). ⌘-click
+  sent every link to this device's handler, so an OSC 8 `file://` link from `ls --hyperlink`,
+  `rg` or `delta` named a path on this Mac, and `http://localhost:3000` a port on it.
+  - `terminal::url::destination` sorts them. A `file://` link, with or without the host those
+    tools put in it, is the path on the shell's machine, percent-decoded, and opens as a file
+    tile as a ⌘-clicked path does. A page on the loopback (`localhost`, `127.0.0.0/8`, `[::1]`,
+    `0.0.0.0`, the handoff's `Wary::Loopback`) opens in a page tile on that machine, which
+    reaches the port through it. Anything else goes to this device's handler as before.
+  - `open <file>` in a shell shows one existing file in a tile there (`CtlRequest::Edit`, not
+    waiting): a PDF, a picture or a text, on Linux too, where the system's opener had no screen.
+    A flag, an application, a folder or a saved page (`.html`) is still the system's.
+  - Tests: `a_link_goes_to_the_machine_the_program_runs_on`,
+    `a_link_opens_on_the_machine_the_shell_runs_on` (`slopty-ui`) and
+    `open_shows_one_existing_file_in_a_tile` (`slopty-cli`).
+
+- ✅ **The sticky block row does not repeat the title** (2026-10-04, design review #15). A shell
+  running `cargo test` said "cargo test" in its header and again on the pinned block's row one
+  line under it. The row is left out when its command is the command running now, which names
+  the tile, or the title the program set. Test: `a_sticky_header_does_not_repeat_the_title`.
+

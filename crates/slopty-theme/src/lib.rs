@@ -773,7 +773,15 @@ pub struct Surfaces {
     /// Slopty's green, the mark's lit dots: the same in both variants, as a brand colour is
     /// (`docs/decisions/brand.md`, OKLCH 0.72 0.16 150).
     pub brand: Rgb,
+    /// What a remote window or display sits on where its picture does not reach: a neutral
+    /// near-black in both variants, as every remote-desktop client letterboxes, and black under
+    /// Increase Contrast. A remote screen is media, and dark bars keep its edge read as a
+    /// screen's (`docs/decisions/video.md`, "Remote pictures sit on a dark stage").
+    pub stage: Rgb,
 }
+
+/// [`Surfaces::stage`] in the standard look.
+pub const STAGE: Rgb = Rgb::hex(0x000a_0a0a);
 
 /// What a ladder step is mixed toward from the content.
 #[derive(Clone, Copy, Debug)]
@@ -1052,6 +1060,10 @@ impl Surfaces {
             solid: text,
             solid_ink: at(t.solid_ink),
             brand: BRAND,
+            stage: match contrast {
+                Contrast::Standard => STAGE,
+                Contrast::Increased => Rgb::hex(0),
+            },
         }
     }
 }
@@ -1872,6 +1884,17 @@ mod tests {
             );
             assert!(text >= secondary * LEVEL, "{name}: text {text:.2}, secondary {secondary:.2}");
         }
+    }
+
+    /// A remote picture's stage is one near-black whatever the content, and black at more
+    /// contrast.
+    #[test]
+    fn the_stage_is_the_same_near_black_in_both_variants_and_black_at_more_contrast() {
+        for content in [Rgb::hex(0x0016_1616), Rgb::hex(0x00ff_ffff), Rgb::hex(0x0028_2c34)] {
+            assert_eq!(Surfaces::derive(content, Contrast::Standard).stage, STAGE, "{content:?}");
+            assert_eq!(Surfaces::derive(content, Contrast::Increased).stage, Rgb::hex(0));
+        }
+        assert!(STAGE.contrast(Rgb::hex(0)) < 1.1, "near-black");
     }
 
     /// Under Increase Contrast every chrome text tone, muted text included, reads at least

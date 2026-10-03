@@ -10,7 +10,9 @@ use slopty_proto::agent::AgentStatus;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemKind, ItemSync};
-use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenRequest};
+use slopty_proto::screen::{
+    CaptureTarget, OpenAsk, Quality, ScreenEvent, ScreenFailure, ScreenRequest,
+};
 use slopty_proto::server::WorkerCaps;
 use slopty_proto::tailnet::LinkPath;
 use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermRequest, TermSize};
@@ -116,6 +118,7 @@ impl WorkspaceView {
         w.watched.clear();
         w.watched_folders.clear();
         w.pending_opens.clear();
+        w.failed_opens.clear();
         if let Some(sized) = w.sized.as_mut() {
             sized.lost();
         }
@@ -397,7 +400,13 @@ impl WorkspaceView {
     pub fn set_worker_caps(&mut self, key: WorkerKey, caps: WorkerCaps, cx: &mut Context<Self>) {
         let Some(w) = self.workers.get_mut(&key) else { return };
         if w.caps.as_ref() != Some(&caps) {
+            let agents_moved = w.caps.as_ref().is_none_or(|was| was.agents != caps.agents);
             w.caps = Some(caps);
+            // What a machine can start is what its link says: an open palette offers the new
+            // agents at once.
+            if agents_moved {
+                self.refresh_palette(cx);
+            }
             cx.notify();
         }
     }
@@ -801,6 +810,10 @@ impl WorkspaceView {
                     this.open_path_on(worker, &path, *line, cx);
                 }
             }
+            TerminalViewEvent::OpenPage { url } => {
+                let worker = this.worker_of_session(sid);
+                this.open_browser(worker, url, cx);
+            }
             TerminalViewEvent::DragOut { path } => {
                 let path = this.absolute_in_session(sid, path);
                 if let Some(worker) = this.worker_of_session(sid) {
@@ -920,7 +933,10 @@ impl WorkspaceView {
                 keep.push(id);
                 let streaming = (self.screens.contains_key(&id) && !w.stale_screens.contains(&id))
                     || w.fresh_screens.contains_key(&id);
-                if streaming || w.pending_opens.values().any(|&p| p == id) {
+                if streaming
+                    || w.pending_opens.values().any(|&p| p == id)
+                    || w.failed_opens.contains_key(&id)
+                {
                     continue;
                 }
                 if w.pending_opens.contains_key(&target) {
@@ -930,6 +946,7 @@ impl WorkspaceView {
                 w.send(ClientMsg::Screen(ScreenRequest::Open { target, quality }));
             }
             w.pending_opens.retain(|_, id| wanted.iter().any(|(k, _)| k == id));
+            w.failed_opens.retain(|id, _| wanted.iter().any(|(k, _)| k == id));
         }
         // Dropping a view sends `Close` for its stream.
         self.screens.retain(|id, _| keep.contains(id));
@@ -1086,6 +1103,16 @@ impl WorkspaceView {
                     view.update(cx, |v, cx| v.set_field(field, cx));
                 }
             }
+            ScreenEvent::OpenFailed { asked, why } => self.screen_refused(key, asked, why, cx),
+            ScreenEvent::ListFailed { why } => {
+                let Some(w) = self.workers.get_mut(&key) else { return };
+                w.titles_requested = false;
+                w.display_wanted = false;
+                if std::mem::take(&mut w.picker_wanted) {
+                    let text = crate::screen::failure_text(&why, &w.name);
+                    self.show_notice(format!("No windows to list: {text}"), cx);
+                }
+            }
             ScreenEvent::Drag { stream, event } => {
                 for (id, view) in self.stream_views(key, stream, cx) {
                     if let Some((drag, outcome)) = view.update(cx, |v, cx| v.drag_heard(&event, cx))
@@ -1096,6 +1123,37 @@ impl WorkspaceView {
             }
         }
         cx.notify();
+    }
+
+    /// An open the worker refused: the tile waiting on it stops asking until the next link,
+    /// and the person hears why. A display made for this device
+    /// that could not be made goes back to the physical one, as a closed one does.
+    fn screen_refused(
+        &mut self,
+        key: WorkerKey,
+        asked: OpenAsk,
+        why: ScreenFailure,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(w) = self.workers.get_mut(&key) else { return };
+        let id = match asked {
+            OpenAsk::Target(target) => w.pending_opens.remove(&target),
+            OpenAsk::Made(_) => w.sized.take().map(|s| s.item()),
+        };
+        let Some(id) = id else {
+            tracing::debug!(?asked, ?why, "a refused open nobody waits on");
+            return;
+        };
+        tracing::info!(%id, ?asked, ?why, "screen open refused");
+        let text = crate::screen::failure_text(&why, &w.name);
+        if matches!(asked, OpenAsk::Target(_)) {
+            w.failed_opens.insert(id, why);
+        }
+        let item = w.doc.get(id).cloned();
+        let title = item
+            .map_or_else(String::new, |i| i.name.clone().unwrap_or_else(|| self.derived_title(&i)));
+        self.show_notice(format!("{title} did not open. {text}"), cx);
+        self.items_dirty = true;
     }
 
     /// The views of `key`'s items that show `stream` on its current link, each with its item:

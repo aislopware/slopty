@@ -416,6 +416,9 @@ struct Worker {
     display_wanted: bool,
     /// Streams requested but not yet `Opened`, by target.
     pending_opens: HashMap<CaptureTarget, ItemId>,
+    /// Remote tiles whose open the worker refused on this link, and why: not asked again
+    /// until the next link or a retry.
+    failed_opens: HashMap<ItemId, slopty_proto::screen::ScreenFailure>,
     /// Remote tiles whose view came over a link that has gone: it shows its last picture, set
     /// back, until a stream opened on the next link has one of its own.
     stale_screens: HashSet<ItemId>,
@@ -460,6 +463,7 @@ impl Worker {
             picker_wanted: false,
             display_wanted: false,
             pending_opens: HashMap::new(),
+            failed_opens: HashMap::new(),
             stale_screens: HashSet::new(),
             fresh_screens: HashMap::new(),
             sized: None,

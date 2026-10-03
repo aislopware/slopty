@@ -13,7 +13,7 @@ use slopty_core::{ClientId, StreamId};
 use slopty_input::sources::Claim;
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::drag::{DragEvent, DragInput};
-use slopty_proto::screen::{CaptureTarget, Quality, ScreenEvent, ScreenInput, TextField};
+use slopty_proto::screen::{CaptureTarget, OpenAsk, Quality, ScreenEvent, ScreenInput, TextField};
 use slopty_worker::platform::{Native, Platform};
 use slopty_worker::screen::drag::Heard;
 use slopty_worker::screen::sound::{Listen, Sound};
@@ -190,7 +190,7 @@ async fn run_on<P: Platform>(
     let sink = Arc::new(QuicSink(link.conn.clone()));
     let opened = Pipeline::<P>::open(id, target, quality, sink, on_event).await;
     let opened = opened.map(|(stream, opened)| (stream, vec![opened], None));
-    serve_opened(link, id, opened, commands).await;
+    serve_opened(link, id, OpenAsk::Target(target), opened, commands).await;
 }
 
 /// Open a stream of a display made for the client (or, when none can be had, of a physical
@@ -204,16 +204,17 @@ pub async fn run_display(
 ) {
     let on_event = on_event(id, link.out.clone());
     let sink = Arc::new(QuicSink(link.conn.clone()));
+    let made = OpenAsk::Made(asked.key);
     #[cfg(target_os = "macos")]
     if slopty_worker::screen::synthetic_screen() {
         let opened = sized::open::<Synthetic, sized::Cg>(None, id, asked, sink, on_event).await;
         let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
-        return serve_opened(link, id, opened, commands).await;
+        return serve_opened(link, id, made, opened, commands).await;
     }
     let displays = link.daemon.displays.as_ref();
     let opened = sized::open::<Native, sized::Cg>(displays, id, asked, sink, on_event).await;
     let opened = opened.map(|(stream, told, sized)| (stream, told.into(), sized));
-    serve_opened(link, id, opened, commands).await;
+    serve_opened(link, id, made, opened, commands).await;
 }
 
 /// What a stream tells its client outside its commands' answers.
@@ -233,10 +234,12 @@ type Opened<P> = Result<(Pipeline<P>, Vec<ScreenEvent>, Option<sized::Sized>), S
 
 /// Tell the client how the stream opened, serve it until it is closed or the connection lets
 /// go of it, and tear it down: input released, capture stopped, then any display made for it
-/// released on the main thread.
+/// released on the main thread. One that did not open is told as what was `asked` and why,
+/// since the client has not heard of `id`.
 async fn serve_opened<P: Platform>(
     link: Link,
     id: StreamId,
+    asked: OpenAsk,
     opened: Opened<P>,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
@@ -255,7 +258,7 @@ async fn serve_opened<P: Platform>(
         }
         Err(e) => {
             tracing::warn!(%client, %id, error = %e, "screen open");
-            let event = ScreenEvent::Closed { stream: id, reason: e.to_string() };
+            let event = ScreenEvent::OpenFailed { asked, why: e.failure() };
             let _sent = out.send(WorkerMsg::Screen(event)).await;
             let _told = told.send(Told::Gone(id));
             return;
@@ -959,6 +962,7 @@ mod tests {
             );
         let mut accepted = listener.accept().await.unwrap();
         let ack = slopty_proto::handshake::HelloAck {
+            settings: String::new(),
             worker: slopty_core::WorkerId::new(),
             name: "bench".to_owned(),
             home: String::new(),
@@ -2434,6 +2438,7 @@ mod console {
             );
         let mut accepted = listener.accept().await.expect("the client connects");
         let ack = HelloAck {
+            settings: String::new(),
             worker: WorkerId::new(),
             name: "console".to_owned(),
             home: String::new(),

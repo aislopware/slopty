@@ -214,6 +214,26 @@ pub enum ScreenError {
     EncodeThread(std::io::Error),
 }
 
+impl ScreenError {
+    /// What the client is told of it: the kinds it answers differently, else these words.
+    #[must_use]
+    pub fn failure(&self) -> slopty_proto::screen::ScreenFailure {
+        use slopty_proto::screen::ScreenFailure;
+        /// ScreenCaptureKit's "the user declined": no Screen Recording grant.
+        const DECLINED: i64 = -3801;
+        match self {
+            Self::NotPermitted | Self::Capture(CaptureError::Sck { code: DECLINED, .. }) => {
+                ScreenFailure::NotPermitted
+            }
+            Self::WindowGone | Self::NoDisplay | Self::Capture(CaptureError::NotFound(_)) => {
+                ScreenFailure::Gone
+            }
+            Self::Capture(CaptureError::Unsupported) => ScreenFailure::Unsupported,
+            other => ScreenFailure::Failed(other.to_string()),
+        }
+    }
+}
+
 /// Frames' worth of bytes (at the current target rate) QUIC may hold before a captured frame
 /// is dropped instead of encoded.
 ///

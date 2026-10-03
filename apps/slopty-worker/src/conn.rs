@@ -246,6 +246,7 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         worker: daemon.id,
         name: daemon.name.clone(),
         home: daemon.home.clone(),
+        settings: daemon.settings.clone(),
         caps,
         load,
         sessions: daemon.worker.summaries().await,
@@ -1419,12 +1420,11 @@ impl Peer<'_> {
                 let out = self.out.clone();
                 let client = self.client;
                 self.tasks.spawn(async move {
-                    match listing().await {
-                        Ok(event) => {
-                            let _sent = out.send(WorkerMsg::Screen(event)).await;
-                        }
-                        Err(e) => tracing::warn!(%client, error = %e, "screen listing"),
-                    }
+                    let event = listing().await.unwrap_or_else(|e| {
+                        tracing::warn!(%client, error = %e, "screen listing");
+                        ScreenEvent::ListFailed { why: e.failure() }
+                    });
+                    let _sent = out.send(WorkerMsg::Screen(event)).await;
                 });
             }
             ScreenRequest::Open { target, quality } => {
@@ -2098,6 +2098,7 @@ mod lossy {
             shaping.abort();
         };
         let ack = HelloAck {
+            settings: String::new(),
             worker: WorkerId::new(),
             name: "lossy".to_owned(),
             home: String::new(),
