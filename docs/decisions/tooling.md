@@ -966,16 +966,17 @@ more full-window layer.
     gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at 0.16.0, the
     minimum the vendored ghostty names. The image's unused SDKs are deleted first, since it keeps
     about 14 GB free.
-  - **What the runner lacks.** The job installs zsh and fish for the PTY's shell tests and
+  - **What the runner lacks.** The job installs zsh, fish and tmux for the PTY's shell tests and
     raises `net.core.rmem_max` to 8 MiB for the endpoint's receive buffer (2026-10-03, after
     the first run; `docs/decisions/platform.md`, "The Linux lane's first run").
-  - **Not required yet.** `promote` needs only the gate's matrix. Once the job has passed
-    steadily, adding it there (`needs: [gate, linux]`) makes it decide what lands.
+  - **Required.** `promote` needs it beside the gate's matrix (`needs: [gate, linux]`), since it
+    passed two runs in a row after its last fix (37106871278, 37111546057). It took 12.7 and
+    12.8 min there, inside the run's critical path (clippy-ios, 18 to 21 min), so requiring it
+    costs no wall time.
   - **No Actions compile cache.** The repository's Actions cache held 10.78 GB in 8 309 entries
     on 2026-10-03, over its 10 GB quota, and GitHub evicts the least recently used: Linux units
     there would push out the Mac lanes' and lengthen the critical path. The job's sccache keeps
-    its cache on the runner, so it compiles cold each run. Before it is required, measure its
-    wall time against the run's (21.5 min warm, `docs/MEASUREMENTS.md` 2026-10-02).
+    its cache on the runner, so it compiles cold each run, and still ends inside the run.
   - **Next.** arm64 on `ubuntu-24.04-arm` once the cache question is settled (aarch64 runs here
     in the Docker e2e meanwhile). Once required, the Linux clippy could move here from the
     clippy-ios lane, the longest on the critical path.

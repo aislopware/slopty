@@ -661,8 +661,9 @@ fn provision(home: &Utf8Path, macos: Macos, base: &str) -> Result<()> {
         ),
     )?;
     exec_out(home, base, "sudo mdutil -a -i off >/dev/null && sudo softwareupdate --schedule off")?;
-    // slopty-pty's shell integration drives fish beside zsh and bash; a guest lacks nothing.
-    exec_out(home, base, "/opt/homebrew/bin/brew install --quiet fish >/dev/null")?;
+    // slopty-pty's shell integration drives fish beside zsh and bash, and tmux for the marks
+    // that cross a real one; a guest lacks nothing.
+    exec_out(home, base, "/opt/homebrew/bin/brew install --quiet fish tmux >/dev/null")?;
 
     // The worker runs from launchd, so it is its own responsible process and needs grants of its
     // own; commands through `tart exec` hold the agent's. A row with no code requirement is

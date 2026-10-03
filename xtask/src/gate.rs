@@ -1347,6 +1347,7 @@ mod tests {
         let workflow = std::fs::read_to_string(&path).expect("ci.yml");
         assert!(workflow.contains("cargo xtask gate --ci --lane linux"), "ci.yml runs it");
         assert!(workflow.contains("cargo xtask setup --lane linux"), "with its tools");
+        assert!(workflow.contains("needs: [gate, linux]"), "and main waits for it");
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));

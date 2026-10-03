@@ -131,10 +131,9 @@ jobs:
 
   # The Linux worker on Linux: its ptyd, the CLI and the server built natively, and the tests of
   # every crate of theirs that builds there (`cargo xtask gate --lane linux`), beside the gate on
-  # a free Linux runner, so the run takes no longer. Not yet among what `promote` needs: it joins
-  # them once it has passed steadily. Its compile cache stays on the runner: the Actions cache is
-  # at its 10 GB quota, and Linux units there would evict the Mac lanes' (MEASUREMENTS
-  # 2026-10-03, "a Linux lane in CI").
+  # a free Linux runner, so the run takes no longer. `promote` needs it as it needs the gate. Its
+  # compile cache stays on the runner: the Actions cache is at its 10 GB quota, and Linux units
+  # there would evict the Mac lanes' (MEASUREMENTS 2026-10-03, "a Linux lane in CI").
   linux:
     name: gate (linux)
     runs-on: ubuntu-24.04
@@ -145,14 +144,14 @@ jobs:
       # A hosted Ubuntu image leaves about 14 GB free, which a test build can outgrow.
       # These SDKs are what the image holds that no step here uses.
       - run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-      # The shells whose integration the PTY tests check besides the image's bash, and the
-      # receive buffer a worker's socket asks for (4 MiB), which Ubuntu caps at 208 KiB. The
-      # image leaves completion directories group-writable, so Ubuntu's zshrc stopped at
-      # compinit's "insecure directories" question and ate the tests' typed lines: those
-      # directories lose their group and other write bits.
+      # The shells whose integration the PTY tests check besides the image's bash, tmux for the
+      # marks that cross a real one, and the receive buffer a worker's socket asks for (4 MiB),
+      # which Ubuntu caps at 208 KiB. The image leaves completion directories group-writable, so
+      # Ubuntu's zshrc stopped at compinit's "insecure directories" question and ate the tests'
+      # typed lines: those directories lose their group and other write bits.
       - run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends zsh fish
+          sudo apt-get install -y -qq --no-install-recommends zsh fish tmux
           sudo sysctl -w net.core.rmem_max=8388608
           { zsh -fc 'autoload -Uz compaudit; compaudit' || true; } | xargs -r sudo chmod g-w,o-w
       - uses: actions/checkout@v5
@@ -197,7 +196,7 @@ jobs:
   # main moves to the commit every lane passed on, only forward: a push without force is
   # refused unless main is an ancestor of it, and the check before says why in the summary.
   promote:
-    needs: gate
+    needs: [gate, linux]
     if: github.ref == 'refs/heads/gate'
     runs-on: ubuntu-24.04
     permissions:
