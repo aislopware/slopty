@@ -59,7 +59,11 @@ jobs:
           submodules: recursive
           # `committed` lints every commit since the last tag; the other lanes read the tree.
           fetch-depth: ${{ matrix.lane != 'tools' && 1 || 0 }}
+      # A named version: without one the action asks the GitHub API for the latest release,
+      # and that call timing out failed whole runs.
       - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -165,6 +169,8 @@ jobs:
         with:
           submodules: recursive
       - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0
@@ -250,6 +256,8 @@ jobs:
           fetch-depth: 0
       # `.cargo/config.toml` wraps rustc in sccache here too.
       - uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          version: v0.18.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.99.0

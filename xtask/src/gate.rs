@@ -1341,7 +1341,7 @@ mod tests {
 
     /// CI runs the Linux lane on a Linux runner, apart from the gate's matrix until it is
     /// required; its tested crates all build for Linux and none is one the lane leaves untested.
-    /// Every job's zig is the pinned one.
+    /// Every job's zig is the pinned one, and every sccache setup names its version.
     #[test]
     fn ci_runs_the_linux_lane_on_linux() {
         let path = repo_root().expect("repo root").join(".github/workflows/ci.yml");
@@ -1354,6 +1354,10 @@ mod tests {
         let deep = std::fs::read_to_string(path.with_file_name("deep.yml")).expect("deep.yml");
         for jobs in [&workflow, &deep] {
             assert!(!jobs.contains("brew install zig"), "Homebrew's zig is whatever it is today");
+            let sccache = jobs.matches("sccache-action@").count();
+            let named =
+                jobs.matches("sccache-action@v0.0.11\n        with:\n          version: v").count();
+            assert_eq!(named, sccache, "every sccache setup names its version, or asks the API");
         }
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
