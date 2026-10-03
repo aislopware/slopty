@@ -81,7 +81,9 @@ jobs:
           key: fuzz-corpus-${{ github.run_id }}
           restore-keys: fuzz-corpus-
       - uses: cargo-bins/cargo-binstall@main
-      - run: brew install zig
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
       - run: cargo xtask setup
       - run: |
           mkdir -p target/deep

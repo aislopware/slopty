@@ -966,6 +966,10 @@ more full-window layer.
     gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at 0.16.0, the
     minimum the vendored ghostty names. The image's unused SDKs are deleted first, since it keeps
     about 14 GB free.
+  - **Every job's zig is pinned.** The Mac lanes, the release and the deep runs took
+    `brew install zig`, which became 0.17 on 2026-10-03, and Ghostty's `build.zig` does not
+    build under 0.17. They take `mlugg/setup-zig` at 0.16.0 too, as `cargo xtask setup` asks
+    locally (`tools::ZIG`).
   - **What the runner lacks.** The job installs zsh, fish and tmux for the PTY's shell tests and
     raises `net.core.rmem_max` to 8 MiB for the endpoint's receive buffer (2026-10-03, after
     the first run; `docs/decisions/platform.md`, "The Linux lane's first run").
