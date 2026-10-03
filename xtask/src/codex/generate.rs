@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Map, Value};
 
 /// The requests Slopty sends.
-const CLIENT_REQUESTS: [&str; 12] = [
+const CLIENT_REQUESTS: [&str; 13] = [
     "initialize",
     "thread/start",
     "thread/resume",
@@ -26,6 +26,7 @@ const CLIENT_REQUESTS: [&str; 12] = [
     "turn/steer",
     "turn/interrupt",
     "model/list",
+    "account/usage/read",
 ];
 
 /// The requests the app-server sends that Slopty answers: approvals and questions.
@@ -120,7 +121,7 @@ impl Defs {
                 let props = m.get("properties").context("a method with no properties")?;
                 let method = props.pointer("/method/enum/0").and_then(Value::as_str);
                 let method = method.context("a method with no name")?.to_owned();
-                let params = props.get("params").and_then(reference);
+                let params = props.get("params").and_then(params_of);
                 Ok(Method { name: method, params })
             })
             .collect()
@@ -135,6 +136,17 @@ fn bare(def: &Value) -> Value {
         map.remove("title");
     }
     def
+}
+
+/// The definition a method's `params` are. Params that may be left out are an `anyOf` of
+/// that definition and `null`; Slopty always sends them.
+fn params_of(schema: &Value) -> Option<String> {
+    reference(schema).or_else(|| {
+        let members = schema.get("anyOf")?.as_array()?;
+        let mut defined = members.iter().filter(|m| !is_null(m));
+        let only = defined.next()?;
+        defined.next().is_none().then(|| reference(only)).flatten()
+    })
 }
 
 /// The definition `schema` refers to, by name.

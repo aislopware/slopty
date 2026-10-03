@@ -113,7 +113,16 @@ mod codex {
         let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
             "primary": {"usedPercent": 30, "windowDurationMins": 300, "resetsAt": null}}}});
         say(&mut ws, &limits).await;
-        while next(&mut ws, &heard).await.is_some() {}
+        // What the thread cost, asked once its turn ended, as Codex 0.160.0's schema shapes it.
+        while let Some(msg) = next(&mut ws, &heard).await {
+            if msg["method"] == "account/usage/read" {
+                let thread = msg["params"]["threadId"].clone();
+                let usage = json!({ "id": msg["id"], "result": { "summary": {}, "threadUsage": {
+                    "threadId": thread, "estimatedUsageCreditsMicros": 41_000,
+                    "estimatedUsageUsdMicros": 82_000, "groups": [] } } });
+                say(&mut ws, &usage).await;
+            }
+        }
     }
 
     /// Wait until `thread` in `host` satisfies `done`.
@@ -199,9 +208,13 @@ mod codex {
         assert_eq!(users, [("Say hello.".to_owned(), Some(id))]);
         assert!(state.meta.agent.is(AgentId::CODEX));
         assert_eq!(handle.start(id, start(&work, "Say hello.")).await, outcome, "started once");
-        // What Codex's answer and the account say of the thread: its policy, its sandbox, and
-        // the account's window, which names no thread.
-        let state = until(&host, thread, |s| !s.meters.limits.is_empty()).await;
+        // What Codex's answer and the account say of the thread: its policy, its sandbox, the
+        // account's window, which names no thread, and what the thread has cost.
+        let state = until(&host, thread, |s| {
+            !s.meters.limits.is_empty() && s.meters.cost_micro_usd.is_some()
+        })
+        .await;
+        assert_eq!(state.meters.cost_micro_usd, Some(82_000));
         assert_eq!(state.meters.mode.as_deref(), Some("on-request"));
         assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("readOnly"));
         assert_eq!(state.meters.limits[0].name, "five-hour");
@@ -221,6 +234,10 @@ mod codex {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0]["params"]["input"][0]["text"], "Say hello.");
         assert_eq!(turns[0]["params"]["threadId"], native.as_str());
+        let reads: Vec<&Value> =
+            sent.iter().filter(|m| m["method"] == "account/usage/read").collect();
+        assert_eq!(reads.len(), 1, "read once, as the turn ended: {sent:?}");
+        assert_eq!(reads[0]["params"], json!({ "threadId": native }));
     }
 
     /// With no Codex daemon running, a start is refused in words, and Slopty starts none.

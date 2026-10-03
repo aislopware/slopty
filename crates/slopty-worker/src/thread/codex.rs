@@ -490,6 +490,10 @@ enum Waiting {
     Turn {
         thread: ThreadId,
     },
+    /// What Codex estimates Codex thread `native` has cost.
+    Usage {
+        native: String,
+    },
     /// A thread started for intent `id`, whose first turn is `prompt`.
     Start {
         id: IntentId,
@@ -706,6 +710,7 @@ impl Session {
                     Ok(resumed) => {
                         self.follow(&resumed.thread);
                         self.settled(&resumed.thread.id, resumed.approval_policy, &resumed.sandbox);
+                        self.read_usage(native).await?;
                     }
                     Err(e) => {
                         tracing::debug!(%native, "a Codex thread's resume did not read: {e}");
@@ -746,6 +751,23 @@ impl Session {
             (Waiting::Start { id, .. }, Err(e)) => {
                 self.answer_start(id, refused(format!("Codex did not start the thread: {e}")));
             }
+            (Waiting::Usage { native }, Ok(result)) => {
+                let read = rpc::response::<p::GetAccountTokenUsageParams>(result);
+                match (read, self.threads.get_mut(&native)) {
+                    (Ok(read), Some(followed)) => {
+                        let actions = followed.shared.usage(&read);
+                        if !actions.is_empty() {
+                            self.host.apply(followed.id, actions);
+                        }
+                    }
+                    (Err(e), _) => tracing::debug!(%native, "Codex's usage did not read: {e}"),
+                    (Ok(_), None) => {}
+                }
+            }
+            (Waiting::Usage { native }, Err(e)) => {
+                // An account Codex does not bill through, or a build that does not say.
+                tracing::trace!(%native, "Codex gave no usage: {e}");
+            }
             (Waiting::Loaded | Waiting::Turn { .. }, _) => {}
         }
         Ok(())
@@ -760,6 +782,12 @@ impl Session {
         let params =
             p::ThreadResumeParams { thread_id: native.clone(), ..p::ThreadResumeParams::default() };
         self.request(&params, Waiting::Resume { native }).await
+    }
+
+    /// Ask what Codex thread `native` has cost so far.
+    async fn read_usage(&mut self, native: String) -> Result<(), String> {
+        let params = p::GetAccountTokenUsageParams { thread_id: Some(native.clone()) };
+        self.request(&params, Waiting::Usage { native }).await
     }
 
     /// Host Codex thread `thread`, as it now stands.
@@ -875,6 +903,9 @@ impl Session {
                 if let Some((params, taken)) = next {
                     self.host.apply(id, taken);
                     self.request(params.as_ref(), Waiting::Turn { thread: id }).await?;
+                }
+                if matches!(note, ServerNotification::TurnCompleted(_)) {
+                    self.read_usage(native).await?;
                 }
             }
             None if matches!(note, ServerNotification::ThreadStatusChanged(_)) => {

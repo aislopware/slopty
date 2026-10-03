@@ -192,6 +192,9 @@ mod codex {
         stub.answer("thread/loaded/list", json!({ "data": [thread], "nextCursor": null })).await;
         let resume = stub.answer("thread/resume", resumed).await;
         assert_eq!(resume["params"]["threadId"], thread);
+        // What the thread has cost so far, asked as it is taken up; this account says no figure.
+        let usage = stub.answer("account/usage/read", json!({ "summary": {} })).await;
+        assert_eq!(usage["params"]["threadId"], thread);
         for line in lines.iter().skip(resumed_at.saturating_add(1)) {
             if !line.sent {
                 stub.say(&line.msg).await;

@@ -437,6 +437,21 @@ impl Shared {
         vec![Action::MetersSet(self.meters.clone())]
     }
 
+    /// What Codex estimates the thread has cost so far (`account/usage/read` for it). An account
+    /// billed in credits alone has no figure in dollars, and keeps none.
+    pub fn usage(&mut self, read: &p::GetAccountTokenUsageResponse) -> Vec<Action> {
+        let cost = read
+            .thread_usage
+            .as_ref()
+            .and_then(|usage| usage.estimated_usage_usd_micros)
+            .and_then(|micros| u64::try_from(micros).ok());
+        if cost.is_none() || cost == self.meters.cost_micro_usd {
+            return Vec::new();
+        }
+        self.meters.cost_micro_usd = cost;
+        vec![Action::MetersSet(self.meters.clone())]
+    }
+
     /// The thread is a subagent started by the call `link` names.
     pub fn adopted(&mut self, link: Link) -> Vec<Action> {
         if self.meta.parent.as_ref() == Some(&link) {

@@ -869,8 +869,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     the model to the turn with a notice. Approval policy and sandbox are the thread's mode and
     a fact. A collab agent call is a subagent call that opens its child thread, and the child
     names its parent. Account rate limits carry no thread id, so the worker gives them to every
-    Codex thread it follows and to each one it follows later. Tests in
-    `crates/slopty-agent/tests/codex.rs` and the worker's `tests/codex.rs` stand-in.
+    Codex thread it follows and to each one it follows later. A thread's cost is Codex's own
+    estimate (`account/usage/read` for the thread, its `estimatedUsageUsdMicros`), asked when
+    the worker takes the thread up and after each turn ends, since Codex announces no cost. A
+    plan billed only in credits gives no dollar figure, and the thread keeps none rather than
+    a converted guess. Tests in `crates/slopty-agent/tests/codex.rs` and the worker's
+    `tests/codex.rs` stand-in.
   - **ACP** turn tokens come from `PromptResponse.usage`, behind the schema's
     `unstable_end_turn_token_usage` feature, which this crate enables. It is an unstable part
     of the protocol, taken because it is the only door to a turn's tokens.

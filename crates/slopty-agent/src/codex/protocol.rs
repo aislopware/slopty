@@ -103,6 +103,12 @@ impl Method for ModelListParams {
     const METHOD: &'static str = "model/list";
 }
 
+impl Method for GetAccountTokenUsageParams {
+    type Response = GetAccountTokenUsageResponse;
+
+    const METHOD: &'static str = "account/usage/read";
+}
+
 impl Method for CommandExecutionRequestApprovalParams {
     type Response = CommandExecutionRequestApprovalResponse;
 
@@ -369,6 +375,36 @@ pub struct AccountRateLimitsUpdatedNotification {
     /// `rateLimits`.
     #[serde(rename = "rateLimits")]
     pub rate_limits: RateLimitSnapshot,
+}
+
+/// `AccountTokenUsageDailyBucket`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct AccountTokenUsageDailyBucket {
+    /// `startDate`.
+    #[serde(rename = "startDate")]
+    pub start_date: String,
+    /// `tokens`.
+    pub tokens: i64,
+}
+
+/// `AccountTokenUsageSummary`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct AccountTokenUsageSummary {
+    /// `currentStreakDays`.
+    #[serde(rename = "currentStreakDays", default, skip_serializing_if = "Option::is_none")]
+    pub current_streak_days: Option<i64>,
+    /// `lifetimeTokens`.
+    #[serde(rename = "lifetimeTokens", default, skip_serializing_if = "Option::is_none")]
+    pub lifetime_tokens: Option<i64>,
+    /// `longestRunningTurnSec`.
+    #[serde(rename = "longestRunningTurnSec", default, skip_serializing_if = "Option::is_none")]
+    pub longest_running_turn_sec: Option<i64>,
+    /// `longestStreakDays`.
+    #[serde(rename = "longestStreakDays", default, skip_serializing_if = "Option::is_none")]
+    pub longest_streak_days: Option<i64>,
+    /// `peakDailyTokens`.
+    #[serde(rename = "peakDailyTokens", default, skip_serializing_if = "Option::is_none")]
+    pub peak_daily_tokens: Option<i64>,
 }
 
 /// `ActivePermissionProfile`, as Codex's schema names it.
@@ -1429,6 +1465,27 @@ pub enum FunctionCallOutputContentItemInputImageForm {
     /// `file_id`.
     #[serde(rename = "file_id")]
     FileId(String),
+}
+
+/// `GetAccountTokenUsageParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct GetAccountTokenUsageParams {
+    /// When present, read estimated usage for this thread instead of account-wide token activity.
+    #[serde(rename = "threadId", default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+}
+
+/// `GetAccountTokenUsageResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct GetAccountTokenUsageResponse {
+    /// `dailyUsageBuckets`.
+    #[serde(rename = "dailyUsageBuckets", default, skip_serializing_if = "Option::is_none")]
+    pub daily_usage_buckets: Option<Vec<AccountTokenUsageDailyBucket>>,
+    /// `summary`.
+    pub summary: AccountTokenUsageSummary,
+    /// Estimated usage when a thread was requested and its billing route is available.
+    #[serde(rename = "threadUsage", default, skip_serializing_if = "Option::is_none")]
+    pub thread_usage: Option<ThreadUsage>,
 }
 
 /// `GitInfo`, as Codex's schema names it.
@@ -4508,6 +4565,54 @@ pub enum ThreadUnsubscribeStatus {
     /// `unsubscribed`.
     #[serde(rename = "unsubscribed")]
     Unsubscribed,
+}
+
+/// `ThreadUsage`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadUsage {
+    /// `estimatedUsageCreditsMicros`.
+    #[serde(rename = "estimatedUsageCreditsMicros")]
+    pub estimated_usage_credits_micros: i64,
+    /// `estimatedUsageUsdMicros`.
+    #[serde(rename = "estimatedUsageUsdMicros", default, skip_serializing_if = "Option::is_none")]
+    pub estimated_usage_usd_micros: Option<i64>,
+    /// `groups`.
+    pub groups: Vec<ThreadUsageBreakdownGroup>,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ThreadUsageBreakdownGroup`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadUsageBreakdownGroup {
+    /// `cachedInputTokens`.
+    #[serde(rename = "cachedInputTokens", default, skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<i64>,
+    /// `estimatedUsageCreditsMicros`.
+    #[serde(rename = "estimatedUsageCreditsMicros")]
+    pub estimated_usage_credits_micros: i64,
+    /// `inputTokens`.
+    #[serde(rename = "inputTokens", default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i64>,
+    /// `model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `netNewInputTokens`.
+    #[serde(rename = "netNewInputTokens", default, skip_serializing_if = "Option::is_none")]
+    pub net_new_input_tokens: Option<i64>,
+    /// `outputTokens`.
+    #[serde(rename = "outputTokens", default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i64>,
+    /// `reasoningEffort`.
+    #[serde(rename = "reasoningEffort", default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// `speed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed: Option<String>,
+    /// `totalTokens`.
+    #[serde(rename = "totalTokens", default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<i64>,
 }
 
 /// `TokenUsageBreakdown`, as Codex's schema names it.
