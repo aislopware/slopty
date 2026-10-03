@@ -11,9 +11,11 @@
 use std::collections::{HashMap, HashSet};
 
 use slopty_core::{WallMs, WorkerId, XferId};
-use slopty_proto::orchestration::{BUNDLES, BranchBundle, ErrorCode, Outcome, UploadPart, Verb};
-use slopty_proto::project::{ProjectId, StepKind, StepState, Task, TaskId, TaskStep};
-use slopty_proto::terminal::RepoId;
+use slopty_proto::orchestration::{
+    BUNDLES, BranchBundle, ErrorCode, Outcome, TermRef, UploadPart, Verb,
+};
+use slopty_proto::project::{Commits, ProjectId, StepKind, StepState, Task, TaskId, TaskStep};
+use slopty_proto::terminal::{RepoId, SessionState};
 
 use super::{Hub, State};
 
@@ -33,9 +35,21 @@ pub(super) struct Steps {
     homing: HashMap<(ProjectId, TaskId), bool>,
     /// The tasks the person asked to merge whose branch is on its way home first.
     merge_after: HashSet<(ProjectId, TaskId)>,
+    /// The verifiers a restart of the server left running, by task: their terminal, the
+    /// commits they check and since when, for the lane to follow rather than run again.
+    reattach: HashMap<(ProjectId, TaskId), (TermRef, Commits, WallMs)>,
 }
 
 impl Steps {
+    /// The verifier of `task` a restart of the server left running, once: its terminal, the
+    /// commits it checks and since when.
+    pub(super) fn left_running(
+        &mut self,
+        task: &(ProjectId, TaskId),
+    ) -> Option<(TermRef, Commits, WallMs)> {
+        self.reattach.remove(task)
+    }
+
     /// The clones the server had made on `worker`: a worker's `repos` fact holds them beside
     /// its shells' (`facts_of`).
     pub(super) fn made_on(&self, worker: WorkerId) -> &[(String, RepoId)] {
@@ -53,7 +67,12 @@ pub(super) fn said(outcome: &Outcome) -> String {
 
 impl Hub {
     /// Move `task`'s step on, and push the change.
-    fn step(&self, state: &mut State, (project, task): (&ProjectId, TaskId), step: TaskStep) {
+    pub(super) fn step(
+        &self,
+        state: &mut State,
+        (project, task): (&ProjectId, TaskId),
+        step: TaskStep,
+    ) {
         match state.projects.set_step(project, task, step, WallMs::now()) {
             Ok(updates) => self.projects_moved(state, updates),
             Err(refused) => tracing::debug!(%project, %task, ?refused, "a step for no task"),
@@ -68,7 +87,14 @@ impl Hub {
         worker: WorkerId,
         now: StepState,
     ) {
-        let step = TaskStep { kind, worker, state: now, since_ms: WallMs::now(), term: None };
+        let step = TaskStep {
+            kind,
+            worker,
+            state: now,
+            since_ms: WallMs::now(),
+            term: None,
+            commits: None,
+        };
         self.step(&mut self.inner.state.lock(), (project, task), step);
     }
 
@@ -112,10 +138,68 @@ impl Hub {
             state: ended,
             since_ms: WallMs::now(),
             term: None,
+            commits: None,
         };
         self.step(&mut state, (project, task), step);
         drop(state);
         cloned
+    }
+
+    /// Take up the steps under way on `worker` when the server stopped, now that it is back.
+    ///
+    /// A clone is made again (the worker answers one already there as it is), and a branch on
+    /// its way home goes again: both only set names the server alone uses. A verifier or a
+    /// reviewer whose terminal still runs there is followed as it is. Anything else, and a
+    /// verifier whose terminal is gone, is the lane's to do again from the store. A reviewer
+    /// whose terminal is gone stops, and the person says whether the work may merge.
+    /// Nothing here runs a step a second time that could do harm twice: a merge and a rebase
+    /// start over from the target as it is, as the lane would after any failure.
+    pub(super) fn resume_steps(&self, state: &mut State, worker: WorkerId) {
+        for (project, task, step) in state.projects.resumable(worker) {
+            let running = step.term.filter(|term| {
+                state.workers.get(&term.worker).is_some_and(|e| {
+                    e.sessions
+                        .iter()
+                        .any(|s| s.id == term.session && s.state == SessionState::Running)
+                })
+            });
+            tracing::info!(%project, %task, kind = ?step.kind, "a step taken up after a restart");
+            match step.kind {
+                StepKind::Clone => {
+                    let url = state
+                        .projects
+                        .project(&project)
+                        .ok()
+                        .and_then(|p| p.repo_id.as_ref()?.url.clone());
+                    let Some(url) = url else {
+                        let why = "no address to clone from is known now".to_owned();
+                        let failed = TaskStep { state: StepState::Failed { why }, ..step };
+                        self.step(state, (&project, task), failed);
+                        continue;
+                    };
+                    let hub = self.clone();
+                    tokio::spawn(async move {
+                        if let Err(why) = hub.clone_for((&project, task), worker, url).await {
+                            tracing::info!(%project, %task, why, "a clone taken up failed");
+                        }
+                    });
+                }
+                StepKind::Home => self.bring_home_soon(state, (project, task), None),
+                StepKind::Verify => {
+                    if let (Some(term), Some(commits)) = (running, step.commits) {
+                        state
+                            .steps
+                            .reattach
+                            .insert((project, task), (term, commits, step.since_ms));
+                    }
+                }
+                // One still waiting to start holds nothing: the lane starts it.
+                StepKind::Review if step.term.is_some() => {
+                    self.resume_review(state, (&project, task), running, step);
+                }
+                StepKind::Review | StepKind::Merge | StepKind::Rebase => {}
+            }
+        }
     }
 
     /// How far clone `clone` has come, from its worker: its task's card shows it, in steps of
@@ -149,6 +233,7 @@ impl Hub {
             state: StepState::Running { phase, percent },
             since_ms: WallMs::now(),
             term: None,
+            commits: None,
         };
         self.step(state, (&project, task), step);
     }
@@ -421,7 +506,7 @@ fn route_in(
     };
     let from = assigned.term;
     let to = orchestrator.worker;
-    let session_repo = |term: slopty_proto::orchestration::TermRef| {
+    let session_repo = |term: TermRef| {
         let entry = state.workers.get(&term.worker)?;
         let s = entry.sessions.iter().find(|s| s.id == term.session)?;
         s.repo_id.as_ref().is_some_and(|other| other.same(id)).then(|| s.repo.clone())?

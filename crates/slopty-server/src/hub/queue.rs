@@ -22,8 +22,8 @@ use std::time::Duration;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    Merge, Moment, ProjectId, ReportKind, ReviewRun, StepKind, StepState, Task, TaskId, TaskState,
-    TaskStep, VerifierRun,
+    Commits, Merge, Moment, ProjectId, ReportKind, ReviewRun, StepKind, StepState, Task, TaskId,
+    TaskState, TaskStep, VerifierRun,
 };
 use slopty_proto::terminal::SessionState;
 
@@ -316,16 +316,15 @@ impl Hub {
         };
         let term = TermRef { worker: place.worker, session: SessionId::new() };
         let started = WallMs::now();
-        let step = |phase: String| TaskStep {
+        let starting = TaskStep {
             kind,
             worker: place.worker,
-            state: StepState::Running { phase, percent: None },
+            state: StepState::Running { phase: label.to_owned(), percent: None },
             since_ms: started,
             term: Some(term),
+            commits: None,
         };
-        let starting = if label.is_empty() { String::new() } else { label.to_owned() };
-        self.progress(at, step(starting));
-        let mut head_seen = self.inner.head.subscribe();
+        self.progress(at, starting);
         let verb = Verb::Verify {
             worker: place.worker,
             repo: place.clone.clone(),
@@ -336,11 +335,36 @@ impl Hub {
             session: term.session,
             title: format!("Verifier for {} #{}", at.0, at.1),
         };
-        let (head, base) = match self.forward(None, verb).await {
-            Outcome::Verifying { head, base, .. } => (head, base),
+        let commits = match self.forward(None, verb).await {
+            Outcome::Verifying { head, base, .. } => Commits { head, base },
             other if unreachable(&other) => return Ran::Held(said(&other)),
             other => return Ran::Refused(said(&other)),
         };
+        self.watch_verifier(at, term, commits, (kind, label), started).await
+    }
+
+    /// Follow the verifier in `term`, on `commits`, to its end, showing its last line on
+    /// `task`'s step of `kind` as it goes (after `label`, when there is one), and judge it: a
+    /// pass closes its terminal, a failure keeps it for its whole output. One a restart of the
+    /// server left running is followed as it is.
+    async fn watch_verifier(
+        &self,
+        at: (&ProjectId, TaskId),
+        term: TermRef,
+        commits: Commits,
+        (kind, label): (StepKind, &str),
+        started: WallMs,
+    ) -> Ran {
+        let step = |phase: String| TaskStep {
+            kind,
+            worker: term.worker,
+            state: StepState::Running { phase, percent: None },
+            since_ms: started,
+            term: Some(term),
+            commits: Some(commits.clone()),
+        };
+        self.progress(at, step(label.to_owned()));
+        let mut head_seen = self.inner.head.subscribe();
         let clock = tokio::time::Instant::now();
         let mut shown = String::new();
         let mut tick = tokio::time::interval(PROGRESS_EVERY);
@@ -379,7 +403,7 @@ impl Hub {
                 }
             }
         };
-        let took_ms = u64::try_from(clock.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let took_ms = WallMs::now().millis_since(started);
         let screen = match self.forward(None, Verb::ReadScreen { term }).await {
             Outcome::Screen(screen) => {
                 screen.lines.into_iter().map(|l| l.text).collect::<Vec<_>>().join("\n")
@@ -397,6 +421,7 @@ impl Hub {
         {
             tracing::debug!(?failed, "a passed verifier's terminal not closed");
         }
+        let Commits { head, base } = commits;
         Ran::Judged(VerifierRun { passed, summary, head, base, exit, took_ms }, term)
     }
 
@@ -419,9 +444,16 @@ impl Hub {
             self.advance(at, advance);
             return Went::Next;
         }
-        self.close_kept(at).await;
-        let head = place.head.clone();
-        let (run, term) = match self.run_verifier(at, &place, &head, (StepKind::Verify, "")).await {
+        // A verifier a restart of the server left running is followed as it is, not run again.
+        let left = self.inner.state.lock().steps.left_running(&(project.clone(), task));
+        let ran = if let Some((term, commits, since)) = left {
+            self.watch_verifier(at, term, commits, (StepKind::Verify, ""), since).await
+        } else {
+            self.close_kept(at).await;
+            let head = place.head.clone();
+            self.run_verifier(at, &place, &head, (StepKind::Verify, "")).await
+        };
+        let (run, term) = match ran {
             Ran::Judged(run, term) => (run, term),
             Ran::Held(why) => {
                 self.held(at, StepKind::Verify, place.worker, why);
@@ -439,6 +471,7 @@ impl Hub {
                 state: StepState::Done { detail: format!("passed at {}", short(&run.head)) },
                 since_ms: WallMs::now(),
                 term: None,
+                commits: None,
             };
             // With a reviewer to read it next, it stays being checked until the review says.
             let (state, merge) = if self.inner.state.lock().projects.reviews(project) {
@@ -508,6 +541,7 @@ impl Hub {
             state,
             since_ms,
             term: None,
+            commits: None,
         };
         let running = |phase: String| step(StepState::Running { phase, percent: None });
         for _ in 0..MERGE_TRIES {
@@ -664,6 +698,7 @@ impl Hub {
             state: StepState::Failed { why: why.to_owned() },
             since_ms: WallMs::now(),
             term,
+            commits: None,
         });
         let verified = run.map(|(run, _)| run);
         let reviewed = review.map(|(run, _)| run);
@@ -722,6 +757,7 @@ impl Hub {
             state: StepState::Failed { why },
             since_ms: WallMs::now(),
             term: None,
+            commits: None,
         };
         let moment = Some(Moment::Step(step.clone()));
         self.advance(at, Advance { step: Some(step), moment, ..Advance::default() });
@@ -829,6 +865,7 @@ impl Hub {
             state,
             since_ms: WallMs::now(),
             term: None,
+            commits: None,
         };
         let phase = format!("Pushing {target} to origin");
         self.progress(at, step(StepState::Running { phase, percent: None }));

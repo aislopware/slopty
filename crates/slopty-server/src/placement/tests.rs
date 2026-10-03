@@ -61,7 +61,7 @@ fn rules_read_every_fact_by_its_name_and_in_facts() {
         "has(facts.labels) && !has(facts.gpus)",
         "load < 2",
     ];
-    let ranked = rank(&requiring(&rules), &[gpu], &BTreeMap::new(), free()).unwrap();
+    let ranked = rank(&requiring(&rules), &[gpu], &BTreeMap::new(), &free()).unwrap();
     let only = ranked.first().unwrap();
     assert!(only.fits, "{only:?}");
     assert!(only.reasons.iter().all(|r| r.held), "{only:?}");
@@ -107,7 +107,7 @@ fn a_hostile_rule_fails_instead_of_overflowing_the_stack() {
             let fleet = [worker("a", "linux", 8, 0.0)];
             for rule in hostile {
                 let rule = rule.get(..EXPR_MAX).unwrap_or(&rule).to_owned();
-                if let Ok(ranked) = rank(&requiring(&[&rule]), &fleet, &BTreeMap::new(), free()) {
+                if let Ok(ranked) = rank(&requiring(&[&rule]), &fleet, &BTreeMap::new(), &free()) {
                     assert_eq!(ranked.len(), 1);
                 }
             }
@@ -123,7 +123,7 @@ fn a_missing_fact_or_a_rule_that_is_not_a_flag_does_not_hold_and_says_why() {
         &requiring(&["probes.cuda != \"\"", "cpus", "os == \"linux\""]),
         &[worker("box", "linux", 8, 0.0)],
         &BTreeMap::new(),
-        free(),
+        &free(),
     )
     .unwrap();
     let s = ranked.first().unwrap();
@@ -151,7 +151,7 @@ fn preferences_rank_the_workers_that_fit_with_their_points() {
         ],
         ..Placement::default()
     };
-    let ranked = rank(&placement, &fleet, &BTreeMap::new(), free()).unwrap();
+    let ranked = rank(&placement, &fleet, &BTreeMap::new(), &free()).unwrap();
     assert_eq!(names(&ranked), ["big", "small", "mac"]);
     let big = ranked.first().unwrap();
     assert_eq!(big.score, 10 + 64 - 9);
@@ -164,7 +164,7 @@ fn a_pin_is_honoured_over_every_rule_and_names_what_it_overrode() {
     let fleet = [worker("linux", "linux", 64, 0.0), worker("mac", "macos", 8, 0.0)];
     let mac = fleet.get(1).unwrap().worker;
     let placement = Placement { pin: Some(mac), ..requiring(&["os == \"linux\"", "cpus >= 32"]) };
-    let ranked = rank(&placement, &fleet, &BTreeMap::new(), free()).unwrap();
+    let ranked = rank(&placement, &fleet, &BTreeMap::new(), &free()).unwrap();
     let first = ranked.first().unwrap();
     assert_eq!((first.name.as_str(), first.fits), ("mac", true));
     assert!(!reason(first, "cpus >= 32").held, "the overridden rule still shows");
@@ -173,14 +173,14 @@ fn a_pin_is_honoured_over_every_rule_and_names_what_it_overrode() {
 
     let away = WorkerId::new();
     let lost = Placement { pin: Some(away), ..Placement::default() };
-    let ranked = rank(&lost, &fleet, &BTreeMap::new(), free()).unwrap();
+    let ranked = rank(&lost, &fleet, &BTreeMap::new(), &free()).unwrap();
     assert!(choose(&lost, &ranked).unwrap_err().contains("does not know"));
 
     let mut offline = fleet;
     if let Some(m) = offline.get_mut(1) {
         m.online = false;
     }
-    let ranked = rank(&placement, &offline, &BTreeMap::new(), free()).unwrap();
+    let ranked = rank(&placement, &offline, &BTreeMap::new(), &free()).unwrap();
     let why = choose(&placement, &ranked).unwrap_err();
     assert_eq!(why, "mac: not online", "a pin never moves elsewhere");
 }
@@ -191,13 +191,13 @@ fn near_and_avoid_follow_where_the_other_tasks_run() {
     let (a, b) = (fleet.first().unwrap().worker, fleet.get(1).unwrap().worker);
     let peers = BTreeMap::from([(TaskId(1), b), (TaskId(2), a)]);
     let near = Placement { near: vec![Peer::Task(TaskId(1))], ..Placement::default() };
-    assert_eq!(names(&rank(&near, &fleet, &peers, free()).unwrap()), ["b", "a"]);
+    assert_eq!(names(&rank(&near, &fleet, &peers, &free()).unwrap()), ["b", "a"]);
     let avoid =
         Placement { avoid: vec![Peer::Task(TaskId(1)), Peer::Worker(a)], ..Placement::default() };
-    let ranked = rank(&avoid, &fleet, &peers, free()).unwrap();
+    let ranked = rank(&avoid, &fleet, &peers, &free()).unwrap();
     assert_eq!(ranked.iter().map(|s| s.score).collect::<Vec<_>>(), [-100, -100]);
     let both = Placement { avoid: vec![Peer::Task(TaskId(1))], ..near };
-    let ranked = rank(&both, &fleet, &peers, free()).unwrap();
+    let ranked = rank(&both, &fleet, &peers, &free()).unwrap();
     assert!(ranked.iter().all(|s| s.fits), "near and avoid steer, never refuse");
 }
 
@@ -211,7 +211,7 @@ fn a_worker_at_the_project_s_cap_does_not_fit_even_pinned() {
         &Placement::default(),
         &fleet,
         &BTreeMap::new(),
-        Ranking { per_worker: Some(2), ..free() },
+        &Ranking { per_worker: Some(2), ..free() },
     )
     .unwrap();
     assert_eq!(names(&ranked), ["free", "full"]);
@@ -219,7 +219,8 @@ fn a_worker_at_the_project_s_cap_does_not_fit_even_pinned() {
     assert!(reason(full, "live_per_worker").detail.contains("runs 2"), "{full:?}");
     let pinned = Placement { pin: Some(full.worker), ..Placement::default() };
     let ranked =
-        rank(&pinned, &fleet, &BTreeMap::new(), Ranking { per_worker: Some(2), ..free() }).unwrap();
+        rank(&pinned, &fleet, &BTreeMap::new(), &Ranking { per_worker: Some(2), ..free() })
+            .unwrap();
     let why = choose(&pinned, &ranked).unwrap_err();
     assert!(why.starts_with("full: runs 2"), "{why}");
 }
@@ -241,8 +242,8 @@ fn an_agent_goes_only_where_it_is_installed_even_pinned() {
     installed(&mut fleet[0], &["claude", "codex"]);
     installed(&mut fleet[1], &["claude"]);
     fleet[2].reported = false;
-    let codex = Ranking { agent: Some("codex"), ..free() };
-    let ranked = rank(&Placement::default(), &fleet, &BTreeMap::new(), codex).unwrap();
+    let codex = Ranking { agent: Some(Installed::program("codex")), ..free() };
+    let ranked = rank(&Placement::default(), &fleet, &BTreeMap::new(), &codex).unwrap();
     assert_eq!(names(&ranked)[0], "has", "the only one that fits, for all its load");
     assert!(ranked[0].fits && !ranked[1].fits && !ranked[2].fits);
     let lacks = ranked.iter().find(|s| s.name == "lacks").unwrap();
@@ -251,11 +252,11 @@ fn an_agent_goes_only_where_it_is_installed_even_pinned() {
     assert_eq!(reason(quiet, "agent").detail, "has not said yet whether codex is installed");
 
     let pinned = Placement { pin: Some(fleet[1].worker), ..Placement::default() };
-    let ranked = rank(&pinned, &fleet, &BTreeMap::new(), codex).unwrap();
+    let ranked = rank(&pinned, &fleet, &BTreeMap::new(), &codex).unwrap();
     let why = choose(&pinned, &ranked).unwrap_err();
     assert_eq!(why, "lacks: codex is not installed");
-    let ranked =
-        rank(&pinned, &fleet, &BTreeMap::new(), Ranking { agent: Some("claude"), ..free() });
+    let claude = Ranking { agent: Some(Installed::program("claude")), ..free() };
+    let ranked = rank(&pinned, &fleet, &BTreeMap::new(), &claude);
     assert_eq!(choose(&pinned, &ranked.unwrap()), Ok(fleet[1].worker));
 }
 
@@ -264,7 +265,7 @@ fn equal_workers_go_to_the_least_busy_then_by_name() {
     let fleet =
         [worker("c", "linux", 8, 4.0), worker("b", "linux", 16, 4.0), worker("a", "linux", 8, 4.0)];
     assert_eq!(
-        names(&rank(&Placement::default(), &fleet, &BTreeMap::new(), free()).unwrap()),
+        names(&rank(&Placement::default(), &fleet, &BTreeMap::new(), &free()).unwrap()),
         ["b", "a", "c"]
     );
 }
@@ -308,12 +309,12 @@ fn a_rule_is_judged_the_same_every_time_and_not_past_its_deadline() {
         "!{\"b\": 0, \"a\": 2}.all(k, 1 / {\"b\": 0, \"a\": 2}[k] == 1)",
     ];
     for _ in 0..8 {
-        let ranked = rank(&requiring(&rules), &fleet, &BTreeMap::new(), free()).unwrap();
+        let ranked = rank(&requiring(&rules), &fleet, &BTreeMap::new(), &free()).unwrap();
         let only = ranked.first().unwrap();
         assert!(only.fits, "{only:?}");
     }
     let past = Ranking { until: Some(Instant::now()), ..free() };
-    let ranked = rank(&requiring(&["cpus > 1"]), &fleet, &BTreeMap::new(), past).unwrap();
+    let ranked = rank(&requiring(&["cpus > 1"]), &fleet, &BTreeMap::new(), &past).unwrap();
     let only = ranked.first().unwrap();
     assert!(!only.fits);
     assert!(reason(only, "cpus > 1").detail.contains("not judged"), "{only:?}");

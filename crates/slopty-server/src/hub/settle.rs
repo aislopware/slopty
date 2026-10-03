@@ -122,6 +122,9 @@ impl Hub {
 /// or the terminal's program ended. Busy, waiting on the person, or holding work or prompts
 /// it scheduled, it does not.
 fn rests(state: &State, term: TermRef) -> bool {
+    if let Some(status) = state.board.seat_status(term) {
+        return resting(&status);
+    }
     let Some(session) = state
         .workers
         .get(&term.worker)
@@ -132,14 +135,18 @@ fn rests(state: &State, term: TermRef) -> bool {
     if matches!(session.state, SessionState::Exited { .. }) {
         return true;
     }
-    session.agent.as_ref().is_none_or(|agent| {
-        matches!(
-            agent.status,
-            AgentStatus::None
-                | AgentStatus::Idle
-                | AgentStatus::Done
-                | AgentStatus::Blocked(BlockReason::IdlePrompt)
-                | AgentStatus::Waiting { tasks: 0, crons: 0 }
-        )
-    })
+    session.agent.as_ref().is_none_or(|agent| resting(&agent.status))
+}
+
+/// Whether an agent with `status` rests at its prompt.
+const fn resting(status: &AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::None
+            | AgentStatus::Idle
+            | AgentStatus::Done
+            | AgentStatus::Failed { .. }
+            | AgentStatus::Blocked(BlockReason::IdlePrompt)
+            | AgentStatus::Waiting { tasks: 0, crons: 0 }
+    )
 }

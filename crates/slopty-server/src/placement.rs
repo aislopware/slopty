@@ -76,8 +76,35 @@ pub(crate) struct Candidate {
     pub fleet_live: u16,
 }
 
+/// An agent a worker must have installed, as its facts name it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct Installed {
+    /// The facts it is under: `agents` by its program, `acp` by the registry's name.
+    pub map: &'static str,
+    /// Its name there.
+    pub name: String,
+}
+
+impl Installed {
+    /// The agent whose program is `program`, under `agents`.
+    pub(crate) fn program(program: &str) -> Self {
+        Self { map: "agents", name: program.to_owned() }
+    }
+
+    /// `agent`, by the thread model's id: an ACP agent under `acp` by the registry's name,
+    /// Claude Code as `claude`, any other by its own name under `agents`.
+    pub(crate) fn of(agent: &slopty_proto::thread::AgentId) -> Self {
+        use slopty_proto::thread::AgentId;
+        match agent.acp_name() {
+            Some(name) => Self { map: "acp", name: name.to_owned() },
+            None if agent.is(AgentId::CLAUDE_CODE) => Self::program("claude"),
+            None => Self::program(&agent.0),
+        }
+    }
+}
+
 /// What a ranking is held to.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Ranking {
     /// The project's cap on its agents per worker, when there is a project.
     pub per_worker: Option<u16>,
@@ -87,9 +114,9 @@ pub(crate) struct Ranking {
     pub comprehensions: u8,
     /// When the ranking stops judging: a rule not judged by then does not hold.
     pub until: Option<Instant>,
-    /// The agent the start runs, by its name among a worker's `agents` facts: a worker that
-    /// does not report it installed does not fit, pinned or not.
-    pub agent: Option<&'static str>,
+    /// The agent the start runs, as a worker's facts name it: a worker that does not report
+    /// it installed does not fit, pinned or not.
+    pub agent: Option<Installed>,
 }
 
 /// A rule that compiled.
@@ -406,7 +433,7 @@ pub(crate) fn rank(
     placement: &Placement,
     candidates: &[Candidate],
     peers: &BTreeMap<TaskId, WorkerId>,
-    ranking: Ranking,
+    ranking: &Ranking,
 ) -> Result<Vec<Suggestion>, Outcome> {
     let Compiled { require, prefer } = compiled(placement, ranking.comprehensions)?;
     let mut ranked: Vec<(Suggestion, bool, u16, f64)> = candidates
@@ -479,7 +506,7 @@ fn judge(
     placement: &Placement,
     (require, prefer): (&[Rule], &[(Rule, i32)]),
     peers: &BTreeMap<TaskId, WorkerId>,
-    ranking: Ranking,
+    ranking: &Ranking,
 ) -> Suggestion {
     let mut reasons = Vec::new();
     let mut fits = true;
@@ -517,8 +544,8 @@ fn judge(
         };
         held("fleet live_per_worker", room, 0, detail);
     }
-    if let Some(agent) = ranking.agent {
-        let has = matches!(c.facts.get("agents"), Some(Fact::Map(installed))
+    if let Some(Installed { map, name: agent }) = &ranking.agent {
+        let has = matches!(c.facts.get(*map), Some(Fact::Map(installed))
             if installed.contains_key(agent));
         let detail = match (has, c.reported) {
             (true, _) => String::new(),

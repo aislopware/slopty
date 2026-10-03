@@ -104,7 +104,7 @@ fn kept(changes: &[Change]) -> Vec<Kept> {
 }
 
 fn who(term: TermRef, spawned: bool, branch: Option<&AgentBranch>) -> Assignee<'_> {
-    Assignee { term, spawned, branch, conversation: None, placed: None }
+    Assignee { term, spawned, branch, conversation: None, placed: None, thread: None }
 }
 
 fn assign(p: &mut Projects, task: TaskId, at: TermRef) -> Changed<Task> {
@@ -738,15 +738,23 @@ fn a_timeline_is_kept_and_paged_within_its_bytes() {
 }
 
 /// A step's start and end go on the timeline and its progress between on the card alone, its
-/// start time kept; and a server that stopped mid-step says, as it loads, that the step ended.
+/// start time kept, though the commits it works on are kept the moment they come. A server
+/// that stopped mid-step keeps it under way as it loads, and hands it, as it stood, to its
+/// worker once that is back, and only once.
 #[test]
-fn a_step_is_shown_as_it_goes_and_ends_with_the_server() {
-    use slopty_proto::project::{StepKind, StepState, TaskStep};
+fn a_step_is_shown_as_it_goes_and_is_taken_up_after_a_restart() {
+    use slopty_proto::project::{Commits, StepKind, StepState, TaskStep};
     let mut p = project(None);
     let a = task(&mut p, "A", &[]);
     let (worker, since) = (WorkerId::new(), now());
-    let step =
-        |state, since_ms| TaskStep { kind: StepKind::Clone, worker, state, since_ms, term: None };
+    let step = |state, since_ms| TaskStep {
+        kind: StepKind::Clone,
+        worker,
+        state,
+        since_ms,
+        term: None,
+        commits: None,
+    };
     let running = |percent| StepState::Running { phase: "Receiving objects".to_owned(), percent };
     let steps_logged = |p: &Projects| {
         status(p).timeline.iter().filter(|e| matches!(e.what, Moment::Step(_))).count()
@@ -758,10 +766,24 @@ fn a_step_is_shown_as_it_goes_and_ends_with_the_server() {
     assert!(moved.iter().all(|c| !c.durable), "progress is not kept");
     assert_eq!(get(&p, a).step.map(|s| (s.state, s.since_ms)), Some((running(Some(40)), since)));
     assert_eq!(steps_logged(&p), 1);
+    let commits = Commits { head: "a".repeat(40), base: "b".repeat(40) };
+    let with = TaskStep { commits: Some(commits.clone()), ..step(running(Some(50)), later) };
+    let kept = p.set_step(&id(), a, with, later).unwrap();
+    assert!(kept.iter().all(|c| c.durable), "the commits it works on are kept");
+    let moved = p.set_step(&id(), a, step(running(Some(60)), later), later).unwrap();
+    assert!(moved.iter().all(|c| !c.durable), "and carried, not kept again");
+    assert_eq!(get(&p, a).step.and_then(|s| s.commits), Some(commits.clone()));
 
     let mut p = Projects::restore(p.file(Vec::new(), 0));
-    let why = "the server stopped while it ran".to_owned();
-    assert_eq!(get(&p, a).step.map(|s| s.state), Some(StepState::Failed { why }));
+    let resuming = StepState::Running { phase: RESUMING.to_owned(), percent: None };
+    assert_eq!(get(&p, a).step.map(|s| (s.state, s.since_ms)), Some((resuming, since)));
+    assert_eq!(p.resumable(WorkerId::new()), [], "only its own worker takes it up");
+    let stood = TaskStep { commits: Some(commits), ..step(running(Some(60)), since) };
+    assert_eq!(p.resumable(worker), [(id(), a, stood)]);
+    assert_eq!(p.resumable(worker), [], "once");
+    let mut moved_on = Projects::restore(p.file(Vec::new(), 0));
+    moved_on.set_step(&id(), a, step(running(None), later), later).unwrap();
+    assert_eq!(moved_on.resumable(worker), [], "a step moved on from leaves nothing to take up");
     let done = StepState::Done { detail: "/home/c/slopty/clones/example.com/o/demo".to_owned() };
     p.set_step(&id(), a, step(done, later), later).unwrap();
     assert_eq!(steps_logged(&p), 2, "an end is logged");

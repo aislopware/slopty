@@ -623,6 +623,8 @@ impl Hub {
             Self::push_batch(&state, &batch);
         }
         self.unpark_deliveries(&mut state);
+        // What a restart of the server left under way on it is taken up.
+        self.resume_steps(&mut state, worker);
         // A lane that stopped for want of a worker, or one a restart left, goes on.
         self.kick_all(&mut state);
         if reshaped || !replaced.is_empty() {
@@ -872,6 +874,10 @@ impl Hub {
             Verb::RemoveWorktree { .. } => error(
                 ErrorCode::Forbidden,
                 "the server frees a finished task's worktree itself, once its agent is closed",
+            ),
+            Verb::StartThread { .. } => error(
+                ErrorCode::Forbidden,
+                "the server starts a task's thread itself; task_spawn with an agent asks for it",
             ),
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
@@ -1471,7 +1477,12 @@ impl Lease {
                         now,
                     ));
                 }
+                for (term, status) in state.board.seat_moves(worker) {
+                    hub.adopt(&mut state, term);
+                    moved.extend(state.projects.agent_status(term, &status, now));
+                }
                 hub.projects_moved(&mut state, moved);
+                hub.threads_ended(&mut state, worker, now);
             }
             ToServer::Hello { .. } | ToServer::Request { .. } | ToServer::Presence(_) => {
                 tracing::debug!(%worker, "ignored a message a worker does not send");
@@ -1619,6 +1630,9 @@ fn term_of(state: &State, session: SessionId) -> Option<TermRef> {
         .values()
         .find(|e| e.sessions.iter().any(|s| s.id == session))
         .map(|e| TermRef { worker: e.info.worker, session })
+        // A task's thread with no terminal of its own, by the seat it was started at.
+        .or_else(|| state.board.seat(session))
+        .or_else(|| state.projects.thread_seat(session))
 }
 
 /// `term`, if given, is a terminal the server knows.
@@ -1713,7 +1727,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ReviewCheckout { worker, .. }
         | Verb::Rebase { worker, .. }
         | Verb::FastForward { worker, .. }
-        | Verb::RemoveWorktree { worker, .. } => Some(*worker),
+        | Verb::RemoveWorktree { worker, .. }
+        | Verb::StartThread { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
             Some(item.worker)
         }
@@ -1774,6 +1789,9 @@ mod project_tests;
 
 #[cfg(test)]
 mod outcome_tests;
+
+#[cfg(test)]
+mod thread_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

@@ -14,15 +14,17 @@ mod golden_project {
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
-        AgentReport, Assignment, Bounds, Budget, Fact, Facts, Limits, LimitsChange, Live, Merge,
-        Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, Need, NodeDetail, Peer,
-        Placed, Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate,
+        AgentReport, Assignment, Bounds, Budget, Commits, Fact, Facts, Limits, LimitsChange, Live,
+        Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, Need, NodeDetail,
+        Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate,
         ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Spend, Spent, StepKind, StepState,
         Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep,
         TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
+    use slopty_proto::thread::wire::Start;
+    use slopty_proto::thread::{AgentId, ThreadId};
     use uuid::Uuid;
 
     fn hex(bytes: &[u8]) -> String {
@@ -138,6 +140,7 @@ mod golden_project {
             status: Some("waiting on a permission".to_owned()),
             assignment: Some(Assignment {
                 term: term(),
+                thread: None,
                 since_ms: at(),
                 ended_ms: None,
                 conversation: Some("0199a1b1-c3d4-7000-8000-00000000c0de".to_owned()),
@@ -170,6 +173,7 @@ mod golden_project {
                 },
                 since_ms: at(),
                 term: Some(term()),
+                commits: None,
             }),
             proposal: None,
         }
@@ -380,6 +384,61 @@ mod golden_project {
                 launch: launch(codex),
             }),
         );
+        let pi = Runner::Agent {
+            agent: AgentId::named(AgentId::PI),
+            prompt: Some("Read your brief.".to_owned()),
+            model: Some("sonnet".to_owned()),
+            args: Vec::new(),
+        };
+        snap(
+            "task_spawn_agent",
+            &request(Verb::TaskSpawn {
+                project: project_id(),
+                task: TaskId(6),
+                launch: launch(pi),
+            }),
+        );
+        let start = Start {
+            agent: AgentId::acp("gemini"),
+            cwd: "/w/slopty".to_owned(),
+            drive: None,
+            prompt: Some("Read your brief.".to_owned()),
+            model: None,
+            args: Vec::new(),
+        };
+        snap(
+            "start_thread",
+            &request(Verb::StartThread {
+                worker: term().worker,
+                start: Box::new(start),
+                seat: term().session,
+                env: vec![("SLOPTY_TASK".to_owned(), "6".to_owned())],
+                role: Some("You are the agent of task 6.".to_owned()),
+                worktree: Some("slopty-slopty-6".to_owned()),
+            }),
+        );
+        let made = Worktree {
+            name: "slopty-slopty-6".to_owned(),
+            path: "/w/slopty/.claude/worktrees/slopty-slopty-6".to_owned(),
+            branch: Some("worktree-slopty-slopty-6".to_owned()),
+            original_cwd: "/w/slopty".to_owned(),
+            original_branch: Some("main".to_owned()),
+        };
+        let thread =
+            ThreadId::from_uuid(Uuid::from_u128(0x0199_a000_0000_7000_8000_0000_0000_0006));
+        snap(
+            "thread_started",
+            &reply(Outcome::ThreadStarted { thread, worktree: Some(Box::new(made)) }),
+        );
+        let seated = Assignment {
+            term: term(),
+            thread: Some(thread),
+            since_ms: at(),
+            ended_ms: None,
+            conversation: None,
+            placed: None,
+        };
+        snap("assignment_thread", &seated);
         let apple = Need {
             name: "Apple work".to_owned(),
             paths: vec!["apps/slopty-ios".to_owned()],
@@ -575,8 +634,21 @@ mod golden_project {
             state: StepState::Failed { why: "CONFLICT (content): crates/a.rs".to_owned() },
             since_ms: at(),
             term: None,
+            commits: None,
         };
         snap("step_rebase_failed", &step);
+        let reading = TaskStep {
+            kind: StepKind::Review,
+            worker: term().worker,
+            state: StepState::Running {
+                phase: "Reading aaaaaaa over bbbbbbb".to_owned(),
+                percent: None,
+            },
+            since_ms: at(),
+            term: Some(term()),
+            commits: Some(Commits { head: commit('a'), base: commit('b') }),
+        };
+        snap("step_review_commits", &reading);
     }
 
     /// A task's pull request's own checks: the read the server asks of the worker its agent
@@ -854,6 +926,7 @@ mod golden_project {
                 state: StepState::Failed { why: "fatal: Authentication failed".to_owned() },
                 since_ms: at(),
                 term: None,
+                commits: None,
             }),
             Moment::Step(TaskStep {
                 kind: StepKind::Merge,
@@ -861,6 +934,7 @@ mod golden_project {
                 state: StepState::Done { detail: "main at dddddd".to_owned() },
                 since_ms: at(),
                 term: None,
+                commits: None,
             }),
         ];
         let timeline: Vec<TimelineEntry> =

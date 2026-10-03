@@ -33,7 +33,7 @@ pub(super) fn worker_on(
     worker_again(hub, worker, name, os, sessions)
 }
 
-fn worker_again(
+pub(super) fn worker_again(
     hub: &Hub,
     worker: WorkerId,
     name: &str,

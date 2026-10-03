@@ -15,15 +15,17 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use slopty_core::{WallMs, WorkerId};
+use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_proto::agent::{AgentStatus, BlockReason};
 use slopty_proto::orchestration::TermRef;
+use slopty_proto::project::SEAT_FACT;
 use slopty_proto::server::FromServer;
-use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::{
     Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, ThreadAt,
     Via,
 };
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
+use slopty_proto::thread::{Liveness, Phase, Request, ThreadId};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 use super::{Hub, WeakHub};
@@ -46,6 +48,11 @@ pub(super) struct Board {
     next_link: u64,
     /// Wakes [`Hub::publish_ladder`] when rows came.
     wake: Arc<Notify>,
+    /// What each task's thread with no terminal of its own was last said to be doing, by its
+    /// seat ([`Self::seat_moves`]).
+    seat_said: HashMap<TermRef, AgentStatus>,
+    /// Every task's thread a table has shown, by its worker: one gone from it since ended.
+    seen: std::collections::HashSet<(WorkerId, ThreadId)>,
 }
 
 /// What one thread says it spent so far, under the terminal its agent runs in.
@@ -94,12 +101,13 @@ impl Board {
             }
         };
         self.wake.notify_one();
+        self.seen.extend(table.values().filter(|r| seat_fact(r).is_some()).map(|r| (worker, r.id)));
         named
             .into_iter()
             .filter_map(|id| {
                 let row = table.get(&id)?;
                 let root = table.get(&root_of(table, row))?;
-                let session = row.terminal.or(root.terminal)?;
+                let session = seat_of(row).or_else(|| seat_of(root))?;
                 Some(Figures {
                     term: TermRef { worker, session },
                     thread: id,
@@ -110,14 +118,88 @@ impl Board {
             .collect()
     }
 
-    /// The thread whose TUI runs in `term` and hangs from no other, the latest to change when
-    /// there were several.
+    /// The thread seated at `term` (its TUI runs there, or a task's thread was started there)
+    /// and hanging from no other, the latest to change when there were several.
     fn thread_in(&self, term: TermRef) -> Option<&ThreadRow> {
         let table = self.tables.get(&term.worker)?;
         table
             .values()
-            .filter(|r| r.terminal == Some(term.session) && root_of(table, r) == r.id)
+            .filter(|r| seat_of(r) == Some(term.session) && root_of(table, r) == r.id)
             .max_by_key(|r| (r.updated_ms, r.id))
+    }
+
+    /// The seat `session` of a task's thread on any worker, as its row's [`SEAT_FACT`] says.
+    pub(super) fn seat(&self, session: SessionId) -> Option<TermRef> {
+        self.tables.iter().find_map(|(worker, table)| {
+            table
+                .values()
+                .any(|r| seat_fact(r) == Some(session))
+                .then_some(TermRef { worker: *worker, session })
+        })
+    }
+
+    /// The thread a task's start seated at `term`, as its row's [`SEAT_FACT`] says.
+    pub(super) fn seated_thread(&self, term: TermRef) -> Option<ThreadId> {
+        let table = self.tables.get(&term.worker)?;
+        table.values().find(|r| seat_fact(r) == Some(term.session)).map(|r| r.id)
+    }
+
+    /// Every task's thread with no terminal of its own whose agent is there, by its seat:
+    /// it counts as a live terminal does.
+    pub(super) fn live_seats(&self) -> Vec<TermRef> {
+        self.tables
+            .iter()
+            .flat_map(|(worker, table)| {
+                table
+                    .values()
+                    .filter(|r| r.terminal.is_none() && there(r))
+                    .filter_map(|r| Some(TermRef { worker: *worker, session: seat_fact(r)? }))
+            })
+            .collect()
+    }
+
+    /// Whether the thread `thread` on `worker` is in its table with its agent there; `None`
+    /// when the worker has published no table.
+    pub(super) fn thread_there(&self, worker: WorkerId, thread: ThreadId) -> Option<bool> {
+        let table = self.tables.get(&worker)?;
+        Some(table.get(&thread).is_some_and(there))
+    }
+
+    /// Whether a table of `worker`'s has shown the task's thread `thread`.
+    pub(super) fn seen(&self, worker: WorkerId, thread: ThreadId) -> bool {
+        self.seen.contains(&(worker, thread))
+    }
+
+    /// What the agent of the task's thread seated at `term`, with no terminal of its own, is
+    /// doing, as an agent's status reads: what a terminal's agent says through its hooks.
+    pub(super) fn seat_status(&self, term: TermRef) -> Option<AgentStatus> {
+        let row = self.thread_in(term).filter(|r| r.terminal.is_none())?;
+        Some(status_of(row))
+    }
+
+    /// Each task's thread on `worker` with no terminal of its own whose status moved since
+    /// last asked, with its status now; one gone is forgotten.
+    pub(super) fn seat_moves(&mut self, worker: WorkerId) -> Vec<(TermRef, AgentStatus)> {
+        let now: Vec<(TermRef, AgentStatus)> = self
+            .tables
+            .get(&worker)
+            .map(|table| {
+                table
+                    .values()
+                    .filter(|r| r.terminal.is_none() && root_of(table, r) == r.id)
+                    .filter_map(|r| {
+                        Some((TermRef { worker, session: seat_fact(r)? }, status_of(r)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.seat_said
+            .retain(|term, _| term.worker != worker || now.iter().any(|(seat, _)| seat == term));
+        now.into_iter()
+            .filter(|(term, status)| {
+                self.seat_said.insert(*term, status.clone()).as_ref() != Some(status)
+            })
+            .collect()
     }
 
     /// The last line the agent in `term` wrote, as its thread's row says.
@@ -132,13 +214,12 @@ impl Board {
         row.requests.first().map(|r| r.title.clone()).filter(|t| !t.trim().is_empty())
     }
 
-    /// Whether any thread in `term`, or under one there, has a request open.
+    /// Whether any thread seated at `term`, or under one there, has a request open.
     pub(super) fn asks(&self, term: TermRef) -> bool {
         self.tables.get(&term.worker).is_some_and(|table| {
             table.values().any(|r| {
                 !r.requests.is_empty()
-                    && table.get(&root_of(table, r)).and_then(|root| root.terminal)
-                        == Some(term.session)
+                    && table.get(&root_of(table, r)).and_then(seat_of) == Some(term.session)
             })
         })
     }
@@ -294,6 +375,42 @@ struct Root<'a> {
 }
 
 /// The thread `row` hangs from in `table`, through every parent there; itself when none.
+/// Where `row`'s thread sits, as the projects know its agent: the terminal its TUI runs in,
+/// else the seat a task's thread was started at ([`SEAT_FACT`]).
+fn seat_of(row: &ThreadRow) -> Option<SessionId> {
+    row.terminal.or_else(|| seat_fact(row))
+}
+
+/// The seat a task's thread was started at, as its row's [`SEAT_FACT`] says.
+fn seat_fact(row: &ThreadRow) -> Option<SessionId> {
+    row.facts.get(SEAT_FACT)?.parse().ok()
+}
+
+/// Whether `row`'s agent is there: its process has not ended.
+const fn there(row: &ThreadRow) -> bool {
+    !matches!(row.status.liveness, Liveness::Exited { .. })
+}
+
+/// `row`'s phase as an agent's status reads, for a task's thread with no hooks: a request
+/// open is a block on the person, by what it asks.
+fn status_of(row: &ThreadRow) -> AgentStatus {
+    match row.status.phase {
+        Phase::Working => AgentStatus::Working,
+        Phase::Waiting => AgentStatus::Waiting { tasks: 1, crons: 0 },
+        Phase::NeedsYou => AgentStatus::Blocked(match row.requests.first() {
+            Some(r) if r.kind == Request::APPROVAL => {
+                BlockReason::Permission { tool: r.title.clone() }
+            }
+            Some(r) if r.kind == Request::ELICITATION => BlockReason::Elicitation,
+            _ => BlockReason::Question,
+        }),
+        Phase::Done => AgentStatus::Done,
+        // The row names no error; the turn it ended is said by the outcome notice.
+        Phase::Failed => AgentStatus::Failed { error: "unknown".to_owned(), until_ms: None },
+        Phase::Idle | Phase::Stopped => AgentStatus::Idle,
+    }
+}
+
 fn root_of(table: &BTreeMap<ThreadId, ThreadRow>, row: &ThreadRow) -> ThreadId {
     let mut at = row.id;
     // A parent chain longer than the table loops: it ends where it started over.
@@ -390,7 +507,7 @@ fn ladder(
     projects: &Projects,
 ) -> Ladder {
     let roots = roots(tables);
-    let mut tiles: BTreeMap<(WorkerId, slopty_core::SessionId), Standing> = BTreeMap::new();
+    let mut tiles: BTreeMap<(WorkerId, SessionId), Standing> = BTreeMap::new();
     let mut workers: BTreeMap<WorkerId, Standing> = BTreeMap::new();
     let mut nodes: BTreeMap<NodeAt, Standing> = BTreeMap::new();
     let mut by_project: BTreeMap<slopty_proto::project::ProjectId, Standing> = BTreeMap::new();
@@ -399,8 +516,10 @@ fn ladder(
         let ranked = &root.ranked;
         fleet.add(ranked);
         workers.entry(ranked.at.worker).or_default().add(ranked);
-        let Some(session) = root.row.terminal else { continue };
-        tiles.entry((ranked.at.worker, session)).or_default().add(ranked);
+        if let Some(session) = root.row.terminal {
+            tiles.entry((ranked.at.worker, session)).or_default().add(ranked);
+        }
+        let Some(session) = seat_of(root.row) else { continue };
         let term = TermRef { worker: ranked.at.worker, session };
         let under = nodes_of(projects, term);
         if let Some(first) = under.first() {

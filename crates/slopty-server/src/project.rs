@@ -11,7 +11,7 @@
 //! as a [`ProjectUpdate`] and hands the store what it must keep ([`Kept`]). A refused change
 //! leaves everything as it was.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{SessionId, WallMs, WorkerId};
@@ -371,6 +371,8 @@ pub(crate) struct Assignee<'a> {
     pub conversation: Option<String>,
     /// Why the server started it on its worker, when it did.
     pub placed: Option<Placed>,
+    /// The thread its agent runs as, for a task started as one.
+    pub thread: Option<ThreadId>,
 }
 
 /// A refused change: its [`Outcome::Error`].
@@ -390,7 +392,13 @@ pub(crate) struct Projects {
     unclaimed: VecDeque<(TermRef, Natives)>,
     /// Each task's agent's turn, and what the nodes above are to hear of it.
     turns: turns::Turns,
+    /// The steps under way when the server stopped, as they stood, until their worker is back
+    /// to take them up ([`Self::resumable`]).
+    restarted: HashMap<(ProjectId, TaskId), TaskStep>,
 }
+
+/// What a step under way when the server stopped says until its worker is back to take it up.
+pub(crate) const RESUMING: &str = "Taken up again once its worker is back";
 
 fn refuse(code: ErrorCode, message: impl Into<String>) -> Refused {
     Outcome::Error { code, message: message.into() }
@@ -931,18 +939,18 @@ fn checked_change(change: &TaskChange) -> Result<(), Refused> {
 impl Projects {
     /// The projects a store kept.
     pub(crate) fn restore(file: ProjectsFile) -> Self {
+        let mut restarted = HashMap::new();
         let records = file
             .projects
             .into_iter()
             .map(|mut r| {
                 r.recount();
-                // No step goes on across a restart: one under way when the server stopped
-                // says it ended.
-                for step in r.tasks.iter_mut().filter_map(|t| t.step.as_mut()) {
-                    if matches!(step.state, StepState::Running { .. }) {
-                        let why = "the server stopped while it ran".to_owned();
-                        step.state = StepState::Failed { why };
-                    }
+                // A step under way when the server stopped is taken up again once its worker
+                // is back ([`Self::resumable`]); until then it says so.
+                for t in &mut r.tasks {
+                    let Some(step) = t.step.as_mut().filter(|s| s.running()) else { continue };
+                    restarted.insert((r.project.id.clone(), t.id), step.clone());
+                    step.state = StepState::Running { phase: RESUMING.to_owned(), percent: None };
                 }
                 // Nor a stretch of work: how long the server was away is not known to be
                 // work, and the agent's status after its worker registers starts the next.
@@ -953,7 +961,16 @@ impl Projects {
                 (r.project.id.clone(), r)
             })
             .collect();
-        Self { records, ..Self::default() }
+        Self { records, restarted, ..Self::default() }
+    }
+
+    /// The steps under way on `worker` when the server stopped, as they stood then, each once:
+    /// its worker is back to take them up.
+    pub(crate) fn resumable(&mut self, worker: WorkerId) -> Vec<(ProjectId, TaskId, TaskStep)> {
+        self.restarted
+            .extract_if(|_, step| step.worker == worker)
+            .map(|((project, task), step)| (project, task, step))
+            .collect()
     }
 
     /// Every project, as the store keeps it after `through` changes, beside `watched`.
@@ -1794,7 +1811,7 @@ impl Projects {
         terminals: &HashSet<TermRef>,
         now: WallMs,
     ) -> Changed<Task> {
-        let Assignee { term, spawned, branch, conversation, placed } = who;
+        let Assignee { term, spawned, branch, conversation, placed, thread } = who;
         if let Some((other, on)) = self.working_in(term).filter(|(p, t)| (*p, *t) != (id, task)) {
             return Err(refuse(
                 ErrorCode::Conflict,
@@ -1830,7 +1847,7 @@ impl Projects {
             moments.push(Moment::AgentGone { term: gone });
         }
         t.assignment =
-            Some(Assignment { term, since_ms: now, ended_ms: None, conversation, placed });
+            Some(Assignment { term, thread, since_ms: now, ended_ms: None, conversation, placed });
         // Whatever starts it, a start proposed for it is spent.
         t.proposal = None;
         moments.push(Moment::Assigned { term, spawned });
@@ -2104,6 +2121,8 @@ impl Projects {
             StepState::Failed { why } => why,
         };
         *text = clipped(text, SUMMARY_MAX);
+        // A step the task has moved on to leaves nothing from before a restart to take up.
+        self.restarted.remove(&(id.clone(), task));
         let record = self.record(id)?;
         let t =
             record.tasks.iter_mut().find(|t| t.id == task).ok_or_else(|| unknown_task(id, task))?;
@@ -2114,12 +2133,18 @@ impl Projects {
         };
         if !began && let Some(was) = &t.step {
             step.since_ms = was.since_ms;
+            if step.commits.is_none() {
+                step.commits.clone_from(&was.commits);
+            }
         }
+        // The commits a step works on are what it is taken up on after a restart: kept.
+        let commits_came = step.commits.is_some()
+            && t.step.as_ref().and_then(|s| s.commits.as_ref()) != step.commits.as_ref();
         t.step = Some(step.clone());
         t.updated_ms = now;
         let task_now = t.clone();
         let entry = logged.then(|| record.log(Some(task), Moment::Step(step), now));
-        Ok(vec![Change { durable: logged, ..record.task_update(&task_now, entry) }])
+        Ok(vec![Change { durable: logged || commits_came, ..record.task_update(&task_now, entry) }])
     }
 
     /// The terminal `term` is in the repository `id`: a project it orchestrates that knows no
@@ -2275,7 +2300,8 @@ impl Projects {
     }
 
     /// A worker registered with `sessions` open: every assignment on it to a terminal it no
-    /// longer has ended while the server was away.
+    /// longer has ended while the server was away. A thread's is judged by the worker's
+    /// thread table instead ([`Self::threads_on`]), since its seat need be no terminal.
     pub(crate) fn reconcile(
         &mut self,
         worker: WorkerId,
@@ -2285,10 +2311,34 @@ impl Projects {
         let gone: HashSet<TermRef> = self
             .records
             .values()
-            .flat_map(|r| r.tasks.iter().filter_map(open_term))
+            .flat_map(|r| r.tasks.iter())
+            .filter(|t| t.assignment.as_ref().is_some_and(|a| a.thread.is_none()))
+            .filter_map(open_term)
             .filter(|t| t.worker == worker && !sessions.contains(&t.session))
             .collect();
         gone.into_iter().flat_map(|term| self.session_ended(term, now)).collect()
+    }
+
+    /// The seat `session` of a task's thread still assigned, whatever its worker's table says
+    /// yet.
+    pub(crate) fn thread_seat(&self, session: SessionId) -> Option<TermRef> {
+        self.records
+            .values()
+            .flat_map(|r| r.tasks.iter())
+            .filter_map(|t| t.assignment.as_ref().filter(|a| a.open() && a.thread.is_some()))
+            .find(|a| a.term.session == session)
+            .map(|a| a.term)
+    }
+
+    /// Every open assignment on `worker` to a thread: its seat, the thread, and since when.
+    pub(crate) fn threads_on(&self, worker: WorkerId) -> Vec<(TermRef, ThreadId, WallMs)> {
+        self.records
+            .values()
+            .flat_map(|r| r.tasks.iter())
+            .filter_map(|t| t.assignment.as_ref().filter(|a| a.open()))
+            .filter(|a| a.term.worker == worker)
+            .filter_map(|a| Some((a.term, a.thread?, a.since_ms)))
+            .collect()
     }
 
     /// What the worker `worker` reported of what runs in a terminal: its node (a task's

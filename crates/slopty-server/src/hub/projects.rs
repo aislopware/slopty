@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
-use slopty_proto::agent::AgentKind;
+use slopty_proto::agent::{AgentBranch, AgentKind};
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, Verb};
 use slopty_proto::project::{
     Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
@@ -24,14 +24,15 @@ use slopty_proto::project::{
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
 use slopty_proto::terminal::{RepoId, SessionSummary};
-use slopty_proto::thread::AgentId;
+use slopty_proto::thread::wire::Start;
+use slopty_proto::thread::{AgentId, ThreadId};
 
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, WeakHub, branch_of, codex, digest, error, keep_start,
     keyed, known_term, remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
-use crate::placement::{self, Candidate, Ranking};
+use crate::placement::{self, Candidate, Installed, Ranking};
 use crate::project::{
     Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,
     Watched, clipped,
@@ -70,6 +71,11 @@ pub(super) fn live(state: &mut State) -> (HashSet<TermRef>, HashSet<TermRef>) {
                 agents.insert(term);
             }
         }
+    }
+    // A task's thread with no terminal of its own lives while its agent is there.
+    for seat in state.board.live_seats() {
+        terminals.insert(seat);
+        agents.insert(seat);
     }
     let now = tokio::time::Instant::now();
     let projects = &state.projects;
@@ -336,6 +342,20 @@ pub(super) fn keep(state: &mut State, keep: Keep) {
     {
         tracing::warn!("the projects keeper is gone; changes are no longer kept");
         state.keeper = None;
+    }
+}
+
+/// What in `args` would loosen the permissions of `agent` run as a thread. Claude Code's and
+/// Codex's are judged as their own starts' are. The server knows no other agent's flags (pi's,
+/// an ACP agent's), so without the person's leave such an agent takes none, and the first is
+/// named.
+fn agent_loosening(agent: &AgentId, args: &[String]) -> Option<String> {
+    if agent.is(AgentId::CLAUDE_CODE) {
+        loosening(args)
+    } else if agent.is(AgentId::CODEX) {
+        codex::loosening(args)
+    } else {
+        args.first().cloned()
     }
 }
 
@@ -1166,6 +1186,7 @@ impl Hub {
                         branch: branch.as_ref(),
                         conversation: None,
                         placed: None,
+                        thread: None,
                     };
                     let mut open = terminals.clone();
                     open.insert(term);
@@ -1369,7 +1390,7 @@ impl Hub {
         ranking.until = start.checked_add(RANK_DEADLINE);
         let ranked = tokio::task::spawn_blocking(move || {
             let _turn = permit;
-            placement::rank(&placement, &candidates, &peers, ranking)
+            placement::rank(&placement, &candidates, &peers, &ranking)
         })
         .await;
         let mut ranked = ranked
@@ -1708,6 +1729,7 @@ impl Hub {
         let runs = match &launch.run {
             Runner::Claude { .. } => CLAUDE.to_owned(),
             Runner::Codex { .. } => codex::PROGRAM.to_owned(),
+            Runner::Agent { agent, .. } => agent.0.clone(),
             Runner::Command { argv } => {
                 argv.first().map_or("a shell", |p| p.rsplit('/').next().unwrap_or(p)).to_owned()
             }
@@ -1793,6 +1815,7 @@ impl Hub {
                 .and_then(loosening)
                 .or_else(|| codex::args_of(argv).and_then(codex::loosening)),
             Runner::Codex { args, .. } => codex::loosening(args),
+            Runner::Agent { agent, args, .. } => agent_loosening(agent, args),
         };
         flag.map_or(Ok(()), |flag| Err(loosened(&flag, Some(project))))
     }
@@ -1900,7 +1923,7 @@ impl Hub {
             return Err(error(ErrorCode::Unplaced, &message));
         }
         fleet_room(state, &running, bounds, Some(worker))?;
-        let agent = matches!(launch.run, Runner::Claude { .. } | Runner::Codex { .. });
+        let agent = !matches!(launch.run, Runner::Command { .. });
         Ok(Self::place(state, worker, Some((project.clone(), task)), agent, placed))
     }
 
@@ -1910,13 +1933,15 @@ impl Hub {
         state: &mut State,
         (project, task): (&ProjectId, TaskId),
         term: TermRef,
-        conversation: Option<String>,
+        (conversation, thread): (Option<String>, Option<(ThreadId, Option<AgentBranch>)>),
     ) -> Result<Task, Outcome> {
         let (mut terminals, _) = live(state);
         terminals.insert(term);
-        let branch = branch_of(state, term);
+        let (thread, made) = thread.map_or((None, None), |(id, made)| (Some(id), made));
+        let branch = made.or_else(|| branch_of(state, term));
         let placed = state.starting.iter().find(|s| s.term == term).and_then(|s| s.placed.clone());
-        let who = Assignee { term, spawned: true, branch: branch.as_ref(), conversation, placed };
+        let who =
+            Assignee { term, spawned: true, branch: branch.as_ref(), conversation, placed, thread };
         let (task, updates) =
             state.projects.assign(project, task, who, &terminals, WallMs::now())?;
         state.starting.retain(|s| s.term != term);
@@ -2048,6 +2073,10 @@ impl Hub {
                                 Some(Worktree::Named(format!("slopty-{project}-{task}")))
                             }
                             Runner::Codex { .. } => Some(Worktree::Codex),
+                            // The worker makes it, where Claude Code makes its own.
+                            Runner::Agent { .. } => {
+                                Some(Worktree::Named(format!("slopty-{project}-{task}")))
+                            }
                             Runner::Claude { .. } | Runner::Command { .. } => None,
                         };
                         Place { path, worktree }
@@ -2120,13 +2149,38 @@ impl Hub {
                 };
                 (open, None)
             }
+            // Its adapter gives it Slopty's tools and its role through the agent's own doors.
+            Runner::Agent { agent, prompt, model, args } => {
+                let worktree = match worktree {
+                    Some(Worktree::Named(name)) => Some(name),
+                    Some(Worktree::Codex) | None => None,
+                };
+                let start = Start { agent, cwd, drive: None, prompt, model, args };
+                let start = Verb::StartThread {
+                    worker,
+                    start: Box::new(start),
+                    seat: term.session,
+                    env,
+                    role: Some(role),
+                    worktree,
+                };
+                (start, None)
+            }
         };
         // A refusal is the worker's answer, and a repeat under the key is the worker's to
         // answer; one whose answer was lost may still open, and is put on its task when its
         // worker announces it.
         let outcome = self.forward(key.map(|k| k.part("start")), start).await;
-        let opened = match outcome {
-            Outcome::Opened(opened) => opened,
+        let (opened, thread) = match outcome {
+            Outcome::Opened(opened) => (opened, None),
+            Outcome::ThreadStarted { thread, worktree } => {
+                let branch = worktree.map(|w| AgentBranch {
+                    session: term.session,
+                    pr: None,
+                    worktree: Some(*w),
+                });
+                (term, Some((thread, branch)))
+            }
             other if maybe_done(&other) => {
                 if let Some(s) = self.inner.state.lock().starting.iter_mut().find(|s| s.id == id) {
                     s.conversation = conversation;
@@ -2141,7 +2195,7 @@ impl Hub {
             &mut self.inner.state.lock(),
             (project, task),
             opened,
-            conversation,
+            (conversation, thread),
         );
         match assigned {
             Ok(task) => Outcome::Task(Box::new(task)),
@@ -2161,11 +2215,28 @@ impl Hub {
         };
         let Some((project, task)) = start.task.clone() else { return };
         let conversation = start.conversation.clone();
-        match self.assign_started(state, (&project, task), term, conversation) {
+        let thread = state.board.seated_thread(term).map(|thread| (thread, None));
+        match self.assign_started(state, (&project, task), term, (conversation, thread)) {
             Ok(_) => tracing::info!(%project, %task, session = %term.session, "a lost start found"),
             Err(refused) => {
                 tracing::warn!(%project, %task, ?refused, "a lost start found and not taken");
                 state.starting.retain(|s| s.term != term);
+            }
+        }
+    }
+
+    /// Each task's thread on `worker` whose agent is gone from the worker's table ends its
+    /// assignment, as a closed terminal does: at once when the table showed it before, and
+    /// one it never showed once [`STARTED_GRACE`] has passed since its start, so a table that
+    /// has not caught up with a start ends nothing.
+    pub(super) fn threads_ended(&self, state: &mut State, worker: WorkerId, now: WallMs) {
+        let grace = u64::try_from(STARTED_GRACE.as_millis()).unwrap_or(u64::MAX);
+        for (term, thread, since) in state.projects.threads_on(worker) {
+            let gone = state.board.thread_there(worker, thread) == Some(false);
+            let due = state.board.seen(worker, thread) || now.millis_since(since) >= grace;
+            if gone && due {
+                tracing::info!(session = %term.session, %thread, "a task's thread ended");
+                self.session_closed(state, term);
             }
         }
     }
@@ -2299,7 +2370,7 @@ impl Gathered {
     /// Ranked for `wanted`: the agent it runs must be installed, and its needs' rules say
     /// their names.
     fn wanting(mut self, wanted: &Wanted) -> Self {
-        self.ranking.agent = wanted.agent;
+        self.ranking.agent.clone_from(&wanted.agent);
         self.named.clone_from(&wanted.named);
         self
     }
@@ -2312,22 +2383,23 @@ pub(super) struct Wanted {
     placement: Placement,
     /// Each rule a need brought, trimmed as a reason names it, and that need's name.
     named: Vec<(String, String)>,
-    /// The agent it runs, by its name among a worker's `agents` facts.
-    agent: Option<&'static str>,
+    /// The agent it runs, as a worker's facts name it.
+    agent: Option<Installed>,
 }
 
-/// The agent `run` starts, by its name among a worker's `agents` facts: a worker must have it
-/// installed to be chosen. A command is judged by its program, so `claude …` run as a command
-/// still needs Claude Code.
-fn agent_of(run: &Runner) -> Option<&'static str> {
+/// The agent `run` starts, as a worker's facts name it: a worker must have it installed to be
+/// chosen. A command is judged by its program, so `claude …` run as a command still needs
+/// Claude Code.
+fn agent_of(run: &Runner) -> Option<Installed> {
     match run {
-        Runner::Claude { .. } => Some(CLAUDE),
-        Runner::Codex { .. } => Some(codex::PROGRAM),
+        Runner::Claude { .. } => Some(Installed::program(CLAUDE)),
+        Runner::Codex { .. } => Some(Installed::program(codex::PROGRAM)),
+        Runner::Agent { agent, .. } => Some(Installed::of(agent)),
         Runner::Command { argv } => {
             let program = argv.first()?;
             match program.rsplit('/').next().unwrap_or(program) {
-                CLAUDE => Some(CLAUDE),
-                codex::PROGRAM => Some(codex::PROGRAM),
+                CLAUDE => Some(Installed::program(CLAUDE)),
+                codex::PROGRAM => Some(Installed::program(codex::PROGRAM)),
                 _ => None,
             }
         }
@@ -2496,7 +2568,7 @@ mod tests {
         let fits = |rule: &str| {
             let placement = Placement { require: vec![rule.to_owned()], ..Placement::default() };
             let ranking = Ranking { comprehensions: 2, ..Ranking::default() };
-            let ranked = placement::rank(&placement, &fleet, &BTreeMap::new(), ranking).unwrap();
+            let ranked = placement::rank(&placement, &fleet, &BTreeMap::new(), &ranking).unwrap();
             let mut fit: Vec<String> =
                 ranked.into_iter().filter(|s| s.fits).map(|s| s.name).collect();
             fit.sort();

@@ -17,8 +17,8 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentKind;
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    Merge, Moment, PROJECT_ENV, ProjectId, REVIEW_DIFF, ReviewRun, ReviewVerdict, Reviewer,
-    StepKind, StepState, TASK_ENV, Task, TaskId, TaskState, TaskStep,
+    Commits, Merge, Moment, PROJECT_ENV, ProjectId, REVIEW_DIFF, ReviewRun, ReviewVerdict,
+    Reviewer, StepKind, StepState, TASK_ENV, Task, TaskId, TaskState, TaskStep,
 };
 
 use super::projects::{fleet_room, live, started_args};
@@ -47,11 +47,34 @@ impl Reading {
     }
 }
 
-/// The reviewers at work, by the task each reads. Not kept across a restart: a review under
-/// way then is marked as stopped on load, and the person settles it.
+/// The reviewers at work, by the task each reads. After a restart of the server, a reviewer
+/// whose terminal still runs is read again from its step ([`Hub::resume_review`]).
 pub(super) type Reviews = HashMap<(ProjectId, TaskId), Reading>;
 
 impl Hub {
+    /// The reviewer of `task` a restart of the server left at work, as its step stood: still
+    /// running in `running`, it is at work again and its verdict is taken; gone, or with no
+    /// commits kept, it stops, and the person says whether the work may merge.
+    pub(super) fn resume_review(
+        &self,
+        state: &mut State,
+        (project, task): (&ProjectId, TaskId),
+        running: Option<TermRef>,
+        step: TaskStep,
+    ) {
+        if let (Some(term), Some(commits)) = (running, step.commits.clone()) {
+            let since = tokio::time::Instant::now();
+            let phase = format!("Reading {} over {}", short(&commits.head), short(&commits.base));
+            let Commits { head, base } = commits;
+            state.reviews.insert((project.clone(), task), Reading { term, head, base, since });
+            let reading = StepState::Running { phase, percent: None };
+            self.step(state, (project, task), TaskStep { state: reading, ..step });
+            return;
+        }
+        let why = "The reviewer ended while the server was away".to_owned();
+        self.step(state, (project, task), TaskStep { state: StepState::Failed { why }, ..step });
+    }
+
     /// Start a reviewer on `task`'s work: the commit its verifier passed, else its branch as
     /// it is. The lane goes on at once; the verdict comes later.
     pub(super) async fn review_job(&self, project: &ProjectId, task: TaskId) -> Went {
@@ -69,6 +92,7 @@ impl Hub {
             state,
             since_ms: WallMs::now(),
             term,
+            commits: None,
         };
         if let Err(why) = self.room_for_a_reviewer(project, place.worker) {
             let waiting = format!("Waiting to start: {why}");
@@ -137,8 +161,11 @@ impl Hub {
             let phase = format!("Reading {} over {}", short(&head), short(&base));
             (spawn, phase)
         };
-        // On the task before it starts, so a verdict that comes at once finds it there.
-        self.progress(at, step(StepState::Running { phase, percent: None }, Some(term)));
+        // On the task before it starts, so a verdict that comes at once finds it there, with
+        // the commits it reads kept for a restart of the server to take it up again.
+        let commits = Some(Commits { head: head.clone(), base: base.clone() });
+        let reading = step(StepState::Running { phase, percent: None }, Some(term));
+        self.progress(at, TaskStep { commits, ..reading });
         match self.forward(None, spawn).await {
             Outcome::Opened(_) => {}
             other => {
@@ -222,6 +249,7 @@ impl Hub {
                     state: StepState::Done { detail },
                     since_ms: WallMs::now(),
                     term: None,
+                    commits: None,
                 }),
                 merge: Queue::Set(Merge::Queued { since_ms: WallMs::now() }),
                 moment: Some(Moment::Reviewed(run.clone())),
@@ -267,6 +295,7 @@ impl Hub {
                 state: StepState::Failed { why: "The reviewer ended without a verdict".to_owned() },
                 since_ms: WallMs::now(),
                 term: None,
+                commits: None,
             };
             match state.projects.set_step(&key.0, key.1, step, WallMs::now()) {
                 Ok(updates) => self.projects_moved(state, updates),

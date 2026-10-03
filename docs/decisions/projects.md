@@ -685,8 +685,8 @@ MonoCode)
   worker's `repos` fact, so the next task finds the clone before any shell has opened in it.
   After a restart that list is empty, and a worker asked again answers from the clone it
   already has.
-- A step under way when the server stops is marked failed as the store loads, so no card
-  keeps saying it is cloning.
+- A clone under way when the server stops is made again once its worker is back (see "A step
+  a restart left under way is taken up again").
 - Rejected: **cloning through the server** (a bare repository there, as the phase 2 design
   has it). It needs `git-remote-slopty` and a server-side copy of every repository. A worker
   can reach the forge the person already uses, with credentials the person already has.
@@ -864,8 +864,9 @@ Not built in Phase 1:
 **The queue survives a restart.** ✅ 2026-10-01
 - The lane keeps nothing the store does not. Each time, it reads its next job from the tasks
   (`Projects::next_job`): the longest verifying task, else the head of the queue.
-- A step under way when the server stopped is marked failed on load ("the server stopped while
-  it ran"). The task keeps its state and its place, and registration starts the lane again.
+- A step under way when the server stopped is taken up again once its worker is back (see "A
+  step a restart left under way is taken up again"). The task keeps its state and its place,
+  and registration starts the lane again.
 - Every move the lane makes is one store change with at most one timeline entry
   (`Projects::advance`), checked against `TaskState::may_become`.
 
@@ -996,7 +997,8 @@ Not built in Phase 1:
     passed. It closes whichever reviewer session is open or kept.
 - A reviewer that ends with no verdict leaves the step failed, "The reviewer ended without a
   verdict". The task waits for the person and is not read again on its own. `task merge`
-  starts the checks afresh. So does a server restart that finds a review under way.
+  starts the checks afresh. A reviewer whose terminal ended while the server was away leaves
+  the step failed the same way, "The reviewer ended while the server was away".
 - A new head clears the old word. Each report of done, `task merge` and the person's ask for a
   merge drop the last verifier run, the last review and the step, and close a reviewer still
   reading.
@@ -1504,7 +1506,7 @@ Tests:
 
 **Codex runs a task, with Slopty's tools.** ✅ 2026-10-02
 - `Runner::Codex { prompt, args }` (MCP `task_spawn` with `agent: "codex"`, `slopty task spawn
-  --codex`) opens the person's own `codex`, unmodified. The server gives it its role through
+  --agent codex`) opens the person's own `codex`, unmodified. The server gives it its role through
   Codex's own `developer_instructions` config (`-c developer_instructions="…"`), the place Codex
   documents for instructions a tool adds, rather than inside the first prompt. The brief stays
   the first prompt the person sees, and the role is not lost when the conversation compacts.
@@ -1739,6 +1741,87 @@ R2).
   `a_worktree_in_use_or_not_committed_is_kept` (`slopty-worker`, on real git repositories),
   `a_merged_task_s_worktree_goes_once_its_agent_is_closed` (`slopty-server`), and the goldens
   `remove_worktree` and `worktree_removed`.
+
+**Any agent runs a task, as a thread.** ✅ 2026-10-04 (server, wire and the worker's door; each
+adapter's tool wiring follows in the agents lane)
+- Before: a task ran Claude Code or Codex in a terminal, or a command. pi and ACP agents run
+  with no terminal, as threads of the worker's thread host, so they could start as threads
+  but never run a task with Slopty's tools, a role and a count. The whole project model knew
+  an agent only by the terminal it ran in.
+- Prior art: T3 Code's `delegate_task`, which targets any provider instance and model.
+- `Runner::Agent { agent, prompt, model, args }` names any agent by the thread model's id. MCP
+  `task_spawn` and `slopty task spawn --agent <name>` take `claude` (the default) and `codex`,
+  which keep their own runners in a terminal, and `pi`, `acp:<name>` or an ACP agent's bare
+  registry name, which become `Runner::Agent`. `model` goes as Claude Code's and Codex's
+  `--model`, and as the thread's model for the rest.
+- Placement holds it to a worker that has the agent installed, as it does Claude Code and
+  Codex: built-in agents under the `agents` facts, ACP agents under `acp` by the registry's
+  name. The server cannot judge pi's or an ACP agent's flags, so without the person's
+  `permission_flags` such an agent takes no arguments, and the first is named in the refusal.
+- The server chooses a seat, a session id, and asks the worker for `StartThread { start,
+  seat, env, role, worktree }`. The worker answers `ThreadStarted { thread, worktree }`. The
+  assignment keeps the seat as its `term` and the thread as `thread`.
+- **The seat makes a thread look like a terminal to everything else.** Its tools speak as the
+  seat, with the worker's token for it, so `Speaker::Proven(seat)` finds the task as a
+  terminal's tools do. Deliveries go to the seat. Settling closes it with `Close`, which the
+  worker turns into ending the thread's agent. Its row in the worker's thread table carries
+  the fact `slopty.seat`, so the board finds the row by the seat. Its last words, its
+  requests, its spend and its rung on the ladder all work as they do for a terminal's thread.
+- Its liveness and state come from that row. A row whose agent is there counts as a live
+  agent. Its phase moves the task as a hook's status does (working runs it, a request open
+  blocks it on the person, a rest waits), which also feeds the outcome notices. A row gone,
+  or one whose process exited, ends the assignment. That happens at once for a row the table
+  showed before, and only after the 30 s start grace for one it never showed, so a table
+  behind the start ends nothing. A worker re-registering no longer ends a thread's
+  assignment for want of a terminal.
+- A writing task beside a clone gets a worktree the worker makes, named and placed as Claude
+  Code's `--worktree` would make it (`.claude/worktrees/slopty-<project>-<task>`, branch
+  `worktree-…`, from `origin`'s default branch, else `HEAD`). Claude Code's resets a branch of
+  that name to the base; the worker's checks out a branch already there as it is, so a task
+  tried again keeps its work. The worktree comes back on the answer, so the card names it from
+  the start, and settling frees it as any other.
+- What the agents lane adds behind the worker's `TaskThreads` door: starting the thread with
+  the seat's fact and environment, opening a terminal agent's thread under the seat, the role
+  through each agent's door (Codex's `developerInstructions`, pi's `--append-system-prompt`,
+  ahead of the first prompt for ACP), Slopty's tools (Codex's MCP config, ACP's
+  `session/new` `mcpServers`, a pi extension over `slopty mcp`), deliveries to a seat as a
+  queued message, and `close` by the seat.
+- Tests: `any_agent_runs_a_task_as_a_thread` (`slopty-server`), the goldens `task_spawn_agent`,
+  `start_thread`, `thread_started` and `assignment_thread`, and
+  `a_worktree_is_made_as_claude_code_would_and_a_branch_there_is_kept` (`slopty-worker`).
+
+**A step a restart left under way is taken up again.** ✅ 2026-10-04
+- Before: a step running when the server stopped was marked failed as the store loaded. A
+  verifier still running on its worker was then run again from the start. A reviewer at work
+  left its task for the person, and a branch on its way home or a clone stopped half done.
+- On load the step stays running, its phase "Taken up again once its worker is back", with
+  when it began and the commits it works on. The step as it stood is kept in memory
+  (`Projects::restarted`). When its worker registers, the server takes it up
+  (`Hub::resume_steps`), each step once. A step the task has moved on from in the meantime
+  leaves nothing to take up.
+  - **Clone:** made again. A worker asked again answers from the clone it already has, so
+    this is safe to repeat. The task start that asked for it had already failed with the
+    server, so the next start finds the clone.
+  - **Bringing a branch home:** sent again. It only sets names the server alone uses.
+  - **Verify:** a verifier whose terminal still runs is followed to its verdict, which is
+    judged like any other. It is not run a second time, and the timeline has one start. One
+    whose terminal is gone is run again by the lane, which closes the old terminal first.
+  - **Review:** a reviewer whose terminal still runs is at work again on the commits it was
+    reading, and its verdict counts. One whose terminal ended leaves the step failed and the
+    task to the person, as a reviewer ending without a verdict does. One still waiting to
+    start is started by the lane.
+  - **Merge and rebase:** the lane runs them again from the queue. They start from the
+    target as it is now, as after any failure, so repeating them does no harm.
+- `TaskStep.commits` (head and base) is what makes a verifier or reviewer resumable. It is
+  stored as soon as it arrives, although the progress between a step's start and end is not.
+- Rejected: **failing every step on load.** That runs a long verifier twice and throws away a
+  review the reviewer is still writing.
+- Tests: `a_step_is_shown_as_it_goes_and_is_taken_up_after_a_restart`,
+  `the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart`,
+  `a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own`,
+  `a_verifier_left_running_by_a_restart_is_followed_to_its_verdict` and
+  `a_reviewer_left_reading_by_a_restart_is_heard_once_its_worker_is_back` (`slopty-server`),
+  and the golden `step_review_commits`.
 
 ## Phases
 

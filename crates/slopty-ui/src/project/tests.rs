@@ -293,6 +293,7 @@ fn every_moment_reads_as_a_sentence() {
             state,
             since_ms: AT,
             term: None,
+            commits: None,
         })
     };
     let running = |phase: &str, percent| StepState::Running { phase: phase.into(), percent };
@@ -1120,6 +1121,7 @@ fn only_what_holds_a_task_up_or_waits_on_the_person_is_news() {
             state: StepState::Failed { why: why.into() },
             since_ms: AT,
             term: None,
+            commits: None,
         })
     };
     assert_eq!(

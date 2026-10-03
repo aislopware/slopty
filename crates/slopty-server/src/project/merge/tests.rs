@@ -5,7 +5,7 @@ use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{LimitsChange, StepKind, TaskChange, TaskSpec};
 
 use super::*;
-use crate::project::{Caller, Keep, NewProject, ProjectsFile, Queue, Running};
+use crate::project::{Caller, Keep, NewProject, ProjectsFile, Queue, RESUMING, Running};
 
 fn at(ms: u64) -> WallMs {
     WallMs::from_millis(ms.saturating_add(1_790_000_000_000))
@@ -72,8 +72,8 @@ fn verifying() -> Advance {
 
 /// The queue is its tasks: those done and queued, the longest waiting first, with a task
 /// waiting for its verifier taken before any. It reads back the same from the store's file and
-/// from its log replayed, and a merge under way when the server stopped says it ended, its
-/// task still in its place.
+/// from its log replayed, and a merge under way when the server stopped waits for its worker,
+/// its task still in its place for the lane to merge again.
 #[test]
 fn the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart() {
     let mut log = Vec::new();
@@ -98,6 +98,7 @@ fn the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart() {
         state: StepState::Running { phase: "Rebasing onto main".to_owned(), percent: None },
         since_ms: at(6),
         term: None,
+        commits: None,
     };
     let under_way = Advance { step: Some(merging), ..Advance::default() };
     log.extend(p.advance(&id(), b, under_way, at(6)).unwrap().1);
@@ -113,11 +114,8 @@ fn the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart() {
         assert_eq!(back.queue(&id()), [b, a], "the queue as it stood");
         assert_eq!(back.next_job(&id()), Some(Job::Verify(c)));
         let step = back.task(&id(), b).unwrap().step.clone().unwrap();
-        assert_eq!(
-            step.state,
-            StepState::Failed { why: "the server stopped while it ran".to_owned() },
-            "no merge goes on across a restart"
-        );
+        let resuming = StepState::Running { phase: RESUMING.to_owned(), percent: None };
+        assert_eq!(step.state, resuming, "taken up once its worker is back");
         assert_eq!(back.task(&id(), b).unwrap().merge, Some(Merge::Queued { since_ms: at(10) }));
     }
 }
@@ -173,7 +171,8 @@ fn the_person_asks_for_a_merge_and_the_queue_takes_only_what_is_done() {
 /// With a reviewer asked for, a task's verifier passing leaves it to be read next, at once
 /// for a task with no verifier. A reviewer at work holds only its own task, and the lane
 /// verifies the next beside it. A review under way when the server stopped holds its task
-/// for the person, never started again on its own. A review keeps at most a card's worth:
+/// until its worker is back to take it up, never started again on its own. A review keeps at
+/// most a card's worth:
 /// what blocks first, the rest counted.
 #[test]
 fn a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own() {
@@ -201,6 +200,7 @@ fn a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own() {
         state: StepState::Running { phase: "Reading".to_owned(), percent: None },
         since_ms: at(3),
         term: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),
+        commits: None,
     };
     let at_work = Advance { step: Some(reading), ..Advance::default() };
     log.extend(p.advance(&id(), a, at_work, at(3)).unwrap().1);
@@ -214,8 +214,9 @@ fn a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own() {
     }
     let back = Projects::restore(replayed);
     let step = back.task(&id(), a).unwrap().step.clone().unwrap();
-    assert!(matches!(step.state, StepState::Failed { .. }), "{step:?}");
-    assert_eq!(back.next_job(&id()), Some(Job::Verify(b)), "held for the person, not read again");
+    let resuming = StepState::Running { phase: RESUMING.to_owned(), percent: None };
+    assert_eq!(step.state, resuming);
+    assert_eq!(back.next_job(&id()), Some(Job::Verify(b)), "held, not read again");
 
     let mut bare = reviewed(None, Some("goldens"), &mut Vec::new());
     let c = task(&mut bare, "C");

@@ -14,10 +14,11 @@ use slopty_proto::project::{
 use slopty_proto::server::Os;
 
 use super::super::project_tests::{
-    answer, create, in_repo, new_task, project, status, task_now, worker_on,
+    answer, create, in_repo, new_task, project, status, task_now, worker_again, worker_on,
 };
 use super::super::tests::summary;
 use super::super::*;
+use crate::project::RESUMING;
 
 const URL: &str = "https://example.com/o/demo.git";
 const TREE: &str = "/w/demo/.claude/worktrees/slopty-slopty-1";
@@ -260,6 +261,82 @@ async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_
     );
     let merged = studio.told(orchestrator.session, "merged into main").await;
     assert!(merged.contains(&format!("task {task} merged into main at aaaaaaa")), "{merged}");
+}
+
+/// The hub after a restart of the server, from what `hub` kept: the studio of [`fleet`]
+/// registers again, its orchestrator and agent still in their places beside `running`.
+pub(in crate::hub) fn restarted(
+    hub: Hub,
+    studio: Studio,
+    (orchestrator, agent): (TermRef, TermRef),
+    running: &[SessionId],
+) -> (Hub, Studio) {
+    let (file, known) = (hub.projects_file(0), hub.directory());
+    drop(studio);
+    drop(hub);
+    let hub = Hub::new("server".to_owned(), known);
+    hub.adopt_projects(file);
+    let mut sessions = vec![
+        in_repo(orchestrator.session, "/w/demo", Some(URL)),
+        in_repo(agent.session, TREE, Some(URL)),
+    ];
+    sessions.extend(running.iter().map(|s| summary(*s)));
+    let (_, lease, rx) = worker_again(&hub, orchestrator.worker, "studio", Os::MacOs, sessions);
+    (hub, Studio { lease, rx, delivered: Vec::new() })
+}
+
+/// A verifier still running when the server stopped is followed again once its worker is
+/// back, not run a second time: the step waits for the worker meanwhile, keeps when it began
+/// and the commits it checks, and the verdict it ends with is judged as any.
+#[tokio::test]
+async fn a_verifier_left_running_by_a_restart_is_followed_to_its_verdict() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, orchestrator, task, agent) = fleet(&hub).await;
+    done(&hub, task, agent).await;
+    let (id, verb) = studio.request().await;
+    let Verb::Verify { worker, session, .. } = verb else { panic!("{verb:?}") };
+    let term = TermRef { worker, session };
+    studio.lease.handle(ToServer::SessionChanged(summary(session)));
+    answer(&studio.lease, id, Outcome::Verifying { term, head: commit('a'), base: commit('b') });
+    let since = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let step = task_now(&hub, task).await.step.unwrap();
+            if step.commits.is_some() {
+                return step.since_ms;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (file, known) = (hub.projects_file(0), hub.directory());
+    let away = Hub::new("server".to_owned(), known);
+    away.adopt_projects(file);
+    let step = task_now(&away, task).await.step.unwrap();
+    let resuming = StepState::Running { phase: RESUMING.to_owned(), percent: None };
+    assert_eq!((step.state, step.term), (resuming, Some(term)), "waiting for its worker");
+    drop(away);
+
+    let (hub, mut studio) = restarted(hub, studio, (orchestrator, agent), &[session]);
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::ReadScreen { term: t } if t == term), "no second run: {verb:?}");
+    answer(&studio.lease, id, screen(&["   Compiling demo"]));
+    let exited = SessionSummary { state: SessionState::Exited { status: 0 }, ..summary(session) };
+    studio.lease.handle(ToServer::SessionChanged(exited));
+    let (id, verb) = studio.past_screens(&["test result: ok. 12 passed", ""]).await;
+    assert!(matches!(verb, Verb::Close { term: t } if t == term), "a pass closes it: {verb:?}");
+    answer(&studio.lease, id, Outcome::Done);
+    let (_, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::Rebase { .. }), "then the queue: {verb:?}");
+    let card = task_now(&hub, task).await;
+    let run = card.verified.unwrap();
+    assert_eq!((run.passed, run.head, run.base), (true, commit('a'), commit('b')));
+    let entries = status(&hub).await.timeline;
+    let began = entries.iter().filter(
+        |e| matches!(&e.what, Moment::Step(s) if s.kind == StepKind::Verify && s.since_ms == since),
+    );
+    assert_eq!(began.count(), 1, "one run, begun once");
 }
 
 /// A verifier that fails gives the task back: it waits at its agent's prompt again, out of the

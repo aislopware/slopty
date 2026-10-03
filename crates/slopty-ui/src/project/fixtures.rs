@@ -72,6 +72,7 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -
 pub(crate) fn on(mut card: TaskCard, worker: WorkerId, session: SessionId) -> TaskCard {
     card.assignment = Some(Assignment {
         term: TermRef { worker, session },
+        thread: None,
         since_ms: AT,
         ended_ms: None,
         conversation: None,
@@ -145,7 +146,7 @@ pub(crate) fn step(
     state: StepState,
     term: Option<TermRef>,
 ) -> TaskStep {
-    TaskStep { kind, worker, state, since_ms: AT, term }
+    TaskStep { kind, worker, state, since_ms: AT, term, commits: None }
 }
 
 /// `card` done and in the merge queue since `after` past [`AT`], its verifier passed.

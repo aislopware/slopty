@@ -88,6 +88,7 @@ fn large() -> Large {
                     branch: None,
                     conversation: None,
                     placed: None,
+                    thread: None,
                 };
                 large.projects.assign(&id, task.id, who, &HashSet::from([term]), now()).unwrap();
                 for a in 0..SUBAGENTS {
@@ -255,7 +256,7 @@ fn placement_cost() {
     compiled.report().unwrap();
     let mut ranked = bench.series("rank_32_workers");
     for _ in 0..SAMPLES {
-        let suggestions = ranked.time(|| rank(&placement, &fleet, &BTreeMap::new(), ranking));
+        let suggestions = ranked.time(|| rank(&placement, &fleet, &BTreeMap::new(), &ranking));
         assert!(
             suggestions.as_ref().is_ok_and(|s| s.first().is_some_and(|w| w.fits)),
             "{suggestions:?}"

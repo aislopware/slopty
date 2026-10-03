@@ -889,6 +889,30 @@ pub enum Verb {
         /// head, the target, the target on `origin`); none keeps the branch.
         landed: Vec<String>,
     },
+    /// Start a task's agent as a thread of the worker's thread host, seated at `seat`: its
+    /// row carries [`crate::project::SEAT_FACT`], its Slopty tools speak as `seat` with the
+    /// worker's token for it and `env`, and `role` reaches it through its agent's own door (a
+    /// system prompt where it takes one, else ahead of its first prompt). An agent whose
+    /// thread runs in a terminal runs in one opened under `seat`. With `worktree`, it works in
+    /// a git worktree of that name the worker makes under the clone at the start's `cwd`
+    /// (`.claude/worktrees/<name>`, on branch `worktree-<name>`, from `origin`'s default
+    /// branch, else `HEAD`), or reopens when it is there. A repeat with a `seat` already
+    /// started answers that thread. Answered with [`Outcome::ThreadStarted`];
+    /// [`ErrorCode::Unsupported`] for an agent the worker cannot start.
+    StartThread {
+        /// Where.
+        worker: WorkerId,
+        /// What to start.
+        start: Box<crate::thread::wire::Start>,
+        /// The id it is known by: the task's [`crate::project::Assignment::term`].
+        seat: SessionId,
+        /// Variables for the agent and its Slopty tools (the server, project and task).
+        env: Vec<(String, String)>,
+        /// What the agent is told it is for.
+        role: Option<String>,
+        /// The name of the worktree of its own it works in, for an agent that writes.
+        worktree: Option<String>,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -979,7 +1003,8 @@ impl Verb {
             | Self::Verify { .. }
             | Self::Rebase { .. }
             | Self::FastForward { .. }
-            | Self::RemoveWorktree { .. } => true,
+            | Self::RemoveWorktree { .. }
+            | Self::StartThread { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1444,6 +1469,13 @@ pub enum Outcome {
         branch: Option<String>,
         /// Whether that branch went too, its work all landed.
         branch_removed: bool,
+    },
+    /// For [`Verb::StartThread`]: the thread runs.
+    ThreadStarted {
+        /// The thread.
+        thread: crate::thread::ThreadId,
+        /// The worktree it works in, when it was given one.
+        worktree: Option<Box<crate::agent::Worktree>>,
     },
 }
 

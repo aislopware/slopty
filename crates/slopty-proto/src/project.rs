@@ -4,11 +4,11 @@
 //! it off, to any depth the project allows) and a graph by [`Task::depends_on`]. Each owns the
 //! paths it may write ([`Task::owns`]) unless it only reads, says where it may run as
 //! expressions over the workers' [`Facts`] ([`Placement`]), and, once something runs for it,
-//! names that terminal ([`Assignment`]): Claude Code, another agent's CLI or a plain command
-//! ([`Runner`]). Claude Code's own subagents and task list inside a session show as [`Natives`]
-//! of its node. Everything that happens is kept in the project's timeline ([`TimelineEntry`])
-//! and pushed to every client as a [`ProjectUpdate`], so the tree is followed as it grows, never
-//! run where nobody can see it.
+//! names that terminal, or the thread any agent runs as ([`Assignment`]): Claude Code, Codex,
+//! pi, an ACP agent, another agent's CLI or a plain command ([`Runner`]). Claude Code's own
+//! subagents and task list inside a session show as [`Natives`] of its node. Everything that
+//! happens is kept in the project's timeline ([`TimelineEntry`]) and pushed to every client as a
+//! [`ProjectUpdate`], so the tree is followed as it grows, never run where nobody can see it.
 //!
 //! Every limit is a number the project sets ([`Limits`]) under the bounds the person sets for
 //! the whole fleet ([`Bounds`]); agents read both and cannot raise the second.
@@ -39,6 +39,10 @@ pub const SERVER_ENV: &str = "SLOPTY_SERVER";
 pub const PROJECT_ENV: &str = "SLOPTY_PROJECT";
 /// The variable naming the task, in the session of an agent spawned for it.
 pub const TASK_ENV: &str = "SLOPTY_TASK";
+/// The fact on a task's thread row ([`crate::thread::wire::ThreadRow::facts`]) naming the
+/// seat it was started at ([`Assignment::thread`]), so the server knows the row as the task's
+/// whatever terminal it has.
+pub const SEAT_FACT: &str = "slopty.seat";
 /// Claude Code's flags known to give an agent nothing the person would be asked for.
 ///
 /// From the CLI reference, checked against 2.1.285. Any other flag loosens, or may, and is refused
@@ -924,13 +928,32 @@ pub enum Runner {
         /// Arguments after `codex`, before the prompt.
         args: Vec<String>,
     },
+    /// Any agent, run as a thread of the worker's thread host
+    /// ([`crate::orchestration::Verb::StartThread`]): pi, an ACP agent, or Claude Code and
+    /// Codex driven that way. Its adapter gives it Slopty's tools and its role through the
+    /// agent's own doors; it goes only where the agent is installed.
+    Agent {
+        /// The agent.
+        agent: crate::thread::AgentId,
+        /// The first prompt.
+        prompt: Option<String>,
+        /// The model, by the agent's own id.
+        model: Option<String>,
+        /// More arguments for the agent, checked by its adapter.
+        args: Vec<String>,
+    },
 }
 
-/// The terminal working on a task.
+/// The terminal, or the thread, working on a task.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Assignment {
-    /// Its terminal.
+    /// Its terminal, or for a thread its seat: the id its Slopty tools speak as, and the
+    /// terminal its agent runs in when it runs in one.
     pub term: TermRef,
+    /// The thread its agent runs as, for a task started as one ([`Runner::Agent`]). Whether
+    /// it runs, and where its agent is, then come from the worker's thread table, the row
+    /// marked with [`SEAT_FACT`].
+    pub thread: Option<crate::thread::ThreadId>,
     /// Since when, by the server's clock.
     pub since_ms: WallMs,
     /// When its terminal closed; open while it runs.
@@ -1384,6 +1407,18 @@ pub struct TaskStep {
     /// The terminal it runs in, for a person to open: a verifier's, kept after a failure so
     /// its whole output can still be read.
     pub term: Option<TermRef>,
+    /// The commits it works on, once its worker said: what a verifier or a reviewer still
+    /// running in its terminal across a restart of the server is taken up on.
+    pub commits: Option<Commits>,
+}
+
+/// The commit a verifier or a reviewer works on, and the one that work is on top of.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Commits {
+    /// The commit, in hex.
+    pub head: String,
+    /// Where the work left the target, in hex.
+    pub base: String,
 }
 
 /// Which [`TaskStep`].
@@ -1436,7 +1471,8 @@ impl TaskStep {
             StepState::Done { detail } => detail,
             StepState::Failed { why } => why,
         };
-        text.len().saturating_add(104)
+        let commits = if self.commits.is_some() { 84 } else { 0 };
+        text.len().saturating_add(104).saturating_add(commits)
     }
 
     /// Whether it is under way.

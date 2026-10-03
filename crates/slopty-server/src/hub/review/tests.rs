@@ -11,7 +11,7 @@ use slopty_proto::project::{
 };
 
 use super::super::project_tests::{answer, project, status, task_now};
-use super::super::queue::tests::{Studio, commit, done, fleet, until_state};
+use super::super::queue::tests::{Studio, commit, done, fleet, restarted, until_state};
 use super::super::tests::summary;
 use super::super::*;
 
@@ -256,4 +256,55 @@ async fn a_reviewer_that_ends_without_a_verdict_leaves_it_to_the_person() {
         matches!(&refused, Outcome::Error { code: ErrorCode::Invalid, message } if message.contains("verifier")),
         "{refused:?}"
     );
+}
+
+/// A reviewer at work when the server stopped is at work again once its worker is back with
+/// its terminal still running, on the commits it was reading, and its verdict counts. One whose
+/// terminal ended meanwhile leaves its task to the person, as one that ends without a verdict.
+#[tokio::test]
+async fn a_reviewer_left_reading_by_a_restart_is_heard_once_its_worker_is_back() {
+    for still_running in [true, false] {
+        let hub = Hub::new("server".to_owned(), Vec::new());
+        let (mut studio, orchestrator, task, agent) = reviewed_fleet(&hub).await;
+        done(&hub, task, agent).await;
+        verified(&mut studio).await;
+        let (reviewer, ..) = reviewer_started(&mut studio).await;
+        let running: &[SessionId] = if still_running { &[reviewer.session] } else { &[] };
+        let (hub, mut studio) = restarted(hub, studio, (orchestrator, agent), running);
+        let step = task_now(&hub, task).await.step.expect("a step");
+        assert_eq!((step.kind, step.term), (StepKind::Review, Some(reviewer)));
+        if !still_running {
+            let why = "The reviewer ended while the server was away".to_owned();
+            assert_eq!(step.state, StepState::Failed { why });
+            let nothing = tokio::time::timeout(Duration::from_millis(300), studio.rx.recv()).await;
+            assert!(
+                !matches!(nothing, Ok(Some(FromServer::Request { .. }))),
+                "nothing started again on its own: {nothing:?}"
+            );
+            continue;
+        }
+        let reading =
+            StepState::Running { phase: "Reading aaaaaaa over bbbbbbb".to_owned(), percent: None };
+        assert_eq!(step.state, reading);
+        let said = review_as(&hub, Speaker::Proven(reviewer.session), task, approve()).await;
+        assert!(matches!(said, Outcome::Task(_)), "{said:?}");
+        let run = task_now(&hub, task).await.reviewed.expect("the review");
+        assert_eq!(
+            (run.by, run.head, run.base),
+            (Reviewer::Agent(reviewer), commit('a'), commit('b'))
+        );
+        // The reviewer is let go as the queue takes the work, in either order.
+        let (mut closed, mut rebased) = (false, false);
+        while !closed || !rebased {
+            let (id, verb) = studio.request().await;
+            match verb {
+                Verb::Close { term } if term == reviewer => {
+                    closed = true;
+                    answer(&studio.lease, id, Outcome::Done);
+                }
+                Verb::Rebase { .. } => rebased = true,
+                other => panic!("{other:?}"),
+            }
+        }
+    }
 }
