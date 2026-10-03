@@ -31,6 +31,7 @@ use slopty_proto::thread::detail::{
     EditDetail, ExecDetail, ExecStatus, FetchDetail, Hunk, Patch, ReadDetail, SearchDetail,
     WriteDetail,
 };
+use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     self, Action, Answerer, AskId, Cap, Changed, Clipped, Command, Delivery, Drive, Effect,
     IntentId, Item, ItemBody, ItemId, Liveness, Meters, Mode, Model, Notice, PartKey, Pending,
@@ -39,6 +40,7 @@ use slopty_proto::thread::{
 };
 
 use super::rpc;
+use crate::attach::Attached;
 use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
 
 /// What every ACP agent can do through Slopty: its requests are answered here, its turn is
@@ -51,6 +53,10 @@ pub const PROTOCOL: ProtocolVersion = ProtocolVersion::V1;
 /// The fact a thread keeps once its agent said it can load a session again (`loadSession`), so a
 /// thread read from the log after the agent is gone knows whether it can be taken up again.
 pub const LOADABLE_FACT: &str = "acp-load-session";
+
+/// The fact a thread keeps once its agent said it takes pictures in a prompt (`image`), so a
+/// message queued before a restart still goes with its pictures as pictures.
+pub const PICTURES_FACT: &str = "acp-prompt-image";
 
 /// Whether the thread of `meta` can be taken up again: its agent loads sessions and named this
 /// one.
@@ -75,6 +81,63 @@ pub fn gone(state: &ThreadState, now: WallMs) -> Vec<Action> {
 #[must_use]
 pub fn thread_of(intent: IntentId) -> ThreadId {
     ThreadId::derived(&["acp thread", &intent.to_string()])
+}
+
+/// What a start's arguments are to take one of the agent's sessions up again rather than begin
+/// one: `resume <session>`.
+pub const RESUME: &str = "resume";
+
+/// The arguments of a start that takes the agent's session `native` up again.
+#[must_use]
+pub fn resume_args(native: &str) -> Vec<String> {
+    vec![RESUME.to_owned(), native.to_owned()]
+}
+
+/// The session a start's `args` take up again, when they are [`resume_args`].
+#[must_use]
+pub fn resumed(args: &[String]) -> Option<&str> {
+    match args {
+        [word, native] if word == RESUME && !native.trim().is_empty() => Some(native),
+        _ => None,
+    }
+}
+
+/// `session/list` of the agent's sessions in folder `cwd`, from `cursor` on.
+#[must_use]
+pub fn list(cwd: &str, cursor: Option<String>) -> acp::ListSessionsRequest {
+    acp::ListSessionsRequest::new().cwd(std::path::PathBuf::from(cwd)).cursor(cursor)
+}
+
+/// One of the sessions `session/list` listed, as a past session: taken up again by
+/// [`resume_args`] when the agent `loads` sessions, else by nothing.
+#[must_use]
+pub fn past(info: &acp::SessionInfo, loads: bool) -> PastSession {
+    let updated = info.updated_at.as_deref().and_then(crate::conversation::parse_ms);
+    PastSession {
+        native: info.session_id.0.to_string(),
+        title: info.title.clone().filter(|t| !t.trim().is_empty()),
+        updated_ms: updated,
+        thread: None,
+        resume: if loads { resume_args(&info.session_id.0) } else { Vec::new() },
+        facts: BTreeMap::new(),
+    }
+}
+
+/// `path` as a `file:` URI, every byte but the unreserved ones and `/` escaped.
+fn file_uri(path: &str) -> String {
+    let mut uri = String::with_capacity(path.len().saturating_add(7));
+    uri.push_str("file://");
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            uri.push('%');
+            for nibble in [byte >> 4, byte & 0x0f] {
+                uri.extend(char::from_digit(u32::from(nibble), 16).map(|c| c.to_ascii_uppercase()));
+            }
+        }
+    }
+    uri
 }
 
 /// Slopty's `initialize`: protocol v1, and no file system or terminal offered, so the agent
@@ -163,6 +226,8 @@ pub struct Session {
     meta: ThreadMeta,
     /// The agent can load a session again (`loadSession`).
     loadable: bool,
+    /// The agent takes pictures in a prompt (`promptCapabilities.image`).
+    pictures: bool,
     turns: u32,
     turn_open: bool,
     /// The turn under way as it began, told again once its input is known.
@@ -246,6 +311,7 @@ impl Session {
     fn with(meta: ThreadMeta, now: WallMs) -> Self {
         Self {
             loadable: loads(&meta),
+            pictures: meta.facts.get(PICTURES_FACT).is_some_and(|v| v == "true"),
             meta,
             turns: 0,
             turn_open: false,
@@ -301,8 +367,17 @@ impl Session {
                 response.protocol_version
             ));
         }
-        self.loadable = response.agent_capabilities.load_session;
+        let can = &response.agent_capabilities;
+        self.loadable = can.load_session;
+        self.pictures = can.prompt_capabilities.image;
         self.meta.facts.insert(LOADABLE_FACT.to_owned(), self.loadable.to_string());
+        self.meta.facts.insert(PICTURES_FACT.to_owned(), self.pictures.to_string());
+        let fork = Cap::named(Cap::FORK);
+        self.meta.caps.retain(|c| *c != fork);
+        if can.session_capabilities.fork.is_some() {
+            self.meta.caps.push(fork);
+            self.meta.caps.sort();
+        }
         if let Some(info) = &response.agent_info {
             self.meta.agent_version.clone_from(&info.version);
         }
@@ -313,6 +388,25 @@ impl Session {
     #[must_use]
     pub fn session_new(&self) -> acp::NewSessionRequest {
         acp::NewSessionRequest::new(self.meta.cwd.clone())
+    }
+
+    /// `session/fork` of the agent's session `from` into this thread's folder: the fork is this
+    /// thread's session once the agent answers ([`Session::opened`]).
+    #[must_use]
+    pub fn session_fork(&self, from: &str) -> acp::ForkSessionRequest {
+        acp::ForkSessionRequest::new(from.to_owned(), self.meta.cwd.clone())
+    }
+
+    /// This thread branched off another as `fork` says: it says so from its start.
+    pub fn forked(&mut self, fork: thread::Fork) {
+        self.meta.forked_from = Some(fork);
+        ThreadMeta::FORK.clone_into(&mut self.meta.origin);
+    }
+
+    /// This thread takes up the agent's session `native`, made before it: it is loaded once the
+    /// agent runs ([`Session::session_load`]).
+    pub fn resuming(&mut self, native: &str) {
+        native.clone_into(&mut self.meta.native);
     }
 
     /// `session/load` for the thread's session, when the agent can load it. The agent replays
@@ -440,10 +534,13 @@ impl Session {
         }
     }
 
-    /// What goes to the agent for `text`, sent as intent `intent`, and the turn it opens.
+    /// What goes to the agent for `text` and the files `attached`, sent as intent `intent`, and
+    /// the turn it opens. A picture goes as an image block where the agent takes pictures, else
+    /// as a link to its file, as any other file goes: a resource link every agent takes.
     pub fn prompt(
         &mut self,
         text: &str,
+        attached: &[Attached],
         intent: IntentId,
         now: WallMs,
     ) -> (acp::PromptRequest, Vec<Action>) {
@@ -454,8 +551,22 @@ impl Session {
         self.running = true;
         self.cancelling = false;
         actions.push(self.status(now));
-        let prompt = vec![ContentBlock::Text(acp::TextContent::new(text))];
+        let words =
+            (!text.trim().is_empty()).then(|| ContentBlock::Text(acp::TextContent::new(text)));
+        let files = attached.iter().map(|file| self.block(file));
+        let prompt = words.into_iter().chain(files).collect();
         (acp::PromptRequest::new(self.meta.native.clone(), prompt), actions)
+    }
+
+    /// The block a file sent with a message is.
+    fn block(&self, file: &Attached) -> ContentBlock {
+        let uri = file_uri(file.path());
+        match (file, file.base64()) {
+            (Attached::Picture { media_type, .. }, Some(data)) if self.pictures => {
+                ContentBlock::Image(acp::ImageContent::new(data, *media_type).uri(uri))
+            }
+            _ => ContentBlock::ResourceLink(acp::ResourceLink::new(file.name(), uri)),
+        }
     }
 
     /// The prompt's answer: how the turn ended, or why the agent refused it.
@@ -655,12 +766,12 @@ impl Session {
         Some(Cancelled { notification, answers, actions })
     }
 
-    /// Hold `text`, sent as intent `intent`, until the turn ends.
-    pub fn queue(&mut self, intent: IntentId, text: &str) -> Vec<Action> {
+    /// Hold `text` and the files at `attachments`, sent as intent `intent`, until the turn ends.
+    pub fn queue(&mut self, intent: IntentId, text: &str, attachments: Vec<String>) -> Vec<Action> {
         self.queued.push_back(Pending {
             intent,
             text: text.to_owned(),
-            attachments: Vec::new(),
+            attachments,
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
         });
@@ -681,13 +792,14 @@ impl Session {
         Some(vec![self.pending_now()])
     }
 
-    /// The next message held, taken off the queue, once no turn is under way.
-    pub fn next_queued(&mut self) -> Option<(IntentId, String, Vec<Action>)> {
+    /// The next message held, taken off the queue, once no turn is under way: its intent, its
+    /// words and its files.
+    pub fn next_queued(&mut self) -> Option<(Pending, Vec<Action>)> {
         if self.running {
             return None;
         }
         let next = self.queued.pop_front()?;
-        Some((next.intent, next.text, vec![self.pending_now()]))
+        Some((next, vec![self.pending_now()]))
     }
 
     /// What switches the session to mode `mode` (an id it offers), when it can be.
@@ -1188,6 +1300,10 @@ impl Session {
             }),
         };
         let mut names: Vec<&str> = CAPS.to_vec();
+        // Whether it forks is said once, as it starts.
+        if self.meta.can(Cap::FORK) {
+            names.push(Cap::FORK);
+        }
         if mode.is_some() || !self.modes.is_empty() {
             names.push(Cap::SET_MODE);
         }

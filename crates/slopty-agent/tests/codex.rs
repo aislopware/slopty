@@ -766,6 +766,65 @@ mod tests {
         assert!(shared.settings(approval, &sandbox).is_empty(), "nothing moved");
     }
 
+    /// A fork names Codex's own id of the turn it branches after, or none for the whole thread;
+    /// a turn Codex does not hold, or the one under way, is refused in words. A thread Codex
+    /// forked says which it came from, as Codex records it, with no turn.
+    #[test]
+    fn a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from() {
+        use slopty_proto::thread::{Fork, ThreadMeta, TurnId};
+        let (mut shared, mut state) = begun();
+        let whole = shared.fork(None).unwrap();
+        assert_eq!(
+            (whole.thread_id.as_str(), whole.last_turn_id),
+            (shared.meta().native.as_str(), None)
+        );
+        let started = recorded_note("question.jsonl", "turn/started");
+        let codex_turn = started["turn"]["id"].as_str().unwrap().to_owned();
+        hear(&mut shared, &mut state, "turn/started", &started);
+        let turn = state.last_turn().unwrap().id;
+        assert!(shared.fork(Some(turn)).is_err(), "not through the turn under way");
+        hear(
+            &mut shared,
+            &mut state,
+            "turn/completed",
+            &recorded_note("question.jsonl", "turn/completed"),
+        );
+        assert_eq!(shared.fork(Some(turn)).unwrap().last_turn_id, Some(codex_turn));
+        assert!(shared.fork(Some(TurnId(99))).is_err(), "no such turn");
+
+        let lines = fixture("question.jsonl");
+        let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
+        let mut thread = started.msg["result"]["thread"].clone();
+        thread["forkedFromId"] = json!("019a-parent");
+        let thread: p::Thread = serde_json::from_value(thread).unwrap();
+        let (forked, _) = Shared::new(&thread, None);
+        assert_eq!(
+            forked.meta().forked_from,
+            Some(Fork { thread: shared::thread_of("019a-parent"), turn: None })
+        );
+        assert_eq!(forked.meta().origin, ThreadMeta::FORK);
+    }
+
+    /// A folder's past threads are asked of `thread/list` by the folder, the latest first, and
+    /// each is listed by Codex's id with the words that take it up again.
+    #[test]
+    fn past_threads_are_listed_with_the_words_that_resume_them() {
+        let asked = serde_json::to_value(shared::list("/work", 25)).unwrap();
+        assert_eq!(asked, json!({"cwd": "/work", "limit": 25, "sortKey": "updated_at"}));
+        let lines = fixture("question.jsonl");
+        let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
+        let mut thread = started.msg["result"]["thread"].clone();
+        thread["name"] = json!("Fix the build");
+        thread["updatedAt"] = json!(1_700_000_000);
+        let thread: p::Thread = serde_json::from_value(thread).unwrap();
+        let past = shared::past(&thread);
+        assert_eq!(past.native, thread.id);
+        assert_eq!(past.title.as_deref(), Some("Fix the build"));
+        assert_eq!(past.updated_ms, Some(WallMs::from_millis(1_700_000_000_000)));
+        assert_eq!(past.resume, shared::resume_args(&thread.id));
+        assert_eq!(shared::resumed(&past.resume), Some(thread.id.as_str()));
+    }
+
     /// The recorded notification `method` of `name`'s fixture, as its params.
     fn recorded_note(name: &str, method: &str) -> Value {
         fixture(name).into_iter().find(|l| l.msg["method"] == method).unwrap().msg["params"].clone()
@@ -776,9 +835,10 @@ mod tests {
     /// turn ended; a message to a thread at rest goes at once.
     #[test]
     fn a_queued_message_waits_for_the_turn_and_goes_as_the_next() {
+        use slopty_agent::attach::Attached;
         use slopty_proto::thread::{Delivery, IntentId};
         let (mut shared, mut state) = begun();
-        let at_rest = shared.send("Now", Delivery::Queue, IntentId::new());
+        let at_rest = shared.send("Now", vec![], Delivery::Queue, IntentId::new());
         assert!(matches!(at_rest, shared::Send::Start(_)), "nothing runs: it goes at once");
         hear(
             &mut shared,
@@ -789,8 +849,19 @@ mod tests {
         assert!(shared.current().is_some());
 
         let (kept, dropped) = (IntentId::new(), IntentId::new());
-        for (intent, text) in [(kept, "Then the docs"), (dropped, "And the changelog")] {
-            let shared::Send::Held(actions) = shared.send(text, Delivery::Queue, intent) else {
+        let files = vec![
+            Attached::Picture {
+                path: "/drop/x/shot.png".to_owned(),
+                media_type: "image/png",
+                bytes: vec![0x89],
+            },
+            Attached::File { path: "/drop/x/my notes.md".to_owned() },
+        ];
+        for (intent, text, attached) in
+            [(kept, "Then the docs", files), (dropped, "And the changelog", vec![])]
+        {
+            let shared::Send::Held(actions) = shared.send(text, attached, Delivery::Queue, intent)
+            else {
                 panic!("held while the turn runs")
             };
             for action in &actions {
@@ -808,6 +879,11 @@ mod tests {
             state.pending.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
             ["Then the docs, briefly"]
         );
+        assert_eq!(
+            state.pending[0].attachments,
+            ["/drop/x/shot.png", "/drop/x/my notes.md"],
+            "the change kept its files"
+        );
         assert!(shared.withdraw(dropped).is_none(), "taken back once");
         assert!(shared.next_queued().is_none(), "not while the turn runs");
 
@@ -822,7 +898,14 @@ mod tests {
             state.apply(action);
         }
         let sent = serde_json::to_value(&*turn).unwrap();
-        assert_eq!(sent["input"][0]["text"], "Then the docs, briefly");
+        assert_eq!(
+            sent["input"],
+            json!([
+                {"type": "text", "text": "Then the docs, briefly '/drop/x/my notes.md'", "text_elements": []},
+                {"type": "localImage", "path": "/drop/x/shot.png"},
+            ]),
+            "a picture is Codex's own localImage; any other file goes by its path"
+        );
         assert!(state.pending.is_empty(), "no longer waiting");
         assert!(shared.next_queued().is_none());
     }

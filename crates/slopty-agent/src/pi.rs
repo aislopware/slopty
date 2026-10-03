@@ -13,6 +13,7 @@
 
 pub mod driven;
 pub mod rpc;
+pub mod sessions;
 
 use std::io;
 use std::path::{Path, PathBuf};

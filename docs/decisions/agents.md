@@ -1066,3 +1066,73 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_start_on_its_way_closes_and_goes_with_its_link` and
     `new_agent_opens_the_picker_with_the_last_choices` (the prompt) in
     `workspace/tests/thread_start.rs`.
+
+- ✅ **Files go with a message, landed outside the work** (2026-10-04, readiness item 2). A file
+  dropped or picked in the composer is uploaded first, over the ordinary transfer, to
+  `~/.slopty/drop/<transfer>/`. That needs no terminal and puts nothing in the agent's working
+  tree, where it would show in its diff, be committed by accident, or be lost to a `git clean`.
+  `Intent::Send` then carries the worker paths, and the worker reads each file only as the
+  message goes.
+  - A file counts as a picture by its first bytes (PNG, JPEG, GIF, WebP) and only up to 20 MiB.
+    Anything else, and a picture that cannot be read, goes by its path, so the message is never
+    lost for a file. At most 32 files go with one message, each an absolute path to a file on
+    the worker, checked when the intent is decided.
+  - Each agent gets the files the way it takes them. Codex gets the words, then each file's
+    path, then a `localImage` per picture, which Codex reads itself. pi gets the words with the
+    paths after them and each picture in `images`. An ACP agent gets each picture as an image
+    block with its bytes and where it is, when it says it takes pictures (`promptCapabilities.image`).
+    Every other file goes as a resource link. Claude Code's TUI is typed the words with the
+    paths after them, shell-quoted, since its prompt reads a pasted path as a file.
+  - The words in the thread stay as the person wrote them. The paths ride on the pending
+    message, so a queued message keeps its files.
+  - Tests: `pictures_are_read_whole_and_the_rest_go_by_path`, `only_files_here_are_taken`
+    (`slopty-worker::thread::attach`), `a_picture_goes_to_pi_with_the_message`,
+    `a_picture_goes_as_an_image_and_a_file_as_a_link`,
+    `files_go_by_path_and_a_fork_and_a_listing_go_to_codex`, golden `intent_send_attachments`.
+
+- ✅ **Past sessions per folder, from each agent's own record** (2026-10-04, readiness item 3).
+  `ThreadRequest::Sessions` asks one agent's sessions in one folder and is answered with
+  `WorkerMsg::Sessions`. Each session carries the words a start takes it up again with, and the
+  thread already kept of it, if there is one. When nothing could be had, the answer says why in
+  words instead of showing an empty list.
+  - Codex is asked over its app-server (`thread/list`, by folder, last updated first).
+  - An ACP agent is asked by a short run of its own (`session/list`, paged), when it lists
+    sessions. A session is offered to take up again only when the agent loads sessions.
+  - pi's session directory for the folder is listed. A session is called by the last name
+    given it, else its first message, read only from the first and last 64 KiB of its file.
+  - Claude Code's sessions are its project directory's transcript names and times alone. No
+    transcript is opened: what the person said to Claude Code is theirs, and what Slopty shows
+    of a session is what its own thread of it holds. The tests write their own project
+    directory under a temporary home.
+  - The words that take a session up again are each agent's own: `--resume <id>` for Claude
+    Code, `--session <id>` for pi, and `resume <id>` for Codex and ACP. A start with them finds
+    the thread kept of that session before making a new one.
+  - Tests: `past_sessions_are_named_by_their_files_alone` (`slopty-agent::discover`),
+    `a_past_session_is_listed_and_taken_up_again` (pi),
+    `a_fork_and_a_listing_go_to_the_agent` (ACP),
+    `past_threads_are_listed_with_the_words_that_resume_them` (Codex), goldens
+    `client_sessions`, `link_worker_sessions` and `link_worker_sessions_absent`.
+
+- ✅ **Fork, as each agent forks** (2026-10-04, readiness item 3). `Intent::Fork` branches a new
+  thread off one, through a turn or the whole of it, and is answered once per intent like a
+  start. It needs `Cap::FORK`, which a thread has when its agent can fork.
+  - Codex forks over its app-server (`thread/fork`), through any turn that has ended.
+  - An ACP agent forks in a fresh run of itself (`session/fork`, behind the schema's unstable
+    feature, offered when the agent says it forks). The fork is then loaded, so its history is
+    replayed into the new thread.
+  - pi starts on a new session named by the intent, copying the old one (`--fork` with
+    `--session-id`). `--fork` is passed on that first run only and never kept with the thread's
+    flags, so every later run opens the copy.
+  - Claude Code opens in a new terminal with `--resume <id> --fork-session --session-id <new>`.
+    It needs a first message, since Claude Code writes the conversation only then.
+  - pi, ACP and Claude Code copy whole sessions, so a fork from an earlier turn is refused in
+    words. A fork of the whole thread records the last turn the two share.
+  - Where a thread came from (`ThreadMeta::forked_from`, origin `fork`) is kept by the host as
+    well as by the adapter. An agent's own account of the thread that does not say it, such as
+    a reload or a worker restart, has the host's record put back.
+  - Tests: `a_fork_copies_the_whole_session_into_a_new_thread` (pi),
+    `a_fork_and_a_listing_go_to_the_agent` (ACP),
+    `files_go_by_path_and_a_fork_and_a_listing_go_to_codex`,
+    `a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from`,
+    `a_fork_resumes_into_a_new_conversation` (Claude Code's words), goldens `intent_fork` and
+    `intent_fork_whole`.

@@ -1645,7 +1645,7 @@ fn ms_of(ms: f64) -> u64 {
 }
 
 /// An RFC 3339 UTC stamp (`2026-09-27T03:15:25.849Z`) in ms since the Unix epoch.
-fn parse_ms(stamp: &str) -> Option<WallMs> {
+pub(crate) fn parse_ms(stamp: &str) -> Option<WallMs> {
     let (date, time) = stamp.split_once('T')?;
     let time = time.strip_suffix('Z')?;
     let mut ymd = date.splitn(3, '-').map(str::parse::<i64>);

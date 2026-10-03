@@ -143,7 +143,8 @@ mod tests {
                     Some("session/prompt") => {
                         sends = sends.saturating_add(1);
                         let text = msg["params"]["prompt"][0]["text"].as_str().unwrap();
-                        let (prompt, actions) = session.prompt(text, intent(sends), WallMs::ZERO);
+                        let (prompt, actions) =
+                            session.prompt(text, &[], intent(sends), WallMs::ZERO);
                         apply(&mut state, actions);
                         serde_json::to_value(prompt).unwrap()
                     }

@@ -37,9 +37,10 @@ use slopty_proto::thread::detail::{
     AgentDetail, Answer, Clip, EditDetail, ExecDetail, ExecStatus, Hunk, McpDetail, Offered,
     Question, header_heading,
 };
+use slopty_proto::thread::wire::PastSession;
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
-    Effect, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey,
+    Effect, Fork, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey,
     Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Status, Step,
     ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
     UserMessage, Wait, kind,
@@ -51,10 +52,18 @@ use super::protocol::{
     FileChangeApprovalDecision, PatchApplyStatus, RequestId, ServerNotification, ServerRequest,
     ThreadActiveFlag, ThreadItem, ThreadStatus, TurnStatus, UserInput,
 };
+use crate::attach::Attached;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 6] =
-    [Cap::APPROVALS, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::LIVE_TUI, Cap::QUEUE, Cap::STEER];
+pub const CAPS: [&str; 7] = [
+    Cap::APPROVALS,
+    Cap::FORK,
+    Cap::INTERRUPT,
+    Cap::LIVE_TEXT,
+    Cap::LIVE_TUI,
+    Cap::QUEUE,
+    Cap::STEER,
+];
 
 /// A form's answer that declines it, and the one that cancels it. Their ids start with a
 /// colon, so words typed into a form's one field are not taken for them.
@@ -169,7 +178,7 @@ pub struct Shared {
     /// waiting on the person: Codex begins a call before it asks about it.
     calls: HashMap<ItemId, Item>,
     /// Messages held until the turn under way ends, in their order.
-    queued: VecDeque<Pending>,
+    queued: VecDeque<(Pending, Vec<Attached>)>,
 }
 
 impl Shared {
@@ -194,8 +203,16 @@ impl Shared {
                 facts.insert(fact.to_owned(), value);
             }
         }
+        // Codex records the thread a fork came from, but not the turn it branched after.
+        let forked_from = thread
+            .forked_from_id
+            .as_deref()
+            .filter(|from| !from.is_empty())
+            .map(|from| Fork { thread: thread_of(from), turn: None });
         let origin = if thread.parent_thread_id.is_some() {
             ThreadMeta::SUBAGENT
+        } else if forked_from.is_some() {
+            ThreadMeta::FORK
         } else {
             ThreadMeta::PERSON
         };
@@ -210,7 +227,7 @@ impl Shared {
             terminal,
             parent: None,
             origin: origin.to_owned(),
-            forked_from: None,
+            forked_from,
             drive: Drive::named(Drive::SHARED),
             caps,
             models: Vec::new(),
@@ -689,22 +706,30 @@ impl Shared {
         Some((open.id.clone(), result))
     }
 
-    /// What goes to the app-server for `text`, sent as intent `intent` with `delivery`: into
-    /// the turn under way when it steers and one is, else a turn of its own.
-    /// A message queued while a turn runs is held here until it ends ([`Self::next_queued`]).
-    pub fn send(&mut self, text: &str, delivery: Delivery, intent: IntentId) -> Send {
+    /// What goes to the app-server for `text` and the files `attached`, sent as intent `intent`
+    /// with `delivery`: into the turn under way when it steers and one is, else a turn of its
+    /// own. A picture goes as Codex's `localImage`, which Codex reads from its path; any other
+    /// file goes by its path in the words. A message queued while a turn runs is held here until
+    /// it ends ([`Self::next_queued`]).
+    pub fn send(
+        &mut self,
+        text: &str,
+        attached: Vec<Attached>,
+        delivery: Delivery,
+        intent: IntentId,
+    ) -> Send {
         if delivery == Delivery::Queue && self.current.is_some() {
-            self.queued.push_back(Pending {
+            let pending = Pending {
                 intent,
                 text: text.to_owned(),
-                attachments: Vec::new(),
+                attachments: attached.iter().map(|a| a.path().to_owned()).collect(),
                 delivery,
                 state: PendingState::Waiting,
-            });
+            };
+            self.queued.push_back((pending, attached));
             return Send::Held(vec![self.pending_now()]);
         }
-        let input =
-            vec![UserInput::Text { text: text.to_owned(), text_elements: Some(Vec::new()) }];
+        let input = input(text, &attached);
         let client = Some(intent.to_string());
         match (&self.current, delivery) {
             (Some(turn), Delivery::Steer) => Send::Steer(Box::new(p::TurnSteerParams {
@@ -726,14 +751,14 @@ impl Shared {
 
     /// Take back the message held for `intent`; `None` when none is.
     pub fn withdraw(&mut self, intent: IntentId) -> Option<Vec<Action>> {
-        let at = self.queued.iter().position(|p| p.intent == intent)?;
+        let at = self.queued.iter().position(|(p, _)| p.intent == intent)?;
         self.queued.remove(at);
         Some(vec![self.pending_now()])
     }
 
-    /// Make the message held for `intent` say `text`; `None` when none is.
+    /// Make the message held for `intent` say `text`, its files kept; `None` when none is.
     pub fn edit(&mut self, intent: IntentId, text: &str) -> Option<Vec<Action>> {
-        let held = self.queued.iter_mut().find(|p| p.intent == intent)?;
+        let (held, _) = self.queued.iter_mut().find(|(p, _)| p.intent == intent)?;
         text.clone_into(&mut held.text);
         Some(vec![self.pending_now()])
     }
@@ -744,15 +769,41 @@ impl Shared {
         if self.current.is_some() {
             return None;
         }
-        let next = self.queued.pop_front()?;
-        let Send::Start(params) = self.send(&next.text, Delivery::Steer, next.intent) else {
+        let (next, attached) = self.queued.pop_front()?;
+        let Send::Start(params) = self.send(&next.text, attached, Delivery::Steer, next.intent)
+        else {
             return None;
         };
         Some((params, vec![self.pending_now()]))
     }
 
     fn pending_now(&self) -> Action {
-        Action::PendingSet(self.queued.iter().cloned().collect())
+        Action::PendingSet(self.queued.iter().map(|(p, _)| p.clone()).collect())
+    }
+
+    /// What branches a new thread off this one, sharing its turns through `after`, or all of
+    /// them (`thread/fork`); why not, in words, when it cannot.
+    ///
+    /// # Errors
+    ///
+    /// When `after` is no turn Codex holds of the thread, or the turn under way.
+    pub fn fork(&self, after: Option<TurnId>) -> Result<p::ThreadForkParams, String> {
+        let last = match after {
+            None => None,
+            Some(after) => {
+                let codex = self.turns.iter().find(|(_, t)| **t == after).map(|(c, _)| c);
+                let codex = codex.ok_or_else(|| format!("There is no turn {} here", after.0))?;
+                if self.current.as_ref() == Some(codex) {
+                    return Err("That turn is still under way".to_owned());
+                }
+                Some(codex.clone())
+            }
+        };
+        Ok(p::ThreadForkParams {
+            thread_id: self.meta.native.clone(),
+            last_turn_id: last,
+            ..p::ThreadForkParams::default()
+        })
     }
 
     /// The terminal Codex's own TUI runs in on this thread, opened by the worker, or none once
@@ -1224,6 +1275,54 @@ pub fn ask_of(id: &RequestId) -> AskId {
 }
 
 /// A thread's name for people: its own, else what it was first asked.
+/// What a message of `text` and the files `attached` is to Codex: the words, with the paths of
+/// the files that are no pictures after them, then each picture as a `localImage`.
+fn input(text: &str, attached: &[Attached]) -> Vec<UserInput> {
+    let words = crate::attach::with_files(text, attached);
+    let words = (!words.trim().is_empty())
+        .then(|| UserInput::Text { text: words, text_elements: Some(Vec::new()) });
+    let pictures = crate::attach::pictures(attached)
+        .map(|picture| UserInput::LocalImage { detail: None, path: picture.path().to_owned() });
+    words.into_iter().chain(pictures).collect()
+}
+
+/// What lists Codex's threads in folder `cwd`, most recently changed first, at most `limit`
+/// (`thread/list`).
+#[must_use]
+pub fn list(cwd: &str, limit: u32) -> p::ThreadListParams {
+    p::ThreadListParams {
+        cwd: Some(p::ThreadListCwdFilter::String(cwd.to_owned())),
+        limit: Some(limit),
+        sort_key: Some(p::ThreadSortKey::UpdatedAt),
+        ..p::ThreadListParams::default()
+    }
+}
+
+/// One of the threads `thread/list` listed, as a past session: taken up again by
+/// [`resume_args`].
+#[must_use]
+pub fn past(thread: &p::Thread) -> PastSession {
+    let mut facts = BTreeMap::new();
+    if let Some(branch) = thread.git_info.as_ref().and_then(|g| g.branch.clone()) {
+        facts.insert("branch".to_owned(), branch);
+    }
+    if let Some(model) = thread.model.clone().filter(|m| !m.is_empty()) {
+        facts.insert("model".to_owned(), model);
+    }
+    if let Some(from) = thread.forked_from_id.clone().filter(|f| !f.is_empty()) {
+        facts.insert("forked-from".to_owned(), from);
+    }
+    let title = title_of(thread);
+    PastSession {
+        native: thread.id.clone(),
+        title: (!title.trim().is_empty()).then_some(title),
+        updated_ms: Some(seconds(thread.updated_at)),
+        thread: None,
+        resume: resume_args(&thread.id),
+        facts,
+    }
+}
+
 fn title_of(thread: &p::Thread) -> String {
     thread
         .name

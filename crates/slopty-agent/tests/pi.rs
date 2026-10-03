@@ -250,7 +250,7 @@ mod tests {
                         Command::Prompt { message, .. } | Command::Steer { message, .. } => {
                             sends = sends.saturating_add(1);
                             let intent = IntentId::from_uuid(uuid::Uuid::from_u128(sends));
-                            asked.push(driven.send(message, intent));
+                            asked.push(driven.send(message, &[], intent));
                         }
                         Command::ExtensionUiResponse { value: Some(value), .. } => {
                             let ask = AskId(request.id.clone().unwrap());
@@ -639,7 +639,7 @@ mod tests {
                     if let Ok(Request { command: Command::Prompt { message, .. }, .. }) =
                         serde_json::from_value::<Request>(line.msg.clone())
                     {
-                        drop(driven.send(&message, IntentId::new()));
+                        drop(driven.send(&message, &[], IntentId::new()));
                     }
                     continue;
                 }
@@ -770,9 +770,9 @@ mod tests {
             let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
             let first = IntentId::from_uuid(uuid::Uuid::from_u128(1));
             let second = IntentId::from_uuid(uuid::Uuid::from_u128(2));
-            drop(driven.send("Say hello.", first));
+            drop(driven.send("Say hello.", &[], first));
             driven.unsent(first);
-            drop(driven.send("Say hello.", second));
+            drop(driven.send("Say hello.", &[], second));
             let start = r#"{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Say hello."}],"timestamp":0}}"#;
             let end = start.replace("message_start", "message_end");
             heard(&mut driven, start, 1);

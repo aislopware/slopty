@@ -12,8 +12,12 @@ workspace = true
 
 [dependencies]
 # ACP's wire types, for any agent driven over ACP (`acp`), with the token counts an agent
-# gives at a turn's end (`PromptResponse.usage`), which one that does not send leaves out.
-agent-client-protocol-schema = { workspace = true, features = [ "unstable_end_turn_token_usage" ] }
+# gives at a turn's end (`PromptResponse.usage`), which one that does not send leaves out,
+# and the fork of a session an agent advertises (`session/fork`).
+agent-client-protocol-schema = { workspace = true, features = [
+    "unstable_end_turn_token_usage",
+    "unstable_session_fork",
+] }
 # The Claude mod's directory is named by its files' digest (`claude_mod`).
 blake3.workspace = true
 # The pictures in a transcript are base64; the worker sends their bytes.

@@ -45,12 +45,14 @@ use super::rpc::{
     self, AssistantEvent, Command, Content, Entries, GateAsk, Incoming, Message, Request, State,
     Stats, StreamingBehavior, ToolOutput, UiMethod, UiRequest,
 };
+use crate::attach::Attached;
 use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 7] = [
+pub const CAPS: [&str; 8] = [
     Cap::APPROVALS,
     Cap::COMPACT,
+    Cap::FORK,
     Cap::HANDOFF,
     Cap::INTERRUPT,
     Cap::LIVE_TEXT,
@@ -258,6 +260,13 @@ impl Driven {
         }
         let json = serde_json::to_string(args).unwrap_or_default();
         self.meta.facts.insert(ARGS_FACT.to_owned(), json);
+        vec![Action::Meta(Box::new(self.meta.clone()))]
+    }
+
+    /// This thread's session branched off `fork`'s (`--fork`), which it holds the history of.
+    pub fn forked(&mut self, fork: thread::Fork) -> Vec<Action> {
+        self.meta.forked_from = Some(fork);
+        ThreadMeta::FORK.clone_into(&mut self.meta.origin);
         vec![Action::Meta(Box::new(self.meta.clone()))]
     }
 
@@ -547,16 +556,26 @@ impl Driven {
     /// What goes to pi for `text`, sent as intent `intent`: a prompt that steers into the run
     /// under way when there is one, and starts one when there is not. pi takes it either way,
     /// so a run that settles as it goes loses nothing.
-    pub fn send(&mut self, text: &str, intent: IntentId) -> Command {
+    ///
+    /// The pictures in `attached` go as pi's images; any other file goes by its path in the
+    /// words.
+    pub fn send(&mut self, text: &str, attached: &[Attached], intent: IntentId) -> Command {
+        let message = crate::attach::with_files(text, attached);
         if self.sends.len() >= SENDS {
             self.sends.pop_front();
         }
-        self.sends.push_back((intent, text.to_owned()));
-        Command::Prompt {
-            message: text.to_owned(),
-            images: Vec::new(),
-            streaming_behavior: Some(StreamingBehavior::Steer),
-        }
+        self.sends.push_back((intent, message.clone()));
+        let images = crate::attach::pictures(attached)
+            .filter_map(|picture| match picture {
+                Attached::Picture { media_type, .. } => Some(rpc::ImageContent {
+                    kind: "image".to_owned(),
+                    data: picture.base64()?,
+                    mime_type: (*media_type).to_owned(),
+                }),
+                Attached::File { .. } => None,
+            })
+            .collect();
+        Command::Prompt { message, images, streaming_behavior: Some(StreamingBehavior::Steer) }
     }
 
     /// The message sent as `intent` did not go: pi refused it.

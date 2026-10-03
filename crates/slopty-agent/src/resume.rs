@@ -326,6 +326,31 @@ pub fn resumed(session: &str, model: Option<&str>, prompt: Option<&str>) -> Opti
     Some(args)
 }
 
+/// The flag that has a resume go on in a new conversation, the one it resumes left as it was.
+pub const FORK_SESSION_FLAG: &str = "--fork-session";
+
+/// The arguments that branch a new conversation off Claude Code's conversation `session`, and
+/// the new one's id.
+///
+/// They read `claude --resume <id> --fork-session --session-id <uuid>`. The new id is
+/// chosen here, as [`started`] chooses one, so the thread is named before the first hook; `None`
+/// when `session` cannot be a session id.
+#[must_use]
+pub fn forked(session: &str) -> Option<(Vec<String>, String)> {
+    if !is_session_id(session) {
+        return None;
+    }
+    let new = uuid::Uuid::new_v4().to_string();
+    let args = vec![
+        RESUME_FLAG.to_owned(),
+        session.to_owned(),
+        FORK_SESSION_FLAG.to_owned(),
+        SESSION_ID_FLAG.to_owned(),
+        new.clone(),
+    ];
+    Some((args, new))
+}
+
 /// Whether `id` can be a Claude Code session id: it is typed into a shell and names a file.
 pub(crate) fn is_session_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
@@ -552,5 +577,17 @@ mod tests {
         let named = Resume { transcript: Some("/t/abc.jsonl".to_owned()), ..resume.clone() };
         assert_eq!(named.transcript(Path::new("/h")), Path::new("/t/abc.jsonl"));
         assert_eq!(resume.args(), words("--resume abc --model x"));
+    }
+
+    /// A fork resumes the conversation into a new one whose id is chosen here, and names no
+    /// conversation that cannot be one.
+    #[test]
+    fn a_fork_resumes_into_a_new_conversation() {
+        let (args, new) = forked("abc-123").expect("a session id");
+        assert_eq!(args, ["--resume", "abc-123", "--fork-session", "--session-id", new.as_str()]);
+        assert_ne!(new, "abc-123");
+        assert!(is_session_id(&new));
+        assert_eq!(forked("a b"), None);
+        assert_eq!(forked(""), None);
     }
 }

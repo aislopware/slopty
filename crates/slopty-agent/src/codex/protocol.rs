@@ -49,6 +49,12 @@ impl Method for ThreadResumeParams {
     const METHOD: &'static str = "thread/resume";
 }
 
+impl Method for ThreadForkParams {
+    type Response = ThreadForkResponse;
+
+    const METHOD: &'static str = "thread/fork";
+}
+
 impl Method for ThreadReadParams {
     type Response = ThreadReadResponse;
 
@@ -3596,6 +3602,132 @@ pub struct ThreadEnvironment {
 
 /// Extra app-server data for a thread.
 pub type ThreadExtra = BTreeMap<String, serde_json::Value>;
+
+/// There are two ways to fork a thread: 1. By `thread_id`: load the thread from disk by `thread_id`
+/// and fork it into a new thread. 2. By path: load the thread from disk by path and fork it into a
+/// new thread.
+///
+/// If using a non-empty path, the `thread_id` param will be ignored. Empty string path values are
+/// treated as absent.
+///
+/// Prefer using `thread_id` whenever possible.
+#[derive(Clone, PartialEq, Eq, Default, Debug, Serialize, Deserialize)]
+pub struct ThreadForkParams {
+    /// `approvalPolicy`.
+    #[serde(rename = "approvalPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<AskForApproval>,
+    /// Override where approval requests are routed for review on this thread and subsequent turns.
+    #[serde(rename = "approvalsReviewer", default, skip_serializing_if = "Option::is_none")]
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    /// `baseInstructions`.
+    #[serde(rename = "baseInstructions", default, skip_serializing_if = "Option::is_none")]
+    pub base_instructions: Option<String>,
+    /// Optional turn id to fork before, excluding that turn and all later turns. Cannot be
+    /// combined with `last_turn_id`.
+    #[serde(rename = "beforeTurnId", default, skip_serializing_if = "Option::is_none")]
+    pub before_turn_id: Option<String>,
+    /// `config`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<BTreeMap<String, serde_json::Value>>,
+    /// `cwd`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// When true, carry the source thread's current goal into the fork without starting its
+    /// initial automatic continuation. The next explicit turn owns the goal lifecycle, and normal
+    /// automatic continuation resumes after it.
+    #[serde(rename = "deferGoalContinuation", default, skip_serializing_if = "Option::is_none")]
+    pub defer_goal_continuation: Option<bool>,
+    /// `developerInstructions`.
+    #[serde(rename = "developerInstructions", default, skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
+    /// `ephemeral`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+    /// When true, return only thread metadata and live fork state without populating
+    /// `thread.turns`. This is useful when the client plans to call `thread/turns/list`
+    /// immediately after forking. Full-history hydration is deprecated for paginated threads; use
+    /// this with `thread/turns/list` and `thread/items/list` instead.
+    #[serde(rename = "excludeTurns", default, skip_serializing_if = "Option::is_none")]
+    pub exclude_turns: Option<bool>,
+    /// Optional last turn id to fork through, inclusive.
+    ///
+    /// When specified, turns after `last_turn_id` are omitted from the fork. The referenced turn
+    /// cannot be in progress.
+    #[serde(rename = "lastTurnId", default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_id: Option<String>,
+    /// Configuration overrides for the forked thread, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `modelProvider`.
+    #[serde(rename = "modelProvider", default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
+    /// `[UNSTABLE]` Specify the rollout path to fork from. If specified, the `thread_id` param
+    /// will be ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Named profile id for the forked thread. Cannot be combined with `sandbox`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<String>,
+    /// Replace the thread's runtime workspace roots. Paths must be absolute.
+    #[serde(rename = "runtimeWorkspaceRoots", default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// `sandbox`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<SandboxMode>,
+    /// `serviceTier`.
+    #[serde(rename = "serviceTier", default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+    /// Optional client-supplied analytics source classification for this forked thread.
+    #[serde(rename = "threadSource", default, skip_serializing_if = "Option::is_none")]
+    pub thread_source: Option<ThreadSource>,
+}
+
+/// `ThreadForkResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ThreadForkResponse {
+    /// Named or implicit built-in profile that produced the active permissions, when known.
+    #[serde(rename = "activePermissionProfile", default, skip_serializing_if = "Option::is_none")]
+    pub active_permission_profile: Option<ActivePermissionProfile>,
+    /// `approvalPolicy`.
+    #[serde(rename = "approvalPolicy")]
+    pub approval_policy: AskForApproval,
+    /// Reviewer currently used for approval requests on this thread.
+    #[serde(rename = "approvalsReviewer")]
+    pub approvals_reviewer: ApprovalsReviewer,
+    /// `cwd`.
+    pub cwd: AbsolutePathBuf,
+    /// Saved list of disabled plugin `IDs`. Does not yet filter plugin capabilities.
+    #[serde(rename = "disabledPluginIds", default, skip_serializing_if = "Option::is_none")]
+    pub disabled_plugin_ids: Option<Vec<String>>,
+    /// Environment-native paths to instruction source files currently loaded for this thread.
+    #[serde(rename = "instructionSources", default, skip_serializing_if = "Option::is_none")]
+    pub instruction_sources: Option<Vec<LegacyAppPathString>>,
+    /// `model`.
+    pub model: String,
+    /// `modelProvider`.
+    #[serde(rename = "modelProvider")]
+    pub model_provider: String,
+    /// @deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior.
+    #[serde(rename = "multiAgentMode", default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_mode: Option<MultiAgentMode>,
+    /// `reasoningEffort`.
+    #[serde(rename = "reasoningEffort", default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Thread-scoped runtime workspace roots used to materialize `:workspace_roots`.
+    #[serde(rename = "runtimeWorkspaceRoots", default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Legacy sandbox policy retained for compatibility. Experimental clients should prefer
+    /// `activePermissionProfile` for profile provenance.
+    pub sandbox: SandboxPolicy,
+    /// `serviceTier`.
+    #[serde(rename = "serviceTier", default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    /// `thread`.
+    pub thread: Thread,
+}
 
 /// `ThreadHistoryMode`, as Codex's schema names it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
