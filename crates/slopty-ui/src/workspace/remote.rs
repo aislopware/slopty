@@ -71,6 +71,9 @@ pub struct Upload {
     pub drag: Option<DragId>,
     /// The worker's remote it was sent through, which reaches it while the worker is away.
     pub via: Option<Arc<dyn Remote>>,
+    /// The names of the top-level files and folders sent, as they left here, for what the
+    /// person is told of them.
+    pub names: Vec<String>,
     /// Since when its worker is away, while it is; the upload waits for the next link
     /// ([`RELINK_WAIT`]).
     pub away_since: Option<std::time::Instant>,
@@ -91,6 +94,7 @@ impl Upload {
             attach: None,
             drag: None,
             via: None,
+            names: Vec::new(),
             away_since: None,
         }
     }
@@ -109,6 +113,7 @@ impl Upload {
             attach: None,
             drag: None,
             via: None,
+            names: Vec::new(),
             away_since: None,
         }
     }
@@ -657,6 +662,11 @@ impl WorkspaceView {
         let xfer = XferId::new();
         tracing::info!(%xfer, files = paths.len(), total = upload.total, "upload");
         upload.via = Some(Arc::clone(&remote));
+        upload.names = paths
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect();
         self.uploads.insert(xfer, upload);
         remote.upload(xfer, paths.to_vec(), dest);
         cx.notify();
@@ -732,7 +742,12 @@ impl WorkspaceView {
                     None if let Some((composer, id)) = upload.attach.clone() => {
                         composer.landed(id, &paths, cx);
                     }
-                    None if upload.dir.is_some() => self.refresh_folder(upload.tile.item, cx),
+                    None if upload.dir.is_some() => {
+                        if let Some(text) = kept_both(&upload.names, &paths) {
+                            self.show_notice(text, cx);
+                        }
+                        self.refresh_folder(upload.tile.item, cx);
+                    }
                     None if upload.paste.is_some() || upload.drag.is_some() => {}
                     None => {
                         let what = if paths.len() == 1 { "file" } else { "files" };
@@ -769,7 +784,14 @@ impl WorkspaceView {
     pub fn xfer_failed(&mut self, xfer: XferId, error: &str, cx: &mut Context<Self>) {
         if let Some(upload) = self.uploads.remove(&xfer) {
             self.terminal_upload_failed(&upload, cx);
-            self.show_notice(format!("Upload failed: {error}"), cx);
+            let machine = self
+                .workers
+                .get(&upload.tile.worker)
+                .map_or_else(|| "the machine".to_owned(), |w| w.name.clone());
+            self.show_notice(
+                format!("{} did not reach {machine}: {error}", sent(&upload.names)),
+                cx,
+            );
             Self::upload_ended(upload, cx);
             cx.notify();
         }
@@ -901,15 +923,21 @@ impl WorkspaceView {
             cx,
         );
         #[cfg(not(target_os = "ios"))]
-        self.save_copy_as(worker, source, cx);
+        self.bring_down_as(worker, source, Bringing::Copy, cx);
     }
 
-    /// The save panel, opened in `~/Downloads` on the file's name; the file comes down to the
-    /// path it gives, off the main thread.
+    /// The save panel, opened in `~/Downloads` on the file's or folder's name; it comes down to
+    /// the path it gives, off the main thread, and the person is told as `bringing` says.
     #[cfg(not(target_os = "ios"))]
-    fn save_copy_as(&mut self, worker: WorkerKey, source: String, cx: &mut Context<Self>) {
+    pub(super) fn bring_down_as(
+        &mut self,
+        worker: WorkerKey,
+        source: String,
+        bringing: Bringing,
+        cx: &mut Context<Self>,
+    ) {
         let Some(remote) = self.remote(worker) else {
-            self.show_notice("The machine is away; nothing was saved".to_owned(), cx);
+            self.show_notice(format!("The machine is away; nothing was {}", bringing.done()), cx);
             return;
         };
         let name = worker_name(&source).to_owned();
@@ -926,12 +954,14 @@ impl WorkspaceView {
                     return;
                 }
             };
+            let to = dest.clone();
             let saved = cx
-                .background_spawn(async move { bring_down_to(remote.as_ref(), &source, &dest) })
+                .background_spawn(async move { bring_down_to(remote.as_ref(), &source, &to) })
                 .await;
-            let text = match saved {
-                Ok(()) => format!("Saved a copy of {name}"),
-                Err(e) => format!("{name} was not saved: {e}"),
+            let text = match (saved, bringing) {
+                (Ok(()), Bringing::Copy) => format!("Saved a copy of {name}"),
+                (Ok(()), Bringing::Download) => format!("Downloaded {}", tildes(&dest)),
+                (Err(e), _) => format!("{name} was not {}: {e}", bringing.done()),
             };
             let _gone = this.update(cx, |this, cx| this.show_notice(text, cx));
         })
@@ -1032,6 +1062,70 @@ fn promise(remote: Arc<dyn Remote>, path: &str) -> Option<slopty_platform::drag:
     let keep: slopty_platform::drag::Keep =
         Arc::new(move |dest: &std::path::Path| bring_down_to(remote.as_ref(), &source, dest));
     Some(slopty_platform::drag::Promise { name, keep })
+}
+
+/// Why a worker's file comes down through the save panel, for what the person is told.
+#[cfg(not(target_os = "ios"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Bringing {
+    /// "Save a copy…" of a file tile's file.
+    Copy,
+    /// "Download…" of a folder tile's selected entry.
+    Download,
+}
+
+#[cfg(not(target_os = "ios"))]
+impl Bringing {
+    /// What it was, as in "nothing was saved".
+    const fn done(self) -> &'static str {
+        match self {
+            Self::Copy => "saved",
+            Self::Download => "downloaded",
+        }
+    }
+}
+
+/// `path` with the home directory as `~`, as a person reads it.
+#[cfg(not(target_os = "ios"))]
+fn tildes(path: &std::path::Path) -> String {
+    let home = slopty_platform::dirs::home();
+    match path.strip_prefix(&home) {
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
+/// What an upload of the top-level `names` is called: its one name, or how many there were.
+fn sent(names: &[String]) -> String {
+    match names {
+        [one] => one.clone(),
+        _ => format!("{} files", names.len()),
+    }
+}
+
+/// What to say of the top-level entries `sent` that `landed` (the worker's paths) under other
+/// names, because those names were taken where they went: `report 2.pdf (report.pdf was there
+/// already)`. Each renamed one is paired with the unmatched sent name it shares the longest
+/// start with, as the worker's numbering keeps the start (`report` of `report 2.pdf`). None when
+/// every entry kept its name.
+fn kept_both(sent: &[String], landed: &[String]) -> Option<String> {
+    let landed: Vec<&str> =
+        landed.iter().map(|p| p.rsplit('/').find(|n| !n.is_empty()).unwrap_or(p)).collect();
+    let mut unmatched: Vec<&str> =
+        sent.iter().map(String::as_str).filter(|s| !landed.contains(s)).collect();
+    let said: Vec<String> = landed
+        .iter()
+        .filter(|l| !sent.iter().any(|s| s == *l))
+        .map(|l| {
+            let shared = |s: &&str| s.chars().zip(l.chars()).take_while(|(a, b)| a == b).count();
+            let best = unmatched.iter().enumerate().max_by_key(|(_, s)| shared(s)).map(|(i, _)| i);
+            match best.map(|i| unmatched.remove(i)) {
+                Some(was) => format!("{l} ({was} was there already)"),
+                None => (*l).to_owned(),
+            }
+        })
+        .collect();
+    (!said.is_empty()).then(|| said.join("; "))
 }
 
 /// Bring the worker's `source` down to exactly `dest`: into a hidden directory beside it

@@ -138,3 +138,62 @@ fn a_file_tiles_copy_is_saved_whole_where_the_panel_says(cx: &mut TestAppContext
     let asked: Vec<String> = std::iter::from_fn(|| downloads.try_recv().ok()).collect();
     assert_eq!(asked, ["/w/src/main.rs", "/w/out/core.bin", "/w/gone.txt"]);
 }
+
+/// "Download…" on a folder tile on a Mac asks the save panel where its selected entry goes, on
+/// its name, and brings it down there whole, saying where it went; one the worker cannot send
+/// is named with why, and nothing lands.
+#[gpui::test]
+fn download_brings_the_selected_entry_where_the_save_panel_says(cx: &mut TestAppContext) {
+    use slopty_proto::folder::{FolderEntry, Listing};
+    use slopty_proto::orchestration::FileKind;
+
+    let held = HashMap::from([("/w/in/report.pdf".to_owned(), b"%PDF-1.7".to_vec())]);
+    let (asked, mut downloads) = mpsc::unbounded_channel();
+    let (view, cx) = workspace(cx);
+    let studio = link_files(&view, cx, Arc::new(Files { held, asked }));
+    let tile = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/in".into() }, 1);
+    let row = |name: &str| FolderEntry {
+        name: name.to_owned(),
+        kind: FileKind::File,
+        link: false,
+        hidden: false,
+        size: 8,
+        items: None,
+        modified_ms: WallMs::from_millis(1),
+    };
+    let entries = vec![row("gone.txt"), row("report.pdf")];
+    let listing = Listing::Listed { dir: "/w/in".to_owned(), entries, total: 2 };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.folder_listed(key, "/w/in", &listing, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    let here = tempfile::tempdir().unwrap();
+    let download = |cx: &mut VisualTestContext| {
+        cx.dispatch_action(crate::folder::SaveToFiles);
+        assert!(cx.did_prompt_for_new_path(), "the save panel is asked");
+        let dest = here.path().join("chosen.pdf");
+        let chosen = dest.clone();
+        cx.simulate_new_path_selection(move |_downloads| Some(chosen));
+        cx.run_until_parked();
+        dest
+    };
+
+    let gone = download(cx);
+    assert!(!gone.exists(), "nothing lands for an entry the worker cannot send");
+    let said = view.read_with(cx, |v, _| v.toast_texts());
+    let refused = "gone.txt was not downloaded: No such file or directory";
+    assert!(said.iter().any(|t| t == refused), "{said:?}");
+
+    cx.simulate_keystrokes("down");
+    let dest = download(cx);
+    assert_eq!(std::fs::read(&dest).unwrap(), b"%PDF-1.7", "the worker's bytes, renamed");
+    let said = view.read_with(cx, |v, _| v.toast_texts());
+    assert!(said.iter().any(|t| *t == format!("Downloaded {}", dest.display())), "{said:?}");
+    let left: Vec<_> =
+        std::fs::read_dir(here.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left.len(), 1, "no staging is left beside it: {left:?}");
+    let asked: Vec<String> = std::iter::from_fn(|| downloads.try_recv().ok()).collect();
+    assert_eq!(asked, ["/w/in/gone.txt", "/w/in/report.pdf"]);
+}

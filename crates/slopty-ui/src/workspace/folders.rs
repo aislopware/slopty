@@ -327,7 +327,8 @@ impl WorkspaceView {
         }
     }
 
-    /// Ask the Files picker, or the seam that stands in for it. Only iOS has the picker.
+    /// Ask the Files picker, or the seam that stands in for it. Only iOS has the picker; a Mac
+    /// asks its open panel for what goes up and its save panel for where a download goes.
     pub(super) fn ask_files(&mut self, ask: &FilesAsk, cx: &mut Context<Self>) {
         if let Some(seam) = cx.try_global::<FilesSeam>().cloned() {
             (seam.0)(ask);
@@ -343,20 +344,19 @@ impl WorkspaceView {
         #[cfg(not(target_os = "ios"))]
         match ask {
             FilesAsk::Import(tile) => Self::open_files(*tile, cx),
-            FilesAsk::Export { .. } => {
-                tracing::debug!(?ask, "no Files picker here");
-                self.show_notice("The Files picker is on iPhone and iPad".to_owned(), cx);
+            FilesAsk::Export { worker, path, .. } => {
+                self.bring_down_as(*worker, path.clone(), super::remote::Bringing::Download, cx);
             }
         }
     }
 
-    /// Show the system's open panel; what is picked goes up to `tile` as a drop on it. The
-    /// files are the person's own, so nothing is deleted after.
+    /// Show the system's open panel; what is picked (files and folders) goes up to `tile` as a
+    /// drop on it. The files are the person's own, so nothing is deleted after.
     #[cfg(not(target_os = "ios"))]
     fn open_files(tile: TileRef, cx: &Context<Self>) {
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
-            directories: false,
+            directories: true,
             multiple: true,
             prompt: None,
         });

@@ -424,7 +424,7 @@ fn a_worker_the_clipboard_is_not_shared_with_neither_hears_nor_gives_it(cx: &mut
     share(cx, false);
     let sent = studio.drain();
     assert_eq!(watches(&sent), [false], "no longer wanted: {sent:?}");
-    assert!(offers(&sent).is_empty());
+    assert_eq!(offers(&sent), Vec::<Offer>::new());
     let key = studio.key;
     let hi = Rep { inline: Some(b"from the worker".to_vec()), ..listed(ClipFormat::Text, b"x") };
     let theirs = worker_offer(3, vec![entry(vec![hi])]);
@@ -908,7 +908,7 @@ fn an_upload_outlives_its_workers_link(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_none()), "ended");
     let notice = view.read_with(cx, |v, _| v.toast_text());
-    assert_eq!(notice.as_deref(), Some("Upload failed: the machine went away"));
+    assert_eq!(notice.as_deref(), Some("c.txt did not reach studio: the machine went away"));
 }
 
 /// A drop on a note sends nothing; a drop on a remote window goes to the worker's staging.

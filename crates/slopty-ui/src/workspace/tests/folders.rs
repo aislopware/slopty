@@ -193,7 +193,7 @@ fn a_path_opens_as_what_it_is(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.open_path_on(key, "/w/proj", None, cx));
     cx.run_until_parked();
     assert_eq!(asked(&mut studio), ["/w/proj"], "asked, nothing opened yet");
-    assert!(kinds(&view, cx).is_empty());
+    assert_eq!(kinds(&view, cx), Vec::<ItemKind>::new());
     answer(&view, cx, &studio, "/w/proj", &listed("/w/proj", vec![entry("a", FileKind::File)]));
     assert_eq!(kinds(&view, cx), [ItemKind::Folder { path: "/w/proj".into() }]);
     assert!(asked(&mut studio).is_empty(), "the answer at hand fills the new tile");
@@ -414,6 +414,19 @@ fn a_drop_on_a_folder_goes_up_into_it_and_lists_it_again(cx: &mut TestAppContext
     view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
     cx.run_until_parked();
     assert_eq!(asked(&mut studio), ["/w/in"], "listed again with the file in it");
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "it kept its name: no word");
+
+    // The same name again: it lands beside the first under the next free name, which is said.
+    let other = dir.path().join("notes.md");
+    std::fs::write(&other, b"md").unwrap();
+    let file = dir.path().join("report.pdf");
+    view.update_in(cx, |v, _window, cx| v.drop_files(tile, &[file, other], cx));
+    let (xfer, _dest) = uploads.try_recv().expect("another upload");
+    let paths = vec!["/w/in/notes.md".to_owned(), "/w/in/report 2.pdf".to_owned()];
+    view.update_in(cx, |v, _window, cx| v.xfer_message(XferMsg::Finished { xfer, paths }, cx));
+    cx.run_until_parked();
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("report 2.pdf (report.pdf was there already)"));
 }
 
 /// A folder says where it is once: in its path bar, whose first crumb's words stand on the
@@ -488,4 +501,31 @@ fn a_folder_tile_follows_its_directory_and_keeps_its_place(cx: &mut TestAppConte
     });
     cx.run_until_parked();
     assert_eq!(followed(&mut studio), Some(Vec::new()), "nothing followed once the tile goes");
+}
+
+/// `open .` in a worker's shell hands its folder over as a path ending in `/`: it opens as a
+/// folder tile, not a file tile, and the worker hears it was taken.
+#[gpui::test]
+fn a_folder_a_shell_hands_over_opens_as_a_folder_tile(cx: &mut TestAppContext) {
+    use slopty_proto::handoff::{EditFile, HandoffEvent, HandoffReply};
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    studio.drain();
+    let key = studio.key;
+    let edit =
+        EditFile { id: 1, session: None, path: "/w/proj/".to_owned(), line: None, wait: false };
+    view.update_in(cx, |v, _w, cx| {
+        v.handoff_event(key, HandoffEvent::Edit(edit), Instant::now(), cx);
+    });
+    cx.run_until_parked();
+    let sent = studio.drain();
+    let added = sent.iter().any(|m| {
+        matches!(m, ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::Folder { path }, .. }))
+            if path == "/w/proj")
+    });
+    assert!(added, "a folder tile at /w/proj: {sent:?}");
+    let taken = sent.iter().any(|m| matches!(m, ClientMsg::Handoff(HandoffReply::Taken { id: 1 })));
+    assert!(taken, "the worker hears it was taken: {sent:?}");
+    let files = view.read_with(cx, |v, _| v.files.len());
+    assert_eq!(files, 0, "no file tile");
 }
