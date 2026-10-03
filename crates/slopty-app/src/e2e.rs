@@ -966,6 +966,16 @@ fn screen_info(item: ItemId, view: &ScreenView, window: &Window) -> ScreenInfo {
         bytes: s.bytes,
         stalls: s.stalls,
         stalled_ms: s.stalled_ms,
+        silences_worker: s.silences.worker_quiet.saturating_add(s.silences.worker_covered),
+        silences_dozed: s.silences.receiver_dozed,
+        stalls_in_flight: s.silences.in_flight,
+        stalls_unread: s
+            .silences
+            .stamp_wrapped
+            .saturating_add(s.silences.stamp_backwards)
+            .saturating_add(s.silences.stamp_absent),
+        gap_ms_max: s.silences.gap_ms_max,
+        dozed_ms_max: s.silences.dozed_ms_max,
         audio_packets: s.audio_packets,
         audio_lost: s.audio_lost,
         audio_concealed: s.audio_concealed,

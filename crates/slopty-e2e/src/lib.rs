@@ -1102,6 +1102,19 @@ pub struct RecoveryInfo {
     pub stalls: u64,
     /// Time spent stalled, milliseconds.
     pub stalled_ms: u64,
+    /// Silences the worker's own quiet explained, outright or within the stamp's slack: not
+    /// stalls.
+    pub silences_worker: u64,
+    /// Silences the receiver's own loop slept through: not stalls.
+    pub silences_dozed: u64,
+    /// Stalls the send stamps prove were spent in flight.
+    pub stalls_in_flight: u64,
+    /// Stalls charged for want of a stamp to read (wrapped, overtaken or absent).
+    pub stalls_unread: u64,
+    /// Longest silence, milliseconds.
+    pub gap_ms_max: u64,
+    /// Longest stretch of a silence the receiver's loop slept through, milliseconds.
+    pub dozed_ms_max: u64,
     /// Opus packets played.
     pub audio_packets: u64,
     /// Opus packets missing from the sequence.
