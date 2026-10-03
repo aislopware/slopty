@@ -11,6 +11,10 @@
 //!   optimistically.
 //! * [`layout`] — [`layout::Layout`]: this device's scrollable tiling of every worker's items
 //!   (workspaces of columns of tiles), with its springs and gestures; pure, clocked by the caller.
+//! * [`groups`] — [`groups::group`]: which tiles are one body of work (a project, a repository, a
+//!   folder, a machine, or any fact the caller names), and the frecency the palette ranks them by.
+//! * [`meters`] — [`meters::PlanMeters`]: each machine's plan windows as its agents publish them,
+//!   the freshest per agent, for the status bar.
 //! * [`xfer`] — files both ways: uploads of dropped files (resumed after a cut stream), downloads
 //!   of a worker's files, and how a path is typed into a shell.
 //! * [`clip`] — [`clip::ClipCache`]: the bytes of the worker's clipboard offer, fetched ahead under
@@ -51,10 +55,12 @@ pub mod clip;
 pub mod directory;
 #[cfg(target_vendor = "apple")]
 pub mod dnd;
+pub mod groups;
 pub mod handoff;
 pub mod items;
 pub mod layout;
 pub mod link;
+pub mod meters;
 pub mod pacing;
 pub mod relay;
 pub mod remote;

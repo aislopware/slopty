@@ -80,7 +80,7 @@ pub async fn serve(listener: TcpListener, admission: Admission, hub: Hub) {
             // An agent's surface: the tailnet must grant the node the agent role.
             match admission.check(peer).await {
                 Verdict::Admit(grant) if grant.allows(slopty_tailnet::Role::Agent) => {}
-                Verdict::Admit(_) => {
+                Verdict::Admit(_) | Verdict::Ungranted => {
                     tracing::info!(%peer, "mcp refused: the tailnet grants no agent role");
                     return;
                 }

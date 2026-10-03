@@ -29,6 +29,7 @@
 
 mod about;
 pub mod actions;
+mod agent_start;
 mod agents;
 mod ask;
 pub mod attention;
@@ -39,6 +40,7 @@ mod desktop;
 mod faces;
 mod facts;
 mod folders;
+mod grouping;
 mod handoffs;
 mod inbox;
 mod marks;
@@ -47,6 +49,7 @@ mod navigator;
 mod overlays;
 mod popout;
 mod presence;
+mod project_lines;
 mod project_search;
 mod projects;
 pub mod remote;
@@ -117,9 +120,6 @@ use crate::picker::WindowPicker;
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::TerminalView;
 
-/// The program a "new agent" terminal runs.
-pub const AGENT_COMMAND: &str = "claude";
-
 /// How long a shell command has to run before its end, unwatched, is worth a badge: shorter
 /// commands end before the human has looked away.
 pub const SLOW_COMMAND: Duration = Duration::from_secs(5);
@@ -181,6 +181,10 @@ impl gpui::Render for ChromeView {
             self.renders = self.renders.saturating_add(1);
         }
         let region = self.region;
+        if let Some(workspace) = self.workspace.upgrade() {
+            let projects = Rc::clone(&workspace.read(cx).frame_projects);
+            projects.hold(false, cx);
+        }
         crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
             workspace.render_region(region, window, cx)
         })
@@ -206,6 +210,10 @@ impl gpui::Render for StripHost {
             self.builds = self.builds.saturating_add(1);
         }
         let host = cx.entity_id();
+        if let Some(workspace) = self.workspace.upgrade() {
+            let projects = Rc::clone(&workspace.read(cx).frame_projects);
+            projects.hold(false, cx);
+        }
         crate::draw::build(&self.workspace, window, cx, |workspace, window, cx| {
             workspace.render_strip(host, window, cx)
         })
@@ -566,6 +574,8 @@ enum Field {
     Name,
     /// A page's address.
     Address,
+    /// The name of the tile's project ("Name this project…").
+    Project,
 }
 
 /// The field open in a tile's header: its name, or a page's address.
@@ -668,6 +678,8 @@ pub struct WorkspaceView {
     attention_at: Option<usize>,
     /// The empty workspace's question.
     ask: ask::Ask,
+    /// The last agent started, where and in which folder: what "New agent…" lists first.
+    last_start: Option<agent_start::LastStart>,
     /// The tiles, the faces or the links changed since the faces were last brought in step
     /// with them: the next frame does it ([`Self::sync_faces`] makes a face with the window).
     faces_dirty: bool,
@@ -699,6 +711,13 @@ pub struct WorkspaceView {
     renders: usize,
     /// What the strip and the chrome show of the shells, streams and faces ([`facts`]).
     facts: facts::Facts,
+    /// How often and how lately each project was gone to on this device, for the palette's
+    /// ranking; saved with the layout.
+    frecency: slopty_client::groups::Frecency,
+    /// The project the focus was last in, so moving among one project's tiles is one visit.
+    last_project: Option<slopty_client::layout::GroupKey>,
+    /// The projects as the frame being drawn groups them, worked out once a draw.
+    frame_projects: Rc<grouping::FrameProjects>,
     /// Holds the working marks' steps while a typed key waits for its echo.
     _keys: Subscription,
     /// Window titles the picker or a listing gave (the registry stores ids).
@@ -928,6 +947,7 @@ impl WorkspaceView {
             drawn_thread_waits: Vec::new(),
             attention_at: None,
             ask: ask::Ask::default(),
+            last_start: None,
             faces_dirty: true,
             twins: HashMap::new(),
             derived: HashMap::new(),
@@ -949,6 +969,9 @@ impl WorkspaceView {
             #[cfg(test)]
             renders: 0,
             facts: facts::Facts::default(),
+            frecency: saved.as_ref().map(|s| s.frecency.clone()).unwrap_or_default(),
+            last_project: None,
+            frame_projects: Rc::default(),
             _keys: keys,
             titles: HashMap::new(),
             agents: HashMap::new(),
@@ -1746,6 +1769,7 @@ impl gpui::Render for WorkspaceView {
         {
             self.renders = self.renders.saturating_add(1);
         }
+        self.frame_projects.hold(true, cx);
         self.reduced = cx.reduce_motion();
         let animate = self.animate && !self.reduced;
         if self.layout.config().animate != animate {
@@ -1833,7 +1857,13 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::edit_address))
             .on_action(cx.listener(Self::find_everywhere))
             .on_action(cx.listener(Self::search_in_files))
-            .on_action(cx.listener(Self::start_thread_action));
+            .on_action(cx.listener(Self::start_thread_action))
+            .on_action(cx.listener(Self::new_agent_of))
+            .on_action(cx.listener(Self::new_agent_on))
+            .on_action(cx.listener(Self::group_navigator_by))
+            .on_action(cx.listener(Self::scope_to))
+            .on_action(cx.listener(Self::pin_to_project))
+            .on_action(cx.listener(Self::name_project));
         // Only while they apply to the focus ([`actions::Applies`]).
         let root = root
             .when(applies.tile, |el| {

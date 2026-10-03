@@ -433,7 +433,13 @@ impl Orchestrator {
                         "a terminal comes with OpenTerminal, which starts its session",
                     ));
                 }
-                let item = Item { id: ItemId::new(), kind, sleeping: false, name };
+                let item = Item {
+                    id: ItemId::new(),
+                    kind,
+                    sleeping: false,
+                    name,
+                    facts: std::collections::BTreeMap::new(),
+                };
                 let id = item.id;
                 self.change(ItemOp::Add(item))?;
                 Ok(Outcome::Item(ItemRef { worker, item: id }))

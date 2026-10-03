@@ -1525,6 +1525,40 @@ Tests:
   standing in for `codex`), and the `task_spawn` and `project_needs` cases of
   `the_project_tools_default_to_the_caller_s_own_project_and_task` (`slopty-tools`).
 
+**A project is a name and its members; orchestration is a part it may have.** ✅ 2026-10-03
+- The person works on a few projects spread over many machines and wants Slopty organised by
+  them, with the machine as one fact among others (`.research/organization-2026-10-04.md`).
+  Most of the projects a client groups by are derived and never stored: a repository's clones,
+  a folder (`docs/decisions/ui.md`, "The navigator groups by project; the machine is a facet").
+  A declared project on the server is how the person names one by hand.
+- `Project::members` holds what else is in it besides its repository's clones: a matcher each,
+  an open map of fact key to the value a tile must have, or for a path the directory it must be
+  in (`{repo: github.com/o/api}`, `{machine: studio, cwd: ~/notes}`). So one project may hold
+  two repositories, or one folder name on two machines. Matchers are evaluated on the client
+  over the facts it already assembles, so no expression language runs off the server (CEL stays
+  the placement language).
+- `ProjectCreate` takes the members and `ProjectSet` replaces them whole (absent leaves them).
+  The server trims each value and refuses an empty matcher (it would match nothing), one named
+  twice, more than `Project::MEMBERS_MAX` (32) or a matcher past `Project::member_fits` (8
+  keys, a key with no space, a value up to 1024 bytes).
+- A project with no orchestrator, no repository and no target is kept and listed: its
+  repository, target, verifier and orchestrator are the part it gains when it orchestrates.
+  `repo` and `target` stay strings, empty for a plain project, since every orchestrating path
+  reads them as given and an empty one already means "none named".
+- An item names its project itself where no fact could (a window, a display, a note, a page):
+  `Item::facts` is an open map the worker keeps with the item, set by `ItemOp::SetFact` and
+  trimmed and bounded (`fact_fits`: a key up to 64 characters with no space, a value up to
+  1024 bytes, since a pin holds a group's key and that may hold a path; at most 32), so a pin
+  is the same on every device. A thread's row says the
+  repository its directory is in (`ThreadRow::{cwd, repo, repo_id}`, the origin read from the
+  config file once per directory), so an agent with no terminal groups as a shell does.
+- Tests: `slopty-proto` `a_fact_is_said_and_taken_back_within_its_bounds`,
+  `a_member_names_facts_within_bounds` and the goldens `client_item_set_fact`,
+  `worker_item_pinned`, `project_create`, `project_set`, `table_snapshot`; `slopty-worker`
+  `an_item_fact_is_kept_and_broadcast`, `a_thread_row_names_its_repository_once_known`;
+  `slopty-server` `a_project_without_an_orchestrator_is_kept_and_listed`,
+  `members_name_clones_and_folders`.
+
 ## Phases
 
 1. **Wiring and state.** Built 2026-09-30, except the tile.

@@ -1018,6 +1018,7 @@ impl Hub {
             Verb::ProjectCreate {
                 project,
                 title,
+                members,
                 repo,
                 target,
                 verifier,
@@ -1031,6 +1032,7 @@ impl Hub {
                 let new = NewProject {
                     id: project,
                     title,
+                    members,
                     repo,
                     target,
                     verifier,
@@ -1046,6 +1048,7 @@ impl Hub {
             }),
             Verb::ProjectSet {
                 project,
+                members,
                 orchestrator,
                 verifier,
                 review,
@@ -1056,6 +1059,7 @@ impl Hub {
             } => known_term(state, orchestrator).and_then(|()| {
                 let before = state.projects.status(&project, None, &running).ok();
                 let change = ProjectChange {
+                    members,
                     orchestrator,
                     verifier,
                     review,
@@ -2525,6 +2529,7 @@ mod tests {
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,
+            members: Vec::new(),
         };
         p.create(new, &running, WallMs::ZERO).unwrap();
         let spec = TaskSpec { title: "t".to_owned(), ..TaskSpec::default() };

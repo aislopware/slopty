@@ -35,7 +35,9 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   special case. `ClientMsg::Point` stays (the "go" toast on the others). The wire module is
   `slopty_proto::items` (`ItemSync`, `ItemOp`); `PROTOCOL_VERSION` 51 with re-accepted goldens.
 
-- ✅ **Where a new tile goes** (2026-09-24). An item this client asked for (its own echo:
+- ✅ **Where a new tile goes** (2026-09-24; amended 2026-10-03: a tile from elsewhere goes by
+  its project, not its worker, see "A tile from elsewhere goes to its project's workspace"
+  below). An item this client asked for (its own echo:
   `ItemChange::Added { by_me: true }`) opens a column right of the focused one and takes the
   focus. An item from elsewhere (another client, the worker's own session list, the first
   snapshot) joins the end of the workspace that most recently held that worker's tiles, and
@@ -902,3 +904,23 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     page mapped upright and back), keymap
     `a_bare_key_binds_where_nothing_takes_typing`, and the timing
     `timing_of_a_page_flip`.
+
+- ✅ **A tile from elsewhere goes to its project's workspace** (2026-10-03, the organisation
+  study `.research/organization-2026-10-04.md` §6.3). A workspace is most useful when it holds
+  one body of work, whatever machines run it, so `Placement::Remote` carries the arriving
+  tile's project (`slopty_client::groups::GroupKey`, worked out by the client over every tile of
+  the layout and the arrivals together) and the layout puts it at the end of the workspace
+  that most recently held a tile of that project. A tile with no project (a window, a display,
+  a note, a page, a shell in its home directory: its project is its machine) goes to the
+  workspace that most recently held any tile of its machine, so it lands where that machine's
+  work is rather than in a strip of its own. Failing both, it fills an empty active workspace,
+  else gets a new workspace just above the trailing empty one, as before. Each tile keeps the
+  project it was last said to be in (`Tile::home`, said again before each placement by
+  `Layout::set_homes`); a tile already placed never moves, so a shell that changes checkout
+  changes its row in the navigator and not its place. The rule is not "one workspace per
+  project": the person's own moves mix them freely, and a tile of this client's own still
+  opens beside the focus. Tests: `layout::tests::a_remote_tile_joins_the_workspace_of_its_project`,
+  `a_project_with_no_workspace_fills_an_empty_one_or_gets_one_above_the_trailing`,
+  `a_placed_tile_never_moves_when_its_project_changes`,
+  `a_tile_with_no_project_joins_its_machines_work`; the UI's view of it is in
+  `docs/decisions/ui.md`, "The navigator groups by project; the machine is a facet".

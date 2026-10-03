@@ -44,7 +44,7 @@ pub(in crate::workspace) const SYNCED: Duration = Duration::from_secs(3);
 pub(in crate::workspace) const HOLD_VERDICT: Duration = Duration::from_secs(15);
 
 /// What a note's answer says when its worker was not reached in time.
-pub(in crate::workspace) const NOT_REACHED: &str = "Couldn't reach that agent's worker";
+pub(in crate::workspace) const NOT_REACHED: &str = "Couldn't reach that agent's machine";
 
 /// A note's "Allow" or "Deny" whose prompt is not here yet.
 #[derive(Debug)]

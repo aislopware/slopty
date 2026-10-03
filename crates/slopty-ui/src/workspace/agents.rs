@@ -632,6 +632,7 @@ impl WorkspaceView {
             kind: ItemKind::Terminal { session },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         self.propose(worker, slopty_proto::items::ItemOp::Add(item), cx);
         self.pending_focus = Some(session);

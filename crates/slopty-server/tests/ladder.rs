@@ -87,6 +87,9 @@ mod tests {
             to_review: false,
             meters: Meters::default(),
             updated_ms: WallMs::from_millis(since),
+            cwd: None,
+            repo: None,
+            repo_id: None,
         }
     }
 

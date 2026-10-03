@@ -13981,3 +13981,74 @@ SLOPTY_UDP_RCVBUF=16777216 target/debug/deps/slopty_net-<hash> --exact \
   endpoint::tests::keyframe_report --ignored --nocapture
 docker run --rm --cap-add NET_ADMIN -u root -e SLOPTY_UDP_RCVBUF=16777216 … (the same)
 ```
+
+## 2026-10-03 — the navigator by project
+
+The navigator groups by project (`docs/decisions/ui.md`, "The navigator groups by project; the
+machine is a facet"): every tile's facts are assembled and grouped once a frame
+(`grouping::FrameProjects`, shared by the navigator, its rail, the breadcrumb and every
+workspace's name). `measure_the_navigator_over_many_tiles` (one worker, 60 shells each in a
+folder of its own and 60 notes, 400 frames) and `measure_the_navigator_scrolling` (120 notes,
+600 frames), three runs each, on this Mac under other lanes' builds.
+
+The workload means more now: each of the 60 shells is a project of its own, so the navigator
+lists 60 project headers, 60 rows and a *Workers* block of 60 notes (181 rows where it had 121),
+the rail draws 60 project glyphs where it drew one worker's, and the snapshot that brings them
+lands in 61 workspaces (a project per workspace, the notes with the first). The test now hides
+the navigator through its action and checks it by the layout's state, since a snapshot's tiles
+leave nothing focused for ⌘B to reach the workspace through and a release build keeps no debug
+selectors; before, it panicked at that step.
+
+| build | docked p50 / p95 | hidden p50 / p95 | scrolling p50 / p95 |
+| --- | --- | --- | --- |
+| release, load ~19 | 0.912 / 1.383, 0.919 / 1.305, 0.883 / 1.296 ms | 0.563 / 0.829, 0.581 / 0.848, 0.559 / 0.840 ms | 0.344 / 0.555, 0.342 / 0.501, 0.344 / 0.515 ms |
+| dev, load ~7–9 | 4.119 / 4.613, 3.989 / 4.476, 4.066 / 4.431 ms | 2.878 / 3.174, 2.647 / 2.973, 2.752 / 3.009 ms | 1.269 / 1.544, 1.261 / 1.455, 1.279 / 1.465 ms |
+
+What the navigator adds at p50 (docked less hidden) is 0.34 ms in release (0.43 to 0.54 ms
+across the four pins measured on 2026-09-30) and 1.3 ms in dev (about 1.2 ms on 2026-09-26):
+the bar holds. The
+hidden frame grew, 0.33 → 0.57 ms in release: it now groups every tile for the rail and draws a
+glyph per project. In dev, one grouping of the 120 tiles takes 0.6 ms (0.3 ms the facts, 0.25 ms
+the grouping); with the grouping stubbed out the same frames take 1.41 ms hidden and 1.66 ms
+docked, so the grouping and the rail are what the hidden frame added. Two fixes came out of the
+measuring, which together took the hidden frame from 4.0 to 2.7 ms in dev: the grouping is
+worked out once a frame where five callers each worked it out, and `reading_order` no longer
+sorts every tile by a linear position lookup (277 µs → 12 µs for 120 tiles), since the layout
+lists its tiles in reading order already. Scrolling the list
+groups once a frame too, since the rows region builds every row's words each frame as before;
+its p50 is the 2026-09-30 figure (0.341 ms) rather than the 0.229 ms of a quieter run, at a load
+of 19, so it is noted and not claimed.
+
+```sh
+cargo test -p slopty-ui --release --lib --no-run
+target/release/deps/slopty_ui-<hash> --ignored --nocapture --test-threads 1 measure_the_navigator
+cargo test -p slopty-ui --lib measure_the_navigator -- --ignored --nocapture
+```
+
+Logs: `target/logs/laneO-navmeasure-release.log`, `target/logs/laneO-navmeasure.log`.
+
+**With boards and threads with no tile (same day, later).** The navigator now also heads each
+project with its board's row and lists the threads at work that have no tile here under their
+project, and every attention look names each tile's project, so a notification of one project
+groups with the others. `measure_the_navigator_over_many_tiles` adds a second phase on top of
+the same 120 tiles: 40 threads with no tile, in 40 folders of their own, and 5 boards with
+members, then times 400 docked frames and the attention look (`WorkspaceView::attention_look`,
+which now carries the projects map). Release, three runs, load ~7–8:
+
+| | docked p50 / p95 | hidden p50 / p95 | scrolling p50 / p95 |
+| --- | --- | --- | --- |
+| 120 tiles | 0.962 / 1.465, 0.939 / 1.374, 0.900 / 1.388 ms | 0.586 / 0.867, 0.594 / 0.850, 0.580 / 0.887 ms | 0.354 / 0.548, 0.341 / 0.485, 0.327 / 0.430 ms |
+| + 40 threads, 5 boards | 0.977 / 1.401, 0.921 / 1.303, 0.885 / 1.422 ms | | |
+
+| attention look p50 / p95 |
+| --- |
+| 0.210 / 0.259, 0.199 / 0.213, 0.209 / 0.261 ms |
+
+The 40 thread rows and 5 boards add nothing measurable to a docked frame (0.93 against
+0.93 ms p50, run to run inside the noise), since the claims are worked out once per listing and
+idle or tiled threads are skipped before any grouping. The figures without them match the
+morning's within noise. The app takes the attention look each time the workspace view notifies
+(`slopty-app`'s observer of the view), not on each drawn frame; with the projects map in it,
+it stays at a fifth of a millisecond.
+
+Log: `target/logs/laneO-measure.log`.

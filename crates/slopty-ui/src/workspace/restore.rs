@@ -79,6 +79,7 @@ impl WorkspaceView {
             });
         let waiting: Vec<SavedPopout> = waiting.cloned().collect();
         saved.popouts.extend(waiting);
+        saved.frecency.clone_from(&self.frecency);
         saved.looked = self
             .projects_looked()
             .into_iter()

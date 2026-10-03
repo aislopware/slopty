@@ -333,6 +333,34 @@ mod threads {
         assert_eq!(rows.len(), 1);
     }
 
+    /// A thread's row says the repository its directory is in, by its root and its origin, as
+    /// a shell's summary does; a directory in none says none.
+    #[tokio::test]
+    async fn a_thread_row_names_its_repository_once_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let clone = tempfile::tempdir().unwrap();
+        let git = clone.path().join(".git");
+        std::fs::create_dir_all(&git).unwrap();
+        let remote = "[remote \"origin\"]\n\turl = git@github.com:aislopware/slopty.git\n";
+        std::fs::write(git.join("config"), remote).unwrap();
+        let crates = clone.path().join("crates");
+        std::fs::create_dir_all(&crates).unwrap();
+        let host = open(dir.path());
+        let inside = ThreadMeta { cwd: crates.to_string_lossy().into_owned(), ..meta() };
+        let outside = ThreadMeta { cwd: dir.path().to_string_lossy().into_owned(), ..meta() };
+        let (a, b) = (inside.id, outside.id);
+        host.create(inside).unwrap();
+        host.create(outside).unwrap();
+        let TableFrame::Snapshot { rows, .. } = host.table(None) else { panic!("a snapshot") };
+        let row = |id: ThreadId| rows.iter().find(|r| r.id == id).expect("its row");
+        let root = std::fs::canonicalize(clone.path()).unwrap();
+        assert_eq!(row(a).repo.as_deref(), Some(root.to_string_lossy().as_ref()));
+        let origin = row(a).repo_id.as_ref().and_then(|id| id.origin.as_deref());
+        assert_eq!(origin, Some("github.com/aislopware/slopty"));
+        assert_eq!(row(a).cwd.as_deref(), Some(crates.to_string_lossy().as_ref()));
+        assert_eq!((row(b).repo.as_ref(), row(b).repo_id.as_ref()), (None, None));
+    }
+
     /// An intent is acted on once per id, across a restart too; a start is too.
     #[tokio::test]
     async fn an_intent_is_acted_on_once() {

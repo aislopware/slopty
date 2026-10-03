@@ -122,12 +122,11 @@ impl ItemDoc {
             | ItemOp::Rename { .. }
             | ItemOp::SetNote { .. }
             | ItemOp::SetUrl { .. }
-            | ItemOp::SetFolder { .. } => {
-                match self.items.get_mut(&id).map(|item| item.apply(op)) {
-                    Some(Ok(true)) => ItemChange::Changed(id),
-                    Some(Ok(false) | Err(_)) | None => ItemChange::Echo,
-                }
-            }
+            | ItemOp::SetFolder { .. }
+            | ItemOp::SetFact { .. } => match self.items.get_mut(&id).map(|item| item.apply(op)) {
+                Some(Ok(true)) => ItemChange::Changed(id),
+                Some(Ok(false) | Err(_)) | None => ItemChange::Echo,
+            },
         }
     }
 }
@@ -144,6 +143,7 @@ mod tests {
             kind: ItemKind::Terminal { session: SessionId::new() },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         }
     }
 

@@ -42,8 +42,8 @@ pub async fn run(server: Option<&str>, data_dir: &Path) -> Result<()> {
     let name = format!("slopty mcp @ {}", crate::client::machine_name());
     let role = Role::Agent { name, vouch: crate::verbs::vouch() };
     let (link, events) = Link::persistent(endpoint.clone(), address, role);
-    let running = handler(link)
-        .serve(rmcp::transport::stdio())
+    // Boxed: the handshake's future holds the tools' verbs, too large to keep on the stack.
+    let running = Box::pin(handler(link).serve(rmcp::transport::stdio()))
         .await
         .context("the MCP client did not open a session")?;
     let forward = tokio::spawn(forward_needs(events, running.peer().clone()));

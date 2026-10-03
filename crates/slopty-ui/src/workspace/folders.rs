@@ -75,6 +75,7 @@ impl WorkspaceView {
             kind: ItemKind::Folder { path: path.clone() },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         let id = item.id;
         tracing::info!(%id, %path, "open folder");
@@ -412,7 +413,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let Some(offer) = self.offer(worker, path, folder) else {
-            self.show_notice("The worker is away; nothing was saved".to_owned(), cx);
+            self.show_notice("The machine is away; nothing was saved".to_owned(), cx);
             return;
         };
         let name = offer.name.clone();

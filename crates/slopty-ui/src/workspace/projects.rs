@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use gpui::{AppContext as _, Context, Entity, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_client::server::ServerCaller;
-use slopty_core::{SessionId, WallMs, WorkerId};
+use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentStatus;
-use slopty_proto::items::ItemKind;
+use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
     Fact, Facts, LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, RunOn,
@@ -143,6 +143,7 @@ fn set_project(project: &ProjectId, push: Option<bool>, ask_to_start: Option<boo
         ask_to_start,
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     }
 }
 
@@ -158,6 +159,7 @@ fn set_checks(project: &ProjectId, verifier: String, review: String) -> Verb {
         ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     }
 }
 
@@ -169,7 +171,7 @@ fn worker_id(key: WorkerKey) -> Option<WorkerId> {
 
 /// A project name made from `name` (a directory's), as [`ProjectId`] takes it, and not one
 /// of `taken`: lowercase, every run of anything else a dash, and `-2`, `-3`… when it is.
-fn project_name(name: &str, taken: impl Fn(&ProjectId) -> bool) -> Option<ProjectId> {
+pub(super) fn project_name(name: &str, taken: impl Fn(&ProjectId) -> bool) -> Option<ProjectId> {
     let mut slug = String::new();
     for c in name.chars().flat_map(char::to_lowercase) {
         if c.is_ascii_lowercase() || c.is_ascii_digit() {
@@ -281,16 +283,31 @@ impl WorkspaceView {
         }
     }
 
-    /// Show `project`'s board in its orchestrator's tile, and go there.
+    /// Show `project`'s board in its orchestrator's tile, and go there. Where its orchestrator
+    /// has no tile here, one is opened for it on its worker.
     pub fn open_project(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
         let Some(board) = self.projects.mirror.get(project) else { return };
         let title = board.project.title.clone();
-        let Some(session) = board.project.orchestrator.map(|t| t.session) else {
+        let Some(term) = board.project.orchestrator else {
             self.show_notice(format!("{title} has no orchestrator yet"), cx);
             return;
         };
+        let session = term.session;
+        let worker = worker_key(term.worker);
+        if self.tile_of_session(session).is_none()
+            && self.workers.get(&worker).is_some_and(|w| w.link.is_some())
+        {
+            let item = Item {
+                id: ItemId::new(),
+                kind: ItemKind::Terminal { session },
+                sleeping: false,
+                name: None,
+                facts: BTreeMap::new(),
+            };
+            self.propose(worker, ItemOp::Add(item), cx);
+        }
         let Some(tile) = self.tile_of_session(session) else {
-            self.show_notice(format!("{title}'s orchestrator has no tile here"), cx);
+            self.show_notice(format!("{title}'s orchestrator is on a machine not linked now"), cx);
             return;
         };
         self.focus_tile(tile, cx);
@@ -914,7 +931,7 @@ impl WorkspaceView {
 
     /// Send `verb` to the server and hand its answer to `then`; a refusal is said as a
     /// notice, in the server's words.
-    fn send_to_server(
+    pub(super) fn send_to_server(
         &mut self,
         verb: Verb,
         then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
@@ -983,6 +1000,7 @@ impl WorkspaceView {
             orchestrator: Some(TermRef { worker, session }),
             limits: LimitsChange::default(),
             metadata: None,
+            members: Vec::new(),
         };
         self.send_to_server(
             verb,
@@ -1060,7 +1078,7 @@ impl WorkspaceView {
 }
 
 /// The mark a project's palette line wears: its most urgent lane's.
-const fn lane_status(lane: Lane) -> Status {
+pub(super) const fn lane_status(lane: Lane) -> Status {
     match lane {
         Lane::NeedsYou => Status::NeedsYou,
         Lane::Failed => Status::Failed,

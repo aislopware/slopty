@@ -83,6 +83,17 @@ pub(super) struct SubagentAsked {
     pub waits: u8,
 }
 
+/// Where a thread works, as its row says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct ThreadPlace {
+    /// Its directory.
+    pub cwd: Option<String>,
+    /// The repository that directory is in.
+    pub repo: Option<String>,
+    /// Which repository that is on every machine.
+    pub repo_id: Option<slopty_proto::terminal::RepoId>,
+}
+
 /// Each worker's threads, and the thread view of each agent tile that shows one.
 #[derive(Default)]
 pub(super) struct ThreadFaces {
@@ -112,16 +123,36 @@ pub(super) struct ThreadFaces {
     agents: HashMap<ThreadId, AgentId>,
     /// Each thread's terminal as its worker's table last said, for its tile's way to it.
     terminals: HashMap<ThreadId, SessionId>,
+    /// Each thread's open facts as its worker's table last said (its project, its task), for
+    /// the group its tile and its terminal's are in.
+    facts: HashMap<ThreadId, std::collections::BTreeMap<String, String>>,
+    /// Where each thread works as its worker's table last said (its directory, the repository
+    /// that is in), for the project of a thread tile with no terminal.
+    places: HashMap<ThreadId, ThreadPlace>,
     /// Where each thread stands as its worker's table last said, its subagents folded in, for
     /// the chrome outside its tile.
     stands: HashMap<ThreadId, ThreadStand>,
     /// Where each thread stands as the server's ladder last said: what speaks for the threads
     /// of a worker this client has no link to.
     server: HashMap<ThreadId, ThreadStand>,
+    /// Each machine's plan windows as its agents' rows last said them, for the status bar.
+    meters: slopty_client::meters::PlanMeters,
     /// Starts sent and not yet answered, and the worker each went to.
     starts: HashMap<IntentId, WorkerKey>,
     /// The thread tile whose view takes the keyboard once it is made.
     focus_item: Option<ItemId>,
+}
+
+impl ThreadFaces {
+    /// Each machine's plan windows, for the status bar.
+    pub(super) const fn meters(&self) -> &slopty_client::meters::PlanMeters {
+        &self.meters
+    }
+
+    /// Forget a machine's plan windows, as it goes from the workspace.
+    pub(super) fn forget_meters(&mut self, worker: WorkerKey) {
+        self.meters.forget(worker);
+    }
 }
 
 impl WorkspaceView {
@@ -195,17 +226,19 @@ impl WorkspaceView {
         }
     }
 
-    /// Start a thread of `agent` on `key`, in `cwd`, with nothing said yet: the worker answers
-    /// with the thread, which opens as a tile ([`Self::thread_done`]), or in words why not.
+    /// Start a thread of `agent` on `key`, in `cwd`, with `prompt` as its first word or nothing
+    /// said yet: the worker answers with the thread, which opens as a tile
+    /// ([`Self::thread_done`]), or in words why not.
     pub fn start_thread(
         &mut self,
         key: WorkerKey,
         agent: AgentId,
         cwd: String,
+        prompt: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let id = IntentId::new();
-        let start = Start { agent, cwd, drive: None, prompt: None, model: None, args: Vec::new() };
+        let start = Start { agent, cwd, drive: None, prompt, model: None, args: Vec::new() };
         tracing::info!(%key, %id, agent = %start.agent.0, cwd = start.cwd, "start thread");
         self.faces.threads.starts.insert(id, key);
         self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }));
@@ -252,6 +285,29 @@ impl WorkspaceView {
             },
             |a| a.0.as_str(),
         ))
+    }
+
+    /// `thread`'s open facts, as its worker's table last said.
+    pub(super) fn thread_facts(
+        &self,
+        thread: ThreadId,
+    ) -> Option<&std::collections::BTreeMap<String, String>> {
+        self.faces.threads.facts.get(&thread)
+    }
+
+    /// Where `thread` works, as its worker's table last said.
+    pub(super) fn thread_place(&self, thread: ThreadId) -> Option<&ThreadPlace> {
+        self.faces.threads.places.get(&thread)
+    }
+
+    /// The terminal `thread`'s TUI runs in, as its worker's table last said.
+    pub(super) fn thread_terminal(&self, thread: ThreadId) -> Option<SessionId> {
+        self.faces.threads.terminals.get(&thread).copied()
+    }
+
+    /// The thread `session`'s agent runs, as its worker's table says.
+    pub(super) fn session_thread(&self, session: SessionId) -> Option<ThreadId> {
+        self.faces.threads.of_session.get(&session).copied()
     }
 
     /// The agent that runs `thread`, by its [`AgentId`] name, as its worker's table last said.
@@ -365,6 +421,7 @@ impl WorkspaceView {
             kind: ItemKind::Thread { thread },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         tracing::info!(id = %item.id, %thread, "open thread");
         self.propose(key, ItemOp::Add(item), cx);
@@ -396,6 +453,7 @@ impl WorkspaceView {
             kind: ItemKind::Terminal { session },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         self.propose(key, ItemOp::Add(item), cx);
         self.pending_focus = Some(session);
@@ -426,9 +484,18 @@ impl WorkspaceView {
             || stands.iter().any(|(id, stand)| old.get(id) != Some(stand));
         self.faces.threads.stands.retain(|_, stand| stand.worker != key);
         self.faces.threads.stands.extend(stands);
+        let meters_before = self.faces.threads.meters.clone();
         for row in rows.values() {
             self.faces.threads.titles.insert(row.id, row.title.clone());
             self.faces.threads.agents.insert(row.id, row.agent.clone());
+            self.faces.threads.facts.insert(row.id, row.facts.clone());
+            let place = ThreadPlace {
+                cwd: row.cwd.clone(),
+                repo: row.repo.clone(),
+                repo_id: row.repo_id.clone(),
+            };
+            self.faces.threads.places.insert(row.id, place);
+            self.faces.threads.meters.hear(key, &row.agent.0, &row.meters.limits, row.updated_ms);
             match row.terminal {
                 Some(session) => self.faces.threads.terminals.insert(row.id, session),
                 None => self.faces.threads.terminals.remove(&row.id),
@@ -436,6 +503,9 @@ impl WorkspaceView {
         }
         if moved {
             self.agents_moved(cx);
+        }
+        if self.faces.threads.meters != meters_before {
+            App::notify(cx, self.chrome.statusbar.entity_id());
         }
         cx.notify();
     }

@@ -95,3 +95,55 @@ fn the_breadcrumb_goes_between_workspaces(cx: &mut TestAppContext) {
     assert!(crumbs.iter().any(|l| l.ends_with(", elsewhere 1 needs you")), "{crumbs:#?}");
     assert!(crumbs.iter().all(|l| !l.contains(['⌘', '⌥', '⌃'])), "no chords: {crumbs:#?}");
 }
+
+/// A shell in `cwd`, opened here.
+fn shell_at(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    version: u64,
+    cwd: Option<&str>,
+) -> TileRef {
+    opens_in(view, cx, fake, SessionId::new(), fake.me, version, cwd)
+}
+
+/// An unnamed workspace is named after the project most of its tiles share (a tie going to
+/// the first in the strip, so the name holds as the focus moves), the worker's name only
+/// where nothing else is shared, and the name the person gives wins.
+#[gpui::test]
+fn a_workspace_is_named_after_the_project_most_of_its_tiles_share(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let name = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.workspace_name());
+    let home = shell_at(&view, cx, &studio, 1, None);
+    assert_eq!(name(cx), "studio", "a home shell shares only its machine");
+    let _site = shell_at(&view, cx, &studio, 2, Some("/w/site"));
+    assert_eq!(name(cx), "site", "a project before a machine");
+    let atlas_first = shell_at(&view, cx, &studio, 3, Some("/w/atlas"));
+    assert_eq!(name(cx), "site", "a tie goes to the first in the strip");
+    let atlas = shell_at(&view, cx, &studio, 4, Some("/w/atlas/docs"));
+    let session = view.read_with(cx, |v, _| session_of(v, atlas));
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        let moved = SessionSummary {
+            repo: Some("/w/atlas".to_owned()),
+            ..summary(session, Some("/w/atlas/docs"))
+        };
+        v.session_opened(key, moved, cx);
+        let first = SessionSummary {
+            repo: Some("/w/atlas".to_owned()),
+            ..summary(session_of(v, atlas_first), Some("/w/atlas"))
+        };
+        v.session_opened(key, first, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(name(cx), "atlas", "two of atlas outnumber one of site");
+    view.update_in(cx, |v, _w, cx| v.focus_tile(home, cx));
+    cx.run_until_parked();
+    assert_eq!(name(cx), "atlas", "the focus does not rename it");
+    view.update_in(cx, |v, _w, cx| {
+        v.layout.set_workspace_name(0, Some("release".to_owned()));
+        cx.notify();
+    });
+    assert_eq!(name(cx), "release", "a given name wins");
+}

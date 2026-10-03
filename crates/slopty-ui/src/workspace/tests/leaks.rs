@@ -84,13 +84,14 @@ pub(super) fn close(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, ti
     cx.run_until_parked();
 }
 
-/// A workspace with one worker and one shell on it, which stays while the cases come and go.
+/// A workspace with one worker and one shell on it, in the folder the cases' files and folders
+/// are in so they arrive beside it, which stays while the cases come and go.
 pub(super) fn studio(
     cx: &mut TestAppContext,
 ) -> (Entity<WorkspaceView>, &mut VisualTestContext, Fake) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/w"));
     (view, cx, fake)
 }
 

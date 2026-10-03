@@ -52,6 +52,7 @@ fn shell_in_repo(
         kind: ItemKind::Terminal { session },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let tile = TileRef { worker: fake.key, item: item.id };
     let (key, me) = (fake.key, fake.me);
@@ -236,24 +237,18 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "branch main"), "{names:#?}");
 
-    // A shell in another repository says its checkout: words, with nothing to choose.
+    // A shell in another repository says its checkout: words, with nothing to choose. Its
+    // project is on one machine, so no machine is named in the breadcrumb; the tile's header
+    // names it, since the workspace now holds two machines' tiles.
     let mini = connect(&view, cx, 3, "mini");
     let (_, notes) = shell_in_repo(&view, cx, &mini, "/w/notes", "/w/notes", "draft");
     view.update_in(cx, |v, _w, cx| v.focus_tile(notes, cx));
     cx.run_until_parked();
-    let (ws, worker, checkout, branch) = (
-        at(cx, "crumb-workspace"),
-        at(cx, "crumb-worker"),
-        at(cx, "crumb-checkout"),
-        at(cx, "crumb-branch"),
-    );
-    assert!(
-        ws.right() <= worker.left()
-            && worker.right() <= checkout.left()
-            && checkout.right() <= branch.left(),
-        "two machines in the workspace: the focused tile's is named, in order"
-    );
-    assert!(labels(&view, cx).iter().any(|l| l == "on mini"), "the worker's name");
+    let (ws, checkout, branch) =
+        (at(cx, "crumb-workspace"), at(cx, "crumb-checkout"), at(cx, "crumb-branch"));
+    assert!(ws.right() <= checkout.left() && checkout.right() <= branch.left(), "in order");
+    assert!(cx.debug_bounds("crumb-worker").is_none(), "a project on one machine");
+    assert!(cx.debug_bounds(selector("worker", notes.item)).is_some(), "the header says mini");
     let padding = 2.0 * Theme::default().spacing.sm;
     let width = f32::from(checkout.size.width);
     assert!(width > padding + 10.0, "the checkout's name is drawn, not only its padding: {width}");
@@ -267,7 +262,8 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     click(cx, "crumb-checkout");
     assert!(cx.debug_bounds("menu").is_none(), "nothing to choose, nothing opens");
 
-    // The same repository on another worker makes the checkout a menu of the two.
+    // The same repository on another worker makes the project span two machines: the
+    // breadcrumb names the focused tile's, and its menu lists the clones by machine.
     let laptop = connect(&view, cx, 2, "laptop");
     let (far, far_tile) =
         shell_in_repo(&view, cx, &laptop, "/home/me/slopty-wt", "/home/me/slopty-wt", "fix");
@@ -283,12 +279,38 @@ fn the_breadcrumb_names_the_checkout_and_its_branch(cx: &mut TestAppContext) {
     });
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
-    click(cx, "crumb-checkout");
-    assert!(cx.debug_bounds("menu-slopty").is_some(), "this checkout");
-    click(cx, "menu-slopty-wt");
+    assert!(labels(&view, cx).iter().any(|l| l == "on studio"), "the focused tile's machine");
+    assert!(cx.debug_bounds("crumb-checkout").is_none(), "the workspace already says slopty");
+    click(cx, "crumb-worker");
+    assert!(cx.debug_bounds("menu-studio").is_some(), "this clone, by its machine");
+    click(cx, "menu-laptop");
     assert_eq!(focused(&view, cx), Some(far_tile), "a row goes to a shell in it");
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "branch fix"), "the crumbs follow: {names:#?}");
+    assert!(names.iter().any(|l| l == "on laptop"), "and the machine: {names:#?}");
+}
+
+/// A tile's header names its worker only where its workspace holds tiles of more than one: a
+/// workspace on one machine never pays for the chip, whatever else is connected.
+#[gpui::test]
+fn the_header_chip_shows_only_where_the_workspace_spans_machines(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let (_, here) = shell_in_repo(&view, cx, &studio, "/w/a", "/w/a", "main");
+    assert!(cx.debug_bounds(selector("worker", here.item)).is_none(), "one machine here");
+    new_workspace_from_the_bar(cx);
+    let (_, there) = shell_in_repo(&view, cx, &laptop, "/w/b", "/w/b", "main");
+    assert!(cx.debug_bounds(selector("worker", there.item)).is_none(), "nor in its own");
+    view.update_in(cx, |v, _w, cx| {
+        v.tick();
+        v.layout.move_column_to_workspace_up();
+        v.after_focus_moved(cx);
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(selector("worker", there.item)).is_some(), "two machines meet");
+    assert!(cx.debug_bounds(selector("worker", here.item)).is_some(), "both say theirs");
 }
 
 /// A worker's actions in the hosts popover wait for the pointer, and the keyboard brings
@@ -381,7 +403,7 @@ fn the_workers_count_opens_the_hosts_and_their_actions(cx: &mut TestAppContext) 
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("status-workers-dot").is_some(), "the lost one shows");
-    assert!(labels(&view, cx).iter().any(|l| l == "2 workers, 1 not connected"));
+    assert!(labels(&view, cx).iter().any(|l| l == "2 machines, 1 not connected"));
 
     click(cx, "status-workers");
     assert!(view.read_with(cx, |v, _| v.hosts_open()));
@@ -690,4 +712,52 @@ fn a_command_ending_on_the_focused_tile_while_away_enters_the_inbox(cx: &mut Tes
         assert!(v.finished(missed).is_some(), "on the focused tile, but the app was away");
         assert_eq!(v.inbox_count(), 1);
     });
+}
+
+/// A Claude Code thread on `fake` whose status line said `limits`, with no terminal.
+fn plan_row(limits: Vec<slopty_proto::thread::Limit>) -> slopty_proto::thread::wire::ThreadRow {
+    let mut row = crate::conversation::thread::fixtures::thread("edit").row(WallMs::now());
+    row.id = slopty_proto::thread::ThreadId::new();
+    row.terminal = None;
+    row.agent = slopty_proto::thread::AgentId(slopty_proto::thread::AgentId::CLAUDE_CODE.into());
+    row.meters.limits = limits;
+    row
+}
+
+fn window(name: &str, used_bp: u32) -> slopty_proto::thread::Limit {
+    slopty_proto::thread::Limit { name: name.to_owned(), used_bp, resets_ms: None }
+}
+
+/// The bar says the focused tile's machine's plan windows as its agents published them, and a
+/// click lists every machine's readings. A machine whose
+/// agents published none shows no meter.
+#[gpui::test]
+fn the_status_bar_shows_the_focused_machines_plan_windows(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let laptop = connect(&view, cx, 2, "laptop");
+    let here = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let there = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+    let row = plan_row(vec![window("five-hour", 2_300), window("seven-day", 4_100)]);
+    let table = slopty_proto::thread::wire::TableFrame::Snapshot {
+        cursor: slopty_proto::thread::Cursor { epoch: 1, seq: 1 },
+        rows: vec![row],
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+        v.focus_tile(here, cx);
+    });
+    cx.run_until_parked();
+    assert!(labels(&view, cx).iter().any(|l| l == "Plan usage 5h 23% · 7d 41%"));
+
+    click(cx, "status-plan");
+    assert!(cx.debug_bounds("plans").is_some(), "every reading, listed");
+    let row = "studio · Claude Code, 5h 23% · 7d 41% · now".to_owned();
+    assert!(labels(&view, cx).contains(&row), "{:?}", labels(&view, cx));
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(there, cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("status-plan").is_none(), "the laptop's agents said nothing");
 }

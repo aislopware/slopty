@@ -26,11 +26,23 @@ fn measure_a_frame_over_a_large_registry(cx: &mut TestAppContext) {
     let mut sessions = Vec::new();
     for _ in 0..NOTES {
         let kind = ItemKind::Note { text: text.clone() };
-        items.push(Item { id: ItemId::new(), kind, sleeping: false, name: None });
+        items.push(Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        });
     }
     for n in 0..FILES {
         let kind = ItemKind::File { path: format!("/w/src/file_{n}.rs") };
-        items.push(Item { id: ItemId::new(), kind, sleeping: false, name: None });
+        items.push(Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        });
     }
     for _ in 0..SHELLS {
         let session = SessionId::new();
@@ -40,6 +52,7 @@ fn measure_a_frame_over_a_large_registry(cx: &mut TestAppContext) {
             kind: ItemKind::Terminal { session },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         });
     }
     let key = studio.key;
@@ -87,6 +100,7 @@ fn measure_an_echo_frame_beside_long_notes(cx: &mut TestAppContext) {
         kind: ItemKind::Note { text: text.clone() },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     })
     .take(LONG_NOTES)
     .collect();
@@ -96,6 +110,7 @@ fn measure_an_echo_frame_beside_long_notes(cx: &mut TestAppContext) {
         kind: ItemKind::Terminal { session },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let ids: Vec<ItemId> = notes.iter().map(|n| n.id).collect();
     let key = studio.key;
@@ -203,6 +218,7 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
             kind: ItemKind::Terminal { session },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         });
     }
     // The window sits between the shells and the notes, so the last shell is drawn beside it.
@@ -213,10 +229,17 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
         kind: ItemKind::Window { window },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     });
     for _ in 0..CROWD_NOTES {
         let kind = ItemKind::Note { text: "a note\n".into() };
-        items.push(Item { id: ItemId::new(), kind, sleeping: false, name: None });
+        items.push(Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        });
     }
     let shell = sessions.last().map(|s| s.id).expect("a shell");
     let key = studio.key;

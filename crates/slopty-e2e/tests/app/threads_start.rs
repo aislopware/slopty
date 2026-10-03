@@ -1,7 +1,7 @@
-//! An agent's thread started from the palette in the real app: the worker's facts say which
-//! agents it can start, the palette offers a line for each, and the thread the worker starts
-//! opens as a thread tile. Claude Code is `slopty-stub-claude`, first on the worker's `PATH`;
-//! no real agent runs.
+//! An agent's thread started from the palette in the real app: the machine's facts say which
+//! agents it can start, the palette offers "New … agent" for each, the folder step offers the
+//! shell's folder first, and the thread the machine starts opens as a thread tile. Claude Code
+//! is `slopty-stub-claude`, first on the worker's `PATH`; no real agent runs.
 
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ use slopty_e2e::{Driver, Dump};
 
 /// A server round trip, the agent's terminal opening, the app hearing of it.
 const STEP: Duration = Duration::from_secs(30);
-const LINE: &str = "New Claude Code thread";
+const LINE: &str = "New Claude Code agent";
 
 /// Wait until the server says the worker has Claude Code: the palette offers what the
 /// worker's facts list, and a worker lists it once its facts are gathered.
@@ -55,8 +55,9 @@ async fn palette_offering(drv: &mut Driver) {
     }
 }
 
-/// "New Claude Code thread" from the palette starts Claude Code on the worker in the focused
-/// shell's folder, and its thread opens as a tile of its own, the shell's tile still there.
+/// "New Claude Code agent" from the palette asks the folder (one machine, so no machine step),
+/// and ↩ starts Claude Code there in the focused shell's folder; its thread opens as a tile of
+/// its own, the shell's tile still there.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_palette_start_opens_a_thread_tile() {
@@ -64,6 +65,14 @@ async fn a_palette_start_opens_a_thread_tile() {
     claude_installed(&stack).await;
     let drv = &mut stack.driver;
     palette_offering(drv).await;
+    drv.keys("enter").await.unwrap();
+    drv.wait_for("the folder step", STEP, |d| {
+        let options = || d.a11y.iter().filter(|n| n.role == "ListBoxOption");
+        options().next().is_some()
+            && options().all(|n| n.label.as_deref().is_none_or(|l| !l.starts_with(LINE)))
+    })
+    .await
+    .unwrap();
     drv.keys("enter").await.unwrap();
     drv.wait_for("the palette closed", STEP, |d| !palette_up(d)).await.unwrap();
     let dump = drv

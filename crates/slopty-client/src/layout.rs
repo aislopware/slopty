@@ -34,6 +34,9 @@ use slopty_core::ItemId;
 pub use spring::{Animation, Curve, Spring, SpringParams};
 pub use swipe::{Axis, AxisLock, RubberBand, SwipeTracker, WheelTracker};
 
+pub use crate::groups::GroupKey;
+use crate::groups::{DEFAULT_CHAIN, Frecency};
+
 /// How long a new tile takes to appear.
 const OPEN_FOR: Duration = Duration::from_millis(150);
 /// How long a closed tile takes to fade.
@@ -274,14 +277,20 @@ impl Default for LayoutConfig {
 }
 
 /// Where a tile being opened comes from.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Placement {
     /// This client opened it: a new column right of the focused one, focused.
     Local,
-    /// It appeared from elsewhere: the last column of the workspace that most recently held
-    /// that worker's tiles, focus untouched. A worker with no tiles yet fills an empty active
-    /// workspace (focused), or else gets a new workspace above the trailing empty one.
-    Remote,
+    /// It appeared from elsewhere: the last column of the workspace that most recently held a
+    /// tile of its `home` (its project, as [`crate::groups`] finds it), focus untouched. A home
+    /// no workspace holds yet fills an empty active workspace (focused), or else gets a new
+    /// workspace above the trailing empty one. A tile whose project is not known yet comes
+    /// home to its machine ([`GroupKey::machine`]), the chain's last link, so placing it never
+    /// waits.
+    Remote {
+        /// The group it belongs to.
+        home: GroupKey,
+    },
 }
 
 /// A tile's place.
@@ -413,6 +422,8 @@ pub struct Saved {
     pub popouts: Vec<SavedPopout>,
     /// How far this device read each project's timeline, for the recap its board opens on.
     pub looked: Vec<SavedLooked>,
+    /// How often and how lately each project was gone to here, for the palette to rank them.
+    pub frecency: Frecency,
 }
 
 /// Where a window stood: its rectangle in points on its display, the display named by its
@@ -480,26 +491,16 @@ pub struct SavedLooked {
 
 /// The navigator beside the strip, as this device left it. The layout keeps it only to save
 /// it with the arrangement it frames; the UI draws it.
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Navigator {
     /// Docked beside the strip, where the window is wide enough to dock it.
     pub shown: bool,
     /// Its width, in points, from [`Navigator::MIN_WIDTH`] to [`Navigator::MAX_WIDTH`].
     pub width: f32,
-    /// How it groups the tiles.
-    pub lens: NavLens,
-}
-
-/// How the navigator groups the tiles: under the worker each runs on, or under the repository
-/// its directory is in, whichever worker that checkout is on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum NavLens {
-    /// Under each worker: the default, since what runs where is the first thing to know
-    /// across many hosts.
-    #[default]
-    Workers,
-    /// Under each repository, across every worker.
-    Repositories,
+    /// The fact keys it groups the tiles by, the first a tile has winning
+    /// ([`crate::groups::group`]): [`DEFAULT_CHAIN`] by project, `["machine"]` by machine, or
+    /// any fact a tile reports.
+    pub group_by: Vec<String>,
 }
 
 impl Navigator {
@@ -521,9 +522,17 @@ impl Navigator {
     }
 }
 
+impl Navigator {
+    /// The chain the navigator groups by before the person picks another: by project.
+    #[must_use]
+    pub fn by_project() -> Vec<String> {
+        DEFAULT_CHAIN.iter().map(|&k| k.to_owned()).collect()
+    }
+}
+
 impl Default for Navigator {
     fn default() -> Self {
-        Self { shown: true, width: Self::DEFAULT_WIDTH, lens: NavLens::Workers }
+        Self { shown: true, width: Self::DEFAULT_WIDTH, group_by: Self::by_project() }
     }
 }
 
@@ -659,14 +668,24 @@ struct Move {
 #[derive(Clone, PartialEq, Debug)]
 pub struct Tile {
     key: TileRef,
+    /// The group it belongs to, which tiles arriving from elsewhere are placed beside.
+    home: GroupKey,
     height: TileHeight,
     open: Option<Animation>,
     moving: Option<Move>,
 }
 
 impl Tile {
-    const fn new(key: TileRef) -> Self {
-        Self { key, height: TileHeight::Auto { weight: 1.0 }, open: None, moving: None }
+    /// A tile of `key`, home to its machine until it is said to belong elsewhere.
+    fn new(key: TileRef) -> Self {
+        let home = GroupKey::machine(key.worker);
+        Self { key, home, height: TileHeight::Auto { weight: 1.0 }, open: None, moving: None }
+    }
+
+    /// The group it belongs to, as last said ([`Layout::set_homes`]).
+    #[must_use]
+    pub const fn home(&self) -> &GroupKey {
+        &self.home
     }
 
     /// Which.
@@ -1056,8 +1075,9 @@ impl Workspace {
         self.refs().map(|t| t.worker).collect()
     }
 
-    fn holds(&self, worker: WorkerKey) -> bool {
-        self.refs().any(|t| t.worker == worker)
+    /// Whether a tile of `home` is in it.
+    fn holds(&self, home: &GroupKey) -> bool {
+        self.columns.iter().flat_map(|c| &c.tiles).any(|t| t.home == *home)
     }
 
     fn refs(&self) -> impl Iterator<Item = TileRef> + '_ {
@@ -2031,13 +2051,20 @@ impl Layout {
 
     /// The navigator as it is to be saved.
     #[must_use]
-    pub const fn navigator(&self) -> Navigator {
-        self.navigator
+    pub const fn navigator(&self) -> &Navigator {
+        &self.navigator
     }
 
-    /// Keep the navigator's state with the layout; its width is clamped.
-    pub const fn set_navigator(&mut self, navigator: Navigator) {
-        self.navigator = Navigator { width: Navigator::clamp_width(navigator.width), ..navigator };
+    /// Keep the navigator's state with the layout; its width is clamped, and a chain with
+    /// nothing in it groups by project.
+    pub fn set_navigator(&mut self, navigator: Navigator) {
+        let group_by = if navigator.group_by.iter().any(|k| !k.trim().is_empty()) {
+            navigator.group_by.into_iter().filter(|k| !k.trim().is_empty()).collect()
+        } else {
+            Navigator::by_project()
+        };
+        self.navigator =
+            Navigator { width: Navigator::clamp_width(navigator.width), group_by, ..navigator };
     }
 
     /// The workspace area, in points.
@@ -2193,7 +2220,7 @@ impl Layout {
         self.position(tile).is_some()
     }
 
-    /// Every tile, workspace by workspace.
+    /// Every tile in reading order: workspace by workspace, column by column, top to bottom.
     pub fn tiles(&self) -> impl Iterator<Item = TileRef> + '_ {
         self.workspaces.iter().flat_map(Workspace::refs)
     }
@@ -2313,19 +2340,15 @@ impl Layout {
         }
         let ctx = self.ctx();
         let mut new = Tile::new(tile);
+        if let Placement::Remote { home } = &placement {
+            new.home = home.clone();
+        }
         new.open = ctx.ease(OPEN_FOR, Curve::EaseOutExpo);
         let active_empty = self.workspaces.get(self.active).is_none_or(Workspace::is_empty);
         let (ws_idx, activate_tile, activate_ws) = match placement {
             Placement::Local => (self.active, true, true),
-            Placement::Remote => {
-                let holder = self
-                    .workspaces
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, ws)| ws.holds(tile.worker))
-                    .max_by_key(|(_, ws)| ws.stamp)
-                    .map(|(i, _)| i);
-                match holder {
+            Placement::Remote { home } => {
+                match self.latest_holding(&home).or_else(|| self.latest_on_machine(&home)) {
                     Some(i) => (i, false, false),
                     None if active_empty => (self.active, true, true),
                     None => {
@@ -2351,6 +2374,55 @@ impl Layout {
         if activate_ws {
             self.activate_workspace(ws_idx);
         }
+    }
+
+    /// Say which group each tile belongs to now, by `home_of` (`None` leaves a tile's as it
+    /// was). Nothing moves: a tile stays where it was placed, and its home only decides where
+    /// the next tile of its group from elsewhere goes.
+    pub fn set_homes(&mut self, home_of: impl Fn(TileRef) -> Option<GroupKey>) {
+        for tile in
+            self.workspaces.iter_mut().flat_map(|ws| &mut ws.columns).flat_map(|c| &mut c.tiles)
+        {
+            if let Some(home) = home_of(tile.key) {
+                tile.home = home;
+            }
+        }
+    }
+
+    /// The workspace that most recently held a tile of `home`, as the homes were last said:
+    /// where a tile of it from elsewhere goes, and where going to it lands.
+    #[must_use]
+    pub fn latest_holding(&self, home: &GroupKey) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| ws.holds(home))
+            .max_by_key(|(_, ws)| ws.stamp)
+            .map(|(i, _)| i)
+    }
+
+    /// For a tile with no project (its home is its machine), the workspace that most recently
+    /// held any tile on that machine: a window or a note goes where its machine's work is
+    /// rather than into a strip of its own.
+    fn latest_on_machine(&self, home: &GroupKey) -> Option<usize> {
+        let worker = home.worker()?;
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| ws.refs().any(|t| t.worker == worker))
+            .max_by_key(|(_, ws)| ws.stamp)
+            .map(|(i, _)| i)
+    }
+
+    /// The group `tile` belongs to, as last said; `None` for a tile not in the layout.
+    #[must_use]
+    pub fn home(&self, tile: TileRef) -> Option<&GroupKey> {
+        self.workspaces
+            .iter()
+            .flat_map(|ws| &ws.columns)
+            .flat_map(|c| &c.tiles)
+            .find(|t| t.key == tile)
+            .map(Tile::home)
     }
 
     /// Take `tile` out: it fades where it stood and its neighbours close the gap.
@@ -3320,11 +3392,12 @@ impl Layout {
                 })
                 .collect(),
             active: self.active,
-            navigator: self.navigator,
+            navigator: self.navigator.clone(),
             window: None,
             faces: Vec::new(),
             popouts: Vec::new(),
             looked: Vec::new(),
+            frecency: Frecency::default(),
         }
     }
 

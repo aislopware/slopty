@@ -51,6 +51,7 @@ fn new_project(orchestrator: Option<TermRef>, limits: LimitsChange) -> NewProjec
         orchestrator,
         limits,
         metadata: None,
+        members: Vec::new(),
     }
 }
 

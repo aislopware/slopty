@@ -526,6 +526,8 @@ pub enum PaletteRun {
     },
     /// Show this project's board in its orchestrator's tile.
     Project(slopty_proto::project::ProjectId),
+    /// Go to the workspace that last held this project's tiles, and to its first tile there.
+    Group(slopty_client::layout::GroupKey),
     /// Open again the tile closed as this closing (the workspace's count of them).
     Reopen(u64),
 }
@@ -541,7 +543,8 @@ impl PaletteRun {
             | Self::Worker(_)
             | Self::FindIn { .. }
             | Self::FindInFile { .. }
-            | Self::Project(_) => "Go to",
+            | Self::Project(_)
+            | Self::Group(_) => "Go to",
             Self::OpenFile { .. }
             | Self::OpenFolder { .. }
             | Self::OpenShell { .. }
@@ -570,6 +573,7 @@ impl Clone for PaletteRun {
             Self::OpenUrl(url) => Self::OpenUrl(url.clone()),
             Self::OpenInTile(url) => Self::OpenInTile(url.clone()),
             Self::Project(project) => Self::Project(project.clone()),
+            Self::Group(group) => Self::Group(group.clone()),
             Self::Reopen(closing) => Self::Reopen(*closing),
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
@@ -613,6 +617,7 @@ impl std::fmt::Debug for PaletteRun {
                 f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
             }
             Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
+            Self::Group(group) => f.debug_tuple("Group").field(group).finish(),
             Self::Reopen(closing) => f.debug_tuple("Reopen").field(closing).finish(),
         }
     }
@@ -625,6 +630,8 @@ impl std::fmt::Debug for PaletteRun {
 /// they are what was asked for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
+    /// Going to a project: the workspace its tiles are in.
+    Projects,
     /// Going to a tile: a session, a file tile, a named tile, a find's hit.
     Tiles,
     /// Going to a worker.
@@ -640,8 +647,9 @@ impl Section {
     #[must_use]
     pub const fn heading(self) -> &'static str {
         match self {
+            Self::Projects => "Projects",
             Self::Tiles => "Tiles",
-            Self::Workers => "Workers",
+            Self::Workers => "Machines",
             Self::Commands => "Commands",
             Self::Files => "Files",
         }
@@ -649,6 +657,7 @@ impl Section {
 
     const fn slug(self) -> &'static str {
         match self {
+            Self::Projects => "projects",
             Self::Tiles => "tiles",
             Self::Workers => "workers",
             Self::Commands => "commands",
@@ -787,6 +796,13 @@ impl PaletteItem {
         Self::line(title.to_owned(), String::new(), run, IconName::Workflow, Section::Tiles)
     }
 
+    /// A project by its name, its glyph saying what it was found by: ↩ goes to its workspace.
+    #[must_use]
+    pub fn group(name: &str, glyph: IconName, group: slopty_client::layout::GroupKey) -> Self {
+        let run = PaletteRun::Group(group);
+        Self::line(name.to_owned(), String::new(), run, glyph, Section::Projects)
+    }
+
     /// An item in the workspace by its title; its icon says what it is.
     #[must_use]
     pub fn item(title: &str, icon: Glyph, item: slopty_core::ItemId) -> Self {
@@ -869,7 +885,7 @@ impl PaletteItem {
             PaletteRun::FindInFile { .. } => IconName::FileText.into(),
             PaletteRun::Item(_) => IconName::StickyNote.into(),
             PaletteRun::OpenFolder { .. } => IconName::Folder.into(),
-            PaletteRun::Project(_) => IconName::Workflow.into(),
+            PaletteRun::Project(_) | PaletteRun::Group(_) => IconName::Workflow.into(),
             PaletteRun::Reopen(_) => IconName::Undo2.into(),
             PaletteRun::Action(_)
             | PaletteRun::Worker(_)
@@ -977,7 +993,7 @@ impl PaletteItem {
     /// readout.
     #[must_use]
     pub fn trailing(&self) -> Option<(String, Option<Status>)> {
-        if self.section == Section::Tiles
+        if matches!(self.section, Section::Tiles | Section::Projects)
             && let Some(status) = self.status.filter(|s| !matches!(s, Status::Idle | Status::Done))
         {
             return Some((status.label().to_owned(), Some(status)));
@@ -1050,10 +1066,11 @@ fn group(item: &PaletteItem, recent: &[String]) -> (&'static str, &'static str) 
 pub(crate) fn in_sections<T: Listed>(items: Vec<T>, path_first: bool) -> Vec<T> {
     let rank = |section: Section| match section {
         Section::Files if path_first => 0,
-        Section::Tiles => 1,
-        Section::Workers => 2,
-        Section::Commands => 3,
-        Section::Files => 4,
+        Section::Projects => 1,
+        Section::Tiles => 2,
+        Section::Workers => 3,
+        Section::Commands => 4,
+        Section::Files => 5,
     };
     let mut items = items;
     items.sort_by_key(|item| rank(item.item().section));
@@ -1101,9 +1118,10 @@ enum Line {
 pub(crate) fn section_heading(
     theme: &Theme,
     id: ElementId,
-    text: &'static str,
+    text: impl Into<SharedString>,
 ) -> gpui::Stateful<gpui::Div> {
-    crate::kit::inset_x(crate::kit::label(theme, text), theme)
+    let text = text.into();
+    crate::kit::inset_x(crate::kit::label(theme, text.clone()), theme)
         .id(id)
         .role(gpui::accesskit::Role::Heading)
         .aria_label(text)
@@ -1423,6 +1441,18 @@ impl CommandPalette {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::with_field(items, "Type a command", false, theme, window, cx)
+    }
+
+    /// The palette as one step of a choice (an agent, a machine, a folder): only `items`, its
+    /// field saying what is chosen.
+    pub fn pick_step(
+        items: Vec<PaletteItem>,
+        placeholder: &'static str,
+        theme: Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::with_field(items, placeholder, false, theme, window, cx)
     }
 
     /// The palette as a search across every tile: no commands, no path lines, the field
@@ -1818,7 +1848,7 @@ impl CommandPalette {
         match self.lines.get(ix) {
             Some(Line::Heading { heading, slug }) => {
                 let name = format!("palette-heading-{slug}");
-                section_heading(&self.theme, ElementId::Name(name.clone().into()), heading)
+                section_heading(&self.theme, ElementId::Name(name.clone().into()), *heading)
                     .debug_selector(move || name)
                     .into_any_element()
             }

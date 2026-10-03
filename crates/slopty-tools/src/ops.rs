@@ -723,6 +723,7 @@ pub async fn project_create<D: Dispatch>(
         orchestrator,
         limits: spec.limits,
         metadata: spec.metadata,
+        members: Vec::new(),
     };
     project_answer(res.dispatch(), key, verb).await
 }
@@ -768,6 +769,7 @@ pub async fn project_set<D: Dispatch>(
         ask_to_start,
         limits,
         metadata,
+        members: None,
     };
     project_answer(res.dispatch(), key, verb).await
 }

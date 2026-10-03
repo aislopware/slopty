@@ -45,6 +45,7 @@ impl WorkspaceView {
             kind: ItemKind::Browser { url: url.clone() },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         tracing::info!(id = %item.id, %url, "open browser tile");
         self.propose(key, ItemOp::Add(item), cx);
@@ -284,7 +285,7 @@ impl WorkspaceView {
                 view.update(cx, |v, cx| match proxy {
                     Some(_) => v.set_local(Some(url), cx),
                     None => v.unreachable(
-                        "The worker's network could not be served here".to_owned(),
+                        "The machine's network could not be served here".to_owned(),
                         cx,
                     ),
                 });

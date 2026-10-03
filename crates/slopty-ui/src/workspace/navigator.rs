@@ -1,4 +1,5 @@
-//! The navigator: what is there and where it runs, down the whole left of the window.
+//! The navigator: the work there is, by project, and the machines it runs on, down the whole
+//! left of the window.
 //!
 //! It runs from the window's top edge to its bottom, and its top row is the title bar's
 //! height: the traffic lights sit in it on a Mac, then a field that filters every row below.
@@ -8,32 +9,39 @@
 //! *Needs you* appears only while an agent waits on the human, *To review* only while one's turn
 //! ended unseen (its row says what it did, else how long it ran), and *Working* only while one
 //! is at its turn (its heading turns the working mark and counts them, its rows tick their
-//! turn's time once a second), each only for agents whose own row is out of sight. Then the
-//! workers, whose heading is left out when it would be the only one. Each worker has a header
-//! disclosing its tiles: its name in the strong weight after a server icon (crossed out while the
-//! worker is away), then on its right edge a word for what is wrong with its link, else its round
-//! trip when that is slow enough to matter, led by what its tiles add up to while it is folded. The
-//! pointer brings out the chevron and "+" (a new shell on that worker) in the readouts' place. Its
-//! tiles come in order of attention: what needs the human, then what finished unseen, then what
-//! is working, then the rest, each class in reading order. Each tile is two lines: its kind and
-//! its title, ended by its state in a word ("Needs approval", "Working", "Done", "Failed"),
-//! else the unseen dot, else its age past a minute (an agent at rest counts from its last turn);
-//! then, muted, its directory (its worker's name where it has none), what its agent says or its
-//! last command and its branch, or a note's progress; a shell reopened after its shell was lost
-//! says "Restored" there, and one whose program reports progress (`OSC 9;4`) ends that line in
-//! its figure and draws a hairline bar along the row's foot, as the Dock's does for them all,
-//! from the session's summary, so a tile never viewed shows it too. A row waiting on the human is
-//! not washed: the *Needs you* section above already leads with it, and its word says so in the
-//! warn tone. A row flies the camera to what it names. Workspaces are the title bar's tabs, not a
-//! section here.
+//! turn's time once a second), each only for agents whose own row is out of sight; each row
+//! says its project, then its machine where there are several.
 //!
-//! The palette's "Group the navigator by repository" swaps the workers for the repositories
-//! the shells are in, whichever worker holds each checkout: a header per repository path (its
-//! directory's name, and where it is when another listed has that name), its tiles from every
-//! worker in order of attention, each second line naming the worker, the directory below the
-//! repository and the branch. A file or folder joins the deepest repository of its worker's
-//! shells that holds it; the rest sit under *No repository*, last. The lens is kept with the
-//! layout, and the same palette line goes back by worker.
+//! Then *Projects*: the tiles grouped by the first fact of the layout's chain each has
+//! ([`slopty_client::groups`]): its declared project, else its repository (one block for every
+//! clone of it on every worker), else its folder. Each project has a header disclosing its
+//! tiles: its glyph and its name in the strong weight (where it is, when another listed has
+//! that name), then on its right edge the machines it spans where there are several workers,
+//! led by what its tiles add up to while it is folded; the pointer brings out the chevron and,
+//! for a project with a place, "+" (a new shell in its clone on the focused tile's machine,
+//! else its first). Then *Workers*: a row per worker with its server icon (crossed out while it
+//! is away), its name, and on its right edge a word for what is wrong with its link, else its
+//! round trip when that is slow enough to matter; under it only what belongs to no project (its
+//! desktops, windows, notes and home-directory shells). A section's heading is left out when it
+//! would be the only one.
+//!
+//! A group's tiles come in order of attention: what needs the human, then what finished unseen,
+//! then what is working, then the rest, each class in reading order. Each tile is two lines: its
+//! kind and its title, ended by its state as its glyph, else the unseen dot, else its age past a
+//! minute (an agent at rest counts from its last turn); then, muted, what its agent says or its
+//! last command, its machine where its project spans several, its directory below the
+//! project's root and its branch, or a note's progress; a shell reopened after its shell was
+//! lost says "Restored" there, and one whose program reports progress (`OSC 9;4`) ends that
+//! line in its figure and draws a hairline bar along the row's foot. A row flies the camera to
+//! what it names.
+//!
+//! The filter takes words and facets: `machine:devbox`, `project:slopty`, `agent:codex`,
+//! `is:waiting` (or `working`, `failed`, `unseen`, `running`), or any fact a tile has
+//! (`branch:main`, `facts.task:3`). The palette's "Scope to …" narrows the navigator, the
+//! attention sections, the inbox and the status bar's counts to one project, said as the
+//! filter's leading token and cleared with Esc. "Group the navigator by machine" swaps the
+//! projects for the workers' own blocks, and "by agent", "by branch" or by any fact a tile
+//! has regroups them; each is kept with the layout.
 //!
 //! On a window wide enough it docks beside the rest of the frame, 248 pt by default, dragged
 //! from 200 to 400 by a 12 pt handle centred on its right edge, which a double-click puts back
@@ -51,7 +59,7 @@
 //! tile whose row is out of view scrolls into it.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::mem::{Discriminant, discriminant};
 use std::time::{Duration, SystemTime};
 
@@ -64,20 +72,24 @@ use gpui::{
     Subscription, Task, Window, canvas, div, list, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-use slopty_client::layout::{NavLens, Navigator, TileRef, WorkerKey};
+use slopty_client::groups::{self, GroupKey, fact};
+use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_core::WallMs;
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
 use slopty_proto::items::{Item, ItemKind};
+use slopty_proto::project::ProjectId;
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::tailnet::LinkPath;
-use slopty_proto::terminal::{Progress, ProgressState, RepoChanges, RepoId};
+use slopty_proto::terminal::{Progress, ProgressState, RepoChanges};
+use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::Rung;
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
-use super::actions::{ToggleNavigator, ToggleNavigatorLens};
+use super::actions::{GroupNavigatorBy, ToggleNavigator, ToggleNavigatorLens};
 use super::agents::{
     Step, Waiting, agent_ask_line, agent_status_text, agent_status_word, needs_human,
 };
+use super::grouping::{Grouping, group_glyph, parent_of, section_name};
 use super::rollup::{META_SEPARATOR, Rollup, age_at, meta_line, rollup_slot};
 use super::titlebar::{LEADING_INSET, titlebar_height};
 use super::{WorkerStatus, WorkspaceView};
@@ -105,14 +117,26 @@ pub(super) const NO_TILES: &str = "No tiles";
 /// What a shell reopened after its shell was lost says on its row.
 pub(super) const RESTORED: &str = "Restored";
 
-/// The palette's name for [`ToggleNavigatorLens`] while the navigator groups by worker.
-pub(super) const BY_REPOSITORY: &str = "Group the navigator by repository";
+/// What a declared project's board row is called.
+pub(super) const BOARD: &str = "Board";
 
-/// The palette's name for [`ToggleNavigatorLens`] while it groups by repository.
-pub(super) const BY_WORKER: &str = "Group the navigator by worker";
+/// What a thread's row says of it to assistive technology: it has no tile here yet.
+const NO_TILE_YET: &str = "no tile here";
 
-/// The group, under the repository lens, of the tiles in no repository.
-pub(super) const NO_REPOSITORY: &str = "No repository";
+/// A board's words while it has no task.
+const NO_TASKS: &str = "No tasks yet";
+
+/// The palette's name for [`ToggleNavigatorLens`] while the navigator groups by anything but
+/// the machine.
+pub(super) const BY_MACHINE: &str = "Group the navigator by machine";
+
+/// The palette's name for going back to grouping by project.
+pub(super) const BY_PROJECT: &str = "Group the navigator by project";
+
+/// The facts a tile has that the palette never offers to group by: the default chain's own
+/// links, and its directory, which names a place on one machine.
+const NOT_A_GROUPING: [&str; 5] =
+    [fact::PROJECT, fact::REPO, fact::FOLDER, fact::MACHINE, fact::CWD];
 
 /// How many rows *Working* lists before "Show N more".
 const WORKING_SHOWN: usize = 4;
@@ -163,11 +187,12 @@ pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> 
 pub(super) struct NavState {
     /// Open over the strip, where it does not dock.
     pub open: bool,
-    /// Workers whose tiles are folded away.
-    pub folded: HashSet<WorkerKey>,
-    /// Repositories whose tiles are folded away, under the repository lens, by path (the
-    /// empty path for the tiles in none).
-    pub folded_repos: HashSet<String>,
+    /// Projects and workers whose tiles are folded away, by their group's key (a worker's is
+    /// [`GroupKey::machine`]).
+    pub folded: HashSet<GroupKey>,
+    /// The one project the navigator, the attention sections, the inbox and the status bar's
+    /// counts are narrowed to, from the palette's "Scope to …"; Esc clears it.
+    pub scope: Option<GroupKey>,
     /// The handle is being dragged: where the pointer and the width were when it was pressed.
     pub resize: Option<(f32, f32)>,
     /// How it sat in the last frame drawn, and whether it showed.
@@ -314,6 +339,7 @@ impl std::fmt::Debug for NavState {
         f.debug_struct("NavState")
             .field("open", &self.open)
             .field("folded", &self.folded)
+            .field("scope", &self.scope)
             .field("drawn", &self.drawn)
             .field("rail", &self.rail)
             .field("query", &self.filter.query)
@@ -429,17 +455,12 @@ pub(super) fn age_shown(age: Duration) -> Option<String> {
     (age >= Duration::from_secs(60)).then(|| crate::palette::age_label(age))
 }
 
-/// What an agent at rest last said, as its row's second line gives it: a single word quoted
-/// (`“done”`), so the agent's own last word does not read as a second state beside the row's.
+/// What an agent at rest last said, as its row's second line gives it: only words that say
+/// more than a state. A single word is left out, since the row's mark already says where the
+/// agent stands; nothing is ever quoted.
 pub(super) fn rest_words(said: &str) -> Option<String> {
     let said = said.trim();
-    if said.is_empty() {
-        None
-    } else if said.contains(char::is_whitespace) {
-        Some(said.to_owned())
-    } else {
-        Some(format!("\u{201c}{said}\u{201d}"))
-    }
+    said.contains(char::is_whitespace).then(|| said.to_owned())
 }
 
 /// How long until an age's label next changes: the next whole unit of [`age_shown`].
@@ -618,12 +639,6 @@ struct NavTile {
     progress: Option<Progress>,
     /// It was reopened after its shell was lost.
     restored: bool,
-    /// The repository it is in: its shell's, or for a file or a folder the deepest of its
-    /// worker's shells' repositories that holds it.
-    repo: Option<String>,
-    /// Which repository that is, once its worker knows: what the repository lens groups
-    /// clones on several workers by ([`crate::repo_groups`]).
-    repo_id: Option<RepoId>,
 }
 
 impl NavTile {
@@ -682,13 +697,7 @@ pub(super) fn progress_line(theme: &Theme, progress: Progress) -> Option<(Rgb, f
     })
 }
 
-/// A worker's block as the navigator lists it.
-struct NavWorker {
-    header: NavHeader,
-    tiles: Vec<NavTile>,
-}
-
-/// A worker's header as its row shows it.
+/// A worker's row under *Workers*.
 #[derive(Clone)]
 struct NavHeader {
     key: WorkerKey,
@@ -704,32 +713,112 @@ struct NavHeader {
     linked: bool,
     rollup: Rollup,
     folded: bool,
-    /// It follows another worker's rows, and stands a step off them.
+    /// It follows another block's rows, and stands a step off them.
     gap: bool,
 }
 
-/// A repository's header, under the repository lens.
+/// A project's header, or any other group's but a machine's.
 #[derive(Clone)]
-struct NavRepo {
-    /// What it is kept by ([`crate::repo_groups::RepoGroup::key`]): its origin, else its first
-    /// commit, else its path; empty for the tiles in no repository. Its fold is kept under it.
-    key: String,
+struct NavGroup {
+    /// What it is kept by: folded, scoped, gone to.
+    key: GroupKey,
+    /// What its header leads with.
+    glyph: IconName,
     name: String,
-    /// Where it is, when another repository listed has the same name.
+    /// Where it is, when another group listed has the same name.
     parent: Option<String>,
+    /// The machines it spans, as a quiet word, where there are several workers.
+    machines: Option<String>,
+    /// Where "+" opens a shell: a clone of it on a machine that is linked.
+    new_shell: Option<(WorkerKey, String)>,
     rollup: Rollup,
     folded: bool,
-    /// It follows another repository's rows, and stands a step off them.
+    /// It follows another block's rows, and stands a step off them.
     gap: bool,
 }
 
-/// One group of the list: a worker's or a repository's header, then its tiles unless folded.
+/// A declared project's board, leading its group: how its tasks stand, and ↩ to the board.
+#[derive(Clone)]
+struct NavBoard {
+    project: ProjectId,
+    /// Its most urgent lane's status.
+    status: Option<Status>,
+    /// How many tasks wait on the person and how many are merged, as quiet words.
+    words: String,
+}
+
+/// A thread at work with no tile here, set back under its project: ↩ opens its tile.
+#[derive(Clone)]
+struct NavThread {
+    worker: WorkerKey,
+    thread: ThreadId,
+    /// Its agent's mark.
+    glyph: Glyph,
+    status: Option<Status>,
+    title: String,
+    /// Its state in a word or two.
+    word: Option<&'static str>,
+}
+
+/// One block of the list: a project's or a worker's header, then its board, its tiles and
+/// its threads with no tile, unless folded.
 struct NavBlock {
     head: NavRow,
     folded: bool,
+    board: Option<NavBoard>,
+    threads: Vec<NavThread>,
     /// The worker whose empty block says so, where its tiles would be.
     vacant: Option<WorkerKey>,
     tiles: Vec<NavTile>,
+}
+
+/// The navigator's blocks as the filter and the scope leave them.
+#[derive(Default)]
+struct Listing {
+    /// The groups before the machine on the chain: *Projects* by default.
+    groups: Vec<NavBlock>,
+    /// The heading over them.
+    heading: String,
+    /// Each worker, with the tiles that belong to nothing else.
+    workers: Vec<NavBlock>,
+}
+
+impl Listing {
+    /// Every tile listed, in the list's order.
+    fn tiles(&self) -> impl Iterator<Item = &NavTile> {
+        self.groups.iter().chain(&self.workers).flat_map(|b| &b.tiles)
+    }
+}
+
+/// What the filter holds: facets (`machine:devbox`) and the words around them.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub(super) struct Query {
+    /// The words, lower case, joined by a space.
+    pub text: String,
+    /// Each `key:value`, both lower case.
+    pub facets: Vec<(String, String)>,
+}
+
+impl Query {
+    /// `query` read: a word with a colon inside is a facet, the rest is text.
+    pub(super) fn parse(query: &str) -> Self {
+        let mut text = Vec::new();
+        let mut facets = Vec::new();
+        for word in query.split_whitespace() {
+            match word.split_once(':') {
+                Some((key, value)) if !key.is_empty() && !value.is_empty() => {
+                    facets.push((key.to_lowercase(), value.to_lowercase()));
+                }
+                _ => text.push(word.to_lowercase()),
+            }
+        }
+        Self { text: text.join(" "), facets }
+    }
+
+    /// Nothing to narrow by.
+    pub(super) const fn is_empty(&self) -> bool {
+        self.text.is_empty() && self.facets.is_empty()
+    }
 }
 
 /// An agent in *Needs you* or *Working*, or a thread in *Needs you*: what it is, what it
@@ -759,8 +848,8 @@ struct NavSpace {
 #[derive(Clone)]
 enum NavRow {
     Heading {
-        selector: &'static str,
-        text: &'static str,
+        selector: SharedString,
+        text: SharedString,
         /// How many rows the section holds, beside the working mark.
         working: Option<usize>,
     },
@@ -772,8 +861,10 @@ enum NavRow {
     /// "New workspace", the last of *Workspaces*.
     NewSpace,
     Worker(NavHeader),
-    Repo(NavRepo),
+    Group(NavGroup),
+    Board(NavBoard),
     Tile(NavTile),
+    Thread(NavThread),
     /// An open worker with no tile, in one quiet line where its tiles would be.
     Vacant(WorkerKey),
     /// The filter left nothing.
@@ -787,9 +878,11 @@ impl NavRow {
         let (lines, gap) = match self {
             Self::Tile(t) => (!t.two_lines(), false),
             Self::Worker(h) => (h.warning.is_some(), h.gap),
-            Self::Repo(r) => (false, r.gap),
+            Self::Group(g) => (false, g.gap),
             Self::Heading { .. }
             | Self::Agent(_)
+            | Self::Board(_)
+            | Self::Thread(_)
             | Self::More(_)
             | Self::Space(_)
             | Self::NewSpace
@@ -812,7 +905,7 @@ impl WorkspaceView {
         match self.navigator_mode(window) {
             Mode::Docked => {
                 let nav = self.layout.navigator();
-                self.layout.set_navigator(Navigator { shown: !nav.shown, ..nav });
+                self.layout.set_navigator(Navigator { shown: !nav.shown, ..nav.clone() });
                 self.nav.open = false;
                 self.layout_touched(cx);
             }
@@ -832,7 +925,7 @@ impl WorkspaceView {
             Mode::Docked => {
                 let nav = self.layout.navigator();
                 if !nav.shown {
-                    self.layout.set_navigator(Navigator { shown: true, ..nav });
+                    self.layout.set_navigator(Navigator { shown: true, ..nav.clone() });
                     self.layout_touched(cx);
                 }
             }
@@ -856,35 +949,75 @@ impl WorkspaceView {
         }
     }
 
-    /// Group the navigator by repository, or back by worker (kept with the layout).
+    /// Group the navigator by machine, or back by project (kept with the layout).
     pub fn toggle_navigator_lens(
         &mut self,
         _: &ToggleNavigatorLens,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let nav = self.layout.navigator();
-        let lens = match nav.lens {
-            NavLens::Workers => NavLens::Repositories,
-            NavLens::Repositories => NavLens::Workers,
+        let by = if self.grouped_by_machine() {
+            Navigator::by_project()
+        } else {
+            vec![fact::MACHINE.to_owned()]
         };
-        self.layout.set_navigator(Navigator { lens, ..nav });
+        self.group_navigator(by, cx);
+    }
+
+    /// "Group the navigator by …": the chain the action names (kept with the layout).
+    pub fn group_navigator_by(
+        &mut self,
+        by: &GroupNavigatorBy,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.group_navigator(by.chain.clone(), cx);
+    }
+
+    fn group_navigator(&mut self, group_by: Vec<String>, cx: &mut Context<Self>) {
+        let nav = self.layout.navigator().clone();
+        self.layout.set_navigator(Navigator { group_by, ..nav });
         self.layout_touched(cx);
         cx.notify();
     }
 
-    /// The palette's line for the lens the navigator is not in.
-    pub(super) fn lens_line(&self) -> PaletteItem {
-        let (label, glyph) = match self.layout.navigator().lens {
-            NavLens::Workers => (BY_REPOSITORY, IconName::FolderGit2),
-            NavLens::Repositories => (BY_WORKER, IconName::Server),
-        };
-        PaletteItem::new(
-            label,
-            glyph,
-            Box::new(ToggleNavigatorLens),
-            &super::actions::key_bindings(),
-        )
+    /// Whether the navigator lists the workers' own blocks and nothing else.
+    fn grouped_by_machine(&self) -> bool {
+        self.layout.navigator().group_by.first().map(String::as_str) == Some(fact::MACHINE)
+    }
+
+    /// The palette's lines that regroup the navigator: by machine (the keymap's line, which
+    /// goes back by project once it is by machine), by project whenever it is by anything
+    /// else, and by each other fact a tile in the layout has ("by agent", "by branch", "by
+    /// labels.team"), each with the machine after it for the tiles that lack it.
+    pub(super) fn group_lines(&self) -> Vec<PaletteItem> {
+        let keys = super::actions::key_bindings();
+        let current = &self.layout.navigator().group_by;
+        let mut lines = vec![if self.grouped_by_machine() {
+            PaletteItem::new(BY_PROJECT, IconName::Workflow, Box::new(ToggleNavigatorLens), &keys)
+        } else {
+            PaletteItem::new(BY_MACHINE, IconName::Server, Box::new(ToggleNavigatorLens), &keys)
+        }];
+        let by_project = Navigator::by_project();
+        if *current != by_project && !self.grouped_by_machine() {
+            let action = GroupNavigatorBy { chain: by_project };
+            lines.push(PaletteItem::new(BY_PROJECT, IconName::Workflow, Box::new(action), &[]));
+        }
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for tile in self.layout.tiles() {
+            let Some(item) = self.item(tile) else { continue };
+            seen.extend(self.tile_facts(tile, item).into_keys());
+        }
+        for key in seen.into_iter().filter(|k| !NOT_A_GROUPING.contains(&k.as_str())) {
+            let chain = vec![key.clone(), fact::MACHINE.to_owned()];
+            if *current == chain {
+                continue;
+            }
+            let label = format!("Group the navigator by {key}");
+            let action = GroupNavigatorBy { chain };
+            lines.push(PaletteItem::new(&label, group_glyph(&key), Box::new(action), &[]));
+        }
+        lines
     }
 
     /// How the navigator sits in `window`.
@@ -974,7 +1107,7 @@ impl WorkspaceView {
         let nav = self.layout.navigator();
         let width = Navigator::clamp_width(from + x - grab);
         if (width - nav.width).abs() > f32::EPSILON {
-            self.layout.set_navigator(Navigator { width, ..nav });
+            self.layout.set_navigator(Navigator { width, ..nav.clone() });
             cx.notify();
         }
     }
@@ -990,7 +1123,7 @@ impl WorkspaceView {
     fn reset_navigator_width(&mut self, cx: &mut Context<Self>) {
         let nav = self.layout.navigator();
         self.nav.resize = None;
-        self.layout.set_navigator(Navigator { width: Navigator::DEFAULT_WIDTH, ..nav });
+        self.layout.set_navigator(Navigator { width: Navigator::DEFAULT_WIDTH, ..nav.clone() });
         self.layout_touched(cx);
         cx.notify();
     }
@@ -1004,20 +1137,6 @@ impl WorkspaceView {
             _ => false,
         };
         (mark, unwatched && !matches!(mark, Some(Status::Working | Status::NeedsYou)))
-    }
-
-    /// What `worker`'s tiles add up to.
-    pub(super) fn worker_rollup(&self, worker: WorkerKey) -> Rollup {
-        let mut rollup = Rollup::default();
-        let Some(w) = self.workers.get(&worker) else { return rollup };
-        for item in w.doc.items() {
-            let tile = TileRef { worker, item: item.id };
-            if self.layout.contains(tile) {
-                let (mark, unseen) = self.tile_marks(tile, item);
-                rollup.add(mark, unseen);
-            }
-        }
-        rollup
     }
 
     /// What a tile's second line says, and its age: a shell's agent words or its command,
@@ -1098,30 +1217,38 @@ impl WorkspaceView {
         (agent.or(command), since)
     }
 
-    /// [`Self::tile_meta`] under the repository lens, where the header names the repository
-    /// and not the worker: the worker's name, then for a shell its directory below the
-    /// repository (nothing at its root) and its branch.
-    fn tile_meta_by_repo(
+    /// [`Self::tile_meta`] under a project's header, which names the project and not the
+    /// worker: what a shell's agent says or its command, its machine when the project spans
+    /// several (`machine`), its directory below the project's root on that machine (`roots`:
+    /// nothing at the root) and its branch. Any other tile says its machine first, where that
+    /// tells it apart, then its own line.
+    fn tile_meta_in_group(
         &self,
         tile: TileRef,
         item: &Item,
+        (roots, machine): (&[&str], bool),
         now: SystemTime,
         cx: &gpui::App,
     ) -> (String, Option<Duration>) {
-        let worker = self.worker_name(tile.worker);
+        let worker = machine.then(|| self.worker_name(tile.worker));
         let ItemKind::Terminal { session } = item.kind else {
             let (meta, age) = self.tile_meta(item, now, cx);
-            return (meta_line([Some(worker.as_str()), Some(meta.as_str())]), age);
+            return (meta_line([worker.as_deref(), Some(meta.as_str())]), age);
         };
         let (doing, since) = self.shell_doing(session);
+        let doing = doing.filter(|d| self.derived.get(&item.id) != Some(d));
         let doing = with_subagents(doing, self.live_subagents(session, cx));
         let summary = self.summary(session);
         let branch = summary.and_then(|s| s.branch.as_deref());
-        let place = match summary.and_then(|s| Some((s.repo.as_deref()?, s.cwd.as_deref()?))) {
-            Some((repo, cwd)) => within(repo, cwd),
-            None => self.session_tail(session).filter(|p| p != "~"),
+        let cwd = summary.and_then(|s| s.cwd.as_deref());
+        let root = cwd.and_then(|cwd| {
+            roots.iter().copied().filter(|r| groups::within(r, cwd)).max_by_key(|r| r.len())
+        });
+        let place = match (root, cwd) {
+            (Some(root), Some(cwd)) => within(root, cwd),
+            _ => self.session_tail(session).filter(|p| p != "~"),
         };
-        let meta = meta_line([doing.as_deref(), Some(worker.as_str()), place.as_deref(), branch]);
+        let meta = meta_line([doing.as_deref(), worker.as_deref(), place.as_deref(), branch]);
         (meta, age_at(since, now))
     }
 
@@ -1135,100 +1262,306 @@ impl WorkspaceView {
         (!words.is_empty() && !super::tile::only_moves(words)).then(|| words.to_owned())
     }
 
-    /// Every worker's block as the filter leaves it: a worker whose name matches keeps every
-    /// tile; otherwise only its matching tiles, and without one it is not listed. Tiles come
-    /// in order of attention.
-    fn nav_listing(&self, cx: &gpui::App) -> Vec<NavWorker> {
-        let query = self.nav.filter.query.trim().to_lowercase();
-        let order = self.reading_order();
+    /// Whether `tile`, known by `facts` and in the project `project`, has every facet of
+    /// `query`: `machine:` its worker's name, `project:` its project's, `is:` its state, any
+    /// other key one of its facts' values.
+    fn has_facets(
+        &self,
+        query: &Query,
+        tile: TileRef,
+        facts: &groups::Facts,
+        project: Option<&str>,
+        state: (Option<Status>, bool),
+    ) -> bool {
+        query.facets.iter().all(|(key, want)| {
+            let has = |value: &str| value.to_lowercase().contains(want.as_str());
+            match key.as_str() {
+                fact::MACHINE => has(&self.worker_name(tile.worker)),
+                fact::PROJECT => project.is_some_and(has),
+                "is" => matches!(
+                    (want.as_str(), state),
+                    ("waiting" | "needs" | "needs-you", (Some(Status::NeedsYou), _))
+                        | ("working", (Some(Status::Working), _))
+                        | ("running", (Some(Status::Running), _))
+                        | ("failed", (Some(Status::Failed), _))
+                        | ("unseen" | "done", (_, true))
+                ),
+                other => facts.get(other).is_some_and(|values| values.iter().any(|v| has(v))),
+            }
+        })
+    }
+
+    /// The navigator's blocks as the filter and the scope leave them: the groups of the
+    /// layout's chain before the machine, then each worker with the tiles that belong to
+    /// nothing else. A tile is kept when it has every facet of the filter and its words, its
+    /// project's name or its worker's name hold the rest. A block's tiles come in order of
+    /// attention; the groups by name, the workers in their own order.
+    fn nav_listing(&self, projects: &Grouping, cx: &gpui::App) -> Listing {
+        let query = Query::parse(&self.nav.filter.query);
         let now = SystemTime::now();
         let clock = cx.background_executor().now();
-        let by_repo = self.layout.navigator().lens == NavLens::Repositories;
-        let mut out = Vec::new();
-        for (key, w) in &self.workers {
-            let key = *key;
-            let named = matches(&query, &[&w.name]);
-            let roots: Vec<&str> = w.sessions.values().filter_map(|s| s.repo.as_deref()).collect();
-            // Each root's identity, from a shell there whose worker has read it.
-            let identity = |root: &str| {
-                w.sessions.values().find_map(|s| {
-                    s.repo_id.as_ref().filter(|_| s.repo.as_deref() == Some(root)).cloned()
-                })
-            };
-            let mut rollup = Rollup::default();
-            let mut tiles: Vec<(u8, NavTile)> = Vec::new();
-            for &tile in order.iter().filter(|t| t.worker == key) {
-                let Some(item) = w.doc.get(tile.item) else { continue };
-                let (mark, unseen) = self.tile_marks(tile, item);
-                rollup.add(mark, unseen);
-                let title = self.tile_title(item);
-                let (meta, age) = if by_repo {
-                    self.tile_meta_by_repo(tile, item, now, cx)
-                } else {
-                    self.tile_meta(item, now, cx)
-                };
-                let repo = match &item.kind {
-                    ItemKind::Terminal { session } => {
-                        w.sessions.get(session).and_then(|s| s.repo.clone())
-                    }
-                    ItemKind::File { path } | ItemKind::Folder { path } => {
-                        repo_of(path, roots.iter().copied()).map(str::to_owned)
-                    }
-                    _ => None,
-                };
-                let repo_id = repo.as_deref().and_then(identity);
-                let repo_named = repo.as_deref().map_or("", repo_name);
-                if !named && !matches(&query, &[&title, &meta, repo_named]) {
-                    continue;
-                }
-                let kind = self.kind_glyph(item);
-                let summary = match &item.kind {
-                    ItemKind::Terminal { session } => self.summary(*session),
-                    _ => None,
-                };
-                let changes = summary.and_then(|s| s.changes).and_then(line_changes);
-                let progress = summary.and_then(|s| s.progress);
-                let restored = summary.is_some_and(|s| s.restored.is_some());
-                let running = match (mark, &item.kind) {
-                    (Some(Status::Running), ItemKind::Terminal { session }) => {
-                        self.running_for(*session).map(kit::clock)
-                    }
-                    _ => None,
-                };
-                let shell_runs = running.is_some();
-                let word = status_word(mark).filter(|_| !shell_runs).map(|word| {
-                    match (word, &item.kind) {
-                        (Status::NeedsYou, ItemKind::Terminal { session }) => self
-                            .agent_state(*session)
-                            .map_or_else(|| word.label().to_owned(), agent_status_word),
-                        _ => word.label().to_owned(),
-                    }
-                });
-                let row = NavTile {
-                    tile,
-                    kind,
-                    mark,
-                    word,
-                    unseen,
-                    title,
-                    meta,
-                    age: age.and_then(age_shown),
-                    age_changes: age.map(until_age_changes),
-                    running,
-                    changes,
-                    progress,
-                    restored,
-                    repo,
-                    repo_id,
-                };
-                tiles.push((attention(mark, unseen), row));
-            }
-            if !named && tiles.is_empty() {
+        let chain = self.layout.navigator().group_by.clone();
+        let regrouped;
+        let grouping = if chain == groups::DEFAULT_CHAIN {
+            projects
+        } else {
+            regrouped = self.grouping(projects.tiles.clone(), &chain);
+            &regrouped
+        };
+        let scope = self.nav.scope.as_ref();
+        // What every group's tiles add up to, and the machines each spans, before the filter.
+        let spans: Vec<std::collections::BTreeSet<WorkerKey>> =
+            grouping.grouped.groups.iter().map(|g| grouping.machines(g)).collect();
+        let mut by_group: Vec<Vec<(u8, NavTile)>> =
+            grouping.grouped.groups.iter().map(|_| Vec::new()).collect();
+        let mut loose: BTreeMap<WorkerKey, Vec<(u8, NavTile)>> = BTreeMap::new();
+        for (i, &tile) in grouping.tiles.iter().enumerate() {
+            let Some(item) = self.item(tile) else { continue };
+            let project = projects.group_of(tile);
+            if scope.is_some_and(|scope| project.map(|g| &g.key) != Some(scope)) {
                 continue;
             }
-            // Stable: within a class the tiles keep their reading order.
+            let at = grouping.grouped.of.get(i).copied().flatten();
+            let group = at.and_then(|g| grouping.grouped.groups.get(g));
+            let own_group = group.filter(|g| g.key.worker().is_none());
+            let (mark, unseen) = self.tile_marks(tile, item);
+            let title = self.tile_title(item);
+            let (meta, age) = match (own_group, at) {
+                (Some(group), Some(g)) => {
+                    let spanned = spans.get(g).is_some_and(|m| m.len() > 1);
+                    let roots: Vec<&str> =
+                        group.places().filter(|(w, _)| *w == tile.worker).map(|(_, p)| p).collect();
+                    self.tile_meta_in_group(tile, item, (&roots, spanned), now, cx)
+                }
+                _ => self.tile_meta(item, now, cx),
+            };
+            let project_name = project.map(|g| self.group_name(g));
+            let empty = groups::Facts::new();
+            let facts = grouping.facts.get(i).unwrap_or(&empty);
+            if !self.has_facets(&query, tile, facts, project_name.as_deref(), (mark, unseen)) {
+                continue;
+            }
+            let group_name = own_group.map(|g| self.group_name(g));
+            let worker = self.worker_name(tile.worker);
+            let hay = [
+                title.as_str(),
+                meta.as_str(),
+                group_name.as_deref().unwrap_or_default(),
+                project_name.as_deref().unwrap_or_default(),
+                worker.as_str(),
+            ];
+            if !matches(&query.text, &hay) {
+                continue;
+            }
+            let kind = self.kind_glyph(item);
+            let summary = match &item.kind {
+                ItemKind::Terminal { session } => self.summary(*session),
+                _ => None,
+            };
+            let changes = summary.and_then(|s| s.changes).and_then(line_changes);
+            let progress = summary.and_then(|s| s.progress);
+            let restored = summary.is_some_and(|s| s.restored.is_some());
+            let running = match (mark, &item.kind) {
+                (Some(Status::Running), ItemKind::Terminal { session }) => {
+                    self.running_for(*session).map(kit::clock)
+                }
+                _ => None,
+            };
+            let shell_runs = running.is_some();
+            let word =
+                status_word(mark).filter(|_| !shell_runs).map(|word| match (word, &item.kind) {
+                    (Status::NeedsYou, ItemKind::Terminal { session }) => self
+                        .agent_state(*session)
+                        .map_or_else(|| word.label().to_owned(), agent_status_word),
+                    _ => word.label().to_owned(),
+                });
+            let row = NavTile {
+                tile,
+                kind,
+                mark,
+                word,
+                unseen,
+                title,
+                meta,
+                age: age.and_then(age_shown),
+                age_changes: age.map(until_age_changes),
+                running,
+                changes,
+                progress,
+                restored,
+            };
+            let class = attention(mark, unseen);
+            match (own_group, at.and_then(|g| by_group.get_mut(g))) {
+                (Some(_), Some(members)) => members.push((class, row)),
+                _ => loose.entry(tile.worker).or_default().push((class, row)),
+            }
+        }
+        // Stable: within a class the tiles keep their reading order.
+        let ordered = |mut tiles: Vec<(u8, NavTile)>| -> Vec<NavTile> {
             tiles.sort_by_key(|(class, _)| *class);
-            let tiles = tiles.into_iter().map(|(_, t)| t).collect();
+            tiles.into_iter().map(|(_, t)| t).collect()
+        };
+        // Under the default chain a declared project leads its group with its board, and is
+        // listed with its board alone where none of its tiles is here.
+        let boarded = chain.first().is_some_and(|f| f == fact::PROJECT);
+        let mut boards: BTreeMap<GroupKey, NavBoard> =
+            if boarded { self.nav_boards(&query, scope) } else { BTreeMap::new() };
+        let (mut threads, mut thread_groups, mut loose_threads) =
+            if boarded { self.nav_threads(&query, scope, projects) } else { Default::default() };
+        let mut blocks: Vec<(String, NavBlock)> = Vec::new();
+        for ((group, tiles), machines) in grouping.grouped.groups.iter().zip(by_group).zip(&spans) {
+            let board = boards.remove(&group.key);
+            let threads = threads.remove(&group.key).unwrap_or_default();
+            let empty = tiles.is_empty() && board.is_none() && threads.is_empty();
+            if group.key.worker().is_some() || empty {
+                continue;
+            }
+            let tiles = ordered(tiles);
+            let mut rollup = Rollup::default();
+            for t in &tiles {
+                rollup.add(t.mark, t.unseen);
+            }
+            for t in &threads {
+                rollup.add(t.status, false);
+            }
+            let folded = query.is_empty() && self.nav.folded.contains(&group.key);
+            let name = self.group_name(group);
+            let head = NavGroup {
+                key: group.key.clone(),
+                glyph: group_glyph(&group.fact),
+                name: name.clone(),
+                parent: None,
+                machines: self.machines_word(machines),
+                new_shell: self.group_new_shell(group),
+                rollup,
+                folded,
+                gap: false,
+            };
+            let block =
+                NavBlock { head: NavRow::Group(head), folded, board, threads, vacant: None, tiles };
+            blocks.push((name, block));
+        }
+        for (key, board) in boards {
+            let threads = threads.remove(&key).unwrap_or_default();
+            let mut rollup = Rollup::default();
+            rollup.add(board.status, false);
+            for t in &threads {
+                rollup.add(t.status, false);
+            }
+            let folded = query.is_empty() && self.nav.folded.contains(&key);
+            let name = self.mirror_title(&board.project);
+            let head = NavGroup {
+                key,
+                glyph: group_glyph(fact::PROJECT),
+                name: name.clone(),
+                parent: None,
+                machines: None,
+                new_shell: None,
+                rollup,
+                folded,
+                gap: false,
+            };
+            let block = NavBlock {
+                head: NavRow::Group(head),
+                folded,
+                board: Some(board),
+                threads,
+                vacant: None,
+                tiles: Vec::new(),
+            };
+            blocks.push((name, block));
+        }
+        // A thread's own group, where no tile here and no board is in it.
+        for (key, threads) in threads {
+            let Some(group) = thread_groups.remove(&key) else { continue };
+            let mut rollup = Rollup::default();
+            for t in &threads {
+                rollup.add(t.status, false);
+            }
+            let folded = query.is_empty() && self.nav.folded.contains(&key);
+            let name = self.group_name(&group);
+            let head = NavGroup {
+                key,
+                glyph: group_glyph(&group.fact),
+                name: name.clone(),
+                parent: None,
+                machines: None,
+                new_shell: self.group_new_shell(&group),
+                rollup,
+                folded,
+                gap: false,
+            };
+            let block = NavBlock {
+                head: NavRow::Group(head),
+                folded,
+                board: None,
+                threads,
+                vacant: None,
+                tiles: Vec::new(),
+            };
+            blocks.push((name, block));
+        }
+        blocks.sort_by(|(a, x), (b, y)| {
+            let key = |row: &NavRow| match row {
+                NavRow::Group(g) => g.key.clone(),
+                _ => GroupKey::new("", ""),
+            };
+            a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| key(&x.head).cmp(&key(&y.head)))
+        });
+        // Two groups of one name say where each is, in another directory or under another
+        // owner; where that is the same for all of them, they are on other machines, which the
+        // machines word on the right already says.
+        let places_of: Vec<(String, Option<String>)> = blocks
+            .iter()
+            .map(|(name, block)| {
+                let key = match &block.head {
+                    NavRow::Group(head) => Some(&head.key),
+                    _ => None,
+                };
+                (name.to_lowercase(), key.and_then(|k| grouping.group(k)).and_then(parent_of))
+            })
+            .collect();
+        for ((name, block), (_, parent)) in blocks.iter_mut().zip(&places_of) {
+            let lower = name.to_lowercase();
+            let alike: Vec<&Option<String>> =
+                places_of.iter().filter(|(n, _)| *n == lower).map(|(_, p)| p).collect();
+            let tells_apart = alike.len() > 1 && alike.iter().any(|p| *p != parent);
+            if let (true, NavRow::Group(head)) = (tells_apart, &mut block.head) {
+                head.parent.clone_from(parent);
+            }
+        }
+        let first = chain.first().map_or(fact::PROJECT, String::as_str);
+        let mut listing = Listing {
+            groups: blocks.into_iter().map(|(_, b)| b).collect(),
+            heading: section_name(first),
+            workers: Vec::new(),
+        };
+        let spanned: std::collections::BTreeSet<WorkerKey> = scope
+            .and_then(|scope| projects.group(scope))
+            .map(|g| projects.machines(g))
+            .unwrap_or_default();
+        for (key, w) in &self.workers {
+            let key = *key;
+            let tiles = ordered(loose.remove(&key).unwrap_or_default());
+            let threads = loose_threads.remove(&key).unwrap_or_default();
+            let named = !query.text.is_empty() && matches(&query.text, &[&w.name]);
+            let any = self.layout.tiles().any(|t| t.worker == key);
+            let held = !tiles.is_empty() || !threads.is_empty();
+            let listed = if scope.is_some() {
+                held || spanned.contains(&key)
+            } else {
+                query.is_empty() || named || held
+            };
+            if !listed {
+                continue;
+            }
+            let mut rollup = Rollup::default();
+            for t in &tiles {
+                rollup.add(t.mark, t.unseen);
+            }
+            for t in &threads {
+                rollup.add(t.status, false);
+            }
             let health = worker_health(&w.status);
             let rtt = health.is_none().then(|| slow_rtt(self.shown_rtt(w))).flatten();
             // Like the round trip, the path is named here only when it is worth a look: a DERP
@@ -1239,7 +1572,7 @@ impl WorkspaceView {
                 .and_then(|_| w.relay.path())
                 .filter(|_| health.is_none())
                 .map(|path| path_label(path).0);
-            let folded = query.is_empty() && self.nav.folded.contains(&key);
+            let folded = query.is_empty() && self.nav.folded.contains(&GroupKey::machine(key));
             let header = NavHeader {
                 key,
                 name: w.name.clone(),
@@ -1252,17 +1585,190 @@ impl WorkspaceView {
                 folded,
                 gap: false,
             };
-            out.push(NavWorker { header, tiles });
+            // A worker with no tile at all says so where its tiles would be; one whose tiles
+            // are all in projects says nothing more.
+            let vacant =
+                (!any && threads.is_empty() && query.is_empty() && scope.is_none()).then_some(key);
+            let block = NavBlock {
+                head: NavRow::Worker(header),
+                folded,
+                board: None,
+                threads,
+                vacant,
+                tiles,
+            };
+            listing.workers.push(block);
         }
-        out
+        listing
+    }
+
+    /// Each declared project the filter and the scope leave, by the key of its group: its
+    /// board's row. A facet narrows by what only a tile is known by, so it leaves none.
+    fn nav_boards(&self, query: &Query, scope: Option<&GroupKey>) -> BTreeMap<GroupKey, NavBoard> {
+        if !query.facets.is_empty() {
+            return BTreeMap::new();
+        }
+        self.projects
+            .mirror
+            .boards()
+            .filter_map(|board| {
+                let project = &board.project;
+                let key = GroupKey::new(fact::PROJECT, project.id.as_str());
+                let listed = scope.is_none_or(|s| *s == key)
+                    && matches(&query.text, &[&project.title, project.id.as_str(), BOARD]);
+                if !listed {
+                    return None;
+                }
+                let lanes = board.lanes();
+                let status = lanes.first().map(|(lane, _)| super::projects::lane_status(*lane));
+                let waiting = lanes
+                    .iter()
+                    .find(|(lane, _)| *lane == crate::project::model::Lane::NeedsYou)
+                    .map_or(0, |(_, tasks)| tasks.len());
+                let (merged, total) = board.progress();
+                let words = [
+                    match waiting {
+                        0 => None,
+                        1 => Some("1 needs you".to_owned()),
+                        n => Some(format!("{n} need you")),
+                    },
+                    Some(if total == 0 {
+                        NO_TASKS.to_owned()
+                    } else {
+                        format!("{merged} of {total} merged")
+                    }),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(META_SEPARATOR);
+                Some((key, NavBoard { project: project.id.clone(), status, words }))
+            })
+            .collect()
+    }
+
+    /// The threads at work with no tile here, nor their terminal one, that the filter and the
+    /// scope leave: by the key of the group each lists under, with the groups only threads
+    /// make, and by worker those known by nothing but their machine.
+    #[expect(clippy::type_complexity, reason = "the three parts nav_listing takes apart")]
+    fn nav_threads(
+        &self,
+        query: &Query,
+        scope: Option<&GroupKey>,
+        projects: &Grouping,
+    ) -> (
+        BTreeMap<GroupKey, Vec<NavThread>>,
+        BTreeMap<GroupKey, groups::Group>,
+        BTreeMap<WorkerKey, Vec<NavThread>>,
+    ) {
+        let mut by_group: BTreeMap<GroupKey, Vec<NavThread>> = BTreeMap::new();
+        let mut own: BTreeMap<GroupKey, groups::Group> = BTreeMap::new();
+        let mut by_worker: BTreeMap<WorkerKey, Vec<NavThread>> = BTreeMap::new();
+        if !query.facets.is_empty() {
+            return (by_group, own, by_worker);
+        }
+        let mut tiled_threads = HashSet::new();
+        let mut tiled_sessions = HashSet::new();
+        for tile in self.layout.tiles() {
+            match self.item(tile).map(|i| &i.kind) {
+                Some(ItemKind::Thread { thread }) => {
+                    tiled_threads.insert(*thread);
+                }
+                Some(ItemKind::Terminal { session }) => {
+                    tiled_sessions.insert(*session);
+                }
+                _ => {}
+            }
+        }
+        let mut found: Vec<(ThreadId, &super::faces::ThreadStand)> = self
+            .thread_stands()
+            .filter(|(thread, stand)| {
+                stand.rung != Rung::Idle
+                    && !tiled_threads.contains(thread)
+                    && stand.terminal.is_none_or(|s| !tiled_sessions.contains(&s))
+            })
+            .collect();
+        found.sort_by_key(|(thread, stand)| (std::cmp::Reverse(stand.since), *thread));
+        let claims = if found.is_empty() { Vec::new() } else { self.claims() };
+        for (thread, stand) in found {
+            let title = self.thread_title(thread);
+            let word = stand.word();
+            if !matches(&query.text, &[&title, word.unwrap_or_default()]) {
+                continue;
+            }
+            let glyph =
+                self.thread_agent(thread).map_or(Glyph::Agent(AgentMark::Other), Glyph::agent);
+            let row = NavThread {
+                worker: stand.worker,
+                thread,
+                glyph,
+                status: stand.status(),
+                title,
+                word,
+            };
+            let facts = self.thread_listing_facts(stand.worker, thread);
+            match super::grouping::listing_group(projects, &claims, &facts) {
+                Some(group) if scope.is_none_or(|s| *s == group.key) => {
+                    by_group.entry(group.key.clone()).or_default().push(row);
+                    own.entry(group.key.clone()).or_insert(group);
+                }
+                None if scope.is_none() => by_worker.entry(stand.worker).or_default().push(row),
+                Some(_) | None => {}
+            }
+        }
+        (by_group, own, by_worker)
+    }
+
+    /// A declared project's title, else its name.
+    fn mirror_title(&self, project: &ProjectId) -> String {
+        self.projects
+            .mirror
+            .get(project)
+            .map_or_else(|| project.as_str().to_owned(), |b| b.project.title.clone())
+    }
+
+    /// Where "+" on `group`'s header opens a shell: its place on the focused tile's machine
+    /// when it has one there, else its first place on a linked machine.
+    fn group_new_shell(&self, group: &groups::Group) -> Option<(WorkerKey, String)> {
+        let linked = |w: &WorkerKey| self.workers.get(w).is_some_and(|w| w.link.is_some());
+        let focused = self.focused().map(|t| t.worker);
+        let places: Vec<(WorkerKey, &str)> = group.places().filter(|(w, _)| linked(w)).collect();
+        let here = places.iter().find(|(w, _)| Some(*w) == focused);
+        here.or_else(|| places.first()).map(|(w, path)| (*w, (*path).to_owned()))
     }
 
     /// A row's data: an agent's ([`Self::session_nav_agent`]) or a waiting thread's
-    /// ([`Self::thread_nav_agent`]).
-    fn nav_agent(&self, at: Step, status: Status) -> NavAgent {
-        match at {
+    /// ([`Self::thread_nav_agent`]), placed by its project ([`Self::agent_place`]).
+    fn nav_agent(&self, at: Step, status: Status, projects: &Grouping) -> NavAgent {
+        let mut agent = match at {
             Step::Session(at) => self.session_nav_agent(at, status),
             Step::Thread(wait) => self.thread_nav_agent(wait, status),
+        };
+        let (worker, cwd) = match at {
+            Step::Session(at) => (at.worker, self.session_tail(at.session)),
+            Step::Thread(wait) => (wait.worker, None),
+        };
+        agent.place = self.agent_place(at.tile(), worker, cwd.as_deref(), projects);
+        agent
+    }
+
+    /// Where an agent's row says it is: its project, then its machine where there are
+    /// several; one in no project says its worker and its directory.
+    fn agent_place(
+        &self,
+        tile: Option<TileRef>,
+        worker: WorkerKey,
+        cwd: Option<&str>,
+        projects: &Grouping,
+    ) -> String {
+        let project = tile.and_then(|t| projects.group_of(t)).filter(|g| g.key.worker().is_none());
+        let name = self.worker_name(worker);
+        match project {
+            Some(group) => {
+                let machine = (self.workers.len() > 1).then_some(name.as_str());
+                meta_line([Some(self.group_name(group).as_str()), machine])
+            }
+            None => meta_line([Some(name.as_str()), cwd]),
         }
     }
 
@@ -1363,9 +1869,12 @@ impl WorkspaceView {
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => {
-                let first = this.nav_listing(cx).into_iter().flat_map(|w| w.tiles).next();
+                let first = this.nav_rows(cx).into_iter().find_map(|row| match row {
+                    NavRow::Tile(t) => Some(t.tile),
+                    _ => None,
+                });
                 if let Some(first) = first {
-                    this.go_to_tile(first.tile, cx);
+                    this.go_to_tile(first, cx);
                 }
             }
             InputEvent::Focus | InputEvent::Blur => {}
@@ -1373,8 +1882,12 @@ impl WorkspaceView {
         self.nav.filter.input = Some(input);
     }
 
-    /// Empty the filter, and give the keyboard back to the workspace.
+    /// Empty the filter, and give the keyboard back to the workspace. With the filter empty
+    /// already, it lets go of the scope.
     fn clear_navigator_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nav.filter.query.is_empty() {
+            self.set_scope(None, cx);
+        }
         if let Some(input) = self.nav.filter.input.clone() {
             input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         }
@@ -1418,7 +1931,7 @@ impl WorkspaceView {
                     .aria_label("Filter"),
             )
         });
-        let clear = (!self.nav.filter.query.is_empty()).then(|| {
+        let clear = (!self.nav.filter.query.is_empty() || self.nav.scope.is_some()).then(|| {
             let el = div()
                 .id("nav-filter-clear")
                 .debug_selector(|| "nav-filter-clear".to_owned())
@@ -1438,6 +1951,18 @@ impl WorkspaceView {
                 );
             tab_stop(el, s.accent)
         });
+        // A scope leads the field as a token: what every row below is narrowed to.
+        let scope = self.scope_name().map(|name| {
+            let s = theme.surfaces;
+            kit::pill(theme, s.accent, 1.0)
+                .id("nav-scope")
+                .debug_selector(|| "nav-scope".to_owned())
+                .role(Role::Label)
+                .aria_label(SharedString::from(format!("Scoped to {name}")))
+                .flex_none()
+                .max_w(px(self.navigator_width() / 2.0))
+                .child(SharedString::from(name))
+        });
         let field = div()
             .id("nav-filter-field")
             .flex_1()
@@ -1452,6 +1977,7 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .bg(hsla(s.overlay))
             .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
+            .children(scope)
             .children(input)
             .children(clear);
         div()
@@ -1466,64 +1992,50 @@ impl WorkspaceView {
     }
 
     /// Every row the list holds this frame: on a phone *Workspaces*, then *Needs you* while an
-    /// agent waits out of sight, *Working* while one is at its turn out of sight, then each
-    /// worker's header and, unless it is folded, its tiles. The workers' own heading shows only
-    /// under another section. While the filter holds something, a fold hides nothing.
+    /// agent waits out of sight, *To review* and *Working* likewise, then the projects, each
+    /// header with its tiles unless it is folded, then the workers, each with what belongs to
+    /// no project. A section's heading shows only under another section. While the filter
+    /// holds something, a fold hides nothing; under a scope, only its project's rows are left.
     ///
     /// An agent is listed under *Needs you* or *Working* only while its own row is not there to
     /// say so: its tile is folded away, scrolled out of view, filtered out, or it has none. A
     /// tile in view already ends its first line in its state, and a second row for it said the
     /// same thing again.
     fn nav_rows(&self, cx: &gpui::App) -> Vec<NavRow> {
-        let query = self.nav.filter.query.trim().to_lowercase();
-        let listing = self.nav_listing(cx);
-        let (blocks, heading) = match self.layout.navigator().lens {
-            NavLens::Workers => {
-                let blocks = listing
-                    .into_iter()
-                    .map(|NavWorker { header, tiles }| NavBlock {
-                        folded: header.folded,
-                        // A worker listed under a filter matched by its name; with no tiles it
-                        // has nothing else to say, and "No tiles" there would read as the
-                        // filter's answer.
-                        vacant: (tiles.is_empty() && query.is_empty()).then_some(header.key),
-                        head: NavRow::Worker(header),
-                        tiles,
-                    })
-                    .collect::<Vec<_>>();
-                (
-                    blocks,
-                    NavRow::Heading { selector: "nav-workers", text: "Workers", working: None },
-                )
-            }
-            NavLens::Repositories => {
-                let folded = |path: &str| query.is_empty() && self.nav.folded_repos.contains(path);
-                let tiles = listing.into_iter().flat_map(|w| w.tiles);
-                let heading = NavRow::Heading {
-                    selector: "nav-repositories",
-                    text: "Repositories",
-                    working: None,
-                };
-                (repo_blocks(tiles, folded), heading)
-            }
-        };
-        let listed: HashSet<TileRef> = blocks
+        let parsed = Query::parse(&self.nav.filter.query);
+        let query = parsed.text.clone();
+        let projects = self.project_groups();
+        let listing = self.nav_listing(&projects, cx);
+        // Under a facet, an agent is listed only when its tile is: the facet narrows by what
+        // only a tile is known by.
+        let kept: HashSet<TileRef> = listing.tiles().map(|t| t.tile).collect();
+        let faceted = !parsed.facets.is_empty();
+        let listed: HashSet<TileRef> = listing
+            .groups
             .iter()
+            .chain(&listing.workers)
             .filter(|b| !b.folded)
             .flat_map(|b| b.tiles.iter().map(|t| t.tile))
             .collect();
         let seen = |at: &Step| {
             at.tile().is_some_and(|tile| listed.contains(&tile) && self.nav.list.in_view(tile))
         };
+        let scope = self.nav.scope.as_ref();
+        let in_scope = |at: &Step| {
+            scope.is_none_or(|scope| {
+                at.tile().and_then(|t| projects.group_of(t)).is_some_and(|g| g.key == *scope)
+            })
+        };
         let mut rows = Vec::new();
-        if query.is_empty() && self.nav.drawn == Some(Mode::Drawer) {
+        if parsed.is_empty() && scope.is_none() && self.nav.drawn == Some(Mode::Drawer) {
             rows.extend(self.space_rows());
         }
         let agents = |list: Vec<Step>, status: Status| -> Vec<NavAgent> {
             list.into_iter()
-                .filter(|at| !seen(at))
+                .filter(|at| !seen(at) && in_scope(at))
+                .filter(|at| !faceted || at.tile().is_some_and(|t| kept.contains(&t)))
                 .map(|at| {
-                    let mut agent = self.nav_agent(at, status);
+                    let mut agent = self.nav_agent(at, status, &projects);
                     if let Step::Session(at) = at {
                         let words =
                             (!agent.words.is_empty()).then(|| std::mem::take(&mut agent.words));
@@ -1535,6 +2047,9 @@ impl WorkspaceView {
                 .filter(|a| matches(&query, &[&a.title, &a.words, &a.place]))
                 .collect()
         };
+        let heading = |selector: &'static str, text: &'static str, working: Option<usize>| {
+            NavRow::Heading { selector: selector.into(), text: text.into(), working }
+        };
         let sessions = |list: Vec<Waiting>| list.into_iter().map(Step::Session).collect();
         let threads = self.drawn_thread_waits.iter().copied().map(Step::Thread);
         let waiting = self.steps_in_reading_order(
@@ -1542,62 +2057,67 @@ impl WorkspaceView {
         );
         let waiting = agents(waiting, Status::NeedsYou);
         if !waiting.is_empty() {
-            rows.push(NavRow::Heading {
-                selector: "nav-needs-you",
-                text: "Needs you",
-                working: None,
-            });
+            rows.push(heading("nav-needs-you", "Needs you", None));
             rows.extend(waiting.into_iter().map(NavRow::Agent));
         }
         let review = agents(sessions(self.to_review()), Status::Done);
         if !review.is_empty() {
-            rows.push(NavRow::Heading {
-                selector: "nav-to-review",
-                text: "To review",
-                working: None,
-            });
+            rows.push(heading("nav-to-review", "To review", None));
             rows.extend(review.into_iter().map(NavRow::Agent));
         }
         let working = agents(sessions(self.working()), Status::Working);
         if !working.is_empty() {
             let count = working.len();
-            rows.push(NavRow::Heading {
-                selector: "nav-working",
-                text: "Working",
-                working: Some(count),
-            });
+            rows.push(heading("nav-working", "Working", Some(count)));
             let shown = if self.nav.working_all { count } else { WORKING_SHOWN };
             rows.extend(working.into_iter().take(shown).map(NavRow::Agent));
             if count > shown {
                 rows.push(NavRow::More(count.saturating_sub(shown)));
             }
         }
-        if !blocks.is_empty() && !rows.is_empty() {
-            rows.push(heading);
+        let Listing { groups, heading: groups_heading, workers } = listing;
+        if !groups.is_empty() && (!rows.is_empty() || !workers.is_empty()) {
+            rows.push(NavRow::Heading {
+                selector: "nav-projects".into(),
+                text: groups_heading.into(),
+                working: None,
+            });
         }
-        for NavBlock { mut head, folded, vacant, tiles } in blocks {
+        self.push_blocks(&mut rows, groups);
+        if !workers.is_empty() && !rows.is_empty() {
+            rows.push(heading("nav-workers", "Machines", None));
+        }
+        self.push_blocks(&mut rows, workers);
+        if rows.is_empty() {
+            rows.push(NavRow::Nothing);
+        }
+        rows
+    }
+
+    /// `blocks` onto the list: each header, then unless it is folded what it holds.
+    #[expect(clippy::unused_self, reason = "a step of nav_rows, beside its siblings")]
+    fn push_blocks(&self, rows: &mut Vec<NavRow>, blocks: Vec<NavBlock>) {
+        for NavBlock { mut head, folded, board, threads, vacant, tiles } in blocks {
             // A block after another's rows stands a step off them; under a heading, or first,
             // it needs none.
             let gap = matches!(
                 rows.last(),
-                Some(NavRow::Worker(_) | NavRow::Repo(_) | NavRow::Tile(_) | NavRow::Vacant(_))
+                Some(NavRow::Worker(_) | NavRow::Group(_) | NavRow::Tile(_) | NavRow::Vacant(_))
             );
             match &mut head {
                 NavRow::Worker(header) => header.gap = gap,
-                NavRow::Repo(repo) => repo.gap = gap,
+                NavRow::Group(group) => group.gap = gap,
                 _ => {}
             }
             rows.push(head);
             if folded {
                 continue;
             }
+            rows.extend(board.map(NavRow::Board));
             rows.extend(vacant.map(NavRow::Vacant));
             rows.extend(tiles.into_iter().map(NavRow::Tile));
+            rows.extend(threads.into_iter().map(NavRow::Thread));
         }
-        if rows.is_empty() {
-            rows.push(NavRow::Nothing);
-        }
-        rows
     }
 
     /// *Workspaces*, as a phone's drawer heads its list: each workspace the title bar would tab,
@@ -1614,8 +2134,11 @@ impl WorkspaceView {
             })
             .collect();
         let fresh = self.layout.workspaces().get(active).is_some_and(|ws| ws.columns().is_empty());
-        let heading =
-            NavRow::Heading { selector: "nav-workspaces", text: "Workspaces", working: None };
+        let heading = NavRow::Heading {
+            selector: "nav-workspaces".into(),
+            text: "Workspaces".into(),
+            working: None,
+        };
         std::iter::once(heading).chain(spaces).chain((!fresh).then_some(NavRow::NewSpace)).collect()
     }
 
@@ -1651,7 +2174,7 @@ impl WorkspaceView {
     fn nav_row(&self, ix: usize, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let gap = match self.nav.list.rows.borrow().get(ix) {
             Some(NavRow::Worker(h)) => h.gap,
-            Some(NavRow::Repo(r)) => r.gap,
+            Some(NavRow::Group(g)) => g.gap,
             _ => false,
         };
         div()
@@ -1668,14 +2191,16 @@ impl WorkspaceView {
         let rows = self.nav.list.rows.borrow();
         match rows.get(ix) {
             Some(NavRow::Heading { selector, text, working }) => {
-                heading(theme, selector, text, *working).into_any_element()
+                heading(theme, selector.clone(), text.clone(), *working).into_any_element()
             }
             Some(NavRow::Agent(agent)) => self.agent_row(agent, cx),
             Some(NavRow::More(hidden)) => self.more_row(*hidden, cx),
             Some(NavRow::Space(space)) => self.space_row(space, cx),
             Some(NavRow::NewSpace) => self.new_space_row(cx),
             Some(NavRow::Worker(header)) => self.worker_header(header, cx),
-            Some(NavRow::Repo(repo)) => self.repo_header(repo, cx),
+            Some(NavRow::Group(group)) => self.group_header(group, cx),
+            Some(NavRow::Board(board)) => self.board_row(board, cx),
+            Some(NavRow::Thread(thread)) => self.thread_row(thread, cx),
             Some(NavRow::Tile(tile)) => self.tile_row(tile, self.nav.list.selected.get(), cx),
             Some(NavRow::Vacant(key)) => {
                 let key = *key;
@@ -1738,11 +2263,13 @@ impl WorkspaceView {
             // Over the frame it floats, as every floating layer does. It meets the window's
             // top, left and bottom edges, so only its trailing edge carries the hairline.
             .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme).border_0().border_r_1())
-            // Esc in the filter empties it and hands the keyboard back.
+            // Esc in the filter empties it and hands the keyboard back; with it empty, Esc lets
+            // go of the scope.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 let composing =
                     this.nav.filter.input.as_ref().is_some_and(|i| i.read(cx).is_composing());
-                if !this.nav.filter.query.is_empty() && !composing {
+                let held = !this.nav.filter.query.is_empty() || this.nav.scope.is_some();
+                if held && !composing {
                     this.clear_navigator_filter(window, cx);
                     cx.stop_propagation();
                 }
@@ -1785,67 +2312,111 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// Where the navigator is hidden but would dock: a column of one server glyph per worker,
-    /// each with what its tiles add up to under it. A click flies to the worker.
+    /// Where the navigator is hidden but would dock: a column of one glyph per project, with
+    /// what its tiles add up to under it, then a server glyph for each worker that is not up or
+    /// whose own tiles want the human. A click goes to the project, or to the worker.
     fn navigator_rail(&self, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let side = kit::icon_button_side(theme);
-        let buttons: Vec<gpui::AnyElement> = self
-            .workers
-            .iter()
-            .map(|(key, w)| {
-                let key = *key;
-                let rollup = self.worker_rollup(key);
-                let health = worker_health(&w.status);
-                let label = [Some(w.name.clone()), health.map(|(_, word)| word.to_owned())]
-                    .into_iter()
-                    .flatten()
-                    .chain(rollup.words())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let (glyph, ink) = match health {
-                    Some((Status::Away, _)) => (IconName::ServerOff, s.text_muted),
-                    _ => (IconName::Server, s.text_secondary),
-                };
-                let badge = rollup_slot(theme, format!("nav-rail-rollup-{key}"), rollup, true)
-                    .absolute()
-                    .right_0()
-                    .bottom_0();
-                let el = div()
-                    .id(ElementId::Name(format!("nav-rail-{key}").into()))
-                    .debug_selector(move || format!("nav-rail-{key}"))
-                    .role(Role::Button)
-                    .aria_label(SharedString::from(label))
-                    .relative()
-                    .flex_none()
-                    .size(px(side))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(theme.radii.sm))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)))
-                    .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
-                    .child(badge)
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.tick();
-                        this.navigated();
-                        this.go_to_worker(key, cx);
-                    }));
-                tab_stop(el, s.accent).into_any_element()
-            })
-            .collect();
+        let button = |id: String, label: String, glyph: IconName, ink, rollup: Rollup| {
+            let badge = rollup_slot(theme, format!("{id}-rollup"), rollup, true)
+                .absolute()
+                .right_0()
+                .bottom_0();
+            let selector = id.clone();
+            let el = div()
+                .id(ElementId::Name(id.into()))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(SharedString::from(label))
+                .relative()
+                .flex_none()
+                .size(px(side))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme.radii.sm))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.raised)))
+                .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
+                .child(badge);
+            tab_stop(el, s.accent)
+        };
+        let words = |name: String, more: Option<String>, rollup: Rollup| {
+            [Some(name), more]
+                .into_iter()
+                .flatten()
+                .chain(rollup.words())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let projects = self.project_groups();
+        let mut groups: Vec<(String, gpui::AnyElement)> = Vec::new();
+        let mut loose: BTreeMap<WorkerKey, Rollup> = BTreeMap::new();
+        for group in &projects.grouped.groups {
+            let mut rollup = Rollup::default();
+            for tile in projects.members(group) {
+                if let Some(item) = self.item(tile) {
+                    let (mark, unseen) = self.tile_marks(tile, item);
+                    rollup.add(mark, unseen);
+                }
+            }
+            if let Some(worker) = group.key.worker() {
+                loose.insert(worker, rollup);
+                continue;
+            }
+            let name = self.group_name(group);
+            let key = group.key.clone();
+            let el = button(
+                format!("nav-rail-{}", group.key),
+                words(name.clone(), None, rollup),
+                group_glyph(&group.fact),
+                s.text_secondary,
+                rollup,
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| {
+                this.tick();
+                this.navigated();
+                this.go_to_group(&key, cx);
+            }));
+            groups.push((name.to_lowercase(), el.into_any_element()));
+        }
+        groups.sort_by(|(a, _), (b, _)| a.cmp(b));
+        let workers = self.workers.iter().filter_map(|(key, w)| {
+            let key = *key;
+            let rollup = loose.get(&key).copied().unwrap_or_default();
+            let health = worker_health(&w.status);
+            if health.is_none() && rollup.shown().is_none() {
+                return None;
+            }
+            let (glyph, ink) = match health {
+                Some((Status::Away, _)) => (IconName::ServerOff, s.text_muted),
+                _ => (IconName::Server, s.text_secondary),
+            };
+            let label = words(w.name.clone(), health.map(|(_, word)| word.to_owned()), rollup);
+            let el = button(format!("nav-rail-{key}"), label, glyph, ink, rollup).on_click(
+                cx.listener(move |this, _ev, _w, cx| {
+                    this.tick();
+                    this.navigated();
+                    this.go_to_worker(key, cx);
+                }),
+            );
+            Some(el.into_any_element())
+        });
+        let buttons: Vec<gpui::AnyElement> =
+            groups.into_iter().map(|(_, el)| el).chain(workers).collect();
         div()
             .id("nav-rail")
             .debug_selector(|| "nav-rail".to_owned())
             .role(Role::Navigation)
-            .aria_label("Workers")
+            .aria_label("Projects")
             .size_full()
             .flex()
             .flex_col()
             .items_center()
+            .overflow_y_scroll()
             .pt(px(spacing.sm))
             .gap(px(spacing.xs))
             .bg(hsla(s.canvas))
@@ -2245,34 +2816,35 @@ impl WorkspaceView {
         .child(name)
         .child(trailing)
         .on_click(cx.listener(move |this, _ev, _w, cx| {
-            if !this.nav.folded.remove(&key) {
-                this.nav.folded.insert(key);
+            let group = GroupKey::machine(key);
+            if !this.nav.folded.remove(&group) {
+                this.nav.folded.insert(group);
             }
             cx.notify();
         }))
         .into_any_element()
     }
 
-    /// A repository's header under the repository lens: its name in the strong weight after a
-    /// repository glyph, where it is when another listed has its name, what its tiles add up to
-    /// while it is folded, and the chevron under the pointer. A click folds it.
-    fn repo_header(&self, repo: &NavRepo, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+    /// A project's header: its glyph and its name in the strong weight, where it is when
+    /// another listed has its name, then on the right edge the machines it spans, led by what
+    /// its tiles add up to while it is folded. Under the pointer the chevron and "+" (a new shell
+    /// in its clone) take the readouts' place; nothing moves when either shows. A click folds it.
+    fn group_header(&self, group: &NavGroup, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let path = repo.key.clone();
-        let key = if path.is_empty() { "none".to_owned() } else { path.clone() };
-        let folded = repo.folded;
+        let key = group.key.clone();
+        let folded = group.folded;
         let label = SharedString::from(format!(
-            "{}{}{}",
-            repo.name,
-            repo.parent.as_ref().map(|p| format!(", in {p}")).unwrap_or_default(),
+            "{}{}{}{}",
+            group.name,
+            group.parent.as_ref().map(|p| format!(", in {p}")).unwrap_or_default(),
+            group.machines.as_ref().map(|m| format!(", on {m}")).unwrap_or_default(),
             if folded { ", folded" } else { "" }
         ));
-        let glyph = if path.is_empty() { IconName::Folder } else { IconName::FolderGit2 };
-        let lead = lead_slot(theme, icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)));
+        let lead = lead_slot(theme, icon(theme, group.glyph, IconSize::Inline, hsla(s.text_muted)));
         let name_key = key.clone();
         let name = div()
-            .debug_selector(move || format!("nav-repo-name-{name_key}"))
+            .debug_selector(move || format!("nav-group-name-{name_key}"))
             .flex_1()
             .min_w_0()
             .overflow_hidden()
@@ -2280,21 +2852,62 @@ impl WorkspaceView {
             .text_ellipsis()
             .font_weight(gpui::FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(s.text))
-            .child(SharedString::from(repo.name.clone()));
-        let group = SharedString::from(format!("nav-repo-group-{key}"));
-        let rollup = folded.then_some(repo.rollup).filter(|r| r.shown().is_some());
+            .child(SharedString::from(group.name.clone()));
+        let hover_group = SharedString::from(format!("nav-group-hover-{key}"));
+        let rollup = folded.then_some(group.rollup).filter(|r| r.shown().is_some());
         let rollup_key = key.clone();
+        let machines_key = key.clone();
+        // Where it is and what it spans, quiet, on the right edge where a worker's readouts
+        // sit; they give way to the name, which is what the row is for.
+        let place = [group.parent.clone(), group.machines.clone()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(META_SEPARATOR);
         let rest = div()
+            .min_w_0()
             .flex()
             .items_center()
             .justify_end()
             .gap(px(theme.spacing.xs))
-            .group_hover(group.clone(), gpui::Styled::invisible)
+            .group_hover(hover_group.clone(), gpui::Styled::invisible)
             .children(
                 rollup.map(|r| rollup_slot(theme, format!("nav-rollup-{rollup_key}"), r, false)),
             )
-            .children(repo.parent.clone().map(|parent| readout(theme, parent)));
+            .children((!place.is_empty()).then(|| {
+                meta(div(), theme)
+                    .debug_selector(move || format!("nav-group-machines-{machines_key}"))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(SharedString::from(place))
+            }));
         let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
+        let side = theme.typography.icon_large();
+        let add = group.new_shell.clone().map(|(worker, cwd)| {
+            let add_key = key.clone();
+            let el = div()
+                .id(SharedString::from(format!("nav-group-new-shell-{key}")))
+                .debug_selector(move || format!("nav-group-new-shell-{add_key}"))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("New shell in {}", group.name)))
+                .flex_none()
+                .size(px(side))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme.radii.xs))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_secondary)))
+                .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |this, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    this.open_session_on(worker, Some(cwd.clone()), Vec::new(), None, cx);
+                }));
+            tab_stop(el, s.accent)
+        });
         let hover = div()
             .absolute()
             .top_0()
@@ -2303,37 +2916,118 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_end()
+            .gap(px(theme.spacing.xxs))
             .invisible()
-            .group_hover(group.clone(), gpui::Styled::visible)
-            .child(lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted))));
+            .group_hover(hover_group.clone(), gpui::Styled::visible)
+            .child(lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted))))
+            .children(add);
         let trailing = div()
             .relative()
-            .flex_none()
+            .flex_shrink(1.0)
             .min_w(px(header_actions_width(theme)))
-            .h(px(theme.typography.icon_large()))
+            .h(px(side))
             .flex()
             .items_center()
             .justify_end()
             .child(rest)
             .child(hover);
+        let fold = key.clone();
         row(
             theme,
             kit::Row::One,
-            ElementId::Name(format!("nav-repo-{key}").into()),
-            format!("nav-repo-{key}"),
+            ElementId::Name(format!("nav-group-{key}").into()),
+            format!("nav-group-{key}"),
             label,
             false,
         )
-        .group(group)
+        .group(hover_group)
         .child(lead)
         .child(name)
         .child(trailing)
         .on_click(cx.listener(move |this, _ev, _w, cx| {
-            if !this.nav.folded_repos.remove(&path) {
-                this.nav.folded_repos.insert(path.clone());
+            if !this.nav.folded.remove(&fold) {
+                this.nav.folded.insert(fold.clone());
             }
             cx.notify();
         }))
+        .into_any_element()
+    }
+
+    /// A declared project's board, first under its header and set in as its tiles are: the
+    /// project's glyph, else its most urgent lane's status, "Board", and how its tasks stand.
+    /// ↩ or a click shows the board in its orchestrator's tile.
+    fn board_row(&self, board: &NavBoard, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let id = board.project.as_str().to_owned();
+        let label = SharedString::from(format!("{BOARD}, {}", board.words));
+        let glyph = board.status.filter(|m| *m != Status::Idle);
+        let lead =
+            crate::palette::status_slot(theme, IconName::Workflow, glyph, hsla(s.text_muted), 1.0);
+        let words_id = id.clone();
+        let project = board.project.clone();
+        row(
+            theme,
+            kit::Row::One,
+            ElementId::Name(format!("nav-board-{id}").into()),
+            format!("nav-board-{id}"),
+            label,
+            false,
+        )
+        .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+        .child(lead)
+        // "Board" is one short word and stays whole; the words beside it give way instead.
+        .child(title(BOARD, hsla(s.text_secondary)).flex_none())
+        .child(
+            tabular(meta(div(), theme))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_right()
+                .child(board.words.clone())
+                .debug_selector(move || format!("nav-board-words-{words_id}")),
+        )
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.open_project(&project, cx)))
+        .into_any_element()
+    }
+
+    /// A thread at work with no tile here, set back as a row at work is: its status glyph,
+    /// else its agent's, its title and its state in a word. A click opens its tile.
+    fn thread_row(&self, t: &NavThread, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let id = t.thread;
+        let label = [Some(t.title.as_str()), t.word, Some(NO_TILE_YET)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let strength = row_strength(theme, t.status.or(Some(Status::Working)), false);
+        let faded = move |tone: Rgb| crate::colors::hsla_alpha(tone, strength);
+        let glyph = t.status.filter(|m| *m != Status::Idle);
+        let lead = crate::palette::status_slot(theme, t.glyph, glyph, faded(s.text_muted), 1.0);
+        let row_group = SharedString::from(format!("nav-thread-group-{id}"));
+        let ink = s.text_secondary;
+        let (worker, thread) = (t.worker, t.thread);
+        row(
+            theme,
+            kit::Row::One,
+            ElementId::Name(format!("nav-thread-{id}").into()),
+            format!("nav-thread-{id}"),
+            label.into(),
+            false,
+        )
+        .group(row_group.clone())
+        .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+        .child(lead)
+        .child(
+            title(t.title.clone(), faded(ink))
+                .group_hover(row_group, move |st| st.text_color(hsla(ink))),
+        )
+        .children(t.word.map(|word| readout(theme, word)))
+        .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(worker, thread, cx)))
         .into_any_element()
     }
 
@@ -2542,84 +3236,6 @@ impl WorkspaceView {
     }
 }
 
-/// The repository lens's blocks: a repository's tiles from every worker under one header, in
-/// order of attention (each worker's own order kept within a class), the repositories by name
-/// and the tiles in none last. Clones are one repository when their identities match or they
-/// share a path ([`crate::repo_groups::group`]), so one cloned at two paths on two workers is
-/// one block. Two repositories of one name say where each is.
-fn repo_blocks(
-    tiles: impl Iterator<Item = NavTile>,
-    folded: impl Fn(&str) -> bool,
-) -> Vec<NavBlock> {
-    let tiles: Vec<NavTile> = tiles.collect();
-    let grouped = {
-        let clones: Vec<crate::repo_groups::Clone<'_>> = tiles
-            .iter()
-            .filter_map(|t| {
-                Some(crate::repo_groups::Clone { path: t.repo.as_deref()?, id: t.repo_id.as_ref() })
-            })
-            .collect();
-        crate::repo_groups::group(&clones)
-    };
-    let mut members: Vec<Vec<NavTile>> = grouped.groups.iter().map(|_| Vec::new()).collect();
-    let mut loose = Vec::new();
-    let mut of = grouped.of.iter();
-    for tile in tiles {
-        let group = tile.repo.as_ref().and_then(|_| of.next()).and_then(|&g| members.get_mut(g));
-        match group {
-            Some(group) => group.push(tile),
-            None => loose.push(tile),
-        }
-    }
-    let mut seen = HashSet::new();
-    let mut shared = HashSet::new();
-    for group in &grouped.groups {
-        let name = group.name.to_lowercase();
-        if !seen.insert(name.clone()) {
-            shared.insert(name);
-        }
-    }
-    let block = |key: String, name: String, parent: Option<String>, mut tiles: Vec<NavTile>| {
-        tiles.sort_by_key(|t| attention(t.mark, t.unseen));
-        let mut rollup = Rollup::default();
-        for t in &tiles {
-            rollup.add(t.mark, t.unseen);
-        }
-        let folded = folded(&key);
-        let head = NavRow::Repo(NavRepo { key, name, parent, rollup, folded, gap: false });
-        NavBlock { head, folded, vacant: None, tiles }
-    };
-    let mut blocks: Vec<NavBlock> = grouped
-        .groups
-        .into_iter()
-        .zip(members)
-        .map(|(group, tiles)| {
-            // Where it is: the origin's owner when it has one, else its least path's parent.
-            let parent = shared.contains(&group.name.to_lowercase()).then(|| {
-                let origin =
-                    tiles.iter().filter_map(|t| t.repo_id.as_ref()?.origin.as_deref()).min();
-                origin.or_else(|| group.paths.first().map(String::as_str)).and_then(repo_parent)
-            });
-            block(group.key, group.name, parent.flatten(), tiles)
-        })
-        .collect();
-    if !loose.is_empty() {
-        blocks.push(block(String::new(), NO_REPOSITORY.to_owned(), None, loose));
-    }
-    blocks
-}
-
-/// The deepest of `roots` that holds `path`, on a directory boundary.
-fn repo_of<'a>(path: &str, roots: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
-    roots.into_iter().filter(|root| within_or_at(root, path)).max_by_key(|root| root.len())
-}
-
-/// Whether `path` is `root` or below it.
-fn within_or_at(root: &str, path: &str) -> bool {
-    let root = root.trim_end_matches('/');
-    path.strip_prefix(root).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-}
-
 /// `cwd` below `repo`, relative to it: `None` at the repository's root or outside it.
 fn within(repo: &str, cwd: &str) -> Option<String> {
     let rest = cwd.strip_prefix(repo.trim_end_matches('/'))?;
@@ -2627,25 +3243,12 @@ fn within(repo: &str, cwd: &str) -> Option<String> {
     (!rest.is_empty()).then(|| rest.to_owned())
 }
 
-/// A repository's name: its directory's.
-fn repo_name(path: &str) -> &str {
-    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
-}
-
-/// Where a repository is: its parent directory's last two components.
-fn repo_parent(path: &str) -> Option<String> {
-    let trimmed = path.trim_end_matches('/');
-    let (parent, _) = trimmed.rsplit_once('/')?;
-    let parts: Vec<&str> = parent.rsplit('/').take(2).filter(|p| !p.is_empty()).collect();
-    (!parts.is_empty()).then(|| parts.into_iter().rev().collect::<Vec<_>>().join("/"))
-}
-
 /// A section's heading, as every list in the frame heads its sections: the quiet label, and
 /// for *Working* the working mark and how many are at work.
 fn heading(
     theme: &Theme,
-    selector: &'static str,
-    text: &'static str,
+    selector: SharedString,
+    text: SharedString,
     working: Option<usize>,
 ) -> Stateful<Div> {
     let s = &theme.surfaces;
@@ -2663,8 +3266,9 @@ fn heading(
             ))
     });
     let count = working.map(|n| readout(theme, n.to_string()));
-    crate::palette::section_heading(theme, selector.into(), text)
-        .debug_selector(move || selector.to_owned())
+    let id = selector.clone();
+    crate::palette::section_heading(theme, id.into(), text)
+        .debug_selector(move || selector.to_string())
         .flex()
         .items_center()
         .gap(px(theme.spacing.xs))
@@ -2679,6 +3283,20 @@ fn header_actions_width(theme: &Theme) -> f32 {
 
 #[cfg(test)]
 impl WorkspaceView {
+    /// What `worker`'s tiles add up to.
+    pub(super) fn worker_rollup(&self, worker: WorkerKey) -> Rollup {
+        let mut rollup = Rollup::default();
+        let Some(w) = self.workers.get(&worker) else { return rollup };
+        for item in w.doc.items() {
+            let tile = TileRef { worker, item: item.id };
+            if self.layout.contains(tile) {
+                let (mark, unseen) = self.tile_marks(tile, item);
+                rollup.add(mark, unseen);
+            }
+        }
+        rollup
+    }
+
     /// What the navigator's filter holds.
     #[must_use]
     pub(super) fn navigator_filter(&self) -> &str {
@@ -2687,16 +3305,14 @@ impl WorkspaceView {
 
     /// Every tile row the navigator lists, as drawn: its title, its second line and its age.
     pub(super) fn navigator_lines(&self, cx: &gpui::App) -> Vec<(String, String, Option<String>)> {
-        self.nav_listing(cx)
-            .into_iter()
-            .flat_map(|w| w.tiles)
-            .map(|t| (t.title, t.meta, t.age))
-            .collect()
+        let listing = self.nav_listing(&self.project_groups(), cx);
+        listing.tiles().map(|t| (t.title.clone(), t.meta.clone(), t.age.clone())).collect()
     }
 
     /// The state's word at the end of each tile row's first line, by title.
     pub(super) fn navigator_words(&self, cx: &gpui::App) -> Vec<(String, Option<String>)> {
-        self.nav_listing(cx).into_iter().flat_map(|w| w.tiles).map(|t| (t.title, t.word)).collect()
+        let listing = self.nav_listing(&self.project_groups(), cx);
+        listing.tiles().map(|t| (t.title.clone(), t.word.clone())).collect()
     }
 
     /// Each tile row's second line, by tile, in the list's order.
@@ -2708,16 +3324,34 @@ impl WorkspaceView {
         self.nav.list.rows.borrow().iter().filter_map(meta).collect()
     }
 
-    /// What each repository's header is named to assistive technology, in the list's order.
-    pub(super) fn navigator_repo_labels(&self) -> Vec<String> {
+    /// Each project header's name and where it is, in the list's order: `slopty, in w/oss`.
+    pub(super) fn navigator_group_labels(&self) -> Vec<String> {
         let label = |r: &NavRow| match r {
-            NavRow::Repo(repo) => Some(match &repo.parent {
-                Some(parent) => format!("{}, in {parent}", repo.name),
-                None => repo.name.clone(),
+            NavRow::Group(group) => Some(match &group.parent {
+                Some(parent) => format!("{}, in {parent}", group.name),
+                None => group.name.clone(),
             }),
             _ => None,
         };
         self.nav.list.rows.borrow().iter().filter_map(label).collect()
+    }
+
+    /// Each project header's key and the machines it says it spans, in the list's order.
+    pub(super) fn navigator_groups(&self) -> Vec<(GroupKey, Option<String>)> {
+        let group = |r: &NavRow| match r {
+            NavRow::Group(group) => Some((group.key.clone(), group.machines.clone())),
+            _ => None,
+        };
+        self.nav.list.rows.borrow().iter().filter_map(group).collect()
+    }
+
+    /// Each section heading, in the list's order.
+    pub(super) fn navigator_headings(&self) -> Vec<String> {
+        let heading = |r: &NavRow| match r {
+            NavRow::Heading { text, .. } => Some(text.to_string()),
+            _ => None,
+        };
+        self.nav.list.rows.borrow().iter().filter_map(heading).collect()
     }
 
     /// The tiles the navigator's list holds, in its order, whether or not they are in view.
@@ -2762,11 +3396,12 @@ mod tests {
         assert_eq!(until_age_changes(Duration::from_secs(3_700)), Duration::from_secs(3_500));
     }
 
-    /// An agent at rest says what it last said, a lone word quoted so it is not read as a
-    /// state, and nothing when it said nothing.
+    /// An agent at rest says what it last said when that is more than a word; a single word
+    /// is left to the row's mark, and nothing is quoted.
     #[test]
-    fn a_resting_agent_is_quoted_not_stated() {
-        assert_eq!(rest_words("done").as_deref(), Some("\u{201c}done\u{201d}"));
+    fn a_resting_agents_single_word_is_left_to_its_mark() {
+        assert_eq!(rest_words("done"), None);
+        assert_eq!(rest_words("  done  "), None);
         assert_eq!(rest_words("Fixed the build").as_deref(), Some("Fixed the build"));
         assert_eq!(rest_words("  "), None);
     }

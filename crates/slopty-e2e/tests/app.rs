@@ -325,8 +325,8 @@ mod tests {
         stack.shutdown().await;
     }
 
-    /// A `claude` nobody registered hooks for: "+ agent" starts the fake one the harness put
-    /// on ptyd's `PATH`, and the worker attributes it from its foreground process, then its
+    /// A `claude` nobody registered hooks for: a terminal runs the fake one the harness put on
+    /// ptyd's `PATH`, and the worker attributes it from its foreground process, then its
     /// title, then the transcript it writes — each signal taking over from the weaker one.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e app"]
@@ -341,8 +341,10 @@ mod tests {
             .await
             .unwrap();
 
-        // ⌘⇧T runs `claude`, which here is the fake: it prints where it runs and waits.
-        stack.driver.keys("cmd-shift-t").await.unwrap();
+        // A terminal running `claude`, as one typed into a shell: here the fake, which prints
+        // where it runs and waits. (⌘⇧T starts the agent's thread, not a bare terminal.)
+        let open = Command::Open { command: vec!["claude".to_owned()], count: 1 };
+        stack.driver.ok(&open).await.unwrap();
         let dump = stack
             .driver
             .wait_for("the agent's terminal", STEP, |d| {

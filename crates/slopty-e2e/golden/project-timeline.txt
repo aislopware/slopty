@@ -2,17 +2,22 @@ Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
 TextInput │ Filter
-Button │ studio
-Button │ New shell on studio
-Button │ Terminal
-Button │ Close tile
+Heading │ Projects
+Button │ Ship the project board
+Button │ Board, 2 need you · 1 of 7 merged
+Image │ Needs you
 Button │ Orchestrator
 Button │ Close tile
 Button │ #1 Mirror the server's projects
 Button │ Close tile
+Heading │ Machines
+Button │ studio
+Button │ New shell on studio
+Button │ Terminal
+Button │ Close tile
 Button │ Navigator
 Group │ Where
-Button │ studio
+Button │ Ship the project board
 Button │ New
 Button │ Inbox
 Button │ More

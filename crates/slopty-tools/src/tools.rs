@@ -2045,6 +2045,7 @@ mod tests {
                 limits: Limits::default(),
                 metadata: None,
                 created_ms: WallMs::ZERO,
+                members: Vec::new(),
             },
             tasks: [made_task(3, None, "Plan", false), made_task(5, None, "Review", true)]
                 .iter()
@@ -2134,6 +2135,7 @@ mod tests {
                     kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
                     sleeping: false,
                     name: None,
+                    facts: BTreeMap::new(),
                 }]),
                 Verb::ReadConversation { thread, .. } => {
                     let text = Clipped { text: "{}".to_owned(), lines: 1, chars: 2, full: None };

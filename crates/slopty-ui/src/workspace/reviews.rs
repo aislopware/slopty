@@ -44,6 +44,7 @@ impl WorkspaceView {
             kind: ItemKind::Review { thread },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         tracing::info!(id = %item.id, %thread, "open review");
         self.reviews.opening.insert(thread);

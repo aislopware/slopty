@@ -1969,6 +1969,54 @@ mod tests {
         drawn.chain(after_id).chain(after_theme).find(lower)
     }
 
+    /// Whether `text` names a computer as a worker: "worker" or "workers", any case, as a word
+    /// of its own, not part of an identifier (`slopty-worker`, `{worker}`, `nav-worker-`).
+    fn says_worker(text: &str) -> bool {
+        let edge =
+            |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || "_-.{}".contains(c)));
+        let lower = text.to_lowercase();
+        lower.match_indices("worker").any(|(at, word)| {
+            let before = lower.get(..at).and_then(|b| b.chars().next_back());
+            let rest = lower.get(at.saturating_add(word.len())..).unwrap_or_default();
+            let rest = rest.strip_prefix('s').unwrap_or(rest);
+            edge(before) && edge(rest.chars().next())
+        })
+    }
+
+    /// The person's word for a computer Slopty runs on is "machine", as the tailnet's is: no
+    /// string the workspace's chrome or the palette shows says "worker". Code, wire and process
+    /// names keep it. A literal shaped as a key (lowercase, no space: an element's id, a
+    /// `userInfo` key, a selector's part) is not shown, nor is a `Debug` name or a log line.
+    #[test]
+    fn chrome_says_machine_not_worker() {
+        assert!(says_worker("Add a worker") && says_worker("Workers") && says_worker("workers'"));
+        assert!(!says_worker("slopty-worker") && !says_worker("on {worker}"));
+        assert!(!says_worker("nav-worker-{key}") && !says_worker("workerd"));
+        let mut lines = chrome_lines("slopty-ui/src/workspace");
+        for file in ["workspace.rs", "palette.rs", "keymap.rs"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join(file);
+            let text = std::fs::read_to_string(&path).expect("a source file reads");
+            let name = path.display().to_string();
+            let kept = text.lines().take_while(|l| l.trim() != "#[cfg(test)]");
+            lines.extend(kept.enumerate().map(|(ix, l)| (name.clone(), ix + 1, l.to_owned())));
+        }
+        assert!(lines.iter().any(|(_, _, l)| l.contains("\"Machines\"")), "the chrome is scanned");
+        let unshown = ["tracing::", ".id(", "debug_tuple(", "debug_struct(", ".field("];
+        let mut said = Vec::new();
+        for (file, line_no, line) in lines {
+            let code = line.trim_start();
+            if code.starts_with("//") || unshown.iter().any(|u| line.contains(u)) {
+                continue;
+            }
+            let shown = line.split('"').skip(1).step_by(2).filter(|text| {
+                let key = text.chars().all(|c| c.is_ascii_lowercase() || "._-".contains(c));
+                !key && says_worker(text)
+            });
+            said.extend(shown.map(|text| format!("{file}:{line_no}: {text:?}")));
+        }
+        assert!(said.is_empty(), "say machine, not worker:\n{}", said.join("\n"));
+    }
+
     /// Chrome text is drawn in sentence case, as the constants above are written.
     #[test]
     fn a_drawn_label_is_sentence_case() {

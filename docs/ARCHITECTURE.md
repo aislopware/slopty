@@ -912,7 +912,20 @@ empty at the end, each an endless strip of columns of tiles; preset widths 1/3, 
 springs, swipe tracker, overview), saved as `layout.json` in the client's data directory. A
 tile is `(WorkerKey, ItemId)`, so one `slopty-ui::workspace::WorkspaceView` shows every worker
 at once: its own echo opens right of the focus and takes it, anything from elsewhere joins the
-end of the workspace that last held that worker's tiles. A worker that drops keeps its tiles
+end of the workspace that last held a tile of its project (a tile with no project, that of its
+machine). What a tile's project is comes from `slopty-client::groups`: each tile yields an open
+map of facts (`machine`, `kind`, `os`, `agent`, `cwd`, `repo`, `folder`, `branch`, `project`,
+`facts.<key>` from its thread; `slopty-ui::workspace::grouping` assembles them from what the
+client holds), a grouping is a chain of fact keys (by default `project`, `repo`, `folder`,
+`machine`), and tiles that share any value of their first fact on the chain are one group, so
+one repository's clones on three machines are one project. The server's declared projects
+claim tiles by matchers over those facts (`Project::members`), and an item pinned to a
+project says so in its own `project` fact (`ItemOp::SetFact`). The navigator lists
+*Projects*, each declared one led by its board's row and followed by its threads at work that
+have no tile here, then *Machines* (each machine's health and what has no project); a
+notification stacks in its project's thread; the palette goes to a project by frecency, scopes
+the frame to one and regroups the navigator by any fact (`docs/decisions/ui.md`, "The
+navigator groups by project; the machine is a facet"). A worker that drops keeps its tiles
 ("reconnecting"); its next snapshot removes only what it no longer has. Each terminal's agent
 badge starts from its `SessionSummary.agent` when the worker connects or the session opens
 (`WorkspaceView::seed_agents`), so a client that joins late names the running agents and
@@ -925,8 +938,8 @@ off screen, and asks for frames only while something moves. Two-finger swipes dr
 swallowed), ⌘⌥ and the wheel step columns, a header drag moves a tile, the gap right of a
 column resizes it, a pinch opens the overview. The keys are niri's on ⌘⌥ (the table is in the
 decision), bound in `Workspace && !Screen`: a focused remote window gets them all, ⌃Tab is the
-way back. The titlebar is the workspace name (the one given, else the first shell's repository
-or directory, else "Workspace N"), a dot per column (none for one column), "+" (a menu: with
+way back. The titlebar is the workspace name (the one given, else the project most of its tiles are
+in, else "New workspace"), a dot per column (none for one column), "+" (a menu: with
 several workers, first the worker a new tile goes to; then new terminal, agent, window or
 display, note, then a new workspace), the bell and "…"; the status bar under the strip holds
 the readouts. The status bar is never empty: the focused shell's place, branch and working-tree
@@ -1670,7 +1683,7 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
 | `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, the MCP tools | all |
 | `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, claims, placement), QUIC and MCP front ends | server |
-| `slopty-client` | client session state, the item registry mirror, the layout model | client |
+| `slopty-client` | client session state, the item registry mirror, the layout model, grouping tiles by their facts (`groups`) | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |
 | `slopty-ui` | GPUI elements and views; headless `#[gpui::test]` tests drive them through `VisualTestContext` | client |

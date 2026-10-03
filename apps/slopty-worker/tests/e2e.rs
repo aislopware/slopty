@@ -270,6 +270,7 @@ mod tests {
             kind: ItemKind::Note { text: "kept".to_owned() },
             sleeping: false,
             name: None,
+            facts: std::collections::BTreeMap::new(),
         };
         worker.tx.send(&ClientMsg::Items(ItemOp::Add(note.clone()))).await.unwrap();
         let stale = Item { kind: ItemKind::Note { text: "stale".to_owned() }, ..note.clone() };

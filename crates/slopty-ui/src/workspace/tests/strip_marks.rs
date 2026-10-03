@@ -152,7 +152,8 @@ fn the_drop_line_sits_on_the_divider_and_a_join_washes_its_share(cx: &mut TestAp
 /// In the overview a workspace with tiles is one block round its panes: the content's surface
 /// a base unit wider all round, rounded at the floating radius, with a hairline. Only the
 /// active one floats (the one elevation, which the scene does not expose) and wears a 1.5 pt
-/// accent edge flush with it, as a selected thumbnail does. The place for a new workspace is a
+/// edge in the text's tone at half strength flush with it, as a selected thumbnail does: not
+/// the accent, which means "done". The place for a new workspace is a
 /// ghost button under the last block, on its left edge, a row tall, and a click on it opens that
 /// workspace. No tile's header is a band of its own at that zoom: every header is the body's
 /// surface, with no hairline.
@@ -189,7 +190,7 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         assert!(hairline, "a hairline round {at:?}");
     }
     let (ring, gap) = (1.5, 0.0);
-    let ring_color = crate::colors::hsla(theme.surfaces.accent);
+    let ring_color = crate::colors::hsla_alpha(theme.surfaces.text, slopty_theme::alpha::RING);
     let ringed = |cx: &mut VisualTestContext, at: Bounds<Pixels>| {
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
         let reach = 2.0 * (gap + ring);
@@ -202,7 +203,10 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
     };
     let active = view.read_with(cx, |v, _| v.layout.active_workspace());
     assert_eq!(active, 1, "the tile moved down and the focus with it");
-    assert!(ringed(cx, second), "the accent edge round the active one");
+    assert!(ringed(cx, second), "the text-toned edge round the active one");
+    let accent = crate::colors::hsla(theme.surfaces.accent);
+    let green = cx.update(|w, _| w.painted_quads()).iter().any(|q| q.border_color == accent);
+    assert!(!green, "green stays a meaning: no accent edge");
     assert!(!ringed(cx, first), "and only that one");
 
     let pane = shells

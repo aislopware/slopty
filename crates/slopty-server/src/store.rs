@@ -377,6 +377,7 @@ mod tests {
                 orchestrator: None,
                 limits: LimitsChange { live_per_worker: Some(2), ..LimitsChange::default() },
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -494,6 +495,7 @@ mod tests {
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,
+            members: Vec::new(),
         };
         let mut all = p.create(new, &running, now).unwrap().1;
         let spec = TaskSpec { title: "Store".to_owned(), ..TaskSpec::default() };

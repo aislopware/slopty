@@ -11,9 +11,9 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::terminal::TermRequest;
 
+use super::WorkspaceView;
 use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_status_text, needs_human};
-use super::{AGENT_COMMAND, WorkspaceView};
 use crate::icons::Status;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
@@ -28,10 +28,7 @@ const ABOUT_CHARS: usize = 2_000;
 impl WorkspaceView {
     /// Every tile in reading order: workspace by workspace, column by column, top to bottom.
     pub(super) fn reading_order(&self) -> Vec<TileRef> {
-        let mut tiles: Vec<(slopty_client::layout::Pos, TileRef)> =
-            self.layout.tiles().filter_map(|t| self.layout.position(t).map(|p| (p, t))).collect();
-        tiles.sort_by_key(|(p, _)| (p.workspace, p.column, p.tile));
-        tiles.into_iter().map(|(_, t)| t).collect()
+        self.layout.tiles().collect()
     }
 
     /// `worker`'s name for a line about one of its tiles, when more than one worker is known
@@ -107,7 +104,8 @@ impl WorkspaceView {
                 .placed(self.tile_place(item));
             items.push(line.on_worker(self.worker_label(tile.worker)));
         }
-        items.extend(self.start_lines());
+        items.extend(self.project_rows());
+        items.extend(self.agent_lines());
         items.extend(self.project_lines());
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
@@ -123,31 +121,13 @@ impl WorkspaceView {
         }
         items.extend(super::actions::palette_items());
         items.extend(self.attach_line());
-        items.push(self.lens_line());
+        items.extend(self.group_lines());
+        items.extend(self.scope_lines());
+        items.extend(self.pin_lines());
         // What the focused remote tile can do beyond its header, only while one has the focus.
         items.extend(self.screen_lines(cx));
         items.extend(self.palette_extra.iter().cloned());
         items
-    }
-
-    /// "New `agent` thread", for each agent the worker the palette is about can start, in the
-    /// folder the focused tile is about there (its home when none is). The line says that
-    /// folder short, as the navigator does (`~/code/atlas`, `code/atlas`), not its whole path.
-    fn start_lines(&self) -> Vec<PaletteItem> {
-        let Some(worker) = self.context_worker() else { return Vec::new() };
-        let cwd = self.search_root(worker);
-        let shown = super::tile::cwd_tail(&cwd, self.home_of(worker));
-        self.agents_on(worker)
-            .iter()
-            .map(|agent| {
-                let label = format!("New {} thread", super::projects::agent_label(agent));
-                let action = StartThread { worker, agent: agent.clone(), cwd: cwd.clone() };
-                PaletteItem::new(&label, crate::icons::IconName::Sparkles, Box::new(action), &[])
-                    .with_icon(crate::icons::Glyph::agent(&agent.0))
-                    .on_worker(self.worker_label(worker))
-                    .in_dir(Some(shown.clone()))
-            })
-            .collect()
     }
 
     /// What an agent's session is about, for the palette to find it by: its first prompt and
@@ -217,8 +197,8 @@ impl WorkspaceView {
         self.show_notice(format!("{label} does not apply here"), cx);
     }
 
-    /// "New `agent` thread" from the palette: the keyboard stays where it was until the
-    /// thread's tile opens.
+    /// The last step of "New agent…": the keyboard stays where it was until the thread's tile
+    /// opens, and the choice is what each step lists first next time.
     pub(super) fn start_thread_action(
         &mut self,
         start: &StartThread,
@@ -226,7 +206,9 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let StartThread { worker, agent, cwd } = start.clone();
-        self.start_thread(worker, agent, cwd, cx);
+        let last = super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone() };
+        self.last_start = Some(last);
+        self.start_thread(worker, agent, cwd, None, cx);
     }
 
     /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is
@@ -457,9 +439,11 @@ impl WorkspaceView {
                 }
                 PaletteEvent::Run(PaletteRun::OpenAgent { cwd }) => {
                     if let Some(key) = this.context_worker() {
-                        let command = vec![AGENT_COMMAND.to_owned()];
-                        let title = Some(AGENT_COMMAND.to_owned());
-                        this.open_session_on(key, Some(cwd.clone()), command, title, cx);
+                        let agent = this.agent_for(key);
+                        match agent {
+                            Some(agent) => this.start_thread(key, agent, cwd.clone(), None, cx),
+                            None => this.show_notice(super::agent_start::NO_AGENT.to_owned(), cx),
+                        }
                     }
                 }
                 PaletteEvent::Run(PaletteRun::FindIn { session, needle }) => {
@@ -482,6 +466,10 @@ impl WorkspaceView {
                 PaletteEvent::Run(PaletteRun::Project(project)) => {
                     this.palette_return = None;
                     this.open_project(project, cx);
+                }
+                PaletteEvent::Run(PaletteRun::Group(group)) => {
+                    this.palette_return = None;
+                    this.go_to_group(group, cx);
                 }
                 PaletteEvent::Run(PaletteRun::FindInFile { item, needle }) => {
                     this.palette_return = None;

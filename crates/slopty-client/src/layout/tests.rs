@@ -38,6 +38,16 @@ fn t(n: u128) -> TileRef {
     tile(1, n)
 }
 
+/// From elsewhere, its project not known yet: home to its machine.
+fn from_its_machine(tile: TileRef) -> Placement {
+    Placement::Remote { home: GroupKey::machine(tile.worker) }
+}
+
+/// From elsewhere, of project `name`.
+fn of_project(name: &str) -> Placement {
+    Placement::Remote { home: GroupKey::new("project", name) }
+}
+
 fn still() -> Layout {
     Layout::new(LayoutConfig { animate: false, ..LayoutConfig::default() })
 }
@@ -187,7 +197,7 @@ fn local_tiles_open_right_of_the_focus_and_the_view_moves_the_least() {
     assert_eq!(shape(&l)[0], vec![vec![t(1)], vec![t(4)], vec![t(2)], vec![t(3)]]);
     assert_eq!(l.focused(), Some(t(4)));
     // Opening what is already there does nothing.
-    l.open(t(4), Placement::Remote);
+    l.open(t(4), from_its_machine(t(4)));
     assert_eq!(l.tiles().count(), 4);
 }
 
@@ -195,13 +205,13 @@ fn local_tiles_open_right_of_the_focus_and_the_view_moves_the_least() {
 fn remote_tiles_join_the_workspace_that_last_held_their_worker() {
     let mut l = still();
     // Worker 1 fills the empty active workspace, focused.
-    l.open(tile(1, 1), Placement::Remote);
+    l.open(tile(1, 1), from_its_machine(tile(1, 1)));
     assert_eq!(l.focused(), Some(tile(1, 1)));
     assert_eq!(l.workspaces().len(), 2, "a trailing empty workspace, always");
 
     // Worker 2 has no tiles and the active workspace is taken: a new workspace above the
     // trailing one, focus untouched.
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     assert_eq!(shape(&l), vec![vec![vec![tile(1, 1)]], vec![vec![tile(2, 1)]], vec![]]);
     assert_eq!(l.active_workspace(), 0);
     assert_eq!(l.focused(), Some(tile(1, 1)));
@@ -209,7 +219,7 @@ fn remote_tiles_join_the_workspace_that_last_held_their_worker() {
     // More of worker 1: appended at the end of its workspace, not focused.
     l.open(tile(1, 2), Placement::Local);
     l.focus_column_first();
-    l.open(tile(1, 3), Placement::Remote);
+    l.open(tile(1, 3), from_its_machine(tile(1, 3)));
     assert_eq!(shape(&l)[0], vec![vec![tile(1, 1)], vec![tile(1, 2)], vec![tile(1, 3)]]);
     assert_eq!(l.focused(), Some(tile(1, 1)));
 
@@ -222,13 +232,115 @@ fn remote_tiles_join_the_workspace_that_last_held_their_worker() {
     l.focus_workspace_down();
     l.focus_workspace_up();
     // Workspace 0 was active last: it wins.
-    l.open(tile(1, 4), Placement::Remote);
+    l.open(tile(1, 4), from_its_machine(tile(1, 4)));
     assert_eq!(l.position(tile(1, 4)).unwrap().workspace, 0);
     l.focus_workspace_down();
-    l.open(tile(1, 5), Placement::Remote);
+    l.open(tile(1, 5), from_its_machine(tile(1, 5)));
     assert_eq!(l.position(tile(1, 5)).unwrap().workspace, 1, "now workspace 1 is the newer");
     assert!(l.workspaces().last().unwrap().is_empty());
     assert_eq!(l.workspaces()[1].workers(), BTreeSet::from([WorkerKey::new(1), WorkerKey::new(2)]));
+}
+
+/// A tile from elsewhere goes to the workspace that last held a tile of its project, whatever
+/// machine it runs on, and not to one that holds only its machine's other work.
+#[test]
+fn a_remote_tile_joins_the_workspace_of_its_project() {
+    let mut l = still();
+    l.open(tile(1, 1), Placement::Local);
+    l.set_homes(|t| (t == tile(1, 1)).then(|| GroupKey::new("project", "parser")));
+    assert_eq!(l.home(tile(1, 1)), Some(&GroupKey::new("project", "parser")));
+    // Another machine's agent on the parser joins it, focus untouched.
+    l.open(tile(2, 1), of_project("parser"));
+    assert_eq!(shape(&l)[0], vec![vec![tile(1, 1)], vec![tile(2, 1)]]);
+    assert_eq!(l.focused(), Some(tile(1, 1)));
+    // The same machine's work on something else does not.
+    l.open(tile(1, 2), of_project("site"));
+    assert_eq!(l.position(tile(1, 2)).map(|p| p.workspace), Some(1));
+    assert_eq!(l.active_workspace(), 0, "focus untouched");
+    // A tile with no project goes where its machine's work was last seen, the active one.
+    l.open(tile(1, 3), from_its_machine(tile(1, 3)));
+    assert_eq!(l.position(tile(1, 3)).map(|p| p.workspace), Some(0));
+    assert!(l.workspaces().last().is_some_and(Workspace::is_empty), "one trailing empty");
+}
+
+/// A project no workspace holds fills the active workspace while it is empty, focused, and
+/// otherwise gets a new one just above the trailing empty workspace.
+#[test]
+fn a_project_with_no_workspace_fills_an_empty_one_or_gets_one_above_the_trailing() {
+    let mut l = still();
+    l.open(tile(1, 1), of_project("parser"));
+    assert_eq!(l.focused(), Some(tile(1, 1)), "the empty active workspace took it");
+    assert_eq!(l.workspaces().len(), 2);
+    l.open(tile(1, 2), of_project("site"));
+    assert_eq!(shape(&l), vec![vec![vec![tile(1, 1)]], vec![vec![tile(1, 2)]], vec![]]);
+    assert_eq!(l.focused(), Some(tile(1, 1)));
+    // An empty active workspace takes the next project.
+    l.focus_workspace_down();
+    l.focus_workspace_down();
+    assert!(l.workspaces().get(l.active_workspace()).is_some_and(Workspace::is_empty));
+    l.open(tile(2, 1), of_project("docs"));
+    assert_eq!(l.focused(), Some(tile(2, 1)));
+    assert_eq!(l.position(tile(2, 1)).map(|p| p.workspace), Some(2));
+}
+
+/// A tile whose project changes (a shell that moved to another checkout) stays where it was;
+/// the next tile of its new project from elsewhere joins it there.
+#[test]
+fn a_placed_tile_never_moves_when_its_project_changes() {
+    let mut l = still();
+    l.open(tile(1, 1), of_project("parser"));
+    l.open(tile(1, 2), of_project("site"));
+    let before = shape(&l);
+    l.set_homes(|t| (t == tile(1, 1)).then(|| GroupKey::new("project", "site")));
+    assert_eq!(shape(&l), before, "nothing moved");
+    assert_eq!(l.home(tile(1, 2)), Some(&GroupKey::new("project", "site")), "the rest kept");
+    // Workspace 0 was active last, so it is the most recent holder of the site now.
+    l.open(tile(2, 1), of_project("site"));
+    assert_eq!(l.position(tile(2, 1)).map(|p| p.workspace), Some(0));
+    assert_eq!(l.home(tile(9, 9)), None, "not in the layout");
+}
+
+/// Every tile is listed in reading order: workspace by workspace, column by column, top to
+/// bottom, whatever order they were opened in.
+#[test]
+fn the_tiles_are_listed_in_reading_order() {
+    let mut l = still();
+    l.open(tile(1, 1), Placement::Local);
+    l.open(tile(1, 2), Placement::Local);
+    l.open(tile(1, 3), of_project("site"));
+    l.focus_column_left();
+    l.open(tile(1, 4), Placement::Local);
+    let listed: Vec<TileRef> = l.tiles().collect();
+    let mut by_place = listed.clone();
+    by_place.sort_by_key(|t| l.position(*t).map(|p| (p.workspace, p.column, p.tile)));
+    assert_eq!(listed, by_place);
+    assert_eq!(listed, [tile(1, 1), tile(1, 4), tile(1, 2), tile(1, 3)]);
+}
+
+/// A tile with no project of its own (a window, a note: its home is its machine) goes to the
+/// workspace that last held any tile on its machine, though every tile there has a project.
+#[test]
+fn a_tile_with_no_project_joins_its_machines_work() {
+    let mut l = still();
+    l.open(tile(1, 1), of_project("parser"));
+    l.open(tile(2, 1), of_project("site"));
+    l.open(tile(1, 2), from_its_machine(tile(1, 2)));
+    assert_eq!(l.position(tile(1, 2)).map(|p| p.workspace), Some(0), "beside its machine's");
+    l.open(tile(3, 1), from_its_machine(tile(3, 1)));
+    assert_eq!(l.workspaces().len(), 4, "a machine with no tile anywhere gets a workspace");
+}
+
+/// The navigator's grouping is kept with the layout: through `layout.json` and back.
+#[test]
+fn the_navigators_grouping_is_saved_and_restored() {
+    let mut l = still();
+    assert_eq!(l.navigator().group_by, ["project", "repo", "folder", "machine"]);
+    let by_agent = vec!["agent".to_owned(), "machine".to_owned()];
+    l.set_navigator(Navigator { group_by: by_agent.clone(), ..l.navigator().clone() });
+    let json = serde_json::to_string(&l.save()).unwrap();
+    let back: Saved = serde_json::from_str(&json).unwrap();
+    let r = Layout::restore(back, LayoutConfig::default());
+    assert_eq!(r.navigator().group_by, by_agent);
 }
 
 #[test]
@@ -246,7 +358,7 @@ fn there_is_always_exactly_one_trailing_empty_workspace() {
     assert_eq!(shape(&l), vec![vec![vec![t(2)]], vec![]]);
     assert_eq!(l.active_workspace(), 0, "the index followed the removal");
     // Emptying the active one keeps it until the focus leaves.
-    l.open(tile(2, 3), Placement::Remote);
+    l.open(tile(2, 3), from_its_machine(tile(2, 3)));
     l.remove(t(2));
     assert_eq!(l.workspaces().len(), 3);
     l.focus_workspace_down();
@@ -354,7 +466,7 @@ fn focus_moves_stop_at_the_ends() {
 fn focus_window_or_workspace_walks_the_column_then_the_workspaces() {
     let mut l = columns(2);
     l.consume_or_expel_window_left();
-    l.open(tile(2, 9), Placement::Remote);
+    l.open(tile(2, 9), from_its_machine(tile(2, 9)));
     // Workspace 0: [1, 2]; workspace 1: [w2]. Focus is on 2 (bottom).
     assert_eq!(l.focused(), Some(t(2)));
     l.focus_window_or_workspace_up();
@@ -375,7 +487,7 @@ fn focus_window_or_workspace_walks_the_column_then_the_workspaces() {
 #[test]
 fn focusing_a_tile_brings_its_workspace_and_column() {
     let mut l = columns(3);
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.focus(tile(2, 1));
     assert_eq!(l.active_workspace(), 1);
     l.focus(t(1));
@@ -466,7 +578,7 @@ fn moving_a_column_to_a_numbered_workspace_clamps_to_the_trailing_one() {
 #[test]
 fn moving_a_workspace_swaps_it_with_its_neighbour() {
     let mut l = columns(1);
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.move_workspace_down();
     assert_eq!(shape(&l), vec![vec![vec![tile(2, 1)]], vec![vec![t(1)]], vec![]]);
     assert_eq!(l.active_workspace(), 1);
@@ -769,7 +881,7 @@ fn a_named_workspace_stays_when_empty() {
 fn switching_workspaces_springs_and_cleans_up_when_it_lands() {
     let mut l = moving();
     l.open(t(1), Placement::Local);
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.set_clock(MS(1000));
     l.focus_workspace_down();
     let f = l.frame();
@@ -801,7 +913,7 @@ fn switching_workspaces_springs_and_cleans_up_when_it_lands() {
 #[test]
 fn the_overview_fits_every_workspace_with_a_gap_around_each() {
     let mut l = columns(1);
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     assert_eq!(l.workspaces().len(), 3);
     l.set_overview(true);
     let f = l.frame();
@@ -848,7 +960,7 @@ fn the_overview_gap_always_fits_the_workspace_name() {
         l.set_overview_label(LABEL);
         l.set_viewport(w, h);
         for i in 1..workspaces {
-            l.open(tile(i, 1), Placement::Remote);
+            l.open(tile(i, 1), from_its_machine(tile(i, 1)));
         }
         l.set_overview(true);
         let f = l.frame();
@@ -879,7 +991,7 @@ fn the_overview_gap_always_fits_the_workspace_name() {
 fn a_tall_overview_scrolls_with_the_active_workspace_and_refits_smoothly() {
     let mut l = still();
     for i in 1..=5 {
-        l.open(tile(i, 1), Placement::Remote);
+        l.open(tile(i, 1), from_its_machine(tile(i, 1)));
     }
     assert_eq!(l.workspaces().len(), 6);
     l.focus_workspace(0);
@@ -900,7 +1012,7 @@ fn a_tall_overview_scrolls_with_the_active_workspace_and_refits_smoothly() {
     l.set_overview(true);
     l.set_clock(MS(2000));
     near(l.frame().zoom, OVERVIEW_TWO);
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.set_clock(MS(2016));
     near(l.frame().zoom, OVERVIEW_TWO);
     l.set_clock(MS(2050));
@@ -937,7 +1049,7 @@ fn a_lone_column_fills_the_width_and_keeps_its_own_for_a_neighbour() {
     l.remove(t(2));
     fills(&l);
     // A second workspace's lone column fills its own strip.
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.focus_workspace_down();
     near(rect(&l, tile(2, 1)).w, 1280.0);
 }
@@ -1286,7 +1398,7 @@ fn a_fling_past_either_end_stops_at_the_end_snap() {
 #[test]
 fn the_workspace_gesture_resists_past_the_ends_and_lands_on_the_nearest() {
     let mut l = columns(1);
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     // Up from the first workspace: rubber band, never 0.05 past.
     l.ws_gesture_begin();
     assert!(l.ws_gesture_update(-200.0, MS(10)));
@@ -1324,8 +1436,8 @@ fn the_workspace_gesture_resists_past_the_ends_and_lands_on_the_nearest() {
 #[test]
 fn the_wheel_steps_columns_and_workspaces_with_a_cooldown() {
     let mut l = columns(3);
-    l.open(tile(2, 1), Placement::Remote);
-    l.open(tile(3, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
+    l.open(tile(3, 1), from_its_machine(tile(3, 1)));
     // Horizontal: a step per 50 pt, carried.
     assert!(!l.wheel(-30.0, 0.0, MS(0)));
     assert!(l.wheel(-30.0, 0.0, MS(10)));
@@ -1548,7 +1660,7 @@ fn near_marks_what_is_on_screen_plus_one_either_side() {
     }
     assert!(shown.iter().filter(|&&n| !n).count() >= 3, "{shown:?}");
     // Another workspace off screen is not near at all.
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     assert!(!placed(&l, tile(2, 1)).near);
     // In the overview it is on screen.
     l.set_overview(true);
@@ -1605,14 +1717,14 @@ fn save_and_restore_round_trip_through_json() {
     l.switch_preset_width(true);
     l.focus_column_first();
     l.toggle_full_width();
-    l.open(tile(2, 1), Placement::Remote);
+    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.set_workspace_name(1, Some("remote".to_owned()));
     l.focus_workspace_down();
     l.set_workspace_name(2, Some("spare".to_owned()));
-    l.set_navigator(Navigator { shown: false, width: 999.0, lens: NavLens::Repositories });
+    let by_machine = vec!["machine".to_owned()];
+    l.set_navigator(Navigator { shown: false, width: 999.0, group_by: by_machine.clone() });
     let saved = l.save();
-    let navigator =
-        Navigator { shown: false, width: Navigator::MAX_WIDTH, lens: NavLens::Repositories };
+    let navigator = Navigator { shown: false, width: Navigator::MAX_WIDTH, group_by: by_machine };
     assert_eq!(saved.navigator, navigator);
     let json = serde_json::to_string(&saved).unwrap();
     let back: Saved = serde_json::from_str(&json).unwrap();
@@ -1678,7 +1790,7 @@ fn restore_cleans_up_whatever_it_is_given() {
             SavedWorkspace { columns: vec![col(vec![t(2), t(4)])], ..SavedWorkspace::default() },
         ],
         active: 0,
-        navigator: Navigator { shown: false, width: f32::NAN, lens: NavLens::Workers },
+        navigator: Navigator { shown: false, width: f32::NAN, group_by: vec![" ".to_owned()] },
         ..Saved::default()
     };
     let r = Layout::restore(saved, LayoutConfig::default());
@@ -1693,9 +1805,12 @@ fn restore_cleans_up_whatever_it_is_given() {
     assert_eq!(ws.columns()[1].tiles()[0].height(), TileHeight::default());
     assert_eq!(r.active_workspace(), 0, "the dropped active workspace handed over to the next");
     assert!(r.frame().tiles.iter().all(|p| p.rect.x.is_finite()));
-    let navigator =
-        Navigator { shown: false, width: Navigator::DEFAULT_WIDTH, lens: NavLens::Workers };
-    assert_eq!(r.navigator(), navigator);
+    let navigator = Navigator {
+        shown: false,
+        width: Navigator::DEFAULT_WIDTH,
+        group_by: Navigator::by_project(),
+    };
+    assert_eq!(*r.navigator(), navigator, "a blank chain groups by project");
     // Nothing at all: one empty workspace.
     let e = Layout::restore(Saved::default(), LayoutConfig::default());
     assert_eq!(shape(&e), vec![Vec::<Vec<TileRef>>::new()]);

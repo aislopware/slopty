@@ -120,7 +120,7 @@ pub const MUTE: &str = "Mute";
 #[must_use]
 pub(super) fn mute_label(worker: &str) -> String {
     if worker.is_empty() {
-        format!("{MUTE} the worker's sound")
+        format!("{MUTE} the machine's sound")
     } else {
         format!("{MUTE} {worker}'s sound")
     }
@@ -497,7 +497,7 @@ fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
 }
 
 /// The pill's words while an update has no step to name yet.
-const UPDATING: &str = "Updating the worker";
+const UPDATING: &str = "Updating Slopty on the machine";
 
 /// What a tile's header leads with: what the tile is. A file shows its type; a terminal an
 /// agent runs in and a thread show the agent's mark (`agent`, an `AgentId`'s name).
@@ -1209,31 +1209,33 @@ impl WorkspaceView {
                 .into_any_element()
         });
         let place = address.or(text_place);
-        // The worker's name, where more than one could be meant: quiet text after a server
-        // glyph, a fact about the tile rather than a control.
-        let worker =
-            (self.workers.len() > 1).then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
-                let name = w.name.clone();
-                let muted = hsla(s.text_muted);
-                div()
-                    .id("worker")
-                    .debug_selector(move || format!("worker-{}", id.as_uuid()))
-                    .role(Role::Label)
-                    .aria_label(SharedString::from(name.clone()))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(theme.spacing.xs * k))
-                    .text_color(muted)
-                    .child(
-                        crate::icons::icon(theme, IconName::Server, IconSize::Inline, muted)
-                            .size(px(theme.typography.small() * k)),
-                    )
-                    .child(
-                        ChromeText::new(name, px(theme.typography.small()), k)
-                            .zooming(chrome.zooming),
-                    )
-            });
+        // The worker's name, where more than one could be meant (the tile's workspace holds
+        // tiles of several): quiet text after a server glyph, a fact about the tile rather than
+        // a control. A workspace on one machine never pays for it.
+        let spans =
+            self.layout.position(tile).and_then(|p| self.layout.workspaces().get(p.workspace));
+        let several = spans.is_some_and(|ws| ws.workers().len() > 1);
+        let worker = several.then(|| self.workers.get(&tile.worker)).flatten().map(|w| {
+            let name = w.name.clone();
+            let muted = hsla(s.text_muted);
+            div()
+                .id("worker")
+                .debug_selector(move || format!("worker-{}", id.as_uuid()))
+                .role(Role::Label)
+                .aria_label(SharedString::from(name.clone()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(theme.spacing.xs * k))
+                .text_color(muted)
+                .child(
+                    crate::icons::icon(theme, IconName::Server, IconSize::Inline, muted)
+                        .size(px(theme.typography.small() * k)),
+                )
+                .child(
+                    ChromeText::new(name, px(theme.typography.small()), k).zooming(chrome.zooming),
+                )
+        });
         // A file with an edit not yet on disk says so with a dot after its name, as an editor's
         // tab does; saving keeps the dot until the worker has written it.
         let unsaved = self.file_facts(id).unsaved;
@@ -1368,6 +1370,7 @@ impl WorkspaceView {
                 let (part, label) = match field {
                     Field::Name => ("rename", "Tile name"),
                     Field::Address => ("address", ADDRESS),
+                    Field::Project => ("project-name", "Project name"),
                 };
                 div()
                     .id(part)
@@ -2197,7 +2200,7 @@ impl WorkspaceView {
     pub(super) fn body_state(&self, tile: TileRef, item: &Item) -> Option<BodyState> {
         let worker = self.workers.get(&tile.worker);
         if worker.is_none_or(|w| w.link.is_none()) {
-            let name = worker.map_or("The worker", |w| w.name.as_str());
+            let name = worker.map_or("The machine", |w| w.name.as_str());
             return Some(match worker.map(|w| &w.status) {
                 Some(WorkerStatus::NeedsUpdate(notice)) => BodyState::NeedsUpdate(notice.clone()),
                 Some(WorkerStatus::Unreachable) => {
@@ -2805,18 +2808,21 @@ fn pill(
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
 
-/// A header's title tone: focus is said by it. The focused tile's title leads in primary text
-/// (at the medium weight), every other steps back to the muted tone, so a wall of tiles reads
-/// as titles still and one of them as the one in hand. A tab row's tabs follow it too.
+/// A header's title tone: focus is said by it and the focus line. The focused tile's title
+/// leads in primary text (at the medium weight), every other steps back to the muted tone, so
+/// a wall of tiles reads as titles still and one of them as the one in hand. A tab row's tabs
+/// follow it too.
 pub(super) const fn title_ink(theme: &Theme, focused: bool) -> slopty_theme::Rgb {
     if focused { theme.surfaces.text } else { theme.surfaces.text_muted }
 }
 
 /// The line along the top of the focused tile's header (or its column's shown tab) while
-/// several tiles are in view, under Increase Contrast only: there a title's tone is too quiet
-/// a sign of focus on its own, so the line says it in the text's tone. Otherwise focus is the
-/// title's tone and weight, and nothing is drawn.
+/// several tiles are in view: a title's tone alone is too faint a sign across a strip of
+/// columns, so a 2 pt line in the text's tone says which one has the keyboard, set back a step
+/// and whole under Increase Contrast. No ring, no frame, no dimming of the others; a lone tile
+/// and the overview draw none.
 fn focus_line(theme: &Theme, k: f32) -> Div {
+    let strength = theme.set_back(slopty_theme::alpha::STRONG);
     div()
         .debug_selector(|| "focus-line".to_owned())
         .absolute()
@@ -2824,5 +2830,5 @@ fn focus_line(theme: &Theme, k: f32) -> Div {
         .left_0()
         .right_0()
         .h(px(slopty_theme::stroke::MARK * k))
-        .bg(hsla(theme.surfaces.text))
+        .bg(crate::colors::hsla_alpha(theme.surfaces.text, strength))
 }

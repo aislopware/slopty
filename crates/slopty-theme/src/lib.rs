@@ -658,6 +658,9 @@ pub mod alpha {
     pub const TINT: f32 = 0.25;
     /// A tint under the pointer, a scrollbar thumb.
     pub const PRESSED: f32 = 0.4;
+    /// A neutral ring that marks a choice without meaning anything: the overview's active
+    /// workspace, in the text's tone, where the accent would say "done".
+    pub const RING: f32 = 0.5;
     /// The window under a dark modal or sheet.
     pub const SCRIM: f32 = 0.6;
     /// Present but set back: a read row in the inbox.

@@ -132,6 +132,7 @@ fn a_shell_closed_while_its_worker_is_away_is_closed_when_it_is_back(cx: &mut Te
         kind: ItemKind::Terminal { session: s2 },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let snapshot = ItemSync::Snapshot { version: 9, items: [items, vec![gone]].concat() };
     let key = studio.key;

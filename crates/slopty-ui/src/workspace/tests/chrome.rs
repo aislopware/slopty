@@ -31,11 +31,18 @@ fn crowd(
             kind: ItemKind::Terminal { session },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         });
     }
     for _ in 0..notes {
         let kind = ItemKind::Note { text: "a note\n".into() };
-        items.push(Item { id: ItemId::new(), kind, sleeping: false, name: None });
+        items.push(Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        });
     }
     let sessions = summaries.iter().map(|s| s.id).collect();
     let key = fake.key;
@@ -506,10 +513,10 @@ fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppC
     assert_eq!(focused(&view, cx), view.read_with(cx, |v, _| v.tile_of_session(first)));
 }
 
-/// With the navigator hidden where it docks, a rail keeps a glyph per worker, marked with what
-/// its tiles want; one goes to that worker.
+/// With the navigator hidden where it docks, a worker is on the rail only while something of
+/// its own (a tile with no project) wants the person, marked with what; it goes to that tile.
 #[gpui::test]
-fn the_rail_keeps_the_workers_in_view_when_the_navigator_hides(cx: &mut TestAppContext) {
+fn the_rail_shows_a_worker_while_its_own_tiles_wait(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
@@ -521,12 +528,13 @@ fn the_rail_keeps_the_workers_in_view_when_the_navigator_hides(cx: &mut TestAppC
     cx.run_until_parked();
     let rail = cx.debug_bounds("nav-rail").expect("the rail in its place");
     assert!((f32::from(rail.size.width) - navigator::RAIL_W).abs() < 0.5, "{rail:?}");
-    let badge = leak(format!("nav-rail-rollup-{}", laptop.key));
-    assert!(cx.debug_bounds(badge).is_none(), "at rest, no mark");
+    let glyph = leak(format!("nav-rail-{}", laptop.key));
+    assert!(cx.debug_bounds(glyph).is_none(), "at rest and well, no worker");
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(away), cx));
     cx.run_until_parked();
+    let badge = leak(format!("nav-rail-{}-rollup", laptop.key));
     assert!(cx.debug_bounds(badge).is_some(), "what waits shows on the rail");
-    click_at(cx, leak(format!("nav-rail-{}", laptop.key)));
+    click_at(cx, glyph);
     assert_eq!(focused(&view, cx), Some(theirs), "the worker's tile");
 }
 
@@ -536,7 +544,7 @@ fn the_handle_straddles_the_edge_and_a_double_click_resets_it(cx: &mut TestAppCo
     let (view, cx) = workspace(cx);
     let _studio = connect(&view, cx, 1, "studio");
     view.update(cx, |v, cx| {
-        let nav = v.layout.navigator();
+        let nav = v.layout.navigator().clone();
         v.layout.set_navigator(slopty_client::layout::Navigator { width: 320.0, ..nav });
         cx.notify();
     });
@@ -704,7 +712,13 @@ fn plus_lists_what_to_open_and_runs_it_as_its_keys_do(cx: &mut TestAppContext) {
         .collect();
     assert_eq!(
         rows,
-        ["New terminal", "New agent", "Add a window or display", "New note", "New workspace"]
+        [
+            "New terminal",
+            "New agent\u{2026}",
+            "Add a window or display",
+            "New note",
+            "New workspace"
+        ]
     );
     assert!(cx.debug_bounds("menu-separator-4").is_some(), "a new workspace stands apart");
     let (menu, plus) =
@@ -739,7 +753,7 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
     };
     view.update(cx, |v, cx| {
         let entries = vec![
-            entry(MenuGroup::Connections, "Add a worker"),
+            entry(MenuGroup::Connections, "Add a machine"),
             entry(MenuGroup::Settings, "Settings"),
         ];
         v.set_more_menu(entries, cx);
@@ -751,10 +765,10 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
         let selector = Box::leak(format!("menu-{label}").into_boxed_str());
         f32::from(cx.debug_bounds(selector).unwrap_or_else(|| panic!("{label}")).top())
     };
-    let order = ["Command palette", "Overview", "Stream stats", "Settings", "Add a worker"];
+    let order = ["Command palette", "Overview", "Stream stats", "Settings", "Add a machine"];
     let tops: Vec<f32> = order.iter().map(|label| top(cx, label)).collect();
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} at {tops:?}");
-    assert!(top(cx, "Add a worker") < top(cx, "Workers"), "the hosts close the connections");
+    assert!(top(cx, "Add a machine") < top(cx, "Machines"), "the hosts close the connections");
     let hairlines = (0..8).filter(|i| {
         let selector = Box::leak(format!("menu-separator-{i}").into_boxed_str());
         cx.debug_bounds(selector).is_some()
@@ -769,11 +783,11 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
         .expect("a hairline");
     assert!(f32::from(separator.top()) < settings, "the settings open a section");
 
-    let workers = Box::leak("menu-Workers".to_owned().into_boxed_str());
-    let at = cx.debug_bounds(workers).expect("Workers").center();
+    let workers = Box::leak("menu-Machines".to_owned().into_boxed_str());
+    let at = cx.debug_bounds(workers).expect("Machines").center();
     cx.simulate_click(at, Modifiers::none());
     cx.run_until_parked();
-    assert!(view.read_with(cx, |v, _| v.hosts_open()), "Workers opens the hosts");
+    assert!(view.read_with(cx, |v, _| v.hosts_open()), "Machines opens the hosts");
     assert!(cx.debug_bounds("status-workers").is_none(), "with every worker up");
 }
 

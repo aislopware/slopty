@@ -2,18 +2,23 @@ Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
 TextInput │ Filter
-Button │ studio
-Button │ New shell on studio
+Heading │ Projects
+Button │ Ship the project board
+Button │ Board, 0 of 2 merged
+Image │ Working
 Button │ #1 Read a pull request's checks, Working
 Image │ Working
 Button │ Close tile
-Button │ Terminal
-Button │ Close tile
 Button │ Orchestrator
+Button │ Close tile
+Heading │ Machines
+Button │ studio
+Button │ New shell on studio
+Button │ Terminal
 Button │ Close tile
 Button │ Navigator
 Group │ Where
-Button │ studio
+Button │ Ship the project board
 Button │ New
 Button │ Inbox
 Button │ More

@@ -1579,6 +1579,7 @@ fn a_board_sets_its_verifier_and_review(cx: &mut TestAppContext) {
         ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     };
     assert!(cx.debug_bounds("project-checks-panel").is_none(), "closed until asked");
 

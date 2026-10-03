@@ -47,6 +47,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         asking: vec![asking(a, "Run cargo test")],
         turns: Vec::new(),
         unread: 1,
+        projects: HashMap::new(),
     });
     assert!(memory.posted().is_empty(), "in front, the inbox says it");
 
@@ -55,6 +56,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         asking: vec![asking(a, "Run cargo test")],
         turns: Vec::new(),
         unread: 1,
+        projects: HashMap::new(),
     });
     assert!(
         memory.posted().is_empty(),
@@ -65,6 +67,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         asking: vec![asking(a, "Run cargo test"), asking(b, "Asks: which one?")],
         turns: Vec::new(),
         unread: 2,
+        projects: HashMap::new(),
     });
     let posted = memory.posted();
     assert_eq!(posted.len(), 1, "only the agent that started to wait: {posted:?}");
@@ -93,13 +96,19 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
         asking: vec![asking(a, "Run cargo test")],
         turns: Vec::new(),
         unread: 1,
+        projects: HashMap::new(),
     });
     assert_eq!(memory.posted().len(), 1, "away from every device: the phone says it");
 
     attention.set_present_elsewhere(true);
     assert_eq!(memory.withdrawn(), [a.about.note_id()], "at the Mac, the phone's note goes");
     let both = vec![asking(a, "Run cargo test"), asking(b, "Asks: which one?")];
-    attention.look(&Look { asking: both.clone(), turns: Vec::new(), unread: 2 });
+    attention.look(&Look {
+        asking: both.clone(),
+        turns: Vec::new(),
+        unread: 2,
+        projects: HashMap::new(),
+    });
     let done =
         Finished { command: "cargo build".into(), exit: Some(0), elapsed: Duration::from_secs(60) };
     attention.command_finished(route(3), "build".into(), &done, Duration::from_secs(5));
@@ -109,7 +118,7 @@ fn nothing_notifies_while_the_person_is_at_another_device() {
     let c = route(4);
     let mut three = both;
     three.push(asking(c, "Asks: ship it?"));
-    attention.look(&Look { asking: three, turns: Vec::new(), unread: 3 });
+    attention.look(&Look { asking: three, turns: Vec::new(), unread: 3, projects: HashMap::new() });
     let posted = memory.posted();
     assert_eq!(posted.len(), 2, "gone from the Mac, a new wait notifies: {posted:?}");
     assert_eq!(posted[1].id, c.about.note_id());
@@ -129,6 +138,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
         asking: vec![asking(a, "Run cargo test")],
         turns: vec![turn],
         unread: 2,
+        projects: HashMap::new(),
     });
     assert!(memory.posted().is_empty(), "the look decides nothing: {:?}", memory.posted());
 
@@ -144,7 +154,12 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
     assert_eq!((posted[0].title.as_str(), posted[0].category), ("Fix the build", None));
 
     let held = Asking { approval: Some(7), ..asking(a, "Run cargo test") };
-    attention.look(&Look { asking: vec![held], turns: Vec::new(), unread: 2 });
+    attention.look(&Look {
+        asking: vec![held],
+        turns: Vec::new(),
+        unread: 2,
+        projects: HashMap::new(),
+    });
     let posted = memory.posted();
     assert_eq!(posted.len(), 2, "the note again, now with the buttons");
     assert_eq!(posted[1].category, Some(APPROVAL));
@@ -169,11 +184,21 @@ fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
     let a = route(1);
     let id = a.about.note_id();
     attention.set_active(false);
-    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
+    attention.look(&Look {
+        asking: vec![asking(a, "Run make")],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    });
     attention.look(&Look::default());
     assert_eq!(memory.withdrawn(), vec![id.clone()], "answered elsewhere, its note goes");
 
-    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
+    attention.look(&Look {
+        asking: vec![asking(a, "Run make")],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    });
     let done = Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
     attention.command_finished(a, "api".into(), &done, Duration::from_secs(5));
     let ids: Vec<String> = memory.posted().into_iter().map(|n| n.id).collect();
@@ -219,7 +244,12 @@ fn a_command_notifies_when_it_ran_long_and_ended_with_the_app_away() {
 fn the_badge_is_the_inboxs_unread_count() {
     let (mut attention, memory) = attention();
     assert_eq!(memory.badge(), None, "nothing set before the first look");
-    attention.look(&Look { asking: Vec::new(), turns: Vec::new(), unread: 3 });
+    attention.look(&Look {
+        asking: Vec::new(),
+        turns: Vec::new(),
+        unread: 3,
+        projects: HashMap::new(),
+    });
     assert_eq!(memory.badge(), Some(3), "the unread count");
     attention.set_active(false);
     attention.look(&Look::default());
@@ -277,6 +307,7 @@ fn worker(
                 kind: ItemKind::Terminal { session: *session },
                 sleeping: false,
                 name: None,
+                facts: BTreeMap::new(),
             };
             tiles.push(TileRef { worker: key, item: item.id });
             v.session_opened(key, summary(*session), cx);
@@ -428,11 +459,31 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
     let (mut attention, memory) = attention();
     let a = route(1);
     attention.set_active(false);
-    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
+    attention.look(&Look {
+        asking: vec![asking(a, "Run make")],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    });
     let held = Asking { approval: Some(3), ..asking(a, "Run make") };
-    attention.look(&Look { asking: vec![held.clone()], turns: Vec::new(), unread: 1 });
-    attention.look(&Look { asking: vec![held], turns: Vec::new(), unread: 1 });
-    attention.look(&Look { asking: vec![asking(a, "Run make")], turns: Vec::new(), unread: 1 });
+    attention.look(&Look {
+        asking: vec![held.clone()],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    });
+    attention.look(&Look {
+        asking: vec![held],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    });
+    attention.look(&Look {
+        asking: vec![asking(a, "Run make")],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    });
     let said: Vec<(bool, bool, Option<String>)> = memory
         .posted()
         .into_iter()
@@ -449,18 +500,25 @@ fn an_approval_note_carries_the_buttons_while_its_prompt_is_held() {
 
     memory.clear();
     let b = route(2);
-    let asks = || Look { asking: vec![asking(b, "Run make")], turns: Vec::new(), unread: 1 };
+    let asks = || Look {
+        asking: vec![asking(b, "Run make")],
+        turns: Vec::new(),
+        unread: 1,
+        projects: HashMap::new(),
+    };
     attention.look(&asks());
     memory.clear();
     attention.look(&Look {
         asking: vec![Asking { approval: Some(4), ..asking(b, "Run make") }],
         turns: Vec::new(),
         unread: 1,
+        projects: HashMap::new(),
     });
     let answered = Look {
         asking: vec![Asking { answered: Some(4), ..asking(b, "Run make") }],
         turns: Vec::new(),
         unread: 1,
+        projects: HashMap::new(),
     };
     attention.look(&answered);
     attention.look(&answered);
@@ -678,7 +736,8 @@ fn a_finished_turn_notifies_once_while_the_app_is_away() {
     let (mut attention, memory) = attention();
     let a = route(1);
     let turn = Turn { route: a, title: "api".into(), body: "Fixed the test · Done · 2m".into() };
-    let look = Look { asking: Vec::new(), turns: vec![turn.clone()], unread: 1 };
+    let look =
+        Look { asking: Vec::new(), turns: vec![turn.clone()], unread: 1, projects: HashMap::new() };
     attention.look(&look);
     assert!(memory.posted().is_empty(), "in front, the inbox says it");
 
@@ -782,4 +841,52 @@ fn an_agent_that_ended_unseen_is_listed_to_review(cx: &mut TestAppContext) {
     press(cx, leak(format!("nav-review-{away}")));
     assert_eq!(view.read_with(cx, |v, _| v.focused()), Some(tiles[0]), "it went there");
     assert!(cx.debug_bounds("nav-to-review").is_none(), "looked at, nothing is left to review");
+}
+
+/// The notes of one project stack in one thread, keyed by its group: two agents in atlas share
+/// one, the agent in site has its own.
+#[gpui::test]
+fn notes_of_one_project_share_a_thread(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let key = WorkerKey::new(7);
+    let sessions = [SessionId::new(), SessionId::new(), SessionId::new()];
+    let (tiles, _link) = worker(&view, cx, key, "mini", &sessions);
+    view.update_in(cx, |v, _window, cx| {
+        for (session, repo) in sessions.iter().zip(["/w/atlas", "/w/atlas", "/w/site"]) {
+            let placed = SessionSummary {
+                cwd: Some(repo.to_owned()),
+                repo: Some(repo.to_owned()),
+                ..summary(*session)
+            };
+            v.session_opened(key, placed, cx);
+            let waits = AgentEvent {
+                session: *session,
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+                agent_session: None,
+                detail: Some("$ cargo test".into()),
+                attention: true,
+                source: AgentSource::Hook,
+                since_ms: WallMs::ZERO,
+                mode: None,
+            };
+            v.agent_event(waits, cx);
+        }
+    });
+    cx.run_until_parked();
+    let (look, atlas, site) = view.read_with(cx, |v, _| {
+        let groups = v.project_groups();
+        let key = |t| groups.group_of(t).map(|g| g.key.as_str().to_owned()).expect("a group");
+        (v.attention_look(), key(tiles[0]), key(tiles[2]))
+    });
+    assert_ne!(atlas, site);
+    let (mut attention, memory) = attention();
+    attention.set_active(false);
+    attention.look(&look);
+    let thread_of = |session: SessionId| {
+        memory.posted().into_iter().find(|n| n.id == session.to_string()).and_then(|n| n.thread)
+    };
+    assert_eq!(thread_of(sessions[0]), Some(atlas.clone()), "atlas's thread");
+    assert_eq!(thread_of(sessions[1]), Some(atlas), "the same one");
+    assert_eq!(thread_of(sessions[2]), Some(site), "site's own");
 }

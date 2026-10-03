@@ -754,13 +754,12 @@ impl WorkspaceView {
             }
         }
         let zooming = frame.overview > 0.0 && frame.overview < 1.0;
-        // Which of several tiles has the keyboard is said by its title's tone, and under
-        // Increase Contrast by a line as well; a lone tile's needs nothing, nor does the
-        // overview, which rings its workspace instead.
+        // Which of several tiles has the keyboard is said by its title's tone and a line along
+        // its header's top; a lone tile's needs nothing, nor does the overview, which rings its
+        // workspace instead.
         let (w, h) = self.layout.viewport();
         let screen = Rect { x: 0.0, y: 0.0, w, h };
-        let focus_line = self.theme.contrast == slopty_theme::Contrast::Increased
-            && frame.overview <= 0.0
+        let focus_line = frame.overview <= 0.0
             && frame
                 .tiles
                 .iter()
@@ -958,11 +957,12 @@ impl WorkspaceView {
                 .opacity(fade)
                 .map(|el| {
                     if here {
-                        // Where you are: an edge of the full accent flush with the block, as a
-                        // selected thumbnail has it. The keyboard's ring outside a gap read as
-                        // focus round a block, not as the block chosen.
+                        // Where you are: a neutral edge flush with the block, as a selected
+                        // thumbnail has it, in the text's tone since green means "done". The
+                        // keyboard's ring outside a gap read as focus round a block, not as the
+                        // block chosen.
                         let ring = gpui::Outline {
-                            color: hsla(s.accent),
+                            color: hsla_alpha(s.text, alpha::RING),
                             width: px(OVERVIEW_EDGE),
                             offset: px(0.0),
                         };
@@ -1224,7 +1224,7 @@ impl WorkspaceView {
                 .children(self.render_ask(cx))
                 .child(begin)
                 .children(recent)
-                .child(section("empty-workers", "Workers").children(workers))
+                .child(section("empty-workers", "Machines").children(workers))
         };
         // The strip is the content step with or without a tile on it: the empty workspace is
         // the page a tile would be, not a hole down to the bars' `canvas`. It starts a fifth of
@@ -1391,7 +1391,7 @@ impl WorkspaceView {
     }
 }
 
-/// The active overview block's accent edge, in points.
+/// The active overview block's edge, in points.
 const OVERVIEW_EDGE: f32 = 1.5;
 
 /// How wide the empty workspace's column stands: room for a directory beside its branch and
@@ -1447,10 +1447,10 @@ pub(super) fn overview_words(
 }
 
 /// What the empty workspace says with no worker to begin on.
-pub(crate) const NO_WORKERS: &str = "No workers yet";
-pub(crate) const NO_WORKERS_NEXT: &str = "A worker runs your shells, agents and windows.";
+pub(crate) const NO_WORKERS: &str = "No machines yet";
+pub(crate) const NO_WORKERS_NEXT: &str = "A machine runs your shells, agents and windows.";
 /// The empty workspace's way to a first worker, as the "…" menu words it.
-pub(crate) const ADD_WORKER: &str = "Add a worker";
+pub(crate) const ADD_WORKER: &str = "Add a machine";
 const NEW_TERMINAL: &str = "New terminal";
 const ADD_WINDOW: &str = "Add a window or display";
 /// The overview's place for a new workspace.

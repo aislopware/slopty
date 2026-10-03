@@ -34,6 +34,7 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         metadata: None,
         needs: Vec::new(),
         created_ms: AT,
+        members: Vec::new(),
     }
 }
 

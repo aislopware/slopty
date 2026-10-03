@@ -29,6 +29,7 @@ async fn reviewed_fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRef) {
         ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     };
     assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
     fleet

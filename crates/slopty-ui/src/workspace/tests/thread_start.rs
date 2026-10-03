@@ -1,6 +1,7 @@
-//! An agent's thread started from the palette: a "New … thread" line for each agent the
-//! worker's facts say it can start, the start sent to that worker, and the thread it answers
-//! with opened as a tile of its own.
+//! "New agent…" (⌘⇧T), the one start: the agent, then the machine, then the folder, each step
+//! listing the last choice first and passed over with one choice; the palette's "New `agent`
+//! agent" lines starting at the machine; the start sent to that machine, and the thread it
+//! answers with opened as a tile of its own.
 
 use std::collections::BTreeMap;
 
@@ -10,6 +11,7 @@ use slopty_proto::project::{Fact, Facts, WorkerFacts};
 use slopty_proto::thread::wire::{IntentDone, Outcome, ThreadRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
 
+use super::super::actions::{NewAgent, NewAgentOf};
 use super::super::projects::worker_key;
 use super::*;
 use crate::palette::PaletteRun;
@@ -24,16 +26,24 @@ fn facts_of(worker: WorkerId, agents: &[&str], acp: &[&str]) -> WorkerFacts {
     WorkerFacts { worker, facts }
 }
 
-/// The palette's "New … thread" labels, in order.
-fn start_labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<String> {
+/// The palette's "New … agent" labels, in order.
+fn agent_labels(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Vec<String> {
     view.update(cx, |v, cx| v.palette_lines(cx))
         .into_iter()
         .filter(|l| {
             matches!(&l.run, PaletteRun::Action(a)
-                if a.as_any().downcast_ref::<StartThread>().is_some())
+                if a.as_any().downcast_ref::<NewAgentOf>().is_some())
         })
         .map(|l| l.label)
         .collect()
+}
+
+/// The lines of the palette that is up, in order.
+fn step_lines(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Vec<String> {
+    view.read_with(cx, |v, cx| {
+        v.palette.clone().map(|p| p.read(cx).matches().iter().map(|l| l.label.clone()).collect())
+    })
+    .unwrap_or_default()
 }
 
 /// The thread starts `fake` was sent, as (intent, agent, folder, prompt).
@@ -57,69 +67,150 @@ fn settle(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// The palette offers exactly the agents the focused tile's worker can start: Claude Code,
-/// Codex and pi as its facts found them, then each ACP agent, and nothing for a program with
-/// no thread (aider) or another worker's agents. With no server it offers none. A line sends
-/// the start to that worker with no prompt; the thread it answers with opens as a thread tile
-/// that takes the keyboard, and a second answer for it goes to that tile. A refusal is said
-/// in the worker's words and opens nothing.
-#[gpui::test]
-fn the_palette_starts_each_agent_the_worker_offers(cx: &mut TestAppContext) {
-    let (view, cx) = still_workspace(cx);
+/// Answer every question the server was asked with `facts`.
+fn answer(queue: &mut slopty_client::server::CallQueue, facts: &[WorkerFacts]) -> Vec<Verb> {
+    let mut asked = Vec::new();
+    while let Some((verb, reply)) = queue.try_next() {
+        let _gone = reply.send(Answer::Facts(facts.to_vec()));
+        asked.push(verb);
+    }
+    asked
+}
+
+/// A studio with Claude Code (its link's word) and Codex (the server's), and a laptop with
+/// Claude Code; a shell in `/src/app` on the studio has the focus.
+struct Two {
+    studio: Fake,
+    laptop: Fake,
+}
+
+fn two_machines(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Two {
     let (studio_id, laptop_id) = (WorkerId::new(), WorkerId::new());
-    let mut studio = connect(&view, cx, worker_key(studio_id).value(), "studio");
-    let laptop = connect(&view, cx, worker_key(laptop_id).value(), "laptop");
-    let laptop_shell = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
+    let studio = connect(view, cx, worker_key(studio_id).value(), "studio");
+    let laptop = connect(view, cx, worker_key(laptop_id).value(), "laptop");
+    let shell = opens_in(view, cx, &studio, SessionId::new(), studio.me, 1, Some("/src/app"));
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.focus_tile(shell, cx);
+        v.ask_agents(cx);
+    });
+    cx.run_until_parked();
+    answer(&mut queue, &[facts_of(studio_id, &["codex"], &[]), facts_of(laptop_id, &[], &[])]);
+    cx.run_until_parked();
+    Two { studio, laptop }
+}
+
+/// ⌘⇧T asks which agent, then (where several can start it) which machine, then which folder,
+/// the focused shell's first; ↩ on each starts it. The next ⌘⇧T lists that agent, machine and
+/// folder first, so ↩ ↩ starts the same again.
+#[gpui::test]
+fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Claude Code", "Codex"], "which agent");
+    cx.simulate_input("codex");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["src/app", "~"], "only the studio has Codex: the folder");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent = starts(&mut studio);
+    let [(_, agent, cwd, None)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!((agent, cwd.as_str()), (&AgentId::named(AgentId::CODEX), "/src/app"));
+
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["Codex", "Claude Code"], "the last agent first");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent = starts(&mut studio);
+    let [(_, agent, cwd, None)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!((agent, cwd.as_str()), (&AgentId::named(AgentId::CODEX), "/src/app"), "again");
+}
+
+/// The palette's "New `agent` agent" lines, one per agent any machine can start, skip the
+/// agent step: Claude Code asks which machine (the focused one first), and the laptop's folder
+/// step offers its home. The start goes to the laptop.
+#[gpui::test]
+fn per_agent_lines_skip_the_agent_step(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, mut laptop } = two_machines(&view, cx);
+    assert_eq!(agent_labels(&view, cx), ["New Claude Code agent", "New Codex agent"]);
+    studio.drain();
+    laptop.drain();
+
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    cx.dispatch_action(NewAgentOf { agent: claude.clone() });
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["studio", "laptop"], "which machine, the focus's first");
+    cx.simulate_input("laptop");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["~"], "the laptop has no shell: its home");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent = starts(&mut laptop);
+    let [(_, agent, cwd, None)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!((agent, cwd.as_str()), (&claude, "~"));
+    assert!(starts(&mut studio).is_empty(), "nothing went to the studio");
+}
+
+/// With no server, each machine's own link says what it can start: Claude Code on both, so
+/// ⌘⇧T passes the agent step and asks which machine. A machine whose link found nothing offers
+/// nothing, and with none at all ⌘⇧T says so.
+#[gpui::test]
+fn a_start_with_no_server_lists_each_machines_agents(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _laptop = connect(&view, cx, 2, "laptop");
     let shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/src/app"));
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
-    assert_eq!(start_labels(&view, cx), Vec::<String>::new(), "no server, no agents known");
-
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let (studio_key, laptop_key) = (studio.key, laptop.key);
-    view.update_in(cx, |v, _w, cx| {
-        v.set_server_caller(Some(caller));
-        v.threads_linked(studio_key, cx);
-        v.threads_linked(laptop_key, cx);
-    });
-    cx.run_until_parked();
-    let facts = vec![
-        facts_of(studio_id, &["aider", "claude", "codex"], &["gemini"]),
-        facts_of(laptop_id, &["pi"], &[]),
-    ];
-    let mut asked = Vec::new();
-    while let Some((verb, reply)) = queue.try_next() {
-        let _gone = reply.send(Answer::Facts(facts.clone()));
-        asked.push(verb);
-    }
-    assert_eq!(asked, [Verb::WorkerFacts { worker: None }], "one question while one is out");
-    cx.run_until_parked();
-    assert_eq!(
-        start_labels(&view, cx),
-        ["New Claude Code thread", "New Codex thread", "New gemini thread"],
-        "the studio's agents, for the studio's tile"
-    );
-    let dirs: Vec<Option<String>> = view
-        .update(cx, |v, cx| v.palette_lines(cx))
-        .into_iter()
-        .filter(|l| l.label.starts_with("New ") && l.label.ends_with(" thread"))
-        .map(|l| l.cwd)
-        .collect();
-    assert!(
-        dirs.iter().all(|d| d.as_deref() == Some("src/app")),
-        "the folder said short, as the navigator says it: {dirs:?}"
-    );
-    studio.drain();
-
-    cx.simulate_keystrokes("cmd-shift-p");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("n e w space c o d e x space t h r e a d enter");
+    assert_eq!(agent_labels(&view, cx), ["New Claude Code agent"]);
+    cx.simulate_keystrokes("cmd-shift-t");
     settle(cx);
+    assert_eq!(step_lines(&view, cx), ["studio", "laptop"], "one agent: which machine");
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+}
+
+/// A machine whose link found no agent offers none, and with none anywhere ⌘⇧T says so.
+#[gpui::test]
+fn with_no_agent_anywhere_new_agent_says_so(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let caps = WorkerCaps { agents: Vec::new(), ..healthy() };
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(studio.key, caps, cx));
+    cx.run_until_parked();
+    assert_eq!(agent_labels(&view, cx), Vec::<String>::new());
+    cx.simulate_keystrokes("cmd-shift-t");
+    settle(cx);
+    assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some(agent_start::NO_AGENT));
+}
+
+/// A start's answer opens its thread as a tile that takes the keyboard, and a second answer
+/// for it goes to that tile. A refusal is said in the machine's words and opens nothing.
+#[gpui::test]
+fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let studio_key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(studio_key, cx));
+    cx.run_until_parked();
+    studio.drain();
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    view.update_in(cx, |v, _w, cx| {
+        v.start_thread(studio_key, claude.clone(), "~".into(), None, cx);
+    });
     let sent = starts(&mut studio);
-    let [(intent, agent, cwd, prompt)] = sent.as_slice() else { panic!("one start: {sent:?}") };
-    assert_eq!(agent, &AgentId::named(AgentId::CODEX));
-    assert_eq!(cwd, "/src/app", "in the folder the focused shell stands in");
-    assert_eq!(prompt, &None, "a start carries no prompt");
+    let [(intent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
 
     let thread = ThreadId::new();
     let started = IntentDone { id: *intent, outcome: Outcome::Started { thread } };
@@ -151,15 +242,12 @@ fn the_palette_starts_each_agent_the_worker_offers(cx: &mut TestAppContext) {
     assert!(keyboard, "its thread view holds the keyboard");
     assert_eq!(view.read_with(cx, |v, _| v.tile_title(item)), "Thread");
 
-    // A start the worker refuses opens nothing and says why.
-    view.update_in(cx, |v, _w, cx| {
-        v.start_thread(studio_key, AgentId::named(AgentId::CLAUDE_CODE), "~".into(), cx);
-    });
+    view.update_in(cx, |v, _w, cx| v.start_thread(studio_key, claude, "~".into(), None, cx));
     let sent = starts(&mut studio);
     let [(intent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
     let refused = IntentDone {
         id: *intent,
-        outcome: Outcome::Refused { reason: "claude is not on this worker's PATH".into() },
+        outcome: Outcome::Refused { reason: "claude is not on this machine's PATH".into() },
     };
     view.update_in(cx, |v, _w, cx| v.thread_done(studio_key, &refused, cx));
     settle(cx);
@@ -169,16 +257,13 @@ fn the_palette_starts_each_agent_the_worker_offers(cx: &mut TestAppContext) {
     );
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("claude is not on this worker's PATH")
+        Some("claude is not on this machine's PATH")
     );
-
-    view.update_in(cx, |v, _w, cx| v.focus_tile(laptop_shell, cx));
-    cx.run_until_parked();
-    assert_eq!(start_labels(&view, cx), ["New pi thread"], "the laptop's, for the laptop's tile");
 }
 
-/// A palette opened before the worker's agents are known takes them as they arrive: what was
-/// typed finds the new line, and ↩ starts it, with no closing and opening it again.
+/// A palette opened before the machine's agents are known takes them as they arrive: what was
+/// typed finds the new line, and ↩ starts at the machine step, with no closing and opening it
+/// again.
 #[gpui::test]
 fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -193,30 +278,39 @@ fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
         v.threads_linked(studio_key, cx);
     });
     cx.run_until_parked();
-    let dirs: Vec<Option<String>> = view
-        .update(cx, |v, cx| v.palette_lines(cx))
-        .into_iter()
-        .filter(|l| l.label.starts_with("New ") && l.label.ends_with(" thread"))
-        .map(|l| l.cwd)
-        .collect();
-    assert!(
-        dirs.iter().all(|d| d.as_deref() == Some("src/app")),
-        "the folder said short, as the navigator says it: {dirs:?}"
-    );
     studio.drain();
 
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();
-    cx.simulate_keystrokes("n e w space c o d e x space t h r e a d");
+    cx.simulate_keystrokes("n e w space c o d e x space a g e n t");
     cx.run_until_parked();
-    let facts = vec![facts_of(studio_id, &["codex"], &[])];
-    while let Some((_verb, reply)) = queue.try_next() {
-        let _gone = reply.send(Answer::Facts(facts.clone()));
-    }
+    answer(&mut queue, &[facts_of(studio_id, &["codex"], &[])]);
     settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["src/app", "~"], "one machine: the folder");
     cx.simulate_keystrokes("enter");
     settle(cx);
     let sent = starts(&mut studio);
     let [(_, agent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
     assert_eq!(agent, &AgentId::named(AgentId::CODEX), "the line that arrived, chosen");
+}
+
+/// A machine the "+" menu chose first is not asked again: its agents, then its folders.
+#[gpui::test]
+fn the_plus_menus_machine_is_not_asked_again(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut laptop, .. } = two_machines(&view, cx);
+    laptop.drain();
+    let key = laptop.key;
+    view.update_in(cx, |v, window, cx| {
+        v.new_on = Some(key);
+        v.new_agent(&NewAgent, window, cx);
+    });
+    settle(cx);
+    assert_eq!(step_lines(&view, cx), ["~"], "the laptop's one agent: straight to its folders");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let sent = starts(&mut laptop);
+    assert_eq!(sent.len(), 1, "started on the laptop: {sent:?}");
 }

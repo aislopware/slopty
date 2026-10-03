@@ -1,8 +1,9 @@
 //! The title bar's breadcrumb: where the focused work is, `workspace ▾ / checkout ▾ / branch`,
 //! as Zed's title bar names its project and branch.
 //!
-//! When the workspace holds tiles on more than one worker, the focused tile's worker follows
-//! it, so a strip of several machines never reads as one.
+//! When the focused tile's project spans more than one worker, its worker follows the
+//! workspace (`slopty ▾ / devbox ▾ / main`), with the menu of the project's clones on every
+//! machine when there are several, so one project on three machines never reads as one.
 //!
 //! The workspace leads in the medium weight: its name, and a menu of every workspace with
 //! something on it and a new one, which is how the bar switches between them. What waits in
@@ -104,12 +105,12 @@ impl WorkspaceView {
         Crumbs { checkout: Some(checkout), checkouts, branch }
     }
 
-    /// The focused tile's worker, when the active workspace holds tiles on more than one.
-    fn crumb_worker(&self) -> Option<String> {
+    /// The focused tile's worker, when its project spans more than one.
+    pub(super) fn crumb_worker(&self) -> Option<String> {
         let focused = self.focused()?;
-        let ws = self.layout.workspaces().get(self.layout.active_workspace())?;
-        let mut tiles = ws.columns().iter().flat_map(Column::tiles).map(Tile::tile);
-        tiles.any(|t| t.worker != focused.worker).then(|| self.worker_name(focused.worker))
+        let projects = self.project_groups();
+        let group = projects.group_of(focused).filter(|g| g.key.worker().is_none())?;
+        (projects.machines(group).len() > 1).then(|| self.worker_name(focused.worker))
     }
 
     /// What the workspaces other than the active one add up to: what waits out of view.
@@ -161,26 +162,34 @@ impl WorkspaceView {
                 })
                 .into_any_element(),
         ];
-        // A workspace that holds tiles on more than one worker names the focused tile's, so a
-        // strip of three machines' checkouts of one repository does not read as one machine.
-        if let Some(worker) = self.crumb_worker() {
-            let words = self
-                .words("crumb-worker", SharedString::from(format!("on {worker}")))
-                .gap(px(spacing.xs))
-                .child(
-                    icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(theme.typography.icon())),
-                )
-                .child(SharedString::from(worker));
-            parts.extend([step(), words.into_any_element()]);
-        }
-        // A workspace is named after its first shell's checkout until it is named otherwise,
-        // and that name said twice in a row is noise; a menu of checkouts keeps its segment.
+        // A project on more than one worker names the focused tile's, so three machines'
+        // clones of one repository do not read as one; the menu of its clones is then the
+        // machine's, each clone named by its machine.
         let more = crumbs.checkouts.len() > 1;
-        let checkout = crumbs.checkout.as_ref().filter(|c| more || c.name != *name);
+        let machine = self.crumb_worker();
+        if let Some(worker) = machine.clone() {
+            let label = SharedString::from(format!("on {worker}"));
+            let segment = if more {
+                self.crumb(MenuKind::Checkouts, "crumb-worker", label, cx)
+            } else {
+                self.words("crumb-worker", label)
+            }
+            .gap(px(spacing.xs))
+            .child(
+                icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
+                    .size(px(theme.typography.icon())),
+            )
+            .child(SharedString::from(worker))
+            .when(more, |el| el.child(self.chevron()));
+            parts.extend([step(), segment.into_any_element()]);
+        }
+        // A workspace is named after its project until it is named otherwise, and that name
+        // said twice in a row is noise; a menu of checkouts keeps its segment.
+        let menu = more && machine.is_none();
+        let checkout = crumbs.checkout.as_ref().filter(|c| menu || c.name != *name);
         if let Some(checkout) = checkout {
             let name = SharedString::from(checkout.name.clone());
-            let segment = if more {
+            let segment = if menu {
                 self.crumb(MenuKind::Checkouts, "crumb-checkout", name.clone(), cx)
                     .child(name)
                     .child(self.chevron())
@@ -343,25 +352,29 @@ impl WorkspaceView {
     }
 
     /// The checkout segment's menu: the same repository's checkouts in the layout, each named
-    /// with its worker, the focused one ticked; choosing one goes to a shell in it.
+    /// with its worker, the focused one ticked; choosing one goes to a shell in it. Where the
+    /// machine leads the segment, each is named by its machine and placed by its directory.
     pub(super) fn checkout_entries(&self, entity: &gpui::WeakEntity<Self>) -> Vec<MenuEntry> {
         let crumbs = self.crumbs();
         let current = crumbs.checkout;
+        let by_machine = self.crumb_worker().is_some();
         crumbs
             .checkouts
             .into_iter()
             .map(|c| {
                 let worker = self.worker_name(c.worker);
-                let detail = if current.as_ref() == Some(&c) {
-                    format!("{worker} \u{2713}")
+                let (label, place) = if by_machine {
+                    (worker, super::tile::cwd_tail(&c.root, self.home_of(c.worker)))
                 } else {
-                    worker
+                    (c.name.clone(), worker)
                 };
+                let detail =
+                    if current.as_ref() == Some(&c) { format!("{place} \u{2713}") } else { place };
                 let entity = entity.clone();
                 let tile = c.tile;
                 MenuEntry {
                     group: MenuGroup::Places,
-                    label: c.name.into(),
+                    label: label.into(),
                     detail: detail.into(),
                     run: std::rc::Rc::new(move |_window: &mut Window, cx: &mut gpui::App| {
                         let _gone = entity.update(cx, |this, cx| this.focus_tile(tile, cx));

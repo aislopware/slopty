@@ -635,7 +635,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(remote) = self.remote(tile.worker) else {
-            self.show_notice("The worker is away; nothing was sent".to_owned(), cx);
+            self.show_notice("The machine is away; nothing was sent".to_owned(), cx);
             Self::upload_ended(upload, cx);
             return false;
         };
@@ -737,7 +737,7 @@ impl WorkspaceView {
                     None => {
                         let what = if paths.len() == 1 { "file" } else { "files" };
                         self.show_notice(
-                            format!("{} {what} on the worker's clipboard", paths.len()),
+                            format!("{} {what} on the machine's clipboard", paths.len()),
                             cx,
                         );
                     }
@@ -909,7 +909,7 @@ impl WorkspaceView {
     #[cfg(not(target_os = "ios"))]
     fn save_copy_as(&mut self, worker: WorkerKey, source: String, cx: &mut Context<Self>) {
         let Some(remote) = self.remote(worker) else {
-            self.show_notice("The worker is away; nothing was saved".to_owned(), cx);
+            self.show_notice("The machine is away; nothing was saved".to_owned(), cx);
             return;
         };
         let name = worker_name(&source).to_owned();
@@ -1009,7 +1009,7 @@ impl WorkspaceView {
             .map(|(xfer, _)| *xfer)
             .collect();
         for xfer in outlived {
-            self.xfer_failed(xfer, "the worker went away", cx);
+            self.xfer_failed(xfer, "the machine went away", cx);
         }
     }
 }

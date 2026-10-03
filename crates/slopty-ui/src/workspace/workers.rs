@@ -286,6 +286,7 @@ impl WorkspaceView {
     pub fn remove_worker(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         self.disconnect_worker(key, WorkerStatus::Connecting, cx);
         let Some(w) = self.workers.remove(&key) else { return };
+        self.faces.threads.forget_meters(key);
         for item in w.doc.items() {
             self.drop_item_views(item.id, cx);
             if let ItemKind::Terminal { session } = item.kind {
@@ -310,7 +311,7 @@ impl WorkspaceView {
         // Added again, it is a new worker: an empty registry is given its shell again.
         self.given_shell.remove(&key);
         self.given_pending.remove(&key);
-        self.nav.folded.remove(&key);
+        self.nav.folded.remove(&slopty_client::layout::GroupKey::machine(key));
         self.items_dirty = true;
         self.tick();
         self.layout.retain_worker(key, |_| false);
@@ -413,7 +414,7 @@ impl WorkspaceView {
     /// An open this client asked of `key` failed: the tile it would have made never comes, so
     /// the person hears why.
     pub fn open_failed(&mut self, key: WorkerKey, message: &str, cx: &mut Context<Self>) {
-        let name = self.workers.get(&key).map_or("the worker", |w| w.name.as_str());
+        let name = self.workers.get(&key).map_or("the machine", |w| w.name.as_str());
         let text = format!("Could not open a terminal on {name}: {message}");
         self.show_notice(text, cx);
     }
@@ -494,8 +495,10 @@ impl WorkspaceView {
                     .map(|i| i.id)
                     .filter(|id| !self.layout.contains(TileRef { worker: key, item: *id }))
                     .collect();
+                let tiles: Vec<TileRef> =
+                    new.iter().map(|&item| TileRef { worker: key, item }).collect();
+                self.place_from_elsewhere(&tiles);
                 for item in new {
-                    self.layout.open(TileRef { worker: key, item }, Placement::Remote);
                     self.note_recent(item);
                 }
                 let kept = self.recency.iter().copied().filter(|id| self.tile_of(*id).is_some());
@@ -515,8 +518,11 @@ impl WorkspaceView {
             }
             ItemChange::Added { id, by_me } => {
                 let tile = TileRef { worker: key, item: id };
-                let placement = if by_me { Placement::Local } else { Placement::Remote };
-                self.layout.open(tile, placement);
+                if by_me {
+                    self.layout.open(tile, Placement::Local);
+                } else {
+                    self.place_from_elsewhere(&[tile]);
+                }
                 self.note_recent(id);
                 // A worker's given shell opens beside the rest and leaves the focus where it
                 // was: a worker coming up must not take the keys someone is typing elsewhere.
@@ -1304,7 +1310,7 @@ impl WorkspaceView {
                     // Out of reach: said at once, not left saving for an answer never coming.
                     if !sent {
                         let name =
-                            this.workers.get(&worker).map_or("The worker", |w| w.name.as_str());
+                            this.workers.get(&worker).map_or("The machine", |w| w.name.as_str());
                         let error = format!("{name} is out of reach");
                         view.update(cx, |v, cx| v.written(WriteResult::Failed { error }, cx));
                     }

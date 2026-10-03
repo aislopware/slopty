@@ -84,9 +84,9 @@ impl WorkspaceView {
                     let keep: Keep = Arc::new(move |dest| match shared.promised(n, CATCH_WAIT) {
                         FileAt::At(path) => bring_down_to(remote.as_ref(), &path, dest),
                         FileAt::Waiting => {
-                            Err("the worker did not catch the drag in time".to_owned())
+                            Err("the machine did not catch the drag in time".to_owned())
                         }
-                        FileAt::Gone => Err("the app on the worker did not write it".to_owned()),
+                        FileAt::Gone => Err("the app on the machine did not write it".to_owned()),
                     });
                     files.push(Promise { name, keep });
                 }

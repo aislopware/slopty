@@ -1,5 +1,5 @@
-//! Which tile has the keyboard: said by its title's tone, every header on its own content, and
-//! under Increase Contrast by a line along the top of the focused header as well.
+//! Which tile has the keyboard: said by its title's tone and, while two or more tiles show, a
+//! line along the top of the focused header, every header on its own content.
 
 use gpui::{Bounds, Pixels};
 use slopty_theme::Contrast;
@@ -36,20 +36,25 @@ fn fills_at(cx: &mut VisualTestContext, at: Bounds<Pixels>) -> Vec<gpui::Hsla> {
         .collect()
 }
 
-/// With two tiles in view neither header is a band: both sit on the content, with no line
-/// drawn for focus. Focus is the title's tone, primary on the focused one and muted on the
-/// other, and it goes with the focus.
+/// With two tiles in view neither header is a band: both sit on the content. The focused one's
+/// title leads in the primary tone and its header carries a line along its top in the text's
+/// tone, set back a step; the other's title is muted and carries none. A lone tile needs no
+/// saying. The line goes with the focus.
 #[gpui::test]
-fn the_headers_sit_on_their_content_and_focus_is_the_titles_tone(cx: &mut TestAppContext) {
+fn the_focused_header_carries_a_text_line_while_two_tiles_show(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.simulate_resize(size(px(1280.0), px(800.0)));
     let studio = connect(&view, cx, 1, "studio");
     let first = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    assert_eq!(line_in_header(cx, first), None, "one tile needs no saying");
     let second = opens(&view, cx, &studio, SessionId::new(), studio.me, 2);
     assert_eq!(focused(&view, cx), Some(second));
-    assert_eq!(line_in_header(cx, second), None, "focus draws no line");
+    assert_eq!(line_in_header(cx, second), Some(true), "along the focused header's top");
 
     let theme = Theme::default();
+    let line = cx.debug_bounds("focus-line").expect("drawn");
+    let ink = crate::colors::hsla_alpha(theme.surfaces.text, slopty_theme::alpha::STRONG);
+    assert!(fills_at(cx, line).contains(&ink), "in the text's tone, set back a step");
     let content = crate::colors::hsla(theme.content());
     let panel = crate::colors::hsla(theme.surfaces.panel);
     for tile in [first, second] {
@@ -60,13 +65,16 @@ fn the_headers_sit_on_their_content_and_focus_is_the_titles_tone(cx: &mut TestAp
     }
     assert_eq!(tile::title_ink(&theme, true), theme.surfaces.text);
     assert_eq!(tile::title_ink(&theme, false), theme.surfaces.text_muted);
+
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    assert_eq!(line_in_header(cx, first), Some(true), "it goes with the focus");
 }
 
-/// Under Increase Contrast a title's tone is too quiet a sign on its own: a lone tile still
-/// carries no line, but with a second in view the focused one's header does, along its top
-/// edge in the text's tone, and it follows the focus.
+/// Under Increase Contrast the line is the text's whole tone: a lone tile still carries none,
+/// and with a second in view the focused one's header does, and it follows the focus.
 #[gpui::test]
-fn under_increase_contrast_the_focused_header_carries_a_line(cx: &mut TestAppContext) {
+fn under_increase_contrast_the_focus_line_is_whole(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     view.update(cx, |v, cx| {
         let mut theme = Theme { contrast: Contrast::Increased, ..Theme::default() };

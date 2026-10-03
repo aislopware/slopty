@@ -18,7 +18,7 @@ use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, CHECK_NAME_MAX, CHECKS_NAMED, Checks, DEPENDS_MAX,
-    KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Merge, Moment, NOTE_MAX, Native,
+    KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native,
     NativeAgent, NativeChange, Natives, Need, NodeDetail, NodeNatives, Placed, Project,
     ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent,
     StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange,
@@ -298,6 +298,7 @@ pub(crate) struct Starting {
 pub(crate) struct NewProject {
     pub id: ProjectId,
     pub title: String,
+    pub members: Vec<Matcher>,
     pub repo: String,
     pub target: String,
     pub verifier: Option<String>,
@@ -312,6 +313,7 @@ pub(crate) struct NewProject {
 /// A change to a project's own fields.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectChange {
+    pub members: Option<Vec<Matcher>>,
     pub orchestrator: Option<TermRef>,
     pub verifier: Option<String>,
     pub review: Option<String>,
@@ -740,6 +742,31 @@ fn within(name: &str, text: Option<&str>, max: usize) -> Result<(), Refused> {
 }
 
 /// A verifier command as it is kept, within [`SUMMARY_MAX`].
+/// A project's members, each value trimmed: at most [`Project::MEMBERS_MAX`], each within
+/// [`Project::member_fits`], none named twice.
+fn members(members: Vec<Matcher>) -> Result<Vec<Matcher>, Refused> {
+    if members.len() > Project::MEMBERS_MAX {
+        return Err(invalid(format!("a project names at most {} members", Project::MEMBERS_MAX)));
+    }
+    let mut kept: Vec<Matcher> = Vec::with_capacity(members.len());
+    for member in members {
+        let member: Matcher =
+            member.into_iter().map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned())).collect();
+        if !Project::member_fits(&member) {
+            return Err(invalid(format!(
+                "a member names 1 to {} facts, each a key with no space and a value of at most                  {} bytes",
+                Project::MATCHER_KEYS_MAX,
+                Project::MATCHER_VALUE_MAX
+            )));
+        }
+        if kept.contains(&member) {
+            return Err(invalid("a member is named twice"));
+        }
+        kept.push(member);
+    }
+    Ok(kept)
+}
+
 fn verifier(text: Option<String>) -> Result<Option<String>, Refused> {
     within("a verifier", text.as_deref(), SUMMARY_MAX)?;
     Ok(words(text))
@@ -1026,6 +1053,7 @@ impl Projects {
             orchestrator_spent: Spent::default(),
             id: new.id.clone(),
             title,
+            members: members(new.members)?,
             repo: new.repo.trim().to_owned(),
             repo_id: None,
             target: new.target.trim().to_owned(),
@@ -1050,7 +1078,7 @@ impl Projects {
         Ok((status, updates))
     }
 
-    /// Change a project's orchestrator, verifier, limits or metadata.
+    /// Change a project's members, orchestrator, verifier, limits or metadata.
     pub(crate) fn set(
         &mut self,
         id: &ProjectId,
@@ -1064,8 +1092,13 @@ impl Projects {
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let new_verifier = change.verifier.map(|v| verifier(Some(v))).transpose()?;
         let new_review = change.review.map(|r| review_brief(Some(r))).transpose()?;
+        let new_members = change.members.map(members).transpose()?;
         let mut updates = Vec::new();
         let mut quiet = false;
+        if let Some(members) = new_members {
+            quiet |= record.project.members != members;
+            record.project.members = members;
+        }
         if let Some(verifier) = new_verifier {
             quiet |= record.project.verifier != verifier;
             record.project.verifier = verifier;

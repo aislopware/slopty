@@ -6,16 +6,17 @@
 //! tile header's. On the right, the link to the focused worker while it is worth a look (a
 //! round trip past [`RTT_SHOWN_FROM`], or a DERP relay) or while the pointer is over the bar,
 //! what is wrong with the link when something is, what the focused tile says of itself (a
-//! file's language and caret; a page's host is its header's), the ports forwarded here (which
-//! list them when clicked), the uploads in flight to tiles other than the focused one (whose
-//! header says its own), the count of workers only while one of them is not up (which opens
-//! the hosts popover: each worker's link, connect and forget), and each worker's agents:
-//! working, waiting, blocked and to review (a turn that ended unseen), each a faint "·" from
-//! the next. Who waits on the human is counted once, on the bell. The frame time shows only
-//! with the stream stats (⌘⇧I). Each readout is meta text with no icon, its figures tabular,
-//! and a state is a small dot of its fill beside quiet words: the tile and the bell carry the
-//! loud marks. The bar sits on the navigator's tone with no rule over it. A phone keeps the
-//! worker, a slow round trip and the agents.
+//! file's language and caret; a page's host is its header's), the plan's windows the focused
+//! machine's agents last published (`5h 23% · 7d 41%`, in `warn` from 80 %, which list every
+//! machine's when clicked), the ports forwarded here (which list them when clicked), the uploads in
+//! flight to tiles other than the focused one (whose header says its own), the count of workers
+//! only while one of them is not up (which opens the hosts popover: each worker's link, connect and
+//! forget), and each worker's agents: working, waiting, blocked and to review (a turn that ended
+//! unseen), each a faint "·" from the next. Who waits on the human is counted once, on the bell.
+//! The frame time shows only with the stream stats (⌘⇧I). Each readout is meta text with no icon,
+//! its figures tabular, and a state is a small dot of its fill beside quiet words: the tile and the
+//! bell carry the loud marks. The bar sits on the navigator's tone with no rule over it. A phone
+//! keeps the worker, a slow round trip and the agents.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, nor
 //! does a round trip nobody would read.
@@ -60,6 +61,13 @@ const SERVER_DOWN_MEANS: &str = "direct links only";
 
 /// The hosts popover's width, in points.
 const HOSTS_W: f32 = 300.0;
+
+/// How old a plan reading grows before the bar says its age: the Claude Code status line runs
+/// only while a session is live, so a reading after a long idle is a past one.
+const PLAN_AGED_FROM: Duration = Duration::from_mins(15);
+
+/// A plan window used this far, in hundredths of a percent, is said in `warn`.
+const PLAN_WARN_FROM_BP: u32 = 8_000;
 
 /// How long a frame-time readout stands before it is worked out again: the percentile sorts
 /// the probe's ring, which is not work for every frame.
@@ -107,6 +115,8 @@ pub(super) struct Bar {
     rate: Cell<Option<(ItemId, PaintRate)>>,
     /// The pointer is over the bar, which then shows the link however quick it is.
     hovered: bool,
+    /// The plan windows' popover is up.
+    plans_open: bool,
 }
 
 impl std::fmt::Debug for Bar {
@@ -167,6 +177,17 @@ impl AgentCounts {
     }
 }
 
+#[cfg(test)]
+impl AgentCounts {
+    /// How many agents it counts, whatever their state.
+    pub(super) const fn total(self) -> usize {
+        self.working
+            .saturating_add(self.waiting)
+            .saturating_add(self.blocked)
+            .saturating_add(self.review)
+    }
+}
+
 /// The agents' line in words, as a screen reader hears it: `2 working, 1 blocked`, each worker
 /// named when there are more than one (`studio: 2 working; mini: 1 waiting`).
 #[must_use]
@@ -209,8 +230,13 @@ impl WorkspaceView {
 
     /// Each worker's agents, as their tiles mark them, in the workers' order: the ones this
     /// client follows, the ones only the server reports, and the threads no terminal speaks
-    /// for. A worker with none at work is left out.
+    /// for. A worker with none at work is left out. Under a scope, only the agents whose tile
+    /// is in its project.
     pub(super) fn agent_counts(&self) -> Vec<(String, AgentCounts)> {
+        let scoped = self.scoped_tiles();
+        let kept = |tile: Option<slopty_client::layout::TileRef>| {
+            scoped.as_ref().is_none_or(|s| tile.is_some_and(|t| s.contains(&t)))
+        };
         let mut by_worker: BTreeMap<WorkerKey, AgentCounts> = BTreeMap::new();
         let followed = self.agents.keys().filter_map(|s| Some((*s, self.worker_of_session(*s)?)));
         let reported = self
@@ -219,15 +245,25 @@ impl WorkspaceView {
             .filter(|(s, _)| !self.agents.contains_key(s))
             .map(|(s, (worker, _))| (*s, *worker));
         for (session, worker) in followed.chain(reported) {
+            if !kept(self.tile_of_session(session)) {
+                continue;
+            }
             if let Some(status) = self.agent_mark(session) {
                 by_worker.entry(worker).or_default().add(status);
             }
         }
-        for ended in self.to_review() {
+        for ended in self.to_review().into_iter().filter(|e| kept(e.tile)) {
             by_worker.entry(ended.worker).or_default().add_review();
         }
         // Threads no terminal speaks for (Codex, pi, an ACP agent), as their rows say.
-        for (_, stand) in self.thread_stands() {
+        for (thread, stand) in self.thread_stands() {
+            let tile = stand
+                .terminal
+                .and_then(|s| self.tile_of_session(s))
+                .or_else(|| self.tile_of_thread(thread));
+            if !kept(tile) {
+                continue;
+            }
             let counts = by_worker.entry(stand.worker).or_default();
             match stand.rung {
                 slopty_proto::thread::attention::Rung::ToReview => counts.add_review(),
@@ -546,6 +582,7 @@ impl WorkspaceView {
             let text = SharedString::from(text);
             spaced(tabular(readout("status-facts", text.clone())), &text, theme)
         });
+        let plan = (!phone).then(|| self.plan_button(cx)).flatten();
         // The link leads the right: it comes and goes with the pointer, and growing leftward
         // from the start of a cluster that is pinned right, it moves nothing else. The readouts
         // are parted by the faint dot the left's path steps are, never by space alone.
@@ -553,6 +590,7 @@ impl WorkspaceView {
             link_readout.map(gpui::IntoElement::into_any_element),
             health.map(gpui::IntoElement::into_any_element),
             facts.map(gpui::IntoElement::into_any_element),
+            plan.map(gpui::IntoElement::into_any_element),
             ports.map(gpui::IntoElement::into_any_element),
             transfers.map(gpui::IntoElement::into_any_element),
             frame.map(gpui::IntoElement::into_any_element),
@@ -574,6 +612,7 @@ impl WorkspaceView {
             .gap(px(spacing.sm))
             .children(right_parts);
         let hosts = (self.bar.hosts_open && !phone).then(|| self.render_hosts(window, cx));
+        let plans = (self.bar.plans_open && !phone).then(|| self.render_plans(window, cx));
         let statusbar = self.chrome.statusbar.entity_id();
         let bar = div()
             .id("statusbar")
@@ -601,6 +640,7 @@ impl WorkspaceView {
             .children(notices)
             .child(right)
             .children(hosts)
+            .children(plans)
             .into_any_element()
     }
 
@@ -711,7 +751,7 @@ impl WorkspaceView {
             .map(|(m, _)| m)
             .collect();
         let worst = *down.first()?;
-        let text = counted(count, "worker", "workers");
+        let text = counted(count, "machine", "machines");
         let label = format!("{text}, {} not connected", down.len());
         let dot = state_dot(theme, state_fill(theme, worst))
             .debug_selector(|| "status-workers-dot".to_owned());
@@ -723,6 +763,126 @@ impl WorkspaceView {
             tab_stop(el, s.accent)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_hosts(cx))),
         )
+    }
+
+    /// The plan's windows on the focused tile's machine, as its agent last published them (else
+    /// the freshest reading there): `5h 23% · 7d 41%`, in `warn` from 80 %, with when a spent
+    /// window comes back, and its age once it is past [`PLAN_AGED_FROM`]. None where no agent
+    /// there published any. Clicked, every machine's readings.
+    fn plan_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let tile = self.focused();
+        let worker = tile.map(|t| t.worker).or_else(|| self.status_worker())?;
+        let agent = tile.and_then(|t| self.item(t)).and_then(|i| self.item_agent(i));
+        let now = slopty_core::WallMs::now();
+        let (_, reading) = self.faces.threads.meters().shown(worker, agent, now)?;
+        let (text, warn) = plan_words(reading, now);
+        let label = SharedString::from(format!("{PLAN_USAGE} {text}"));
+        let words = spaced(tabular(div().id("status-plan-words")), &text, theme);
+        let el = button("status-plan", label, theme)
+            .when(warn, |el| el.text_color(hsla(s.warn)))
+            .child(words)
+            .when(self.bar.plans_open, |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+        Some(tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| {
+            this.bar.plans_open = !this.bar.plans_open;
+            cx.notify();
+        })))
+    }
+
+    /// Every plan reading the machines' agents published, by machine and agent, with its age.
+    /// A click anywhere else closes it.
+    fn render_plans(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
+        let theme = &self.theme;
+        let s = &theme.surfaces;
+        let spacing = theme.spacing;
+        let safe = window.insets().effective();
+        let now = slopty_core::WallMs::now();
+        let rows: Vec<gpui::AnyElement> = self
+            .faces
+            .threads
+            .meters()
+            .all(now)
+            .map(|(worker, agent, reading)| {
+                let agent_id = slopty_proto::thread::AgentId(agent.to_owned());
+                let who = format!(
+                    "{}{META_SEPARATOR}{}",
+                    self.worker_name(worker),
+                    super::projects::agent_label(&agent_id)
+                );
+                let (words, warn) = plan_words(reading, now);
+                let age = crate::palette::age_label(reading.age(now));
+                let words = format!("{words}{META_SEPARATOR}{age}");
+                let selector = format!("plans-row-{worker}-{agent}");
+                div()
+                    .id(ElementId::Name(selector.clone().into()))
+                    .debug_selector(move || selector)
+                    .role(Role::Label)
+                    .aria_label(SharedString::from(format!("{who}, {words}")))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(spacing.sm))
+                    .mx(px(spacing.xs))
+                    .px(px(spacing.xs))
+                    .py(px(spacing.xs))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(who)),
+                    )
+                    .child(
+                        meta(tabular(div()), theme)
+                            .flex_none()
+                            .when(warn, |el| el.text_color(hsla(s.warn)))
+                            .child(SharedString::from(words)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let panel = kit::elevate(div(), theme)
+            .id("plans")
+            .debug_selector(|| "plans".to_owned())
+            .role(Role::Dialog)
+            .aria_label(PLAN_USAGE)
+            .occlude()
+            .absolute()
+            .bottom(px(STATUSBAR_H + spacing.xs) + safe.bottom)
+            .right(px(spacing.md) + safe.right)
+            .w(px(HOSTS_W))
+            .flex()
+            .flex_col()
+            .pb(px(spacing.xs))
+            .rounded(px(theme.radii.lg))
+            .text_size(px(theme.typography.ui_size))
+            .font_family(theme.typography.ui_family.clone())
+            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+            .child(section_heading(theme, "plans-heading".into(), PLAN_USAGE))
+            .children(rows);
+        let viewport = window.viewport_size();
+        gpui::deferred(
+            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
+                div()
+                    .id("plans-away")
+                    .relative()
+                    .w(viewport.width)
+                    .h(viewport.height)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _ev, _w, cx| {
+                            this.bar.plans_open = false;
+                            cx.notify();
+                        }),
+                    )
+                    .child(kit::fade_in(panel, "plans-fade", cx)),
+            ),
+        )
+        .with_priority(crate::palette::Layer::Popover.priority())
+        .into_any_element()
     }
 
     /// The hosts popover over the bar's right end: each worker with its link, and what can be
@@ -739,7 +899,7 @@ impl WorkspaceView {
                 .id("hosts-add")
                 .debug_selector(|| "hosts-add".to_owned())
                 .role(Role::Button)
-                .aria_label("Add a worker")
+                .aria_label("Add a machine")
                 .flex()
                 .items_center()
                 .gap(px(spacing.sm))
@@ -759,7 +919,7 @@ impl WorkspaceView {
                         .justify_center()
                         .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_muted))),
                 )
-                .child("Add a worker");
+                .child("Add a machine");
             tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, window, cx| {
                 this.bar.hosts_open = false;
                 cx.notify();
@@ -771,7 +931,7 @@ impl WorkspaceView {
             .id("hosts")
             .debug_selector(|| "hosts".to_owned())
             .role(Role::Dialog)
-            .aria_label("Workers")
+            .aria_label("Machines")
             .occlude()
             .absolute()
             .bottom(px(STATUSBAR_H + spacing.xs) + safe.bottom)
@@ -784,7 +944,7 @@ impl WorkspaceView {
             .text_size(px(theme.typography.ui_size))
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(section_heading(theme, "hosts-heading".into(), "Workers"))
+            .child(section_heading(theme, "hosts-heading".into(), "Machines"))
             .children(rows)
             .when(add.is_some(), |el| {
                 el.child(div().my(px(spacing.xs)).h(px(1.0)).bg(hsla(s.border_subtle)))
@@ -986,6 +1146,39 @@ const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
     }
 }
 
+/// What the plan popover is called.
+const PLAN_USAGE: &str = "Plan usage";
+
+/// A reading's windows still holding at `now` as the bar says them, `5h 23% · 7d 41%`, a spent
+/// one with when it comes back (`5h 100% until 14:00`), and the reading's age once it is past
+/// [`PLAN_AGED_FROM`]; and whether any window is far enough used to say in `warn`.
+fn plan_words(
+    reading: &slopty_client::meters::Reading,
+    now: slopty_core::WallMs,
+) -> (String, bool) {
+    let mut warn = false;
+    let mut parts: Vec<String> = reading
+        .current(now)
+        .map(|limit| {
+            warn |= limit.used_bp >= PLAN_WARN_FROM_BP;
+            let pct = limit.used_bp.saturating_add(50) / 100;
+            let name = slopty_client::meters::short_name(&limit.name);
+            let until = limit
+                .resets_ms
+                .filter(|_| limit.used_bp >= 10_000)
+                .and_then(crate::conversation::figures::clock)
+                .map(|at| format!(" until {at}"))
+                .unwrap_or_default();
+            format!("{name} {pct}%{until}")
+        })
+        .collect();
+    let age = reading.age(now);
+    if age >= PLAN_AGED_FROM {
+        parts.push(format!("{} ago", crate::palette::age_label(age)));
+    }
+    (parts.join(META_SEPARATOR), warn)
+}
+
 /// A small dot of a state's fill beside a readout's words.
 fn state_dot(theme: &Theme, fill: slopty_theme::Rgb) -> Div {
     div().flex_none().size(px(theme.spacing.xs + theme.spacing.xxs)).rounded_full().bg(hsla(fill))
@@ -1031,6 +1224,34 @@ fn button(selector: &'static str, text: SharedString, theme: &Theme) -> Stateful
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window used 80 % or more says the reading in `warn`; a spent one says when it comes
+    /// back; a reading past a quarter of an hour says its age; a window past its reset is left.
+    #[test]
+    fn a_plan_window_far_used_warns_and_a_spent_one_says_when_it_comes_back() {
+        use slopty_client::meters::Reading;
+        use slopty_core::WallMs;
+        use slopty_proto::thread::Limit;
+        let limit = |name: &str, used_bp, resets: Option<u64>| Limit {
+            name: name.to_owned(),
+            used_bp,
+            resets_ms: resets.map(WallMs::from_millis),
+        };
+        let now = WallMs::from_millis(1_000_000_000);
+        let fresh = Reading { limits: vec![limit("five-hour", 2_349, None)], heard: now };
+        assert_eq!(plan_words(&fresh, now), ("5h 23%".to_owned(), false));
+        let far = Reading { limits: vec![limit("seven-day", 8_000, None)], heard: now };
+        assert_eq!(plan_words(&far, now), ("7d 80%".to_owned(), true));
+        let back = now.as_millis().saturating_add(3_600_000);
+        let spent = Reading {
+            limits: vec![limit("five-hour", 10_000, Some(back)), limit("seven-day", 100, Some(1))],
+            heard: WallMs::from_millis(now.as_millis().saturating_sub(20 * 60_000)),
+        };
+        let (words, warn) = plan_words(&spent, now);
+        let at = crate::conversation::figures::clock(WallMs::from_millis(back)).unwrap_or_default();
+        assert_eq!(words, format!("5h 100% until {at} \u{b7} 20m ago"));
+        assert!(warn);
+    }
 
     #[test]
     fn the_readouts_say_what_they_count() {

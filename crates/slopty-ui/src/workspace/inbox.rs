@@ -165,13 +165,30 @@ impl WorkspaceView {
 
     /// The list's two sections: the agents waiting, then the finishes, only the unread ones
     /// unless `all`.
+    ///
+    /// Under a scope, only the rows whose tile is in its project.
     fn inbox_rows(&self, all: bool) -> (Vec<Row>, Vec<Row>) {
         let now_ms = wall_ms();
-        let sessions = self.drawn_waiting.iter().map(|w| self.waiting_inbox_row(*w, now_ms));
-        let threads =
-            self.drawn_thread_waits.iter().filter_map(|w| self.thread_inbox_row(*w, now_ms));
+        let scoped = self.scoped_tiles();
+        let kept = |tile: Option<slopty_client::layout::TileRef>| {
+            scoped.as_ref().is_none_or(|s| tile.is_some_and(|t| s.contains(&t)))
+        };
+        let sessions = self
+            .drawn_waiting
+            .iter()
+            .filter(|w| kept(w.tile))
+            .map(|w| self.waiting_inbox_row(*w, now_ms));
+        let threads = self
+            .drawn_thread_waits
+            .iter()
+            .filter(|w| kept(w.tile))
+            .filter_map(|w| self.thread_inbox_row(*w, now_ms));
         let waiting = sessions.chain(threads).collect();
-        (waiting, self.finished_rows(all))
+        let finished = self.finished_rows(all).into_iter().filter(|row| match row.go {
+            Go::Session(session) => kept(self.tile_of_session(session)),
+            Go::Waiting(_) | Go::Thread(..) => true,
+        });
+        (waiting, finished.collect())
     }
 
     /// Keep a command that finished unwatched in the history, as it was when it ended.

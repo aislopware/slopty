@@ -908,7 +908,7 @@ fn an_upload_outlives_its_workers_link(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.upload_on(tile).is_none()), "ended");
     let notice = view.read_with(cx, |v, _| v.toast_text());
-    assert_eq!(notice.as_deref(), Some("Upload failed: the worker went away"));
+    assert_eq!(notice.as_deref(), Some("Upload failed: the machine went away"));
 }
 
 /// A drop on a note sends nothing; a drop on a remote window goes to the worker's staging.
@@ -986,6 +986,7 @@ fn a_browser_item_is_the_worker_s_address_served_at_each_client_s_own_port(
         kind: ItemKind::Browser { url: url.to_owned() },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let mut loaded = Vec::new();
     for offset in [0, 1] {

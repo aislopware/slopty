@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, ItemId, SessionId};
-use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync, NAME_MAX};
+use slopty_proto::items::{FACTS_MAX, Item, ItemKind, ItemOp, ItemSync, NAME_MAX, fact_fits};
 
 use crate::WorkerError;
 
@@ -133,6 +133,7 @@ impl ItemStore {
                 kind: ItemKind::Terminal { session },
                 sleeping: false,
                 name: None,
+                facts: BTreeMap::new(),
             };
             registry.items.insert(item.id, item.clone());
             registry.version = registry.version.saturating_add(1);
@@ -230,7 +231,16 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
         ItemOp::Add(mut item) => {
             check_kind(&item.kind)?;
             item.name = clean_name(item.name)?;
+            item.facts = clean_facts(item.facts)?;
             ItemOp::Add(item)
+        }
+        ItemOp::SetFact { id, key, value } => {
+            let (key, value) = (key.trim().to_owned(), value.map(|v| v.trim().to_owned()));
+            let value = value.filter(|v| !v.is_empty());
+            if value.as_deref().is_some_and(|v| !fact_fits(&key, v)) {
+                return Err(WorkerError::Items("fact out of bounds".to_owned()));
+            }
+            ItemOp::SetFact { id, key, value }
         }
         ItemOp::Rename { id, name } => ItemOp::Rename { id, name: clean_name(name)? },
         ItemOp::SetNote { id, text } => {
@@ -294,6 +304,20 @@ fn clean_name(name: Option<String>) -> Result<Option<String>, WorkerError> {
     Ok(name)
 }
 
+/// An item's facts as they are added, trimmed: blank values dropped, each within
+/// [`fact_fits`], at most [`FACTS_MAX`].
+fn clean_facts(facts: BTreeMap<String, String>) -> Result<BTreeMap<String, String>, WorkerError> {
+    let facts: BTreeMap<String, String> = facts
+        .into_iter()
+        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+        .filter(|(_, v)| !v.is_empty())
+        .collect();
+    if facts.len() > FACTS_MAX || facts.iter().any(|(k, v)| !fact_fits(k, v)) {
+        return Err(WorkerError::Items("facts out of bounds".to_owned()));
+    }
+    Ok(facts)
+}
+
 /// An `http` or `https` address with a host, [`URL_MAX`] bytes at most, and nothing a URL
 /// leaves out (whitespace, control characters): a tile never opens `file:` or `javascript:`.
 fn web_address(url: &str) -> bool {
@@ -323,7 +347,8 @@ fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
         | ItemOp::Rename { id, .. }
         | ItemOp::SetNote { id, .. }
         | ItemOp::SetUrl { id, .. }
-        | ItemOp::SetFolder { id, .. } => {
+        | ItemOp::SetFolder { id, .. }
+        | ItemOp::SetFact { id, .. } => {
             let item = registry.items.get_mut(id).ok_or(WorkerError::NoSuchItem)?;
             item.apply(op).map_err(|e| WorkerError::Items(e.to_string()))?;
         }
@@ -404,6 +429,7 @@ mod tests {
             kind: ItemKind::Note { text: String::new() },
             sleeping: false,
             name: Some(name.to_owned()),
+            facts: BTreeMap::new(),
         };
         let fresh = added(store.apply(ItemOp::Add(note(" plan ")), by).unwrap());
         assert_eq!(fresh.name.as_deref(), Some("plan"));
@@ -422,6 +448,7 @@ mod tests {
             kind: ItemKind::Note { text: "draft".to_owned() },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         };
         let _added = store.apply(ItemOp::Add(note.clone()), mac).unwrap();
         let stale = note;
@@ -470,6 +497,7 @@ mod tests {
             kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         };
         let _added = store.apply(ItemOp::Add(page.clone()), by).unwrap();
         for bad in ["javascript:alert(1)", "file:///etc/passwd", "http://", "http://a b/"] {
@@ -495,6 +523,7 @@ mod tests {
             kind: ItemKind::Folder { path: "/w".to_owned() },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         };
         let _added = store.apply(ItemOp::Add(folder.clone()), by).unwrap();
         let set = |id, path: &str| ItemOp::SetFolder { id, path: path.to_owned() };
@@ -519,7 +548,13 @@ mod tests {
         let file = dir.path().join("items.json");
         let store = ItemStore::open(&file).unwrap();
         let thread = slopty_proto::thread::ThreadId::new();
-        let item = |kind| Item { id: ItemId::new(), kind, sleeping: false, name: None };
+        let item = |kind| Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        };
         let review = item(ItemKind::Review { thread });
         let shown = item(ItemKind::Thread { thread });
         for added in [&review, &shown] {
@@ -550,6 +585,7 @@ mod tests {
             kind: ItemKind::Note { text: String::new() },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         };
         let _added = store.apply(ItemOp::Add(note.clone()), by).unwrap();
         store.apply(set(note.id, "n".repeat(NOTE_MAX)), by).unwrap();
@@ -647,7 +683,13 @@ mod tests {
     fn notes_and_paths_are_bounded() {
         let (_dir, store) = store();
         let by = ClientId::new();
-        let item = |kind: ItemKind| Item { id: ItemId::new(), kind, sleeping: false, name: None };
+        let item = |kind: ItemKind| Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        };
         let note = |text: String| item(ItemKind::Note { text });
         store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX))), by).unwrap();
         let err = store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX + 1))), by).unwrap_err();
@@ -670,6 +712,7 @@ mod tests {
             kind: ItemKind::Browser { url: url.to_owned() },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         };
         let long = format!("http://localhost/{}", "a".repeat(URL_MAX - 17));
         for url in ["http://localhost:5173/", "HTTPS://example.test/a?b#c", &long] {
@@ -689,5 +732,45 @@ mod tests {
             let err = store.apply(ItemOp::Add(page(url)), by).unwrap_err();
             assert!(matches!(&err, WorkerError::Items(m) if m == "bad url"), "{url}: {err:?}");
         }
+    }
+
+    /// A fact is kept, trimmed, through a reload, and broadcast as the worker took it; a blank
+    /// value takes it back, and one out of bounds is refused and changes nothing.
+    #[test]
+    fn an_item_fact_is_kept_and_broadcast() {
+        let (dir, store) = store();
+        let by = ClientId::new();
+        let window = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Window { window: slopty_core::WindowId(4) },
+            sleeping: false,
+            name: None,
+            facts: BTreeMap::new(),
+        };
+        let id = window.id;
+        store.apply(ItemOp::Add(window), by).unwrap();
+        let fact = |key: &str, value: Option<&str>| ItemOp::SetFact {
+            id,
+            key: key.to_owned(),
+            value: value.map(str::to_owned),
+        };
+        let delta = store.apply(fact(" project ", Some("  atlas ")), by).unwrap();
+        let ItemSync::Delta { op: ItemOp::SetFact { key, value, .. }, .. } = delta else {
+            panic!("{delta:?}")
+        };
+        assert_eq!((key.as_str(), value.as_deref()), ("project", Some("atlas")), "trimmed");
+        store.flush();
+        let again = ItemStore::open(&dir.path().join("items.json")).unwrap();
+        let ItemSync::Snapshot { items, .. } = again.snapshot() else { panic!() };
+        let kept = items.iter().find(|i| i.id == id).map(|i| i.facts.clone()).unwrap_or_default();
+        assert_eq!(kept.get("project").map(String::as_str), Some("atlas"), "through a reload");
+        store.apply(fact("project", Some("  ")), by).unwrap();
+        let ItemSync::Snapshot { items, .. } = store.snapshot() else { panic!() };
+        assert!(items.iter().all(|i| i.facts.is_empty()), "a blank value takes it back");
+        let long = "k".repeat(slopty_proto::items::FACT_KEY_MAX + 1);
+        store.apply(fact(&long, Some("v")), by).unwrap_err();
+        let version = store.version();
+        store.apply(fact("two words", Some("v")), by).unwrap_err();
+        assert_eq!(store.version(), version, "a refusal changes nothing");
     }
 }

@@ -124,8 +124,13 @@ fn a_relaunch_shows_each_picked_face_and_knows_where_the_window_stood(cx: &mut T
 fn a_relaunch_puts_a_popped_out_tile_back_in_its_window(cx: &mut TestAppContext) {
     let (dir, path) = layout_file();
     let window = WindowId(7);
-    let item =
-        Item { id: ItemId::new(), kind: ItemKind::Window { window }, sleeping: false, name: None };
+    let item = Item {
+        id: ItemId::new(),
+        kind: ItemKind::Window { window },
+        sleeping: false,
+        name: None,
+        facts: BTreeMap::new(),
+    };
     let tile = TileRef { worker: WorkerKey::new(1), item: item.id };
     let frame = WindowFrame {
         display: None,
@@ -136,7 +141,12 @@ fn a_relaunch_puts_a_popped_out_tile_back_in_its_window(cx: &mut TestAppContext)
         fullscreen: false,
     };
     let mut saved = Layout::new(LayoutConfig::default());
-    saved.open(tile, slopty_client::layout::Placement::Remote);
+    saved.open(
+        tile,
+        slopty_client::layout::Placement::Remote {
+            home: slopty_client::layout::GroupKey::machine(tile.worker),
+        },
+    );
     let mut saved = saved.save();
     saved.popouts.push(slopty_client::layout::SavedPopout { tile, frame });
     std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();

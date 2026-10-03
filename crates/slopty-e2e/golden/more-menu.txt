@@ -36,5 +36,5 @@ MenuItem │ Overview
 MenuItem │ Stream stats
 MenuItem │ Settings
 MenuItem │ Connect to a server
-MenuItem │ Add a worker
-MenuItem │ Workers
+MenuItem │ Add a machine…
+MenuItem │ Machines

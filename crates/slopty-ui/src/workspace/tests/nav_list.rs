@@ -15,6 +15,7 @@ fn notes(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, fake: &Fake, 
         kind: ItemKind::Note { text: "a note\nits second line\n".into() },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let items = std::iter::repeat_with(note).take(n).collect();
     let key = fake.key;
@@ -211,27 +212,34 @@ fn needs_you_lists_a_waiting_tile_scrolled_out_of_view(cx: &mut TestAppContext) 
     assert!(cx.debug_bounds("nav-needs-you").is_none(), "back in view, the section goes");
 }
 
-/// A row under its worker's header never repeats the worker's name: a shell with no directory
-/// yet, or only its home, has nothing to add, and its row is one line. A directory, a command
-/// or an agent's words give it its second.
+/// A row never repeats what its header says: a shell with no directory yet, or only its home,
+/// sits under its worker's name with nothing to add, and one at its project's root under the
+/// project's; their rows are one line. A directory below the root, a branch, a command or an
+/// agent's words give a row its second.
 #[gpui::test]
 fn a_row_with_nothing_to_add_is_one_line(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let bare = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let home = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 2, Some("/Users/me"));
-    let work = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 3, Some("/w/oss/app"));
+    let root = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 3, Some("/w/notes"));
+    let work = nav_rows::in_repo(&view, cx, &studio, 4, ("/w/oss/app", "/w/oss/app/src", "main"));
     let lines = view.read_with(cx, WorkspaceView::navigator_lines);
     let metas: Vec<&str> = lines.iter().map(|(_, meta, _)| meta.as_str()).collect();
     assert!(!metas.contains(&"studio"), "no worker's name under its header: {metas:?}");
     assert!(!metas.contains(&"~"), "a home alone says nothing: {metas:?}");
-    assert!(metas.contains(&"oss/app"), "{metas:?}");
+    assert!(
+        !metas.iter().any(|m| m.contains("notes")),
+        "the project's root is its name: {metas:?}"
+    );
+    assert!(metas.contains(&"src · main"), "{metas:?}");
     let height = |cx: &mut VisualTestContext, t: TileRef| {
         f32::from(cx.debug_bounds(selector("nav-tile", t.item)).expect("drawn").size.height)
     };
     let theme = Theme::default();
-    assert!((height(cx, bare) - crate::kit::Row::One.height(&theme)).abs() < 0.5);
-    assert!((height(cx, home) - crate::kit::Row::One.height(&theme)).abs() < 0.5);
+    for one in [bare, home, root] {
+        assert!((height(cx, one) - crate::kit::Row::One.height(&theme)).abs() < 0.5, "{one:?}");
+    }
     assert!((height(cx, work) - crate::kit::Row::Two.height(&theme)).abs() < 0.5);
     let meta = |id: ItemId| format!("nav-meta-{}", id.as_uuid());
     assert!(cx.debug_bounds(Box::leak(meta(bare.item).into_boxed_str())).is_none());

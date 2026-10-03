@@ -21,13 +21,13 @@ use super::actions::{
     FontSmaller, FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight,
     MoveColumnToFirst, MoveColumnToLast, MoveColumnToWorkspace, MoveColumnToWorkspaceDown,
     MoveColumnToWorkspaceUp, MoveDown, MoveUp, MoveWorkspaceDown, MoveWorkspaceUp, NarrowColumn,
-    NewAgent, NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats,
-    ToggleTabbed, UndoClose, WidenColumn,
+    NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed,
+    UndoClose, WidenColumn,
 };
 use super::toast::ToastKind;
 use super::{
-    AGENT_COMMAND, CLOSED_KEPT, ClosedTile, Field, IDLE_SHELL_KEPT, KeyTarget, Rename, Reshell,
-    UNDO_CLOSE, WorkspaceView,
+    CLOSED_KEPT, ClosedTile, Field, IDLE_SHELL_KEPT, KeyTarget, Rename, Reshell, UNDO_CLOSE,
+    WorkspaceView,
 };
 use crate::file::FileView;
 use crate::palette::PaletteItem;
@@ -59,6 +59,7 @@ impl WorkspaceView {
             return;
         };
         self.note_recent(tile.item);
+        self.navigated_to(tile);
         match self.item(tile).map(|i| i.kind.clone()) {
             Some(ItemKind::Terminal { session }) => {
                 self.finished.remove(&session);
@@ -520,14 +521,6 @@ impl WorkspaceView {
         self.open_session_on(key, cwd, Vec::new(), None, cx);
     }
 
-    /// ⌘⇧T: a terminal running Claude Code. The bare name resolves on the worker through the
-    /// user's login shell.
-    pub fn new_agent(&mut self, _: &NewAgent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some((key, cwd)) = self.new_tile_target() else { return };
-        let command = vec![AGENT_COMMAND.to_owned()];
-        self.open_session_on(key, cwd, command, Some(AGENT_COMMAND.to_owned()), cx);
-    }
-
     /// Where a new tile goes, taking the choice "+" made: the worker, and the focused shell's
     /// directory when it is on that worker.
     fn new_tile_target(&mut self) -> Option<(WorkerKey, Option<String>)> {
@@ -611,8 +604,13 @@ impl WorkspaceView {
     }
 
     fn put_note(&mut self, key: WorkerKey, text: String, cx: &mut Context<Self>) -> ItemId {
-        let item =
-            Item { id: ItemId::new(), kind: ItemKind::Note { text }, sleeping: false, name: None };
+        let item = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text },
+            sleeping: false,
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
         let id = item.id;
         self.propose(key, ItemOp::Add(item), cx);
         id
@@ -695,7 +693,13 @@ impl WorkspaceView {
             CaptureTarget::Window(window) => ItemKind::Window { window },
             CaptureTarget::Display(display) => ItemKind::Display { display },
         };
-        let item = Item { id: ItemId::new(), kind, sleeping: false, name: None };
+        let item = Item {
+            id: ItemId::new(),
+            kind,
+            sleeping: false,
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
         self.titles.insert(item.id, title);
         self.propose(key, ItemOp::Add(item), cx);
     }
@@ -738,6 +742,7 @@ impl WorkspaceView {
                 kind: ItemKind::File { path: path.to_owned() },
                 sleeping: false,
                 name: None,
+                facts: std::collections::BTreeMap::new(),
             };
             let id = item.id;
             tracing::info!(%id, %path, ?line, "open file tile");
@@ -1160,6 +1165,7 @@ impl WorkspaceView {
                     self.propose(rename.tile.worker, op, cx);
                 }
                 Field::Address => self.load_address(rename.tile, &text, cx),
+                Field::Project => self.name_project_as(rename.tile, &text, cx),
             }
         }
         if back {

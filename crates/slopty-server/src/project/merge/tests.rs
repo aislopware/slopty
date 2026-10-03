@@ -41,6 +41,7 @@ fn reviewed(verifier: Option<&str>, review: Option<&str>, log: &mut Vec<Change>)
         orchestrator: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),
         limits: LimitsChange::default(),
         metadata: None,
+        members: Vec::new(),
     };
     log.extend(p.create(new, &running, at(0)).unwrap().1);
     p

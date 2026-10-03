@@ -101,7 +101,8 @@ fn connect(
     fake
 }
 
-/// A Mac worker that says all is well: every grant, this build's version.
+/// A Mac worker that says all is well: every grant, this build's version, Claude Code
+/// installed.
 fn healthy() -> WorkerCaps {
     WorkerCaps {
         os: Os::MacOs,
@@ -109,8 +110,25 @@ fn healthy() -> WorkerCaps {
         can_capture: true,
         can_inject: true,
         version: env!("CARGO_PKG_VERSION").into(),
+        agents: vec![slopty_proto::server::InstalledAgent {
+            kind: AgentKind::ClaudeCode,
+            version: "2.1.0".into(),
+        }],
         ..WorkerCaps::bare(Os::MacOs)
     }
+}
+
+/// The thread starts `fake` was sent, as (agent, folder, prompt).
+fn thread_starts(fake: &mut Fake) -> Vec<(String, String, Option<String>)> {
+    fake.drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(slopty_proto::thread::wire::ThreadRequest::Start {
+                start, ..
+            }) => Some((start.agent.0, start.cwd, start.prompt)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What a worker `name` says on a new link: no home, all well, `sessions` alive.
@@ -154,7 +172,7 @@ fn a_shell_left_for_a_file_is_drawn_without_the_keyboard(cx: &mut TestAppContext
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
-    let shell = opens(&view, cx, &studio, session, studio.me, 1);
+    let shell = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/w"));
     let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.md".to_owned() }, 2);
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
@@ -195,6 +213,7 @@ fn opens_in(
         kind: ItemKind::Terminal { session },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let tile = TileRef { worker: fake.key, item: item.id };
     let key = fake.key;
@@ -214,7 +233,8 @@ fn arrives(
     kind: ItemKind,
     version: u64,
 ) -> TileRef {
-    let item = Item { id: ItemId::new(), kind, sleeping: false, name: None };
+    let item =
+        Item { id: ItemId::new(), kind, sleeping: false, name: None, facts: BTreeMap::new() };
     let tile = TileRef { worker: fake.key, item: item.id };
     let key = fake.key;
     view.update_in(cx, |v, _window, cx| {
@@ -499,16 +519,14 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
         ),
         "{sent:?}"
     );
+    // ⌘⇧T with one machine and one agent goes straight to the folder, the shell's first.
     cx.simulate_keystrokes("cmd-shift-t");
-    let sent = fake.drain();
-    assert!(
-        matches!(
-            sent.as_slice(),
-            [ClientMsg::OpenSession { spec: OpenSession { command, .. }, .. }]
-                if command == &[AGENT_COMMAND.to_owned()]
-        ),
-        "{sent:?}"
-    );
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let sent = thread_starts(&mut fake);
+    let claude = slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned();
+    assert_eq!(sent, [(claude, "/tmp/work".to_owned(), None)], "a Claude Code thread there");
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     assert_eq!(
         column_of(&view, cx, second),
@@ -1412,6 +1430,7 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
             kind: ItemKind::Terminal { session },
             sleeping: false,
             name: None,
+            facts: BTreeMap::new(),
         };
         let items = vec![tile(waiting), tile(working)];
         v.apply_sync(key, ItemSync::Snapshot { version: 1, items }, cx);
@@ -1604,6 +1623,7 @@ mod measure;
 mod menus;
 mod miniatures;
 mod nav_list;
+mod nav_projects;
 mod nav_rows;
 mod niri_keys;
 mod no_workers;
@@ -1611,6 +1631,7 @@ mod overlays;
 mod page_chrome;
 mod page_host;
 mod palette;
+mod pins;
 mod popout;
 mod presence;
 mod projects;

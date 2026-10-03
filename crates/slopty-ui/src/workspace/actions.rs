@@ -67,7 +67,7 @@ actions!(
         ToggleSystemKeys,
         /// Show or hide the navigator: the workers, what runs on them, and what needs you.
         ToggleNavigator,
-        /// Group the navigator's tiles by repository across the workers, or back by worker.
+        /// Group the navigator's tiles by the machine each runs on, or back by project.
         ToggleNavigatorLens,
         /// Move the keyboard focus to the next control, from anywhere, a terminal included.
         FocusNext,
@@ -185,6 +185,9 @@ actions!(
         PageCut,
         /// Select all in the page that holds the keyboard: its field with the caret, or the page.
         PageSelectAll,
+        /// Name the focused tile's project, in a field in its header, and keep it on the server
+        /// with its members, so every device groups it under that name.
+        NameProject,
     ]
 );
 
@@ -199,8 +202,8 @@ pub struct FocusColumn {
     pub index: usize,
 }
 
-/// "New `agent` thread": start a thread of `agent` on `worker`, in `cwd`. The palette offers a
-/// line for each agent the worker can start, as the worker's facts list them.
+/// Start a thread of `agent` on `worker`, in `cwd`: the last step of "New agent…", a line for
+/// each folder it offers.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
 #[action(namespace = workspace, no_json)]
 pub struct StartThread {
@@ -210,6 +213,53 @@ pub struct StartThread {
     pub agent: slopty_proto::thread::AgentId,
     /// In which folder, as the worker spells it (`~` its home).
     pub cwd: String,
+}
+
+/// "New `agent` agent", or an agent picked in "New agent…": the machine to start it on is
+/// asked next, then the folder.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct NewAgentOf {
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+}
+
+/// A machine picked in "New agent…": the folder to start `agent` in on `worker` is asked next.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct NewAgentOn {
+    /// Which agent.
+    pub agent: slopty_proto::thread::AgentId,
+    /// On which machine.
+    pub worker: slopty_client::layout::WorkerKey,
+}
+
+/// "Group the navigator by …": the fact keys it groups the tiles by, the first a tile has
+/// winning ([`slopty_client::groups`]). The palette offers a line for each fact a tile in the
+/// layout has.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct GroupNavigatorBy {
+    /// The chain, `["agent", "machine"]` for "by agent".
+    pub chain: Vec<String>,
+}
+
+/// "Scope to `project`": narrow the navigator, the attention sections, the inbox and the
+/// status bar's counts to one project; `None` lets go of the scope.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct ScopeTo {
+    /// The project's group.
+    pub project: Option<slopty_client::layout::GroupKey>,
+}
+
+/// "Add to `project`": pin the focused tile to a project, so every client groups it there
+/// whatever else it is; `None` takes the pin back.
+#[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct PinToProject {
+    /// The project's group.
+    pub project: Option<slopty_client::layout::GroupKey>,
 }
 
 /// ⌘⌥1…⌘⌥9: focus workspace `index` (0-based; past the last, the trailing empty one).
@@ -257,7 +307,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
     };
     let mut items = vec![
         w("New terminal", IconName::SquareTerminal, Box::new(NewTerminal)),
-        w("New agent", IconName::Sparkles, Box::new(NewAgent)),
+        w("New agent\u{2026}", IconName::Sparkles, Box::new(NewAgent)),
         w("New note", IconName::StickyNote, Box::new(NewNote)),
         w("Add a window or display", IconName::AppWindow, Box::new(AddWindow)),
         w("Open file…", IconName::FileText, Box::new(OpenFile)),
@@ -296,7 +346,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Point other devices at this tile", IconName::Cast, Box::new(PointOthers)),
         w("Find in every tile", IconName::Search, Box::new(FindEverywhere)),
         w(super::project_search::SEARCH_IN_FILES, IconName::FolderSearch, Box::new(SearchInFiles)),
-        w("List workers", IconName::Server, Box::new(ListWorkers)),
+        w("List machines", IconName::Server, Box::new(ListWorkers)),
         w("Forwarded ports", IconName::Cable, Box::new(ListPorts)),
         w("Column to the left", IconName::ArrowLeft, Box::new(FocusColumnLeft)),
         w("Column to the right", IconName::ArrowRight, Box::new(FocusColumnRight)),

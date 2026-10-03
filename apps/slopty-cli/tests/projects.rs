@@ -253,6 +253,7 @@ mod tests {
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -522,6 +523,7 @@ mod tests {
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -636,6 +638,7 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -762,6 +765,7 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -1002,6 +1006,7 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -1306,6 +1311,7 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -1496,6 +1502,7 @@ mod tests {
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             })
             .await;
         assert!(matches!(made, Outcome::Project(_)), "{made:?}");

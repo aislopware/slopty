@@ -73,6 +73,7 @@ async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits: LimitsCha
             orchestrator,
             limits,
             metadata: None,
+            members: Vec::new(),
         })
         .await;
     assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -309,6 +310,7 @@ async fn an_agent_s_start_waits_for_the_person_when_they_ask_to_start_tasks() {
         ask_to_start: Some(on),
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     };
     let by_agent = spawn_as(&hub, agent, ask(false)).await.unwrap();
     refused(&by_agent, ErrorCode::Forbidden);
@@ -489,6 +491,7 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
         ask_to_start: None,
         limits: greedy,
         metadata: None,
+        members: None,
     };
     assert!(refused(&hub.dispatch(set).await, ErrorCode::Limit).contains("the person allows"));
 }
@@ -937,6 +940,7 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
             ask_to_start: None,
             limits: LimitsChange::default(),
             metadata: None,
+            members: None,
         },
     ] {
         let said = hub.dispatch_as(orchestrating, None, verb).await;
@@ -1456,6 +1460,7 @@ async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
         ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     };
     refused(&hub.dispatch_as(as_orchestrator, None, named).await, ErrorCode::Forbidden);
     let unproven = hub.dispatch_as(Speaker::Agent, None, assign(task, persons)).await;
@@ -1494,6 +1499,7 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
             orchestrator: Some(TermRef { worker: linux, session: theirs }),
             limits: LimitsChange::default(),
             metadata: None,
+            members: Vec::new(),
         })
         .await;
     assert!(matches!(made, Outcome::Project(_)), "{made:?}");
@@ -1618,6 +1624,7 @@ async fn a_task_s_agent_splits_work_only_under_its_own_task() {
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
+                members: Vec::new(),
             },
         )
         .await;
@@ -2163,4 +2170,70 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
     let placed = started.assignment.and_then(|a| a.placed).expect("why");
     assert!(!placed.why.contains("agent"), "an agent installed is said by no worker: {placed:?}");
+}
+
+/// A member: what a tile must have to be in the project.
+fn member(pairs: &[(&str, &str)]) -> slopty_proto::project::Matcher {
+    pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+}
+
+/// A project is a name and its members: one with no orchestrator, no repository and no target
+/// is kept, and listed with its members, its values trimmed.
+#[tokio::test]
+async fn a_project_without_an_orchestrator_is_kept_and_listed() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let notes = member(&[("machine", "studio"), ("cwd", " ~/notes ")]);
+    let made = hub
+        .dispatch(Verb::ProjectCreate {
+            project: project(),
+            title: "Notes".to_owned(),
+            members: vec![notes, member(&[("machine", "devbox"), ("cwd", "/w/notes")])],
+            repo: String::new(),
+            target: String::new(),
+            verifier: None,
+            review: None,
+            push: false,
+            ask_to_start: false,
+            orchestrator: None,
+            limits: LimitsChange::default(),
+            metadata: None,
+        })
+        .await;
+    assert!(matches!(made, Outcome::Project(_)), "{made:?}");
+    let Outcome::Projects(listed) = hub.dispatch(Verb::ProjectList).await else { panic!() };
+    let [notes] = listed.as_slice() else { panic!("{listed:?}") };
+    assert_eq!((notes.orchestrator, notes.repo.as_str()), (None, ""));
+    assert_eq!(notes.members.len(), 2);
+    let cwd = notes.members.first().and_then(|m| m.get("cwd")).map(String::as_str);
+    assert_eq!(cwd, Some("~/notes"), "trimmed");
+}
+
+/// Members are set whole and kept when a change leaves them out; an empty member, which would
+/// match nothing, and one named twice are refused and change nothing.
+#[tokio::test]
+async fn members_name_clones_and_folders() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    create(&hub, None).await;
+    let set = |members: Option<Vec<slopty_proto::project::Matcher>>| Verb::ProjectSet {
+        project: project(),
+        members,
+        orchestrator: None,
+        verifier: None,
+        review: None,
+        push: None,
+        ask_to_start: None,
+        limits: LimitsChange::default(),
+        metadata: None,
+    };
+    let api = member(&[("repo", "github.com/aislopware/api")]);
+    let site = member(&[("repo", "github.com/aislopware/site")]);
+    let Outcome::Project(two) = hub.dispatch(set(Some(vec![api.clone(), site]))).await else {
+        panic!("set")
+    };
+    assert_eq!(two.project.members.len(), 2);
+    let Outcome::Project(kept) = hub.dispatch(set(None)).await else { panic!("kept") };
+    assert_eq!(kept.project.members.len(), 2, "left out is left alone");
+    refused(&hub.dispatch(set(Some(vec![member(&[])]))).await, ErrorCode::Invalid);
+    refused(&hub.dispatch(set(Some(vec![api.clone(), api]))).await, ErrorCode::Invalid);
+    assert_eq!(status(&hub).await.project.members.len(), 2, "a refusal changes nothing");
 }

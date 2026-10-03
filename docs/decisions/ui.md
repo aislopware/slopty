@@ -3280,7 +3280,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and "Needs you" is left to head the section.
   - **An agent at rest** says what it last said (the face's summary, else the hook's detail),
     with a single word quoted (“done”), and no state word at all: "Idle · done" read as two
-    states. Its age runs from the hook's `since_ms`, when it came to rest, not from the shell's
+    states (amended 2026-10-04 by "A resting agent's lone word is left to its mark"). Its age runs from the hook's `since_ms`, when it came to rest, not from the shell's
     start.
   - **One clock.** The navigator's ticking time is whole seconds through `kit::duration`, from
     "1 s", and the inbox's finished row takes `kit::duration` too.
@@ -3367,7 +3367,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 
 - ✅ **Design critique round three, wave B: settings** (2026-09-28,
   `.research/design-critique-round3-2026-09-28.md` §2 #12, #13).
-  - **A row holds one line.** The line on what a key does is cut to one line with an
+  - **A row holds one line** (superseded 2026-10-04 by `settings.md`, "A description wraps to
+    two lines and is never cut"). The line on what a key does is cut to one line with an
     ellipsis, and the whole text is that line's hint. The wells for a colour, a host and a
     font are 140 pt, down from 184, and a segmented choice keeps its own width. The colour rows
     had wrapped to two lines, so the rows ran 40, 56 and 48 pt and the rhythm broke. System
@@ -4251,7 +4252,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     only the server's tree hears it today, so showing it at once needs a field on the wire.
   - Not taken: shortcuts inside controls, because keybindings live in the palette (CLAUDE.md),
     and plan usage in the bar, which needs an undocumented endpoint and the Keychain
-    credential. Both are parked for the user.
+    credential. Both are parked for the user (plan usage superseded 2026-10-04 by "Plan usage
+    in the status bar, from what the agents publish").
   - Tests: `the_mode_chip_takes_the_freshest_word`, `a_fold_names_what_its_work_touched`,
     `the_status_bar_counts_every_workers_agents`,
     `the_status_bar_reads_the_focused_tile_and_its_link`, `the_readouts_say_what_they_count`,
@@ -4259,7 +4261,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`the_surfaces_climb_bars_panel_content` and the derived-surfaces sweep, now through
     `Hairline::over`).
 
-- ✅ **The navigator groups by worker, or by repository on request** (2026-10-01). Slopty
+- ✅ **The navigator groups by worker, or by repository on request** (2026-10-01; superseded
+  2026-10-03 by "The navigator groups by project; the machine is a facet"). Slopty
   reaches many hosts first, so the navigator lists each worker's tiles under it by default.
   The palette's "Group the navigator by repository" swaps the workers for repositories, and
   the same line reads "Group the navigator by worker" to go back. It is a palette line and
@@ -4489,7 +4492,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   became "Open file…", because like "Open folder…" it asks for more first. Test:
   `workspace::tests::no_workers::with_no_worker_the_empty_workspace_offers_to_add_one`.
 
-- ✅ **The focused tile carries a line while there is more than one** (2026-10-01). The
+- ✅ **The focused tile carries a line while there is more than one** (2026-10-01; its tone
+  amended 2026-10-04 by "Focus is a line in the text's tone"). The
   focused header was told only by its surface and its title's weight: 255 against 249 in the
   light golden and 23 against 19 in dark, which read as faint once tiles sat side by side.
   The focused header, or a tabbed column's shown tab, now carries a 2 pt line along its top
@@ -4505,7 +4509,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The words.** *Needs you* in `warn`, *Failed* in `error`, *Working* and *Waiting* in
     `text_muted`, and a finish not yet seen as the accent dot with no word. Rest shows
     nothing, only the kind's glyph. `Status::Running` reads "Waiting", and its calm mark is a
-    dashed ring that steps once a second; *Working* keeps its stepped ring on the shared clock.
+    dashed ring that steps once a second (amended 2026-10-04 by "Waiting holds still"); *Working* keeps its stepped ring on the shared clock.
   - **Busy rows recede.** A navigator row at work is drawn at `alpha::STRONG` until it is
     hovered or selected, with its title at the regular weight, so a row that needs the person
     leads at full ink (`navigator::row_strength`). Increase Contrast draws it whole.
@@ -4820,8 +4824,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is pressed through an open popover, and the bar comes up for a notice when it would be
     hidden (no worker yet, the keys' bar up).
   - **The machine is named where several meet.** A workspace is the person's grouping and is
-    named after its first shell's checkout; it is never grouped by repository behind their
-    back. When it holds tiles on more than one worker, the breadcrumb names the focused
+    named after its first shell's checkout (since 2026-10-03, after the project most of its
+    tiles are in); it is never grouped by repository behind their back. When it holds tiles on more than one worker, the breadcrumb names the focused
     tile's worker after the workspace (`atlas ▾ / devbox / main`), so three machines'
     checkouts of one repository no longer read as one machine.
   - **The overview shows that a strip goes on.** A workspace whose block runs past the
@@ -5075,7 +5079,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   another app is in front. Test:
   `workspace::tests::desktop::a_window_of_its_own_takes_the_shortcuts_while_it_is_in_front`.
 
-- ✅ **The repository lens groups clones by what they are** (2026-10-03, readiness C13). The
+- ✅ **The repository lens groups clones by what they are** (2026-10-03, readiness C13;
+  `repo_groups` folded into `slopty_client::groups` the same day, see "The navigator groups by
+  project; the machine is a facet"). The
   navigator's "By repository" lens goes through `repo_groups::group`: each tile's clone is its
   path and the identity its worker read (`SessionSummary::repo_id`; a file's or a folder's,
   the shell's whose repository holds it), so one repository cloned at two paths on two
@@ -5186,3 +5192,227 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `thread-work-open`, `inbox`, `inbox-dark`, `agent-needs-you`,
     `agent-needs-you-navigator`, `project-live-lanes` and `project-live-tree` (.txt: the
     working pill gone).
+
+- ✅ **The navigator groups by project; the machine is a facet** (2026-10-03, the
+  organisation study `.research/organization-2026-10-04.md` §6–7). The person works on a few
+  projects spread over many machines, so a machine is where a tile runs, not what it is about.
+  Before, the navigator listed each worker's tiles under it, and a tile from elsewhere went to
+  the workspace holding that worker's tiles. So one project's agents on three machines sat in
+  three places, and a workspace was named after a machine.
+  - **One open model.** Each tile yields a map of facts (`slopty_client::groups::Facts`, key
+    to values): `machine`, `kind`, `os`, `agent`, `cwd`, `branch`, `repo` (the clone's origin,
+    its first commit and its place), `folder` (a shell's directory, not its home), `project`
+    (the server board its session works for, or its thread's own `project` fact) and every
+    thread fact as `facts.<key>`. A grouping is a chain of fact keys, by default `project`,
+    `repo`, `folder`, `machine`; a tile joins the group of the first fact on the chain it has.
+    Tiles that share any value of that fact are one group, transitively, so one repository's
+    clones on three machines are one project, and a clone whose identity has not come yet
+    joins the others at its place. A value names a place on one machine
+    (`at:<worker>:<path>`), so two folders of one name on two machines stay two until a
+    person names them one. A group's key is its fact and its strongest value (an origin over a
+    first commit over a place) and does not depend on the order of the tiles. The server's
+    orchestrated projects claim the clones of the repository they work in. No grouping or fact
+    is a closed set: any key a tile has is a grouping.
+  - **The navigator.** The filter; *Needs you*, *To review*, *Working*; *Projects*, a header
+    per project with its glyph, its name (two of one name say whose or where, as before), its
+    rollup when folded and, on the right, the machines it spans as a quiet word (`devbox,
+    studio`, or `3 machines`) once more than one worker is known; then *Machines* (named
+    *Workers* until "The person's word is machine"), a header per machine with its health and
+    under it only what has no project (its windows, displays, notes, pages and home-directory
+    shells). A row's second line says its machine only when its
+    project spans several, then what it does, its directory below the project's root and its
+    branch. An attention row says `project · machine`. The palette's "Group the navigator by
+    machine" (⌘-less, the `toggle_navigator_lens` command) brings back one block per worker;
+    "Group the navigator by <fact>" appears for every fact a tile has, and "Group the navigator
+    by project" goes back. The chain is kept with the device's layout
+    (`layout::Navigator::group_by`).
+  - **The filter takes facets.** `machine:devbox`, `project:atlas`, `agent:codex`,
+    `branch:main`, `is:waiting` (also `working`, `running`, `failed`, `unseen`) and any fact
+    key, beside free text.
+  - **Scope.** "Scope to <project>" in the palette narrows the navigator, its attention
+    sections, the inbox and the status bar's agent counts to one project. It shows as a token
+    leading the filter field, and Esc lets it go. It is a filter, not a mode: nothing moves.
+    The bell and the Dock badge stay whole-fleet, so nothing waiting is ever hidden by a scope.
+  - **Placement.** A tile from elsewhere joins the workspace that last held a tile of its
+    project; one with no project (a window, a note) the workspace that last held a tile of its
+    machine; else it fills an empty active workspace, else it gets one above the trailing
+    empty one. A tile already placed never moves when its project changes: a shell that `cd`s
+    into another clone changes row, not place. Each tile keeps the project it was last said to
+    be in (`Tile::home`), refreshed before each placement.
+  - **Names.** An unnamed workspace is named after the project most of its tiles are in, a
+    project before a machine, a tie to the one first in the strip (the study said the focused
+    tile's; the strip's order keeps the name still while the focus moves).
+  - **Breadcrumb and header.** When the focused tile's project spans several machines, the
+    breadcrumb names its machine (`atlas ▾ / on devbox ▾ / main`), and that segment's menu
+    lists the project's clones by machine. A tile's header names its worker only where its
+    workspace holds tiles of more than one, so a one-machine project never pays for the chip.
+  - **The rail** (navigator hidden) keeps a glyph per project with its rollup, then a glyph for
+    a worker only while it is not well or something of its own waits. It scrolls.
+  - **The palette** lists projects first ("atlas", its state, the machines it spans and what it
+    holds: "3 agents", else "4 tiles"), ranked by how often and how lately the focus went to
+    each on this device, as zoxide ranks directories (`groups::Frecency`, saved with the
+    layout: a visit counts when the focus comes to a tile of another project than the last).
+    ↩ goes to the workspace that last held it.
+  - **Worked out once a frame.** The navigator, the rail, the breadcrumb and every
+    workspace's name share one grouping while the window draws (`grouping::FrameProjects`),
+    let go as the draw's update ends, so an action never reads a frame-old grouping.
+    MEASUREMENTS "the navigator by project".
+  - **Pins and names.** The palette offers, for the focused tile, "Add to <project>" for each
+    project it is not in and "Take out of <project>" for the one it is pinned to. A pin is the
+    item's `project` fact (`ItemOp::SetFact`), holding the key of the group it joins, so it is
+    the same on every device and stands in for every link of the default chain. "Name this
+    project…" opens a field in the tile's header with the project's name. ↩ keeps the project
+    on the server (`ProjectCreate`, with no orchestrator and no repository) under the name
+    typed. Its members are the values its tiles are known by, a place spelled as
+    `{machine: <name>, cwd: <path>}` so a person or an agent reads it. A declared project's
+    members claim the tiles they match (a machine by its worker's name, `~` spelled out).
+  - **Declared projects in the navigator.** Each heads its group with a board row ("Board",
+    "1 needs you · 3 of 5 merged", its most urgent lane's glyph). A project none of whose
+    tiles is here is still listed, by its board row alone. A click shows the board in its
+    orchestrator's tile, opening that terminal in a tile on its worker when it has none here.
+  - **Threads with no tile.** A thread at work (any rung but idle) with no tile here, nor its
+    terminal one, lists after its project's tiles, set back as a row at work is. The project
+    is the one it names, else a declared project's claim on its facts, else a group whose
+    values it shares, else one of its own. A click opens its tile. A thread at rest with no
+    tile is history, found by search, not listed.
+  - **On a phone,** the drawer is the same list: the workspaces, then *Projects*, then
+    *Machines*. A notification's thread identifier is its project's key (`Note::thread`), so
+    one project's notes stack together in Notification Centre.
+  - Kept for later: the workers' recent places for the empty state. Kept as they were: the
+    hosts popover, and the status bar keeping the focused tile's machine.
+  - Tests: `slopty-client` `groups::tests` (the chain, clones across machines, two folders of
+    one name, claims, any fact a grouping, keys independent of tile order over every order of
+    six, frecency), `layout::tests::a_remote_tile_joins_the_workspace_of_its_project`,
+    `a_project_with_no_workspace_fills_an_empty_one_or_gets_one_above_the_trailing`,
+    `a_placed_tile_never_moves_when_its_project_changes`,
+    `a_tile_with_no_project_joins_its_machines_work`,
+    `the_navigators_grouping_is_saved_and_restored`; ui `nav_rows::`
+    `a_project_header_says_the_machines_it_spans`,
+    `a_row_names_its_machine_only_where_its_project_spans_several`,
+    `group_by_machine_brings_back_the_workers_blocks`, `any_fact_a_tile_has_is_a_grouping`,
+    `the_filter_takes_a_facet`, `an_away_worker_shows_on_its_projects_rows_and_in_workers`,
+    `the_rail_keeps_the_projects_in_view`, `the_rail_scrolls_its_projects`,
+    `a_shell_that_changes_checkout_moves_row_not_tile`; `pins::`
+    `adding_a_tile_to_a_project_pins_it_there`,
+    `naming_a_project_keeps_it_on_the_server_with_its_members`,
+    `a_projects_members_claim_the_tiles_they_name`; `nav_projects::`
+    `a_projects_board_heads_its_group`,
+    `a_project_whose_orchestrator_has_no_tile_here_still_lists_and_opens`,
+    `a_thread_with_no_tile_lists_under_its_project_and_opens_its_tile`,
+    `on_a_phone_the_drawer_lists_the_projects_then_the_workers`; `attention::`
+    `notes_of_one_project_share_a_thread`; `palette::`
+    `a_project_line_goes_to_its_workspace`, `projects_rank_by_frecency`,
+    `a_scope_filters_the_navigator_the_inbox_and_the_counts_alike`; `tab_strip::`
+    `a_workspace_is_named_after_the_project_most_of_its_tiles_share`; `bars::`
+    `the_header_chip_shows_only_where_the_workspace_spans_machines`.
+
+- ✅ **The person's word is machine** (2026-10-04, `.research/rulings-2026-10-04.md` §8). The
+  person says "machine", Tailscale's admin page says "Machines", and no remote-access or agent
+  product calls a computer a worker; the chrome mixed both. Everything the person reads says
+  machine: the navigator's and the palette's section "Machines", the hosts popover, the status
+  bar's count ("2 machines, 1 not connected"), "Add a machine", "No machines yet", "List
+  machines", and every notice ("The machine is away; nothing was saved"). Code identifiers, the
+  wire, the decision files, the `slopty-worker` process and the `slopty worker` CLI keep
+  "worker" (this amends "The worker is called a worker everywhere" in `topology.md` for the UI
+  only). The update pill says "Updating Slopty on the machine", since the machine itself is not
+  what updates. A lint keeps it: `kit::tests::chrome_says_machine_not_worker` scans the string
+  literals of `workspace/**`, `workspace.rs`, `palette.rs` and `keymap.rs` (not their tests, log
+  lines, element ids or `Debug` names) for "worker" as a word of its own. Left to their owners:
+  `slopty-app` (`ssh.rs`, `this_mac.rs`, `finder.rs`, its menus' "Add a worker"),
+  `apps/slopty`'s menu bar, `project/view.rs`'s empty board ("No workers yet"), and the words
+  a worker sends itself ("the worker finds no host named …"). Tests: the lint, and the moved
+  `bars::the_workers_count_opens_the_hosts_and_their_actions`,
+  `chrome::the_more_menu_groups_its_rows_into_sections`,
+  `palette::the_palette_lists_tiles_then_workers_then_commands`, `nav_rows::` headings.
+
+- ✅ **Focus is a line in the text's tone** (2026-10-04, rulings §4b). Across a strip of five
+  the focused title's tone alone was too faint to find, and the accent line before it spent
+  green on something that is not done. While two or more tiles are in view, the focused
+  header (or a tabbed column's shown tab) carries a 2 pt line (`stroke::MARK`) along its top in
+  the **text** tone at `alpha::STRONG`, whole under Increase Contrast (`Theme::set_back`); the
+  title keeps the medium weight in `text`. No ring, no frame, no dimming of the others; a lone
+  tile and the overview draw none. The overview's active workspace keeps its elevation and
+  takes a 1.5 pt ring of `text` at the new `alpha::RING` (0.5) in place of the accent. This
+  amends the 2026-10-02 rule that focus is the title's tone alone. Tests:
+  `focus_line::the_focused_header_carries_a_text_line_while_two_tiles_show`,
+  `focus_line::under_increase_contrast_the_focus_line_is_whole`,
+  `strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one` (the ring in the
+  text's tone, and no accent edge; kept under its name, which the entries above cite),
+  `tiles::the_overview_words_start_on_the_panes_glyphs`.
+
+- ✅ **Waiting holds still** (2026-10-04, rulings §4d). A mark that moves says work is in
+  progress, and Waiting (an agent paused on its own background work, a long command) lasts
+  minutes, past WCAG's five seconds of motion with no pause. `Status::Running` is a still
+  dashed ring (`CircleDashed` in `text_muted`), drawn as an icon; Working is the only mark that
+  moves, and it stands still under Reduce Motion. The calm lane of the spin clock went with it:
+  how long a command has run is the readouts' clock's to count (`WorkspaceView::keep_time`).
+  Test: `icons::tests::waiting_holds_still` (a Waiting mark wakes its view for nothing over
+  three seconds).
+
+- ✅ **A resting agent's lone word is left to its mark** (2026-10-04, rulings §4e). A row at
+  rest shows the agent's last words only when they say more than a state, more than one word;
+  a single word ("done") is left out, because the row's mark already says it, and nothing is
+  quoted. One ambient place per fact. Tests:
+  `navigator::tests::a_resting_agents_single_word_is_left_to_its_mark`,
+  `nav_rows::a_resting_agent_reads_its_last_word_and_its_age`.
+
+- ✅ **"New agent…" is the one start** (2026-10-04, rulings §4f). One agent had two starts in
+  two words ("New agent" ran a bare `claude` in a terminal; "New … thread" lines came only from
+  a linked server). Every agent-first tool has one generic start and asks the agent after.
+  - **⌘⇧T, "New agent…",** asks in the palette which agent, then on which machine, then in
+    which folder, and starts that agent's thread, the GUI face; Claude Code's TUI runs under it
+    and is one action away, as for every observed thread (`workspace/agent_start.rs`). Each step
+    lists the last choice first, so ↩ ↩ ↩ starts the last combination again, and a step with one
+    choice is passed over. A machine the "+" menu chose first is not asked again.
+  - **What a machine can start** comes from its own link (the agents its capabilities found
+    installed) and from the server's facts, so a machine reached with no server still offers
+    Claude Code. Its link names Claude Code alone until `AgentKind` grows (rulings §3, lane T).
+  - **The folders** are the focused shell's on that machine, the last start's there, where its
+    shells stand (most recent first), then its home.
+  - **Per-agent lines skip the agent step**: the palette's "New Claude Code agent", "New Codex
+    agent" and so on, one per agent any machine can start. The noun is "agent" in every start.
+  - **No raw Claude terminal start.** `AGENT_COMMAND` is gone; the empty workspace's question
+    and a folder's "agent here" start a thread too (the question with its text as the first
+    prompt). A `claude` typed into a shell is still wired, as before.
+  - Tests: `thread_start::new_agent_opens_the_picker_with_the_last_choices`,
+    `per_agent_lines_skip_the_agent_step`, `a_start_with_no_server_lists_each_machines_agents`,
+    `with_no_agent_anywhere_new_agent_says_so`, `the_plus_menus_machine_is_not_asked_again`,
+    `a_started_thread_opens_as_a_tile_and_a_refusal_is_said`,
+    `an_open_palette_takes_the_agents_as_they_arrive`;
+    `palette::the_empty_workspace_asks_what_an_agent_should_do`,
+    `palette::the_questions_chips_choose_where_the_agent_starts`.
+
+- ✅ **Plan usage in the status bar, from what the agents publish** (2026-10-04, rulings §6).
+  MonoCode reads an undocumented endpoint with Claude Code's Keychain token; Slopty never reads
+  a credential. The plan's windows already arrive on every thread row (`ThreadRow::meters`,
+  `Limit`): Claude Code's status line `rate_limits` and Codex's `account/rateLimits`, mapped by
+  the agent adapters. `slopty_client::meters::PlanMeters` keeps the freshest reading per machine
+  and agent from the thread tables. The bar shows the focused tile's machine's windows for its
+  agent, else the freshest reading there, as `5h 23% · 7d 41%`, in `warn` from 80 %, a spent
+  window with when it comes back ("5h 100% until 14:00"), and the reading's age once it is past
+  a quarter of an hour. A window past its reset is dropped; no reading, no meter. A click lists
+  every reading by machine and agent with its age. Nothing is polled outside the agents' own
+  doors, so a Claude reading after a long idle is stale until the next turn, and says its age.
+  This supersedes "plan usage in the bar … parked for the user". Tests: `slopty-client`
+  `meters::tests::a_reading_past_its_reset_is_dropped`, `no_reading_shows_no_meter`,
+  `the_focused_agents_reading_leads_else_the_freshest`, `a_windows_name_is_said_short`; ui
+  `bars::the_status_bar_shows_the_focused_machines_plan_windows`,
+  `statusbar::tests::a_plan_window_far_used_warns_and_a_spent_one_says_when_it_comes_back`.
+
+- ✅ **The thread says what it could not do, and how to go on** (2026-10-04).
+  - **A refusal line** in the activity bar, above the queue: an alert icon in `error`, the words
+    ("Couldn't stop: no turn is running"), and a dismiss button. In review, a refused Keep or
+    Revert is said in `error` on its file or hunk, beside the buttons, until the next try.
+  - **A notice strip** at the composer's head, in `text_secondary` with an info icon (a spinner
+    while a send waits on an upload). It is for what the composer itself turned down or waits
+    on, and goes once the draft changes.
+  - **The exited strip.** It takes the composer's place where a message would reach no agent
+    (Claude Code, Codex): "{agent} exited" with a secondary Resume, "Resuming {agent}…" with a
+    spinner while the start is on its way. Where the next message starts the agent again (pi,
+    ACP), the composer stays and a quiet line says so.
+  - **"Deny…"** is a ghost button after the plain deny. It swaps the answers for a small field
+    ("Why, for the agent (optional)") with Cancel and Deny; ↵ denies.
+  - **Send's secondary click queues.** A right click on Mac, or a long press on touch, sends
+    behind the turn where the agent queues. It is the pointer's form of ⌘↵, so no button is added.
+  - **"Answer in Codex"** replaces "Answer in the terminal" for an agent whose own TUI joins the
+    thread, and brings that terminal into view once it runs.

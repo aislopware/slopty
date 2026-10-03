@@ -37,9 +37,9 @@ Heading │ Tiles
 ListBoxOption │ Terminal 2
 ListBoxOption │ Terminal ~
 ListBoxOption │ Release 1 of 3 done
-Heading │ Workers
+Heading │ Machines
 ListBoxOption │ e2e-worker
 Heading │ Commands
 ListBoxOption │ New terminal ⌘T
-ListBoxOption │ New agent ⇧⌘T
+ListBoxOption │ New agent… ⇧⌘T
 Label │ ↑↓ Move · Esc Close · ↩ Go to

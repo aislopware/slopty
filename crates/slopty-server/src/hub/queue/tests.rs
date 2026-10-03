@@ -128,6 +128,7 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
         ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
+        members: None,
     };
     assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
     let task = new_task(hub, Placement::default()).await;

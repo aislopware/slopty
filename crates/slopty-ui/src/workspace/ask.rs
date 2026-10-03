@@ -1,7 +1,7 @@
 //! The empty workspace asks for work: a composer-shaped field, "What should an agent do?", with
-//! the worker and the directory the agent starts in as chips under it. ↵ starts the agent there
-//! with what was typed as its first prompt, its tile titled by the prompt's first line; ↵ on
-//! nothing starts it bare, as ⌘⇧T does.
+//! the machine and the directory the agent starts in as chips under it. ↵ starts the agent's
+//! thread there (the last agent started on that machine, else the first it offers) with what
+//! was typed as its first prompt; ↵ on nothing starts it bare.
 //!
 //! The field takes the keyboard once as the page shows, while the workspace itself holds it, so
 //! a person landing on an empty workspace can type the task at once; not while a tile just
@@ -16,8 +16,8 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::layout::WorkerKey;
 
+use super::WorkspaceView;
 use super::strip::RecentPlace;
-use super::{AGENT_COMMAND, WorkspaceView};
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::IconName;
@@ -146,8 +146,8 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// ↵ in the field: the agent on the chosen worker, in the chosen directory, with what was
-    /// typed as its first prompt and its tile's title.
+    /// ↵ in the field: the agent's thread on the chosen machine, in the chosen directory, with
+    /// what was typed as its first prompt.
     pub(super) fn ask_agent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.ask_worker() else { return };
         let Some(input) = self.ask.input.clone() else { return };
@@ -156,14 +156,14 @@ impl WorkspaceView {
             self.show_notice(text, cx);
             return;
         }
+        let Some(agent) = self.agent_for(key) else {
+            self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
+            return;
+        };
         let prompt = input.read(cx).value().trim().to_owned();
-        let title = prompt.lines().next().map_or(AGENT_COMMAND, str::trim).to_owned();
-        let mut command = vec![AGENT_COMMAND.to_owned()];
-        if !prompt.is_empty() {
-            command.push(prompt);
-        }
-        let cwd = self.ask_cwd(key);
-        self.open_session_on(key, cwd, command, Some(title), cx);
+        let prompt = (!prompt.is_empty()).then_some(prompt);
+        let cwd = self.ask_cwd(key).unwrap_or_else(|| "~".to_owned());
+        self.start_thread(key, agent, cwd, prompt, cx);
         input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         self.ask.on = None;
         self.ask.cwd = Dir::Latest;

@@ -29,6 +29,7 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, canvas,
     div, px,
 };
+use slopty_client::groups::Group;
 use slopty_client::layout::{Column, Tile, WorkerKey};
 use slopty_theme::Typography;
 
@@ -130,33 +131,31 @@ impl WorkspaceView {
         self.workspace_name_at(self.layout.active_workspace())
     }
 
-    /// Workspace `ix`'s name: the one given, else where its first shell is (the repository,
-    /// else the directory), else the worker its first tile is on. Never a number, nor a tile's
+    /// Workspace `ix`'s name: the one given, else the project most of its tiles are in (a tie
+    /// going to the one first in the strip, so the name holds as the focus moves), which is the
+    /// worker's name where that is all its tiles have in common. Never a number, nor a tile's
     /// title, which follows every command run and every page loaded. One with nothing on it is
     /// new.
     pub(super) fn workspace_name_at(&self, ix: usize) -> String {
         let Some(ws) = self.layout.workspaces().get(ix) else { return NEW_WORKSPACE.to_owned() };
-        if let Some(name) = ws.name().map(str::to_owned).or_else(|| self.workspace_place(ws)) {
-            return name;
+        if let Some(name) = ws.name() {
+            return name.to_owned();
         }
-        ws.columns()
-            .iter()
-            .flat_map(Column::tiles)
-            .map(Tile::tile)
-            .next()
-            .map_or_else(|| NEW_WORKSPACE.to_owned(), |first| self.worker_name(first.worker))
-    }
-
-    /// Where the first shell of `ws` that has said so is: its repository's name, else its
-    /// directory's, unless that is the home directory.
-    fn workspace_place(&self, ws: &slopty_client::layout::Workspace) -> Option<String> {
-        ws.columns().iter().flat_map(Column::tiles).map(Tile::tile).find_map(|tile| {
-            let slopty_proto::items::ItemKind::Terminal { session } = self.item(tile)?.kind else {
-                return None;
-            };
-            let (home, summary) = self.session_on(session)?;
-            super::tile::place_name(summary.cwd.as_deref()?, summary.repo.as_deref(), home)
-        })
+        let projects = self.project_groups();
+        // The project of the most tiles; a project before a machine, which only says where.
+        let mut counts: Vec<(&Group, usize)> = Vec::new();
+        for tile in ws.columns().iter().flat_map(Column::tiles).map(Tile::tile) {
+            let Some(group) = projects.group_of(tile) else { continue };
+            match counts.iter_mut().find(|(g, _)| g.key == group.key) {
+                Some((_, n)) => *n = n.saturating_add(1),
+                None => counts.push((group, 1)),
+            }
+        }
+        let best = counts.iter().enumerate().max_by_key(|(order, (g, n))| {
+            (g.key.worker().is_none(), *n, std::cmp::Reverse(*order))
+        });
+        best.map(|(_, (group, _))| *group)
+            .map_or_else(|| NEW_WORKSPACE.to_owned(), |group| self.group_name(group))
     }
 
     /// The workspaces the bar has a tab for: those holding something or named, and the
@@ -438,7 +437,7 @@ impl WorkspaceView {
             entry(MenuGroup::Tiles, "New terminal", Some(&NewTerminal), |this, w, cx| {
                 this.new_terminal(&NewTerminal, w, cx);
             }),
-            entry(MenuGroup::Tiles, "New agent", Some(&NewAgent), |this, w, cx| {
+            entry(MenuGroup::Tiles, "New agent\u{2026}", Some(&NewAgent), |this, w, cx| {
                 this.new_agent(&NewAgent, w, cx);
             }),
             entry(MenuGroup::Tiles, "Add a window or display", Some(&AddWindow), |this, w, cx| {
@@ -525,7 +524,7 @@ impl WorkspaceView {
                     let entity = entity.clone();
                     entries.push(MenuEntry {
                         group: MenuGroup::Connections,
-                        label: "Workers".into(),
+                        label: "Machines".into(),
                         detail: SharedString::default(),
                         run: Rc::new(move |_window, cx| {
                             let _gone = entity.update(cx, Self::toggle_hosts);

@@ -78,7 +78,8 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
     let fake = connect(&view, cx, 1, "studio");
     let shell =
         opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/Users/w/src/slopty"));
-    let file = arrives(&view, cx, &fake, ItemKind::File { path: "/w/src/main.rs".into() }, 2);
+    let main = "/Users/w/src/slopty/src/main.rs".to_owned();
+    let file = arrives(&view, cx, &fake, ItemKind::File { path: main }, 2);
     let tasks = "# Release\n- [x] tag\n- [ ] ship\n".to_owned();
     let release = arrives(&view, cx, &fake, ItemKind::Note { text: tasks }, 3);
     let nodes = tree(cx);
@@ -114,6 +115,7 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
         kind: ItemKind::Terminal { session },
         sleeping: false,
         name: Some("release notes".to_owned()),
+        facts: BTreeMap::new(),
     };
     let (here, nowhere) = (SessionId::new(), SessionId::new());
     let (placed, bare) = (named(here), named(nowhere));
@@ -138,15 +140,17 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
     assert!(place > 0.0 && place < 100.0, "the place gave way: {place}");
 }
 
-/// The worker's name is worth a chip only when there is another worker it could be.
+/// The worker's name is worth a chip only when the workspace holds another worker's tile it
+/// could be confused with; the chip says the name.
 #[gpui::test]
 fn the_worker_chip_shows_only_beside_another_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let laptop = connect(&view, cx, 2, "laptop");
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("worker", shell.item)).is_none(), "one worker: no chip");
-    let _laptop = connect(&view, cx, 2, "laptop");
+    assert!(cx.debug_bounds(selector("worker", shell.item)).is_none(), "connected is not beside");
+    let _beside = opens(&view, cx, &laptop, SessionId::new(), laptop.me, 1);
     let nodes = tree(cx);
     assert!(cx.debug_bounds(selector("worker", shell.item)).is_some(), "two: the chip");
     assert!(nodes.iter().any(|n| n.is("Label", Some("studio"))), "{nodes:#?}");
@@ -168,8 +172,9 @@ fn quads_at(cx: &mut VisualTestContext, bounds: Bounds<Pixels>) -> Vec<gpui::Qua
 }
 
 /// Panes sit flush: no tile is rounded or framed, the focused one included. Every header is
-/// its body's surface with nothing under it, focused or not: focus is the title's tone
-/// (`focus_line::the_headers_sit_on_their_content_and_focus_is_the_titles_tone`).
+/// its body's surface with nothing under it, focused or not: focus is the title's tone and a
+/// line along the header's top
+/// (`focus_line::the_focused_header_carries_a_text_line_while_two_tiles_show`).
 #[gpui::test]
 fn tiles_have_no_frame_and_focus_is_told_by_the_header(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -536,6 +541,7 @@ fn an_exited_shell_offers_restart_and_close(cx: &mut TestAppContext) {
         kind: ItemKind::Terminal { session },
         sleeping: false,
         name: None,
+        facts: BTreeMap::new(),
     };
     let tile = TileRef { worker: fake.key, item: item.id };
     let (key, me) = (fake.key, fake.me);
@@ -914,7 +920,7 @@ fn a_note_keeps_its_name_and_counts_its_tasks(cx: &mut TestAppContext) {
 
 /// In the overview the words line up with the panes: a workspace's name and the "New
 /// workspace" glyph start on the edge of the glyphs the pane covers lead with, and the active
-/// block's ring is the full accent.
+/// block's ring is in the text's tone, not the accent.
 #[gpui::test]
 fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -932,9 +938,10 @@ fn the_overview_words_start_on_the_panes_glyphs(cx: &mut TestAppContext) {
     let new = cx.debug_bounds("overview-new-workspace").expect("the place for the next");
     let pad = Theme::default().spacing.sm;
     assert!((f32::from(new.left()) + pad - edge).abs() < 0.5, "its glyph on {edge}: {new:?}");
-    let accent = crate::colors::hsla(Theme::default().surfaces.accent);
+    let theme = Theme::default();
+    let ring = crate::colors::hsla_alpha(theme.surfaces.text, alpha::RING);
     let quads = cx.update(|window, _| window.painted_quads());
-    assert!(quads.iter().any(|q| q.border_color == accent), "the ring in the full accent");
+    assert!(quads.iter().any(|q| q.border_color == ring), "the ring in the text's tone");
 }
 
 /// On a phone the bar names the workspace as a navigation bar does, at the size the breadcrumb

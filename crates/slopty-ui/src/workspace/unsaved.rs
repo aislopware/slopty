@@ -240,6 +240,7 @@ impl WorkspaceView {
                     kind: ItemKind::File { path: path.clone() },
                     sleeping: false,
                     name: None,
+                    facts: std::collections::BTreeMap::new(),
                 };
                 let id = item.id;
                 self.propose(key, ItemOp::Add(item), cx);
@@ -480,9 +481,9 @@ fn offer<'a>(wanted: &mut Wanted<'a>, key: TileKey, mark: Option<Mark>, source: 
 /// What the person hears at start of `n` kept edits over [`OLD_AFTER`] old.
 fn old_notice(n: usize) -> String {
     let what = if n == 1 {
-        "An unsaved edit over a week old waits for its worker".to_owned()
+        "An unsaved edit over a week old waits for its machine".to_owned()
     } else {
-        format!("{n} unsaved edits over a week old wait for their workers")
+        format!("{n} unsaved edits over a week old wait for their machines")
     };
     format!("{what}: \u{201c}Discard unsaved edits over a week old\u{201d} lets them go")
 }

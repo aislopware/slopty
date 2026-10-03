@@ -163,6 +163,7 @@ impl Asking {
             info,
             category: self.approval.map(|_| APPROVAL),
             silent,
+            thread: None,
         }
     }
 }
@@ -187,6 +188,9 @@ pub struct Look {
     pub turns: Vec<Turn>,
     /// The inbox's unread count: the icon badge.
     pub unread: usize,
+    /// The project each terminal and thread is in, by its group's key: the thread its notes
+    /// stack in, so one project's notes sit together.
+    pub projects: HashMap<About, String>,
 }
 
 /// A notice the server picked this client for, as its note says it.
@@ -230,6 +234,8 @@ pub struct Attention {
     answers: HashMap<About, Option<u64>>,
     /// The badge last set.
     badge: Option<usize>,
+    /// The project each terminal and thread was in at the last look.
+    projects: HashMap<About, String>,
 }
 
 impl std::fmt::Debug for Attention {
@@ -257,6 +263,7 @@ impl Attention {
             posted: HashMap::new(),
             answers: HashMap::new(),
             badge: None,
+            projects: HashMap::new(),
         }
     }
 
@@ -336,6 +343,7 @@ impl Attention {
     /// The workspace changed: an agent that has just started to wait notifies while the app is
     /// away, one that stopped takes its note back, and the badge follows the inbox.
     pub fn look(&mut self, look: &Look) {
+        self.projects.clone_from(&look.projects);
         let now: HashSet<About> = look.asking.iter().map(|a| a.route.about).collect();
         if self.away() {
             for asking in &look.asking {
@@ -439,8 +447,9 @@ impl Attention {
         self.post(route.about, Why::Unanswered, note);
     }
 
-    fn post(&mut self, about: About, why: Why, note: Note) {
+    fn post(&mut self, about: About, why: Why, mut note: Note) {
         tracing::debug!(?about, ?why, "attention note");
+        note.thread = self.projects.get(&about).cloned();
         if why != Why::Asks {
             self.answers.remove(&about);
         }
@@ -490,7 +499,36 @@ impl WorkspaceView {
                 Some(Turn { route, title, body })
             })
             .collect();
-        Look { asking, turns, unread: self.inbox_count() }
+        Look { asking, turns, unread: self.inbox_count(), projects: self.note_projects() }
+    }
+
+    /// The project each terminal and thread is in, by its group's key: a tile's group (its
+    /// machine's where it is in no project), and a thread with no tile here where the navigator
+    /// lists it.
+    fn note_projects(&self) -> HashMap<About, String> {
+        let projects = self.project_groups();
+        let mut out = HashMap::new();
+        for (tile, group) in
+            projects.tiles.iter().filter_map(|t| Some((*t, projects.group_of(*t)?)))
+        {
+            let about = match self.item(tile).map(|i| &i.kind) {
+                Some(ItemKind::Terminal { session }) => About::Session(*session),
+                Some(ItemKind::Thread { thread }) => About::Thread(*thread),
+                _ => continue,
+            };
+            out.insert(about, group.key.as_str().to_owned());
+        }
+        let claims = self.claims();
+        for (thread, stand) in self.thread_stands() {
+            if out.contains_key(&About::Thread(thread)) {
+                continue;
+            }
+            let facts = self.thread_listing_facts(stand.worker, thread);
+            let key = super::grouping::listing_group(&projects, &claims, &facts)
+                .map_or_else(|| slopty_client::groups::GroupKey::machine(stand.worker), |g| g.key);
+            out.insert(About::Thread(thread), key.as_str().to_owned());
+        }
+        out
     }
 
     /// The note the server's `notice` makes here; `None` for a finished turn shorter than the
