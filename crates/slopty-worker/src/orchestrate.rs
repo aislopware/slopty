@@ -50,7 +50,9 @@ use slopty_proto::orchestration::{
 };
 use slopty_proto::project::VERIFY_PLACES;
 use slopty_proto::screen::ScreenEvent;
-use slopty_proto::terminal::{CloseReason, OpenSession, SessionSummary, TermRequest, TermSize};
+use slopty_proto::terminal::{
+    CloseReason, OpenSession, SessionState, SessionSummary, TermRequest, TermSize,
+};
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -388,6 +390,7 @@ impl Orchestrator {
             | Verb::ReviewCheckout { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
+            | Verb::RemoveWorktree { .. }
             | Verb::PullChecks { .. }) => Box::pin(self.repository(verb)).await,
             Verb::WriteFile { worker, path, bytes } => {
                 self.mine(worker)?;
@@ -837,6 +840,36 @@ impl Orchestrator {
                             Failure::new(ErrorCode::Failed, why)
                         }
                     })
+            }
+            Verb::RemoveWorktree { worker, worktree, landed } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let worktree = crate::file::expand_home(Path::new(&worktree));
+                let cwds: Vec<PathBuf> = self
+                    .inner
+                    .worker
+                    .summaries()
+                    .await
+                    .into_iter()
+                    .filter(|s| matches!(s.state, SessionState::Running))
+                    .filter_map(|s| s.cwd)
+                    .map(|cwd| crate::file::expand_home(Path::new(&cwd)))
+                    .collect();
+                let removed = crate::repo::worktrees::remove(git, &worktree, &landed, &cwds)
+                    .await
+                    .map_err(|failed| {
+                        use crate::repo::worktrees::Failed;
+                        let code = match &failed {
+                            Failed::NotOne(_) => ErrorCode::Invalid,
+                            Failed::Busy(_) | Failed::Uncommitted(_) => ErrorCode::Conflict,
+                            Failed::Other(_) => ErrorCode::Failed,
+                        };
+                        Failure::new(code, failed.to_string())
+                    })?;
+                let crate::repo::worktrees::Removed { branch, branch_removed } = removed;
+                Ok(Outcome::WorktreeRemoved { branch, branch_removed })
             }
             _ => Err(Failure::new(ErrorCode::Unsupported, "not a repository verb")),
         }

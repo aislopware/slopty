@@ -2222,6 +2222,57 @@ impl Projects {
         vec![record.task_update(&t, Some(entry))]
     }
 
+    /// What frees a settled task's worktree once its agent is closed: the worktree its agent
+    /// reported, and where its work landed (the merge queue's head, the target, the target on
+    /// `origin`). Only a merged task's: one given up may be tried again, and its agent would
+    /// remake a worktree gone, its branch reset to the base with it.
+    pub(crate) fn to_free(&self, id: &ProjectId, task: TaskId) -> Option<(String, Vec<String>)> {
+        let record = self.records.get(id)?;
+        let t = record.task(task).ok().filter(|t| t.state == TaskState::Merged)?;
+        let (head, target) = match &t.merge {
+            Some(Merge::Merged { target, head, .. }) => (Some(head.clone()), target.clone()),
+            _ => (None, record.project.target.clone()),
+        };
+        let origin = format!("origin/{target}");
+        let landed = head.into_iter().chain([target, origin]).collect();
+        Some((t.worktree.clone()?, landed))
+    }
+
+    /// What became of freeing `task`'s worktree `worktree`: gone, with whether its branch went
+    /// too, or kept and why. A worktree gone leaves the card; the timeline says either way.
+    pub(crate) fn freed(
+        &mut self,
+        id: &ProjectId,
+        (task, worktree): (TaskId, &str),
+        went: Result<(Option<String>, bool), String>,
+        now: WallMs,
+    ) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let Ok(t) = record.task_mut(task) else { return Vec::new() };
+        let text = match went {
+            Ok((branch, removed)) => {
+                if t.worktree.as_deref() == Some(worktree) {
+                    t.worktree = None;
+                }
+                match (branch, removed) {
+                    (Some(branch), true) => format!(
+                        "The server removed its worktree, and its branch {branch}, whose work all \
+                         landed."
+                    ),
+                    (Some(branch), false) => format!(
+                        "The server removed its worktree; its branch {branch} is kept, with \
+                         work that did not land."
+                    ),
+                    (None, _) => "The server removed its worktree.".to_owned(),
+                }
+            }
+            Err(why) => format!("Its worktree is kept: {}.", why.trim_end_matches('.')),
+        };
+        let t = t.clone();
+        let entry = record.log(Some(task), Moment::Note { text }, now);
+        vec![record.task_update(&t, Some(entry))]
+    }
+
     /// A worker registered with `sessions` open: every assignment on it to a terminal it no
     /// longer has ended while the server was away.
     pub(crate) fn reconcile(

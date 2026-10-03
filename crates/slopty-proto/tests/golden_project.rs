@@ -469,6 +469,21 @@ mod golden_project {
                 push_failed: Some("! [rejected] main -> main (fetch first)".to_owned()),
             }),
         );
+        snap(
+            "remove_worktree",
+            &request(Verb::RemoveWorktree {
+                worker,
+                worktree: "/w/slopty/.claude/worktrees/slopty-slopty-3".to_owned(),
+                landed: vec![commit('d'), "main".to_owned(), "origin/main".to_owned()],
+            }),
+        );
+        snap(
+            "worktree_removed",
+            &reply(Outcome::WorktreeRemoved {
+                branch: Some("worktree-slopty-slopty-3".to_owned()),
+                branch_removed: true,
+            }),
+        );
         let merged = Merge::Merged {
             target: "main".to_owned(),
             head: commit('d'),

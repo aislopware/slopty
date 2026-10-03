@@ -7,18 +7,22 @@
 //! prompt, with no request open, nothing scheduled and its tile on no client's screen, the
 //! server closes the terminal the server started for it, through the worker's own `Close`. The
 //! agent's session stays, so it can be taken up again. A terminal the person put on a task is
-//! theirs and is never closed, nor is anything still at work.
+//! theirs and is never closed, nor is anything still at work. Once a merged task's agent is
+//! closed, its worktree goes too, through the worker's `RemoveWorktree`, which keeps one with
+//! anything uncommitted or a terminal in it, and the branch of work that did not land.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use slopty_core::WallMs;
 use slopty_proto::agent::{AgentStatus, BlockReason};
-use slopty_proto::orchestration::TermRef;
+use slopty_proto::orchestration::{Outcome, TermRef, Verb};
+use slopty_proto::project::{ProjectId, TaskId};
 use slopty_proto::terminal::SessionState;
 use tokio::time::Instant;
 
 use super::projects::live;
+use super::steps::said;
 use super::{Hub, State, WeakHub};
 
 /// How long a finished task's agent rests before its terminal is closed.
@@ -70,13 +74,47 @@ impl Hub {
             let changes = state.projects.settled(&project, task, mins, WallMs::now());
             self.projects_moved(state, changes);
             tracing::info!(%project, %task, session = %term.session, "a finished task's agent closed");
-            closing.push(term);
+            let free = state.projects.to_free(&project, task);
+            closing.push((term, free.map(|(worktree, landed)| (project, task, worktree, landed))));
         }
         drop(guard);
-        for term in &closing {
-            self.close_soon(*term);
-        }
         closing
+            .into_iter()
+            .map(|(term, free)| {
+                self.close_and_free(term, free);
+                term
+            })
+            .collect()
+    }
+
+    /// Close `term`, then once it is closed free the worktree its task's agent worked in,
+    /// saying on the task's timeline how that went.
+    fn close_and_free(
+        &self,
+        term: TermRef,
+        free: Option<(ProjectId, TaskId, String, Vec<String>)>,
+    ) {
+        let Some((project, task, worktree, landed)) = free else {
+            self.close_soon(term);
+            return;
+        };
+        let hub = self.clone();
+        tokio::spawn(async move {
+            if let failed @ Outcome::Error { .. } = hub.forward(None, Verb::Close { term }).await {
+                tracing::debug!(?failed, "a terminal not closed");
+                return;
+            }
+            let remove =
+                Verb::RemoveWorktree { worker: term.worker, worktree: worktree.clone(), landed };
+            let went = match hub.forward(None, remove).await {
+                Outcome::WorktreeRemoved { branch, branch_removed } => Ok((branch, branch_removed)),
+                other => Err(said(&other)),
+            };
+            let mut state = hub.inner.state.lock();
+            let changes = state.projects.freed(&project, (task, &worktree), went, WallMs::now());
+            hub.projects_moved(&mut state, changes);
+            drop(state);
+        });
     }
 }
 

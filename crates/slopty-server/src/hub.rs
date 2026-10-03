@@ -869,6 +869,10 @@ impl Hub {
                 "the server verifies and merges tasks itself, one at a time; a task's done \
                  report starts it, and the person's task_merge asks for it",
             ),
+            Verb::RemoveWorktree { .. } => error(
+                ErrorCode::Forbidden,
+                "the server frees a finished task's worktree itself, once its agent is closed",
+            ),
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
             | Verb::TaskCreate { .. }
@@ -1708,7 +1712,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Verify { worker, .. }
         | Verb::ReviewCheckout { worker, .. }
         | Verb::Rebase { worker, .. }
-        | Verb::FastForward { worker, .. } => Some(*worker),
+        | Verb::FastForward { worker, .. }
+        | Verb::RemoveWorktree { worker, .. } => Some(*worker),
         Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
             Some(item.worker)
         }

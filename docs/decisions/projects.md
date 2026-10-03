@@ -1632,9 +1632,8 @@ R2).
   stays, so it can be taken up again, as "Stop its agent" relies on. The timeline says why in
   a note before the terminal's end says it is gone. Only a terminal the server started for the
   task is closed: one the person put on a task is theirs.
-- Freeing the task's worktree is left for a later change, since it needs a worker verb (a
-  `slopty-proto` change) that removes a clean, merged worktree under `.claude/worktrees/` and
-  keeps a dirty or unmerged one.
+- Freeing the task's worktree came in the next change ("A merged task frees its worktree"
+  below).
 - Tests: `a_finished_task_s_agent_counts_only_while_it_works` (`slopty-server::project`) and
   `a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests` (`slopty-server`).
 
@@ -1707,6 +1706,39 @@ R2).
 - Tests: `task_wait_waits_for_news_and_cancels_nothing` (`slopty-tools`, over a scripted
   timeline on a paused clock) and the rest's timeline mark in
   `a_task_s_outcome_reaches_the_orchestrator_without_a_report` (`slopty-server`).
+
+**A merged task frees its worktree.** ✅ 2026-10-04
+- Before: a writing task's agent works in a worktree of its own, under the clone's
+  `.claude/worktrees/`, and nothing ever removed one. A long project filled the worker's disk
+  with checkouts (and their `target/` directories) of work already merged.
+- Prior art: T3 Code issue #15146 (worktrees never freed), Conductor's archive script, and Vibe
+  Kanban's `worktree_deleted` per workspace.
+- The worker's `RemoveWorktree { worktree, landed }` removes a worktree only when all of these
+  hold:
+  - it is a linked worktree directly under its clone's `.claude/worktrees/`, so neither the
+    clone itself, the person's own worktrees nor any other path qualifies (`Invalid`);
+  - no live terminal on the worker has its directory in it (`Conflict`);
+  - `git status --porcelain` lists nothing, so nothing uncommitted or untracked is lost
+    (`Conflict`, naming what git listed).
+  It removes with `git worktree remove` and no `--force`, so git refuses whatever this missed.
+- The branch the worktree had checked out goes too only when every commit on it is in one of
+  `landed` by patch, as `git cherry` reads it. The merge queue rebases, so the commits on the
+  target are not the branch's own and ancestry would never call them landed. `landed` is the
+  merge's head, the target and the target on `origin`; those that name nothing on the worker
+  are passed over. A branch with work that did not land is kept, and the timeline says so.
+- The server asks once settling has closed a merged task's agent ("A finished task's agent
+  stops counting" above), after the worker answers that close, so the agent's own terminal is
+  gone. The card drops the worktree that went, and the timeline says what went and what was
+  kept. A worktree the worker keeps stays on the card with the reason on the timeline.
+- Only a merged task's worktree is freed. A task given up may be tried again, and Claude
+  Code's `--worktree` remakes a missing worktree with `git worktree add -B`, which would reset
+  the kept branch to the base. A Codex task's worktree is not freed yet, since Codex makes and
+  names it itself and no report names where.
+- `RemoveWorktree` is the server's alone: a tool that asks is `Forbidden`.
+- Tests: `a_clean_worktree_goes_and_its_branch_only_once_landed` and
+  `a_worktree_in_use_or_not_committed_is_kept` (`slopty-worker`, on real git repositories),
+  `a_merged_task_s_worktree_goes_once_its_agent_is_closed` (`slopty-server`), and the goldens
+  `remove_worktree` and `worktree_removed`.
 
 ## Phases
 

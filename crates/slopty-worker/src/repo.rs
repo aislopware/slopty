@@ -16,6 +16,7 @@ pub mod cloning;
 pub mod review;
 pub mod snapshot;
 pub mod verify;
+pub mod worktrees;
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;

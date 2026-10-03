@@ -1,12 +1,13 @@
 //! What a task's agent came to reaches the node above it through its worker, with no report
-//! from the agent; a finished task's agent stops counting and is closed once it rests; and an
-//! agent tells the tasks under it in its own words.
+//! from the agent; a finished task's agent stops counting and is closed once it rests, a merged
+//! one's worktree going after it; and an agent tells the tasks under it in its own words.
 
 use std::time::Duration;
 
-use slopty_proto::agent::BlockReason;
+use slopty_proto::agent::{AgentBranch, BlockReason, Worktree};
 use slopty_proto::project::{
     LimitsChange, Moment, Placement, Report, ReportKind, TaskChange, TaskSpec, TaskState,
+    TimelineEntry,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::Phase;
@@ -14,8 +15,8 @@ use slopty_proto::thread::attention::Seat;
 
 use super::ladder::tests::{Client, asking, row, snapshot};
 use super::project_tests::{
-    agent, announce, claude, create, create_with, new_task, opened, project, refused, request,
-    spawn, status, worker_on,
+    agent, announce, answer, claude, create, create_with, new_task, opened, project, refused,
+    request, spawn, status, worker_on,
 };
 use super::settle::SETTLE_AFTER;
 use super::*;
@@ -183,6 +184,92 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     });
     let said = said.unwrap_or_default();
     assert!(said.starts_with("The server closed its agent, at rest 10 min after"), "{said}");
+}
+
+/// A merged task's agent, closed once it rests, frees the worktree it worked in after its
+/// terminal is gone: the worker is asked to remove it with where the work landed, and the card
+/// lets it go while the timeline says whether its branch went. One the worker keeps (a terminal
+/// still in it) stays on the card, and the timeline says why.
+#[tokio::test]
+async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    create(&hub, None).await;
+    let note = |entries: &[TimelineEntry], task: TaskId| {
+        let said = entries.iter().rev().find_map(|e| match &e.what {
+            Moment::Note { text } if e.task == Some(task) => Some(text.clone()),
+            _ => None,
+        });
+        said.unwrap_or_default()
+    };
+    let removed = Outcome::WorktreeRemoved {
+        branch: Some("worktree-slopty-demo-1".to_owned()),
+        branch_removed: true,
+    };
+    let kept = Outcome::Error {
+        code: ErrorCode::Conflict,
+        message: "a terminal works in /w/demo/.claude/worktrees/slopty-demo-2".to_owned(),
+    };
+    for (n, worker_says) in [(1, removed), (2, kept)] {
+        let task = new_task(&hub, Placement::default()).await;
+        let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+        let term = opened(&lease, &request(&mut rx).await);
+        assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+        let path = format!("/w/demo/.claude/worktrees/slopty-demo-{n}");
+        let worktree = Worktree {
+            name: format!("slopty-demo-{n}"),
+            path: path.clone(),
+            branch: Some(format!("worktree-slopty-demo-{n}")),
+            original_cwd: "/w/demo".to_owned(),
+            original_branch: Some("main".to_owned()),
+        };
+        let branch = AgentBranch { session: term.session, pr: None, worktree: Some(worktree) };
+        lease.handle(ToServer::Report(AgentReport::Branch(branch)));
+        for state in [TaskState::Done, TaskState::Merged] {
+            let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
+            let moved = hub.dispatch(Verb::TaskUpdate { project: project(), task, change }).await;
+            assert!(matches!(moved, Outcome::Task(_)), "{moved:?}");
+        }
+        lease.handle(agent(term.session, AgentStatus::Idle));
+        let mut resting = HashMap::new();
+        let t0 = tokio::time::Instant::now();
+        assert_eq!(hub.settle_due(&mut resting, t0), []);
+        assert_eq!(hub.settle_due(&mut resting, t0.checked_add(SETTLE_AFTER).unwrap()), [term]);
+
+        let (id, verb) = request(&mut rx).await;
+        assert_eq!(verb, Verb::Close { term });
+        answer(&lease, id, Outcome::Done);
+        let reason = slopty_proto::terminal::CloseReason::Requested;
+        lease.handle(ToServer::SessionClosed { session: term.session, reason });
+        let (id, verb) = request(&mut rx).await;
+        let landed = vec!["main".to_owned(), "origin/main".to_owned()];
+        assert_eq!(
+            verb,
+            Verb::RemoveWorktree { worker: term.worker, worktree: path.clone(), landed }
+        );
+        answer(&lease, id, worker_says);
+        let mut now = status(&hub).await;
+        for _ in 0..500 {
+            if note(&now.timeline, task).contains("worktree") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            now = status(&hub).await;
+        }
+        let card = now.tasks.iter().find(|t| t.id == task).expect("the card");
+        let said = note(&now.timeline, task);
+        if n == 1 {
+            assert_eq!(card.worktree, None, "gone from the card");
+            assert_eq!(
+                said,
+                "The server removed its worktree, and its branch worktree-slopty-demo-1, whose \
+                 work all landed."
+            );
+        } else {
+            assert_eq!(card.worktree.as_deref(), Some(path.as_str()), "kept on the card");
+            assert_eq!(said, format!("Its worktree is kept: a terminal works in {path}."));
+        }
+    }
 }
 
 /// The orchestrator tells a task's agent something, and a task's agent tells a task split from

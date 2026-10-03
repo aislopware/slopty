@@ -774,12 +774,14 @@ pub enum Verb {
         /// This worker, over the proposal's and the task's placement.
         pin: Option<WorkerId>,
     },
-    /// Tell a task's agent, or the project's orchestrator, something as the person: their own
-    /// words, which reach the agent through its hooks as reports do (its inbox wakes it when
-    /// idle), never typed into its terminal. The board's next steps (fix CI, address the
-    /// review's comments, resolve conflicts) and its line to the orchestrator are said this
-    /// way. Answered with [`Outcome::Done`]; a node with no agent running is
-    /// [`ErrorCode::Invalid`], and an agent is [`ErrorCode::Forbidden`].
+    /// Tell a task's agent, or the project's orchestrator, something: the person's own words,
+    /// or an agent's to a task under it, marked as an agent's. They reach the agent through
+    /// its hooks as reports do (its inbox wakes it when idle), never typed into its terminal.
+    /// The board's next steps (fix CI, address the review's comments, resolve conflicts) and
+    /// its line to the orchestrator are said this way. Answered with [`Outcome::Done`]; a node
+    /// with no agent running is [`ErrorCode::Invalid`]. An agent telling a node not under it
+    /// is [`ErrorCode::Forbidden`] or [`ErrorCode::Invalid`], and one telling a task that
+    /// waits on the person is [`ErrorCode::Conflict`].
     TaskTell {
         /// In which project.
         project: ProjectId,
@@ -871,6 +873,22 @@ pub enum Verb {
         /// Which.
         task: TaskId,
     },
+    /// Remove a finished task's worktree from its worker: one an agent made under its clone's
+    /// `.claude/worktrees/`, with nothing uncommitted in it and no terminal on the worker
+    /// working in it. The branch it had checked out goes too only when every commit on it is
+    /// in one of `landed` by patch (`git cherry`), so work the merge queue rebased counts as
+    /// landed; otherwise the branch is kept. Answered with [`Outcome::WorktreeRemoved`];
+    /// [`ErrorCode::Conflict`] while a terminal works in it or something in it is not
+    /// committed, [`ErrorCode::Invalid`] for a path that is no such worktree.
+    RemoveWorktree {
+        /// Where.
+        worker: WorkerId,
+        /// The worktree, as its agent reported it.
+        worktree: String,
+        /// Where the task's work landed, as commits or branches of the clone (the merge's
+        /// head, the target, the target on `origin`); none keeps the branch.
+        landed: Vec<String>,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -960,7 +978,8 @@ impl Verb {
             | Self::ProjectDelete { .. }
             | Self::Verify { .. }
             | Self::Rebase { .. }
-            | Self::FastForward { .. } => true,
+            | Self::FastForward { .. }
+            | Self::RemoveWorktree { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1416,6 +1435,13 @@ pub enum Outcome {
     },
     /// For [`Verb::PullChecks`]: what the pull request's checks say.
     Checks(crate::project::Checks),
+    /// For [`Verb::RemoveWorktree`]: the worktree is gone.
+    WorktreeRemoved {
+        /// The branch it had checked out, if one.
+        branch: Option<String>,
+        /// Whether that branch went too, its work all landed.
+        branch_removed: bool,
+    },
 }
 
 /// A page of an agent's conversation: the entries of one thread from `start`, what the face
