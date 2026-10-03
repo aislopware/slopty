@@ -78,8 +78,8 @@ use slopty_media::{
 use slopty_proto::ctl::{LtrStats, Quantiles, ScreenStats, ScreenSummary};
 use slopty_proto::media::{ClockEcho, MAX_DATAGRAM};
 use slopty_proto::screen::{
-    CaptureTarget, Caret, Chroma, CursorShape, Quality, ReceiverReport, ScreenEvent, ScreenInput,
-    SourceState, Stripe, TextField, VideoCodec,
+    CaptureTarget, Caret, Chroma, CursorShape, Quality, ReceiverReport, Region, ScreenEvent,
+    ScreenInput, SourceState, Stripe, TextField, VideoCodec,
 };
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -88,6 +88,7 @@ use crate::platform::{Native, Platform};
 
 pub mod drag;
 mod engines;
+mod region;
 pub mod sized;
 pub mod sound;
 mod stripes;
@@ -984,6 +985,19 @@ impl Helper {
 /// Where a stripe sits in the stream's padded picture ([`slopty_codec::stripes::layout`]).
 type CodedStripe = slopty_codec::stripes::Stripe;
 
+/// A frame handed to a session, until it comes back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Submitted {
+    /// Its presentation time, which names it in the session's callback.
+    pts_us: u64,
+    /// When it went in.
+    at_us: u64,
+    /// The stripes coded from its capture.
+    stripes: u8,
+    /// The region of the target its capture shows; `None` for all of it.
+    region: Option<Region>,
+}
+
 /// Requests folded into the next encoded frame.
 #[derive(Default)]
 struct Pending {
@@ -1025,9 +1039,8 @@ struct Coder {
     /// the one queue a refinement may leave ahead of the next change, which the guard lets
     /// that change pass ([`Shared::frame_fits`]).
     refine_wire: AtomicU64,
-    /// `(pts, submitted at, the stripes coded from its capture)` of frames inside the session,
-    /// oldest first.
-    in_flight: Mutex<VecDeque<(u64, u64, u8)>>,
+    /// Frames inside the session, oldest first.
+    in_flight: Mutex<VecDeque<Submitted>>,
     /// `datagrams_sent` at the previous receiver report.
     sent_at_report: AtomicU64,
 }
@@ -1051,26 +1064,26 @@ impl Coder {
         }
     }
 
-    /// A frame went into the session at `now`, one of the `stripes` coded from its capture.
-    fn submitted(&self, pts_us: u64, now: u64, stripes: u8) {
+    /// A frame went into the session as `submitted` says.
+    fn submitted(&self, submitted: Submitted) {
         let mut in_flight = self.in_flight.lock();
         if in_flight.len() >= IN_FLIGHT_MAX {
             in_flight.pop_front();
         }
-        in_flight.push_back((pts_us, now, stripes));
+        in_flight.push_back(submitted);
     }
 
-    /// The session returned the frame with `pts_us` at `now`: its encode latency and the
-    /// stripes coded from its capture, when the frame's submission is on record.
-    fn returned(&self, pts_us: u64, now: u64) -> Option<(u64, u8)> {
+    /// The session returned the frame with `pts_us` at `now`: its encode latency, and its
+    /// submission, when that is on record.
+    fn returned(&self, pts_us: u64, now: u64) -> Option<(u64, Submitted)> {
         let submitted = {
             let mut in_flight = self.in_flight.lock();
-            let at = in_flight.iter().position(|&(pts, ..)| pts == pts_us);
+            let at = in_flight.iter().position(|frame| frame.pts_us == pts_us);
             let found = at.and_then(|i| in_flight.remove(i));
             drop(in_flight);
             found
         };
-        submitted.map(|(_, at, stripes)| (now.saturating_sub(at), stripes))
+        submitted.map(|frame| (now.saturating_sub(frame.at_us), frame))
     }
 
     /// Whether a refresh would come back as a delta: an acknowledged reference newer than the
@@ -1653,6 +1666,13 @@ struct Shared<P: Platform = Native> {
     unstuck: tokio::sync::Notify,
     /// The held capture's time, `0` while none is held: what the runtime reads of it.
     held_us: AtomicU64,
+    /// The region of the target the held capture shows ([`region::pack`]), written with it.
+    held_region: AtomicU64,
+    /// Which region each capture shows, by its display time ([`region::RegionClock`]).
+    region: Mutex<region::RegionClock>,
+    /// Captures not sent because they came while the capture was changing region, and may
+    /// show either.
+    between_regions: AtomicU64,
     /// The held capture has not reached the encoder.
     owed: AtomicBool,
     /// Wakes [`repair_loop`]: a capture was held back, or a request came in.
@@ -1762,6 +1782,9 @@ impl<P: Platform> Shared<P> {
             encode_thread: AtomicU64::new(0),
             unstuck: tokio::sync::Notify::new(),
             held_us: AtomicU64::new(0),
+            held_region: AtomicU64::new(0),
+            region: Mutex::new(region::RegionClock::steady(None)),
+            between_regions: AtomicU64::new(0),
             owed: AtomicBool::new(false),
             repair: tokio::sync::Notify::new(),
             lane: Mutex::new(Lane::default()),
@@ -2249,7 +2272,11 @@ impl<P: Platform> Shared<P> {
             self.forget_held();
             return;
         }
-        let attempt = self.try_encode(Some(frame), now::<P>());
+        let region::Shows::Region(region) = self.region.lock().shows(frame.capture_ts_us) else {
+            self.between_regions.fetch_add(1, Ordering::Relaxed);
+            return;
+        };
+        let attempt = self.try_encode(Some((frame, region)), now::<P>());
         if attempt != Attempt::Sent {
             self.repair.notify_one();
         }
@@ -2285,7 +2312,7 @@ impl<P: Platform> Shared<P> {
     /// Encode the held capture if the gates let it through, in the stream's turn ([`Gate`]).
     /// `fresh` is a capture that just arrived, held from here on as the newest picture;
     /// without one it is [`repair_loop`] sending the held one again at `now`.
-    fn try_encode(&self, fresh: Option<Frame<P>>, now: u64) -> Attempt {
+    fn try_encode(&self, fresh: Option<(Frame<P>, Option<Region>)>, now: u64) -> Attempt {
         let turn = self.gate.take();
         let attempt = self.encode_turn(turn, fresh, now);
         self.gate.leave(turn);
@@ -2307,13 +2334,19 @@ impl<P: Platform> Shared<P> {
     /// not coded: VideoToolbox would take it and code it into the session's size. The session's
     /// keyframe stays wanted for the first capture of its own size.
     #[expect(clippy::too_many_lines, reason = "one decision, read top to bottom")]
-    fn encode_turn(&self, turn: u64, fresh: Option<Frame<P>>, now: u64) -> Attempt {
+    fn encode_turn(
+        &self,
+        turn: u64,
+        fresh: Option<(Frame<P>, Option<Region>)>,
+        now: u64,
+    ) -> Attempt {
         // Declared ahead of the lock, so the capture a fresh one replaces is let go after it.
         let mut replaced = None;
         let mut held = self.held.lock();
         let is_fresh = fresh.is_some();
-        if let Some(frame) = fresh {
+        if let Some((frame, region)) = fresh {
             self.held_us.store(frame.capture_ts_us.max(1), Ordering::Relaxed);
+            self.held_region.store(region::pack(region), Ordering::Relaxed);
             self.owed.store(true, Ordering::Relaxed);
             replaced = held.replace(frame);
         }
@@ -2454,6 +2487,7 @@ impl<P: Platform> Shared<P> {
             self.counters.repaired.fetch_add(1, Ordering::Relaxed);
         }
         let stripes = if count > 1 { coding } else { 0 };
+        let shown = region::unpack(self.held_region.load(Ordering::Relaxed));
         // Before the submits: an aligned session's callback runs inside them.
         if stripes.count_ones() > 1 && !refining {
             *self.join.lock() = Join { pts, waiting: coding, took: None, keyframe: false };
@@ -2471,7 +2505,7 @@ impl<P: Platform> Shared<P> {
                 coder.refine.lock().other_sent(now);
             }
             *told = self.tell(&mut lives, i, fps);
-            coder.submitted(pts, now, stripes);
+            coder.submitted(Submitted { pts_us: pts, at_us: now, stripes, region: shown });
             // Marked in flight before the submit, as the callback that clears the mark may run
             // inside it: marked after, a keyframe already out read as one still being encoded
             // and the refreshes of the next 400 ms went unanswered.
@@ -2809,7 +2843,8 @@ impl<P: Platform> Shared<P> {
         let refined_at =
             coder.refine.lock().returned(packet.pts_us, packet.mse.map(|mse| mse.luma), bytes);
         let returned = coder.returned(packet.pts_us, now);
-        let (took, stripes) = returned.map_or((None, 0), |(took, stripes)| (Some(took), stripes));
+        let (took, stripes, region) = returned
+            .map_or((None, 0, None), |(took, frame)| (Some(took), frame.stripes, frame.region));
         if let Some(took) = took.filter(|_| !packet.keyframe) {
             coder.refine.lock().took(took);
         }
@@ -2885,6 +2920,7 @@ impl<P: Platform> Shared<P> {
             discardable: packet.discardable,
             capture_ts_us,
             stripes,
+            region,
         };
         let max = self.sink.max_size().map_or(MAX_DATAGRAM, |m| m.min(MAX_DATAGRAM));
         let mut packetizer = coder.packetizer.lock();
@@ -3679,20 +3715,47 @@ const fn align(codec: VideoCodec) -> u32 {
     }
 }
 
-/// [`configs_padded`] with the codec's own padding, as every stream but a measurement's has it.
+/// [`configs_padded`] with the codec's own padding, as every stream but a measurement's has it,
+/// for a target of two pixels a point.
 #[cfg(test)]
 fn configs(
     native: (u32, u32),
     quality: &Quality,
     refresh_hz: Option<f64>,
 ) -> (CaptureConfig, EncoderConfig) {
-    configs_padded(native, quality, refresh_hz, None)
+    configs_padded(native, quality, refresh_hz, None, 2.0)
+}
+
+/// The quality's scale as the stream applies it.
+fn scale_of(quality: &Quality) -> f64 {
+    if quality.scale.is_finite() { f64::from(quality.scale).clamp(0.05, 1.0) } else { 1.0 }
+}
+
+/// A side of `px` native pixels at `scale`: even, and at least 2.
+fn scaled_side(px: u32, scale: f64) -> u32 {
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+    let v = (f64::from(px) * scale).round().clamp(2.0, 16_384.0) as u32;
+    v.next_multiple_of(2)
+}
+
+/// The size of the whole target `native` pixels in size at the quality's scale: the stream's
+/// pixels, which input, the cursor, `Opened` and `Geometry` are in whatever region is streamed.
+fn whole_size(native: (u32, u32), quality: &Quality) -> (u32, u32) {
+    let scale = scale_of(quality);
+    (scaled_side(native.0, scale), scaled_side(native.1, scale))
+}
+
+/// The region of a target `native` pixels in size that `quality` streams; `None` for all of
+/// it ([`Region::within`]).
+fn region_of(native: (u32, u32), quality: &Quality) -> Option<Region> {
+    quality.region.and_then(|region| region.within(native))
 }
 
 /// Capture and encoder settings for a target at a requested quality, on a display refreshing at
-/// `refresh_hz` when that is known.
+/// `refresh_hz` when that is known, `point_scale` pixels a point.
 ///
-/// The capture's picture is the target at the quality's scale, sides even; the encoder codes
+/// The capture's picture is the target at the quality's scale, sides even, or only the
+/// quality's region of it ([`region_of`]), sampled in the target's points; the encoder codes
 /// the capture's surface, the picture padded to [`HEVC_ALIGN`] for HEVC ([`start_encoder`]
 /// crops the stream back to the picture). `pad_to` pads to another multiple in its place: a
 /// measurement's A/B, one stream padded and one not in one process
@@ -3708,15 +3771,12 @@ fn configs_padded(
     quality: &Quality,
     refresh_hz: Option<f64>,
     pad_to: Option<u32>,
+    point_scale: f64,
 ) -> (CaptureConfig, EncoderConfig) {
-    let scale =
-        if quality.scale.is_finite() { f64::from(quality.scale).clamp(0.05, 1.0) } else { 1.0 };
-    let side = |px: u32| -> u32 {
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
-        let v = (f64::from(px) * scale).round().clamp(2.0, 16_384.0) as u32;
-        v.next_multiple_of(2)
-    };
-    let (width, height) = (side(native.0), side(native.1));
+    let scale = scale_of(quality);
+    let region = region_of(native, quality);
+    let shown = region.map_or(native, |r| (u32::from(r.w), u32::from(r.h)));
+    let (width, height) = (scaled_side(shown.0, scale), scaled_side(shown.1, scale));
     let align = pad_to.unwrap_or_else(|| align(quality.codec));
     #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
     let display =
@@ -3731,6 +3791,7 @@ fn configs_padded(
         format,
         queue_depth: QUEUE_DEPTH,
         crop: None,
+        region: region.map(|region| region::to_points(region, point_scale)),
     };
     let (width, height) = capture.surface();
     let encoder = EncoderConfig {
@@ -3956,6 +4017,7 @@ impl<P: Platform> Pipeline<P> {
             format: PixelFormat::Nv12Full,
             queue_depth: 1,
             crop: None,
+            region: None,
         };
         let (tx, rx) = oneshot::channel();
         let capture = Source::<P>::start(
@@ -4053,8 +4115,9 @@ impl<P: Platform> Pipeline<P> {
         let enumerated = t0.elapsed();
         let (resolved, path) = resolve::<P>(&content, target)?;
         let native = Source::<P>::pixel_size(&resolved);
+        let point_scale = f64::from(Source::<P>::point_scale(&resolved));
         let refresh_hz = Source::<P>::refresh_hz(target);
-        let sized = configs_padded(native, &quality, refresh_hz, pad_to);
+        let sized = configs_padded(native, &quality, refresh_hz, pad_to, point_scale);
         let shared = Arc::new(Shared::new(
             id,
             sink,
@@ -4067,7 +4130,9 @@ impl<P: Platform> Pipeline<P> {
         let chroma = shared.ask_chroma(asked(&quality), &sized.1);
         let (mut capture_config, mut encoder_config) = carrying(chroma, sized);
         capture_config.crop = Source::<P>::crop(&resolved);
-        let zoom = f64::from(capture_config.width) / f64::from(native.0);
+        *shared.region.lock() = region::RegionClock::steady(region_of(native, &quality));
+        let whole = whole_size(native, &quality);
+        let zoom = f64::from(whole.0) / f64::from(native.0);
         shared.set_zoom(zoom);
         let t_encoder = Instant::now();
         let sessions = [shared.next_session(), shared.next_session()];
@@ -4122,7 +4187,6 @@ impl<P: Platform> Pipeline<P> {
             "capture started"
         );
 
-        let point_scale = f64::from(Source::<P>::point_scale(&resolved));
         let injector = P::Input::new(target, point_scale * zoom);
         // Two tasks, not one. The beat is a promise about time and must never be behind work
         // that takes any: the pointer read in the cursor loop is a window-server round trip, and
@@ -4140,8 +4204,8 @@ impl<P: Platform> Pipeline<P> {
             stream: id,
             target,
             codec: encoder_config.codec,
-            width: capture_config.width,
-            height: capture_config.height,
+            width: whole.0,
+            height: whole.1,
             scale,
             stripes: on_the_wire(id, layout, capture_config.height),
         };
@@ -4255,8 +4319,9 @@ impl<P: Platform> Pipeline<P> {
         pending: Option<Rebuild<P>>,
     ) -> Option<Rebuild<P>> {
         self.quality = *quality;
+        let mut pending = pending;
         let native = pending.as_ref().map_or(self.native, |rebuild| rebuild.native);
-        let sized = configs_padded(native, quality, self.refresh_hz, self.pad_to);
+        let sized = configs_padded(native, quality, self.refresh_hz, self.pad_to, self.point_scale);
         let chroma = self.shared.ask_chroma(asked(quality), &sized.1);
         let (capture_config, encoder_config) = carrying(chroma, sized);
         let desired = CaptureConfig { crop: self.desired.crop, ..capture_config };
@@ -4264,6 +4329,19 @@ impl<P: Platform> Pipeline<P> {
             pending.as_ref().map_or((self.desired, self.encoder_config), |rebuild| {
                 (rebuild.desired, rebuild.config)
             });
+        // A region that moves at the size in force needs no session of its own: the capture
+        // samples elsewhere, the encoder goes on predicting from what it coded, and each frame
+        // says where it goes. Only a region of another size is a rebuild.
+        let moved = CaptureConfig { region: desired.region, ..was };
+        if moved == desired && was.region != desired.region {
+            if let Some(rebuild) = pending.as_mut() {
+                rebuild.desired.region = desired.region;
+            } else {
+                self.desired.region = desired.region;
+                self.apply_desired();
+            }
+        }
+        let was = moved;
         // The rate is the encoder's alone while the capture follows the display's beat.
         let same_rate = encoder_config.fps == was_config.fps;
         if desired == was
@@ -4305,7 +4383,7 @@ impl<P: Platform> Pipeline<P> {
         if let Some(superseded) = pending {
             superseded.abandon();
         }
-        self.map_at(desired.width, native.0);
+        self.map_at(native);
         let mut rebuild = self.start_rebuild(native, desired, encoder_config);
         rebuild.resized = resized;
         Some(rebuild)
@@ -4369,7 +4447,8 @@ impl<P: Platform> Pipeline<P> {
             return None;
         };
         tracing::info!(stream = %self.id, from = ?self.native, to = ?native, "target resized");
-        let sized = configs_padded(native, &self.quality, self.refresh_hz, self.pad_to);
+        let sized =
+            configs_padded(native, &self.quality, self.refresh_hz, self.pad_to, self.point_scale);
         let asked = self.shared.chroma.lock().asked();
         let chroma = self.shared.ask_chroma(asked, &sized.1);
         let (capture_config, encoder_config) = carrying(chroma, sized);
@@ -4385,10 +4464,11 @@ impl<P: Platform> Pipeline<P> {
     pub fn finish_rebuild(&mut self, rebuild: Rebuild<P>, built: Built<P>) -> Option<ScreenEvent> {
         let told = rebuild.resized || rebuild.layout != self.layout;
         self.install_rebuild(rebuild, built);
+        let (width, height) = whole_size(self.native, &self.quality);
         told.then(|| ScreenEvent::Geometry {
             stream: self.id,
-            width: self.desired.width,
-            height: self.desired.height,
+            width,
+            height,
             stripes: on_the_wire(self.id, self.layout, self.desired.height),
         })
     }
@@ -4649,15 +4729,19 @@ impl<P: Platform> Pipeline<P> {
     }
 
     /// Ask ScreenCaptureKit for the desired path and configuration, whole, unless a transition
-    /// is still in flight; the next tick asks again for whatever is still different.
+    /// is still in flight; the next tick asks again for whatever is still different. A
+    /// transition that has completed is settled first, so the configuration asked is weighed
+    /// against the one in force, not the one the last tick saw: a region asked and then given
+    /// back between two ticks is otherwise taken for the one in force, and never asked.
     ///
     /// Order matters between the two calls of a path change: the crop is cleared before the swap
     /// to the window filter, since a `sourceRect` on a window stream would be read in the
     /// window's own space, and the display filter is in place before the crop is set on it.
-    fn apply_desired(&self) {
+    fn apply_desired(&mut self) {
         if self.stopped {
             return;
         }
+        self.settle();
         let (path, config) = (self.desired_path, self.desired);
         if path == self.path && config == self.capture_config {
             return;
@@ -4704,15 +4788,22 @@ impl<P: Platform> Pipeline<P> {
         }
     }
 
-    /// Push `config` to the live stream; the completion lands in the transition.
+    /// Push `config` to the live stream; the completion lands in the transition, and in the
+    /// clock that says which region each capture shows.
     fn update_capture(&self, config: CaptureConfig) {
         let id = self.id;
         let transitions = self.transitions.clone();
+        let region = config.region.map(|points| region::to_pixels(points, self.point_scale));
+        self.shared.region.lock().asked(region, now::<P>());
+        let shared = Arc::downgrade(&self.shared);
         Source::<P>::update(&self.capture, &config, move |result| {
             if let Err(e) = &result {
                 tracing::warn!(stream = %id, error = %e, "capture update failed");
             }
             transitions.on_result(result.is_ok());
+            if let Some(shared) = shared.upgrade() {
+                shared.region.lock().answered(result.is_ok(), now::<P>());
+            }
         });
     }
 
@@ -4751,16 +4842,16 @@ impl<P: Platform> Pipeline<P> {
         // in force answered a bitrate the client has just replaced.
         self.shared.reset_rate(encoder_config.fps);
         self.shared.apply_cadence(target);
-        self.map_at(desired.width, native.0);
+        self.map_at(native);
         self.desired = desired;
         self.encoder_config = encoder_config;
         self.apply_desired();
     }
 
-    /// Map input and the pointer for a stream `width` pixels wide of a target `native_width`
-    /// pixels wide.
-    fn map_at(&mut self, width: u32, native_width: u32) {
-        let zoom = f64::from(width) / f64::from(native_width);
+    /// Map input and the pointer for the whole of a target `native` pixels in size at the
+    /// quality in force, whatever region of it is streamed.
+    fn map_at(&mut self, native: (u32, u32)) {
+        let zoom = f64::from(whole_size(native, &self.quality).0) / f64::from(native.0);
         self.shared.set_zoom(zoom);
         self.injector.set_scale(self.point_scale * zoom);
     }
@@ -5528,6 +5619,35 @@ mod tests {
         assert_eq!((capture.width, capture.height), (2, 2), "never below two pixels");
     }
 
+    /// A region is captured at the quality's scale, sampled in the target's points, while the
+    /// stream's own size stays the whole target's. A window that shrank under its region holds
+    /// the region to what is left, and one that shrank past it streams the whole window.
+    #[test]
+    fn a_region_is_captured_at_the_scale_and_held_to_the_target() {
+        let region = Region { x: 1000, y: 600, w: 1756, h: 988 };
+        let native = Quality { region: Some(region), ..Quality::default() };
+        let (capture, encoder) = configs((5120, 2880), &native, None);
+        assert_eq!((capture.width, capture.height), (1756, 988), "the region at native");
+        assert_eq!((encoder.width, encoder.height), (1760, 992), "padded to 16");
+        let points = capture.region.expect("sampled in points");
+        assert_eq!((points.x, points.y, points.w, points.h), (500.0, 300.0, 878.0, 494.0));
+        assert_eq!(whole_size((5120, 2880), &native), (5120, 2880), "the stream's own size");
+
+        let half = Quality { scale: 0.5, ..native };
+        let (capture, _encoder) = configs((5120, 2880), &half, None);
+        assert_eq!((capture.width, capture.height), (878, 494), "and at half");
+        assert_eq!(whole_size((5120, 2880), &half), (2560, 1440));
+
+        // The window shrank to 2000 × 1200: what is left of the region from its corner.
+        let (capture, _encoder) = configs((2000, 1200), &native, None);
+        assert_eq!((capture.width, capture.height), (1000, 600));
+        let points = capture.region.expect("held");
+        assert_eq!((points.x, points.y, points.w, points.h), (500.0, 300.0, 500.0, 300.0));
+        // To 900 × 500: nothing of the region is on it, so all of the window.
+        let (capture, _encoder) = configs((900, 500), &native, None);
+        assert_eq!((capture.width, capture.height, capture.region), (900, 500, None));
+    }
+
     /// An HEVC stream's encoder codes the capture's surface, each side the picture's rounded up
     /// to 16, and the picture keeps today's even size: the client is told that size, input maps
     /// through it, and the stream's SPS crops the surface back to it.
@@ -6061,16 +6181,22 @@ mod tests {
     #[test]
     fn encode_latency_is_matched_by_pts_and_bounded_in_flight() {
         let coder = Coder::new(StreamId(1));
-        coder.submitted(1, 1_000, 0b11);
-        coder.submitted(2, 2_000, 0b10);
-        assert_eq!(coder.returned(2, 2_500), Some((500, 0b10)));
-        assert_eq!(coder.returned(1, 4_000), Some((3_000, 0b11)));
+        let frame = |pts_us, at_us, stripes| Submitted { pts_us, at_us, stripes, region: None };
+        let region = Some(Region { x: 64, y: 0, w: 640, h: 360 });
+        coder.submitted(frame(1, 1_000, 0b11));
+        coder.submitted(Submitted { region, ..frame(2, 2_000, 0b10) });
+        assert_eq!(
+            coder.returned(2, 2_500),
+            Some((500, Submitted { region, ..frame(2, 2_000, 0b10) }))
+        );
+        assert_eq!(coder.returned(1, 4_000), Some((3_000, frame(1, 1_000, 0b11))));
         assert_eq!(coder.returned(9, 5_000), None);
         for pts in 0..u64::try_from(IN_FLIGHT_MAX).unwrap_or(u64::MAX) {
-            coder.submitted(100 + pts, 10_000, 0);
+            coder.submitted(frame(100 + pts, 10_000, 0));
         }
-        coder.submitted(200, 10_000, 0);
-        assert_eq!(coder.in_flight.lock().front().map(|f| f.0), Some(101), "the oldest forgotten");
+        coder.submitted(frame(200, 10_000, 0));
+        let oldest = coder.in_flight.lock().front().map(|f| f.pts_us);
+        assert_eq!(oldest, Some(101), "the oldest forgotten");
         assert_eq!(coder.returned(100, 20_000), None, "a forgotten frame is not a sample");
     }
 
@@ -6116,7 +6242,7 @@ mod tests {
         shared.lower.session.store(1, Ordering::Relaxed);
         shared.lower.pending.lock().keyframe = false;
         let flight = |coder: &Coder| -> Vec<(u64, u8)> {
-            coder.in_flight.lock().iter().map(|&(pts, _, stripes)| (pts, stripes)).collect()
+            coder.in_flight.lock().iter().map(|f| (f.pts_us, f.stripes)).collect()
         };
         let mut frame = a_frame();
         let base = host_now_us();
@@ -7176,7 +7302,7 @@ mod tests {
         let capture = |k: u64| CapturedFrame { capture_ts_us: base + k * 1_000_000, ..a_frame() };
         let encoding = std::thread::spawn({
             let (shared, frame) = (Arc::clone(&shared), capture(1));
-            move || shared.try_encode(Some(frame), host_now_us())
+            move || shared.try_encode(Some((frame, None)), host_now_us())
         });
         latch.reached();
         let turn = shared.gate.inside.load(Ordering::Acquire);
@@ -7198,11 +7324,11 @@ mod tests {
         assert_eq!(shared.top.session.load(Ordering::Relaxed), 0, "out of force");
         assert_eq!(shared.gate.inside.load(Ordering::Acquire), 0);
 
-        assert_eq!(shared.try_encode(Some(capture(2)), host_now_us()), Attempt::Sent);
+        assert_eq!(shared.try_encode(Some((capture(2), None)), host_now_us()), Attempt::Sent);
         assert_eq!(*log.lock(), vec![(1, true)], "nothing more for the session given up on");
         let replacement = Log::default();
         drop(shared.install(whole(recorder(2, Arc::clone(&replacement))), [2, 0]));
-        assert_eq!(shared.try_encode(Some(capture(3)), host_now_us()), Attempt::Sent);
+        assert_eq!(shared.try_encode(Some((capture(3), None)), host_now_us()), Attempt::Sent);
         assert_eq!(*replacement.lock(), vec![(2, true)], "the replacement's keyframe");
 
         latch.open();
@@ -7406,7 +7532,7 @@ mod tests {
         let shared = Arc::new(Shared::<Recording>::new(StreamId(1), sink, 8_000_000, 60, false));
         let log = Log::default();
         drop(shared.install(whole(recorder(1, Arc::clone(&log))), [1, 0]));
-        assert_eq!(shared.try_encode(Some(a_frame()), host_now_us()), Attempt::Sent);
+        assert_eq!(shared.try_encode(Some((a_frame(), None)), host_now_us()), Attempt::Sent);
         assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
 
         shared.request_refresh(0, 0, true);
@@ -7446,7 +7572,7 @@ mod tests {
         });
         let session = Recorder { inline: Some(inline), ..recorder(1, Arc::clone(&log)) };
         drop(shared.install(whole(session), [1, 0]));
-        assert_eq!(shared.try_encode(Some(a_frame()), host_now_us()), Attempt::Sent);
+        assert_eq!(shared.try_encode(Some((a_frame(), None)), host_now_us()), Attempt::Sent);
         assert_eq!(*log.lock(), vec![(1, true)], "the session's keyframe went in");
         assert!(!wire.sent.lock().is_empty(), "and came out inside the submit");
         assert_eq!(shared.top.keyframe_submitted_us.load(Ordering::Relaxed), 0, "none in flight");
@@ -7664,7 +7790,7 @@ mod tests {
                     // Handed over a tenth of a second ago as far as the encode's clock goes: every
                     // frame is back late at 60, however quickly this picture codes.
                     let now = host_now_us().saturating_sub(100_000);
-                    let attempt = shared.try_encode(Some(frame), now);
+                    let attempt = shared.try_encode(Some((frame, None)), now);
                     assert_eq!(attempt, Attempt::Sent, "frame {i}");
                 }
                 let _gone = done_tx.send("encodes");
@@ -7770,7 +7896,7 @@ mod tests {
     #[test]
     fn a_streams_padding_is_its_own() {
         let quality = Quality::default();
-        let (_capture, measured) = configs_padded((3024, 1964), &quality, Some(60.0), Some(2));
+        let (_capture, measured) = configs_padded((3024, 1964), &quality, Some(60.0), Some(2), 2.0);
         let (_capture, beside) = configs((3024, 1964), &quality, Some(60.0));
         assert_eq!((measured.width, measured.height), (3024, 1964), "the even size asked for");
         assert_eq!((beside.width, beside.height), (3024, 1968), "the codec's own 16");

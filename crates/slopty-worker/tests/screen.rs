@@ -371,6 +371,7 @@ mod encoder_rate_control {
             format: PixelFormat::Nv12Full,
             queue_depth: 2,
             crop: None,
+            region: None,
         };
         let capture = Capture::start(
             &target,

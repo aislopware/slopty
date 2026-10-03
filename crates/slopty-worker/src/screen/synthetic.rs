@@ -464,7 +464,9 @@ mod tests {
     use slopty_proto::datagram::ClientDatagram;
     use slopty_proto::input::{Mods, MouseButton};
     use slopty_proto::media::MAX_DATAGRAM;
-    use slopty_proto::screen::{Chroma, Feedback, Quality, ScreenEvent, ScreenRequest, Stripe};
+    use slopty_proto::screen::{
+        Chroma, Feedback, Quality, Region, ScreenEvent, ScreenRequest, Stripe,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
@@ -2406,6 +2408,142 @@ mod tests {
         });
     }
 
+    /// The client's end of `stream` on loopback: its reports and feedback answered the moment
+    /// they are sent. The reporting task goes with the stream.
+    fn loopback_client<P: Platform>(
+        stream: &Pipeline<P>,
+        router: &ScreenRouter,
+        codec: slopty_proto::screen::VideoCodec,
+    ) -> (slopty_client::screen::ScreenHandle, tokio::task::JoinHandle<()>) {
+        let control = stream.control();
+        let (reports_tx, mut reports) = mpsc::channel::<ClientMsg>(64);
+        let reporting = {
+            let control = control.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = reports.recv().await {
+                    if let ClientMsg::Screen(ScreenRequest::Report { stream, report }) = msg {
+                        let _decision = control.of_media(stream).report(&report, None);
+                    }
+                }
+            })
+        };
+        let uplink = Uplink {
+            control: reports_tx,
+            feedback: Box::new(move |bytes| {
+                answer(&control, &bytes);
+                true
+            }),
+            rtt: Box::new(|| Some(Duration::from_millis(1))),
+        };
+        let handle =
+            spawn_screen(&tokio::runtime::Handle::current(), router, STREAM, codec, uplink);
+        (handle, reporting)
+    }
+
+    /// The next picture the client decodes that shows `region`: its size, and when it came
+    /// out of the decoder. Waited for on the stream ([`next_or_stopped`]).
+    async fn picture_of<P: Platform>(
+        frames: &mut tokio::sync::watch::Receiver<Option<Arc<slopty_client::screen::Presentable>>>,
+        stream: &mut Pipeline<P>,
+        handle: &slopty_client::screen::ScreenHandle,
+        region: Option<Region>,
+    ) -> ((usize, usize), Instant) {
+        loop {
+            let what = || format!("showing {region:?}");
+            assert!(next_or_stopped(frames, stream, handle, what).await, "the stream ended");
+            let Some(frame) = frames.borrow_and_update().clone() else { continue };
+            if frame.region == region {
+                return (frame.size(), frame.stamp.decoded);
+            }
+        }
+    }
+
+    /// Ask `stream` for `quality`, waiting for and putting in the sessions it builds, if any:
+    /// whether it built any.
+    async fn ask<P: Platform>(stream: &mut Pipeline<P>, quality: &Quality) -> bool {
+        let Some(mut rebuild) = stream.set_quality(quality, None) else { return false };
+        let built = rebuild.built().await.unwrap();
+        let told = stream.finish_rebuild(rebuild, built);
+        assert_eq!(told, None, "a region never changes the stream's size");
+        true
+    }
+
+    /// A zoomed picture's region streams at native resolution: the frames are the region's
+    /// size, and their prefix says which region they show, while `Opened`, input and the
+    /// pointer stay in the whole target's pixels. A region of another size builds a session for
+    /// it; one moved at the size in force builds none, and its frames say where they now go. A
+    /// region past the target's edge is held to it, one wholly off it streams the whole target,
+    /// and `None` returns to the whole target. Drawn, never captured.
+    #[test]
+    fn a_region_streams_its_part_at_native_resolution() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
+            let full = Quality { scale: 1.0, ..Quality::default() };
+            let coding = Coding { pad_to: None, stripes: Knob::Off };
+            let (mut stream, opened) = Pipeline::<Synthetic>::open_padded(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                full,
+                wire,
+                |_event| {},
+                coding,
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, width, height, .. } = opened else {
+                panic!("{opened:?}")
+            };
+            assert_eq!((width, height), (3024, 1964));
+            let (handle, reporting) = loopback_client(&stream, &router, codec);
+            let mut frames = handle.frames();
+            let whole = picture_of(&mut frames, &mut stream, &handle, None).await.0;
+            assert_eq!(whole, (3024, 1964));
+
+            // A phone's view at one to one, with a quarter of it on every side.
+            let a = Region { x: 400, y: 300, w: 1756, h: 988 };
+            assert!(ask(&mut stream, &Quality { region: Some(a), ..full }).await, "a new size");
+            let size = picture_of(&mut frames, &mut stream, &handle, Some(a)).await.0;
+            assert_eq!(size, (1756, 988), "the region at native resolution");
+            assert!((stream.zoom() - 1.0).abs() < f64::EPSILON, "input in the whole target's");
+
+            let b = Region { x: 1200, y: 900, ..a };
+            assert!(!ask(&mut stream, &Quality { region: Some(b), ..full }).await, "moved");
+            let size = picture_of(&mut frames, &mut stream, &handle, Some(b)).await.0;
+            assert_eq!(size, (1756, 988));
+
+            // Past the bottom-right corner: held to the target, at the size left there.
+            let past = Region { x: 2500, y: 1500, w: 1756, h: 988 };
+            assert!(ask(&mut stream, &Quality { region: Some(past), ..full }).await);
+            let held = Region { x: 2500, y: 1500, w: 524, h: 464 };
+            let size = picture_of(&mut frames, &mut stream, &handle, Some(held)).await.0;
+            assert_eq!(size, (524, 464));
+
+            // Wholly off the target, then none: the whole target.
+            let off = Region { x: 4000, y: 3000, w: 640, h: 360 };
+            assert!(ask(&mut stream, &Quality { region: Some(off), ..full }).await);
+            let size = picture_of(&mut frames, &mut stream, &handle, None).await.0;
+            assert_eq!(size, (3024, 1964), "off the target is the whole of it");
+            assert!(ask(&mut stream, &Quality { region: Some(a), ..full }).await);
+            let _a = picture_of(&mut frames, &mut stream, &handle, Some(a)).await;
+            assert!(ask(&mut stream, &full).await);
+            let size = picture_of(&mut frames, &mut stream, &handle, None).await.0;
+            assert_eq!(size, (3024, 1964), "none is the whole target again");
+            let between = stream.shared.between_regions.load(Ordering::Relaxed);
+            eprintln!("captures between two regions, not sent: {between}");
+
+            // A stream closed while a region's sessions build and its capture moves.
+            let rebuild = stream.set_quality(&Quality { region: Some(b), ..full }, None);
+            assert!(rebuild.is_some(), "a new size");
+            drop(rebuild);
+            drop(handle);
+            reporting.abort();
+            stream.close().await;
+        });
+    }
+
     /// Capture → glass and input → glass on this Mac, from drawn pictures. Run from a copy of the
     /// test binary off the repository volume (`docs/MEASUREMENTS.md`, "Capture to the glass");
     /// `SLOPTY_GLASS_SECONDS` sets the run length (default 20).
@@ -2565,6 +2703,161 @@ mod tests {
                     run_padded::<FiveK>(&label5, 60, Duration::ZERO, 0, seconds, knobs).await;
                 }
             }
+        });
+    }
+
+    /// Encode, bits and decode for a drawn 5K display (5120 × 2880) at native scale, against
+    /// the regions a phone at one to one streams of it: its landscape view of the display
+    /// (2080 × 1170 device pixels) and its portrait one (1170 × 658), each with a quarter of
+    /// itself on every side (3120 × 1756 and 1756 × 988). The regions are drawn as displays of
+    /// their own size, whose glyphs are the 5K display's, so the encoder sees the same density
+    /// (`docs/MEASUREMENTS.md`, "a zoomed picture's region"). The whole display goes once as
+    /// one picture and once as two stripes. Loopback, 60 asked, alternated.
+    /// `SLOPTY_GLASS_SECONDS` sets each run's length (default 20), `SLOPTY_GLASS_ROUNDS` the
+    /// rounds (default 2).
+    #[test]
+    #[ignore = "measurement"]
+    fn a_region_against_the_whole_5k_display() {
+        /// [`Synthetic`] on a 5120 × 2880 display.
+        enum FiveK {}
+
+        impl Platform for FiveK {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<60, 2560, 1440>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        /// A landscape phone's region of it: 3120 × 1756.
+        enum Landscape {}
+
+        impl Platform for Landscape {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<60, 1560, 878>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        /// A portrait phone's region of it: 1756 × 988.
+        enum Portrait {}
+
+        impl Platform for Portrait {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<60, 878, 494>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        slopty_platform::user_interactive_thread();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let knob = |name: &str, default: u64| {
+            std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+        };
+        let (seconds, rounds) = (knob("SLOPTY_GLASS_SECONDS", 20), knob("SLOPTY_GLASS_ROUNDS", 2));
+        let whole = Knobs::default();
+        let striped = Knobs { stripes: Knob::On, ..Knobs::default() };
+        runtime.block_on(async {
+            for _ in 0..rounds {
+                run_padded::<FiveK>("5K whole", 60, Duration::ZERO, 0, seconds, whole).await;
+                run_padded::<FiveK>("5K two stripes", 60, Duration::ZERO, 0, seconds, striped)
+                    .await;
+                run_padded::<Landscape>("landscape region", 60, Duration::ZERO, 0, seconds, whole)
+                    .await;
+                run_padded::<Portrait>("portrait region", 60, Duration::ZERO, 0, seconds, whole)
+                    .await;
+            }
+        });
+    }
+
+    /// The time from a zoomed picture's ask for a region to the client's first decoded picture
+    /// of it, on a drawn 5K display at native scale, loopback: from the whole display to a
+    /// landscape phone's region (a new size: new sessions and a keyframe), that region moved at
+    /// its size (no new session), and back to the whole display. Wire bytes between the ask and
+    /// that picture beside each. `SLOPTY_REGION_ROUNDS` sets the rounds (default 8)
+    /// (`docs/MEASUREMENTS.md`, "a zoomed picture's region").
+    #[test]
+    #[ignore = "measurement"]
+    fn measure_a_region_change() {
+        /// [`Synthetic`] on a 5120 × 2880 display.
+        enum FiveK {}
+
+        impl Platform for FiveK {
+            type Audio = slopty_codec::Opus;
+            type Capture = StudioAt<60, 2560, 1440>;
+            type Input = Poke;
+            type Video = slopty_codec::VideoToolbox;
+        }
+
+        slopty_platform::user_interactive_thread();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .on_thread_start(slopty_platform::user_interactive_thread)
+            .build()
+            .unwrap();
+        let rounds: usize =
+            std::env::var("SLOPTY_REGION_ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(8);
+        runtime.block_on(async {
+            let router = ScreenRouter::new();
+            let wire = Arc::new(Wire::new(router.clone(), None, None));
+            let full = Quality { scale: 1.0, ..Quality::default() };
+            let coding = Coding { pad_to: None, stripes: Knob::Off };
+            let (mut stream, opened) = Pipeline::<FiveK>::open_padded(
+                STREAM,
+                CaptureTarget::Display(DISPLAY.id),
+                full,
+                Arc::<Wire>::clone(&wire),
+                |_event| {},
+                coding,
+            )
+            .await
+            .unwrap();
+            let ScreenEvent::Opened { codec, .. } = opened else { panic!("{opened:?}") };
+            let (handle, reporting) = loopback_client(&stream, &router, codec);
+            let mut frames = handle.frames();
+            let _first = picture_of(&mut frames, &mut stream, &handle, None).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let a = Region { x: 1000, y: 562, w: 3120, h: 1756 };
+            let b = Region { x: 1600, y: 900, ..a };
+            let steps = [("whole → region", Some(a)), ("region moved", Some(b)), ("→ whole", None)];
+            let mut took: [Vec<Duration>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+            let mut bytes: [Vec<u64>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+            for _ in 0..rounds {
+                for (i, (_label, region)) in steps.iter().enumerate() {
+                    let (asked, sent) = (Instant::now(), wire.bytes());
+                    let _rebuilt = ask(&mut stream, &Quality { region: *region, ..full }).await;
+                    let (_size, decoded) =
+                        picture_of(&mut frames, &mut stream, &handle, *region).await;
+                    took[i].push(decoded.saturating_duration_since(asked));
+                    bytes[i].push(wire.bytes().saturating_sub(sent));
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+            }
+            eprintln!(
+                "MEASURE region change on a drawn 5K display, {rounds} rounds, load {}",
+                load_average()
+            );
+            for (i, (label, _region)) in steps.iter().enumerate() {
+                let mut kib: Vec<u64> = bytes[i].iter().map(|b| b / 1024).collect();
+                kib.sort_unstable();
+                eprintln!(
+                    "  {label}: ask → first picture {}; wire KiB in between p50 {}",
+                    spread(&mut took[i]),
+                    kib.get(kib.len() / 2).copied().unwrap_or(0)
+                );
+            }
+            eprintln!(
+                "  captures between two regions, not sent: {}",
+                stream.shared.between_regions.load(Ordering::Relaxed)
+            );
+            drop(handle);
+            reporting.abort();
+            stream.close().await;
         });
     }
 

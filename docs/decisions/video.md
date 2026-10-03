@@ -1136,31 +1136,75 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   machine-wide counter did not move (MEASUREMENTS, "UDP receive buffer"). `SO_RCVBUF` is set
   when a measurement shows drops, and not before.
 
-- ⏸ **A zoomed picture's region at native resolution** (designed 2026-09-28, not built). A
-  zoomed picture already asks for the scale it is drawn at, which tops out at the whole target
-  at native size: a 5K display at 1:1 on a phone costs a 14.7 MP encode, send and decode for the
-  3 MP the phone shows. The follow-up streams only the zoomed region, at native resolution. It
-  needs a wire change, so it waits for its own round:
-  - `ScreenRequest::SetRegion { stream: StreamId, region: Option<Region> }`, with
-    `Region { x: u16, y: u16, w: u16, h: u16 }` in the target's native pixels. `None` streams
-    the whole target again. The client asks when the zoom settles (the pinch or pan ended,
-    then `QUALITY_COOLDOWN`), for the drawn rect plus a quarter of it on each side, so a small
-    pan stays inside what is streamed. A pan past that margin asks again.
-  - `FramePrefix` gains the region the frame shows (`region: [U16; 4]`, the same units, all
-    zero for the whole target). It rides with each frame, under the frame's parity. A frame in
-    flight across a change then says for itself where it goes, with no ordering between the
-    control stream and the datagrams to get wrong. The prefix grows from 16 to 24 bytes.
-  - The worker sets `SCStreamConfiguration.sourceRect` to the region (display points on the
-    display and crop paths, the window's own space on the window path, as the crop path
-    already does) and the output size to the region at the quality's scale. A new size is a new
-    encoder session and a keyframe, so a region change costs what a quality change does
-    today (the `sourceRect` update itself took about 20 ms on the crop path).
-  - Input and the cursor stay in whole-target stream pixels, so `ScreenInput` and the
-    cursor channel do not change and the view's mapping (`Zoom::to_picture`) is untouched. The
-    view draws each frame at its region's place in the zoomed picture, over the last
-    whole-target frame, which fills the margin while a new region is on its way.
-  Before building it, measure encode, bitrate and decode for a 5K display at native against a
-  phone-sized region, and the time from `SetRegion` to the first frame of the new region.
+- ✅ **A zoomed picture's region at native resolution** (designed 2026-09-28, built 2026-10-03).
+  A zoomed picture already asked for the scale it is drawn at, which tops out at the whole
+  target at native size. A 5K display at 1:1 on a phone then cost a 14.7 MP encode, send and
+  decode for the 3 MP the phone shows. Now a zoomed picture streams only its region, at the
+  scale it is drawn at. Measured before building, on a drawn 5K display at native: the whole
+  display encodes in 35 ms and holds 28 frames a second (48 in two stripes). A phone's portrait
+  region with its margin (1756 × 988) encodes in 5.8 ms and holds 60. Capture to painted drops
+  from 55–65 ms to 23 ms, and the landscape region (3120 × 1756) sits between the two
+  (MEASUREMENTS, "a zoomed picture's region"). Built as designed, except as follows:
+  - **The region rides in `Quality`, not a `SetRegion` request.** `Quality::region:
+    Option<Region>` (`Region { x, y, w, h: u16 }`, the target's native pixels, `None` for all
+    of it). A zoom changes the scale and the region together, so one numbered `SetQuality`
+    asks for both and builds sessions at most once. Two requests would have built twice, or
+    needed an ordering between them. `Region::within` holds a region to its target: edges on
+    even pixels, sides of at least `Region::MIN_SIDE` (64), moved in from an edge it would cross
+    and cut at one it runs past. A region wholly off the target, or covering all of it, is the
+    whole target.
+  - **`FramePrefix` grows from 20 to 28 bytes** (the 2026-09-28 figure was from before the stripe
+    fields): `region: [U16; 4]`, all zero for the whole target, under the frame's parity. The
+    reassembler hands it on as `FrameInfo::region`, and the client's `Presentable::region`
+    says where each picture goes. The client's stitch pairs two stripes only when both their
+    build and their region match.
+  - **A region moved at the size in force builds nothing.** The capture samples elsewhere
+    (`sourceRect`, through `CaptureConfig::region` composed inside any crop), the encoder goes
+    on predicting from what it coded, and each frame says where it goes. Only a region of
+    another size builds new sessions and a keyframe. The client keeps a zoom's region the same
+    size while it pans, so only a new zoom changes the size. Measured: a move shows its first
+    picture in 36–41 ms (p50), against 120 ms for a new size and 148–165 ms back to the whole
+    display.
+  - **Each capture is labelled by its display time** (`screen::region::RegionClock`). A
+    configuration update takes ScreenCaptureKit some milliseconds after it is asked, so a
+    capture whose display time falls between the ask and the completion handler could show
+    either region. Such a capture is not sent (`between_regions` counts them), because placed
+    by the wrong region it would draw the old picture in the new place for a frame. A refused
+    update leaves the old region on every capture. The capture's configuration is now weighed
+    against the transition that has completed, not the one the last geometry tick settled.
+    Otherwise a region asked for and then given back between two ticks was taken for the one
+    in force, and never asked for.
+  - **Where the client asks.** The region is the view plus a quarter of it on every side. At
+    the picture's edges the region is moved inside the picture rather than cut, so its size
+    holds (`zoom::streamed`). It is asked `QUALITY_COOLDOWN` (400 ms) after the zoom settles.
+    A pan that leaves part of the view outside the region last asked for asks at once, so
+    the margin is never a blank edge for longer than a round trip and a frame.
+  - **The view.** The region's picture goes to its own native layer at its place in the zoomed
+    whole (`region_bounds`). Under it, GPUI paints the newest picture of the whole target
+    (`Glass::base`), which fills the margin while a new region is on its way. A picture of
+    another region waits until the view has placed the layers for it (`glass::Placed` carries
+    the region beside the seam), so it never shows at the old region's place. Input, the
+    pointer, `Opened` and `Geometry` stay in the whole target's stream pixels, so `ScreenInput`,
+    the cursor channel and `Zoom::to_picture` did not change.
+  Rejected: a `SetRegion` request beside `SetQuality` (two builds per zoom, or an ordering
+  between them); a rebuild on every move (a keyframe per pan, for no gain, since the encoder
+  predicts across the shift); and a region cut at the picture's edge (a new size, and so a
+  rebuild, every time a pan reached an edge). Owed on hardware: that a real ScreenCaptureKit
+  stream delivers promptly after a same-size `sourceRect` move on a still screen (the drawn
+  capture does). Also owed: the one refresh when a zoom back out to fit may show the last
+  region's picture before the whole one comes. Tests: `a_region_is_held_to_its_target`, the
+  goldens `screen_quality_region` and `frame_prefix_region` (proto);
+  `the_datagrams_share_one_buffer_and_rebuild_the_frame` (media);
+  `the_region_is_sampled_inside_the_crop` (capture); `screen::region::tests`,
+  `a_region_is_captured_at_the_scale_and_held_to_the_target` and
+  `a_region_streams_its_part_at_native_resolution` (worker: region frames at the region's size
+  with it in the prefix, a move without a rebuild, a region past the edge, one off the target,
+  `None` back to the whole, a window shrunk under its region, a stream closed while a region's
+  sessions build); `stripes_of_two_regions_never_go_up_together` (client);
+  `a_region_picture_waits_for_its_place_and_the_whole_one_stays_the_base`,
+  `screen::zoom::tests`, `a_zoom_asks_for_its_region_once_it_settles`,
+  `a_region_picture_goes_to_its_place_over_the_whole` (ui). Measurements:
+  `a_region_against_the_whole_5k_display`, `measure_a_region_change`.
 
 - ✅ **A cursor sample draws only what it moves, and rides the frames** (2026-09-28; the riding
   superseded 2026-09-30 by **Pictures go to a layer of their own, not through a GPUI frame**:
