@@ -258,13 +258,18 @@ impl WorkspaceView {
     }
 
     /// Show `edit.path` in a file tile beside its shell, focused, at its line; and when a
-    /// program waits on it, the tile says so until the person is done.
+    /// program waits on it, the tile says so until the person is done. A folder's path, which
+    /// `open <folder>` sends ending in `/`, opens a folder tile there.
     fn edit_file(&mut self, key: WorkerKey, edit: &EditFile, again: bool, cx: &mut Context<Self>) {
         tracing::info!(path = %edit.path, wait = edit.wait, again, "edit a file a shell handed over");
         // A new tile opens right of the focused column: the shell's, once it has the focus.
         if let Some(shell) = edit.session.and_then(|s| self.tile_of_session(s)) {
             self.tick();
             self.layout.focus(shell);
+        }
+        if edit.path.ends_with('/') && !edit.wait {
+            let _shown = self.open_folder_on(key, &edit.path, cx);
+            return;
         }
         let Some(item) = self.show_file(Some(key), &edit.path, edit.line, cx) else { return };
         // A view made later, once the tile is echoed, asks `waiting_on` itself.
