@@ -108,13 +108,16 @@ pub fn list(cwd: &str, cursor: Option<String>) -> acp::ListSessionsRequest {
     acp::ListSessionsRequest::new().cwd(std::path::PathBuf::from(cwd)).cursor(cursor)
 }
 
-/// One of the sessions `session/list` listed, as a past session: taken up again by
+/// One of the sessions `session/list` listed of `agent`, as a past session: taken up again by
 /// [`resume_args`] when the agent `loads` sessions, else by nothing.
 #[must_use]
-pub fn past(info: &acp::SessionInfo, loads: bool) -> PastSession {
+pub fn past(agent: &thread::AgentId, info: &acp::SessionInfo, loads: bool) -> PastSession {
     let updated = info.updated_at.as_deref().and_then(crate::conversation::parse_ms);
     PastSession {
+        agent: agent.clone(),
         native: info.session_id.0.to_string(),
+        cwd: Some(info.cwd.to_string_lossy().into_owned()),
+        prompts: Vec::new(),
         title: info.title.clone().filter(|t| !t.trim().is_empty()),
         updated_ms: updated,
         thread: None,

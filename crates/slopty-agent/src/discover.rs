@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use slopty_core::WallMs;
+use slopty_proto::thread::AgentId;
 use slopty_proto::thread::wire::PastSession;
 
 /// Claude Code's per-project directory under the home directory.
@@ -100,9 +101,13 @@ pub fn sessions(home: &Path, cwd: &Path, limit: usize) -> std::io::Result<Vec<Pa
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     found.truncate(limit);
+    let folder = cwd.to_string_lossy();
     Ok(found
         .into_iter()
         .map(|(modified, id)| PastSession {
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            cwd: Some(folder.clone().into_owned()),
+            prompts: Vec::new(),
             title: None,
             updated_ms: modified.map(WallMs::of),
             thread: None,

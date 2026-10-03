@@ -29,6 +29,7 @@ use slopty_worker::thread::acp::{self, Acp};
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
+use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
@@ -92,6 +93,7 @@ pub struct Threads {
     acp: Acp,
     composer: Composer,
     snapshots: Snapshots,
+    history: History,
 }
 
 /// Open the threads kept under `dir`, and what [`start`] needs to observe into them.
@@ -119,6 +121,7 @@ pub fn open(
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
             // The threads live under the data directory, where pi's gate is written too.
             let data = dir.parent().unwrap_or(dir).to_path_buf();
+            let history = History::new(history::Stores::here(), history::Limits::default());
             let observing = Observing {
                 claude: asks,
                 claude_start: claude_start_asks,
@@ -128,8 +131,17 @@ pub fn open(
                 data,
                 terminals,
             };
-            let threads =
-                Threads { host, claude, claude_start, codex, pi, acp, composer, snapshots };
+            let threads = Threads {
+                host,
+                claude,
+                claude_start,
+                codex,
+                pi,
+                acp,
+                composer,
+                snapshots,
+                history,
+            };
             Some((threads, observing))
         }
         Err(e) => {
@@ -454,10 +466,10 @@ impl Following {
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
             }
             // An agent is asked, or its session directory listed: on a task of its own.
-            ThreadRequest::Sessions { agent, cwd, limit } => {
+            ThreadRequest::Sessions { agent, cwd, query, limit } => {
                 let out = at.out.clone();
                 at.tasks.spawn(async move {
-                    let listed = sessions(&threads, agent, cwd, limit).await;
+                    let listed = sessions(&threads, agent, cwd, query, limit).await;
                     let _gone = out.send(WorkerMsg::Sessions(listed)).await;
                 });
             }
@@ -503,10 +515,60 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
     }
 }
 
+/// The past sessions [`ThreadRequest::Sessions`] asks for, at most `limit`: agent `agent`'s in
+/// folder `cwd` as the agent lists them, with no `query`; else those the person's past prompts
+/// find ([`History`]). Each is named by the thread held of it here, if one is; why there are
+/// none, when they could not be had.
+async fn sessions(
+    threads: &Threads,
+    agent: Option<AgentId>,
+    cwd: Option<String>,
+    query: String,
+    limit: u32,
+) -> PastSessions {
+    let (sessions, absent, cut) = match (&agent, &cwd) {
+        (Some(agent), Some(cwd)) if query.trim().is_empty() => {
+            let (sessions, absent) = listed(threads, agent.clone(), cwd.clone(), limit).await;
+            (sessions, absent, None)
+        }
+        _ => {
+            let history = threads.history.clone();
+            let (agent, cwd, query) = (agent.clone(), cwd.clone(), query.clone());
+            let found = tokio::task::spawn_blocking(move || {
+                history.search(&history::Ask {
+                    agent: agent.as_ref(),
+                    cwd: cwd.as_deref(),
+                    query: &query,
+                    limit: usize::try_from(limit).unwrap_or(usize::MAX),
+                })
+            })
+            .await;
+            match found {
+                Ok(found) => (found.sessions, found.absent, found.cut),
+                Err(e) => (Vec::new(), Some(format!("The search stopped: {e}")), None),
+            }
+        }
+    };
+    let mut sessions = sessions;
+    for past in &mut sessions {
+        if let Some((thread, title)) = threads.host.session(&past.agent, &past.native) {
+            past.thread = Some(thread);
+            if !title.trim().is_empty() && (past.title.is_none() || !past.prompts.is_empty()) {
+                past.title = Some(title);
+            }
+        }
+    }
+    PastSessions { agent, cwd, query, sessions, absent, cut }
+}
+
 /// Agent `agent`'s past sessions in folder `cwd`, at most `limit`, the last first, as the agent
-/// keeps them: each named by the thread held of it here, if one is; why there are none, when
-/// they could not be had.
-async fn sessions(threads: &Threads, agent: AgentId, cwd: String, limit: u32) -> PastSessions {
+/// keeps them; why there are none, when they could not be had.
+async fn listed(
+    threads: &Threads,
+    agent: AgentId,
+    cwd: String,
+    limit: u32,
+) -> (Vec<slopty_proto::thread::wire::PastSession>, Option<String>) {
     let cwd = slopty_worker::file::expand_home(Path::new(&cwd)).to_string_lossy().into_owned();
     let listed = if agent.is(AgentId::CLAUDE_CODE) {
         let (home, dir) = (slopty_platform::dirs::home(), PathBuf::from(&cwd));
@@ -532,15 +594,7 @@ async fn sessions(threads: &Threads, agent: AgentId, cwd: String, limit: u32) ->
         Err(why) => (Vec::new(), Some(why)),
     };
     sessions.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-    for past in &mut sessions {
-        if let Some((thread, title)) = threads.host.session(&agent, &past.native) {
-            past.thread = Some(thread);
-            if past.title.is_none() && !title.trim().is_empty() {
-                past.title = Some(title);
-            }
-        }
-    }
-    PastSessions { agent, cwd, sessions, absent }
+    (sessions, absent)
 }
 
 const fn refused(reason: String) -> Outcome {

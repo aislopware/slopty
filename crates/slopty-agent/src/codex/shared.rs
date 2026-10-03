@@ -1378,7 +1378,10 @@ pub fn past(thread: &p::Thread) -> PastSession {
     }
     let title = title_of(thread);
     PastSession {
+        agent: AgentId::named(AgentId::CODEX),
         native: thread.id.clone(),
+        cwd: Some(thread.cwd.clone()),
+        prompts: Vec::new(),
         title: (!title.trim().is_empty()).then_some(title),
         updated_ms: Some(seconds(thread.updated_at)),
         thread: None,

@@ -14207,3 +14207,31 @@ cargo nextest run -p slopty-worker --test codex_rest --run-ignored only --no-cap
 # or, with the binaries already built:
 cargo test -p slopty-worker --test codex_rest -- --ignored --nocapture
 ```
+
+## 2026-10-04 — Prompt search
+
+The worker's search of the person's past prompts (`slopty_worker::thread::history`) over this
+Mac's own records: Claude Code's prompt history (4.2 MB, 13,936 lines, with its paste cache),
+Codex's (0.2 MB) and the first lines of its 143 rollouts, and pi's 78 session files (18 MB). A
+fresh index for each query reads every record (cold); five more searches on the same index read
+only what was appended (warm). Release build, Apple silicon, the files in the page cache. Only
+times and counts are printed; no prompt is.
+
+| query | cold | warm median | warm max | sessions |
+|---|---|---|---|---|
+| none (prompted last first) | 150–192 ms | 3.4 ms | 4.7 ms | 50 (the limit) |
+| `the` | 82–107 ms | 19.3 ms | 20.2 ms | 50 |
+| `login test` | 85–90 ms | 4.8 ms | 5.5 ms | 14 |
+| `zzqxj` (no match) | 87–107 ms | 2.5 ms | 2.6 ms | 0 |
+
+- The cold read is far inside the search's bounds (3 s, 512 MiB, 64 MiB a file), so nothing was
+  cut. It happens once per worker; every later search reads only new lines.
+- Scoring every prompt with `nucleo-matcher` took 45 ms a warm search whatever the words. Each
+  prompt now keeps its text folded as the matcher reads it (by grapheme, accents folded, lower
+  case), and a prompt that lacks one of the words is passed over before scoring. A rare word
+  went from 45 ms to 3–5 ms. A word in nearly every prompt (`the`) still scores most of them,
+  at 19 ms.
+
+```sh
+cargo test --release -p slopty-worker --test history -- --ignored --nocapture measure
+```

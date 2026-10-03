@@ -113,11 +113,14 @@ pub fn title(head: &str, tail: &str) -> Option<String> {
     named(tail).or_else(|| named(head)).or_else(first).map(|text| title_of(&text))
 }
 
-/// Session `id`, called `title`, last written at `updated`, as a past session.
+/// Session `id` in folder `cwd`, called `title`, last written at `updated`, as a past session.
 #[must_use]
-pub fn past(id: &str, title: Option<String>, updated: Option<WallMs>) -> PastSession {
+pub fn past(id: &str, cwd: &str, title: Option<String>, updated: Option<WallMs>) -> PastSession {
     PastSession {
+        agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::PI),
         native: id.to_owned(),
+        cwd: Some(cwd.to_owned()),
+        prompts: Vec::new(),
         title,
         updated_ms: updated,
         thread: None,

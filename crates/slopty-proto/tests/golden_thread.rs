@@ -8,6 +8,7 @@ mod golden_thread {
 
     use slopty_core::{ClientId, SessionId, WallMs};
     use slopty_proto::codec;
+    use slopty_proto::search::Span;
     use slopty_proto::thread::detail::{
         AgentDetail, Answer, EditDetail, ExecDetail, ExecStatus, FetchDetail, Hunk, McpDetail,
         Offered, Question, QuestionDetail, ReadDetail, SearchDetail, WebLink, WebSearchDetail,
@@ -15,7 +16,7 @@ mod golden_thread {
     };
     use slopty_proto::thread::wire::{
         Expanded, FileDiff, Intent, IntentDone, Outcome, Page, PastSession, PastSessions, Pick,
-        Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadRequest,
+        PromptHit, Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
@@ -295,9 +296,19 @@ mod golden_thread {
         snap(
             "client_sessions",
             &ThreadRequest::Sessions {
-                agent: AgentId::named(AgentId::CLAUDE_CODE),
-                cwd: "/work".to_owned(),
+                agent: Some(AgentId::named(AgentId::CLAUDE_CODE)),
+                cwd: Some("/work".to_owned()),
+                query: String::new(),
                 limit: 50,
+            },
+        );
+        snap(
+            "client_sessions_search",
+            &ThreadRequest::Sessions {
+                agent: None,
+                cwd: None,
+                query: "flaky login".to_owned(),
+                limit: 20,
             },
         );
         snap(
@@ -773,26 +784,60 @@ mod golden_thread {
         snap(
             "link_worker_sessions",
             &WorkerMsg::Sessions(PastSessions {
-                agent: AgentId::named(AgentId::CODEX),
-                cwd: "/work".to_owned(),
+                agent: Some(AgentId::named(AgentId::CODEX)),
+                cwd: Some("/work".to_owned()),
+                query: String::new(),
                 sessions: vec![PastSession {
+                    agent: AgentId::named(AgentId::CODEX),
                     native: "019a-c0de".to_owned(),
+                    cwd: Some("/work".to_owned()),
                     title: Some("Fix the build".to_owned()),
                     updated_ms: Some(ms(1_700_000)),
                     thread: Some(thread()),
                     resume: vec!["resume".to_owned(), "019a-c0de".to_owned()],
                     facts: BTreeMap::from([("branch".to_owned(), "main".to_owned())]),
+                    prompts: vec![],
                 }],
                 absent: None,
+                cut: None,
             }),
         );
         snap(
             "link_worker_sessions_absent",
             &WorkerMsg::Sessions(PastSessions {
-                agent: AgentId::named(AgentId::PI),
-                cwd: "/work".to_owned(),
+                agent: Some(AgentId::named(AgentId::PI)),
+                cwd: Some("/work".to_owned()),
+                query: String::new(),
                 sessions: vec![],
                 absent: Some("pi is not installed".to_owned()),
+                cut: None,
+            }),
+        );
+        snap(
+            "link_worker_sessions_found",
+            &WorkerMsg::Sessions(PastSessions {
+                agent: None,
+                cwd: None,
+                query: "flaky login".to_owned(),
+                sessions: vec![PastSession {
+                    agent: AgentId::named(AgentId::CLAUDE_CODE),
+                    native: "5f0c-1d".to_owned(),
+                    cwd: Some("/work".to_owned()),
+                    title: Some("Look at CI".to_owned()),
+                    updated_ms: Some(ms(1_800_000)),
+                    thread: None,
+                    resume: vec!["--resume".to_owned(), "5f0c-1d".to_owned()],
+                    facts: BTreeMap::new(),
+                    prompts: vec![PromptHit {
+                        text: "fix the flaky login test".to_owned(),
+                        spans: vec![Span { start: 8, end: 13 }, Span { start: 14, end: 19 }],
+                        cut_before: false,
+                        cut_after: true,
+                        at_ms: Some(ms(1_790_000)),
+                    }],
+                }],
+                absent: None,
+                cut: Some("Claude Code's prompt history is read from its last 64 MiB".to_owned()),
             }),
         );
         snap("link_uni_thread", &UniHead::Thread { thread: thread() });

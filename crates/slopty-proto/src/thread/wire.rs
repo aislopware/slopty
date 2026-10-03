@@ -20,6 +20,7 @@ use super::{
     Action, AgentId, AskId, Cap, Changed, Choice, ContentRef, Cursor, Delivery, Drive, IntentId,
     Item, ItemId, Link, Patch, Status, ThreadId, ThreadState, TreeRef, Turn, TurnId,
 };
+use crate::search::Span;
 
 /// What a client asks of a worker's threads.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -85,14 +86,23 @@ pub enum ThreadRequest {
         /// Over what.
         scope: ReviewScope,
     },
-    /// An agent's past sessions in a folder, newest first, from the agent's own record of
-    /// them; answered with [`PastSessions`] on the control stream.
+    /// Past sessions of this machine's agents, from each agent's own record of them; answered
+    /// with [`PastSessions`] on the control stream.
+    ///
+    /// With no `query` and both an agent and a folder, the agent lists its sessions there itself,
+    /// newest first: every session it keeps, prompted or not. Otherwise the person's past prompts
+    /// as each agent records them (Claude Code's and Codex's prompt histories, pi's session
+    /// files) answer: the sessions whose prompts hold every word of `query`, best match first,
+    /// each with the prompts that matched; with no `query`, the sessions prompted last first,
+    /// each with its last prompt.
     Sessions {
-        /// The agent.
-        agent: AgentId,
-        /// The folder, as a [`Start`] names it.
-        cwd: String,
-        /// The most to list.
+        /// The agent; every agent whose prompts the worker reads when `None`.
+        agent: Option<AgentId>,
+        /// The folder, as a [`Start`] names it; every folder when `None`.
+        cwd: Option<String>,
+        /// Words to find in the person's past prompts; empty for none.
+        query: String,
+        /// The most sessions to list.
         limit: u32,
     },
 }
@@ -477,25 +487,34 @@ pub struct RequestCard {
     pub opened_ms: WallMs,
 }
 
-/// An agent's past sessions in a folder: the answer to [`ThreadRequest::Sessions`].
+/// Past sessions: the answer to [`ThreadRequest::Sessions`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PastSessions {
-    /// The agent asked about.
-    pub agent: AgentId,
+    /// The agent asked about, as it was asked.
+    pub agent: Option<AgentId>,
     /// The folder asked about, as it was asked.
-    pub cwd: String,
-    /// Its sessions there, newest first.
+    pub cwd: Option<String>,
+    /// The words asked for, as they were asked.
+    pub query: String,
+    /// The sessions, in the order [`ThreadRequest::Sessions`] says.
     pub sessions: Vec<PastSession>,
     /// Why none could be listed, in words, when none could: the agent is not installed, or keeps
     /// no list Slopty can read.
     pub absent: Option<String>,
+    /// Why the answer may lack sessions, in words, when it may: a record too large to read
+    /// whole, or a read that ran out of time. Asking again reads on from where it stopped.
+    pub cut: Option<String>,
 }
 
 /// One of an agent's sessions, as its own record lists it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PastSession {
+    /// Its agent.
+    pub agent: AgentId,
     /// The agent's own id for it ([`ThreadMeta::native`](super::ThreadMeta::native)).
     pub native: String,
+    /// The folder it ran in, when its record says.
+    pub cwd: Option<String>,
     /// What it is about, when the agent or the worker's thread of it says.
     pub title: Option<String>,
     /// When it last changed, when the agent says.
@@ -508,4 +527,25 @@ pub struct PastSession {
     pub resume: Vec<String>,
     /// Open facts about it, as the agent records them: its branch, its model, its size.
     pub facts: BTreeMap<String, String>,
+    /// The person's prompts in it that matched the words asked for, best first; with no words,
+    /// its last prompt. Empty when the agent listed it.
+    pub prompts: Vec<PromptHit>,
+}
+
+/// How much of a prompt a [`PromptHit`] carries, in bytes: the part round its first match.
+pub const PROMPT_HIT_BYTES: usize = 600;
+
+/// One of the person's past prompts, as a search found it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PromptHit {
+    /// The prompt, cut to [`PROMPT_HIT_BYTES`] round its first match.
+    pub text: String,
+    /// Where the words asked for are in [`Self::text`], in order, never overlapping.
+    pub spans: Vec<Span>,
+    /// Text of the prompt before [`Self::text`] was cut off.
+    pub cut_before: bool,
+    /// Text of the prompt after [`Self::text`] was cut off.
+    pub cut_after: bool,
+    /// When the person sent it, when the agent recorded that.
+    pub at_ms: Option<WallMs>,
 }

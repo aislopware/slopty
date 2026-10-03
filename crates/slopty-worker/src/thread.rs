@@ -12,7 +12,8 @@
 //! A pi thread is started here and driven over pi's RPC mode ([`pi`]), and the thread of any other
 //! agent that speaks the Agent Client Protocol over ACP ([`acp`]). A Claude Code thread is
 //! started by opening the person's `claude` in one of the worker's [`terminals`] and observing
-//! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one.
+//! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one. The
+//! person's past prompts, as the agents record them, are searched by [`history`].
 
 pub mod acp;
 pub mod attach;
@@ -21,6 +22,7 @@ pub mod codex;
 pub mod compose;
 pub mod follow;
 pub mod fork;
+pub mod history;
 pub mod host;
 pub mod intents;
 pub mod log;

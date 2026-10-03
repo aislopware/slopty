@@ -353,7 +353,8 @@ pub fn forked(session: &str) -> Option<(Vec<String>, String)> {
 }
 
 /// Whether `id` can be a Claude Code session id: it is typed into a shell and names a file.
-pub(crate) fn is_session_id(id: &str) -> bool {
+#[must_use]
+pub fn is_session_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
         && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }

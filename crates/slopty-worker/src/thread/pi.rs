@@ -625,7 +625,7 @@ pub async fn sessions(agent: &Path, cwd: &str, limit: u32) -> Result<Vec<PastSes
                 None
             }
         };
-        past.push(sessions::past(&id, title, modified.map(WallMs::of)));
+        past.push(sessions::past(&id, cwd, title, modified.map(WallMs::of)));
     }
     Ok(past)
 }

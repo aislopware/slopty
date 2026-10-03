@@ -408,8 +408,9 @@ impl Served {
         };
         match self.launcher(&name).await {
             Ok(launch) => {
+                let agent = agent.clone();
                 tokio::spawn(async move {
-                    let _gone = reply.send(task::list(&launch, &cwd, limit).await);
+                    let _gone = reply.send(task::list(&launch, &agent, &cwd, limit).await);
                 });
             }
             Err(why) => {

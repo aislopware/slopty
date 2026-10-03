@@ -28,7 +28,8 @@ mod threads {
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
-        Expanded, Intent, IntentDone, Outcome, Start, TableFrame, ThreadFrame, ThreadRequest,
+        Expanded, Intent, IntentDone, Outcome, PastSessions, Start, TableFrame, ThreadFrame,
+        ThreadRequest,
     };
     use slopty_proto::thread::{
         AgentId, Cap, Cursor, IntentId, Request, RequestState, TableState, ThreadId, ThreadState,
@@ -898,29 +899,170 @@ mod threads {
         let mut a = Client::connect(&daemons, ClientId::new()).await;
         let claude = AgentId::named(AgentId::CLAUDE_CODE);
         let cwd = work.to_string_lossy().into_owned();
-        a.send(ThreadRequest::Sessions { agent: claude.clone(), cwd: cwd.clone(), limit: 10 })
-            .await;
+        let asked = ThreadRequest::Sessions {
+            agent: Some(claude.clone()),
+            cwd: Some(cwd.clone()),
+            query: String::new(),
+            limit: 10,
+        };
+        a.send(asked).await;
         let listed = a
             .heard(|msg| match msg {
-                WorkerMsg::Sessions(listed) if listed.agent == claude => Some(listed),
+                WorkerMsg::Sessions(listed) if listed.agent.as_ref() == Some(&claude) => {
+                    Some(listed)
+                }
                 _ => None,
             })
             .await;
         assert_eq!(listed.absent, None);
-        assert_eq!(listed.cwd, cwd);
+        assert_eq!(listed.cwd.as_deref(), Some(cwd.as_str()));
         let names: Vec<&str> = listed.sessions.iter().map(|s| s.native.as_str()).collect();
         assert_eq!(names, ["newer-2", "older-1"]);
         assert_eq!(listed.sessions[0].resume, ["--resume", "newer-2"]);
 
         let nobody = AgentId::named("nobody");
-        a.send(ThreadRequest::Sessions { agent: nobody.clone(), cwd, limit: 10 }).await;
+        let asked = ThreadRequest::Sessions {
+            agent: Some(nobody.clone()),
+            cwd: Some(cwd),
+            query: String::new(),
+            limit: 10,
+        };
+        a.send(asked).await;
         let listed = a
             .heard(|msg| match msg {
-                WorkerMsg::Sessions(listed) if listed.agent == nobody => Some(listed),
+                WorkerMsg::Sessions(listed) if listed.agent.as_ref() == Some(&nobody) => {
+                    Some(listed)
+                }
                 _ => None,
             })
             .await;
         assert_eq!(listed.sessions, []);
         assert!(listed.absent.is_some(), "why, in words");
+    }
+
+    /// The person's past prompts are searched across Claude Code, Codex and pi from each agent's
+    /// own record under the worker's home: every word must be there, the sessions come with the
+    /// prompts that matched and the words that take each up again, a line that is not JSON is
+    /// passed over, and a narrower question narrows the answer.
+    #[tokio::test]
+    async fn past_prompts_are_found_across_agents_with_the_words_that_resume_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let w = work.to_string_lossy().into_owned();
+        // Claude Code: its prompt history, a paste kept apart, and the session's transcript,
+        // which is looked at and never opened.
+        let claude = root.join(".claude");
+        std::fs::create_dir_all(claude.join("paste-cache")).unwrap();
+        std::fs::write(claude.join("paste-cache/abc1.txt"), "panic in the login handler").unwrap();
+        let project = slopty_agent::discover::project_dir(&root, &work);
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("c-1.jsonl"), "not read\n").unwrap();
+        let history = format!(
+            "{}\nnot json at all\n{}\n{}\n",
+            serde_json::json!({"display": "fix the flaky login test", "pastedContents": {},
+                "timestamp": 1_000, "project": w, "sessionId": "c-1"}),
+            serde_json::json!({"display": "why [Pasted text #1 +4 lines]",
+                "pastedContents": {"1": {"id": 1, "type": "text", "contentHash": "abc1"}},
+                "timestamp": 2_000, "project": w, "sessionId": "c-2"}),
+            serde_json::json!({"display": "/model opus", "pastedContents": {},
+                "timestamp": 3_000, "project": w, "sessionId": "c-1"}),
+        );
+        std::fs::write(claude.join("history.jsonl"), history).unwrap();
+        // Codex: its prompt history, and the rollout that says where the thread ran.
+        let codex_id = "01a1009b-ce5e-7d91-b77c-80127c630fd6";
+        let day = root.join(".codex/sessions/2026/10/03");
+        std::fs::create_dir_all(&day).unwrap();
+        let meta = serde_json::json!({"timestamp": "2026-10-03T10:00:00.000Z",
+            "type": "session_meta", "payload": {"id": codex_id, "cwd": w, "source": "cli"}});
+        std::fs::write(
+            day.join(format!("rollout-2026-10-03T10-00-00-{codex_id}.jsonl")),
+            format!("{meta}\n"),
+        )
+        .unwrap();
+        let codex_history = serde_json::json!({"session_id": codex_id, "ts": 5, "text": "login retries for the api"});
+        std::fs::write(root.join(".codex/history.jsonl"), format!("{codex_history}\n")).unwrap();
+        // pi: a session file in its folder's directory.
+        let pi_dir = slopty_agent::pi::sessions::folder(&root.join(".pi/agent"), &w);
+        std::fs::create_dir_all(&pi_dir).unwrap();
+        let pi_file = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({"type": "session", "version": 3, "id": "p-1", "cwd": w}),
+            serde_json::json!({"type": "message", "id": "1", "message": {"role": "user",
+                "content": [{"type": "text", "text": "Login page layout"}], "timestamp": 4_000}}),
+            serde_json::json!({"type": "message", "id": "2", "message": {"role": "assistant",
+                "content": [{"type": "text", "text": "the login page"}], "timestamp": 4_001}}),
+        );
+        std::fs::write(pi_dir.join("2026-10-03T10-00-00-000Z_p-1.jsonl"), pi_file).unwrap();
+
+        let daemons = daemons(&root).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let search = |agent: Option<&str>, query: &str| ThreadRequest::Sessions {
+            agent: agent.map(AgentId::named),
+            cwd: None,
+            query: query.to_owned(),
+            limit: 10,
+        };
+
+        a.send(search(None, "login")).await;
+        let found = answer(&mut a, "login").await;
+        assert_eq!((found.absent.as_deref(), found.cut.as_deref()), (None, None));
+        let mut by: Vec<(&str, &str, &[String])> = found
+            .sessions
+            .iter()
+            .map(|s| (s.agent.0.as_str(), s.native.as_str(), s.resume.as_slice()))
+            .collect();
+        by.sort_unstable();
+        let resume = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+        let (claude_words, codex_words, pi_words) = (
+            resume(&["--resume", "c-1"]),
+            resume(&["resume", codex_id]),
+            resume(&["--session", "p-1"]),
+        );
+        let mut want = vec![
+            (AgentId::CLAUDE_CODE, "c-1", claude_words.as_slice()),
+            (AgentId::CLAUDE_CODE, "c-2", &[][..]),
+            (AgentId::CODEX, codex_id, codex_words.as_slice()),
+            (AgentId::PI, "p-1", pi_words.as_slice()),
+        ];
+        want.sort_unstable();
+        assert_eq!(by, want, "c-2 matched by its paste; it has no transcript to take up");
+        for session in &found.sessions {
+            assert_eq!(session.cwd.as_deref(), Some(w.as_str()), "{}", session.native);
+            let hit = session.prompts.first().unwrap();
+            let marked: Vec<&str> = hit
+                .spans
+                .iter()
+                .filter_map(|s| hit.text.get(s.start as usize..s.end as usize))
+                .collect();
+            assert_eq!(marked.iter().map(|m| m.to_lowercase()).collect::<Vec<_>>(), ["login"]);
+        }
+        let pi = found.sessions.iter().find(|s| s.native == "p-1").unwrap();
+        assert_eq!(pi.prompts.len(), 1, "only the person's message is a prompt");
+
+        a.send(search(Some(AgentId::CLAUDE_CODE), "flaky LOGIN")).await;
+        let found = answer(&mut a, "flaky LOGIN").await;
+        assert_eq!(found.sessions, [], "a capital asks for that case");
+        a.send(search(Some(AgentId::CLAUDE_CODE), "flaky login")).await;
+        let found = answer(&mut a, "flaky login").await;
+        let names: Vec<&str> = found.sessions.iter().map(|s| s.native.as_str()).collect();
+        assert_eq!(names, ["c-1"], "every word must be there");
+        assert_eq!(found.sessions[0].title.as_deref(), Some("fix the flaky login test"));
+
+        a.send(search(None, "opus")).await;
+        assert_eq!(answer(&mut a, "opus").await.sessions, [], "a command is no prompt");
+        a.send(search(Some("nobody"), "login")).await;
+        let found = answer(&mut a, "login").await;
+        assert!(found.sessions.is_empty() && found.absent.is_some(), "why, in words");
+    }
+
+    /// The worker's answer to a search for `query`.
+    async fn answer(a: &mut Client, query: &str) -> PastSessions {
+        a.heard(|msg| match msg {
+            WorkerMsg::Sessions(found) if found.query == query => Some(found),
+            _ => None,
+        })
+        .await
     }
 }

@@ -1214,3 +1214,54 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     terminal), `a_held_message_moves_in_the_queue_or_steers_the_turn` (Codex),
     `an_acp_thread_runs_turns_and_asks_before_it_acts` (ACP), and
     `a_message_moves_before_another_or_to_the_end` with the property `a_reorder_is_a_move`.
+
+- ✅ **The person's past prompts are searched on each machine, and a hit takes its session up
+  again** (2026-10-04, from the Ghostex study's first idea). `ThreadRequest::Sessions` grew
+  rather than a second request: an agent and a folder are each optional, and it carries the
+  words to find. With no words and both named, the agent lists its own sessions as before.
+  Otherwise the worker answers from the person's prompts as each agent records them, best match
+  first, and each session comes with the prompts that matched (`PromptHit`: the prompt cut to
+  600 bytes round its first match, the matches as byte spans) and the words that take it up
+  again. With no words, the sessions come prompted last first, each with its last prompt. A
+  client asks every machine and merges the answers by time.
+  - **What is read.** Claude Code's own prompt history (`~/.claude/history.jsonl`), with a long
+    paste put back from the line or from `paste-cache/<hash>.txt`. This widens the earlier rule
+    that no transcript is opened: the history is the record Claude Code keeps of what the person
+    typed for its own ↑ recall, and transcripts are still never read. A session's transcript is
+    looked at, never opened, to tell whether it can be taken up. Codex's prompt history
+    (`$CODEX_HOME/history.jsonl`) holds what its TUI was sent; the folder comes from the first
+    line of the thread's rollout. A thread another client of Codex's app-server ran is in no
+    history, so its prompts are read from its rollout: the `user_message` events where it has
+    them, else the `user` input items without the blocks Codex adds before a first turn. `exec`
+    runs and subagents are left out, as nobody's prompts. pi's prompts are the person's
+    messages in its session files. ACP agents keep no prompt record Slopty can read, so a search
+    of one says so in words.
+  - **What is no prompt.** A slash command on one line (`/model opus`) is left out; a path that
+    begins a prompt is not one.
+  - **The match.** Each word must be in the prompt as written, case ignored unless a word has a
+    capital, accents ignored (`nucleo-matcher` substring atoms). Prompts are prose, so fuzzy
+    letters in order would find nearly every long prompt for a short query. A word at a word's
+    start scores above one inside a word; equal scores go to the newer prompt. Each prompt keeps
+    its text folded as the matcher reads it, and one that lacks a word is passed over before it
+    is scored: a warm search for a rare word went from 45 ms to 3–5 ms on this machine.
+  - **Bounded and cached.** The worker keeps every record it read in memory with how far it read
+    it. The records are only appended to, so a later search reads only the new whole lines, and
+    a file replaced at its path is read again. A file is read from at most its last 64 MiB, a
+    search reads at most 512 MiB and for 3 s, and a prompt is kept to 32 KiB. What a search
+    skipped is said in `PastSessions::cut`, and the next one reads on. The numbers on this
+    machine are in `docs/MEASUREMENTS.md`, "Prompt search".
+  - **Resume.** A hit carries the words its agent's own resume takes (`--resume <id>`,
+    `resume <id>`, `--session <id>`) and the thread kept of it, if one is, so opening a hit goes
+    through the start path that already takes a session up again. A Claude Code session whose
+    transcript is gone, or a Codex thread with no rollout, has no words and is shown only.
+  - **Not yet.** The palette's search across machines, `slopty prompts` and an MCP tool are the
+    client's half and come next. Claude Code driven over stream-json may not write its prompt
+    history; that is checked when the driven drive is used.
+  - Tests: `claude_codes_history_gives_prompts_with_their_pastes`,
+    `codex_gives_prompts_from_its_history_and_rollouts`, `pi_gives_prompts_from_its_session_files`,
+    `a_slash_command_is_no_prompt` (`slopty-agent::history`);
+    `a_record_is_read_on_from_where_it_stopped_and_again_when_replaced`,
+    `sessions_rank_by_their_best_prompt`, `a_bounded_search_says_what_it_skipped_and_reads_on`,
+    `an_agent_without_a_record_says_why` (`slopty-worker/tests/history.rs`);
+    `past_prompts_are_found_across_agents_with_the_words_that_resume_them` (the worker daemon);
+    goldens `client_sessions_search` and `link_worker_sessions_found`.

@@ -523,13 +523,14 @@ const LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// they are listed.
 pub(super) async fn list(
     launch: &Launcher,
+    agent: &slopty_proto::thread::AgentId,
     cwd: &str,
     limit: u32,
 ) -> Result<Vec<slopty_proto::thread::wire::PastSession>, String> {
     let (stdin, Process { mut child, stdout, stderr }) =
         start_agent(launch, cwd, format!("sessions in {cwd}"))?;
     let mut asking = Asking { stdin, lines: BufReader::new(stdout).split(b'\n'), next: 0 };
-    let listed = tokio::time::timeout(LIST_WAIT, asking.sessions(cwd, limit)).await;
+    let listed = tokio::time::timeout(LIST_WAIT, asking.sessions(agent, cwd, limit)).await;
     drop(asking);
     if tokio::time::timeout(SHUTDOWN, child.wait()).await.is_err() {
         let _killed = child.start_kill();
@@ -549,6 +550,7 @@ struct Asking {
 impl Asking {
     async fn sessions(
         &mut self,
+        agent: &slopty_proto::thread::AgentId,
         cwd: &str,
         limit: u32,
     ) -> Result<Vec<slopty_proto::thread::wire::PastSession>, String> {
@@ -568,8 +570,9 @@ impl Asking {
             let page: acp::ListSessionsResponse =
                 self.ask("session/list", &driven::list(cwd, cursor.take())).await?;
             let room = limit.saturating_sub(sessions.len());
-            sessions
-                .extend(page.sessions.iter().take(room).map(|s| driven::past(s, can.load_session)));
+            sessions.extend(
+                page.sessions.iter().take(room).map(|s| driven::past(agent, s, can.load_session)),
+            );
             match page.next_cursor {
                 Some(next) if !page.sessions.is_empty() => cursor = Some(next),
                 _ => break,
