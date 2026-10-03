@@ -319,11 +319,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     title and ask line from a headless workspace, a tapped note focusing its tile);
     `slopty-platform` `notify::tests::memory_keeps_what_it_was_told_in_order` and
     `a_tap_before_the_app_listens_arrives_once_it_does_exactly_once`.
-  - Open: the workspace still posts its own agent banners through GPUI
-    (`WorkspaceView::notify_system`, `notify_program`), so on macOS an agent's note goes out
-    twice under one identifier and the second replaces the first. `command_finished` counts the
-    focused tile as watched even while the app is away, so that command notifies but does not
-    enter the inbox or the badge.
+  - Closed since: the workspace's own GPUI banners (`WorkspaceView::notify_system`,
+    `notify_program`) are gone, so an agent's note goes out once (e07d0c3d, 2026-09-28), and
+    `command_finished` counts the focused tile as watched only while the app is active
+    (304adfe7, 2026-10-02).
 
 - ⏸ **Attention past the background grace needs push through the server (APNs)**
   (2026-09-28). Local notifications stop when iOS suspends the app, a few tens of seconds

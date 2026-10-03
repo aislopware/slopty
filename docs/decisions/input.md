@@ -325,7 +325,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     client's point when the hold ends redraws the view then. Trackpad mode keeps drawing the
     trackpad's pointer. What is left between this and a local pointer is one app frame: the
     overlay is drawn by the app, not by the hardware cursor. A fork `CursorStyle` that carries
-    the worker's picture would remove that, and is not built. Tests:
+    the worker's picture would remove that; it was built on 2026-09-30 ("The remote pointer is
+    the system cursor" below). Tests:
     `a_window_streams_pointer_is_drawn_where_this_client_put_it_in_the_same_frame`,
     `a_displays_pointer_follows_the_worker_unless_this_client_moves_it`.
 

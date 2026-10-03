@@ -55,6 +55,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - Fetch and push go through `git-remote-slopty`, a git remote helper that carries git's
   pack protocol over the worker's existing server link. So there is no SSH setup and no second
   credential, and the link is the one everything else already trusts.
+- Superseded on 2026-10-01, never built: each worker clones from the forge with its own git
+  ("A repository is the same on every machine that has a clone"), and a branch crosses
+  machines as a bundle through the server ("A finished task's branch comes home as a bundle").
 - `.git` is never file-synced (Mutagen documents why not). Worktrees on one host share objects;
   across hosts they fetch.
 
@@ -108,8 +111,8 @@ The research behind these rulings, with sources, is in `.research/projects-resea
   scripted commits), never the real one. This proves the project end to end without spending
   quota:
   1. The orchestrator spawns.
-  2. A task is placed on the Linux container worker (`cargo xtask linux run`) and pushes through
-     `git-remote-slopty`.
+  2. A task is placed on the Linux container worker (`cargo xtask linux run`), and its branch
+     comes home as a bundle through the server.
   3. The verifier runs, the merge queue merges, and the tree and timeline show each step.
 
 **Deferred.** ⏸ 2026-09-30
@@ -1571,7 +1574,8 @@ Tests:
      `AgentBranch`.
    - A first project tile shows the tree and opens nodes.
 2. **Code across machines.**
-   - `git-remote-slopty` and the server's bare repositories.
+   - Clones from the forge on each worker and branches carried home as bundles (the plan's
+     `git-remote-slopty` and server-side bare repositories were dropped on 2026-10-01).
    - A worker verb that prepares a mirror and a worktree for a task.
    - Mirror presence as a placement fact (placement itself was built in Phase 1).
    - A worktree setup file (A3).
