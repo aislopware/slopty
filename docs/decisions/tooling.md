@@ -966,6 +966,9 @@ more full-window layer.
     gate's matrix, so the run takes no longer. zig comes from `mlugg/setup-zig` at 0.16.0, the
     minimum the vendored ghostty names. The image's unused SDKs are deleted first, since it keeps
     about 14 GB free.
+  - **What the runner lacks.** The job installs zsh and fish for the PTY's shell tests and
+    raises `net.core.rmem_max` to 8 MiB for the endpoint's receive buffer (2026-10-03, after
+    the first run; `docs/decisions/platform.md`, "The Linux lane's first run").
   - **Not required yet.** `promote` needs only the gate's matrix. Once the job has passed
     steadily, adding it there (`needs: [gate, linux]`) makes it decide what lands.
   - **No Actions compile cache.** The repository's Actions cache held 10.78 GB in 8 309 entries
