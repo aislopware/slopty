@@ -333,6 +333,10 @@ impl Following {
                     tracing::debug!(client = %at.client, %thread, "follow of a thread not here");
                     return;
                 };
+                // A Codex thread let go while it rested is taken up again.
+                if codex::is_shared(&state) {
+                    threads.codex.wake(thread);
+                }
                 let terminal = state.meta.terminal;
                 if let Some(session) = terminal {
                     let mut follows = at.daemon.follows.lock();
@@ -448,10 +452,6 @@ impl Following {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, "start refused");
                 let reason = format!("{} is no agent this machine can start", start.agent.0);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
-            }
-            ThreadRequest::Approvals { on } => {
-                tracing::info!(client = %at.client, on, "approvals");
-                crate::follow::approvals(at.daemon, at.link, on, |msg| at.post(msg));
             }
             // An agent is asked, or its session directory listed: on a task of its own.
             ThreadRequest::Sessions { agent, cwd, limit } => {
@@ -668,13 +668,29 @@ fn shared(
             codex.send(thread, text.clone(), attachments.clone(), *delivery, id);
             Outcome::Done
         }
-        Intent::Withdraw { pending } | Intent::Edit { pending, .. }
+        Intent::Withdraw { pending }
+        | Intent::Edit { pending, .. }
+        | Intent::Promote { pending }
+        | Intent::Reorder { pending, .. }
             if !state.pending.iter().any(|p| p.intent == *pending) =>
         {
             refused("That message is not waiting".to_owned())
         }
+        Intent::Reorder { before: Some(before), .. }
+            if !state.pending.iter().any(|p| p.intent == *before) =>
+        {
+            refused("That message has already gone".to_owned())
+        }
         Intent::Withdraw { pending } => {
             codex.withdraw(thread, *pending);
+            Outcome::Done
+        }
+        Intent::Promote { pending } => {
+            codex.promote(thread, *pending);
+            Outcome::Done
+        }
+        Intent::Reorder { pending, before } => {
+            codex.reorder(thread, *pending, *before);
             Outcome::Done
         }
         Intent::Edit { pending, text } => {

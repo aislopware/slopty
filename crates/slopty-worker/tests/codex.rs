@@ -158,6 +158,18 @@ mod codex {
         }
     }
 
+    /// What a thread Slopty starts, takes up again or forks is given, so its commands never
+    /// claim the Slopty terminal, its proof or the project task of whoever started Codex's
+    /// daemon: each set empty, which names no terminal.
+    fn unclaimed() -> Value {
+        json!({
+            "shell_environment_policy.set.SLOPTY_SESSION": "",
+            "shell_environment_policy.set.SLOPTY_SESSION_TOKEN": "",
+            "shell_environment_policy.set.SLOPTY_PROJECT": "",
+            "shell_environment_policy.set.SLOPTY_TASK": "",
+        })
+    }
+
     fn host(dir: &Path) -> Host {
         Host::open(&dir.join("threads"), Limits::default()).unwrap()
     }
@@ -231,7 +243,8 @@ mod codex {
         let starts: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/start").collect();
         let cwd = work.to_string_lossy();
         assert_eq!(starts.len(), 1, "one thread asked for: {sent:?}");
-        assert_eq!(starts[0]["params"], json!({ "cwd": cwd }), "nothing loosened");
+        let want = json!({ "cwd": cwd, "config": unclaimed() });
+        assert_eq!(starts[0]["params"], want, "nothing loosened, no terminal claimed");
         let turns: Vec<&Value> = sent.iter().filter(|m| m["method"] == "turn/start").collect();
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0]["params"]["input"][0]["text"], "Say hello.");
@@ -566,9 +579,107 @@ mod codex {
         }
         let forks: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/fork").collect();
         assert_eq!(forks.len(), 1, "asked once: {sent:?}");
-        assert_eq!(forks[0]["params"], json!({ "threadId": native }));
+        assert_eq!(forks[0]["params"], json!({ "threadId": native, "config": unclaimed() }));
         let lists: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/list").collect();
         assert_eq!(lists[0]["params"]["cwd"], json!(cwd));
         assert_eq!(lists[0]["params"]["limit"], 5);
+    }
+
+    /// A stand-in daemon that has the recording's thread loaded, takes it up again on each
+    /// `thread/resume`, lets it go on `thread/unsubscribe` and then says it is unloaded, and
+    /// answers a turn as the recording did. Every frame the worker sent goes to `heard`.
+    async fn unloader(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let native = resumed()["result"]["thread"]["id"].clone();
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let mut answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [native], "nextCursor": null } })
+                }
+                Some("thread/resume") => resumed(),
+                Some("thread/unsubscribe") => json!({ "result": { "status": "unsubscribed" } }),
+                Some("turn/start") => lines[recorded(&lines, "turn/start").1].msg.clone(),
+                _ => continue,
+            };
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+            if msg["method"] == "thread/unsubscribe" {
+                let unloaded = json!({ "method": "thread/status/changed", "params": {
+                    "threadId": native, "status": { "type": "notLoaded" } } });
+                say(&mut ws, &unloaded).await;
+            }
+        }
+    }
+
+    /// The frames the worker sends from now on, until one says `method`.
+    async fn until_sent(heard: &mut mpsc::UnboundedReceiver<Value>, method: &str) -> Vec<Value> {
+        tokio::time::timeout(BOUND, async {
+            let mut sent = Vec::new();
+            loop {
+                let msg = heard.recv().await.unwrap();
+                let done = msg["method"] == method;
+                sent.push(msg);
+                if done {
+                    return sent;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no {method}"))
+    }
+
+    /// A thread that rests with nobody following it is let go (`thread/unsubscribe`), so Codex
+    /// can unload it, and stays in the table as it was; Codex saying it is unloaded does not take
+    /// it up again. A follower keeps it. A message to a thread let go takes it up again first,
+    /// then goes as its turn, and a follow takes it up again too.
+    #[tokio::test]
+    async fn a_rested_thread_nobody_follows_is_let_go_and_taken_up_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(unloader(listener, tx));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let rest = Duration::from_millis(300);
+        let _served = codex::spawn(host.clone(), socket, None, asks.rest_after(rest));
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        let resumed = until_sent(&mut heard, "thread/resume").await;
+        let want = json!({ "threadId": native, "config": unclaimed() });
+        assert_eq!(resumed.last().unwrap()["params"], want, "no terminal claimed");
+        let state = until(&host, thread, |s| !s.turns.is_empty()).await;
+
+        let follower = host.follow(thread, None, 1).unwrap();
+        tokio::time::sleep(rest * 4).await;
+        let mut sent = Vec::new();
+        while let Ok(msg) = heard.try_recv() {
+            sent.push(msg);
+        }
+        assert!(sent.iter().all(|m| m["method"] != "thread/unsubscribe"), "followed: {sent:?}");
+        drop(follower);
+        let sent = until_sent(&mut heard, "thread/unsubscribe").await;
+        assert_eq!(sent.last().unwrap()["params"], json!({ "threadId": native }));
+        tokio::time::sleep(rest * 2).await;
+        assert!(heard.try_recv().is_err(), "an unloaded thread is not taken up again");
+        let (kept, _) = host.state(thread).unwrap();
+        assert_eq!(kept.turns, state.turns, "kept in the table as it was");
+        assert_eq!(kept.status.liveness, state.status.liveness);
+
+        let send = IntentId::new();
+        handle.send(thread, "Say hello.".to_owned(), Vec::new(), Delivery::Steer, send);
+        let sent = until_sent(&mut heard, "turn/start").await;
+        let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
+        assert_eq!(methods, ["thread/resume", "turn/start"], "taken up again first");
+        assert_eq!(sent[1]["params"]["threadId"], native.as_str());
+
+        until_sent(&mut heard, "thread/unsubscribe").await;
+        handle.wake(thread);
+        until_sent(&mut heard, "thread/resume").await;
     }
 }

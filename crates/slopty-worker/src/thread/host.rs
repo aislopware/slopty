@@ -384,6 +384,12 @@ impl Host {
         self.inner.lock().threads.get(&thread)?.intents.outcome(&id).cloned()
     }
 
+    /// How many follow `thread` now: clients' streams and anything else that watches it.
+    #[must_use]
+    pub fn followers(&self, thread: ThreadId) -> usize {
+        self.inner.lock().threads.get(&thread).map_or(0, |h| h.feed.receiver_count())
+    }
+
     /// Every batch `thread` applies from now on; `None` for a thread not held.
     #[must_use]
     pub fn watch(&self, thread: ThreadId) -> Option<broadcast::Receiver<Arc<Batch>>> {

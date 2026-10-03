@@ -12,6 +12,9 @@
 //! after a reboot"). The daemon's agent tick tells the keeper which conversation each session
 //! holds ([`Keeper::agent`]); a tile opened on `claude` runs it again resumed, and a shell the
 //! person typed `claude` into gets the resuming line typed at its first prompt.
+//! A conversation Claude Code still runs in the background (`claude --bg`, listed by
+//! `claude agents --json`) is opened with `claude attach <id>` instead: `--resume` refuses it
+//! while it runs.
 //!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written at most
 //! every [`KEEP_EVERY`], off the session's thread: a state is megabytes, and the formatter
@@ -74,6 +77,9 @@ pub struct AgentLaunch {
     /// Slopty's Claude Code mod, loaded into an agent the worker starts itself. One typed at
     /// a prompt gets it from the shell's `claude` function.
     pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
+    /// The conversations Claude Code runs in the background now ([`background`]): one of them is
+    /// opened with `claude attach`, since `claude --resume` refuses it while it runs.
+    pub background: Vec<String>,
 }
 
 /// How a lost session starts again ([`Recipe::reopen`]).
@@ -167,6 +173,15 @@ impl Recipe {
                 args
             }
         };
+        // Still running in the background: it is opened where it runs, with nothing given anew.
+        let attach = launch.background.contains(&agent.session);
+        let args = |in_shell: bool| {
+            if attach {
+                vec![slopty_agent::roster::ATTACH.to_owned(), agent.session.clone()]
+            } else {
+                args(in_shell)
+            }
+        };
         let ran_it = self.command.first().filter(|program| {
             slopty_agent::detect::is_claude(
                 program.rsplit('/').next().unwrap_or(program),
@@ -232,6 +247,34 @@ impl Recipe {
             self.command.clone()
         };
         Restored { saved_ms: self.saved_ms, command }
+    }
+}
+
+/// How long `claude agents --json` may take.
+pub const ROSTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The conversations of `recipes` that Claude Code runs in the background now, as
+/// `claude agents --json` lists them.
+///
+/// `claude` is found as the person's terminal finds it, or is the program at that path. Claude
+/// Code is asked only when a recipe holds a conversation; a list that cannot be had is none.
+pub async fn background<'a>(
+    claude: &str,
+    recipes: impl IntoIterator<Item = &'a Recipe>,
+) -> Vec<String> {
+    if !recipes.into_iter().any(|recipe| recipe.agent.is_some()) {
+        return Vec::new();
+    }
+    let args = slopty_agent::roster::ARGS;
+    let Some(out) = crate::caps::agent_output(claude, &args, ROSTER_WAIT).await else {
+        return Vec::new();
+    };
+    match slopty_agent::roster::parse(&String::from_utf8_lossy(&out)) {
+        Ok(listed) => slopty_agent::roster::background(&listed).map(str::to_owned).collect(),
+        Err(e) => {
+            tracing::debug!("claude agents --json did not read: {e}");
+            Vec::new()
+        }
     }
 }
 
@@ -623,6 +666,82 @@ mod tests {
         }
     }
 
+    /// A conversation Claude Code still runs in the background is opened where it runs,
+    /// `claude attach <id>`, with nothing given anew: as a tile's command, or typed at the
+    /// first prompt of the shell it ran in. One no longer there is resumed as before.
+    #[test]
+    fn a_conversation_running_in_the_background_is_attached_not_resumed() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let transcript = home.path().join("abc.jsonl");
+        std::fs::write(&transcript, b"{}\n").unwrap();
+        let agent = Resume {
+            session: "abc".to_owned(),
+            cwd: project.path().to_string_lossy().into_owned(),
+            transcript: Some(transcript.to_string_lossy().into_owned()),
+            args: vec!["--model".to_owned(), "opus".to_owned()],
+            relay: true,
+            mcp: false,
+            locked: false,
+            role: None,
+        };
+        let open = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
+        let launch = AgentLaunch {
+            relay: Some("/opt/slopty".to_owned()),
+            background: vec!["abc".to_owned()],
+            ..AgentLaunch::default()
+        };
+        let at = |recipe: &Recipe, launch: &AgentLaunch| {
+            recipe.reopen(SessionId::new(), SHELLS, home.path(), launch)
+        };
+        let tile = at(&open(&["/opt/bin/claude", "--bg"]), &launch);
+        assert_eq!(tile.command, ["/opt/bin/claude", "attach", "abc"]);
+        assert_eq!(tile.cwd.as_deref(), Some(project.path()));
+        let shell = at(&open(&["/bin/zsh"]), &launch);
+        assert_eq!(shell.launch.as_deref(), Some("claude attach abc"));
+        let ended = AgentLaunch { background: vec!["other".to_owned()], ..launch };
+        let resumed = at(&open(&["/bin/zsh"]), &ended);
+        assert!(resumed.launch.unwrap().contains("--resume abc"), "resumed as before");
+    }
+
+    /// Claude Code is asked which conversations run in the background only when a lost session
+    /// held one, and its list is read; a `claude` that fails or is not there lists none.
+    #[tokio::test]
+    async fn the_background_conversations_are_claude_codes_own_list() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let asked = dir.path().join("asked");
+        let claude = dir.path().join("claude");
+        let list = r#"[{"pid": 7, "sessionId": "abc", "kind": "background"},
+            {"pid": 8, "sessionId": "tty", "kind": "interactive"}]"#;
+        let script = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat <<'EOF'\n{list}\nEOF\n",
+            asked.display()
+        );
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let claude = claude.to_string_lossy().into_owned();
+        let held = Recipe {
+            agent: Some(Resume {
+                session: "abc".to_owned(),
+                cwd: "/".to_owned(),
+                transcript: None,
+                args: Vec::new(),
+                relay: false,
+                mcp: false,
+                locked: false,
+                role: None,
+            }),
+            ..recipe(&["/bin/zsh"])
+        };
+        assert_eq!(background(&claude, [&recipe(&["/bin/zsh"])]).await, Vec::<String>::new());
+        assert!(!asked.exists(), "not asked for shells alone");
+        assert_eq!(background(&claude, [&held]).await, ["abc"]);
+        assert_eq!(std::fs::read_to_string(&asked).unwrap(), "agents --json\n");
+        let gone = dir.path().join("gone").to_string_lossy().into_owned();
+        assert_eq!(background(&gone, [&held]).await, Vec::<String>::new());
+    }
+
     /// A project's agent comes back wired as Slopty started it: its relay, its tools, the lock
     /// on the mode that asks nothing, and its role. A shell the person ran it in gets all but
     /// the role, which spans lines a prompt cannot take.
@@ -642,7 +761,8 @@ mod tests {
             locked: true,
             role: Some("You work on task 3.\nReport with task_report.".to_owned()),
         };
-        let launch = AgentLaunch { relay: Some("/opt/slopty".to_owned()), claude_mod: None };
+        let launch =
+            AgentLaunch { relay: Some("/opt/slopty".to_owned()), ..AgentLaunch::default() };
         let recipe = |command: &[&str]| Recipe { agent: Some(agent.clone()), ..recipe(command) };
         let tile = recipe(&["claude"]).reopen(SessionId::new(), SHELLS, home.path(), &launch);
         let kept = slopty_agent::resume::invocation(&tile.command[1..]);

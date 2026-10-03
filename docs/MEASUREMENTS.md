@@ -14174,3 +14174,36 @@ SLOPTY_WORKER_SOCKET=$root/worker.sock target/release/slopty bench screen --data
   --worker 127.0.0.1:<port from $root/addr> --window 7001 --scale 1 --seconds 6
 # then kill the worker and ptyd
 ```
+
+## 2026-10-04 — what rested Codex threads keep, followed and let go
+
+Two `codex app-server` daemons (codex-cli 0.156.1, each with its own signed-out `CODEX_HOME`)
+ran side by side on this Mac. Each had Slopty's MCP relay (`slopty mcp`) as the one MCP server
+every thread loads, and `thread_unload_delay_secs = 10` so the run is short (Codex's own default
+is longer). The worker started 10 threads on each, with no turn, so no model was asked. On one
+side the worker kept every thread followed, as it did before. On the other it let a thread go
+(`thread/unsubscribe`) after 3 s at rest. Counts are `pgrep -f` of each side's relays and `ps
+-o rss=`, every 5 s for 45 s.
+
+| | MCP relays | relays' RSS | daemon RSS |
+|---|---|---|---|
+| followed, 5–46 s | 10 | 290–292 MiB | 142 MiB |
+| let go, 5–10 s (before Codex's unload delay) | 10 | 289 MiB | 141 MiB |
+| let go, 15–46 s | 0 | 0 | 142 MiB |
+
+- Each loaded thread kept one relay of about 29 MiB, for as long as anything stayed subscribed.
+  Let go, a thread's relay was gone within Codex's unload delay, and the 10 never came back.
+- The daemon's own resident size did not fall: its allocator keeps what it freed. What
+  letting go saves is the MCP servers' processes, one per server per thread, and for the
+  person's own MCP servers the same again for each.
+- In the shipped worker a thread is let go after 10 minutes at rest, with nobody following it
+  and no TUI on it ([`REST`](../crates/slopty-worker/src/thread/codex.rs)). Codex unloads it after
+  its own delay.
+- The same run checks that Codex takes the per-thread `config` Slopty now sends
+  (`shell_environment_policy.set.SLOPTY_*`): every thread started with it.
+
+```sh
+cargo nextest run -p slopty-worker --test codex_rest --run-ignored only --no-capture
+# or, with the binaries already built:
+cargo test -p slopty-worker --test codex_rest -- --ignored --nocapture
+```

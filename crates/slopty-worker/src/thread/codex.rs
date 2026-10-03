@@ -13,6 +13,12 @@
 //! its next status change, which the daemon tells every client. When the daemon is not there,
 //! or goes, the worker tries again every [`RETRY`].
 //!
+//! A thread that has rested for [`REST`], with no turn under way, nothing asked or held, nobody
+//! following it and no TUI on it, is let go (`thread/unsubscribe`), so Codex can unload it with
+//! its MCP servers. It stays in the table as it was. A follow ([`Codex::wake`]), anything asked of
+//! it, or Codex saying it works on it again takes it up again with `thread/resume`, and what was
+//! asked meanwhile goes once it is followed.
+//!
 //! A thread is started from a client ([`Codex::start`], `ThreadRequest::Start` for agent `codex`)
 //! as Codex's own TUI starts one: `thread/start` in the thread's folder, with nothing set but the
 //! model the person picked, so the policies are their Codex configuration's. The connection that
@@ -36,7 +42,7 @@
 //! thread names that terminal while it runs, so a client shows it. With no daemon running it is
 //! refused: only a start brings the daemon up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -57,6 +63,7 @@ use slopty_proto::thread::{
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -71,6 +78,9 @@ const CLIENT: &str = "slopty";
 
 /// How long Codex's daemon start may take: it answers once the app-server does.
 pub const DAEMON_WAIT: Duration = Duration::from_secs(20);
+
+/// How long a thread rests, with nobody following it, before the worker lets Codex unload it.
+pub const REST: Duration = Duration::from_mins(10);
 
 /// Why a start is refused where the person has no `codex`.
 pub const NO_CODEX: &str = "Codex isn't installed on this machine";
@@ -130,6 +140,15 @@ enum Ask {
         intent: IntentId,
         text: String,
     },
+    Promote {
+        thread: ThreadId,
+        intent: IntentId,
+    },
+    Reorder {
+        thread: ThreadId,
+        intent: IntentId,
+        before: Option<IntentId>,
+    },
     Interrupt {
         thread: ThreadId,
     },
@@ -154,6 +173,29 @@ enum Ask {
         limit: u32,
         reply: oneshot::Sender<Result<Vec<PastSession>, String>>,
     },
+    /// Someone follows the thread: Codex loads it again if it was let go.
+    Wake {
+        thread: ThreadId,
+    },
+}
+
+impl Ask {
+    /// The thread it is about, when it is about one.
+    const fn thread(&self) -> Option<ThreadId> {
+        match self {
+            Self::Answer { thread, .. }
+            | Self::Send { thread, .. }
+            | Self::Withdraw { thread, .. }
+            | Self::Edit { thread, .. }
+            | Self::Promote { thread, .. }
+            | Self::Reorder { thread, .. }
+            | Self::Interrupt { thread }
+            | Self::Release { thread, .. }
+            | Self::Fork { thread, .. }
+            | Self::Wake { thread } => Some(*thread),
+            Self::Start { .. } | Self::Sessions { .. } => None,
+        }
+    }
 }
 
 /// How the person's own `codex` is launched for a start or a request: the `PATH` it is looked
@@ -196,6 +238,10 @@ impl Launch {
             .env("PATH", &codex.path)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true);
+        // The daemon runs every thread's commands with its environment: it claims no terminal.
+        for var in slopty_agent::codex::shared::TERMINAL_ENV {
+            command.env_remove(var);
+        }
         let ran = tokio::time::timeout(DAEMON_WAIT, command.output())
             .await
             .map_err(|elapsed| {
@@ -241,16 +287,28 @@ enum Said {
 #[derive(Clone, Debug)]
 pub struct Codex(mpsc::UnboundedSender<Ask>);
 
-/// Where a [`Codex`]'s asks wait for [`spawn`].
+/// Where a [`Codex`]'s asks wait for [`spawn`], and how long a thread rests before it is let go.
 #[derive(Debug)]
-pub struct Asks(mpsc::UnboundedReceiver<Ask>);
+pub struct Asks {
+    asks: mpsc::UnboundedReceiver<Ask>,
+    rest: Duration,
+}
+
+impl Asks {
+    /// A thread is let go once it has rested `rest` ([`REST`] unless said).
+    #[must_use]
+    pub const fn rest_after(mut self, rest: Duration) -> Self {
+        self.rest = rest;
+        self
+    }
+}
 
 impl Codex {
     /// A handle, and the asks [`spawn`] takes from it.
     #[must_use]
     pub fn channel() -> (Self, Asks) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (Self(tx), Asks(rx))
+        let (tx, asks) = mpsc::unbounded_channel();
+        (Self(tx), Asks { asks, rest: REST })
     }
 
     /// Answer request `ask` of `thread` with `choice`, as `by`. The answer is the JSON-RPC
@@ -304,9 +362,24 @@ impl Codex {
         let _gone = self.0.send(Ask::Edit { thread, intent, text });
     }
 
+    /// Send the message `intent` queued in `thread` now, into the turn under way.
+    pub fn promote(&self, thread: ThreadId, intent: IntentId) {
+        let _gone = self.0.send(Ask::Promote { thread, intent });
+    }
+
+    /// Move the message `intent` queued in `thread` to just before `before`, or to the end.
+    pub fn reorder(&self, thread: ThreadId, intent: IntentId, before: Option<IntentId>) {
+        let _gone = self.0.send(Ask::Reorder { thread, intent, before });
+    }
+
     /// Stop the turn under way in `thread`.
     pub fn interrupt(&self, thread: ThreadId) {
         let _gone = self.0.send(Ask::Interrupt { thread });
+    }
+
+    /// Someone follows `thread`: Codex takes it up again if the worker let it go.
+    pub fn wake(&self, thread: ThreadId) {
+        let _gone = self.0.send(Ask::Wake { thread });
     }
 
     /// Hand `thread`'s requests to Codex's own TUI for intent `id`, once: done when it runs on
@@ -402,7 +475,7 @@ pub fn spawn(
     host: Host,
     socket: PathBuf,
     launch: Option<Launch>,
-    Asks(mut asks): Asks,
+    Asks { mut asks, rest }: Asks,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut socket = socket;
@@ -415,7 +488,7 @@ pub fn spawn(
             match connect(&socket).await {
                 Ok(ws) => {
                     bringing = Bringing::Idle;
-                    let mut session = Session::new(host.clone(), ws, open);
+                    let mut session = Session::new(host.clone(), ws, open, rest);
                     session.held = std::mem::take(&mut held);
                     let ended = session.run(&mut asks, &mut hear).await;
                     session.exited();
@@ -590,12 +663,18 @@ enum Waiting {
     List {
         reply: oneshot::Sender<Result<Vec<PastSession>, String>>,
     },
+    /// Codex thread `native`, let go.
+    Unsubscribe {
+        native: String,
+    },
 }
 
 /// A followed thread.
 struct Followed {
     id: ThreadId,
     shared: Shared,
+    /// When Codex or a client last said anything of it.
+    heard: Instant,
 }
 
 /// One connection to the daemon.
@@ -628,10 +707,17 @@ struct Session {
     parents: HashMap<ThreadId, Link>,
     /// Who waits on each fork Codex has not answered yet, and the thread it branches off.
     forking: HashMap<IntentId, (ThreadId, Vec<oneshot::Sender<Outcome>>)>,
+    /// How long a thread rests, with nobody following it, before it is let go.
+    rest: Duration,
+    /// The threads let go: Codex may have unloaded them, and they are taken up again when
+    /// someone follows or asks.
+    asleep: HashSet<String>,
+    /// What was asked of each thread let go, sent once it is followed again.
+    waking: HashMap<String, Vec<Ask>>,
 }
 
 impl Session {
-    fn new(host: Host, ws: Socket, tuis: Opened) -> Self {
+    fn new(host: Host, ws: Socket, tuis: Opened, rest: Duration) -> Self {
         Self {
             host,
             ws,
@@ -648,6 +734,9 @@ impl Session {
             limits: None,
             parents: HashMap::new(),
             forking: HashMap::new(),
+            rest,
+            asleep: HashSet::new(),
+            waking: HashMap::new(),
         }
     }
 
@@ -697,8 +786,13 @@ impl Session {
         if let Err(why) = self.request(&init, Waiting::Initialize).await {
             return Ended::Link(why);
         }
+        let mut sweep = tokio::time::interval(
+            self.rest.checked_div(4).unwrap_or(self.rest).max(Duration::from_millis(50)),
+        );
+        sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             let ended = tokio::select! {
+                _ = sweep.tick() => self.let_go().await.err(),
                 frame = self.ws.next() => match frame {
                     Some(Ok(Message::Text(text))) => self.heard(&text).await.err(),
                     Some(Ok(Message::Close(_))) | None => Some("closed".to_owned()),
@@ -720,16 +814,57 @@ impl Session {
         }
     }
 
-    /// Every followed thread is left exited and resumable: Codex is not there to say more.
+    /// Every followed thread, and every one let go, is left exited and resumable: Codex is not
+    /// there to say more.
     fn exited(&self) {
-        for followed in self.threads.values() {
+        let asleep =
+            self.asleep.iter().map(|native| slopty_agent::codex::shared::thread_of(native));
+        for thread in self.threads.values().map(|f| f.id).chain(asleep) {
             let status = Status {
                 phase: Phase::Idle,
                 wait: None,
                 liveness: Liveness::Exited { resumable: true },
                 since_ms: WallMs::now(),
             };
-            self.host.apply(followed.id, vec![Action::Status(status)]);
+            self.host.apply(thread, vec![Action::Status(status)]);
+        }
+    }
+
+    /// Let Codex unload each thread that has rested [`Session::rest`] with nobody following it
+    /// and no TUI on it: its MCP servers and whatever else Codex keeps for a loaded thread go.
+    /// The thread stays in the table, and is taken up again once someone follows or asks.
+    async fn let_go(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        let resting: Vec<String> = self
+            .threads
+            .iter()
+            .filter(|(_, f)| now.saturating_duration_since(f.heard) >= self.rest)
+            .filter(|(_, f)| f.shared.rests())
+            .filter(|(_, f)| {
+                self.host.followers(f.id) == 0 && !self.tuis.running.contains_key(&f.id)
+            })
+            .map(|(native, _)| native.clone())
+            .collect();
+        for native in resting {
+            self.threads.remove(&native);
+            self.asleep.insert(native.clone());
+            let params = p::ThreadUnsubscribeParams { thread_id: native.clone() };
+            self.request(&params, Waiting::Unsubscribe { native }).await?;
+        }
+        Ok(())
+    }
+
+    /// `ask`, held for a thread Codex could not take up again, answered with `reason` where
+    /// someone waits on it; what was answered already is only noted.
+    fn unanswered(&mut self, ask: Ask, reason: &str) {
+        match ask {
+            Ask::Fork { thread, id, reply, .. } => {
+                let _gone = reply.send(once(&self.host, thread, id, refused(reason.to_owned())));
+            }
+            Ask::Release { thread, id, reply } => {
+                let _gone = reply.send(self.tuis.refuse(&self.host, thread, id, reason));
+            }
+            other => tracing::debug!(?other, "an ask of a Codex thread that did not come back"),
         }
     }
 
@@ -763,6 +898,7 @@ impl Session {
             Incoming::Request { id, thread, request } => {
                 // A thread not followed here is asked of its other clients as well.
                 if let Some(followed) = thread.and_then(|native| self.threads.get_mut(&native)) {
+                    followed.heard = Instant::now();
                     let actions = followed.shared.request(&id, &request, now);
                     self.host.apply(followed.id, actions);
                 }
@@ -810,6 +946,9 @@ impl Session {
                     Ok(resumed) => {
                         self.follow(&resumed.thread);
                         self.settled(&resumed.thread.id, resumed.approval_policy, &resumed.sandbox);
+                        for ask in self.waking.remove(&native).unwrap_or_default() {
+                            self.ask(ask).await?;
+                        }
                         self.read_usage(native).await?;
                     }
                     Err(e) => {
@@ -822,6 +961,13 @@ impl Session {
                 // Not written yet: tried again at its next status change.
                 tracing::trace!(%native, "a Codex thread is not resumable yet: {e}");
                 self.reopened(&native, &format!("Codex couldn't take the thread up again: {e}"));
+                if let Some(held) = self.waking.remove(&native) {
+                    let reason = format!("Codex couldn't take the thread up again: {e}");
+                    for ask in held {
+                        self.unanswered(ask, &reason);
+                    }
+                    self.asleep.insert(native.clone());
+                }
                 self.resuming.insert(native, false);
             }
             (Waiting::Turn { thread }, Err(e)) => {
@@ -889,6 +1035,15 @@ impl Session {
             (Waiting::List { reply }, Err(e)) => {
                 let _gone = reply.send(Err(format!("Codex did not list its threads: {e}")));
             }
+            (Waiting::Unsubscribe { native }, Ok(_)) => {
+                tracing::debug!(%native, "a rested Codex thread is let go");
+            }
+            // Still subscribed, so still followed.
+            (Waiting::Unsubscribe { native }, Err(e)) => {
+                tracing::debug!(%native, "Codex kept a thread it was asked to let go: {e}");
+                self.asleep.remove(&native);
+                self.resume(native).await?;
+            }
             (Waiting::Usage { native }, Ok(result)) => {
                 let read = rpc::response::<p::GetAccountTokenUsageParams>(result);
                 match (read, self.threads.get_mut(&native)) {
@@ -917,8 +1072,11 @@ impl Session {
             return Ok(());
         }
         self.resuming.insert(native.clone(), true);
-        let params =
-            p::ThreadResumeParams { thread_id: native.clone(), ..p::ThreadResumeParams::default() };
+        let params = p::ThreadResumeParams {
+            thread_id: native.clone(),
+            config: Some(slopty_agent::codex::shared::unclaimed()),
+            ..p::ThreadResumeParams::default()
+        };
         self.request(&params, Waiting::Resume { native }).await
     }
 
@@ -945,7 +1103,7 @@ impl Session {
         self.native.insert(id, thread.id.clone());
         self.adopt(id, &actions);
         self.host.apply(id, actions);
-        self.threads.insert(thread.id.clone(), Followed { id, shared });
+        self.threads.insert(thread.id.clone(), Followed { id, shared, heard: Instant::now() });
         let mut late = Vec::new();
         if let Some(followed) = self.threads.get_mut(&thread.id) {
             if let Some(limits) = &self.limits {
@@ -1030,6 +1188,7 @@ impl Session {
         let Some(native) = thread else { return Ok(()) };
         match self.threads.get_mut(&native) {
             Some(followed) => {
+                followed.heard = Instant::now();
                 let id = followed.id;
                 let actions = followed.shared.notification(note, now);
                 let next = followed.shared.next_queued();
@@ -1044,6 +1203,15 @@ impl Session {
                 }
                 if matches!(note, ServerNotification::TurnCompleted(_)) {
                     self.read_usage(native).await?;
+                }
+            }
+            // A thread let go is taken up again only when it works: its unloading is no news.
+            None if self.asleep.contains(&native) => {
+                if let ServerNotification::ThreadStatusChanged(changed) = note
+                    && matches!(changed.status, p::ThreadStatus::Active { .. })
+                {
+                    self.asleep.remove(&native);
+                    self.resume(native).await?;
                 }
             }
             None if matches!(note, ServerNotification::ThreadStatusChanged(_)) => {
@@ -1073,7 +1241,22 @@ impl Session {
     }
 
     async fn ask(&mut self, ask: Ask) -> Result<(), String> {
+        if let Some(thread) = ask.thread()
+            && let Some(native) = self.native.get(&thread).cloned()
+        {
+            if let Some(followed) = self.threads.get_mut(&native) {
+                followed.heard = Instant::now();
+            } else if self.asleep.remove(&native) || self.waking.contains_key(&native) {
+                // Let go: held until Codex has taken the thread up again.
+                let held = self.waking.entry(native.clone()).or_default();
+                if !matches!(ask, Ask::Wake { .. }) {
+                    held.push(ask);
+                }
+                return self.resume(native).await;
+            }
+        }
         match ask {
+            Ask::Wake { .. } => Ok(()),
             Ask::Fork { thread, id, after, reply } => {
                 if let Some(first) = self.host.outcome(thread, id) {
                     let _gone = reply.send(first);
@@ -1177,6 +1360,30 @@ impl Session {
             Ask::Edit { thread, intent, text } => {
                 let changed = self.followed(thread).and_then(|f| f.shared.edit(intent, &text));
                 if let Some(actions) = changed {
+                    self.host.apply(thread, actions);
+                }
+                Ok(())
+            }
+            Ask::Promote { thread, intent } => {
+                let Some(followed) = self.followed(thread) else { return Ok(()) };
+                let Some((send, actions)) = followed.shared.promote(intent) else { return Ok(()) };
+                self.host.apply(thread, actions);
+                match send {
+                    Send::Start(params) => {
+                        self.request(params.as_ref(), Waiting::Turn { thread }).await
+                    }
+                    Send::Steer(params) => {
+                        self.request(params.as_ref(), Waiting::Turn { thread }).await
+                    }
+                    Send::Held(actions) => {
+                        self.host.apply(thread, actions);
+                        Ok(())
+                    }
+                }
+            }
+            Ask::Reorder { thread, intent, before } => {
+                let moved = self.followed(thread).and_then(|f| f.shared.reorder(intent, before));
+                if let Some(actions) = moved {
                     self.host.apply(thread, actions);
                 }
                 Ok(())

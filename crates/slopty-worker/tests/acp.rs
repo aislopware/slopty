@@ -261,6 +261,13 @@ mod acp {
         let queued = rig.send(&acp, thread, "Remove it.");
         let state = rig.until(thread, "the message waits", |s| s.pending.len() == 1).await;
         assert_eq!(state.pending[0].intent, queued);
+        let last = Intent::Reorder { pending: queued, before: None };
+        assert_eq!(rig.intent(&acp, thread, &last).1, Outcome::Done, "moved to where it is");
+        let nowhere = Intent::Reorder { pending: queued, before: Some(IntentId::new()) };
+        assert!(matches!(rig.intent(&acp, thread, &nowhere).1, Outcome::Refused { .. }));
+        let now = Intent::Promote { pending: queued };
+        let promoted = rig.intent(&acp, thread, &now).1;
+        assert_eq!(promoted, Outcome::Unsupported { cap: Cap::named(Cap::STEER) }, "no steer");
         let answer = |choice: &str| Intent::Answer {
             ask: ask.clone(),
             choice: choice.to_owned(),

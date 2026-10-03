@@ -8,8 +8,8 @@
 //! person something, before its hooks have spoken, once it has exited, or while a person has a
 //! line typed and unsent in the terminal. Nothing it types ever clears that line.
 //!
-//! A message waits in the thread's pending list until it goes, where it can be withdrawn or
-//! edited:
+//! A message waits in the thread's pending list until it goes, where it can be withdrawn,
+//! edited, moved in the list, or promoted to go now as a steer:
 //!
 //! - a steer goes as soon as the guard lets it, into the turn under way, which the agent takes at
 //!   its next step;
@@ -29,7 +29,7 @@ use slopty_proto::agent::{AgentSource, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Input};
 use slopty_proto::thread::wire::{Intent, Outcome};
 use slopty_proto::thread::{
-    Action, Delivery, IntentId, Pending, PendingState, ThreadId, ThreadState, TurnState,
+    Action, Delivery, IntentId, ItemBody, Pending, PendingState, ThreadId, ThreadState, TurnState,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -41,6 +41,9 @@ use crate::session::SessionHandle;
 /// them as one paste and swallows the Enter.
 pub const SUBMIT_PAUSE: Duration = Duration::from_millis(200);
 
+/// The newest items a message that went is looked for among, to see the transcript took it.
+const SHOWN_WITHIN: usize = 64;
+
 /// How often a message the guard holds is tried again: a person's draft says nothing when it
 /// is sent.
 pub const RETRY: Duration = Duration::from_millis(250);
@@ -50,6 +53,10 @@ pub const DRAFT: &str = "Your draft in the terminal is in the way";
 
 /// Why a message stays: it was typed in, and the person's draft came in before its Enter.
 pub const TYPED_NOT_SENT: &str = "Typed into the terminal but not sent: your draft is in the way";
+
+/// Why a message is back in the list: Claude Code took it back into its input before it began
+/// (Esc right after Enter), so it is in the terminal, unsent, and not typed again.
+pub const TAKEN_BACK: &str = "Not taken: Claude Code put it back in its input";
 
 /// The terminals the composer types into, and their agents as the guard reads them.
 pub trait Terminals: Agents {
@@ -90,7 +97,8 @@ impl Composer {
     }
 
     /// What intent `id` comes to on the thread `state`, when it is the composer's to act on: a
-    /// message, a change to one pending, an interrupt or a model. `None` for any other. Meant
+    /// message, a change to one pending (its words, its place, or its going now), an interrupt
+    /// or a model. `None` for any other. Meant
     /// to run once per id, as [`Host::intent`] runs its decision.
     pub fn decide(
         &self,
@@ -123,11 +131,12 @@ impl Composer {
                     return refused("That message has already gone");
                 };
                 let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
+                let back = PendingState::Held { reason: TAKEN_BACK.to_owned() };
                 match (intent, pending.get(at).map(|p| &p.state)) {
                     (_, Some(PendingState::Sending)) => {
                         return refused("That message is being typed");
                     }
-                    (Intent::Edit { .. }, Some(state)) if *state == typed => {
+                    (Intent::Edit { .. }, Some(state)) if *state == typed || *state == back => {
                         return refused("That message is already in the terminal");
                     }
                     (Intent::Edit { text, .. }, Some(_)) => {
@@ -138,6 +147,31 @@ impl Composer {
                     _ => {
                         pending.remove(at);
                     }
+                }
+                Some((Outcome::Done, vec![Action::PendingSet(pending)]))
+            }
+            Intent::Promote { pending: which } => {
+                let mut pending = state.pending.clone();
+                let Some(promoted) = pending.iter_mut().find(|p| p.intent == *which) else {
+                    return refused("That message has already gone");
+                };
+                match &promoted.state {
+                    PendingState::Sending => return refused("That message is being typed"),
+                    PendingState::Held { reason }
+                        if reason == TYPED_NOT_SENT || reason == TAKEN_BACK =>
+                    {
+                        return refused("That message is already in the terminal");
+                    }
+                    _ => {}
+                }
+                promoted.delivery = Delivery::Steer;
+                self.kick(thread);
+                Some((Outcome::Done, vec![Action::PendingSet(pending)]))
+            }
+            Intent::Reorder { pending: which, before } => {
+                let mut pending = state.pending.clone();
+                if !Pending::reorder(&mut pending, |p| p.intent, *which, *before) {
+                    return refused("That message has already gone");
                 }
                 Some((Outcome::Done, vec![Action::PendingSet(pending)]))
             }
@@ -257,6 +291,8 @@ async fn compose(c: Composer, thread: ThreadId, mut jobs: mpsc::UnboundedReceive
     let Some(mut feed) = c.host.watch(thread) else { return };
     let mut queued: VecDeque<Job> = VecDeque::new();
     let mut started: Option<Started> = None;
+    // The message that went last, until the transcript shows it or Claude Code took it back.
+    let mut unconfirmed: Option<Pending> = None;
     loop {
         while let Ok(job) = jobs.try_recv() {
             queued.push_back(job);
@@ -274,15 +310,24 @@ async fn compose(c: Composer, thread: ThreadId, mut jobs: mpsc::UnboundedReceive
                 continue;
             }
         }
-        let next = c.host.update(thread, |state| next(&c, state, session, &mut started));
+        let next =
+            c.host.update(thread, |state| next(&c, state, session, &mut started, &mut unconfirmed));
         let held = match next.unwrap_or(Next::Gone) {
             Next::Gone => return,
             Next::Message { intent, text, delivery } => {
                 c.host.typed(thread, intent, &text);
                 let left = send(&c, session, &text).await;
-                let after = c.host.update(thread, |state| sent(state, intent, left.as_deref()));
-                if left.is_none() && delivery == Delivery::Queue {
-                    started = after.map(|turns| Started { turns, working: false });
+                let after = c.host.update(thread, |state| {
+                    let went = state.pending.iter().find(|p| p.intent == intent).cloned();
+                    let (actions, turns) = sent(state, intent, left.as_deref());
+                    (actions, (turns, went))
+                });
+                if left.is_none() {
+                    let (turns, went) = after.unzip();
+                    unconfirmed = went.flatten();
+                    if delivery == Delivery::Queue {
+                        started = turns.map(|turns| Started { turns, working: false });
+                    }
                 }
                 continue;
             }
@@ -316,7 +361,11 @@ fn next(
     state: &ThreadState,
     session: SessionId,
     started: &mut Option<Started>,
+    unconfirmed: &mut Option<Pending>,
 ) -> (Vec<Action>, Next) {
+    if let Some(back) = taken_back(c, state, session, unconfirmed) {
+        return back;
+    }
     // A queued message that went holds the next until the agent has taken it: it was seen
     // working since, or the turn the message started has ended.
     if let Some(at) = started.as_mut() {
@@ -327,7 +376,9 @@ fn next(
         }
     }
     let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
-    let open = |p: &&Pending| p.state != PendingState::Sending && p.state != typed;
+    let back = PendingState::Held { reason: TAKEN_BACK.to_owned() };
+    let open =
+        |p: &&Pending| p.state != PendingState::Sending && p.state != typed && p.state != back;
     let steer = state.pending.iter().filter(open).find(|p| p.delivery == Delivery::Steer);
     let queue = state.pending.iter().filter(open).find(|p| p.delivery == Delivery::Queue);
     let resting = started.is_none() && c.at_rest(session);
@@ -351,6 +402,35 @@ fn next(
     let next =
         if sending { Next::Message { intent, text, delivery } } else { Next::Wait { held: true } };
     (vec![Action::PendingSet(pending)], next)
+}
+
+/// The message that went last, back in the list held for [`TAKEN_BACK`], once Claude Code took
+/// it back: the transcript never showed it and the agent is at rest again by its title
+/// (`slopty_agent::Tracker`). Forgotten once the transcript shows it.
+fn taken_back(
+    c: &Composer,
+    state: &ThreadState,
+    session: SessionId,
+    unconfirmed: &mut Option<Pending>,
+) -> Option<(Vec<Action>, Next)> {
+    let went = unconfirmed.as_ref()?;
+    let shown = state.items.iter().rev().take(SHOWN_WITHIN).any(
+        |item| matches!(&item.body, ItemBody::User(message) if message.intent == Some(went.intent)),
+    );
+    if shown {
+        *unconfirmed = None;
+        return None;
+    }
+    let back = c.terminals.status(session).is_some_and(|agent| {
+        agent.status == AgentStatus::Idle && agent.source == AgentSource::Title
+    });
+    if !back {
+        return None;
+    }
+    let went = unconfirmed.take()?;
+    let held = Pending { state: PendingState::Held { reason: TAKEN_BACK.to_owned() }, ..went };
+    let pending = std::iter::once(held).chain(state.pending.iter().cloned()).collect();
+    Some((vec![Action::PendingSet(pending)], Next::Wait { held: false }))
 }
 
 /// `pending` with message `intent` in `state`.

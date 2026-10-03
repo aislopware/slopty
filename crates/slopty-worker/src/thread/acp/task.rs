@@ -263,6 +263,10 @@ impl Task {
                 let actions = self.session.edit(intent, &text).unwrap_or_default();
                 self.apply(actions);
             }
+            ThreadAsk::Reorder { intent, before } => {
+                let actions = self.session.reorder(intent, before).unwrap_or_default();
+                self.apply(actions);
+            }
             ThreadAsk::Interrupt => {
                 let Some(Cancelled { notification, answers, actions }) = self.session.cancel(now)
                 else {

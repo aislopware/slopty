@@ -2016,3 +2016,42 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     starts them, a stand-in `claude` writing down its arguments), and
     `claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents` and
     `a_claude_code_conversation_comes_back_resumed` for the worker's side.
+
+- ✅ **A conversation running in the background comes back attached, not resumed**
+  (2026-10-04). `claude --resume <id>` refuses a conversation that still runs in the
+  background (`claude --bg`), so a session lost to a reboot fell back to a bare shell. The
+  worker now asks Claude Code's own list (`claude agents --json`) once it restores sessions,
+  and only when one of them held a conversation. A conversation listed as a live background
+  session opens with `claude attach <id>`: as the tile's command, or typed at the first
+  prompt of the shell it ran in. Nothing Slopty gives a new agent is given again, since the
+  session already runs with it. Any other conversation is resumed as before. Tests:
+  `a_conversation_running_in_the_background_is_attached_not_resumed`,
+  `the_background_conversations_are_claude_codes_own_list` (a stand-in `claude` the test
+  writes) and `background_sessions_are_the_live_ones_run_with_bg`.
+
+- ✅ **A prompt Claude Code takes back settles the agent and comes back to the list**
+  (2026-10-04). An Esc just after Enter puts the prompt back in Claude Code's input. Nothing
+  reaches the transcript and no `Stop` fires, so the agent read as working forever, and a
+  message Slopty sent looked sent. No hook says this happened. Claude Code's own terminal
+  title does show it, since the title goes back to its idle mark, and the title is already one
+  of the signals the agent table reads.
+  - After `UserPromptSubmit`, if the transcript stays silent and the title reads idle for 4
+    probes in a row (about 3 s), the agent is idle, by its title. Any transcript record, any
+    other hook or a spinner in between disarms or restarts the count, so a turn that began is
+    never taken as gone back. The next hook speaks for the agent again.
+  - The composer remembers the message it typed last until the transcript shows it. If the
+    agent comes to rest by its title first, the message goes back to the head of the list,
+    held as "Not taken: Claude Code put it back in its input". It is not typed again, since
+    it is in the terminal already. It cannot be edited there, and it can be withdrawn.
+  - Tests: `a_prompt_taken_back_leaves_the_agent_idle_by_its_title` (slopty-agent) and
+    `a_message_claude_code_takes_back_is_held_as_taken_back` (the composer on a real
+    terminal).
+
+- ✅ **A session started in a worktree is resumed without `--worktree`** (2026-10-04, readiness
+  A11). The question was whether a reboot's resume should keep the flag. It should not.
+  - Claude Code 2.1.281 records the worktree a session runs in (`worktreeSession`) and, on
+    `--resume`, enters that worktree again when it still exists. Given again, `--worktree`
+    would make a second worktree beside it. `--tmux`, which needs `--worktree`, goes too.
+  - The resume runs in the directory the hooks last named, which for such a session is the
+    worktree.
+  - Test: `a_worktree_is_entered_again_by_claude_code_not_made_again`.

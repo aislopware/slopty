@@ -22,7 +22,7 @@ mod compose {
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::Agents;
     use slopty_worker::session::{self, SessionHandle, SessionStart};
-    use slopty_worker::thread::compose::{DRAFT, Terminals};
+    use slopty_worker::thread::compose::{DRAFT, TAKEN_BACK, Terminals};
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::{Composer, Host};
     use tokio::sync::mpsc;
@@ -34,6 +34,7 @@ mod compose {
     struct Terminal {
         handle: SessionHandle,
         agent: parking_lot::Mutex<Option<AgentStatus>>,
+        source: parking_lot::Mutex<AgentSource>,
     }
 
     impl Agents for Terminal {
@@ -42,7 +43,7 @@ mod compose {
             Some(SessionAgent {
                 kind: AgentKind::ClaudeCode,
                 status,
-                source: AgentSource::Hook,
+                source: *self.source.lock(),
                 since_ms: WallMs::ZERO,
                 mode: None,
             })
@@ -119,6 +120,7 @@ mod compose {
             let terminal = Arc::new(Terminal {
                 handle,
                 agent: parking_lot::Mutex::new(Some(AgentStatus::Idle)),
+                source: parking_lot::Mutex::new(AgentSource::Hook),
             });
             let composer = Composer::new(host.clone(), Arc::<Terminal>::clone(&terminal));
             let rig = Self { terminal, host, composer, thread, record, _child: child, _dir: dir };
@@ -233,6 +235,40 @@ mod compose {
         assert!(rig.state().pending.is_empty(), "and nothing sent again");
     }
 
+    /// Queued messages go in the order the person puts them in, and one promoted goes at once,
+    /// into the turn under way, while the rest wait for the agent to be at rest.
+    #[tokio::test]
+    async fn a_queued_message_moves_in_the_list_or_goes_now() {
+        let rig = Rig::new().await;
+        rig.agent(AgentStatus::Working);
+        let q1 = rig.send("q1", Delivery::Queue);
+        let q2 = rig.send("q2", Delivery::Queue);
+        let q3 = rig.send("q3", Delivery::Queue);
+        rig.until(|s| s.pending.len() == 3).await;
+        let order = |s: &ThreadState| s.pending.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
+
+        let first = Intent::Reorder { pending: q3, before: Some(q1) };
+        assert_eq!(rig.intent(IntentId::new(), &first), Outcome::Done);
+        assert_eq!(order(&rig.state()), ["q3", "q1", "q2"]);
+        let last = Intent::Reorder { pending: q3, before: None };
+        assert_eq!(rig.intent(IntentId::new(), &last), Outcome::Done);
+        assert_eq!(order(&rig.state()), ["q1", "q2", "q3"]);
+        let nowhere = Intent::Reorder { pending: q1, before: Some(IntentId::new()) };
+        let refused = rig.intent(IntentId::new(), &nowhere);
+        assert!(matches!(refused, Outcome::Refused { .. }), "{refused:?}");
+
+        let now = Intent::Promote { pending: q2 };
+        assert_eq!(rig.intent(IntentId::new(), &now), Outcome::Done);
+        rig.recorded("q2\r").await;
+        let left = rig.until(|s| s.pending.len() == 2).await;
+        assert_eq!(order(&left), ["q1", "q3"], "the rest wait");
+        let gone = rig.intent(IntentId::new(), &now);
+        assert!(matches!(gone, Outcome::Refused { .. }), "{gone:?}");
+
+        rig.agent(AgentStatus::Idle);
+        rig.recorded("q2\rq1\r").await;
+    }
+
     /// A queued message waits for the agent to be at rest, one per turn, while a steer goes
     /// into the turn under way; what waits can be edited and withdrawn.
     #[tokio::test]
@@ -311,5 +347,55 @@ mod compose {
         rig.recorded("draft\r\x1bthen this\r").await;
         rig.agent(AgentStatus::Idle);
         rig.recorded("draft\r\x1bthen this\r/model opus\r").await;
+    }
+
+    /// A message Claude Code takes back into its input before it begins (Esc right after
+    /// Enter) never reaches the transcript: once the agent is at rest again by its own title,
+    /// the message is back in the list, held as taken back, and not typed again, since it is
+    /// in the terminal. It cannot be edited there, and can be withdrawn. A message the
+    /// transcript shows is never taken as gone back.
+    #[tokio::test]
+    async fn a_message_claude_code_takes_back_is_held_as_taken_back() {
+        let rig = Rig::new().await;
+        let shown = rig.send("shown", Delivery::Steer);
+        rig.recorded("shown\r").await;
+        rig.until(|s| s.pending.is_empty()).await;
+        let prompt = Item {
+            id: ItemId("p1".to_owned()),
+            turn: TurnId(1),
+            at_ms: WallMs::ZERO,
+            body: ItemBody::User(UserMessage {
+                text: Clipped::whole("shown"),
+                images: Vec::new(),
+                command: None,
+                intent: Some(shown),
+            }),
+        };
+        rig.host.apply(rig.thread, vec![Action::ItemStarted(prompt)]);
+        *rig.terminal.source.lock() = AgentSource::Title;
+        rig.host.apply(rig.thread, vec![Action::Status(rig.state().status)]);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(rig.state().pending.is_empty(), "the transcript took it");
+
+        *rig.terminal.source.lock() = AgentSource::Hook;
+        let back = rig.send("never mind", Delivery::Steer);
+        rig.recorded("shown\rnever mind\r").await;
+        rig.until(|s| s.pending.is_empty()).await;
+        rig.agent(AgentStatus::Working);
+        rig.host.apply(rig.thread, vec![Action::Status(rig.state().status)]);
+        rig.agent(AgentStatus::Idle);
+        *rig.terminal.source.lock() = AgentSource::Title;
+        rig.host.apply(rig.thread, vec![Action::Status(rig.state().status)]);
+        let state = rig.until(|s| !s.pending.is_empty()).await;
+        assert_eq!(state.pending[0].intent, back);
+        assert_eq!(state.pending[0].text, "never mind");
+        assert_eq!(state.pending[0].state, PendingState::Held { reason: TAKEN_BACK.to_owned() });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(read(&rig.record), "shown\rnever mind\r", "not typed again");
+        let edit = Intent::Edit { pending: back, text: "again".to_owned() };
+        assert!(matches!(rig.intent(IntentId::new(), &edit), Outcome::Refused { .. }));
+        let withdraw = Intent::Withdraw { pending: back };
+        assert_eq!(rig.intent(IntentId::new(), &withdraw), Outcome::Done);
+        assert_eq!(rig.state().pending, []);
     }
 }

@@ -24,6 +24,7 @@ mod threads {
     use slopty_core::{ClientId, SessionId};
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
+    use slopty_proto::conversation::ConversationRequest;
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
@@ -220,6 +221,12 @@ mod threads {
 
         async fn send(&self, req: ThreadRequest) {
             self.link.send(ClientMsg::Thread(req)).await.unwrap();
+        }
+
+        /// Answer requests from this client from now on.
+        async fn answer_requests(&self) {
+            let on = ConversationRequest::Approvals { on: true };
+            self.link.send(ClientMsg::Conversation(on)).await.unwrap();
         }
 
         /// Follow `thread` from where this copy stands.
@@ -547,7 +554,7 @@ mod threads {
         let dir = tempfile::tempdir().unwrap();
         let daemons = daemons(dir.path()).await;
         let mut a = Client::connect(&daemons, ClientId::new()).await;
-        a.send(ThreadRequest::Approvals { on: true }).await;
+        a.answer_requests().await;
         let session = open_shell(&mut a, dir.path()).await;
         let main = dir.path().join("p1.jsonl");
         std::fs::write(&main, "").unwrap();
@@ -577,6 +584,63 @@ mod threads {
         a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 
+    /// Two clients follow one Claude Code thread and both answer requests. The second denies
+    /// a permission prompt with a word for the model: Claude Code is told to deny with it, both
+    /// clients see the request answered by the second with that choice, and the first's
+    /// answer after it moves nothing.
+    #[tokio::test]
+    async fn a_denial_from_one_of_two_clients_settles_the_request_for_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let second = ClientId::new();
+        let mut b = Client::connect(&daemons, second).await;
+        a.answer_requests().await;
+        b.answer_requests().await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let main = dir.path().join("p1.jsonl");
+        std::fs::write(&main, "").unwrap();
+
+        let held = relay(dir.path(), session, &first_ask("p1", &main));
+        let thread = slopty_agent::observed::thread_of("p1");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| row_in(c, session).is_some_and(|r| r.requests.len() == 1)).await;
+        a.follow(thread).await;
+        b.follow(thread).await;
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
+        b.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
+
+        let request = b.state().open_requests().next().unwrap().id.clone();
+        let deny = Intent::Answer {
+            ask: request.clone(),
+            choice: "deny".to_owned(),
+            message: Some("Not on main".to_owned()),
+        };
+        assert_eq!(b.intent(IntentId::new(), thread, deny).await, Outcome::Done);
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        let decision = &output["hookSpecificOutput"]["decision"];
+        assert_eq!(decision["behavior"], "deny", "{output}");
+        assert_eq!(decision["message"], "Not on main", "{output}");
+        let denied_by_b = |c: &Client| {
+            c.thread.as_ref().is_some_and(|s| {
+                s.requests.iter().any(|r| {
+                    r.id == request
+                        && matches!(&r.state, RequestState::Answered { by, choice }
+                            if by.client == Some(second) && choice == "deny")
+                })
+            })
+        };
+        b.until(denied_by_b).await;
+        a.until(denied_by_b).await;
+
+        let allow =
+            Intent::Answer { ask: request.clone(), choice: "allow".to_owned(), message: None };
+        let late = a.intent(IntentId::new(), thread, allow).await;
+        assert!(matches!(late, Outcome::Refused { .. }), "{late:?}");
+        assert!(denied_by_b(&a), "the late answer moves nothing");
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
     /// Two terminals whose Claude Codes name one session id at once keep a thread each: the
     /// first the session's own, the second one of its own. A prompt in the second is a request
     /// on the second's thread alone, and neither thread moves to the other terminal.
@@ -585,7 +649,7 @@ mod threads {
         let dir = tempfile::tempdir().unwrap();
         let daemons = daemons(dir.path()).await;
         let mut a = Client::connect(&daemons, ClientId::new()).await;
-        a.send(ThreadRequest::Approvals { on: true }).await;
+        a.answer_requests().await;
         let first = open_shell(&mut a, dir.path()).await;
         let second = open_shell(&mut a, dir.path()).await;
         let main = dir.path().join("e2e.jsonl");

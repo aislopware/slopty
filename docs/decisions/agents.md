@@ -108,7 +108,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     compares it exactly.
   - **The wire.** `thread::wire` holds:
     - `ThreadRequest`: `Table`, `Follow { have, turns, max_latency_ms }`, `Page`, `Expand`,
-      `Start`, `Intent`, `Approvals`;
+      `Start`, `Intent`. Whether a client answers requests is said once, by
+      `ConversationRequest::Approvals`, for every agent; the thread wire's own copy of it was
+      removed on 2026-10-04;
     - `Intent`, each naming the capability it needs (`Intent::needs`);
     - `IntentDone` with an `Outcome`;
     - `ThreadFrame`: `Snapshot`, then `Actions { epoch, first }`, plus `Page` and `Expanded`;
@@ -1136,3 +1138,73 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from`,
     `a_fork_resumes_into_a_new_conversation` (Claude Code's words), goldens `intent_fork` and
     `intent_fork_whole`.
+
+- ✅ **Codex threads at rest are let go** (2026-10-04). The worker kept every Codex thread it
+  followed subscribed, so Codex kept each one loaded with its MCP servers until the worker
+  restarted: about 29 MiB per thread for Slopty's relay alone (`docs/MEASUREMENTS.md`,
+  2026-10-04).
+  - A thread is let go (`thread/unsubscribe`) when all of these hold:
+    - it has rested 10 minutes, with no turn under way;
+    - nothing is asked of the person and no message is held;
+    - Codex does not say it works on it;
+    - no client follows it and no TUI of Slopty's runs on it.
+  - Codex then unloads it after its own delay. The thread stays in the table as it was.
+  - A follow, anything asked of the thread, or Codex saying it works on it again takes it up
+    again with `thread/resume`. What was asked meanwhile goes once it is followed. Codex
+    saying it unloaded the thread takes nothing up again.
+  - Tests: `a_rested_thread_nobody_follows_is_let_go_and_taken_up_again` (stand-in daemon)
+    and `what_rested_codex_threads_keep_followed_and_let_go` (the real `codex app-server`,
+    run by hand).
+
+- ✅ **A Codex thread's commands claim no Slopty terminal** (2026-10-04). Codex's shared
+  daemon runs every thread's commands with its own environment, which is that of whatever
+  started it. A Codex TUI typed in a Slopty shell can start it, and then every thread's tools
+  carried that shell's `SLOPTY_SESSION`, its token and its project task, so Slopty's CLI in
+  any Codex command spoke as that one terminal.
+  - Every thread Slopty starts, takes up again or forks is now loaded with
+    `shell_environment_policy.set` for those four variables, each set empty through the
+    app-server's published per-thread `config`. Each is its own key, so the person's own
+    policy is added to, never replaced. Set empty, they name no terminal, and the CLI speaks
+    as an agent, never for the person.
+  - A daemon the worker starts gets none of them.
+  - Codex ignores `config` for a thread already loaded. A thread the person's TUI starts on a
+    daemon their shell started is not covered by this. Covering it needs the shell
+    integration to start the daemon without those variables.
+  - Tests: the start, resume and fork parameters in
+    `a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn`,
+    `a_rested_thread_nobody_follows_is_let_go_and_taken_up_again` and
+    `files_go_by_path_and_a_fork_and_a_listing_go_to_codex`. The measurement above checks
+    that the real `codex app-server` takes the `config`.
+
+- ✅ **A turn a usage limit stopped fails until the limit resets** (2026-10-04). A limit used
+  to end Claude Code's turn as done, and Codex's limit error was a plain API error.
+  - The turn's state `Failed` carries `until_ms`: when the agent can go on, where it is known.
+    Its notice is of kind `limit`.
+  - Claude Code records the API error it gives up on with its kind (`error: rate_limit`) and,
+    for a usage limit, the quota it hit (`quotaLimits.resetsAt`). The decoder keeps both on
+    the note (`Stop`). A turn whose last word is that error fails with its text. A turn the
+    model went on in after an error completes. A limit with no quota recorded resets when the
+    status line's full window does.
+  - The main thread's done after a failed turn is a failure (`Phase::Failed`), whichever of
+    the hook and the transcript is heard first. The terminal's agent badge (`AgentStatus`)
+    still says done, since it has no failed state.
+  - Codex's `usageLimitExceeded` and `rateLimitExceeded`, once Codex gives up, fail the turn
+    until its full window resets (`account/rateLimits/updated`).
+  - Tests: `a_turn_a_usage_limit_stopped_fails_until_it_resets` (Claude Code and Codex) and
+    `a_stopped_turn_fails_by_what_stopped_it`.
+
+- ✅ **A queued message can be moved in the list or sent now** (2026-10-04, from the T3 Code
+  study's queue controls). Two intents on the thread wire, for the UI to offer later:
+  - `Reorder { pending, before }` moves a message that has not gone to just before another,
+    or to the end (`Cap::QUEUE`). Queued messages go in the list's order. One rule serves every
+    adapter (`Pending::reorder`): a message or mark no longer in the list is refused and moves
+    nothing.
+  - `Promote { pending }` sends a queued message now, as a steer would go (`Cap::STEER`). For
+    Claude Code it becomes a steer in the list and is typed at the next step the guard allows.
+    For Codex it leaves the queue and goes by `turn/steer` into the turn under way, or as a
+    turn of its own when none runs. ACP takes no steer, so it is unsupported there. A message
+    being typed, or already in Claude Code's terminal, is refused.
+  - Tests: `a_queued_message_moves_in_the_list_or_goes_now` (the composer on a real
+    terminal), `a_held_message_moves_in_the_queue_or_steers_the_turn` (Codex),
+    `an_acp_thread_runs_turns_and_asks_before_it_acts` (ACP), and
+    `a_message_moves_before_another_or_to_the_end` with the property `a_reorder_is_a_move`.

@@ -76,6 +76,7 @@ enum ThreadAsk {
     Send { text: String, attachments: Vec<String>, intent: IntentId },
     Withdraw { intent: IntentId },
     Edit { intent: IntentId, text: String },
+    Reorder { intent: IntentId, before: Option<IntentId> },
     Interrupt,
     Answer { ask: AskId, choice: String, by: Answerer },
     SetMode { mode: String },
@@ -178,10 +179,20 @@ impl Acp {
                 }
                 ThreadAsk::Send { text: text.clone(), attachments: attachments.clone(), intent }
             }
-            Intent::Withdraw { pending } | Intent::Edit { pending, .. }
+            Intent::Withdraw { pending }
+            | Intent::Edit { pending, .. }
+            | Intent::Reorder { pending, .. }
                 if !state.pending.iter().any(|p| p.intent == *pending) =>
             {
                 return refused("That message is not waiting");
+            }
+            Intent::Reorder { before: Some(before), .. }
+                if !state.pending.iter().any(|p| p.intent == *before) =>
+            {
+                return refused("That message has already gone");
+            }
+            Intent::Reorder { pending, before } => {
+                ThreadAsk::Reorder { intent: *pending, before: *before }
             }
             Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
             Intent::Edit { pending, text } => {

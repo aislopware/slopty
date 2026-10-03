@@ -465,7 +465,8 @@ impl Worker {
             return Vec::new();
         }
         let shells = crate::restore::system_shells();
-        let launch = self.agent_launch();
+        let mut launch = self.agent_launch();
+        launch.background = crate::restore::background("claude", lost.iter().map(|(_, r)| r)).await;
         let mut reopened = Vec::with_capacity(lost.len());
         for (id, recipe) in lost {
             match self.reopen(id, &recipe, &shells, &launch).await {
@@ -495,6 +496,7 @@ impl Worker {
                 .as_ref()
                 .map(|relay| relay.to_string_lossy().into_owned()),
             claude_mod,
+            background: Vec::new(),
         }
     }
 
