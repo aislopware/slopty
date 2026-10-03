@@ -151,10 +151,22 @@ impl Starting {
         handler: Box<Handler>,
         up: Box<dyn FnOnce() + Send>,
     ) -> Self {
+        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::UserInitiated);
+        Self::spawn_on(&DispatchQueue::global_queue(queue), paths, latency, label, handler, up)
+    }
+
+    /// [`Starting::spawn`] on `queue`.
+    fn spawn_on(
+        queue: &DispatchQueue,
+        paths: Vec<PathBuf>,
+        latency: f64,
+        label: &'static str,
+        handler: Box<Handler>,
+        up: Box<dyn FnOnce() + Send>,
+    ) -> Self {
         let slot = Arc::new(Mutex::new(None));
         let wanted = Arc::downgrade(&slot);
-        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::UserInitiated);
-        DispatchQueue::global_queue(queue).exec_async(move || {
+        queue.exec_async(move || {
             if wanted.strong_count() == 0 {
                 return;
             }
@@ -226,6 +238,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
+    use dispatch2::DispatchQueueAttr;
+
     use super::*;
 
     /// Longer than fseventsd takes to start a stream on a loaded machine (2.7 s seen).
@@ -274,7 +288,14 @@ mod tests {
         let (tx, released) = mpsc::sync_channel(1);
         let guard = Released(tx);
         let (said, up) = mpsc::sync_channel(1);
-        let starting = Starting::spawn(
+        // The queue is held until the drop, so the start always comes after it.
+        let queue = DispatchQueue::new("io.slopty.fsevents.test.held", DispatchQueueAttr::SERIAL);
+        let (open, opened) = mpsc::sync_channel::<()>(1);
+        queue.exec_async(move || {
+            let _open = opened.recv_timeout(UP);
+        });
+        let starting = Starting::spawn_on(
+            &queue,
             vec![dir],
             0.01,
             "io.slopty.fsevents.test",
@@ -286,6 +307,7 @@ mod tests {
             }),
         );
         drop(starting);
+        open.send(()).unwrap();
         assert!(released.recv_timeout(UP).is_ok(), "the handler, and the stream with it, went");
         assert!(up.try_recv().is_err(), "a stream nobody waits for is not said to be up");
     }
