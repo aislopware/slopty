@@ -1157,6 +1157,36 @@ Tests:
 - The bar's hover says what each segment counts.
 - A finding wraps to two lines, so it is no longer cut to a few characters in a narrow lane.
 
+**Short lanes stack; the board never wraps a row of lanes under another.** ✅ 2026-10-03
+(design review `.research/design-review-2026-10-03.md` #1, #4)
+- Before: the lanes stood in equal columns, as many as fit at 232 pt, and wrapped onto a new
+  row. Six lanes in a 1030 pt tile made a row of four and a row of two. The second row started
+  under the tallest lane, so the short lanes stood over an empty gap, and Ready to merge (the
+  lane the person acts on) sat at the fold with its Merge button cut.
+- How others do it: Linear, GitHub Projects, Height, Plane and Trello give each column a fixed
+  width and scroll the board sideways, and Linear and Plane also hide or fold empty and done
+  columns. Sideways scrolling is not open to a tile here. A sideways swipe moves the strip
+  (`workspace/strip.rs`), so lanes past the tile's edge could only be reached by a scroll bar.
+  Folding a lane would hide cards the person may need.
+- Now: the lanes keep their columns of at least 232 pt, one per lane while they fit. With more
+  lanes than columns, neighbouring lanes stack in one column with a gap between them, in their
+  order, down each column and then across (`project::view::stack_lanes`). The split makes the
+  tallest column as short as it can be, and among splits as short, the most even. So a short
+  lane joins a short neighbour rather than a tall one: in the showcase, Needs you over Failed,
+  then Working, then Up next, then Ready to merge over Merged. Every lane stands in the first
+  screen.
+- A lane's height is counted, not measured: a card's lines from the parts it draws (title,
+  second line, place, pipeline, check, its tail or findings, a subtask's word, its buttons),
+  and the heading as two (`ProjectView::card_lines`). Only the balance rests on the count, and
+  a card drawn a line taller or shorter than counted moves nothing else.
+- A verdict names its verifier ("Verifier failed", "Verifier passed"), as the timeline does. A
+  task the server sends back after a failed check, with no agent left to fix it, is Planned
+  (`hub/queue.rs`), so it stands in Up next. There a bare "Failed" read as the Failed lane,
+  which is a task given up.
+- Tests: `short_lanes_stack_so_every_lane_stands_in_the_first_screenful` (`slopty-ui`), with
+  `the_board_says_each_thing_once_and_fills_its_tile` unchanged. The `project-lanes` golden
+  was retaken.
+
 ## Where tasks run, and starts that wait for the person (2026-10-02)
 
 **The board has a machines lens, and every placement keeps its reasons.** ✅ 2026-10-02

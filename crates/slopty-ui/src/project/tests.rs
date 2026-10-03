@@ -354,6 +354,30 @@ fn as_many_lanes_stand_across_as_fit_at_the_zoom() {
     assert_eq!(lanes_across(10_000.0, 1.0), 7, "one column per lane at most");
 }
 
+/// More lanes than columns: neighbouring short lanes share a column, in their order, so the
+/// tallest column is as short as it can be and the split is as even as that allows; fewer
+/// lanes than columns stand one a column.
+#[test]
+fn short_lanes_stack_so_every_lane_stands_in_the_first_screenful() {
+    use super::view::stack_lanes;
+    // The showcase's board: needs you, failed, working, up next, ready to merge, merged.
+    let showcase = [8, 3, 9, 19, 10, 3];
+    assert_eq!(stack_lanes(&showcase, 4), [2, 1, 1, 2], "the short ones join their neighbours");
+    assert_eq!(stack_lanes(&showcase, 6), [1; 6]);
+    assert_eq!(stack_lanes(&showcase, 9), [1; 6], "no more columns than lanes");
+    assert_eq!(stack_lanes(&showcase, 1), [6], "one column holds them all");
+    assert_eq!(stack_lanes(&showcase, 0), [6], "before the first layout");
+    assert_eq!(stack_lanes(&[5, 5, 5], 2), [1, 2], "a tie keeps the first split");
+    assert_eq!(stack_lanes(&[1, 1, 30], 2), [2, 1], "the tall one stands alone");
+    assert!(stack_lanes(&[], 3).is_empty());
+    for columns in 1..=7 {
+        let sizes = stack_lanes(&[4, 2, 7, 1, 9, 3, 5], columns);
+        assert_eq!(sizes.len(), columns);
+        assert_eq!(sizes.iter().sum::<usize>(), 7, "every lane once: {sizes:?}");
+        assert!(sizes.iter().all(|n| *n > 0), "no empty column: {sizes:?}");
+    }
+}
+
 /// A board unchanged by an update keeps its address, so handing it over again costs a pointer.
 #[test]
 fn an_update_copies_only_the_board_it_touches() {

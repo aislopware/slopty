@@ -206,6 +206,16 @@ impl Check<'_> {
     }
 }
 
+/// What a card says besides its title ([`ProjectView::card_facts`]).
+struct CardFacts<'a> {
+    /// Its check's block.
+    check: Option<Check<'a>>,
+    /// The stages of its way to the target that its check's block does not say.
+    stages: Vec<Stage>,
+    /// Its second line.
+    meta: String,
+}
+
 /// How many of a failed verifier's last lines its card and row show.
 const TAIL_LINES: usize = 4;
 
@@ -806,11 +816,54 @@ impl ProjectView {
 // ----- drawing ---------------------------------------------------------------------------------
 
 /// How many lanes a tile `width` points wide, drawn at `zoom`, sets side by side: as many as
-/// fit, one at the least. They share the width equally and wrap past it, so a lane that comes
-/// or goes moves no card sideways.
+/// fit, one at the least. They share the width equally; past it, short lanes stack
+/// ([`stack_lanes`]).
 pub(super) fn lanes_across(width: f32, zoom: f32) -> u16 {
     let lanes = u16::try_from(Lane::ALL.len()).unwrap_or(u16::MAX);
     (2..=lanes).rev().find(|&n| width >= f32::from(n) * LANE_W * zoom).unwrap_or(1)
+}
+
+/// How many of a card's lines a lane's heading stands for in [`stack_lanes`]'s balance, the
+/// space under it counted.
+const LANE_HEAD_LINES: u32 = 2;
+
+/// How many lanes each of `columns` columns holds, left to right, for lanes about `weights`
+/// lines tall in their order: every column holds at least one, the lanes keep their order down
+/// each column and then across, and the tallest column is as short as it can be. Among splits
+/// as short, the most even wins, so a short lane joins a short neighbour rather than a tall
+/// one. More columns than lanes leave a lane each.
+pub(super) fn stack_lanes(weights: &[u32], columns: usize) -> Vec<usize> {
+    let n = weights.len();
+    let columns = columns.clamp(1, n.max(1));
+    if columns >= n {
+        return vec![1; n];
+    }
+    // A cut after lane `i` is bit `i`; at most seven lanes make 64 ways to cut.
+    let gaps = n.saturating_sub(1);
+    let mut best: Option<((u64, u64), Vec<usize>)> = None;
+    for cuts in 0_u32..(1_u32 << gaps) {
+        if usize::try_from(cuts.count_ones()).ok() != Some(columns.saturating_sub(1)) {
+            continue;
+        }
+        let mut sizes = Vec::with_capacity(columns);
+        let (mut tallest, mut squares, mut height, mut held) = (0_u64, 0_u64, 0_u64, 0_usize);
+        for (i, weight) in weights.iter().enumerate() {
+            height = height.saturating_add(u64::from(*weight));
+            held = held.saturating_add(1);
+            let cut = u32::try_from(i).is_ok_and(|i| i < 31 && cuts & (1 << i) != 0);
+            if cut || i.saturating_add(1) == n {
+                tallest = tallest.max(height);
+                squares = squares.saturating_add(height.saturating_mul(height));
+                sizes.push(held);
+                (height, held) = (0, 0);
+            }
+        }
+        let score = (tallest, squares);
+        if best.as_ref().is_none_or(|(b, _)| score < *b) {
+            best = Some((score, sizes));
+        }
+    }
+    best.map_or_else(|| vec![1; n], |(_, sizes)| sizes)
 }
 
 /// A lane's tone: colour for the two lanes that need the person, and for the rest the ink
@@ -1869,7 +1922,9 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        // Red is for a run that failed; a reviewer asking for changes is a word, not an alarm.
+        // Red is for a run that failed; a reviewer asking for changes is a word, not an alarm. A
+        // verdict names the verifier: a task its failure sent back is Up next, and a bare "Failed"
+        // there read as the Failed lane, which is a task given up.
         let (glyph, tone, word, detail, tail) = match check {
             Check::Running { line, review: false, .. } => {
                 let status = Status::Working;
@@ -1879,13 +1934,17 @@ impl ProjectView {
                 let status = Status::Working;
                 (status.icon(), board_tone(theme, status), "Reviewing", line.clone(), Vec::new())
             }
-            Check::Verdict { run, .. } if run.passed => {
-                (IconName::CircleCheck, s.text_secondary, "Passed", verdict_detail(run), Vec::new())
-            }
+            Check::Verdict { run, .. } if run.passed => (
+                IconName::CircleCheck,
+                s.text_secondary,
+                "Verifier passed",
+                verdict_detail(run),
+                Vec::new(),
+            ),
             Check::Verdict { run, .. } => (
                 IconName::CircleX,
                 s.error,
-                "Failed",
+                "Verifier failed",
                 verdict_detail(run),
                 verdict_tail(run, TAIL_LINES),
             ),
@@ -2173,59 +2232,142 @@ impl ProjectView {
         out
     }
 
-    /// The lanes, as many across as the tile fits ([`lanes_across`]), sharing its width.
+    /// The lanes in as many columns as the tile fits at [`LANE_W`] ([`lanes_across`]),
+    /// sharing its width. With more lanes than columns, neighbouring short lanes stack in one
+    /// column ([`stack_lanes`]), so every lane stands in the first screenful in its left-to-right
+    /// order and none waits under a gap on a second row. The board never scrolls sideways: a
+    /// sideways swipe moves the strip.
     fn board(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let lanes = board.lanes();
         if lanes.is_empty() {
             return vec![self.empty(NO_TASKS, NO_TASKS_HINT)];
         }
-        let theme = &self.theme;
-        let sp = theme.spacing;
-        let columns = lanes.into_iter().map(|(lane, tasks)| {
-            let tone = lane_tone(theme, lane);
-            let count = tasks.len();
-            let head = div()
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xs))
-                .px(self.z(sp.xs))
-                .pb(self.z(sp.xs))
-                .text_size(self.z(theme.typography.small()))
-                .child(div().flex_none().size(self.z(6.0)).rounded_full().bg(hsla(tone)))
-                .child(div().text_color(hsla(theme.surfaces.text_secondary)).child(lane.title()))
-                .child(
-                    crate::kit::tabular(div())
-                        .text_color(hsla(theme.surfaces.text_muted))
-                        .child(SharedString::from(count.to_string())),
-                );
-            let cards = tasks.into_iter().filter_map(|task| {
-                let card = board.tasks.get(&task)?;
-                Some(self.card(board, card, lane, cx))
-            });
-            let selector = format!("project-lane-{}", lane.selector());
-            div()
-                .id(SharedString::from(selector.clone()))
-                .debug_selector(move || selector)
-                .role(Role::List)
-                .aria_label(lane.title())
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(self.z(sp.xs))
-                .child(head)
-                .children(cards)
-                .into_any_element()
-        });
+        let sp = self.theme.spacing;
+        let across = usize::from(lanes_across(self.width, self.zoom)).min(lanes.len());
+        let weights: Vec<u32> = lanes
+            .iter()
+            .map(|(lane, tasks)| {
+                tasks
+                    .iter()
+                    .filter_map(|task| board.tasks.get(task))
+                    .map(|card| self.card_lines(board, card, *lane))
+                    .fold(LANE_HEAD_LINES, u32::saturating_add)
+            })
+            .collect();
+        let mut lanes = lanes.into_iter();
+        let columns: Vec<AnyElement> = stack_lanes(&weights, across)
+            .into_iter()
+            .map(|n| {
+                div()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(self.z(sp.lg))
+                    .children(
+                        lanes
+                            .by_ref()
+                            .take(n)
+                            .map(|(lane, tasks)| self.lane(board, lane, tasks, cx)),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         let grid = div()
             .grid()
-            .grid_cols(lanes_across(self.width, self.zoom))
+            .grid_cols(u16::try_from(columns.len()).unwrap_or(1))
             .items_start()
             .gap_x(self.z(sp.sm))
-            .gap_y(self.z(sp.md))
             .px(self.z(sp.inset() - sp.xs))
             .pt(self.z(sp.sm))
             .children(columns);
         vec![grid.into_any_element()]
+    }
+
+    /// What a card says besides its title: its check, the stages of its way to the target the
+    /// check's own block does not say, and its second line.
+    fn card_facts<'a>(&self, board: &'a Board, card: &'a TaskCard) -> CardFacts<'a> {
+        let check = Self::check(board, card);
+        let mut stages = board.pipeline(card.id);
+        if let Some(check) = &check {
+            let spoken = if check.is_review() { StageKind::Reviewer } else { StageKind::Verifier };
+            stages.retain(|stage| stage.kind != spoken);
+        }
+        let meta =
+            self.node_meta(board, Some(card.id), Some(card), check.as_ref(), !stages.is_empty());
+        CardFacts { check, stages, meta }
+    }
+
+    /// About how many lines `card` stands in `lane`, its padding counted as one: what
+    /// [`stack_lanes`] balances the columns by. Only the balance rests on it, so it counts the
+    /// card's parts as [`Self::card`] draws them without measuring a glyph.
+    fn card_lines(&self, board: &Board, card: &TaskCard, lane: Lane) -> u32 {
+        let CardFacts { check, stages, meta } = self.card_facts(board, card);
+        let check_lines = match &check {
+            None => 0,
+            Some(Check::Verdict { run, .. }) if !run.passed => {
+                // The head, then the tail in its well, which pads by about a line.
+                2_usize.saturating_add(verdict_tail(run, TAIL_LINES).len())
+            }
+            Some(Check::Review { run, .. }) if !run.verdict.findings.is_empty() => {
+                // The head, then each finding's head and two lines of its words, in a well.
+                let shown = run.verdict.findings.len().min(TAIL_LINES);
+                2_usize.saturating_add(shown.saturating_mul(3))
+            }
+            Some(_) => 1,
+        };
+        let lines = 2_usize
+            .saturating_add(usize::from(!meta.is_empty()))
+            .saturating_add(usize::from(self.where_words(board, Some(card.id)).is_some()))
+            .saturating_add(usize::from(!stages.is_empty()))
+            .saturating_add(check_lines)
+            .saturating_add(usize::from(Lane::of(card.state) != lane))
+            .saturating_add(if board.actions(card.id).is_empty() { 0 } else { 2 });
+        u32::try_from(lines).unwrap_or(u32::MAX)
+    }
+
+    /// One lane: its heading with its count, then its cards.
+    fn lane(
+        &self,
+        board: &Board,
+        lane: Lane,
+        tasks: Vec<TaskId>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let sp = theme.spacing;
+        let tone = lane_tone(theme, lane);
+        let count = tasks.len();
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(self.z(sp.xs))
+            .px(self.z(sp.xs))
+            .pb(self.z(sp.xs))
+            .text_size(self.z(theme.typography.small()))
+            .child(div().flex_none().size(self.z(6.0)).rounded_full().bg(hsla(tone)))
+            .child(div().text_color(hsla(theme.surfaces.text_secondary)).child(lane.title()))
+            .child(
+                crate::kit::tabular(div())
+                    .text_color(hsla(theme.surfaces.text_muted))
+                    .child(SharedString::from(count.to_string())),
+            );
+        let cards = tasks.into_iter().filter_map(|task| {
+            let card = board.tasks.get(&task)?;
+            Some(self.card(board, card, lane, cx))
+        });
+        let selector = format!("project-lane-{}", lane.selector());
+        div()
+            .id(SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .role(Role::List)
+            .aria_label(lane.title())
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(self.z(sp.xs))
+            .child(head)
+            .children(cards)
+            .into_any_element()
     }
 
     /// One task on the board: its number and title, where it runs, and what it waits on.
@@ -2237,16 +2379,8 @@ impl ProjectView {
         let picked = self.picked() == Some(node);
         let own = Lane::of(card.state);
         let status = self.node_status(board, node);
-        let check = Self::check(board, card);
         let key = format!("project-card-{}", card.id);
-        // The check's own block says its stage, with its detail.
-        let mut stages = board.pipeline(card.id);
-        if let Some(check) = &check {
-            let spoken = if check.is_review() { StageKind::Reviewer } else { StageKind::Verifier };
-            stages.retain(|stage| stage.kind != spoken);
-        }
-        let piped = !stages.is_empty();
-        let meta = self.node_meta(board, node, Some(card), check.as_ref(), piped);
+        let CardFacts { check, stages, meta } = self.card_facts(board, card);
         let place = self.where_chip(board, node, "project-card", cx);
         // A reason that says only that the worker had room tells the card nothing.
         let placed = board.place(node);
@@ -3380,9 +3514,9 @@ impl Render for ProjectView {
 }
 
 impl ProjectView {
-    /// `body` fading out at its edges while more lies past them, so a lane cut at the foot (the
-    /// board's second row) reads as more below, not as the end. The body fades per pixel; the
-    /// tile's surface is outside the fade.
+    /// `body` fading out at its edges while more lies past them, so a lane cut at the foot reads
+    /// as more below, not as the end. The body fades per pixel; the tile's surface is outside
+    /// the fade.
     fn scroll_fade(&self, body: impl IntoElement) -> gpui::EdgeFadeElement {
         let spacing = self.theme.spacing;
         let edges = gpui::Edges {
