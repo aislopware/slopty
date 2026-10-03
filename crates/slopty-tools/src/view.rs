@@ -341,6 +341,18 @@ pub struct OpenedView {
     session: SessionId,
 }
 
+/// Where an entry a change to the files left now is, for JSON.
+#[derive(Debug, Serialize)]
+pub struct PlacedView<'a> {
+    path: &'a str,
+}
+
+/// Where an entry made, moved or trashed now is.
+#[must_use]
+pub const fn placed(path: &str) -> PlacedView<'_> {
+    PlacedView { path }
+}
+
 /// Nothing to report, for JSON.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct DoneView {

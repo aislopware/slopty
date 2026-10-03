@@ -43,6 +43,7 @@ use slopty_core::{ClientId, ItemId, SessionId, WorkerId};
 use slopty_engine::ghostty::Position;
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
+use slopty_proto::folder::{FsOutcome, FsRefusal};
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
@@ -494,6 +495,14 @@ impl Orchestrator {
                 self.mine(worker)?;
                 let path = crate::file::expand_home(Path::new(&path));
                 blocking(move || stat(&path)).await.map(Outcome::Stat)
+            }
+            Verb::FsChange { worker, op } => {
+                self.mine(worker)?;
+                match blocking(move || Ok(crate::fsop::apply(&op))).await? {
+                    FsOutcome::Done { path } => Ok(Outcome::FsDone { path }),
+                    FsOutcome::Refused(refusal) => Err(refused(&refusal)),
+                    FsOutcome::Failed { error } => Err(Failure::new(ErrorCode::Failed, error)),
+                }
             }
             Verb::Search { worker, root, query, max_lines } => {
                 self.mine(worker)?;
@@ -1433,6 +1442,46 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(|e| Failure::new(ErrorCode::Failed, e.to_string()))?
+}
+
+/// An op on the worker's files that was not tried, said plainly for an agent or a person to
+/// act on: what stood in the way, and that nothing was touched.
+fn refused(refusal: &FsRefusal) -> Failure {
+    let (code, message) = match refusal {
+        FsRefusal::NotAbsolute { path } => (
+            ErrorCode::Invalid,
+            format!("{path} is not an absolute path (nor ~/…), or climbs with `..`"),
+        ),
+        FsRefusal::BadName { name } => (
+            ErrorCode::Invalid,
+            format!("{name:?} is not one plain name: no `/`, not `.` or `..`, not empty"),
+        ),
+        FsRefusal::Protected { path } => (
+            ErrorCode::Forbidden,
+            format!(
+                "{path} holds others' work (a root, a volume, the home or a folder above it), so                  it is never moved or trashed"
+            ),
+        ),
+        FsRefusal::Clash { path } => (
+            ErrorCode::Conflict,
+            format!("something is already at {path}; nothing is ever replaced, so pick another"),
+        ),
+        FsRefusal::Missing { path } => (ErrorCode::Invalid, format!("nothing is at {path}")),
+        FsRefusal::IntoItself => (
+            ErrorCode::Invalid,
+            "a folder cannot move into itself or a folder inside it".to_owned(),
+        ),
+        FsRefusal::OtherVolume => (
+            ErrorCode::Unsupported,
+            "the destination is on another volume, and a move only renames; copy it instead"
+                .to_owned(),
+        ),
+        FsRefusal::NoTrash => (
+            ErrorCode::Unsupported,
+            "its volume keeps no trash the worker can use, so it was left where it is".to_owned(),
+        ),
+    };
+    Failure::new(code, format!("refused, nothing was touched: {message}"))
 }
 
 fn io_failure(path: &Path, e: &std::io::Error) -> Failure {

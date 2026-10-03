@@ -1711,6 +1711,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WriteFile { worker, .. }
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
+        | Verb::FsChange { worker, .. }
         | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }
         | Verb::ListItems { worker }

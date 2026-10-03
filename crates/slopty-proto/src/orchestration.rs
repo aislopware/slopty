@@ -34,6 +34,7 @@ use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 
 use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
 use crate::conversation::{Entry, Meters, Origin, PermissionPrompt, Task, ThreadId, Verdict};
+use crate::folder::FsOp;
 use crate::items::{Item, ItemKind};
 use crate::project::{
     LimitsChange, Placement, Project, ProjectId, ProjectStatus, ProjectUpdate, Report, Suggestion,
@@ -913,6 +914,15 @@ pub enum Verb {
         /// The name of the worktree of its own it works in, for an agent that writes.
         worktree: Option<String>,
     },
+    /// Make a folder, move or rename an entry, or put one in the OS's trash, as a folder tile
+    /// does ([`FsOp`]): nothing is replaced and nothing unlinked. Answered with
+    /// [`Outcome::FsDone`], or an error that says plainly why it was refused or failed.
+    FsChange {
+        /// Where.
+        worker: WorkerId,
+        /// What to do.
+        op: FsOp,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1004,7 +1014,8 @@ impl Verb {
             | Self::Rebase { .. }
             | Self::FastForward { .. }
             | Self::RemoveWorktree { .. }
-            | Self::StartThread { .. } => true,
+            | Self::StartThread { .. }
+            | Self::FsChange { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1476,6 +1487,12 @@ pub enum Outcome {
         thread: crate::thread::ThreadId,
         /// The worktree it works in, when it was given one.
         worktree: Option<Box<crate::agent::Worktree>>,
+    },
+    /// For [`Verb::FsChange`]: where the entry now is (the new folder, the moved entry, or its
+    /// place in the trash), absolute with `~` spelled out.
+    FsDone {
+        /// The path.
+        path: String,
     },
 }
 

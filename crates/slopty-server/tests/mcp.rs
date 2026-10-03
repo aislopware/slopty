@@ -148,6 +148,9 @@ mod tests {
                 "write_file",
                 "list_dir",
                 "stat",
+                "make_dir",
+                "move_path",
+                "trash_path",
                 "search_files",
                 "list_ports",
                 "list_items",
@@ -333,7 +336,7 @@ mod tests {
         // another test's listener bound to `127.0.0.1` on the same port would answer instead.
         let inside = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 47);
+        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 50);
         serving.abort();
     }
 }

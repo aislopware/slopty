@@ -443,6 +443,60 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// `slopty <args>` against `server` that fails: what it said on stderr.
+    async fn slopty_refused(root: &Path, server: SocketAddr, args: &[&str]) -> String {
+        let ran = scrubbed(bin("slopty"), &root.join("home"))
+            .arg("--server")
+            .arg(server.to_string())
+            .arg("--data-dir")
+            .arg(root.join("cli"))
+            .args(args)
+            .env("RUST_LOG", "warn")
+            .kill_on_drop(true)
+            .output();
+        let out = tokio::time::timeout(STEP, ran).await.expect("slopty answers").unwrap();
+        assert!(!out.status.success(), "slopty {args:?} should fail");
+        String::from_utf8_lossy(&out.stderr).into_owned()
+    }
+
+    /// A folder is made, moved and renamed on a real worker through the `slopty` verbs an
+    /// agent's tools share, each printing where the entry now is. What must not happen is
+    /// refused in plain words and touches nothing: a second folder where one is, a move onto
+    /// something there, and the home to the trash.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_worker_s_folders_are_made_and_moved_and_a_refusal_touches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (server, _daemons, _worker) = fleet(&root, "").await;
+        let addr = server.quic_addr();
+        let home = root.join("home");
+
+        let made = slopty(&root, addr, &["mkdir", "~/drafts"]).await;
+        assert_eq!(made.trim(), home.join("drafts").to_string_lossy(), "{made}");
+        assert!(home.join("drafts").is_dir());
+        let again = slopty_refused(&root, addr, &["mkdir", "~/drafts"]).await;
+        assert!(again.contains("something is already at"), "{again}");
+
+        std::fs::write(home.join("drafts").join("note.md"), "kept").unwrap();
+        let moved = slopty(&root, addr, &["--json", "mv", "~/drafts", "~/notes"]).await;
+        let moved: Value = serde_json::from_str(&moved).unwrap();
+        assert_eq!(moved["path"], home.join("notes").to_string_lossy().as_ref(), "{moved}");
+        assert_eq!(std::fs::read_to_string(home.join("notes").join("note.md")).unwrap(), "kept");
+        assert!(!home.join("drafts").exists());
+
+        std::fs::create_dir_all(home.join("taken")).unwrap();
+        let onto = slopty_refused(&root, addr, &["mv", "~/notes", "~/taken"]).await;
+        assert!(onto.contains("nothing was touched") && onto.contains("taken"), "{onto}");
+        assert!(home.join("notes").join("note.md").is_file(), "left where it was");
+        let inside = slopty_refused(&root, addr, &["mv", "~/notes", "~/notes/deeper"]).await;
+        assert!(inside.contains("into itself"), "{inside}");
+        let the_home = slopty_refused(&root, addr, &["trash", "~"]).await;
+        assert!(the_home.contains("never moved or trashed"), "{the_home}");
+        assert!(home.join("notes").is_dir());
+
+        server.shutdown().await;
+    }
+
     /// What a worker's person says of it, labels and probe commands in its settings, reaches
     /// `slopty workers` as facts, and a task's placement rules read them. A command task made
     /// with the CLI runs where its rules place it, with its project and task in its

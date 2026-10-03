@@ -1019,9 +1019,19 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     more as the person wants it, and asks again for as many after a relist. `FsOps` numbers
     the ops and holds them until answered, so the tile shows them at once, and `sentence` says
     how one went.
-  - *No CLI verbs yet.* The CLI's `ls`, `cat` and `stat` are orchestration verbs through the
-    server. `mkdir`, `mv` and `trash` belong beside them as verbs answered by
-    `slopty_worker::fsop::apply`, not as a second path straight to the worker.
+  - *For agents and the CLI.* `Verb::FsChange { worker, op }` carries the same `FsOp` through
+    the server, beside `ls`, `cat` and `stat`, and the worker answers it with
+    `slopty_worker::fsop::apply`: `Outcome::FsDone { path }`, or an error in plain words that
+    says what stood in the way and that nothing was touched (a clash is `Conflict`, a
+    protected place `Forbidden`, another volume or no trash `Unsupported`, the rest
+    `Invalid`; the OS's own refusal is `Failed`). The MCP tools are `make_dir`, `move_path`
+    and `trash_path`, and the CLI's `slopty mkdir`, `mv` and `trash`, each printing where the
+    entry now is. A folder is named by its whole path and split into its folder and name
+    (`~` and `/` alone name none). Every one takes an idempotency key. Goldens
+    `fs_change_make_dir`, `fs_change_move`, `fs_change_trash`, `fs_done`; tests
+    `files_are_made_moved_and_trashed_and_a_refusal_is_said` (`slopty-tools`) and
+    `a_worker_s_folders_are_made_and_moved_and_a_refusal_touches_nothing` (`slopty-cli`,
+    through a real server and worker).
   - Tests: worker `fsop` (made once and by a plain name only; a move never replaces and never
     goes into itself; a case-only rename; the trash and its refusals; the protected places;
     a mount point), `listing` `the_pages_of_a_huge_folder_hold_every_entry_once_in_order`;

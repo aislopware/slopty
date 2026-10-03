@@ -10,6 +10,7 @@ mod golden_project {
     use slopty_core::{SessionId, WallMs, WorkerId};
     use slopty_proto::agent::{AgentBranch, PullRequest, Review, Worktree};
     use slopty_proto::codec;
+    use slopty_proto::folder::FsOp;
     use slopty_proto::orchestration::{
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
@@ -238,6 +239,20 @@ mod golden_project {
 
     fn reply(outcome: Outcome) -> FromServer {
         FromServer::Reply { id: 21, outcome }
+    }
+
+    /// An agent's change to a worker's files, and where it left the entry. These ride the
+    /// orchestration verbs beside the project ones, so their goldens sit here.
+    #[test]
+    fn folder_changes() {
+        let worker = term().worker;
+        let op = FsOp::Move { from: "~/drafts".to_owned(), to: "~/notes".to_owned() };
+        snap("fs_change_move", &request(Verb::FsChange { worker, op }));
+        let op = FsOp::MakeDir { parent: "~/src".to_owned(), name: "new".to_owned() };
+        snap("fs_change_make_dir", &request(Verb::FsChange { worker, op }));
+        let op = FsOp::Trash { path: "~/old".to_owned() };
+        snap("fs_change_trash", &request(Verb::FsChange { worker, op }));
+        snap("fs_done", &reply(Outcome::FsDone { path: "/Users/c/notes".to_owned() }));
     }
 
     fn launch(run: Runner) -> TaskLaunch {

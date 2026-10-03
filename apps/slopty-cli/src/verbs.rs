@@ -11,6 +11,7 @@ use serde::Serialize;
 use slopty_core::{DisplayId, SessionId, WindowId};
 use slopty_net::client::bind_client;
 use slopty_proto::conversation::Verdict;
+use slopty_proto::folder::FsOp;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{
     EventFilter, Happening, IdempotencyKey, Input, Outcome, Size, Verb, WaitUntil, Waited,
@@ -188,6 +189,35 @@ pub enum VerbCmd {
     },
     /// What is at a path on a worker (links followed).
     Stat {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// Absolute path, or `~/…`.
+        path: String,
+    },
+    /// Make one empty folder on a worker, in a folder that exists; refused when anything is
+    /// there already. Prints the new folder's path.
+    Mkdir {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// Absolute path, or `~/…`.
+        path: String,
+    },
+    /// Move or rename a file or folder on a worker, within one volume. Nothing is replaced:
+    /// refused when anything is at the destination. Prints where it now is.
+    Mv {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// What to move: absolute path, or `~/…`.
+        from: String,
+        /// Where it goes, its new name last.
+        to: String,
+    },
+    /// Put a file or folder on a worker in its OS's trash, where it can be put back; nothing
+    /// is deleted. Prints its path in the trash.
+    Trash {
         /// Worker id or name (the only worker online when omitted).
         #[arg(long)]
         worker: Option<String>,
@@ -752,6 +782,19 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
                 print!("{}", view::stat_text(&path, found.as_ref()));
             }
         }
+        VerbCmd::Mkdir { worker, path } => {
+            let (parent, name) = ops::parent_and_name(&path)?;
+            let op = FsOp::MakeDir { parent, name };
+            print_placed(&ops::fs_change(&mut res, worker.as_deref(), op, key).await?, json)?;
+        }
+        VerbCmd::Mv { worker, from, to } => {
+            let op = FsOp::Move { from, to };
+            print_placed(&ops::fs_change(&mut res, worker.as_deref(), op, key).await?, json)?;
+        }
+        VerbCmd::Trash { worker, path } => {
+            let op = FsOp::Trash { path };
+            print_placed(&ops::fs_change(&mut res, worker.as_deref(), op, key).await?, json)?;
+        }
         VerbCmd::Search {
             pattern,
             root,
@@ -997,6 +1040,16 @@ async fn wake(res: &mut Resolver<'_, Link>, worker: &str, json: bool) -> Result<
     Ok(())
 }
 
+/// Where a change to the files left its entry.
+fn print_placed(path: &str, json: bool) -> Result<()> {
+    if json {
+        print_json(&view::placed(path))
+    } else {
+        println!("{path}");
+        Ok(())
+    }
+}
+
 fn print_done(json: bool) -> Result<()> {
     if json { print_json(&view::DONE) } else { Ok(()) }
 }
@@ -1135,6 +1188,16 @@ mod tests {
         assert_eq!((offset, length), (10, Some(4)));
         let VerbCmd::Ls { max, .. } = parse(&["ls", "~"]).unwrap() else { panic!() };
         assert_eq!(max, DEFAULT_MAX_ENTRIES);
+        let VerbCmd::Mv { from, to, .. } = parse(&["mv", "~/a", "~/b"]).unwrap() else { panic!() };
+        assert_eq!((from.as_str(), to.as_str()), ("~/a", "~/b"));
+        parse(&["mv", "~/a"]).unwrap_err();
+        let VerbCmd::Mkdir { worker, .. } = parse(&["mkdir", "--worker", "box", "~/n"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(worker.as_deref(), Some("box"));
+        let VerbCmd::Trash { path, .. } = parse(&["trash", "~/old"]).unwrap() else { panic!() };
+        assert_eq!(path, "~/old");
         let VerbCmd::Resize { cols, rows, .. } =
             parse(&["resize", "t", "--cols", "100", "--rows", "30"]).unwrap()
         else {

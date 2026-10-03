@@ -6,6 +6,7 @@
 use slopty_core::WorkerId;
 use slopty_proto::agent::{AgentKind, SessionAgent};
 use slopty_proto::conversation::{ThreadId, Verdict};
+use slopty_proto::folder::FsOp;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
     Command, ConversationPage, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent,
@@ -311,6 +312,39 @@ pub async fn stat<D: Dispatch>(
     let worker = res.worker(worker).await?;
     match res.dispatch().call(Verb::Stat { worker, path }).await {
         Outcome::Stat(stat) => Ok(stat),
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+
+/// The folder `path` would be made in, and its name: `~/a/b` is `b` in `~/a`.
+///
+/// # Errors
+///
+/// When `path` names no folder below another, such as `/` or `~`.
+pub fn parent_and_name(path: &str) -> Result<(String, String), ToolError> {
+    let path = if path.len() > 1 { path.trim_end_matches('/') } else { path };
+    match path.rsplit_once('/') {
+        Some((parent, name)) if !name.is_empty() => {
+            let parent = if parent.is_empty() { "/" } else { parent };
+            Ok((parent.to_owned(), name.to_owned()))
+        }
+        _ => Err(ToolError::invalid(format!(
+            "{path} names no folder to make: give its whole path, such as ~/src/new"
+        ))),
+    }
+}
+
+/// Make a folder, move or rename an entry, or trash one ([`FsOp`]), on a worker: where the
+/// entry now is. A refusal comes back as the worker said it, plainly.
+pub async fn fs_change<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    worker: Option<&str>,
+    op: FsOp,
+    key: Option<IdempotencyKey>,
+) -> Result<String, ToolError> {
+    let worker = res.worker(worker).await?;
+    match res.dispatch().send(key, Verb::FsChange { worker, op }).await {
+        Outcome::FsDone { path } => Ok(path),
         other => Err(ToolError::unexpected(other)),
     }
 }

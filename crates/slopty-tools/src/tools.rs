@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use slopty_core::{DisplayId, WindowId};
+use slopty_proto::folder::FsOp;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{ErrorCode, EventFilter, IdempotencyKey, Input, Size, WaitUntil};
 use slopty_proto::project::{
@@ -835,6 +836,36 @@ struct PathArgs {
     path: String,
 }
 
+/// `make_dir` and `trash_path`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct FsPathArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// Absolute path, or `~/…`.
+    path: String,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
+}
+
+/// `move_path`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MovePathArgs {
+    /// Worker name or id; the only worker online when omitted.
+    worker: Option<String>,
+    /// What to move: absolute path, or `~/…`.
+    from: String,
+    /// Where it goes, its new name last: absolute path, or `~/…`.
+    to: String,
+    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
+    /// retry after a timeout or a dropped connection), the call answers what the first did
+    /// instead of doing it twice; the same key with other arguments is an error.
+    idempotency_key: Option<String>,
+}
+
 /// `search_files`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1272,6 +1303,26 @@ pub fn list() -> Vec<Tool> {
             "What is at a path on a worker, following links: `exists`, then `kind`, `size`, \
              `modified_ms` and `mode` (octal).",
             Kind::Read,
+        ),
+        tool::<FsPathArgs>(
+            "make_dir",
+            "Make one empty folder at `path` on a worker; the folder it goes in must exist. \
+             Refused when anything is already there. Returns the new folder's `path`.",
+            Kind::Write,
+        ),
+        tool::<MovePathArgs>(
+            "move_path",
+            "Move or rename `from` to `to` on a worker, within one volume. Nothing is ever \
+             replaced: refused when anything is at `to`, or when `to` is inside `from`. \
+             Returns where it now is as `path`.",
+            Kind::Write,
+        ),
+        tool::<FsPathArgs>(
+            "trash_path",
+            "Put a file or folder on a worker in its OS's trash, where the person can put it \
+             back; never deleted. Refused for the root, a volume, the home or a folder holding \
+             it. Returns its `path` in the trash.",
+            Kind::Write,
         ),
         tool::<SearchFilesArgs>(
             "search_files",
@@ -1927,6 +1978,25 @@ async fn run<D: Dispatch>(
             let found = ops::stat(&mut res, a.worker.as_deref(), a.path.clone()).await?;
             json(&view::stat(&a.path, found.as_ref()))
         }
+        "make_dir" => {
+            let a: FsPathArgs = args(arguments)?;
+            let (parent, name) = ops::parent_and_name(&a.path)?;
+            let op = FsOp::MakeDir { parent, name };
+            let key = checked_key(a.idempotency_key)?;
+            json(&view::placed(&ops::fs_change(&mut res, a.worker.as_deref(), op, key).await?))
+        }
+        "move_path" => {
+            let a: MovePathArgs = args(arguments)?;
+            let op = FsOp::Move { from: a.from, to: a.to };
+            let key = checked_key(a.idempotency_key)?;
+            json(&view::placed(&ops::fs_change(&mut res, a.worker.as_deref(), op, key).await?))
+        }
+        "trash_path" => {
+            let a: FsPathArgs = args(arguments)?;
+            let op = FsOp::Trash { path: a.path };
+            let key = checked_key(a.idempotency_key)?;
+            json(&view::placed(&ops::fs_change(&mut res, a.worker.as_deref(), op, key).await?))
+        }
         "search_files" => {
             let a: SearchFilesArgs = args(arguments)?;
             let max = a.max_lines.unwrap_or(DEFAULT_MAX_MATCHES);
@@ -2264,6 +2334,20 @@ mod tests {
                     Outcome::Task(Box::new(made_task(task.0, None, "Fix the hub", true)))
                 }
                 // The server's record of the terminal, over what its environment says.
+                Verb::FsChange { op: FsOp::Move { to, .. }, .. } if to == "/taken" => {
+                    Outcome::Error {
+                        code: ErrorCode::Conflict,
+                        message: "refused, nothing was touched: something is already at /taken"
+                            .to_owned(),
+                    }
+                }
+                Verb::FsChange { op, .. } => Outcome::FsDone {
+                    path: match op {
+                        FsOp::MakeDir { parent, name } => format!("{parent}/{name}"),
+                        FsOp::Move { to, .. } => to,
+                        FsOp::Trash { path } => format!("/Users/c/.Trash/{path}"),
+                    },
+                },
                 Verb::WorkingOn { .. } => {
                     Outcome::WorkingOn(Some(("slopty".parse().expect("a name"), Some(TaskId(5)))))
                 }
@@ -2458,6 +2542,9 @@ mod tests {
                 "write_file",
                 "list_dir",
                 "stat",
+                "make_dir",
+                "move_path",
+                "trash_path",
                 "search_files",
                 "list_ports",
                 "list_items",
@@ -2605,6 +2692,41 @@ mod tests {
         let args = json!({ "path": "/b", "content": "!!", "encoding": "base64" });
         let (failed, text) = call_json(&fake, "write_file", args).await;
         assert!(failed && text.contains("not base64"), "{text}");
+    }
+
+    /// A folder is made by its whole path, split into where it goes and its name; a move and a
+    /// trip to the trash go as asked, each with its key, and answer where the entry now is. A
+    /// refusal reaches the model in the worker's own plain words, as an error.
+    #[tokio::test]
+    async fn files_are_made_moved_and_trashed_and_a_refusal_is_said() {
+        let fake = Fake::default();
+        let args = json!({ "path": "~/src/new/", "idempotency_key": "mk-1" });
+        let (failed, text) = call_json(&fake, "make_dir", args).await;
+        assert!(!failed, "{text}");
+        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({ "path": "~/src/new" }));
+        let made = FsOp::MakeDir { parent: "~/src".to_owned(), name: "new".to_owned() };
+        assert_eq!(fake.verbs().pop(), Some(Verb::FsChange { worker: studio(), op: made }));
+        assert_eq!(fake.keys.lock().last().cloned().flatten(), IdempotencyKey::new("mk-1").ok());
+        let at_root = FsOp::MakeDir { parent: "/".to_owned(), name: "top".to_owned() };
+        call_json(&fake, "make_dir", json!({ "path": "/top" })).await;
+        assert_eq!(fake.verbs().pop(), Some(Verb::FsChange { worker: studio(), op: at_root }));
+        for nowhere in ["~", "/", ""] {
+            let (failed, text) = call_json(&fake, "make_dir", json!({ "path": nowhere })).await;
+            assert!(failed && text.contains("names no folder to make"), "{nowhere:?}: {text}");
+        }
+
+        let args = json!({ "from": "~/a", "to": "~/b" });
+        let (failed, text) = call_json(&fake, "move_path", args).await;
+        assert!(!failed && text.contains("~/b"), "{text}");
+        let moved = FsOp::Move { from: "~/a".to_owned(), to: "~/b".to_owned() };
+        assert_eq!(fake.verbs().pop(), Some(Verb::FsChange { worker: studio(), op: moved }));
+        let (failed, text) = call_json(&fake, "trash_path", json!({ "path": "~/old" })).await;
+        assert!(!failed && text.contains(".Trash"), "{text}");
+
+        let args = json!({ "from": "~/a", "to": "/taken" });
+        let (failed, text) = call_json(&fake, "move_path", args).await;
+        assert!(failed, "{text}");
+        assert!(text.contains("something is already at /taken"), "{text}");
     }
 
     /// A key given to a tool that changes something goes with its verb; a malformed one is the
