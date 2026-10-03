@@ -14052,3 +14052,24 @@ morning's within noise. The app takes the attention look each time the workspace
 it stays at a fifth of a millisecond.
 
 Log: `target/logs/laneO-measure.log`.
+
+## 2026-10-03 — a folder tile's contents stream start
+
+This Mac, macOS 27.0.1 (26A434), debug builds, other lanes building. The decision is in
+`docs/decisions/workspace.md`, "A folder made again is reported at once, whatever its stream
+costs to start".
+
+| what | macOS 27.0.1, this Mac | macOS 26.6.2, CI runner |
+| --- | --- | --- |
+| `FSEventStreamStart`, asked → up, 8 runs of the unit test | 0.31 s seven times, 0.80 s once | — |
+| the same, throwaway probes under heavier load (3 runs each of 6 flag and `sinceWhen` sets, over 4 folders) | 0.6 to 2.7 s | — |
+| `FSEventsGetCurrentEventId`, alone / while a start is in flight | 0.08 to 0.6 ms / 0.27 to 0.6 s | — |
+| `FSEventStreamStop` while a start is in flight | 0.04 to 0.3 ms | — |
+| `a_folder_deleted_and_made_again_is_followed`, whole test | — | 0.134 s (gate run 37089756772, junit) |
+| folder made again → its report, before | 0.6 to 0.9 s, or past 3 s (1 run in 5 failed) | — |
+| folder made again → its report, after, 8 runs | 51.7 to 52.5 ms (`HOLD` after "gone") | — |
+
+```sh
+cargo test -p slopty-worker --lib fsevents::tests::a_stream_says -- --nocapture
+cargo test -p slopty-worker --test fswatch a_folder_deleted -- --nocapture
+```

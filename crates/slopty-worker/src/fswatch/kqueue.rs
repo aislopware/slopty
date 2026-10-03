@@ -5,7 +5,9 @@
 //! A write inside a file does not touch its directory, so a folder tile's sizes would wait for
 //! the next change of its entries. The folders followed are also covered by one `FSEvents`
 //! stream ([`Queue::follow_contents`]) that notes each write to an entry, and a subfolder's
-//! entries changing, and rings the queue through an `EVFILT_USER` event.
+//! entries changing, and rings the queue through an `EVFILT_USER` event. The stream starts off
+//! the follower's thread, since a start can take seconds and no kqueue report may wait for it
+//! (`fsevents::Starting`).
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -22,7 +24,7 @@ use rustix::event::kqueue::{
 use rustix::fs::{Mode, OFlags};
 
 use super::{DirWatch, Hit};
-use crate::fsevents::{self, Stream};
+use crate::fsevents::{self, Starting};
 
 /// A watch is its descriptor.
 pub(super) type WatchId = RawFd;
@@ -56,15 +58,35 @@ pub(super) struct Queue {
     fd: Arc<OwnedFd>,
     dirs: HashMap<RawFd, OwnedFd>,
     contents: Option<Contents>,
+    /// What the contents streams said since the last ring.
+    heard: Arc<Mutex<Vec<Heard>>>,
+    /// Contents streams asked for so far.
+    asked: u64,
 }
 
-/// The folders whose entries' contents are followed, and the stream that does it.
+/// The folders whose entries' contents are followed, and the streams that do it.
 #[derive(Debug)]
 struct Contents {
     /// Each folder as `FSEvents` names it (symbolic links resolved), with its watch.
     folders: HashMap<PathBuf, RawFd>,
-    heard: Arc<Mutex<Vec<(PathBuf, OsString)>>>,
-    _stream: Stream,
+    /// The stream over them, which may not be up yet, and which of the asks it was.
+    stream: Starting,
+    ask: u64,
+    /// The stream before, kept until this one is up, so a folder it followed is heard
+    /// throughout; and the folders heard throughout so far.
+    covering: Option<Starting>,
+    whole: HashSet<PathBuf>,
+    /// This stream is up and its folders new to it were listed again: it covers them all.
+    settled: bool,
+}
+
+/// What a contents stream said.
+#[derive(Debug)]
+enum Heard {
+    /// What is inside the folder's entry of this name changed.
+    Inside(PathBuf, OsString),
+    /// The stream of this ask is up.
+    Up(u64),
 }
 
 /// A watched file: its descriptor, and the device and inode it was opened on.
@@ -86,7 +108,13 @@ impl Node {
 
 impl Queue {
     pub(super) fn open() -> io::Result<Self> {
-        let queue = Self { fd: Arc::new(kqueue()?), dirs: HashMap::new(), contents: None };
+        let queue = Self {
+            fd: Arc::new(kqueue()?),
+            dirs: HashMap::new(),
+            contents: None,
+            heard: Arc::new(Mutex::new(Vec::new())),
+            asked: 0,
+        };
         let ring = [Event::new(
             EventFilter::User { ident: RING, flags: UserFlags::empty(), user_flags: none() },
             EventFlags::ADD | EventFlags::CLEAR,
@@ -100,8 +128,10 @@ impl Queue {
     }
 
     /// Follow the contents of `folders`, each with its own directory's watch: one stream over
-    /// them all, started again when the set changes. Unfollowed on an empty set, and quietly
-    /// not at all when `FSEvents` refuses (their entries are still followed by kqueue).
+    /// them all, started again when the set changes. It starts off this thread, so the stream
+    /// over the folders before is kept until it is up. Once it is, the folders new to it are
+    /// listed again for what changed inside them while it started. Unfollowed on an empty set,
+    /// and not at all when `FSEvents` refuses (their entries are still followed by kqueue).
     pub(super) fn follow_contents(&mut self, folders: Vec<(PathBuf, RawFd)>) {
         let folders: HashMap<PathBuf, RawFd> = folders
             .into_iter()
@@ -114,27 +144,34 @@ impl Queue {
                 return;
             }
         }
-        self.contents = None;
+        let before = self.contents.take();
         if folders.is_empty() {
             return;
         }
-        let heard = Arc::new(Mutex::new(Vec::new()));
-        let paths: Vec<&Path> = folders.keys().map(PathBuf::as_path).collect();
+        self.asked = self.asked.wrapping_add(1);
+        let ask = self.asked;
+        let paths: Vec<PathBuf> = folders.keys().cloned().collect();
         let (kq, noted, followed) =
-            (Arc::clone(&self.fd), Arc::clone(&heard), folders.keys().cloned().collect());
-        let stream = Stream::start(
-            &paths,
+            (Arc::clone(&self.fd), Arc::clone(&self.heard), folders.keys().cloned().collect());
+        let (rung, said) = (Arc::clone(&self.fd), Arc::clone(&self.heard));
+        let stream = Starting::spawn(
+            paths,
             CONTENTS_LATENCY,
             "io.slopty.fswatch.contents",
             Box::new(move |path: &Path, flags: fsevents::Flags| {
                 hear(&kq, &noted, &followed, path, flags);
             }),
+            Box::new(move || {
+                said.lock().push(Heard::Up(ask));
+                ring(&rung);
+            }),
         );
-        if let Some(stream) = stream {
-            self.contents = Some(Contents { folders, heard, _stream: stream });
-        } else {
-            tracing::info!("folder contents not followed: no FSEvents stream");
-        }
+        let (covering, whole) = match before {
+            Some(b) if b.settled => (Some(b.stream), b.folders.into_keys().collect()),
+            Some(b) => (b.covering, b.whole),
+            None => (None, HashSet::new()),
+        };
+        self.contents = Some(Contents { folders, stream, ask, covering, whole, settled: false });
     }
 
     /// The queue's descriptor, readable while events wait.
@@ -179,7 +216,7 @@ impl Queue {
     }
 
     /// Take every event waiting, without blocking.
-    pub(super) fn drain(&self, hits: &mut Vec<Hit>) {
+    pub(super) fn drain(&mut self, hits: &mut Vec<Hit>) {
         let mut events: Vec<Event> = Vec::with_capacity(BATCH);
         loop {
             events.clear();
@@ -219,13 +256,31 @@ impl Queue {
 }
 
 impl Queue {
-    /// What the contents stream heard since the last ring, as changes of an entry's content.
-    fn contents_heard(&self, hits: &mut Vec<Hit>) {
-        let Some(contents) = self.contents.as_ref() else { return };
-        let heard = std::mem::take(&mut *contents.heard.lock());
-        for (folder, name) in heard {
-            if let Some(id) = contents.folders.get(&folder) {
-                hits.push(Hit::Dir { id: *id, name: Some(name), done: false, content: true });
+    /// What the contents streams said since the last ring: changes of an entry's content, and
+    /// for a stream now up, each folder it is the first to cover, which may have changed inside
+    /// while it started.
+    fn contents_heard(&mut self, hits: &mut Vec<Hit>) {
+        let heard = std::mem::take(&mut *self.heard.lock());
+        let Some(contents) = self.contents.as_mut() else { return };
+        for note in heard {
+            match note {
+                Heard::Inside(folder, name) => {
+                    if let Some(id) = contents.folders.get(&folder) {
+                        let name = Some(name);
+                        hits.push(Hit::Dir { id: *id, name, done: false, content: true });
+                    }
+                }
+                Heard::Up(ask) if ask == contents.ask => {
+                    for (folder, id) in &contents.folders {
+                        if !contents.whole.contains(folder) {
+                            hits.push(Hit::Dir { id: *id, name: None, done: false, content: true });
+                        }
+                    }
+                    contents.covering = None;
+                    contents.whole.clear();
+                    contents.settled = true;
+                }
+                Heard::Up(_) => {}
             }
         }
     }
@@ -241,7 +296,7 @@ fn none() -> UserDefinedFlags {
 /// folder and the entry, and the queue rung.
 fn hear(
     kq: &OwnedFd,
-    noted: &Mutex<Vec<(PathBuf, OsString)>>,
+    noted: &Mutex<Vec<Heard>>,
     followed: &HashSet<PathBuf>,
     path: &Path,
     flags: fsevents::Flags,
@@ -258,7 +313,12 @@ fn hear(
         })
         .flatten();
     let Some((folder, name)) = written.or(counted) else { return };
-    noted.lock().push((folder.to_path_buf(), name.to_os_string()));
+    noted.lock().push(Heard::Inside(folder.to_path_buf(), name.to_os_string()));
+    ring(kq);
+}
+
+/// Wake the follower: the contents streams said something.
+fn ring(kq: &OwnedFd) {
     let ring = [Event::new(
         EventFilter::User { ident: RING, flags: UserFlags::TRIGGER, user_flags: none() },
         EventFlags::empty(),

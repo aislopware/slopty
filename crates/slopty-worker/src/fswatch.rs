@@ -487,7 +487,7 @@ impl State {
 
     /// Read what the kernel has said, and mark the paths it touches.
     fn drain(&mut self, now: Instant) {
-        let Some(queue) = self.queue.as_ref() else { return };
+        let Some(queue) = self.queue.as_mut() else { return };
         let mut hits = Vec::new();
         queue.drain(&mut hits);
         for hit in hits {

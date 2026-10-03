@@ -125,6 +125,18 @@ filter = '''
 '''
 test-group = 'videotoolbox'
 
+# fseventsd starts one stream at a time, about a second each on macOS 27 (up to 2.7 s seen), and
+# every FSEvents call of a process waits meanwhile. The folder follower's tests each wait for
+# their stream to be up: fourteen side by side queued the last start past their 10 s bound, and
+# two at a time they pass.
+[test-groups.fsevents]
+max-threads = 2
+
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = 'package(slopty-worker) & (binary(fswatch) | test(/^fsevents::tests::/))'
+test-group = 'fsevents'
+
 # The gate's tests lane (`cargo gate`): the default profile, plus retries for the tests named
 # below. They time the session actor or the relay's timer against the machine's load: in a loaded
 # gate they have missed their deadline, even run alone in nextest (the gate's other lanes still

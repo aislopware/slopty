@@ -25,6 +25,8 @@ mod follow {
 
     /// Longer than any report takes on a loaded machine, short of a stuck test.
     const WITHIN: Duration = Duration::from_secs(3);
+    /// Longer than fseventsd takes to start a stream (up to 2.7 s seen on macOS 27).
+    const STREAM_UP: Duration = Duration::from_secs(10);
 
     fn key(path: &Path) -> String {
         path.to_string_lossy().into_owned()
@@ -296,14 +298,26 @@ mod follow {
         assert_eq!(tokio::time::timeout(WITHIN, changes.next()).await, Ok(None));
     }
 
-    /// Follow the folders `paths`, once the follower has taken them.
+    /// Follow the folders `paths`, once the follower has taken them and, on macOS, the stream
+    /// that follows their files' sizes is up.
     async fn following_folders(paths: &[&Path]) -> (watch::Sender<Vec<String>>, Changes) {
         let (lists, rx) = watch::channel(Vec::new());
-        let changes = follow_folders(rx, Limits::default());
+        let mut changes = follow_folders(rx, Limits::default());
         let mut status = changes.status();
         lists.send_replace(paths.iter().map(|p| key(p)).collect());
         status.wait_for(|s| s.lists >= 1).await.unwrap();
+        if cfg!(target_os = "macos") {
+            contents_up(&mut changes, paths).await;
+        }
         (lists, changes)
+    }
+
+    /// The listing of `folders` again once their contents stream is up, for what changed inside
+    /// them while it started (macOS).
+    async fn contents_up(changes: &mut Changes, folders: &[&Path]) {
+        let got = next(changes, STREAM_UP).await;
+        assert_eq!(got, Some(folders.iter().map(|p| key(p)).collect()), "listed once up");
+        assert!(quiet(changes, CONTENT_HOLD * 2).await, "listed once");
     }
 
     /// The ways a folder's entries change under its tile, in the order a round does them.
@@ -392,6 +406,9 @@ mod follow {
         }
     }
 
+    /// A folder deleted and made again is reported back at once, not after the stream that
+    /// follows its files' sizes has started again (up to 2.7 s on macOS 27), and its entries and
+    /// sizes are both followed anew.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_folder_deleted_and_made_again_is_followed() {
         let root = tempfile::tempdir().unwrap();
@@ -400,10 +417,65 @@ mod follow {
         let (_lists, mut changes) = following_folders(&[&dir]).await;
         std::fs::remove_dir(&dir).unwrap();
         assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "gone");
+        let at = Instant::now();
         std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("build.log");
+        std::fs::write(&log, "one\n").unwrap();
         assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "back");
+        let took = at.elapsed();
+        println!("made again → back: {took:?}");
+        assert!(took < Duration::from_millis(500), "back at once: {took:?}");
+        assert!(quiet(&mut changes, HOLD * 2).await, "back once");
+        if cfg!(target_os = "macos") {
+            contents_up(&mut changes, &[&dir]).await;
+        }
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        f.write_all(b"two\n").unwrap();
+        drop(f);
+        let got = next(&mut changes, WITHIN).await;
+        assert_eq!(got, Some(vec![key(&dir)]), "its files' sizes followed anew");
         std::fs::write(dir.join("out.o"), "x").unwrap();
         assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&dir)]), "watched anew");
+    }
+
+    /// When the folders change, the stream that follows their files' sizes starts again, and
+    /// meanwhile the one before keeps hearing the folders it followed. Once the new one is up,
+    /// only the folders new to it are listed again (macOS; inotify needs no stream).
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_folder_kept_is_heard_while_the_stream_for_a_new_one_starts() {
+        let root = tempfile::tempdir().unwrap();
+        let [a, b, c] = ["a", "b", "c"].map(|name| root.path().join(name));
+        for dir in [&a, &b, &c] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let log = a.join("log.txt");
+        std::fs::write(&log, "one\n").unwrap();
+        let (lists, mut changes) = following_folders(&[&a]).await;
+        let mut status = changes.status();
+
+        lists.send_replace(vec![key(&a), key(&b)]);
+        status.wait_for(|s| s.lists >= 2).await.unwrap();
+        contents_up(&mut changes, &[&b]).await;
+
+        lists.send_replace(vec![key(&a), key(&b), key(&c)]);
+        status.wait_for(|s| s.lists >= 3).await.unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&log).unwrap();
+        f.write_all(b"two\n").unwrap();
+        drop(f);
+        let mut reported = std::collections::BTreeSet::new();
+        while let Some(paths) = next(&mut changes, STREAM_UP).await {
+            reported.extend(paths);
+            if reported.contains(&key(&a)) && reported.contains(&key(&c)) {
+                break;
+            }
+        }
+        while let Some(paths) = next(&mut changes, CONTENT_HOLD * 2).await {
+            reported.extend(paths);
+        }
+        assert!(reported.contains(&key(&a)), "a write in a kept folder: {reported:?}");
+        assert!(reported.contains(&key(&c)), "the new folder listed once up: {reported:?}");
+        assert!(!reported.contains(&key(&b)), "a kept folder is not listed again: {reported:?}");
     }
 
     /// Folder tiles' change → report (MEASUREMENTS.md, "folder tiles on kernel events").

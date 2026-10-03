@@ -6,13 +6,19 @@
 //! worktree's quick-open index (`find::watch`), which hears every path made or removed however
 //! deep, and a folder tile's follower on macOS (`fswatch`), which hears a write inside a file,
 //! which a kqueue watch on the folder cannot.
+//!
+//! `FSEventStreamStart` waits on fseventsd: 0.3 to 2.7 s a start on macOS 27, where a macOS
+//! 26.6 runner made two in a 134 ms test. Meanwhile any other `FSEvents` call of the process
+//! waits too, even `FSEventsGetCurrentEventId`. A caller that must not wait asks for a
+//! [`Starting`], started on a dispatch queue, and is told when it is up.
 
 use std::ffi::{CStr, OsStr, c_char, c_void};
 use std::os::unix::ffi::OsStrExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
+use std::sync::Arc;
 
-use dispatch2::{DispatchQueue, DispatchRetained};
+use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentifier};
 use objc2_core_foundation::{CFArray, CFString};
 use objc2_core_services::{
     ConstFSEventStreamRef, FSEventStreamContext, FSEventStreamCreate, FSEventStreamEventId,
@@ -30,6 +36,7 @@ pub use objc2_core_services::{
     kFSEventStreamEventFlagRootChanged, kFSEventStreamEventFlagUnmount,
     kFSEventStreamEventFlagUserDropped,
 };
+use parking_lot::Mutex;
 
 /// What a stream calls for each event: the item's path and what happened to it.
 pub type Handler = dyn Fn(&Path, Flags) + Send + Sync;
@@ -124,6 +131,48 @@ impl Stream {
     }
 }
 
+/// A stream started off the caller's thread, which hears what happens once it is up and says
+/// when that is. Dropping it stops the stream, up or not, and one dropped before its start
+/// began is never started.
+#[derive(Debug)]
+pub struct Starting {
+    /// The stream once up, which lives as long as this does.
+    _stream: Arc<Mutex<Option<Stream>>>,
+}
+
+impl Starting {
+    /// Ask for a stream over `paths` as [`Stream::start`] makes one, started on a global
+    /// dispatch queue, which then calls `up` unless the stream was dropped first. A stream
+    /// `FSEvents` refuses is said in the log, and `up` is not called.
+    pub fn spawn(
+        paths: Vec<PathBuf>,
+        latency: f64,
+        label: &'static str,
+        handler: Box<Handler>,
+        up: Box<dyn FnOnce() + Send>,
+    ) -> Self {
+        let slot = Arc::new(Mutex::new(None));
+        let wanted = Arc::downgrade(&slot);
+        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::UserInitiated);
+        DispatchQueue::global_queue(queue).exec_async(move || {
+            if wanted.strong_count() == 0 {
+                return;
+            }
+            let roots: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+            let Some(stream) = Stream::start(&roots, latency, label, handler) else {
+                tracing::info!(label, "no FSEvents stream");
+                return;
+            };
+            // Dropped meanwhile, the stream is stopped here as it goes out of scope.
+            let Some(slot) = wanted.upgrade() else { return };
+            *slot.lock() = Some(stream);
+            drop(slot);
+            up();
+        });
+        Self { _stream: slot }
+    }
+}
+
 impl Drop for Stream {
     fn drop(&mut self) {
         // SAFETY: the stream made in `start`, stopped once (FSEvents.h).
@@ -169,5 +218,75 @@ unsafe extern "C-unwind" fn callback(
         // SAFETY: a NUL-terminated path FSEvents owns for the length of the call.
         let bytes = unsafe { CStr::from_ptr(*path) }.to_bytes();
         handler(Path::new(OsStr::from_bytes(bytes)), *flag);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Longer than fseventsd takes to start a stream on a loaded machine (2.7 s seen).
+    const UP: Duration = Duration::from_secs(10);
+
+    /// Says when the handler that holds it is dropped.
+    struct Released(mpsc::SyncSender<()>);
+
+    impl Drop for Released {
+        fn drop(&mut self) {
+            let _sent = self.0.try_send(());
+        }
+    }
+
+    #[test]
+    fn a_stream_says_when_it_is_up_and_hears_what_happens_then() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(root.path()).unwrap();
+        let (heard, events) = mpsc::channel();
+        let (said, up) = mpsc::sync_channel(1);
+        let asked = Instant::now();
+        let _starting = Starting::spawn(
+            vec![dir.clone()],
+            0.01,
+            "io.slopty.fsevents.test",
+            Box::new(move |path: &Path, flags: Flags| {
+                let _sent = heard.send((path.to_path_buf(), flags));
+            }),
+            Box::new(move || {
+                let _sent = said.try_send(());
+            }),
+        );
+        up.recv_timeout(UP).unwrap();
+        println!("asked → up: {:?}", asked.elapsed());
+        let file = dir.join("made.txt");
+        std::fs::write(&file, "x").unwrap();
+        let made = std::iter::from_fn(|| events.recv_timeout(UP).ok())
+            .find(|(path, flags)| *path == file && flags & kFSEventStreamEventFlagItemCreated != 0);
+        assert!(made.is_some(), "the file made once the stream was up is heard");
+    }
+
+    #[test]
+    fn a_stream_dropped_before_it_is_up_is_stopped_and_never_says_up() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(root.path()).unwrap();
+        let (tx, released) = mpsc::sync_channel(1);
+        let guard = Released(tx);
+        let (said, up) = mpsc::sync_channel(1);
+        let starting = Starting::spawn(
+            vec![dir],
+            0.01,
+            "io.slopty.fsevents.test",
+            Box::new(move |_: &Path, _: Flags| {
+                let _held = &guard;
+            }),
+            Box::new(move || {
+                let _sent = said.try_send(());
+            }),
+        );
+        drop(starting);
+        assert!(released.recv_timeout(UP).is_ok(), "the handler, and the stream with it, went");
+        assert!(up.try_recv().is_err(), "a stream nobody waits for is not said to be up");
     }
 }
