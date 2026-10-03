@@ -142,7 +142,7 @@ mod compose {
 
         fn send(&self, text: &str, delivery: Delivery) -> IntentId {
             let id = IntentId::new();
-            let send = Intent::Send { text: text.to_owned(), delivery };
+            let send = Intent::Send { text: text.to_owned(), delivery, attachments: vec![] };
             assert_eq!(self.intent(id, &send), Outcome::Accepted);
             id
         }
@@ -224,7 +224,11 @@ mod compose {
         rig.recorded("hello there\rhalf\rsecond\r").await;
         rig.until(|s| s.pending.is_empty()).await;
 
-        let again = Intent::Send { text: "hello there".to_owned(), delivery: Delivery::Steer };
+        let again = Intent::Send {
+            text: "hello there".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![],
+        };
         assert_eq!(rig.intent(first, &again), Outcome::Accepted, "its first outcome");
         assert!(rig.state().pending.is_empty(), "and nothing sent again");
     }

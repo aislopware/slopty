@@ -172,7 +172,11 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     click(cx, "review-send");
     assert_eq!(
         intents(&sent),
-        [Intent::Send { text: "src/lib.rs L11: Why new?".to_owned(), delivery: Delivery::Steer }]
+        [Intent::Send {
+            text: "src/lib.rs L11: Why new?".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![]
+        }]
     );
     assert!(cx.debug_bounds("review-comment-0").is_none());
 }

@@ -241,6 +241,8 @@ impl Cap {
     pub const APPROVALS: &'static str = "approvals";
     /// [`wire::Intent::Compact`].
     pub const COMPACT: &'static str = "compact";
+    /// [`wire::Intent::Fork`]: a new thread branched off this one.
+    pub const FORK: &'static str = "fork";
     /// The agent's own TUI takes the session over by a handoff.
     pub const HANDOFF: &'static str = "handoff";
     /// [`wire::Intent::Interrupt`].
@@ -366,8 +368,9 @@ pub struct Link {
 pub struct Fork {
     /// The thread it came from.
     pub thread: ThreadId,
-    /// The last turn it shares with it.
-    pub turn: TurnId,
+    /// The last turn it shares with it, when that is known: a fork the agent made on its own
+    /// names only the thread it came from.
+    pub turn: Option<TurnId>,
 }
 
 /// Where a thread is, as every adapter maps its agent: the contract the attention ladder ranks.
@@ -927,6 +930,8 @@ pub struct Pending {
     pub intent: IntentId,
     /// What it says.
     pub text: String,
+    /// The files sent with it, by their paths on the worker ([`wire::Intent::Send`]).
+    pub attachments: Vec<String>,
     /// When it goes.
     pub delivery: Delivery,
     /// Where it is.

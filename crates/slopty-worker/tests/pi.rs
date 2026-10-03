@@ -192,7 +192,11 @@ mod pi {
         }
 
         fn send(&self, pi: &Pi, thread: ThreadId, text: &str) -> IntentId {
-            let send = Intent::Send { text: text.to_owned(), delivery: Delivery::Steer };
+            let send = Intent::Send {
+                text: text.to_owned(),
+                delivery: Delivery::Steer,
+                attachments: vec![],
+            };
             let (id, outcome) = self.intent(pi, thread, &send);
             assert_eq!(outcome, Outcome::Done, "{text}");
             id
@@ -496,7 +500,11 @@ mod pi {
             vec![program, "--session-id".to_owned(), session.clone(), "--offline".to_owned()];
         assert_eq!(opened, [(want.clone(), rig.work.to_string_lossy().into_owned())]);
         assert_eq!(rig.tui_record()["argv"], serde_json::json!(&want[1..]));
-        let send = Intent::Send { text: "Hello?".to_owned(), delivery: Delivery::Steer };
+        let send = Intent::Send {
+            text: "Hello?".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![],
+        };
         assert!(!matches!(rig.intent(&pi, thread, &send).1, Outcome::Done), "the TUI's now");
         let (_, again) = rig.intent(&pi, thread, &Intent::Handoff);
         assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");

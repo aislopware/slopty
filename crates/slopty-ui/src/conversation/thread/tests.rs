@@ -156,7 +156,7 @@ fn return_sends_now_and_command_return_queues(cx: &mut TestAppContext) {
     cx.simulate_input("Run the tests");
     cx.simulate_keystrokes("enter");
     let id = match intents(&sent).as_slice() {
-        [Intent::Send { text, delivery: Delivery::Steer }] if text == "Run the tests" => {
+        [Intent::Send { text, delivery: Delivery::Steer, .. }] if text == "Run the tests" => {
             hub.read_with(cx, |h, _| h.threads().outbox().all().first().map(|s| s.id)).unwrap()
         }
         other => panic!("one message sent now: {other:?}"),
@@ -172,7 +172,11 @@ fn return_sends_now_and_command_return_queues(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(
         queued.1,
-        Intent::Send { text: "And then the docs".to_owned(), delivery: Delivery::Queue }
+        Intent::Send {
+            text: "And then the docs".to_owned(),
+            delivery: Delivery::Queue,
+            attachments: vec![]
+        }
     );
     assert!(cx.debug_bounds(format!("queued-{}", queued.0).leak()).is_some(), "waits in the bar");
     assert!(!view.read_with(cx, |v, _| v.rows().contains(&Row::Sending { intent: queued.0 })));
@@ -197,7 +201,11 @@ fn return_queues_for_an_agent_that_takes_no_steer(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert_eq!(
         intents(&sent),
-        [Intent::Send { text: "Run the tests".to_owned(), delivery: Delivery::Queue }]
+        [Intent::Send {
+            text: "Run the tests".to_owned(),
+            delivery: Delivery::Queue,
+            attachments: vec![]
+        }]
     );
 }
 

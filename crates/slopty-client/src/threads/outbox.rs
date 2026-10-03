@@ -77,7 +77,8 @@ impl Sent {
             | Intent::TakeBack
             | Intent::StopTask { .. }
             | Intent::Keep(_)
-            | Intent::Revert(_) => self.outcome.is_some(),
+            | Intent::Revert(_)
+            | Intent::Fork { .. } => self.outcome.is_some(),
         }
     }
 

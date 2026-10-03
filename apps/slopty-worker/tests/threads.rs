@@ -487,6 +487,7 @@ mod threads {
         let send = Intent::Send {
             text: "hello from the face".to_owned(),
             delivery: slopty_proto::thread::Delivery::Steer,
+            attachments: vec![],
         };
         assert_eq!(a.intent(id, thread, send).await, Outcome::Accepted);
         recorded("hello from the face\r").await;

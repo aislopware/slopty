@@ -370,7 +370,8 @@ impl ReviewView {
     /// Send the comments as one message.
     fn send_comments(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.model.take_message() else { return };
-        let _id = self.intent(Intent::Send { text, delivery: Delivery::Steer }, cx);
+        let _id = self
+            .intent(Intent::Send { text, delivery: Delivery::Steer, attachments: Vec::new() }, cx);
         self.rebuild();
         cx.emit(ReviewEvent::CommentsSent { thread: self.thread });
         cx.notify();

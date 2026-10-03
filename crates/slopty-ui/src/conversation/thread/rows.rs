@@ -673,7 +673,7 @@ mod tests {
         let sent = |delivery, outcome| Sent {
             id: IntentId::new(),
             thread,
-            intent: Intent::Send { text: "hi".to_owned(), delivery },
+            intent: Intent::Send { text: "hi".to_owned(), delivery, attachments: vec![] },
             outcome,
         };
         let now = sent(Delivery::Steer, None);

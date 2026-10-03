@@ -141,6 +141,9 @@ impl Pi {
             Intent::Send { delivery: Delivery::Queue, .. } => {
                 return Outcome::Unsupported { cap: Cap::named(Cap::QUEUE) };
             }
+            Intent::Send { attachments, .. } if !attachments.is_empty() => {
+                return refused("Files are not sent to pi yet");
+            }
             Intent::Send { text, .. } if text.trim().is_empty() => {
                 return refused("There is nothing to send");
             }

@@ -101,8 +101,8 @@ impl Composer {
         let thread = state.meta.id;
         let refused = |reason: &str| Some((Outcome::Refused { reason: reason.to_owned() }, vec![]));
         match intent {
-            Intent::Send { text, delivery } => {
-                if text.trim().is_empty() {
+            Intent::Send { text, delivery, attachments } => {
+                if text.trim().is_empty() && attachments.is_empty() {
                     return refused("There is nothing to send");
                 }
                 let mut pending = state.pending.clone();
@@ -110,6 +110,7 @@ impl Composer {
                 pending.push(Pending {
                     intent: id,
                     text,
+                    attachments: attachments.clone(),
                     delivery: *delivery,
                     state: PendingState::Waiting,
                 });
@@ -333,7 +334,11 @@ fn next(
     let Some(pick) = steer.or_else(|| queue.filter(|_| resting)) else {
         return (vec![], Next::Wait { held: queue.is_some() });
     };
-    let (intent, text, delivery) = (pick.intent, pick.text.clone(), pick.delivery);
+    // Claude Code takes a file by its path, a picture's too: its TUI attaches a picture pasted
+    // as a path.
+    let text =
+        slopty_agent::attach::with_paths(&pick.text, pick.attachments.iter().map(String::as_str));
+    let (intent, delivery) = (pick.intent, pick.delivery);
     let now = match c.guard(session) {
         Ok(()) => PendingState::Sending,
         Err(reason) => PendingState::Held { reason },

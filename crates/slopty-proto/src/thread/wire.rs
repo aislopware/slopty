@@ -91,6 +91,16 @@ pub enum ThreadRequest {
         /// Over what.
         scope: ReviewScope,
     },
+    /// An agent's past sessions in a folder, newest first, from the agent's own record of
+    /// them; answered with [`PastSessions`] on the control stream.
+    Sessions {
+        /// The agent.
+        agent: AgentId,
+        /// The folder, as a [`Start`] names it.
+        cwd: String,
+        /// The most to list.
+        limit: u32,
+    },
 }
 
 /// A thread to start.
@@ -119,6 +129,11 @@ pub enum Intent {
         text: String,
         /// When it goes.
         delivery: Delivery,
+        /// Files sent with it: absolute paths on the worker, where an upload landed them
+        /// (`transfer::Dest::Attachment`, which needs no terminal) or where they already were.
+        /// Each adapter gives them to its agent in the agent's own form: a picture as a picture
+        /// where the agent takes one, any other file by its path.
+        attachments: Vec<String>,
     },
     /// Take back a message that has not gone yet.
     Withdraw {
@@ -188,6 +203,14 @@ pub enum Intent {
     Handoff,
     /// Take the session back from the agent's own TUI once it rests, and drive it again.
     TakeBack,
+    /// Branch a new thread off this one, sharing its turns through `after`, or all of them
+    /// ([`Cap::FORK`]). Answered with [`Outcome::Started`] and the new thread, whose
+    /// [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) says where it branched; this
+    /// one goes on as it was.
+    Fork {
+        /// The last turn the new thread shares with this one; `None` for all of them.
+        after: Option<TurnId>,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -220,6 +243,7 @@ impl Intent {
             Self::Compact => Cap::COMPACT,
             Self::Handoff | Self::TakeBack => Cap::HANDOFF,
             Self::StopTask { .. } => Cap::STOP_TASK,
+            Self::Fork { .. } => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
         }
     }
@@ -442,4 +466,37 @@ pub struct RequestCard {
     pub options: Vec<Choice>,
     /// When it opened.
     pub opened_ms: WallMs,
+}
+
+/// An agent's past sessions in a folder: the answer to [`ThreadRequest::Sessions`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PastSessions {
+    /// The agent asked about.
+    pub agent: AgentId,
+    /// The folder asked about, as it was asked.
+    pub cwd: String,
+    /// Its sessions there, newest first.
+    pub sessions: Vec<PastSession>,
+    /// Why none could be listed, in words, when none could: the agent is not installed, or keeps
+    /// no list Slopty can read.
+    pub absent: Option<String>,
+}
+
+/// One of an agent's sessions, as its own record lists it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct PastSession {
+    /// The agent's own id for it ([`ThreadMeta::native`](super::ThreadMeta::native)).
+    pub native: String,
+    /// What it is about, when the agent or the worker's thread of it says.
+    pub title: Option<String>,
+    /// When it last changed, when the agent says.
+    pub updated_ms: Option<WallMs>,
+    /// The thread this worker keeps of it, when it keeps one: a client opens that rather than
+    /// start another.
+    pub thread: Option<ThreadId>,
+    /// The arguments of a [`Start`] in the same folder that take it up again, in the agent's
+    /// own words as its adapter takes them.
+    pub resume: Vec<String>,
+    /// Open facts about it, as the agent records them: its branch, its model, its size.
+    pub facts: BTreeMap<String, String>,
 }

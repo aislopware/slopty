@@ -130,6 +130,7 @@ fn a_queued_message_is_changed_in_the_composer(cx: &mut TestAppContext) {
     state.pending = vec![Pending {
         intent: waiting,
         text: "after this".to_owned(),
+        attachments: vec![],
         delivery: Delivery::Queue,
         state: PendingState::Waiting,
     }];
@@ -198,7 +199,10 @@ fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppConte
     view.update(cx, |v, cx| v.attachment_landed(id, &landed, cx));
     cx.run_until_parked();
     let text = composer::with_paths("Look at this", &landed);
-    assert_eq!(intents(&sent), [Intent::Send { text, delivery: Delivery::Steer }]);
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send { text, delivery: Delivery::Steer, attachments: vec![] }]
+    );
     assert!(cx.debug_bounds("composer-attachment").is_none(), "the chip went with it");
     assert!(cx.debug_bounds("thread-composer-notice").is_none(), "nothing left to say");
 
@@ -248,7 +252,11 @@ fn a_failed_upload_under_a_waiting_send_sends_nothing_and_says_so(cx: &mut TestA
     cx.run_until_parked();
     assert_eq!(
         intents(&sent),
-        [Intent::Send { text: "Look at this".to_owned(), delivery: Delivery::Steer }],
+        [Intent::Send {
+            text: "Look at this".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![]
+        }],
         "the words were kept to send again"
     );
 }
@@ -278,7 +286,11 @@ fn a_thread_with_no_terminal_says_it_cannot_take_a_file(cx: &mut TestAppContext)
     cx.simulate_keystrokes("enter");
     assert_eq!(
         intents(&sent),
-        [Intent::Send { text: "Look at this".to_owned(), delivery: Delivery::Steer }]
+        [Intent::Send {
+            text: "Look at this".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![]
+        }]
     );
 }
 
@@ -300,7 +312,11 @@ fn a_secondary_click_on_send_queues_the_message(cx: &mut TestAppContext) {
     cx.simulate_mouse_up(send, MouseButton::Right, Modifiers::none());
     assert_eq!(
         intents(&sent),
-        [Intent::Send { text: "After this turn".to_owned(), delivery: Delivery::Queue }]
+        [Intent::Send {
+            text: "After this turn".to_owned(),
+            delivery: Delivery::Queue,
+            attachments: vec![]
+        }]
     );
 }
 

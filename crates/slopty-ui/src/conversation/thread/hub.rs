@@ -466,6 +466,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Revert(pick) => format!("Couldn't revert {}", file_name(&pick.path)),
         Intent::Handoff => "Couldn't hand over to the terminal".to_owned(),
         Intent::TakeBack => "Couldn't take the session back".to_owned(),
+        Intent::Fork { .. } => "Couldn't fork the thread".to_owned(),
     };
     format!("{what}: {why}")
 }

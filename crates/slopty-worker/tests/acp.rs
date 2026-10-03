@@ -116,7 +116,11 @@ mod acp {
         }
 
         fn send(&self, acp: &Acp, thread: ThreadId, text: &str) -> IntentId {
-            let send = Intent::Send { text: text.to_owned(), delivery: Delivery::Queue };
+            let send = Intent::Send {
+                text: text.to_owned(),
+                delivery: Delivery::Queue,
+                attachments: vec![],
+            };
             let (id, outcome) = self.intent(acp, thread, &send);
             assert_eq!(outcome, Outcome::Done, "{text}");
             id
@@ -238,7 +242,11 @@ mod acp {
         let opened = &record["heard"][1];
         assert_eq!(opened["method"], "session/new");
         assert_eq!(opened["params"]["cwd"], rig.work.to_string_lossy().as_ref());
-        let steer = Intent::Send { text: "Go on.".to_owned(), delivery: Delivery::Steer };
+        let steer = Intent::Send {
+            text: "Go on.".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: vec![],
+        };
         let (_, steered) = rig.intent(&acp, thread, &steer);
         assert_eq!(steered, Outcome::Unsupported { cap: Cap::named(Cap::STEER) });
 
@@ -403,7 +411,8 @@ mod acp {
         let heard: Vec<&Value> =
             record["heard"].as_array().unwrap().iter().map(|m| &m["method"]).collect();
         assert_eq!(heard, ["initialize", "session/new"]);
-        let send = Intent::Send { text: "Hi.".to_owned(), delivery: Delivery::Queue };
+        let send =
+            Intent::Send { text: "Hi.".to_owned(), delivery: Delivery::Queue, attachments: vec![] };
         let (_, again) = rig.intent(&acp, thread, &send);
         assert!(matches!(again, Outcome::Refused { .. }), "no session to take up: {again:?}");
     }

@@ -327,6 +327,8 @@ pub enum WorkerMsg {
     Threads(thread::wire::TableFrame),
     /// How an intent this client sent went (`ClientMsg::Thread`'s `Intent` and `Start`).
     IntentDone(thread::wire::IntentDone),
+    /// An agent's past sessions in a folder (`ClientMsg::Thread`'s `Sessions`).
+    Sessions(thread::wire::PastSessions),
 }
 
 impl WorkerMsg {
@@ -361,6 +363,7 @@ impl WorkerMsg {
             Self::AgentBranch(_) => "AgentBranch",
             Self::Threads(_) => "Threads",
             Self::IntentDone(_) => "IntentDone",
+            Self::Sessions(_) => "Sessions",
         }
     }
 }

@@ -443,6 +443,16 @@ impl Following {
                 tracing::info!(client = %at.client, on, "approvals");
                 crate::follow::approvals(at.daemon, at.link, on, |msg| at.post(msg));
             }
+            ThreadRequest::Sessions { agent, cwd, .. } => {
+                let absent = Some("Past sessions are not listed here yet".to_owned());
+                let sessions = slopty_proto::thread::wire::PastSessions {
+                    agent,
+                    cwd,
+                    sessions: Vec::new(),
+                    absent,
+                };
+                at.post(WorkerMsg::Sessions(sessions));
+            }
         }
     }
 
@@ -571,7 +581,10 @@ fn shared(
             }
             Outcome::Done
         }
-        Intent::Send { text, delivery } => {
+        Intent::Send { attachments, .. } if !attachments.is_empty() => {
+            refused("Files are not sent to Codex yet".to_owned())
+        }
+        Intent::Send { text, delivery, .. } => {
             codex.send(thread, text.clone(), *delivery, id);
             Outcome::Done
         }

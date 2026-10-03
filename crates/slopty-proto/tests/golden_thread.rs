@@ -14,8 +14,8 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        Expanded, FileDiff, Intent, IntentDone, Outcome, Page, Pick, Review, ReviewScope, Start,
-        TableFrame, ThreadFrame, ThreadRequest,
+        Expanded, FileDiff, Intent, IntentDone, Outcome, Page, PastSession, PastSessions, Pick,
+        Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
@@ -73,7 +73,7 @@ mod golden_thread {
             origin: ThreadMeta::SUBAGENT.to_owned(),
             forked_from: Some(Fork {
                 thread: ThreadId::from_uuid(Uuid::from_u128(0xf0)),
-                turn: TurnId(2),
+                turn: Some(TurnId(2)),
             }),
             drive: Drive::named(Drive::OBSERVED),
             caps: vec![Cap::named(Cap::QUEUE), Cap::named(Cap::STEER)],
@@ -218,6 +218,7 @@ mod golden_thread {
         Pending {
             intent: intent(),
             text: "and the docs".to_owned(),
+            attachments: vec!["/Users/me/.slopty/drop/x/shot.png".to_owned()],
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
         }
@@ -293,6 +294,14 @@ mod golden_thread {
         );
         snap("client_approvals", &ThreadRequest::Approvals { on: true });
         snap(
+            "client_sessions",
+            &ThreadRequest::Sessions {
+                agent: AgentId::named(AgentId::CLAUDE_CODE),
+                cwd: "/work".to_owned(),
+                limit: 50,
+            },
+        );
+        snap(
             "client_start",
             &ThreadRequest::Start {
                 id: intent(),
@@ -320,11 +329,27 @@ mod golden_thread {
             &send(Intent::Send {
                 text: "use the other test".to_owned(),
                 delivery: Delivery::Steer,
+                attachments: vec![],
             }),
         );
         snap(
             "intent_send_queue",
-            &send(Intent::Send { text: "then the docs".to_owned(), delivery: Delivery::Queue }),
+            &send(Intent::Send {
+                text: "then the docs".to_owned(),
+                delivery: Delivery::Queue,
+                attachments: vec![],
+            }),
+        );
+        snap(
+            "intent_send_attachments",
+            &send(Intent::Send {
+                text: "what is wrong here?".to_owned(),
+                delivery: Delivery::Steer,
+                attachments: vec![
+                    "/Users/me/.slopty/drop/x/shot.png".to_owned(),
+                    "/work/notes.md".to_owned(),
+                ],
+            }),
         );
         snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
         snap(
@@ -358,6 +383,8 @@ mod golden_thread {
         snap("intent_handoff", &send(Intent::Handoff));
         snap("intent_take_back", &send(Intent::TakeBack));
         snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
+        snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
+        snap("intent_fork_whole", &send(Intent::Fork { after: None }));
     }
 
     #[test]
@@ -509,6 +536,7 @@ mod golden_thread {
                 Pending {
                     intent: IntentId::from_uuid(Uuid::from_u128(0x1e8)),
                     text: "look".to_owned(),
+                    attachments: vec![],
                     delivery: Delivery::Steer,
                     state: PendingState::Held {
                         reason: "Your draft in the terminal is in the way".to_owned(),
@@ -734,6 +762,31 @@ mod golden_thread {
         snap(
             "link_worker_intent_done",
             &WorkerMsg::IntentDone(IntentDone { id: intent(), outcome: Outcome::Accepted }),
+        );
+        snap(
+            "link_worker_sessions",
+            &WorkerMsg::Sessions(PastSessions {
+                agent: AgentId::named(AgentId::CODEX),
+                cwd: "/work".to_owned(),
+                sessions: vec![PastSession {
+                    native: "019a-c0de".to_owned(),
+                    title: Some("Fix the build".to_owned()),
+                    updated_ms: Some(ms(1_700_000)),
+                    thread: Some(thread()),
+                    resume: vec!["resume".to_owned(), "019a-c0de".to_owned()],
+                    facts: BTreeMap::from([("branch".to_owned(), "main".to_owned())]),
+                }],
+                absent: None,
+            }),
+        );
+        snap(
+            "link_worker_sessions_absent",
+            &WorkerMsg::Sessions(PastSessions {
+                agent: AgentId::named(AgentId::PI),
+                cwd: "/work".to_owned(),
+                sessions: vec![],
+                absent: Some("pi is not installed".to_owned()),
+            }),
         );
         snap("link_uni_thread", &UniHead::Thread { thread: thread() });
     }

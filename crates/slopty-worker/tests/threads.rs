@@ -431,6 +431,7 @@ mod threads {
         let pending = |intent, state| Pending {
             intent,
             text: "later".to_owned(),
+            attachments: vec![],
             delivery: Delivery::Queue,
             state,
         };

@@ -126,6 +126,9 @@ impl Acp {
             Intent::Send { delivery: Delivery::Steer, .. } => {
                 return Outcome::Unsupported { cap: Cap::named(Cap::STEER) };
             }
+            Intent::Send { attachments, .. } if !attachments.is_empty() => {
+                return refused("Files are not sent to an ACP agent yet");
+            }
             Intent::Send { text, .. } if text.trim().is_empty() => {
                 return refused("There is nothing to send");
             }

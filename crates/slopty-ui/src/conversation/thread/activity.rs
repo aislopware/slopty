@@ -151,7 +151,7 @@ impl<'a> Activity<'a> {
             })
             .collect();
         queue.extend(threads.unshown(thread).filter_map(|s| match &s.intent {
-            Intent::Send { text, delivery: Delivery::Queue } if !s.failed() => Some(Queued {
+            Intent::Send { text, delivery: Delivery::Queue, .. } if !s.failed() => Some(Queued {
                 intent: s.id,
                 text: text.clone(),
                 held: None,
@@ -323,6 +323,7 @@ mod tests {
         state.pending = vec![Pending {
             intent: held,
             text: "after this".to_owned(),
+            attachments: vec![],
             delivery: Delivery::Queue,
             state: PendingState::Held {
                 reason: "Your draft in the terminal is in the way".to_owned(),
@@ -331,7 +332,11 @@ mod tests {
         let (mut threads, thread) = threads_over(state);
         let (mine, _msg) = threads.intent(
             thread,
-            Intent::Send { text: "and then".to_owned(), delivery: Delivery::Queue },
+            Intent::Send {
+                text: "and then".to_owned(),
+                delivery: Delivery::Queue,
+                attachments: vec![],
+            },
         );
         let (withdraw, _msg) = threads.intent(thread, Intent::Withdraw { pending: held });
         let state = threads.mirror(thread).unwrap().state().unwrap();
@@ -362,6 +367,7 @@ mod tests {
         state.pending = vec![Pending {
             intent: waiting,
             text: "after this".to_owned(),
+            attachments: vec![],
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
         }];

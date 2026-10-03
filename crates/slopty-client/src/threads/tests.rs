@@ -85,7 +85,7 @@ fn followed(thread: ThreadId) -> Threads {
 }
 
 fn send(text: &str) -> Intent {
-    Intent::Send { text: text.to_owned(), delivery: Delivery::Steer }
+    Intent::Send { text: text.to_owned(), delivery: Delivery::Steer, attachments: vec![] }
 }
 
 #[test]
@@ -139,6 +139,7 @@ fn a_send_the_worker_holds_is_its_pending_row_not_a_bubble() {
     let held = Pending {
         intent: id,
         text: "after this".to_owned(),
+        attachments: vec![],
         delivery: Delivery::Queue,
         state: PendingState::Waiting,
     };

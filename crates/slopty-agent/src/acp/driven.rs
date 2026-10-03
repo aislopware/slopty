@@ -660,6 +660,7 @@ impl Session {
         self.queued.push_back(Pending {
             intent,
             text: text.to_owned(),
+            attachments: Vec::new(),
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
         });
