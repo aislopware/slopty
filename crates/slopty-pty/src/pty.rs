@@ -846,7 +846,7 @@ mod tests {
     #[test]
     fn login_shell_gets_dash_argv0() {
         let (_, args, arg0) = resolve_command(&[], Path::new("/"));
-        assert!(args.is_empty());
+        assert_eq!(args, Vec::<String>::new());
         assert!(arg0.unwrap().starts_with('-'));
         let (p, a, explicit_arg0) =
             resolve_command(&["/bin/ls".to_owned(), "-l".to_owned()], Path::new("/"));

@@ -386,7 +386,7 @@ mod tests {
         let now = slopty_core::WallMs::now();
         let quiet = runtime.block_on(sample(Vec::new(), now));
         let busy = runtime.block_on(sample(vec![at(AgentStatus::Working)], now));
-        assert!(quiet.is_empty());
+        assert_eq!(quiet, []);
         assert_eq!(busy.first().map(|(_session, paused)| *paused), Some(None));
         assert_eq!(started.load(std::sync::atomic::Ordering::Relaxed), 0);
 

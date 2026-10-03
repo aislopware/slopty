@@ -2729,7 +2729,7 @@ pub(super) fn offset_for_thumb(m: &CellMetrics, history: u64, y: Pixels) -> u64 
 pub(super) fn rows_past_edge(m: &CellMetrics, y: Pixels) -> i64 {
     let line = f32::from(m.line_height).max(1.0);
     let top = f32::from(m.origin.y);
-    let bottom = top + line * f32::from(m.rows);
+    let bottom = f32::mul_add(line, f32::from(m.rows), top);
     let y = f32::from(y);
     #[expect(clippy::cast_possible_truncation, reason = "a ceiling of a small quotient")]
     if y < top {
@@ -2875,7 +2875,9 @@ mod tests {
         // A huge history: the least height, and the round trip holds within a line.
         let tiny = scrollbar_thumb(&m, 100_000, 40_000).expect("a thumb");
         assert!(
-            (f32::from(tiny.size.height) - f32::from(m.line_height) * THUMB_MIN_ROWS).abs() < 0.01
+            f32::mul_add(f32::from(m.line_height), -THUMB_MIN_ROWS, f32::from(tiny.size.height))
+                .abs()
+                < 0.01
         );
         let back = offset_for_thumb(&m, 100_000, tiny.origin.y);
         assert!(back.abs_diff(40_000) <= 100_000 / 400, "{back}");

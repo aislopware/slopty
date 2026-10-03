@@ -148,7 +148,7 @@ fn a_subagent_is_a_linked_thread() {
         let parent = sub.meta.parent.clone().expect("a parent");
         assert_eq!((parent.thread, parent.item), (observed.main(), call));
         assert_eq!(sub.meta.origin, ThreadMeta::SUBAGENT);
-        assert!(!sub.items.is_empty());
+        assert_ne!(sub.items, Vec::<Item>::new());
     }
 }
 
@@ -401,7 +401,7 @@ fn a_block_with_no_prompt_held_asks_in_the_terminal() {
     host.take(observed.waited(after(9)));
     assert_eq!(host.thread(observed.main()).requests.len(), 1, "told once");
     host.take(observed.status(&event(AgentStatus::Working, None, 9)));
-    assert!(open(&host, &observed).is_empty());
+    assert_eq!(open(&host, &observed), Vec::<Request>::new());
     let by = Answerer { client: None, name: IN_TERMINAL.to_owned() };
     let answered = RequestState::Answered { by, choice: String::new() };
     assert_eq!(host.thread(observed.main()).requests[0].state, answered);
@@ -613,7 +613,7 @@ fn background_commands_are_the_threads_background_work() {
     let call = task.item.as_ref().expect("the call that started it");
     let started = thread.items.iter().find(|i| i.id == *call).expect("the call is in the thread");
     assert_eq!(task.started_ms, started.at_ms);
-    assert!(!task.title.is_empty());
+    assert_ne!(task.title, "");
     assert_eq!(task.state, BackgroundTask::COMPLETED, "its notice came: {task:#?}");
     assert!(task.ended_ms.is_some_and(|end| end >= task.started_ms), "{task:#?}");
 }

@@ -171,7 +171,7 @@ mod tests {
         assert!(out.iter().all(|f| !f.info.recovered));
         let stats = h.rx.stats();
         assert_eq!((stats.frames_ok, stats.frames_fec, stats.datagrams_lost), (3, 0, 0));
-        assert!(h.tick().is_empty());
+        assert_eq!(h.tick(), []);
     }
 
     /// A striped frame's mask and build reach the receiver with it, parity-protected like the
@@ -315,7 +315,7 @@ mod tests {
         let p = frame_bytes(9, 500);
         let s0 = h.send(&p, false, false);
         h.deliver(&s0.datagrams);
-        assert!(h.drain().is_empty());
+        assert_eq!(h.drain(), []);
         let key = frame_bytes(1, 5_000);
         let s1 = h.send(&key, true, false);
         h.deliver(&s1.datagrams);
@@ -384,7 +384,7 @@ mod tests {
         // 26 data + 6 parity; drop 8 data fragments.
         let dropped: Vec<usize> = vec![0, 3, 4, 10, 11, 12, 20, 25];
         h.deliver_except(&s1, &dropped);
-        assert!(h.drain().is_empty());
+        assert_eq!(h.drain(), []);
         assert!(h.tick().is_empty(), "too early to NACK");
         h.advance(nack_delay());
         let actions = h.tick();
@@ -498,7 +498,7 @@ mod tests {
         let out = h.drain();
         assert_eq!(out.iter().map(|f| f.info.frame).collect::<Vec<_>>(), vec![2], "no wait");
         h.advance(nack_delay() + RTT * 4 + cfg().grace);
-        assert!(h.tick().is_empty());
+        assert_eq!(h.tick(), []);
         let stats = h.rx.stats();
         assert_eq!((stats.frames_skipped, stats.refreshes), (1, 0));
     }
@@ -735,7 +735,7 @@ mod tests {
             h.awake(HEARTBEAT_AFTER);
             let dg = heartbeat_datagram(STREAM, beat, 0);
             assert_eq!(h.rx.ingest(&dg, h.now), Ingest::Heartbeat);
-            assert!(h.tick().is_empty());
+            assert_eq!(h.tick(), []);
         }
         assert!(!h.rx.stalled(h.now));
         let report = h.rx.take_report(h.now, 0);
@@ -1068,7 +1068,7 @@ mod tests {
         assert!(h.tick().is_empty(), "the constructor counts as the first request");
         h.advance(cfg().refresh_repeat + RTT * 2);
         assert_eq!(h.tick(), vec![Action::RequestRefresh { last_good_frame: 0, keyframe: true }]);
-        assert!(h.tick().is_empty());
+        assert_eq!(h.tick(), []);
         // Each unanswered repeat doubles the wait: the second one is not due one period later.
         h.advance(cfg().refresh_repeat + RTT * 2);
         assert!(h.tick().is_empty(), "backoff");

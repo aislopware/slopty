@@ -134,7 +134,7 @@ mod tests {
         ]));
         assert!(wrote);
         let (caught, promises) = take(&board, 16);
-        assert!(promises.is_empty());
+        assert_eq!(promises, []);
         assert_eq!(caught.files, vec![file.canonicalize().unwrap()], "{caught:?}");
         assert!(std::fs::read(&file).unwrap() == b"stays", "the file is where it was");
         let kept: Vec<(usize, &str, &[u8])> =

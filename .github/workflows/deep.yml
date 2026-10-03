@@ -57,7 +57,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
           components: llvm-tools
           targets: aarch64-apple-darwin
       - uses: dtolnay/rust-toolchain@nightly
@@ -114,7 +114,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: miri, rust-src
@@ -158,7 +158,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@v0.0.11
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.98.1
+          toolchain: 1.99.0
       - uses: cargo-bins/cargo-binstall@main
       - run: cargo binstall --no-confirm --locked cargo-mutants@27.1.0
       - id: name

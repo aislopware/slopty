@@ -265,7 +265,7 @@ mod tests {
         want.extend(X11_TEXT);
         want.push("application/x-thing");
         assert_eq!(listed(&board.items()), want);
-        assert!(listed(&[]).is_empty());
+        assert_eq!(listed(&[]), Vec::<String>::new());
     }
 
     /// Text read by any of its names is the board's text; a file list is every item's file, a

@@ -1098,7 +1098,7 @@ mod tests {
             (None, "~/src/app", Some("fix the build"))
         );
         assert_eq!(env, [("A".to_owned(), "b=c".to_owned())]);
-        assert!(args.is_empty());
+        assert_eq!(args, Vec::<String>::new());
         let VerbCmd::Agent { cmd: AgentCmd::Spawn { args, .. } } =
             parse(&["agent", "spawn", "--cwd", "/r", "--", "--model", "opus"]).unwrap()
         else {

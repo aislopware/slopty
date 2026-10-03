@@ -486,7 +486,7 @@ mod tests {
         let mut e = engine(20, 3);
         let screen = e.screen_text().unwrap();
         assert_eq!(screen.rows, ["", "", ""]);
-        assert!(e.text_lines(None, 10).unwrap().lines.is_empty());
+        assert_eq!(e.text_lines(None, 10).unwrap().lines, Vec::<String>::new());
         assert_eq!(e.search("x", false, 10).unwrap(), crate::search::Found::default());
     }
 
@@ -520,7 +520,7 @@ mod tests {
         let more = e.text_lines(Some(all.next()), 100).unwrap();
         assert_eq!((more.first, more.lines), (5, vec!["f".to_owned()]));
         let past = e.text_lines(Some(1_000), 10).unwrap();
-        assert!(past.lines.is_empty());
+        assert_eq!(past.lines, Vec::<String>::new());
     }
 
     /// A long line soft-wraps onto two rows and reads as two lines: one per row, numbered as

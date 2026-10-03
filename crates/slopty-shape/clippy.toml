@@ -2,7 +2,7 @@
 # so this is the root's with the two `std::time::Instant` entries added. A test in this crate
 # (`clippy_config_is_the_workspaces_plus_the_clock`) fails when the two drift.
 
-msrv = "1.98"
+msrv = "1.99"
 avoid-breaking-exported-api = false
 too-many-arguments-threshold = 6
 type-complexity-threshold = 250
@@ -36,7 +36,6 @@ doc-valid-idents = [
     "OpenGOP",
     "LTR",
     "PTY",
-    "..",
     "..",
 ]
 disallowed-methods = [

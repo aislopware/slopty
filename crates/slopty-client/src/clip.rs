@@ -439,7 +439,7 @@ mod tests {
         let (cache, mut rx) = cache(PREFETCH_MAX);
         let o = Offer { concealed: true, ..offer(1, vec![rep(ClipFormat::Text, None, None)]) };
         cache.offer(&o);
-        assert!(fetches(&mut rx).is_empty());
+        assert_eq!(fetches(&mut rx), Vec::<(u16, Option<u64>, bool)>::new());
         let text = o.rep_ref(0, ClipType::Format(ClipFormat::Text));
         assert_eq!(cache.fetch(&text, None, Duration::ZERO), Fetched::Gone);
         assert_eq!(fetches(&mut rx), [(0, None, true)]);

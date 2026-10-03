@@ -130,5 +130,5 @@ fn an_empty_paste_event_tells_nothing() {
     let mut e = engine();
     let _on = answer(&mut e, b"\x1b[?5522h");
     assert!(!e.paste_event("", Vec::new()).unwrap());
-    assert!(e.drain_events().is_empty());
+    assert_eq!(e.drain_events(), Vec::<EngineEvent>::new());
 }

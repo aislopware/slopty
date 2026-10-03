@@ -227,7 +227,7 @@ mod claude_threads {
         let state = until(&host, thread, |s| ids(s) == want).await;
         assert_eq!(state.status.phase, Phase::Working);
         assert_eq!(state.meta.terminal, Some(rig.terminal));
-        assert!(!state.meta.title.is_empty());
+        assert_ne!(state.meta.title, "");
         let child = state
             .items
             .iter()
@@ -399,7 +399,7 @@ mod claude_threads {
         let provisional = terminal_thread(rig.terminal);
         rig.tracked(AgentStatus::Idle, None, AgentSource::Process);
         let state = until(&host, provisional, |s| s.status.phase == Phase::Idle).await;
-        assert!(state.meta.native.is_empty());
+        assert_eq!(state.meta.native, "");
         assert_eq!(state.meta.terminal, Some(rig.terminal));
         assert!(!state.meta.caps.contains(&approvals), "no hook has spoken");
 

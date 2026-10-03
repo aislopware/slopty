@@ -1825,7 +1825,7 @@ mod tests {
         assert!(read.error.is_none() && read.warnings.is_empty(), "{read:?}");
         let acp = &read.settings.worker.acp;
         assert_eq!(acp["mine"], ["/opt/mine/bin/agent", "--acp"]);
-        assert!(acp["goose"].is_empty());
+        assert_eq!(acp["goose"], Vec::<String>::new());
         assert!(Settings::default().worker.acp.is_empty());
         assert!(Settings::parse("[worker.acp]\nmine = \"agent\"\n").error.is_some(), "a list");
         let back = toml::to_string(&read.settings).unwrap_or_default();

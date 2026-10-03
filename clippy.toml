@@ -1,4 +1,4 @@
-msrv = "1.98"
+msrv = "1.99"
 avoid-breaking-exported-api = false
 too-many-arguments-threshold = 6
 type-complexity-threshold = 250
@@ -32,7 +32,6 @@ doc-valid-idents = [
     "OpenGOP",
     "LTR",
     "PTY",
-    "..",
     "..",
 ]
 disallowed-methods = [

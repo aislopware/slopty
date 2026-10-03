@@ -262,7 +262,7 @@ impl Found {
         let limit = self.limit;
         let before = self
             .lines
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 Some(used.saturating_add(wanted).min(limit))
             })
             .unwrap_or(limit);

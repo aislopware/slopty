@@ -1898,7 +1898,7 @@ mod conceal_tests {
         assert_eq!(&played[after..], &next[after..], "then the packet as decoded");
         let steps = played.windows(2).take(after).map(|p| (p[1] - p[0]).abs());
         assert!(steps.fold(0.0_f32, f32::max) < 0.05, "no click into the packet");
-        assert!(c.tail.is_empty());
+        assert_eq!(c.tail, Vec::<f32>::new());
         assert_eq!(c.take(&next), &*next, "one merge per gap");
     }
 
@@ -1923,12 +1923,12 @@ mod conceal_tests {
     fn nothing_is_concealed_without_history_or_past_the_cap() {
         let mut out = Vec::new();
         Conceal::default().fill(1, &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, Vec::<f32>::new());
         let mut c = Conceal::default();
         play(&mut c, 3, |from, to| sine(170.0, from, to));
         c.fill(0, &mut out);
         c.fill(MAX_CONCEALED + 1, &mut out);
-        assert!(out.is_empty());
+        assert_eq!(out, Vec::<f32>::new());
         c.fill(1, &mut out);
         assert!(out.is_empty(), "the pause forgot what came before it");
     }

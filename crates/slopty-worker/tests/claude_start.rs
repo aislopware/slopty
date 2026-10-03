@@ -321,7 +321,7 @@ mod claude_start {
             let outcome = rig.starter.start(IntentId::new(), start).await;
             assert!(matches!(outcome, Outcome::Refused { .. }), "{outcome:?}");
         }
-        assert!(rig.opened().is_empty());
+        assert_eq!(rig.opened(), []);
 
         std::fs::remove_file(rig.programs.join("claude")).unwrap();
         let id = IntentId::new();
@@ -329,6 +329,6 @@ mod claude_start {
         let want = Outcome::Refused { reason: "Claude Code is not installed".to_owned() };
         assert_eq!(outcome, want);
         assert_eq!(rig.starter.start(id, rig.start(None)).await, want, "refused once");
-        assert!(rig.opened().is_empty());
+        assert_eq!(rig.opened(), []);
     }
 }

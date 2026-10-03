@@ -575,7 +575,7 @@ mod tests {
         #[test]
         fn each_turn_names_the_model_that_answered() {
             let (state, ..) = replayed();
-            assert!(!state.turns.is_empty());
+            assert_ne!(state.turns, []);
             for turn in &state.turns {
                 assert_eq!(turn.models, ["canned-1"], "turn {}", turn.id.0);
             }
@@ -758,7 +758,7 @@ mod tests {
             let (mut driven, _) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
             assert_eq!(driven::args_of(driven.meta()), Vec::<String>::new());
             let args = ["--offline".to_owned(), "-t".to_owned(), "read".to_owned()];
-            assert!(!driven.started_with(&args).is_empty());
+            assert_ne!(driven.started_with(&args), []);
             assert_eq!(driven::args_of(driven.meta()), args);
             let (again, _) = Driven::of(driven.meta(), WallMs::ZERO);
             assert_eq!(driven::args_of(again.meta()), args, "a pi started again gets them");

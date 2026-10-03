@@ -209,8 +209,8 @@ mod tests {
         assert_eq!(ranked(&paths, "termview", 1), ["crates/slopty-ui/src/terminal/view.rs"]);
         assert_eq!(ranked(&paths, "src view", 5), ["crates/slopty-ui/src/terminal/view.rs"]);
         assert_eq!(ranked(&paths, "MAIN", 5), Vec::<&str>::new(), "a capital is exact");
-        assert!(ranked(&paths, "  ", 5).is_empty());
-        assert!(ranked(&paths, "main", 0).is_empty());
+        assert_eq!(ranked(&paths, "  ", 5), Vec::<&str>::new());
+        assert_eq!(ranked(&paths, "main", 0), Vec::<&str>::new());
     }
 
     #[test]
@@ -257,6 +257,6 @@ mod tests {
         assert_eq!(walk_matching(root, "main", 8), ["src/main.rs", "src/manual/index.md"]);
         assert_eq!(walk_matching(root, "readme", 8), ["README.md"]);
         assert_eq!(walk_matching(root, "man", 1), ["src/manual/"], "capped");
-        assert!(walk_matching(root, "", 8).is_empty());
+        assert_eq!(walk_matching(root, "", 8), Vec::<String>::new());
     }
 }

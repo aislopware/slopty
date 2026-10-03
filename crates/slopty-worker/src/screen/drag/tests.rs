@@ -77,8 +77,14 @@ fn enter_maps_then_places_the_source_then_presses_and_drags() {
         drop_in.hear(Heard::Helper(FromHelper::Ready { drag })),
         [Act::Press { x: 10.0, y: 20.0 }, Act::Deadline(Some(START_WAIT))]
     );
-    assert!(drop_in.hear(Heard::Input(DragInput::Move { drag, x: 30.0, y: 20.0 })).is_empty());
-    assert!(drop_in.hear(Heard::Input(DragInput::Move { drag, x: 40.0, y: 25.0 })).is_empty());
+    assert_eq!(
+        drop_in.hear(Heard::Input(DragInput::Move { drag, x: 30.0, y: 20.0 })),
+        Vec::<Act>::new()
+    );
+    assert_eq!(
+        drop_in.hear(Heard::Input(DragInput::Move { drag, x: 40.0, y: 25.0 })),
+        Vec::<Act>::new()
+    );
     assert_eq!(
         drop_in.hear(Heard::Helper(FromHelper::Began { drag })),
         [Act::Deadline(None), Act::Move { x: 40.0, y: 25.0 }]
@@ -122,9 +128,9 @@ fn moves_coalesce_and_a_still_hover_posts_nothing() {
     let to = |x| input(&drop_in, |drag| DragInput::Move { drag, x, y: 20.0 });
     let (first, again) = (to(50.0), to(50.0));
     assert_eq!(drop_in.hear(first), [Act::Move { x: 50.0, y: 20.0 }]);
-    assert!(drop_in.hear(again).is_empty());
+    assert_eq!(drop_in.hear(again), Vec::<Act>::new());
     let other = DragInput::Move { drag: DragId::new(), x: 60.0, y: 20.0 };
-    assert!(drop_in.hear(Heard::Input(other)).is_empty());
+    assert_eq!(drop_in.hear(Heard::Input(other)), Vec::<Act>::new());
 }
 
 /// What the target under the drag would do goes to the client when it changes, within what the
@@ -210,8 +216,9 @@ fn a_promised_file_is_named_at_the_drop_and_may_land_before_it() {
     let mut drop_in = live(&[promised("public.jpeg"), promised("public.jpeg")]);
     let drag = drop_in.drag();
     let path = Path::new(DIR).join("IMG_1.jpg");
-    assert!(
-        drop_in.hear(Heard::Landed { name: "IMG_1.jpg".to_owned(), path: path.clone() }).is_empty()
+    assert_eq!(
+        drop_in.hear(Heard::Landed { name: "IMG_1.jpg".to_owned(), path: path.clone() }),
+        Vec::<Act>::new()
     );
     let mut meta = file("IMG_1.jpg").file;
     let promised = vec![Promised { item: 0, file: meta.take() }, Promised { item: 1, file: None }];

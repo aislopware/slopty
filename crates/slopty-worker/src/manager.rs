@@ -863,13 +863,13 @@ mod tests {
         let t0 = Instant::now();
         let mut clock = Unwatched::default();
         assert!(clock.sweep(t0, &[(a, 0), (b, 1)], bound).is_empty(), "the clock starts");
-        assert!(clock.sweep(t0 + 23 * hour, &[(a, 0), (b, 0)], bound).is_empty());
+        assert_eq!(clock.sweep(t0 + 23 * hour, &[(a, 0), (b, 0)], bound), []);
         assert_eq!(clock.sweep(t0 + bound, &[(a, 0), (b, 0)], bound), vec![a], "a's day is up");
         // b was watched at t0, so its clock began at 23 h; a viewer at 30 h restarts it.
-        assert!(clock.sweep(t0 + 30 * hour, &[(b, 2)], bound).is_empty());
+        assert_eq!(clock.sweep(t0 + 30 * hour, &[(b, 2)], bound), []);
         assert!(clock.sweep(t0 + 50 * hour, &[(b, 0)], bound).is_empty(), "20 h unwatched");
         assert_eq!(clock.sweep(t0 + 74 * hour, &[(b, 0)], bound), vec![b]);
-        assert!(clock.sweep(t0 + 75 * hour, &[], bound).is_empty());
+        assert_eq!(clock.sweep(t0 + 75 * hour, &[], bound), []);
         assert!(clock.since.is_empty(), "closed sessions are forgotten");
     }
 }

@@ -429,6 +429,6 @@ mod acp {
         nowhere.cwd = "/nowhere/at/all".to_owned();
         refused(&acp.start(IntentId::new(), nowhere).await, "no folder");
         refused(&acp.start(IntentId::new(), rig.start("acp:gemini", "Hi.")).await, "installed");
-        assert!(rig.host.threads().is_empty());
+        assert_eq!(rig.host.threads(), []);
     }
 }

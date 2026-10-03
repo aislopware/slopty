@@ -1036,7 +1036,7 @@ mod tests {
         let s = shapes('\u{1FB91}', CELL).expect("shade and block");
         assert!(matches!(s[0], Shape::Rect { ink: Ink::Shade(_), .. }), "{s:?}");
         assert_eq!(rects('\u{1FB91}'), vec![(0.0, 0.0, 8.0, 8.0)]);
-        assert!(shapes('\u{1FB93}', CELL).expect("unallocated").is_empty());
+        assert_eq!(shapes('\u{1FB93}', CELL).expect("unallocated"), Vec::<Shape>::new());
     }
 
     #[test]

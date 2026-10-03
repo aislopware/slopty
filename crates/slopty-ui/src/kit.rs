@@ -1479,7 +1479,7 @@ mod tests {
     /// The first run and About lead with one mark at one size.
     #[test]
     fn the_brand_is_the_app_icon_at_its_side() {
-        assert!(!APP_ICON.bytes().is_empty());
+        assert_ne!(APP_ICON.bytes(), b"");
         let svg = String::from_utf8_lossy(APP_ICON.bytes());
         let side = BRAND_MARK * 3.0;
         assert!(svg.contains(&format!(r#"width="{side}""#)), "declared at 3x the mark");

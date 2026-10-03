@@ -391,8 +391,9 @@ mod tests {
             "it came back from somewhere else"
         );
         assert_eq!(d.dial(id), Dial::At(HostAddr::new("100.64.0.9", 45550)), "reattach there");
-        assert!(
-            d.apply(FromServer::Worker(info(id, "100.64.0.9:45550", Liveness::Online))).is_empty()
+        assert_eq!(
+            d.apply(FromServer::Worker(info(id, "100.64.0.9:45550", Liveness::Online))),
+            Vec::<Change>::new()
         );
     }
 
@@ -466,8 +467,14 @@ mod tests {
         d.save(&path, &server).unwrap();
         let back = Directory::load(&path, &server);
         assert_eq!(back, vec![info(id, "10.0.0.1:45550", Liveness::Online)]);
-        assert!(Directory::load(&path, &HostAddr::new("other", 45560)).is_empty());
-        assert!(Directory::load(&dir.path().join("absent.json"), &server).is_empty());
+        assert_eq!(
+            Directory::load(&path, &HostAddr::new("other", 45560)),
+            Vec::<WorkerInfo>::new()
+        );
+        assert_eq!(
+            Directory::load(&dir.path().join("absent.json"), &server),
+            Vec::<WorkerInfo>::new()
+        );
         std::fs::write(&path, b"{").unwrap();
         assert!(Directory::load(&path, &server).is_empty(), "a broken cache costs the cache");
     }

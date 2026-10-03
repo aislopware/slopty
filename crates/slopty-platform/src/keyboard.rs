@@ -399,6 +399,6 @@ mod tests {
         assert!(taken.offer(a_up));
         assert_eq!(taken.drain(), [a, a_up]);
         assert_eq!(woken.get(), 2);
-        assert!(taken.drain().is_empty());
+        assert_eq!(taken.drain(), Vec::<NativeKey>::new());
     }
 }

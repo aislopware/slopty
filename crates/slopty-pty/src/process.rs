@@ -206,9 +206,9 @@ mod imp {
             buf.extend_from_slice(b"node\0/opt/claude-code/cli.js\0--resume\0");
             assert_eq!(parse_procargs(&buf), ["node", "/opt/claude-code/cli.js", "--resume"]);
             // A truncated or empty buffer is no arguments, never a panic.
-            assert!(parse_procargs(&[]).is_empty());
-            assert!(parse_procargs(&1_u32.to_ne_bytes()).is_empty());
-            assert!(parse_procargs(b"\x01\0\0\0nonul").is_empty());
+            assert_eq!(parse_procargs(&[]), Vec::<String>::new());
+            assert_eq!(parse_procargs(&1_u32.to_ne_bytes()), Vec::<String>::new());
+            assert_eq!(parse_procargs(b"\x01\0\0\0nonul"), Vec::<String>::new());
         }
 
         #[test]
@@ -390,7 +390,7 @@ mod procfs {
                 ["node", "/opt/cli.js", "--resume"]
             );
             assert_eq!(split_cmdline(b"a\0\0b\0"), ["a", "", "b"], "an empty argument stays");
-            assert!(split_cmdline(b"").is_empty());
+            assert_eq!(split_cmdline(b""), Vec::<String>::new());
 
             assert_eq!(btime("cpu  1 2 3\nbtime 1790000000\nprocesses 9\n"), Some(1_790_000_000));
             assert_eq!(since_boot(987_654, 100), Duration::from_millis(9_876_540));

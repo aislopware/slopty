@@ -793,7 +793,7 @@ async fn a_failed_command_block_says_so_under_the_pointer() {
     // The grid's rows share its height inside the inset (12 pt a side): the middle of the
     // failure's row, clear of the text.
     let line = (h - 24.0) / f32::from(term.size[1]);
-    let at = y + 12.0 + line * (f32::from(u16::try_from(row).unwrap()) + 0.5);
+    let at = line.mul_add(f32::from(u16::try_from(row).unwrap()) + 0.5, y + 12.0);
     drv.ok(&Command::Move { x: w.mul_add(0.6, x), y: at }).await.unwrap();
     let dump = drv
         .wait_for("the block's facts", STEP, |d| {

@@ -341,7 +341,7 @@ mod tests {
         let target = into.path().to_owned();
         let waiting = std::thread::spawn(move || remote.download("~/out".to_owned(), target, None));
         let (first, held) = fetched(&mut client).await;
-        assert!(held.is_empty());
+        assert_eq!(held, []);
         let small = b"landed first".to_vec();
         let big: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 249) as u8).collect();
         let bytes = (small.len() + big.len()) as u64;
@@ -420,7 +420,7 @@ mod tests {
         let waiting =
             std::thread::spawn(move || remote.download("~/big.bin".to_owned(), target, None));
         let (first, held) = fetched(&mut client).await;
-        assert!(held.is_empty());
+        assert_eq!(held, []);
         let big: Vec<u8> = (0..4_000_000_u32).map(|i| (i % 241) as u8).collect();
         let begin = XferMsg::Begin { xfer: first, dest: None, files: 1, bytes: big.len() as u64 };
         client.tx.send(&WorkerMsg::Xfer(begin)).await.unwrap();
@@ -798,7 +798,7 @@ mod tests {
         first.tx.send(&WorkerMsg::Ports { session, ports }).await.unwrap();
         assert_eq!(forwarded(&mut first_events).await[0].local, Some(wanted), "one listener");
         first.tx.send(&WorkerMsg::Ports { session, ports: Vec::new() }).await.unwrap();
-        assert!(forwarded(&mut first_events).await.is_empty());
+        assert_eq!(forwarded(&mut first_events).await, []);
         assert!(std::net::TcpListener::bind(("127.0.0.1", wanted)).is_err(), "still served");
     }
 

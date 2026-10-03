@@ -590,7 +590,7 @@ fn a_save_lost_with_the_link_leaves_the_program_waiting(cx: &mut TestAppContext)
     view.update(cx, FileView::link_lost);
     assert!(!view.read_with(cx, |v, _| v.finishing()), "no longer finishing");
     assert_eq!(view.read_with(cx, |v, _| v.waiting()), Some(4), "still waiting");
-    assert!(edited(&events).is_empty());
+    assert_eq!(edited(&events), Vec::<(u64, EditOutcome)>::new());
 }
 
 fn kept(text: &str, base_ms: Option<u64>, conflict: bool) -> Backup {
@@ -750,7 +750,7 @@ fn a_picture_the_platform_cannot_read_says_so(cx: &mut TestAppContext) {
     arrives(&view, cx, media("image/png", b"\x89PNG\r\n\x1a\nbroken".to_vec()));
     settle(cx);
     assert_eq!(labels(cx, "Status"), ["Cannot show this file: This device cannot read it"]);
-    assert!(view.read_with(cx, |v, _| v.preview_drawn()).is_empty());
+    assert_eq!(view.read_with(cx, |v, _| v.preview_drawn()), Vec::<(usize, u32, u32)>::new());
 }
 
 /// A PDF of `count` letter pages, each saying which it is near its top in 24-point type.

@@ -144,6 +144,6 @@ mod tests {
     /// A name no process has finds nothing, rather than failing.
     #[test]
     fn a_process_that_is_not_running_holds_nothing() {
-        assert!(open_by("slopty-no-such-process").is_empty());
+        assert_eq!(open_by("slopty-no-such-process"), Vec::<PathBuf>::new());
     }
 }

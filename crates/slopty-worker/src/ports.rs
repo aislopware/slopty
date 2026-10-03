@@ -551,9 +551,9 @@ mod tests {
         assert_eq!(t.known(), [(hinted, vec![port(5173, hinted)])]);
         assert_eq!(t.scanned(hinted, Vec::new()), Some(Vec::new()), "it went");
         t.look(hinted, false, next);
-        assert!(t.take_due(next).is_empty());
+        assert_eq!(t.take_due(next), []);
         t.retain(|s| s != hinted);
-        assert!(t.known().is_empty());
+        assert_eq!(t.known(), []);
     }
 
     /// This test process's own listener is found through the same calls, with its port, its
@@ -567,7 +567,7 @@ mod tests {
         let found = listening(&[(session, me)]);
         let mine = found.iter().find(|p| p.number == port).expect("the listener");
         assert_eq!((mine.pid, mine.session), (me, Some(session)));
-        assert!(!mine.process.is_empty());
+        assert_ne!(mine.process, "");
         drop(listener);
         assert!(!listening(&[(session, me)]).iter().any(|p| p.number == port));
     }

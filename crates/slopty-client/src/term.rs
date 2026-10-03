@@ -1538,10 +1538,10 @@ mod tests {
             state.apply(TermEvent::SearchInvalid { needle: "(".into(), message: "open".into() }),
             vec![Effect::SearchInvalid { needle: "(".into(), message: "open".into() }]
         );
-        assert!(state.apply(TermEvent::Resized { cols: 20, rows: 5 }).is_empty());
+        assert_eq!(state.apply(TermEvent::Resized { cols: 20, rows: 5 }), Vec::<Effect>::new());
         assert_eq!((state.size().cols, state.size().rows), (20, 5));
         assert_eq!((state.screen().cols(), state.screen().rows()), (20, 5));
-        assert!(state.apply(TermEvent::Driver { you: true }).is_empty());
+        assert_eq!(state.apply(TermEvent::Driver { you: true }), Vec::<Effect>::new());
         assert!(state.driving());
         // A running command ends with the child.
         state.running = Some((LineIndex(0), "sleep 9".into()));
@@ -1583,12 +1583,12 @@ mod tests {
         // An empty prompt: nothing runs.
         let mut f = frame(1, true, 0, 0, 3, &[(0, "$ ")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
         assert!(!state.command_running());
         // Typed but not entered: the cursor is still on the prompt row.
         let mut f = frame(2, false, 0, 0, 3, &[(0, "$ sleep 9")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
         // Enter: the cursor left the command's rows.
         let f = frame(3, false, 0, 0, 3, &[(1, "")]);
         assert_eq!(
@@ -1597,7 +1597,7 @@ mod tests {
         );
         // Still running: nothing new.
         let f = frame(4, false, 0, 0, 3, &[(1, "")]);
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 1)))), Vec::<Effect>::new());
         assert!(state.command_running());
         // The next prompt carries the status.
         let mut f = frame(5, false, 0, 0, 3, &[(2, "$ ")]);
@@ -1616,10 +1616,10 @@ mod tests {
         // finished by the prompt below it as usual.
         let mut f = frame(6, true, 0, 0, 3, &[(0, "$ "), (1, ""), (2, "")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
         let mut f = frame(7, false, 0, 0, 3, &[(0, "$ sleep 2")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 0)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 0)))), Vec::<Effect>::new());
         let f = frame(8, false, 0, 0, 3, &[(1, "")]);
         assert_eq!(
             commands(state.apply(TermEvent::Frame(at(f, 1)))),
@@ -1639,7 +1639,7 @@ mod tests {
         let mut f = frame(10, true, 1, 0, 3, &[(0, "$ vim"), (1, "$ ")]);
         Arc::make_mut(&mut f.updates[0].line).mark = prompt(None);
         Arc::make_mut(&mut f.updates[1].line).mark = prompt(Some(0));
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 1)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 1)))), Vec::<Effect>::new());
     }
 
     /// The numbering changes under a running command (the window was resized, so the worker
@@ -1669,7 +1669,7 @@ mod tests {
         // Reflowed: the same block, one row further down, still the newest.
         let mut f = frame(2, true, 1, 0, 3, &[(0, ""), (1, "$ sleep 9"), (2, "")]);
         Arc::make_mut(&mut f.updates[1].line).mark = prompt(None);
-        assert!(commands(state.apply(TermEvent::Frame(at(f, 2)))).is_empty());
+        assert_eq!(commands(state.apply(TermEvent::Frame(at(f, 2)))), Vec::<Effect>::new());
         assert!(state.command_running(), "runs on under the new numbers");
         assert_eq!(state.running.as_ref().map(|(p, _)| *p), Some(LineIndex(1)));
         // Reflowed again, and this time the shell has printed the next prompt.
@@ -1740,7 +1740,7 @@ mod tests {
         let last = state.last_block().expect("the seq block");
         assert_eq!((last.command.as_deref(), last.output.as_str()), (Some("seq 2"), "1\n2"));
         assert_eq!(state.recent_commands(2), ["seq 2", "false"], "the limit cuts the oldest");
-        assert!(state.recent_commands(0).is_empty());
+        assert_eq!(state.recent_commands(0), Vec::<String>::new());
         // A block from any of its rows: the prompt, the typed command, the trimmed output.
         let block = state.command_block(LineIndex(6)).expect("the seq block");
         assert_eq!((block.prompt, block.end, block.exit), (LineIndex(4), LineIndex(8), Some(0)));
@@ -1952,16 +1952,16 @@ mod tests {
     #[test]
     fn frames_fill_screen_and_cache_history() {
         let mut s = TermState::new(size());
-        assert!(
-            s.apply(TermEvent::Frame(frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "c")])))
-                .is_empty()
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "c")]))),
+            Vec::<Effect>::new()
         );
         // Output scrolled by two lines: rows now hold c, d, e at absolute 2..5.
         s.apply(TermEvent::Frame(frame(2, false, 0, 2, 5, &[(0, "c"), (1, "d"), (2, "e")])));
         assert_eq!(texts(&s), vec![Some("c".into()), Some("d".into()), Some("e".into())]);
         assert_eq!(s.history_len(), 2);
         // Scroll up two lines: a, b come from the cache, c from the screen; nothing to fetch.
-        assert!(s.scroll(2).is_empty());
+        assert_eq!(s.scroll(2), Vec::<Effect>::new());
         assert_eq!(texts(&s), vec![Some("a".into()), Some("b".into()), Some("c".into())]);
         assert_eq!(s.view_offset(), 2);
         assert!(s.scroll(5).is_empty(), "clamped to history");
@@ -2087,7 +2087,7 @@ mod tests {
             source: PixelRect { x: 0, y: 0, width: 1, height: 1 },
             z: 0,
         };
-        assert!(t.apply(image(1, 1, 4)).is_empty());
+        assert_eq!(t.apply(image(1, 1, 4)), Vec::<Effect>::new());
         let mut first = frame(1, true, 0, 0, 3, &[]);
         first.images = vec![placement(1, 1)];
         let _effects = t.apply(TermEvent::Frame(first));
@@ -2139,26 +2139,26 @@ mod tests {
         let listing = |f: Frame, above: Vec<Placement>| Frame { above: Some(above), ..f };
         let mut s = TermState::new(size());
         s.apply(with(frame(1, true, 0, 0, 3, &[]), vec![placement(0)], 0));
-        assert!(s.placements_above().is_empty());
+        assert_eq!(s.placements_above(), []);
         // Partly on screen, still the frame's.
         s.apply(with(frame(2, false, 0, 1, 4, &[]), vec![placement(0)], 0));
-        assert!(s.placements_above().is_empty());
+        assert_eq!(s.placements_above(), []);
         // Wholly above: moved up.
         s.apply(with(frame(3, false, 0, 3, 6, &[]), vec![], 0));
         assert_eq!(s.placements_above(), [placement(0)]);
         // The worker's list replaces it: deleted, then placed again further down.
         s.apply(with(listing(frame(4, false, 0, 3, 6, &[]), vec![]), vec![], 0));
-        assert!(s.placements_above().is_empty());
+        assert_eq!(s.placements_above(), []);
         s.apply(with(listing(frame(5, false, 0, 3, 6, &[]), vec![placement(1)]), vec![], 0));
         assert_eq!(s.placements_above(), [placement(1)]);
         // Its lines left the history.
         s.apply(with(frame(6, false, 0, 4, 7, &[]), vec![], 3));
-        assert!(s.placements_above().is_empty());
+        assert_eq!(s.placements_above(), []);
         // Another numbering names nothing above until the worker lists it.
         s.apply(with(listing(frame(7, false, 0, 5, 8, &[]), vec![placement(3)]), vec![], 3));
         assert_eq!(s.placements_above(), [placement(3)]);
         s.apply(with(frame(8, true, 1, 0, 3, &[]), vec![], 0));
-        assert!(s.placements_above().is_empty());
+        assert_eq!(s.placements_above(), []);
         // A frame dropped as older is the old stream's, and so is its list.
         s.apply(with(listing(frame(9, true, 1, 0, 3, &[]), vec![placement(1)]), vec![], 0));
         s.apply(with(listing(frame(4, false, 1, 0, 3, &[]), vec![]), vec![], 0));
@@ -2216,7 +2216,10 @@ mod tests {
     fn a_scroll_moves_the_held_rows_up_and_takes_only_the_new_one() {
         let mut s = TermState::new(size());
         s.apply(TermEvent::Frame(frame(1, true, 0, 0, 3, &[(0, "a"), (1, "b"), (2, "c")])));
-        assert!(s.apply(TermEvent::Frame(frame(2, false, 0, 1, 4, &[(2, "d")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(2, false, 0, 1, 4, &[(2, "d")]))),
+            Vec::<Effect>::new()
+        );
         assert_eq!(texts(&s), vec![Some("b".into()), Some("c".into()), Some("d".into())]);
         let shown: Vec<String> = s.screen().lines().iter().map(|l| l.text()).collect();
         assert_eq!(shown, ["b", "c", "d"]);
@@ -2234,7 +2237,10 @@ mod tests {
     fn a_frame_older_than_the_last_applied_is_dropped() {
         let mut s = TermState::new(size());
         s.apply(TermEvent::Frame(frame(4, false, 0, 0, 3, &[(0, "old")])));
-        assert!(s.apply(TermEvent::Frame(frame(5, true, 0, 0, 3, &[(0, "new")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(5, true, 0, 0, 3, &[(0, "new")]))),
+            Vec::<Effect>::new()
+        );
         for stale in [frame(5, false, 0, 0, 3, &[(0, "late")]), frame(3, true, 0, 0, 3, &[])] {
             assert!(s.apply(TermEvent::Frame(stale)).is_empty(), "no resync asked");
         }
@@ -2242,7 +2248,10 @@ mod tests {
         assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("new"));
         s.apply(TermEvent::Frame(frame(5, true, 0, 0, 3, &[(0, "joined")])));
         assert_eq!(s.screen().line(0).map(Line::text).as_deref(), Some("joined"));
-        assert!(s.apply(TermEvent::Frame(frame(6, false, 0, 0, 3, &[(1, "x")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(6, false, 0, 0, 3, &[(1, "x")]))),
+            Vec::<Effect>::new()
+        );
         assert_eq!((s.frames(), s.superseded()), (4, 2));
     }
 
@@ -2269,7 +2278,10 @@ mod tests {
         assert_eq!(s.view_offset(), 0, "a scroll place in the old numbering names nothing");
         let fetch = s.scroll(2);
         assert_eq!(fetch.len(), 1, "asked again on the new link: {fetch:?}");
-        assert!(s.apply(TermEvent::Frame(frame(2, false, 0, 2, 5, &[(2, "z")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(2, false, 0, 2, 5, &[(2, "z")]))),
+            Vec::<Effect>::new()
+        );
         assert_eq!(s.line(LineIndex(4)).map(Line::text).as_deref(), Some("z"));
     }
 
@@ -2311,7 +2323,10 @@ mod tests {
         let mut held = TermState::new(size());
         held.apply(TermEvent::Frame(frame(1, true, 4, 2, 5, &[(0, "c"), (1, "d"), (2, "$ ")])));
         held.apply(TermEvent::Frame(alt(frame(2, true, 5, 0, 3, &[(0, "~")]))));
-        assert!(held.apply(TermEvent::Frame(frame(3, false, 4, 2, 5, &[(2, "$ x")]))).is_empty());
+        assert_eq!(
+            held.apply(TermEvent::Frame(frame(3, false, 4, 2, 5, &[(2, "$ x")]))),
+            Vec::<Effect>::new()
+        );
         let shown: Vec<String> = held.screen().lines().iter().map(|l| l.text()).collect();
         assert_eq!(shown, ["c", "d", "$ x"]);
     }
@@ -2329,16 +2344,28 @@ mod tests {
     #[test]
     fn a_gap_asks_for_a_resync_once_and_a_full_frame_never_does() {
         let mut s = TermState::new(size());
-        assert!(s.apply(TermEvent::Frame(frame(1, true, 0, 0, 1, &[(0, "a")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(1, true, 0, 0, 1, &[(0, "a")]))),
+            Vec::<Effect>::new()
+        );
         // A delta after a missed frame asks to attach again, at this size.
         let effects = s.apply(TermEvent::Frame(frame(3, false, 0, 0, 1, &[(0, "b")])));
         assert_eq!(effects, vec![Effect::Request(TermRequest::Attach { size: s.size() })]);
         // Another gap while that is pending asks nothing more.
-        assert!(s.apply(TermEvent::Frame(frame(6, false, 0, 0, 1, &[(0, "c")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(6, false, 0, 0, 1, &[(0, "c")]))),
+            Vec::<Effect>::new()
+        );
         // The full frame that answers it clears the flag, and a full frame after a gap never
         // asks: it is the resync.
-        assert!(s.apply(TermEvent::Frame(frame(9, true, 0, 0, 1, &[(0, "d")]))).is_empty());
-        assert!(s.apply(TermEvent::Frame(frame(20, true, 0, 0, 1, &[(0, "e")]))).is_empty());
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(9, true, 0, 0, 1, &[(0, "d")]))),
+            Vec::<Effect>::new()
+        );
+        assert_eq!(
+            s.apply(TermEvent::Frame(frame(20, true, 0, 0, 1, &[(0, "e")]))),
+            Vec::<Effect>::new()
+        );
         // A frame at another size resizes the screen; one at the same size leaves it alone.
         let wide = Frame { cols: 20, rows: 4, ..frame(21, false, 0, 0, 1, &[(0, "f")]) };
         s.apply(TermEvent::Frame(wide));

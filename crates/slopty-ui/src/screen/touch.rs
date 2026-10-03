@@ -322,7 +322,7 @@ mod tests {
         // Past the edge the pointer holds, and a move that moves nothing says nothing.
         pad.moved((5000.0, -5000.0), t + ms(60), SPAN);
         assert_eq!(pad.at(), (1.0, 0.0));
-        assert!(pad.moved((5100.0, -5100.0), t + ms(70), SPAN).is_empty());
+        assert_eq!(pad.moved((5100.0, -5100.0), t + ms(70), SPAN), Vec::<Act>::new());
         assert!(pad.ended(t + ms(80)).is_empty(), "a drag clicks nothing");
     }
 

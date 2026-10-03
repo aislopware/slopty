@@ -585,7 +585,7 @@ mod tests {
     fn a_new_follower_is_shown_what_is_waiting() {
         let mut holds = Holds::default();
         let s = session(1);
-        assert!(holds.follow(s, A).is_empty());
+        assert_eq!(holds.follow(s, A), Vec::<u64>::new());
         let one = holds.ask(s, false, |_| ()).expect("held");
         let two = holds.ask(s, false, |_| ()).expect("held");
         assert_eq!(holds.follow(s, B), [one, two]);
@@ -606,7 +606,7 @@ mod tests {
     fn orchestration_follows_until_the_session_ends() {
         let mut holds = Holds::default();
         let (s, t) = (session(1), session(2));
-        assert!(holds.follow(s, ORCHESTRATION).is_empty());
+        assert_eq!(holds.follow(s, ORCHESTRATION), Vec::<u64>::new());
         let first = holds.ask(s, false, |_| "first").expect("held for orchestration");
         assert_eq!(holds.follow(s, A), [first], "a client that follows later is shown it");
         assert_eq!(holds.answer(ORCHESTRATION, s, first).map(|h| h.reply), Some("first"));

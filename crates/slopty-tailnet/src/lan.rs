@@ -566,7 +566,7 @@ mod tests {
         assert_eq!(from.interface, "en0");
         let names: Vec<_> = targets.iter().map(|t| t.interface.as_str()).collect();
         assert_eq!(names, ["en0", "en1"]);
-        assert!(super::plan(&own, &[port("en5", [172, 16, 0, 20], 12)]).is_empty());
+        assert_eq!(super::plan(&own, &[port("en5", [172, 16, 0, 20], 12)]), []);
         assert!(super::plan(&own, &[port("en0", [192, 168, 1, 2], 1)]).is_empty(), "itself");
     }
 

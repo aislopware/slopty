@@ -512,7 +512,7 @@ mod held_tests {
         assert_eq!(board.data(0, PNG), None, "a type it does not hold");
         assert_eq!(board.data(1, TEXT), None, "an item it does not hold");
         assert!(board.clear_if(wrote).is_some_and(|n| n != wrote), "a clear is a change");
-        assert!(board.items().is_empty());
+        assert_eq!(board.items(), Vec::<Vec<String>>::new());
     }
 
     /// A promise is asked once, when first read, and kept; one answered after the board moved

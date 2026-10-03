@@ -1101,8 +1101,8 @@ fn session_lock(session: &str) -> Option<String> {
 }
 
 /// A session's lock, taken exclusively without waiting and never creating the file, or `None`
-/// when a compile holds it (or the file cannot be opened). rustc 1.98 locks with
-/// `fcntl(F_SETLK)` on macOS and with `flock` on Linux; later ones lock with `flock` (std's
+/// when a compile holds it (or the file cannot be opened). rustc 1.99 locks with
+/// `fcntl(F_SETLK)` on macOS and with `flock` on Linux; nightly locks with `flock` (std's
 /// `File::try_lock`) everywhere. Darwin keeps both kinds in one lock list, so either blocks this
 /// `flock`; a test holds each.
 fn claim(lock: &Utf8Path) -> Option<File> {

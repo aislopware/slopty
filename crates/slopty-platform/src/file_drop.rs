@@ -1036,7 +1036,7 @@ mod tests {
         assert_eq!(landing.resolve(Err((Some(outside.clone()), "no".to_owned()))), None);
         assert!(outside.exists());
         let dropped = landing.resolve(Err((None, "cancelled".to_owned()))).unwrap();
-        assert!(dropped.paths.is_empty());
+        assert_eq!(dropped.paths, Vec::<PathBuf>::new());
         assert_eq!(dropped.failed, ["mine.txt: no", "A file: cancelled"]);
         assert_eq!(dropped.landing, None, "nothing arrived, so nothing is uploaded from it");
         assert!(!landing.dir().exists(), "and its directory is gone at once");

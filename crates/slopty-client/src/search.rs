@@ -655,7 +655,7 @@ mod tests {
     #[test]
     fn a_files_field_reads_as_globs() {
         assert_eq!(globs(" *.rs, !tests/** src/*.md ,"), ["*.rs", "!tests/**", "src/*.md"]);
-        assert!(globs("  ").is_empty());
+        assert_eq!(globs("  "), Vec::<String>::new());
         assert_eq!(join("/w/", "a/b.rs"), "/w/a/b.rs");
         assert_eq!(join("", "a"), "a");
     }

@@ -2137,7 +2137,7 @@ impl<P: Platform> Shared<P> {
         let Some(Fed { fps: fed, ceiling }) = verdict else { return };
         let _windows =
             self.windows_since_gave
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_add(1)));
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| Some(n.saturating_add(1)));
         match ceiling {
             Some(ceiling) if ceiling < fps && self.others_give_way() => {
                 self.fed_fps.store(fed, Ordering::Relaxed);
@@ -5743,7 +5743,7 @@ mod tests {
             live.iter().map(|s| (s.client.as_str(), s.stream)).collect::<Vec<_>>(),
             [("alice", 1), ("bob", 2)]
         );
-        assert!(closed.is_empty());
+        assert_eq!(closed, []);
         registry.remove(&"alice", StreamId(9));
         assert_eq!(registry.summaries().0.len(), 2, "an unknown stream is not removed");
         registry.remove(&"alice", StreamId(1));
@@ -6362,7 +6362,7 @@ mod tests {
 
         wire.closed.store(true, Ordering::Relaxed);
         assert_eq!(shared.send(&batch), Taken::default());
-        assert!(wire.drain().is_empty());
+        assert_eq!(wire.drain(), Vec::<Bytes>::new());
         let stats = shared.stats();
         assert_eq!((stats.datagrams, stats.queue_full), (5, 4));
     }
@@ -7494,7 +7494,7 @@ mod tests {
         assert_eq!(encode_held(&shared, a_frame(), &at), Attempt::Sent, "puts it in");
         shared.on_session_packet(0, new, &packet(900, true, Some(0), false));
         let keyframe = wire.drain();
-        assert!(!keyframe.is_empty());
+        assert_ne!(keyframe, Vec::<Bytes>::new());
         shared.on_session_packet(0, old, &packet(900, false, Some(31), false));
         assert!(wire.drain().is_empty(), "the old session's frame after the new keyframe");
         assert_eq!(shared.stats().encoded, 2);

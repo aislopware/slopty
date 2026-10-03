@@ -564,7 +564,7 @@ mod threads {
         let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
         std::fs::write(&main, captured).unwrap();
         let whole = entries(&main);
-        assert!(!whole.is_empty());
+        assert_ne!(whole, Vec::<String>::new());
         a.until(|c| c.thread.as_ref().is_some_and(|s| ids(s) == whole)).await;
         assert_eq!(a.state().open_requests().count(), 1, "the request outlives the read");
 

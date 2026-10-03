@@ -506,7 +506,7 @@ mod tests {
             assert_eq!(env.last(), Some(&pair(CLI, "/opt/s/slopty")), "{shell}: {env:?}");
         }
         assert!(si.apply("bash", &strings(&["-c", "true"]), None, &[]).env.is_empty(), "no prompt");
-        assert!(si.apply("vim", &[], None, &[]).env.is_empty());
+        assert_eq!(si.apply("vim", &[], None, &[]).env, []);
         assert!(si.apply("zsh", &[], None, &[pair(OPT_OUT, "1")]).env.is_empty(), "opted out");
     }
 
@@ -1019,9 +1019,9 @@ mod tests {
         let own = [pair("PATH", "/opt/x/bin")];
         assert_eq!(si.handoff_path(&own, Some("/usr/bin")).as_deref(), Some("/d/bin:/opt/x/bin"));
         assert_eq!(si.handoff_path(&[], None).as_deref(), Some("/d/bin"));
-        assert!(si.handoff_env(&[pair(OPT_OUT, "1")]).is_empty());
+        assert_eq!(si.handoff_env(&[pair(OPT_OUT, "1")]), []);
         assert_eq!(si.handoff_path(&[pair(OPT_OUT, "1")], Some("/usr/bin")), None);
-        assert!(ShellIntegration { enabled: false, ..si }.handoff_env(&[]).is_empty());
+        assert_eq!(ShellIntegration { enabled: false, ..si }.handoff_env(&[]), []);
         assert!(integration().handoff_env(&[]).is_empty(), "no CLI, no commands");
     }
 

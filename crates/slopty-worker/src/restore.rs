@@ -525,9 +525,12 @@ mod tests {
     #[test]
     fn only_a_shell_runs_again() {
         assert_eq!(recipe(&["/bin/zsh"]).reopen_command(SHELLS), ["/bin/zsh"]);
-        assert!(recipe(&[]).reopen_command(SHELLS).is_empty());
-        assert!(recipe(&["claude"]).reopen_command(SHELLS).is_empty());
-        assert!(recipe(&["/bin/sh", "-c", "sleep 9"]).reopen_command(SHELLS).is_empty());
+        assert_eq!(recipe(&[]).reopen_command(SHELLS), Vec::<String>::new());
+        assert_eq!(recipe(&["claude"]).reopen_command(SHELLS), Vec::<String>::new());
+        assert_eq!(
+            recipe(&["/bin/sh", "-c", "sleep 9"]).reopen_command(SHELLS),
+            Vec::<String>::new()
+        );
         assert!(recipe(&["/opt/fish"]).reopen_command(SHELLS).is_empty(), "not listed");
 
         let first = reopen(&recipe(&["claude", "--continue"]));
@@ -535,7 +538,7 @@ mod tests {
         assert_eq!(first.restored.command, ["claude", "--continue"]);
         let reopened = Recipe { restored: Some(first.restored), ..recipe(&[]) };
         assert_eq!(reopen(&reopened).restored.command, ["claude", "--continue"], "kept");
-        assert!(reopen(&recipe(&["/bin/zsh"])).restored.command.is_empty());
+        assert_eq!(reopen(&recipe(&["/bin/zsh"])).restored.command, Vec::<String>::new());
     }
 
     /// A conversation kept with the session comes back resumed in its own directory: typed at
@@ -679,7 +682,7 @@ mod tests {
         assert_eq!(kept.size, size);
         assert!(!kept.saved_ms.is_zero());
         assert_eq!(again.screen(a).await, b"screen-a");
-        assert!(again.screen(b).await.is_empty());
+        assert_eq!(again.screen(b).await, b"");
         let mode = std::os::unix::fs::PermissionsExt::mode(
             &std::fs::metadata(dir.path()).unwrap().permissions(),
         );

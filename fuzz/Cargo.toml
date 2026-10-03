@@ -6,7 +6,7 @@
 name = "slopty-fuzz"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.98"
+rust-version = "1.99"
 license = "MIT"
 publish = false
 description = "libFuzzer targets for every decoder that faces a peer"

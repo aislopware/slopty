@@ -329,7 +329,7 @@ mod actor {
         })
         .await
         .unwrap();
-        assert!(!again.is_empty());
+        assert_ne!(again, b"");
 
         session.close();
         next.close();
@@ -1385,7 +1385,7 @@ done"#
             ev.iter().any(|e| matches!(e, TermEvent::PasteHeld { text } if *text == line))
         })
         .await;
-        assert!(!events.is_empty());
+        assert_ne!(events, []);
         session.request(me, TermRequest::Raw(b"MARK\n".to_vec())).unwrap();
         let (_, screen) = wait_for(&mut rx, |_, s| text(s).contains("MARK")).await;
         assert!(!text(&screen).contains("echo hi"), "not written: {}", text(&screen));

@@ -505,7 +505,7 @@ mod tests {
         assert!(client.read_handshake(&fin).is_ok_and(|ready| !ready));
         let mut out = Vec::new();
         assert!(client.write_handshake(&mut out).is_some(), "handshake keys");
-        assert!(out.is_empty());
+        assert_eq!(out, b"");
         assert!(client.write_handshake(&mut out).is_some(), "1-RTT keys");
         assert_eq!(out, [FINISHED]);
         assert!(!client.is_handshaking());

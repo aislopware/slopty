@@ -197,7 +197,7 @@ mod follow {
         assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&path)]), "made again");
         write_in_place(&path, "three\n");
         assert_eq!(next(&mut changes, WITHIN).await, Some(vec![key(&path)]), "then written");
-        assert!(status(&changes).polled.is_empty());
+        assert_eq!(status(&changes).polled, Vec::<String>::new());
     }
 
     #[tokio::test(flavor = "multi_thread")]

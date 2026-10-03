@@ -237,7 +237,10 @@ fn blocks_settle_on_their_entry_or_after_the_grace() {
     let later = now + Duration::from_secs(1);
     board.apply(&stop("t", 0), later);
     overlay.update(&board, later, WallMs::ZERO);
-    assert!(overlay.expire(later + SETTLE_GRACE / 2).is_empty());
+    assert_eq!(
+        overlay.expire(later + SETTLE_GRACE / 2),
+        Vec::<slopty_proto::conversation::Live>::new()
+    );
     assert_eq!(overlay.expire(later + SETTLE_GRACE), [Live::Clear { id: id("t", 0, 1) }]);
     assert!(
         overlay.update(&board, later + SETTLE_GRACE, WallMs::ZERO).is_empty(),

@@ -790,7 +790,10 @@ mod tests {
             "plain runs are left out"
         );
         assert!(code_ranges(code, "", &theme).is_empty(), "no language, no colours");
-        assert!(code_ranges(code, "nosuchlang", &theme).is_empty());
+        assert_eq!(
+            code_ranges(code, "nosuchlang", &theme),
+            Vec::<(Range<usize>, HighlightStyle)>::new()
+        );
     }
 
     /// The numbers behind the background parse (`docs/MEASUREMENTS.md`): the grammar load

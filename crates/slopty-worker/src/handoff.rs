@@ -639,7 +639,7 @@ mod tests {
         h.join(a, 2, "a".into(), client(&log, 2));
         h.caps(a, BOTH);
         h.focus(session, a, true);
-        assert!(h.leave(a, 0).is_empty());
+        assert_eq!(h.leave(a, 0), []);
         assert_eq!(h.candidates(Some(session), Need::Edit), Ok(vec![a]));
     }
 

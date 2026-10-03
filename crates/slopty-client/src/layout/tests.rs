@@ -1535,7 +1535,7 @@ fn opening_fades_in_and_closing_fades_out() {
     assert!((open.alpha - 1.0).abs() < f32::EPSILON && (open.scale - 1.0).abs() < f32::EPSILON);
     l.remove(t(1));
     let frame = l.frame();
-    assert!(frame.tiles.is_empty());
+    assert_eq!(frame.tiles, Vec::<Placed>::new());
     assert_eq!(frame.closing.len(), 1);
     assert_eq!(frame.closing[0].rect, open.rect);
     near(frame.closing[0].alpha, 1.0);
@@ -1545,7 +1545,7 @@ fn opening_fades_in_and_closing_fades_out() {
     near(fading.alpha, 0.25);
     near(fading.scale, 0.85);
     l.set_clock(MS(1300));
-    assert!(l.frame().closing.is_empty());
+    assert_eq!(l.frame().closing, Vec::<Closing>::new());
     assert!(!l.is_animating());
 }
 
@@ -1562,7 +1562,7 @@ fn without_animation_everything_lands_at_once() {
     l.remove(t(1));
     let f = l.frame();
     assert!(!f.animating);
-    assert!(f.closing.is_empty());
+    assert_eq!(f.closing, Vec::<Closing>::new());
     assert!(f.tiles.iter().all(|p| (p.alpha - 1.0).abs() < f32::EPSILON && p.rect == p.target));
     // Turning it off mid-flight lands what is running.
     let mut l = moving();
@@ -1573,7 +1573,7 @@ fn without_animation_everything_lands_at_once() {
     assert!(l.is_animating());
     l.set_animate(false);
     assert!(!l.is_animating());
-    assert!(l.frame().closing.is_empty());
+    assert_eq!(l.frame().closing, Vec::<Closing>::new());
 }
 
 #[test]
@@ -1880,7 +1880,7 @@ fn every_action_is_safe_on_an_empty_layout() {
     assert!(l.drop_target(f32::NAN, f32::NAN).is_none() || l.overview_open());
     l.set_clock(MS(10_000));
     assert_eq!(l.workspaces().len(), 1);
-    assert!(l.frame().tiles.is_empty());
+    assert_eq!(l.frame().tiles, Vec::<Placed>::new());
 }
 
 /// A divider double-clicked puts its column back at the width a column opens at, its preset

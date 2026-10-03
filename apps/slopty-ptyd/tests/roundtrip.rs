@@ -222,7 +222,7 @@ mod roundtrip {
         .unwrap();
         assert_eq!(exited, 0);
         client2.close(id).await.unwrap();
-        assert!(client2.list().await.unwrap().is_empty());
+        assert_eq!(client2.list().await.unwrap(), []);
         let gone = client2.attach(id).await.map(drop);
         assert!(
             matches!(gone, Err(PtyError::Daemon(PtydError::NoSuchSession))),
@@ -254,7 +254,7 @@ mod roundtrip {
         let master = PtyMaster::new(attached.master).unwrap();
         master.write_all(b"ping\r").await.unwrap();
         let out = read_until(&master, b"echoed:ping", attached.backlog).await;
-        assert!(!out.is_empty());
+        assert_ne!(out, b"");
         let resized = TermSize { cols: 90, rows: 40, metrics: CellMetrics::default() };
         client.resize(id, resized).await.unwrap();
         // A resize carries no reply; a request that does orders it before its reply.
@@ -425,7 +425,7 @@ mod roundtrip {
         let garbage = [1, 0, 0, 0, 0x7f];
         let _still_open = raw_attach(&daemon, id, &garbage).await;
         let attached = attach_when_free(&daemon, id).await;
-        assert!(attached.checkpoint.is_empty());
+        assert_eq!(attached.checkpoint, b"");
         let (mut last, _exits) = PtydClient::connect(&daemon.socket).await.unwrap();
         last.shutdown().await.unwrap();
     }

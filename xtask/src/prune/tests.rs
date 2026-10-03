@@ -188,7 +188,7 @@ fn an_idle_unit_its_artifacts_an_orphan_and_an_old_cache_go() {
     let line = format!("{} .fingerprint/used-{B}", secs(fx.ago(HOUR)));
     assert!(ledger.lines().any(|l| l == line), "{ledger}");
     assert_eq!((report.idle.units, report.idle.caches, report.idle.leftovers), (1, 1, 1));
-    assert!(report.busy.is_empty());
+    assert_eq!(report.busy, []);
 
     // The next pass reads the use from the ledger, not the reset access time.
     let again = fx.prune(Fixture::opts());
@@ -536,7 +536,7 @@ fn a_busy_directory_sweeps_its_idle_caches_session_by_session() {
 
     drop((reader, writer, build));
     let report = fx.prune(Fixture::opts());
-    assert!(report.busy.is_empty());
+    assert_eq!(report.busy, []);
     // The idle cache emptied above was written to just now, so it is not idle yet.
     assert_eq!((report.idle.caches, report.idle.units), (2, 1), "{:?}", report.idle);
     assert!(!debug.join("incremental/read-0def").exists());
@@ -597,7 +597,7 @@ fn odd_entries_in_incremental_leave_the_pass_going() {
 
     drop(build);
     let report = fx.prune(Fixture::opts());
-    assert!(report.busy.is_empty());
+    assert_eq!(report.busy, []);
     assert!(incremental.join("stray").exists(), "not a cache");
     assert!(!incremental.join("odd-0ddd").exists(), "under cargo's lock a cache goes whole");
     assert!(!unopenable.exists(), "under cargo's lock no session lock is taken");

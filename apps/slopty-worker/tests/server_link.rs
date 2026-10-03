@@ -1114,7 +1114,7 @@ mod tests {
         let (mut peer, reg) = Peer::welcome(link).await;
         assert_eq!(reg.name, "link-test");
         assert_eq!(reg.listen, daemons.listen, "where its clients' listener is bound");
-        assert!(reg.sessions.is_empty());
+        assert_eq!(reg.sessions, []);
         assert_eq!(reg.caps.os, Os::MacOs);
         assert!(reg.caps.cpus > 0 && reg.caps.memory > 0, "{:?}", reg.caps);
         let worker = reg.worker;

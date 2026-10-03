@@ -809,7 +809,7 @@ mod tests {
     fn the_index_follows_the_tree() {
         let (_dir, top) = worktree();
         let index = Index::new(top.clone());
-        assert!(index.matching(&top, "lib", 8).is_empty());
+        assert_eq!(index.matching(&top, "lib", 8), Vec::<String>::new());
         index.wait_for_watch();
         if cfg!(any(target_os = "macos", target_os = "linux")) {
             assert!(index.follows_events(), "FSEvents or inotify over the worktree");
@@ -912,13 +912,13 @@ mod tests {
         let (_dir, top) = worktree();
         let index = Index::new(top.clone());
         index.events.store(false, Ordering::Relaxed);
-        assert!(index.matching(&top, "lib", 8).is_empty());
+        assert_eq!(index.matching(&top, "lib", 8), Vec::<String>::new());
         assert!(!index.follows_events());
         fs::write(top.join("src/net/lib.rs"), "").unwrap();
         let found = until(&index, &top, "lib", |f| !f.is_empty());
         assert_eq!(found, ["src/net/lib.rs"]);
         fs::remove_file(top.join("src/net/lib.rs")).unwrap();
-        assert!(until(&index, &top, "lib", <[String]>::is_empty).is_empty());
+        assert_eq!(until(&index, &top, "lib", <[String]>::is_empty), Vec::<String>::new());
     }
 
     #[test]

@@ -128,7 +128,7 @@ fn a_send_is_drawn_at_once_and_until_the_agent_s_record_shows_it() {
     assert_eq!(threads.unshown(thread).count(), 1, "the worker's answer alone is not the record");
     let _took = threads.frame(thread, actions(0, vec![said("u1", Some(id))]));
     assert_eq!(threads.unshown(thread).count(), 0, "the agent's own record takes over");
-    assert!(threads.outbox().all().is_empty());
+    assert_eq!(threads.outbox().all(), []);
 }
 
 #[test]
@@ -168,7 +168,7 @@ fn an_answer_flips_its_card_at_once_and_a_refusal_puts_it_back() {
     let refused = Outcome::Refused { reason: "Already answered".to_owned() };
     threads.done(&IntentDone { id, outcome: refused });
     assert!(threads.answering(thread, &ask).is_none(), "a refused answer is not drawn as one");
-    assert!(threads.outbox().all().is_empty());
+    assert_eq!(threads.outbox().all(), []);
 }
 
 #[test]

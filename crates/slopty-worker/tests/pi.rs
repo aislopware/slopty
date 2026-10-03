@@ -565,7 +565,7 @@ mod pi {
         let mut nowhere = rig.start("Say hello.");
         nowhere.cwd = rig.work.join("gone").to_string_lossy().into_owned();
         assert!(matches!(pi.start(IntentId::new(), nowhere).await, Outcome::Refused { .. }));
-        assert!(rig.host.threads().is_empty());
+        assert_eq!(rig.host.threads(), []);
 
         let (bare, asks) = Pi::channel();
         let empty = rig.data.join("empty");

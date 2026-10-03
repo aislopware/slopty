@@ -695,7 +695,7 @@ mod tests {
         assert!(is_reports(stop) && stop.get("async").is_none(), "synchronous: {stop}");
         assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
         assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
-        assert!(registered(&path).expect("read").is_empty());
+        assert_eq!(registered(&path).expect("read"), Vec::<HookEvent>::new());
         assert_eq!(read(&path).expect("read"), json!({}));
     }
 
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(registered(&path).expect("read").len(), HOOK_EVENTS.len());
         assert_eq!(install_at(&path, "/opt/slopty").expect("install"), Outcome::Unchanged);
         assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Changed);
-        assert!(registered(&path).expect("read").is_empty());
+        assert_eq!(registered(&path).expect("read"), Vec::<HookEvent>::new());
         assert_eq!(uninstall_at(&path).expect("uninstall"), Outcome::Unchanged);
     }
 

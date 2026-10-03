@@ -125,7 +125,7 @@ mod tests {
             None,
         );
         let ServerEvent::Unlinked { why } = next(&mut events).await else { panic!("linked?") };
-        assert!(!why.is_empty());
+        assert_ne!(why, "");
     }
 
     /// A server that turns the client away (the tailnet policy grants it no client role) is

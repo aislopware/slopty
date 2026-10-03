@@ -35,7 +35,7 @@ pub const EXTENSION_FLAG: &str = "--extension";
 #[must_use]
 pub fn digest() -> String {
     let mut hasher = blake3::Hasher::new();
-    for part in [GATE.0, GATE.1] {
+    for part in <[&str; 2]>::from(GATE) {
         hasher.update(&u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(part.as_bytes());
     }

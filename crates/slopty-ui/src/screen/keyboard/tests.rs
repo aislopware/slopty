@@ -245,7 +245,7 @@ fn a_japanese_ime_commit_goes_as_text(cx: &mut gpui::TestAppContext) {
     });
     let space = stroke("space", Modifiers::default(), Some(" "));
     assert!(!view.update(cx, |v, cx| v.key_pressed(&space, false, cx)), "Space picks a candidate");
-    assert!(inputs(&mut rx).is_empty());
+    assert_eq!(inputs(&mut rx), Vec::<ScreenInput>::new());
     commit(&view, cx, "日本語");
     assert_eq!(inputs(&mut rx), [text("日本語")]);
 }
@@ -276,7 +276,7 @@ fn a_key_goes_by_position_not_by_character(cx: &mut gpui::TestAppContext) {
     assert!(!view.update(cx, |v, cx| v.key_pressed(&stroke("escape", force, None), false, cx)));
     let lock = Modifiers { platform: true, control: true, ..Modifiers::default() };
     assert!(!view.update(cx, |v, cx| v.key_pressed(&stroke("q", lock, None), false, cx)));
-    assert!(inputs(&mut rx).is_empty());
+    assert_eq!(inputs(&mut rx), Vec::<ScreenInput>::new());
 }
 
 /// A key the monitor took goes before a chord that came through GPUI after it, and before a

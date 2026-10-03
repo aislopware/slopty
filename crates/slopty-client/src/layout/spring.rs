@@ -74,7 +74,7 @@ impl Spring {
         // Overdamped decays slower than its envelope: Newton on the curve itself.
         let mut y0 = self.oscillate(x0);
         let m = (self.oscillate(x0 + DELTA) - y0) / DELTA;
-        let mut x1 = (self.to - y0 + m * x0) / m;
+        let mut x1 = m.mul_add(x0, self.to - y0) / m;
         let mut y1 = self.oscillate(x1);
         let mut i = 0_u32;
         loop {
@@ -87,7 +87,7 @@ impl Spring {
             x0 = x1;
             y0 = y1;
             let m = (self.oscillate(x0 + DELTA) - y0) / DELTA;
-            x1 = (self.to - y0 + m * x0) / m;
+            x1 = m.mul_add(x0, self.to - y0) / m;
             y1 = self.oscillate(x1);
             if !y1.is_finite() {
                 return secs(x0);

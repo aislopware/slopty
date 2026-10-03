@@ -317,8 +317,8 @@ mod tests {
             agent_args(&words("/bin/sh /Users/x/bin/claude --effort high")),
             words("--effort high")
         );
-        assert!(agent_args(&words("/bin/zsh -lic claude")).is_empty());
-        assert!(agent_args(&words("node server.js --model x")).is_empty());
+        assert_eq!(agent_args(&words("/bin/zsh -lic claude")), Vec::<String>::new());
+        assert_eq!(agent_args(&words("node server.js --model x")), Vec::<String>::new());
     }
 
     /// A shell's command starts the agent when `claude` is the program of any of its simple

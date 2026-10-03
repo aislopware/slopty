@@ -74,7 +74,7 @@ mod tests {
     fn text_goes_in_graphemes_of_at_most_20_units() {
         assert_eq!(chunks("é"), ["é"]);
         assert_eq!(chunks("日本語"), ["日本語"]);
-        assert!(chunks("").is_empty());
+        assert_eq!(chunks(""), Vec::<String>::new());
 
         // Vietnamese typed decomposed: each vowel carries two combining marks.
         let decomposed = "tie\u{302}\u{301}ng Vie\u{323}\u{302}t ".repeat(4);

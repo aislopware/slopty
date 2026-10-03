@@ -15,7 +15,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   through). Timings in MEASUREMENTS.md "gate wall time". Not done: a separate target dir per
   step to overlap cargo invocations (would double the disk and the cold builds).
 
-- ✅ Rust 1.98.1 pinned; edition 2024; resolver 3; `[workspace.lints]` with clippy
+- ✅ Rust 1.99.0 pinned; edition 2024; resolver 3; `[workspace.lints]` with clippy
   all/pedantic/nursery/cargo + curated restriction lints; `panic = "unwind"` everywhere
   (`panic = "abort"` turns any ObjC exception crossing objc2 into a process abort).
 
@@ -156,7 +156,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     that use them. On top of that, cargo never deletes a unit: a `cargo update`, a fork
     rebase or a new toolchain leaves the old ones behind in every target dir, gate lanes
     included. `resolver.feature-unification = "workspace"` would settle the first half inside
-    cargo, but cargo 1.98.1 still ignores it without `-Zfeature-unification`.
+    cargo, but cargo 1.99.0 still ignores it without `-Zfeature-unification`.
   - **One feature set.** `workspace-hack/` is a `cargo hakari` crate: the feature union of every
     third-party dependency per triple, for normal and build dependencies. No crate depends on
     it, which is the unusual part. The union carries the tests' features: GPUI's
@@ -619,7 +619,7 @@ more full-window layer.
     shared while it reads. The pass takes it exclusively without waiting, deletes the session
     and then the lock file, and skips and counts a session it cannot lock. As in rustc, a
     session with no lock file is debris and goes, and so does a lock file with no session,
-    under its lock. rustc 1.98 locks with `fcntl(F_SETLK)` on macOS; beta and nightly lock with
+    under its lock. rustc 1.98 and 1.99 lock with `fcntl(F_SETLK)` on macOS; nightly locks with
     `flock` (std's `File::try_lock`). Darwin keeps both kinds in one lock list, so one `flock`
     attempt sees either (checked on this Mac across two processes; a test holds each kind).
     The crate's cache directory stays even when empty, because rustc creates it and then its

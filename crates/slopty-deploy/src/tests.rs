@@ -46,7 +46,7 @@ fn a_binary_says_what_it_runs_on() {
         Platform::of_binary(&elf(ELF_AARCH64)),
         [Platform { os: Os::Linux, arch: Arch::Arm64 }]
     );
-    assert!(Platform::of_binary(b"#!/bin/sh\n").is_empty());
+    assert_eq!(Platform::of_binary(b"#!/bin/sh\n"), []);
     assert!(Platform::of_binary(&[0xcf, 0xfa]).is_empty(), "a short file");
 
     let this = platforms_of(&std::env::current_exe().unwrap()).unwrap();

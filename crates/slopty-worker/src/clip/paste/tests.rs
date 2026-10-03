@@ -73,7 +73,7 @@ fn a_paste_carries_the_shared_copy_and_asks_for_the_rest_once() {
     assert!(!arrivals.has_changed().unwrap());
     let _whole = c.supply(link, &missing[0], PNG.to_vec());
     assert!(arrivals.has_changed().unwrap());
-    assert!(c.paste_missing(&plan).is_empty());
+    assert_eq!(c.paste_missing(&plan), []);
     assert_eq!(
         c.paste_take(&plan),
         [(ClipFormat::Html, b"<b>hello</b>".to_vec()), (ClipFormat::Png, PNG.to_vec())]
@@ -105,7 +105,7 @@ fn a_paste_carries_no_secret_and_nothing_past_its_budget() {
     let missing = c.paste_missing(&plan);
     let _whole = c.refused(link, &missing[0]);
     assert!(c.paste_missing(&plan).is_empty(), "refused is not coming");
-    assert!(c.paste_take(&plan).is_empty());
+    assert_eq!(c.paste_take(&plan), []);
 
     let _mirror = c.offered(link, offer(client, 3, false, Vec::new()), Instant::now());
     assert!(c.paste_missing(&plan).is_empty() && c.paste_take(&plan).is_empty());

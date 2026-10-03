@@ -1351,7 +1351,7 @@ mod tests {
             }
         );
         // Nothing was activated for a bare move.
-        assert!(inj.backend().activations.is_empty());
+        assert_eq!(inj.backend().activations, Vec::<i32>::new());
     }
 
     #[test]
@@ -1365,7 +1365,7 @@ mod tests {
             inj.inject(&ScreenInput::Move { x: 0.0, y: 0.0 }),
             Err(InputError::NoBounds)
         ));
-        assert!(inj.backend().posts.is_empty());
+        assert_eq!(inj.backend().posts, Vec::<Post>::new());
     }
 
     #[test]
@@ -1608,7 +1608,7 @@ mod tests {
             Event::Key { modifier: true, down: true, .. }
         ));
         // Display streams never activate anything.
-        assert!(inj.backend().activations.is_empty());
+        assert_eq!(inj.backend().activations, Vec::<i32>::new());
     }
 
     /// Committed text activates the owner and goes in pieces a key event can carry, each a
@@ -1809,7 +1809,7 @@ mod tests {
             inj.inject(&ScreenInput::Media { key: MediaKey::PlayPause, down }).unwrap();
         }
         let rec = inj.backend();
-        assert!(rec.activations.is_empty());
+        assert_eq!(rec.activations, Vec::<i32>::new());
         assert_eq!(
             rec.posts.iter().map(|p| (p.route, &p.event)).collect::<Vec<_>>(),
             [
@@ -1855,7 +1855,7 @@ mod tests {
         assert_eq!(inj.backend().activations, [PID]);
         let mut inj = display();
         inj.focus().unwrap();
-        assert!(inj.backend().activations.is_empty());
+        assert_eq!(inj.backend().activations, Vec::<i32>::new());
     }
 
     /// `release_all` lets go of every held button where the pointer last was, then every key,
@@ -2275,7 +2275,7 @@ mod tests {
         let number = inj.press_at(10.0, 10.0).unwrap();
         assert!(inj.dragging(), "a press at the source enters drag mode");
         inj.leave_drag();
-        assert!(inj.backend().activations.is_empty());
+        assert_eq!(inj.backend().activations, Vec::<i32>::new());
         assert_eq!(
             mice(inj.backend()),
             [
@@ -2405,7 +2405,7 @@ mod tests {
     fn a_held_press_on_a_display_cancels_and_a_point_is_located() {
         let mut inj = display();
         inj.drag_step(DragStep::Cancel);
-        assert!(inj.backend().posts.is_empty());
+        assert_eq!(inj.backend().posts, Vec::<Post>::new());
         inj.inject(&ScreenInput::Button {
             button: MouseButton::Left,
             down: true,
@@ -2436,7 +2436,7 @@ mod tests {
     fn cancelling_a_drag_escapes_before_the_release() {
         let mut inj = window();
         inj.cancel_drag().unwrap();
-        assert!(inj.backend().posts.is_empty());
+        assert_eq!(inj.backend().posts, Vec::<Post>::new());
         let number = inj.press_at(0.0, 0.0).unwrap();
         let before = inj.backend().posts.len();
         inj.cancel_drag().unwrap();

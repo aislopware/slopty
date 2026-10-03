@@ -2459,7 +2459,7 @@ mod tests {
         assert_eq!(labels("src/"), ["Open src/"], "relative: no shell to spell it from");
         assert_eq!(labels("./x/"), ["Open ./x/"]);
         assert_eq!(labels("/w/a.rs:3"), ["Open /w/a.rs line 3"]);
-        assert!(labels("note").is_empty());
+        assert_eq!(labels("note"), Vec::<String>::new());
         let item = PaletteItem::open_file("/w/lib.rs", Some(3));
         assert_eq!((item.label.as_str(), item.keys.as_str()), ("Open /w/lib.rs", "line 3"));
         assert_eq!(PaletteItem::open_file("/w", None).keys, "");
@@ -2502,7 +2502,7 @@ mod tests {
         assert_eq!(labels(""), ["New note", "Move column left", "Move column right"]);
         assert_eq!(labels("column"), ["Move column left", "Move column right"]);
         assert_eq!(labels("RIGHT col"), ["Move column right"], "every word, any order, any case");
-        assert!(labels("nothing").is_empty());
+        assert_eq!(labels("nothing"), Vec::<&str>::new());
     }
 
     /// The lines are shown, and stepped through, group by group: tiles, workers, commands, then

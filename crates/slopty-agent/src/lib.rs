@@ -1874,7 +1874,7 @@ mod tests {
         table.apply(a, &hook(r#"{"hook_event_name":"SessionEnd"}"#));
         assert_eq!(table.snapshot().len(), 1);
         table.forget(b);
-        assert!(table.snapshot().is_empty());
+        assert_eq!(table.snapshot(), Vec::<AgentEvent>::new());
     }
 
     #[test]
@@ -2227,7 +2227,7 @@ mod tests {
 
         // The agent exits and the table forgets it.
         table.observe(a, &seen("zsh", None));
-        assert!(table.snapshot().is_empty());
+        assert_eq!(table.snapshot(), Vec::<AgentEvent>::new());
     }
 
     #[test]
@@ -2271,7 +2271,7 @@ mod tests {
         assert_eq!(table.snapshot().len(), 1);
         // Even a hooked agent goes when its terminal does; no `SessionEnd` ever arrives.
         assert_eq!(table.retain(&[]).len(), 1);
-        assert!(table.snapshot().is_empty());
+        assert_eq!(table.snapshot(), Vec::<AgentEvent>::new());
     }
 
     #[test]
@@ -2341,7 +2341,7 @@ mod tests {
         let a = SessionId::new();
         let b = SessionId::new();
         let mut table = AgentTable::default();
-        assert!(table.sessions_with_agents().is_empty());
+        assert_eq!(table.sessions_with_agents(), Vec::<SessionId>::new());
         table.observe(a, &seen("claude", None));
         table.observe(b, &seen("zsh", None));
         assert_eq!(table.sessions_with_agents(), vec![a]);
@@ -2666,7 +2666,7 @@ mod tests {
         assert_eq!(table.branches(), [opened]);
         let closed = table.branch(sid, &line(None)).expect("merged");
         assert_eq!((closed.pr, closed.worktree), (None, None));
-        assert!(table.branches().is_empty());
+        assert_eq!(table.branches(), Vec::<AgentBranch>::new());
         let stop = hook(r#"{"hook_event_name":"Stop"}"#);
         assert_eq!(table.branch(sid, &stop), None, "only a status line names one");
 
@@ -2709,7 +2709,7 @@ mod tests {
 
         let mut unhooked = AgentTable::default();
         unhooked.observe(a, &process("claude", None, 11));
-        assert!(unhooked.recover(&listed, false).is_empty());
+        assert_eq!(unhooked.recover(&listed, false), Vec::<AgentEvent>::new());
         let kept = unhooked.snapshot();
         assert_eq!(kept[0].status, AgentStatus::Idle, "the process's word stands");
         assert_eq!(kept[0].agent_session.as_deref(), Some("s-a"), "the conversation is known");

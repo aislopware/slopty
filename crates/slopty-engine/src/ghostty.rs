@@ -3998,7 +3998,7 @@ mod tests {
         let mut e = engine(10, 3);
         let mut out = Vec::new();
         e.encode_focus(true, &mut out).unwrap();
-        assert!(out.is_empty());
+        assert_eq!(out, Vec::<u8>::new());
         e.write(b"\x1b[?1004h");
         e.encode_focus(true, &mut out).unwrap();
         assert_eq!(out, b"\x1b[I");
@@ -4298,7 +4298,7 @@ mod tests {
         assert!(ev.contains(&EngineEvent::Bell));
         assert!(ev.contains(&EngineEvent::Title("hello".to_owned())));
         assert!(ev.contains(&EngineEvent::Cwd("/tmp".to_owned())));
-        assert!(e.drain_events().is_empty());
+        assert_eq!(e.drain_events(), Vec::<EngineEvent>::new());
     }
 
     /// CAN and SUB cancel an OSC: a title, a directory, a notification, a progress report or a
@@ -4370,7 +4370,7 @@ mod tests {
         e.write(b"false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\x1bc\x1b]133;A\x07$ \x1b]133;B\x07");
         let f = e.full_frame(0).unwrap();
         assert_eq!(f.updates[0].line.mark, SemanticMark::Prompt { exit: None, input: None });
-        assert!(e.commands(None).unwrap().is_empty());
+        assert_eq!(e.commands(None).unwrap(), Vec::<CommandBlock>::new());
         assert_ne!(e.position().unwrap().epoch, epoch, "the history is gone: a new numbering");
         assert_eq!(e.commands_ended(), 1);
     }
@@ -5045,7 +5045,7 @@ mod scrollback_tests {
             let rows = u32::try_from(e.total_rows().unwrap()).unwrap();
             for _ in 0..10 {
                 let text = format.time(|| e.plain_text().unwrap());
-                assert!(!text.is_empty());
+                assert_ne!(text, "");
                 let flags = wraps.time(|| e.row_wraps(0, rows - 1).unwrap());
                 assert_eq!(flags.len(), rows as usize);
                 let found = plain.time(|| e.search("lazy dog", false, 100).unwrap());
@@ -5846,7 +5846,7 @@ mod checkpoint_tests {
         let blob =
             b"\x1b]4;0;rgb:00/00/00\x1b\\\x1b[?1h\x1b[4h\x1b[?7l\x1b[?1049h\x1b[?25l\x1b[2;1H";
         assert_eq!(mode_resets(blob), b"\x1b[?1l\x1b[4l\x1b[?7h\x1b[?25h");
-        assert!(mode_resets(b"plain\x1b[31m\x1b[3;4r").is_empty());
+        assert_eq!(mode_resets(b"plain\x1b[31m\x1b[3;4r"), Vec::<u8>::new());
     }
 
     #[test]

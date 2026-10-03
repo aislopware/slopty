@@ -4867,7 +4867,7 @@ mod tests {
             Modifiers::default(),
         );
         cx.run_until_parked();
-        assert!(inputs(&mut rx).is_empty());
+        assert_eq!(inputs(&mut rx), Vec::<ScreenInput>::new());
     }
 
     /// A button pressed on the picture is let go on the worker however the press ends: released
@@ -5464,7 +5464,7 @@ mod tests {
         pinch(cx, 0.0, TouchPhase::Ended);
         let zoomed = view.read_with(cx, |v, _| v.zoom);
         assert!(zoomed != Zoom::FIT, "zooms here");
-        assert!(magnified(&mut rx).is_empty());
+        assert_eq!(magnified(&mut rx), Vec::<ScrollPhase>::new());
 
         // A pinch sent to the worker whose end never came does not keep the next one there
         // once the gestures are the picture's.

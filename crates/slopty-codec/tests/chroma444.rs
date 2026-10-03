@@ -520,12 +520,12 @@ mod tests {
                     let i = y * p.w + x;
                     if plane == 0 {
                         let d = read(x, first_row + y, 0, 1) - f64::from(p.y[i]);
-                        ey += d * d;
+                        ey = f64::mul_add(d, d, ey);
                     } else {
                         let (cx, cy) = (x / sx, (first_row + y) / sy);
                         let db = read(cx, cy, 0, 2) - f64::from(p.cb[i]);
                         let dr = read(cx, cy, 1, 2) - f64::from(p.cr[i]);
-                        ec += db * db + dr * dr;
+                        ec += f64::mul_add(dr, dr, db * db);
                     }
                 }
             }

@@ -291,7 +291,7 @@ mod tests {
     async fn shell_round_trip_over_quic() {
         let dir = tempfile::tempdir().unwrap();
         let (_guard, mut worker) = connect(dir.path()).await;
-        assert!(worker.ack.sessions.is_empty());
+        assert_eq!(worker.ack.sessions, []);
         let health = doctor(&dir.path().join("worker.sock")).await;
         assert_eq!((health.clients, health.sessions), (1, 0), "this client, no terminal yet");
 

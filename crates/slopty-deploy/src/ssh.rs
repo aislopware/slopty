@@ -273,13 +273,13 @@ impl Ssh {
         let dir = Scratch::new("slopty-ssh").map_err(|(_, e)| failed(e))?;
         let control = dir.path().join("c");
         let sock = dir.path().join("a");
-        let answering = askpass::serve(&sock, password.clone()).map_err(&failed)?;
+        let answering = askpass::serve(&sock, password.clone()).map_err(failed)?;
         let said = dir.path().join("e");
-        let errors = std::fs::File::create(&said).map_err(&failed)?;
+        let errors = std::fs::File::create(&said).map_err(failed)?;
         let mut master = self.master(&control, &helper, &sock);
         master.stdin(Stdio::null()).stdout(Stdio::null()).stderr(errors);
         let status = match tokio::time::timeout(SIGN_IN, master.status()).await {
-            Ok(status) => Some(status.map_err(&failed)?),
+            Ok(status) => Some(status.map_err(failed)?),
             Err(_elapsed) => None,
         };
         drop(answering);

@@ -216,7 +216,7 @@ impl ScreenRouter {
         }
         let next = self
             .lcg
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
                 Some(
                     x.wrapping_mul(6_364_136_223_846_793_005)
                         .wrapping_add(1_442_695_040_888_963_407),

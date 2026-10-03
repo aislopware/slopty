@@ -284,8 +284,11 @@ mod tests {
             loose(&words("claude --permission-mode=bypassPermissions"), cwd),
             ["--permission-mode bypassPermissions"]
         );
-        assert!(loose(&words("claude --permission-mode plan --model opus"), cwd).is_empty());
-        assert!(loose(&words("claude --permission-mode manual"), cwd).is_empty());
+        assert_eq!(
+            loose(&words("claude --permission-mode plan --model opus"), cwd),
+            Vec::<String>::new()
+        );
+        assert_eq!(loose(&words("claude --permission-mode manual"), cwd), Vec::<String>::new());
         assert_eq!(
             loose(&words("claude --append-system-prompt -- --allowedTools Bash"), cwd),
             ["--", "--allowedTools"],
@@ -312,8 +315,14 @@ mod tests {
         assert_eq!(loose(&chained, cwd), ["--allowedTools"]);
         let quoted = sh(r#"claude "--permission-mode" "bypass"'Permissions'"#);
         assert_eq!(loose(&quoted, cwd), ["--permission-mode bypassPermissions"]);
-        assert!(loose(&sh("grep --allowedTools notes.md; claude -c"), cwd).is_empty());
-        assert!(loose(&sh("echo claude --dangerously-skip-permissions"), cwd).is_empty());
+        assert_eq!(
+            loose(&sh("grep --allowedTools notes.md; claude -c"), cwd),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            loose(&sh("echo claude --dangerously-skip-permissions"), cwd),
+            Vec::<String>::new()
+        );
         // What the worker's own start looks like through a login shell: its settings, quoted
         // as `slopty_core::shell_quote` quotes them, loosen nothing.
         let ours = json!({
@@ -352,7 +361,7 @@ mod tests {
             "permissions": { "disableBypassPermissionsMode": "disable", "deny": ["Bash(rm:*)"] },
             "model": "opus",
         });
-        assert!(loose(&argv(&ours), cwd).is_empty());
+        assert_eq!(loose(&argv(&ours), cwd), Vec::<String>::new());
         let judged = |doc: Value| loose(&argv(&doc), cwd);
         assert_eq!(
             judged(json!({ "permissions": { "allow": ["Bash(rm:*)"] } })),
@@ -405,8 +414,11 @@ mod tests {
             argv.extend(["--model".to_owned(), "opus".to_owned()]);
             argv
         };
-        assert!(loose(&argv(&[&ours]), cwd).is_empty());
-        assert!(loose(&["claude".to_owned(), format!("--mcp-config={ours}")], cwd).is_empty());
+        assert_eq!(loose(&argv(&[&ours]), cwd), Vec::<String>::new());
+        assert_eq!(
+            loose(&["claude".to_owned(), format!("--mcp-config={ours}")], cwd),
+            Vec::<String>::new()
+        );
         let other = json!({ "mcpServers": { "x": { "command": "/tmp/x" } } }).to_string();
         assert_eq!(loose(&argv(&[&ours, &other]), cwd), ["--mcp-config with a server of its own"]);
         let posing = crate::hooks::mcp_config("/tmp/slopty").to_string();

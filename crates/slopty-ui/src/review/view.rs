@@ -308,7 +308,8 @@ impl ReviewView {
                     for (ix, pair) in diff::pairs(block).iter().enumerate() {
                         let row = Row::Pair(at, hunk, ix);
                         rows.push(row);
-                        let lines: Vec<&Line> = [pair.0, pair.1].into_iter().flatten().collect();
+                        let lines: Vec<&Line> =
+                            <[_; 2]>::from(*pair).into_iter().flatten().collect();
                         self.under(&mut rows, &path, &lines, row);
                     }
                 } else {

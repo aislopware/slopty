@@ -75,12 +75,12 @@ fn a_result_pairs_with_its_call_whenever_it_arrives() {
 
     // Before its call: parked, then applied.
     let mut c = Conversation::default();
-    assert!(
+    assert_eq!(
         c.ingest(
             &MAIN,
             &result("u2", None, "t2", "Exit code 3\nboom", &json!("Error: Exit code 3"))
-        )
-        .is_empty()
+        ),
+        Vec::<Change>::new()
     );
     let mut late = result("u2", None, "t2", "Exit code 3\nboom", &json!("Error: Exit code 3"));
     late["message"]["content"][0]["is_error"] = json!(true);
@@ -348,9 +348,15 @@ fn a_branch_abandons_what_followed_its_fork() {
     let turns: Vec<&str> = c.turns(&MAIN).iter().map(|t| t.prompt.as_str()).collect();
     assert_eq!(turns, ["p1", "p3"], "the abandoned prompt's turn goes with it");
     // A result for the abandoned call finds nothing to update.
-    assert!(c.ingest(&MAIN, &result("u9", Some("a2"), "t1", "x", &json!({}))).is_empty());
+    assert_eq!(
+        c.ingest(&MAIN, &result("u9", Some("a2"), "t1", "x", &json!({}))),
+        Vec::<Change>::new()
+    );
     // A record read twice (a tail that went back) changes nothing.
-    assert!(c.ingest(&MAIN, &user("p3", Some("a1"), &json!("second, reworded"))).is_empty());
+    assert_eq!(
+        c.ingest(&MAIN, &user("p3", Some("a1"), &json!("second, reworded"))),
+        Vec::<Change>::new()
+    );
 }
 
 /// Esc, slash commands and their output, bash mode, compaction with its summary.
@@ -744,7 +750,7 @@ fn a_pasted_picture_is_on_its_prompt() {
         image.at,
         TextRef { record: "p1".to_owned(), part: Part::Image { tool_use_id: None, index: 0 } }
     );
-    assert!(alone.text.text.is_empty());
+    assert_eq!(alone.text.text, "");
     assert_eq!(alone.images.len(), 1);
     assert_eq!(c.turns(&MAIN).len(), 2, "each opens a turn");
     let jsonl =
