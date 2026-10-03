@@ -137,8 +137,8 @@ pub(super) struct ThreadFaces {
     server: HashMap<ThreadId, ThreadStand>,
     /// Each machine's plan windows as its agents' rows last said them, for the status bar.
     meters: slopty_client::meters::PlanMeters,
-    /// Starts sent and not yet answered, and the worker each went to.
-    starts: HashMap<IntentId, WorkerKey>,
+    /// Starts sent and not yet answered: the worker each went to, and its agent.
+    starts: HashMap<IntentId, (WorkerKey, AgentId)>,
     /// The thread tile whose view takes the keyboard once it is made.
     focus_item: Option<ItemId>,
 }
@@ -238,10 +238,18 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         let id = IntentId::new();
+        // Said at once, so the start shows before the machine answers with its thread.
+        let starting = format!(
+            "Starting {} on {} in {}\u{2026}",
+            super::projects::agent_label(&agent),
+            self.worker_name(key),
+            super::tile::cwd_tail(&cwd, self.home_of(key)),
+        );
         let start = Start { agent, cwd, drive: None, prompt, model: None, args: Vec::new() };
         tracing::info!(%key, %id, agent = %start.agent.0, cwd = start.cwd, "start thread");
-        self.faces.threads.starts.insert(id, key);
+        self.faces.threads.starts.insert(id, (key, start.agent.clone()));
         self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }));
+        self.show_notice(starting, cx);
         cx.notify();
     }
 
@@ -356,7 +364,6 @@ impl WorkspaceView {
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
-        self.ask_agents(cx);
     }
 
     /// The link to `key` went: its thread views show what they last knew.
@@ -396,12 +403,19 @@ impl WorkspaceView {
     /// `key`'s answer to one of this client's intents. A start answered with its thread
     /// opens the thread as a tile there; one refused says why.
     pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
-        if self.faces.threads.starts.get(&done.id) == Some(&key) {
-            self.faces.threads.starts.remove(&done.id);
+        if self.faces.threads.starts.get(&done.id).is_some_and(|(at, _)| *at == key) {
+            let Some((_, agent)) = self.faces.threads.starts.remove(&done.id) else { return };
             match &done.outcome {
                 Outcome::Started { thread } => self.open_thread(key, *thread, cx),
                 Outcome::Refused { reason } => self.show_notice(reason.clone(), cx),
-                other => tracing::debug!(?other, "a start answered with no thread"),
+                Outcome::Unsupported { .. } | Outcome::Done | Outcome::Accepted => {
+                    let text = format!(
+                        "{} can\u{2019}t start {} here",
+                        self.worker_name(key),
+                        super::projects::agent_label(&agent)
+                    );
+                    self.show_notice(text, cx);
+                }
             }
             return;
         }

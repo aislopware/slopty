@@ -106,6 +106,7 @@ mod tests {
 
     fn ack() -> HelloAck {
         HelloAck {
+            settings: String::new(),
             worker: WorkerId::new(),
             name: "sim".to_owned(),
             home: String::new(),

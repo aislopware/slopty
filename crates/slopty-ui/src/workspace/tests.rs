@@ -111,7 +111,7 @@ fn healthy() -> WorkerCaps {
         can_inject: true,
         version: env!("CARGO_PKG_VERSION").into(),
         agents: vec![slopty_proto::server::InstalledAgent {
-            kind: AgentKind::ClaudeCode,
+            agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
             version: "2.1.0".into(),
         }],
         ..WorkerCaps::bare(Os::MacOs)
@@ -134,6 +134,7 @@ fn thread_starts(fake: &mut Fake) -> Vec<(String, String, Option<String>)> {
 /// What a worker `name` says on a new link: no home, all well, `sessions` alive.
 fn hello(name: &str, sessions: Vec<SessionSummary>) -> HelloAck {
     HelloAck {
+        settings: String::new(),
         worker: slopty_core::WorkerId::new(),
         name: name.to_owned(),
         home: String::new(),

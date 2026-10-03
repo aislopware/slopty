@@ -3,14 +3,13 @@
 //! step lists the last choice first, so ↩ ↩ ↩ starts the last combination again, and a step
 //! with one choice is passed over. The palette's "New `agent` agent" lines start at the machine.
 //!
-//! What a machine can start comes from its own link (the agents its capabilities found
-//! installed) and from the server's facts about it, so a machine reached with no server still
-//! offers what it has. The folders are the focused shell's on that machine, then the last start's
+//! What a machine can start comes from its own link: the agents its capabilities found
+//! installed, Claude Code, Codex, pi and every ACP agent, so a machine reached with no server
+//! offers all it has. The folders are the focused shell's on that machine, then the last start's
 //! there, then where its shells stand, most recent first, then its home.
 
 use gpui::{AppContext as _, Context, Window};
 use slopty_client::layout::WorkerKey;
-use slopty_proto::agent::AgentKind;
 use slopty_proto::thread::AgentId;
 
 use super::WorkspaceView;
@@ -40,17 +39,14 @@ pub(super) struct LastStart {
 }
 
 impl WorkspaceView {
-    /// The agents `key` can start a thread of while its link is up: those its link found
-    /// installed, then those the server's facts name, each once.
+    /// The agents `key` can start a thread of while its link is up: those its link says are
+    /// installed there, Claude Code, Codex, pi and the ACP agents alike, each once.
     pub(super) fn startable_on(&self, key: WorkerKey) -> Vec<AgentId> {
         let Some(w) = self.workers.get(&key).filter(|w| w.link.is_some()) else {
             return Vec::new();
         };
-        let installed = w.caps.iter().flat_map(|c| &c.agents).map(|a| match a.kind {
-            AgentKind::ClaudeCode => AgentId::named(AgentId::CLAUDE_CODE),
-        });
         let mut out: Vec<AgentId> = Vec::new();
-        for agent in installed.chain(self.agents_on(key).iter().cloned()) {
+        for agent in w.caps.iter().flat_map(|c| &c.agents).map(|a| a.agent.clone()) {
             if !out.contains(&agent) {
                 out.push(agent);
             }

@@ -26,6 +26,9 @@ pub struct HelloAck {
     /// The worker's home directory (`$HOME` of its daemon), so a client writes a path under it
     /// as `~/…` knowing, not guessing from the path's shape. Empty when the daemon has none.
     pub home: String,
+    /// Where its settings file is, so a client edits that machine's settings in a file tile of
+    /// its own. Empty when the daemon has none.
+    pub settings: String,
     /// What the worker can do and how it is doing, as the server's directory lists it; later
     /// changes come as [`WorkerMsg::Caps`](crate::WorkerMsg::Caps).
     pub caps: WorkerCaps,

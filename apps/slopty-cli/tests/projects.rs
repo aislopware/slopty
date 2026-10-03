@@ -140,7 +140,10 @@ mod tests {
                 .any(|w| {
                     w.name == name
                         && w.liveness == Liveness::Online
-                        && w.caps.agents.iter().any(|a| a.kind == AgentKind::ClaudeCode)
+                        && w.caps
+                            .agents
+                            .iter()
+                            .any(|a| a.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
                 })
                 .then_some(())
         })
@@ -192,7 +195,10 @@ mod tests {
         let worker = until("the worker registers with Claude Code installed", async || {
             hub.directory().into_iter().find(|w| {
                 w.liveness == Liveness::Online
-                    && w.caps.agents.iter().any(|a| a.kind == AgentKind::ClaudeCode)
+                    && w.caps
+                        .agents
+                        .iter()
+                        .any(|a| a.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
             })
         })
         .await

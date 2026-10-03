@@ -217,9 +217,6 @@ impl WorkspaceView {
         if self.palette.is_some() {
             return;
         }
-        // The agents a worker offers come with its facts, which change as it installs or
-        // loses one: the next palette shows what this asks.
-        self.ask_agents(cx);
         let items = self.offered_lines(window, cx);
         let theme = self.theme.clone();
         let palette = cx.new(|cx| {

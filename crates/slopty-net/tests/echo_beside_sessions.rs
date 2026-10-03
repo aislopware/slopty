@@ -46,6 +46,7 @@ mod tests {
     async fn serve(listener: WorkerListener, lifted: bool) {
         let mut client = listener.accept().await.unwrap();
         let ack = HelloAck {
+            settings: String::new(),
             worker: WorkerId::new(),
             name: "worker".to_owned(),
             home: String::new(),

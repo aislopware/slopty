@@ -291,6 +291,7 @@ mod tests {
         let mut client = listener.accept().await.unwrap();
         let _unwatched = accepted.send(client.conn.clone());
         let ack = HelloAck {
+            settings: String::new(),
             worker: WorkerId::new(),
             name: "worker".to_owned(),
             home: String::new(),

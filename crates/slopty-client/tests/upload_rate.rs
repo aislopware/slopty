@@ -52,6 +52,7 @@ mod tests {
         let accepted = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
             let ack = HelloAck {
+                settings: String::new(),
                 worker,
                 name: "worker".to_owned(),
                 home: String::new(),
@@ -164,6 +165,7 @@ mod tests {
         let accepted = tokio::spawn(async move {
             let mut client = listener.accept().await.unwrap();
             let ack = HelloAck {
+                settings: String::new(),
                 worker,
                 name: "worker".to_owned(),
                 home: String::new(),

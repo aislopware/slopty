@@ -6,13 +6,15 @@
 //! only when something a caller would act on changed. The load goes out on its own, so what
 //! the worker can do compares equal until it changes.
 
+use std::collections::BTreeMap;
 #[cfg(target_os = "macos")]
 use std::ffi::CStr;
 use std::time::Duration;
 
-use slopty_proto::agent::AgentKind;
+use slopty_proto::project::{Fact, Facts};
 use slopty_proto::screen::{DisplayInfo, VideoCodec};
 use slopty_proto::server::{InstalledAgent, Os, WorkerCaps};
+use slopty_proto::thread::AgentId;
 use tokio::sync::watch;
 
 /// How often permissions and displays are looked at: TCC and display changes come with no
@@ -24,27 +26,44 @@ const WAKE_PERIOD: Duration = Duration::from_mins(1);
 /// How often a load change is reported, and by how much it must have moved.
 const LOAD_PERIOD: Duration = Duration::from_secs(30);
 const LOAD_STEP: f32 = 0.5;
-/// How long `claude --version` may take, login shell included.
-const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `pmset` may take.
+#[cfg(target_os = "macos")]
+const PMSET_TIMEOUT: Duration = Duration::from_secs(10);
 /// The most of an agent command's output kept: `claude agents --json` lists every session.
 const OUTPUT_CAP: usize = 4 << 20;
 
-/// The coding agents installed here, with the versions they report.
+/// The agents with an adapter of their own, by the program [`crate::facts::agents`] names.
+const ADAPTED: [(&str, &str); 3] =
+    [("claude", AgentId::CLAUDE_CODE), ("codex", AgentId::CODEX), ("pi", AgentId::PI)];
+
+/// The coding agents a thread can be started of here, with the versions they report.
 ///
-/// Runs each agent's `--version` once, as a child process (through the login shell when the
-/// daemon's own `PATH` does not have it, as ptyd runs such a program).
-pub async fn installed_agents() -> Vec<InstalledAgent> {
-    let mut out = Vec::new();
-    if let Some(version) = version_of("claude").await {
-        out.push(InstalledAgent { kind: AgentKind::ClaudeCode, version });
-    }
-    out
+/// Claude Code, Codex and pi, then each agent reached over ACP whose program is here, the
+/// person's own (`own_acp`, from `[worker.acp]`) among the known ones. What a client offers to
+/// start on this machine is exactly this, with no server needed.
+pub async fn installed_agents(own_acp: &BTreeMap<String, Vec<String>>) -> Vec<InstalledAgent> {
+    let (agents, acp) = crate::facts::agents(own_acp).await;
+    agents_in(&agents, &acp)
 }
 
-async fn version_of(program: &str) -> Option<String> {
-    let stdout = agent_output(program, &["--version"], VERSION_TIMEOUT).await?;
-    let text = String::from_utf8_lossy(&stdout);
-    text.lines().map(str::trim).rfind(|line| !line.is_empty()).map(str::to_owned)
+/// The agents a thread can be started of, from the `agents` and `acp` facts.
+///
+/// Those with an adapter come in its order, then the ACP ones by name. An agent with no adapter
+/// (`aider`) is not startable, and an ACP agent that says no version is listed with none.
+#[must_use]
+pub fn agents_in(agents: &Facts, acp: &Facts) -> Vec<InstalledAgent> {
+    let text = |fact: &Fact| match fact {
+        Fact::Text(version) => version.clone(),
+        _ => String::new(),
+    };
+    let adapted = ADAPTED.iter().filter_map(|(program, name)| {
+        let version = text(agents.get(*program)?);
+        Some(InstalledAgent { agent: AgentId::named(name), version })
+    });
+    let reached = acp
+        .iter()
+        .map(|(name, fact)| InstalledAgent { agent: AgentId::acp(name), version: text(fact) });
+    adapted.chain(reached).collect()
 }
 
 /// What an agent's command line `program args…` prints, when it succeeds within `wait`.
@@ -114,7 +133,7 @@ pub async fn wake_on_lan() -> Option<bool> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();
-    let output = tokio::time::timeout(VERSION_TIMEOUT, output).await.ok()?.ok()?;
+    let output = tokio::time::timeout(PMSET_TIMEOUT, output).await.ok()?.ok()?;
     womp(&String::from_utf8_lossy(&output.stdout))
 }
 
@@ -322,6 +341,37 @@ fn sysctl_u64(name: &CStr) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a machine can start is every agent with an adapter its facts found, by the name its
+    /// threads carry, then each ACP agent found, the one that says no version listed with none;
+    /// a program with no adapter (aider) is not startable.
+    #[test]
+    fn the_agents_found_are_what_a_thread_can_be_started_of() {
+        let text = |v: &str| Fact::Text(v.to_owned());
+        let agents: Facts = [
+            ("aider".to_owned(), text("0.86.1")),
+            ("codex".to_owned(), text("0.157.0")),
+            ("claude".to_owned(), text("2.1.286")),
+            ("pi".to_owned(), text("0.42.1")),
+        ]
+        .into();
+        let acp: Facts =
+            [("gemini".to_owned(), text("0.9.0")), ("goose".to_owned(), Fact::Bool(true))].into();
+        let found = agents_in(&agents, &acp);
+        let named: Vec<(&str, &str)> =
+            found.iter().map(|a| (a.agent.0.as_str(), a.version.as_str())).collect();
+        assert_eq!(
+            named,
+            [
+                ("claude-code", "2.1.286"),
+                ("codex", "0.157.0"),
+                ("pi", "0.42.1"),
+                ("acp:gemini", "0.9.0"),
+                ("acp:goose", ""),
+            ]
+        );
+        assert_eq!(agents_in(&Facts::new(), &Facts::new()), []);
+    }
 
     /// A Linux worker names its distribution and version, quoted or not.
     #[test]

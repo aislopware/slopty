@@ -989,3 +989,48 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_mcp_form_is_answered_as_its_content` (`crates/slopty-agent/tests/codex.rs`);
     `an_exited_thread_is_resumed_on_its_own_session_in_a_new_terminal`
     (`crates/slopty-worker/tests/claude_start.rs`).
+
+- ✅ **A machine's own link says which agents it can start, with no server** (2026-10-04,
+  readiness N11). This replaces "What a worker offers comes from its facts" above: with no
+  server linked, nothing but Claude Code could be started, and the worker's capabilities found
+  only `claude`.
+  - *Wire.* `InstalledAgent` names its agent by the open `AgentId` its threads carry
+    (`claude-code`, `codex`, `pi`, `acp:<name>`), not by a closed kind. Golden
+    `machine_hello_ack` (`tests/golden_machine.rs`).
+  - *The worker.* `caps::installed_agents` reads the same `agents` and `acp` facts the server is
+    told (`facts::agents`): Claude Code, Codex and pi where their program answers `--version`,
+    then each ACP agent of the registry or of `[worker.acp]` whose program is there. A program
+    with no adapter (`aider`) is a fact but not startable.
+  - *The client.* The palette's "New <agent> agent" lines and the start picker read the
+    machine's capabilities as its link last said them, and an open palette takes a change at
+    once. The server's `WorkerFacts` question is gone from this path.
+  - *A start shows at once.* "Starting Codex on studio in ~/x…" is said as the start is sent,
+    and an answer that is neither a thread nor a refusal (`Unsupported`) is said in words rather
+    than logged.
+  - Tests: `the_agents_found_are_what_a_thread_can_be_started_of` (`slopty-worker::caps`),
+    `a_started_thread_opens_as_a_tile_and_a_refusal_is_said` and
+    `an_open_palette_takes_the_agents_as_they_arrive` (`workspace/tests/thread_start.rs`).
+
+- ✅ **An edit can be allowed as the person changed it, through the hook's `updatedInput`**
+  (2026-10-04, rulings §5a; the wire and the adapter, the tray's "Edit…" to follow). The
+  hooks reference documents `updatedInput` on a `PermissionRequest` allow as the call's changed
+  input, which Claude Code checks against its rules again before it runs it.
+  - `PermissionPrompt::editable` and `Request::editable` carry the parts of the call the person
+    may change: an `Edit`'s `new_string` and a `Write`'s `content`, each up to
+    `Editable::TEXT_MAX` (256 KiB). A longer one is allowed or denied whole.
+  - The answer is `Verdict::AllowEdited { input }` on the conversation path, and on the thread
+    path an `Intent::Answer` whose choice is `Editable::choice`, a JSON object keyed
+    `allow-edited`, which no option id, answer list or typed words can be.
+  - The relay lays the edited fields over the call's own input, taking only a field offered
+    for editing that the call holds as text. An edit can neither add a field, point the call at
+    another path, nor change one that is not text, and words that are not a JSON object of
+    texts leave the call as asked.
+  - Tests: `an_edited_allow_carries_the_edited_input` (`slopty-agent::permission`),
+    `an_edited_allow_reads_back_and_nothing_else_does` (`slopty-proto::thread`), goldens
+    `machine_permission_editable`, `machine_answer_edited` and `intent_answer_edited`.
+
+- ✅ **A thread lists the modes its agent publishes** (2026-10-04). `ThreadMeta::modes` (id,
+  label, the agent's own description) answers the proposed change above. An ACP agent's session
+  modes, or its mode config option, fill it. Claude Code, Codex and pi publish none on their
+  doors, so theirs stay empty and the TUI changes their mode. The chip that sends
+  `Intent::SetMode` from the list is next. Golden `frame_snapshot`.

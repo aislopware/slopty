@@ -3,11 +3,7 @@
 //! agent" lines starting at the machine; the start sent to that machine, and the thread it
 //! answers with opened as a tile of its own.
 
-use std::collections::BTreeMap;
-
 use slopty_core::WorkerId;
-use slopty_proto::orchestration::{Outcome as Answer, Verb};
-use slopty_proto::project::{Fact, Facts, WorkerFacts};
 use slopty_proto::thread::wire::{IntentDone, Outcome, ThreadRequest};
 use slopty_proto::thread::{AgentId, ThreadId};
 
@@ -16,14 +12,16 @@ use super::super::projects::worker_key;
 use super::*;
 use crate::palette::PaletteRun;
 
-/// What a worker reports of itself: the programs `agents` found (with their versions) and
-/// the ACP agents its registry lists.
-fn facts_of(worker: WorkerId, agents: &[&str], acp: &[&str]) -> WorkerFacts {
-    let map = |names: &[&str]| {
-        Fact::Map(names.iter().map(|n| ((*n).to_owned(), Fact::Text("1.0".into()))).collect())
-    };
-    let facts: Facts = BTreeMap::from([("agents".into(), map(agents)), ("acp".into(), map(acp))]);
-    WorkerFacts { worker, facts }
+/// A machine's capabilities with `agents` installed: what its link says it can start.
+fn with_agents(agents: &[AgentId]) -> WorkerCaps {
+    let installed = agents
+        .iter()
+        .map(|agent| slopty_proto::server::InstalledAgent {
+            agent: agent.clone(),
+            version: "1.0".to_owned(),
+        })
+        .collect();
+    WorkerCaps { agents: installed, ..healthy() }
 }
 
 /// The palette's "New … agent" labels, in order.
@@ -67,18 +65,8 @@ fn settle(cx: &mut VisualTestContext) {
     cx.run_until_parked();
 }
 
-/// Answer every question the server was asked with `facts`.
-fn answer(queue: &mut slopty_client::server::CallQueue, facts: &[WorkerFacts]) -> Vec<Verb> {
-    let mut asked = Vec::new();
-    while let Some((verb, reply)) = queue.try_next() {
-        let _gone = reply.send(Answer::Facts(facts.to_vec()));
-        asked.push(verb);
-    }
-    asked
-}
-
-/// A studio with Claude Code (its link's word) and Codex (the server's), and a laptop with
-/// Claude Code; a shell in `/src/app` on the studio has the focus.
+/// A studio with Claude Code and Codex, and a laptop with Claude Code, each as its own link
+/// says, with no server; a shell in `/src/app` on the studio has the focus.
 struct Two {
     studio: Fake,
     laptop: Fake,
@@ -89,14 +77,12 @@ fn two_machines(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Two
     let studio = connect(view, cx, worker_key(studio_id).value(), "studio");
     let laptop = connect(view, cx, worker_key(laptop_id).value(), "laptop");
     let shell = opens_in(view, cx, &studio, SessionId::new(), studio.me, 1, Some("/src/app"));
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let (claude, codex) = (AgentId::named(AgentId::CLAUDE_CODE), AgentId::named(AgentId::CODEX));
     view.update_in(cx, |v, _w, cx| {
-        v.set_server_caller(Some(caller));
+        v.set_worker_caps(studio.key, with_agents(&[claude.clone(), codex]), cx);
+        v.set_worker_caps(laptop.key, with_agents(&[claude]), cx);
         v.focus_tile(shell, cx);
-        v.ask_agents(cx);
     });
-    cx.run_until_parked();
-    answer(&mut queue, &[facts_of(studio_id, &["codex"], &[]), facts_of(laptop_id, &[], &[])]);
     cx.run_until_parked();
     Two { studio, laptop }
 }
@@ -211,6 +197,11 @@ fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContex
     });
     let sent = starts(&mut studio);
     let [(intent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("Starting Claude Code on studio in ~\u{2026}"),
+        "the start shows before the machine answers"
+    );
 
     let thread = ThreadId::new();
     let started = IntentDone { id: *intent, outcome: Outcome::Started { thread } };
@@ -259,24 +250,34 @@ fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContex
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
         Some("claude is not on this machine's PATH")
     );
+
+    let codex = AgentId::named(AgentId::CODEX);
+    view.update_in(cx, |v, _w, cx| v.start_thread(studio_key, codex, "~".into(), None, cx));
+    let sent = starts(&mut studio);
+    let [(intent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    let unsupported = slopty_proto::thread::Cap::named(slopty_proto::thread::Cap::HANDOFF);
+    let unsupported =
+        IntentDone { id: *intent, outcome: Outcome::Unsupported { cap: unsupported } };
+    view.update_in(cx, |v, _w, cx| v.thread_done(studio_key, &unsupported, cx));
+    settle(cx);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("studio can\u{2019}t start Codex here"),
+        "a start the machine cannot make is said, not dropped"
+    );
 }
 
-/// A palette opened before the machine's agents are known takes them as they arrive: what was
-/// typed finds the new line, and ↩ starts at the machine step, with no closing and opening it
-/// again.
+/// A palette opened before the machine's link says it has Codex takes it as it arrives: what
+/// was typed finds the new line, and ↩ starts at the machine step, with no closing and opening
+/// it again.
 #[gpui::test]
 fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
-    let studio_id = WorkerId::new();
-    let mut studio = connect(&view, cx, worker_key(studio_id).value(), "studio");
+    let mut studio = connect(&view, cx, 1, "studio");
     let shell = opens_in(&view, cx, &studio, SessionId::new(), studio.me, 1, Some("/src/app"));
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
     let studio_key = studio.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.set_server_caller(Some(caller));
-        v.threads_linked(studio_key, cx);
-    });
+    view.update_in(cx, |v, _w, cx| v.threads_linked(studio_key, cx));
     cx.run_until_parked();
     studio.drain();
 
@@ -284,7 +285,8 @@ fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
     cx.run_until_parked();
     cx.simulate_keystrokes("n e w space c o d e x space a g e n t");
     cx.run_until_parked();
-    answer(&mut queue, &[facts_of(studio_id, &["codex"], &[])]);
+    let agents = [AgentId::named(AgentId::CLAUDE_CODE), AgentId::named(AgentId::CODEX)];
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(studio_key, with_agents(&agents), cx));
     settle(cx);
     cx.simulate_keystrokes("enter");
     settle(cx);

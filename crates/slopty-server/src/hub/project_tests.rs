@@ -46,7 +46,7 @@ fn worker_again(
     let (tx, rx) = mpsc::channel(8);
     let ip = IpAddr::from([100, 64, 0, if name == "box" { 9 } else { 7 }]);
     registration.caps.agents = vec![slopty_proto::server::InstalledAgent {
-        kind: AgentKind::ClaudeCode,
+        agent: slopty_proto::thread::AgentId::named(slopty_proto::thread::AgentId::CLAUDE_CODE),
         version: "2.1.0".to_owned(),
     }];
     let lease = hub.register(registration, ip, tx).unwrap();

@@ -172,6 +172,20 @@ pub async fn gather(own: Own) -> Facts {
     facts
 }
 
+/// The coding agents installed here, as `gather` puts them under `agents` and `acp`.
+///
+/// Those run by an adapter of their own (and the other agent programs it knows) by program, then
+/// those reached over ACP by the registry's name, the person's own (`own_acp`) among them. What the
+/// worker's capabilities say it can start ([`crate::caps::installed_agents`]).
+pub async fn agents(own_acp: &BTreeMap<String, Vec<String>>) -> (Facts, Facts) {
+    let (login, stand_ins) = tokio::join!(login_path(), StandIns::find());
+    let search = Arc::new(SearchPath::of(std::env::var_os("PATH").into_iter().chain(login)));
+    tokio::join!(
+        versions(&search, &stand_ins, &AGENTS),
+        acp_agents(&search, &stand_ins, registry::registry(own_acp)),
+    )
+}
+
 /// The versions of those of `tools` installed here, by name.
 async fn versions(search: &Arc<SearchPath>, stand_ins: &StandIns, tools: &'static [Tool]) -> Facts {
     let mut running = JoinSet::new();

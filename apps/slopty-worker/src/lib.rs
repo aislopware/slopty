@@ -185,6 +185,8 @@ pub(crate) struct Daemon {
     pub load: tokio::sync::watch::Receiver<f32>,
     /// The daemon's home directory, which a client writes as `~`.
     pub home: String,
+    /// Its `settings.toml`, which a client opens to edit this machine's settings.
+    pub settings: String,
     /// Who follows which agent's conversation, and the permission prompts held for them.
     pub follows: Arc<parking_lot::Mutex<follow::Follows>>,
     /// Slopty's Claude Code mod as written under the data dir, and the socket it posts to;
@@ -476,17 +478,19 @@ async fn follow_settings(
 }
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
-/// answers) and tell every client each change.
+/// answers, the person's own ACP agents from `own_acp` among them) and tell every client each
+/// change.
 fn watch_caps(
     caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
     load: tokio::sync::watch::Sender<f32>,
     events: broadcast::Sender<slopty_proto::WorkerMsg>,
+    own_acp: std::collections::BTreeMap<String, Vec<String>>,
 ) {
     let mut changed = caps.subscribe();
     let mut moved = load.subscribe();
     let load_events = events.clone();
     tokio::spawn(async move {
-        let agents = slopty_worker::caps::installed_agents().await;
+        let agents = slopty_worker::caps::installed_agents(&own_acp).await;
         caps.send_modify(|c| c.agents.clone_from(&agents));
         slopty_worker::caps::watch(caps, load, agents).await;
     });
@@ -648,7 +652,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     let paths = tailnet::Paths::spawn(listener.admission().clone());
     let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[], None));
     let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
-    watch_caps(caps_tx, load_tx, events.clone());
+    watch_caps(caps_tx, load_tx, events.clone(), own.acp.clone());
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     let mod_path = modsock::beside(&ctl_path);
     let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
@@ -708,6 +712,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         caps,
         load,
         home: slopty_platform::dirs::home().to_str().map(str::to_owned).unwrap_or_default(),
+        settings: slopty_settings::path_in(&data_dir).to_string_lossy().into_owned(),
         follows: Arc::default(),
         handoffs: Arc::default(),
         presence,

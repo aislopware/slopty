@@ -22,6 +22,7 @@ mod tests {
 
     fn ack(worker: WorkerId) -> HelloAck {
         HelloAck {
+            settings: String::new(),
             worker,
             name: "worker".to_owned(),
             home: String::new(),

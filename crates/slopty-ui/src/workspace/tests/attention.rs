@@ -283,6 +283,7 @@ fn worker(
     let factory: ScreenFactory =
         Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
     let hello = HelloAck {
+        settings: String::new(),
         worker: slopty_core::WorkerId::new(),
         name: name.to_owned(),
         home: String::new(),
@@ -544,6 +545,7 @@ fn conversation(link: &mut mpsc::Receiver<ClientMsg>) -> Vec<ConversationRequest
 
 fn asked(session: SessionId, ask: u64, tool: &str) -> PermissionEvent {
     PermissionEvent::Asked(Box::new(PermissionPrompt {
+        editable: Vec::new(),
         session,
         ask,
         tool: tool.to_owned(),

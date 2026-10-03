@@ -24,6 +24,7 @@ use slopty_proto::project::{
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
 use slopty_proto::terminal::{RepoId, SessionSummary};
+use slopty_proto::thread::AgentId;
 
 use super::{
     Again, Entry, Hub, State, WAIT_CAP_MS, WeakHub, branch_of, codex, digest, error, keep_start,
@@ -537,16 +538,17 @@ fn facts_of(entry: &Entry, agents_here: u16, made: &[(String, RepoId)]) -> Facts
     for (name, fact) in known {
         facts.insert(name.to_owned(), fact);
     }
-    // The agents it registered with are installed before its own facts say so.
-    if !caps.agents.is_empty() {
-        let agents = facts.entry("agents".to_owned()).or_insert_with(|| Fact::Map(Facts::new()));
-        if let Fact::Map(installed) = agents {
-            for agent in &caps.agents {
-                let name = match agent.kind {
-                    AgentKind::ClaudeCode => CLAUDE,
-                };
-                installed.entry(name.to_owned()).or_insert_with(|| text(&agent.version));
-            }
+    // The agents it registered with are installed before its own facts say so: those with an
+    // adapter under `agents` by program, those reached over ACP under `acp` by name.
+    for agent in &caps.agents {
+        let (map, name) = match agent.agent.acp_name() {
+            Some(name) => ("acp", name),
+            None if agent.agent.is(AgentId::CLAUDE_CODE) => ("agents", CLAUDE),
+            None => ("agents", agent.agent.0.as_str()),
+        };
+        let entry = facts.entry(map.to_owned()).or_insert_with(|| Fact::Map(Facts::new()));
+        if let Fact::Map(installed) = entry {
+            installed.entry(name.to_owned()).or_insert_with(|| text(&agent.version));
         }
     }
     facts

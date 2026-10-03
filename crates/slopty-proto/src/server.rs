@@ -89,11 +89,12 @@ pub enum Os {
     Linux,
 }
 
-/// An agent installed on a worker.
+/// An agent installed on a worker, which a thread can be started of there.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct InstalledAgent {
-    /// Which.
-    pub kind: crate::agent::AgentKind,
+    /// Which, by the open name its threads carry: Claude Code, Codex, pi, or `acp:<name>` for
+    /// an agent reached over ACP.
+    pub agent: crate::thread::AgentId,
     /// Its version string, as it reports it.
     pub version: String,
 }

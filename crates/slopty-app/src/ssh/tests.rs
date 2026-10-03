@@ -541,6 +541,7 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
             worker: id,
             name: "mini".to_owned(),
             home: String::new(),
+            settings: String::new(),
             caps: WorkerCaps::bare(WorkerOs::MacOs),
             load: 0.0,
             sessions: Vec::new(),
