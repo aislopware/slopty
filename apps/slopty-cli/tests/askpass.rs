@@ -92,14 +92,25 @@ mod askpass_helper {
             let config = format!(
                 "Port {port}\nListenAddress 127.0.0.1\nHostKey {host}\nAuthorizedKeysFile {keys}\n\
                  PasswordAuthentication yes\nKbdInteractiveAuthentication no\nUsePAM no\n\
-                 StrictModes no\nPerSourcePenalties no\nPidFile {pid}\nSetEnv HOME={home}\n\
-                 LogLevel VERBOSE\n",
+                 StrictModes no\nPidFile {pid}\nSetEnv HOME={home}\nLogLevel VERBOSE\n",
                 host = at("host").display(),
                 keys = at("authorized_keys").display(),
                 pid = at("sshd.pid").display(),
                 home = at("home").display(),
             );
-            std::fs::write(at("sshd_config"), config).unwrap();
+            std::fs::write(at("sshd_config"), &config).unwrap();
+            // OpenSSH 9.8 penalises a source after failed logins, which would refuse the wrong
+            // password test's second try; older ones (Ubuntu 24.04's 9.6) reject the option.
+            let penalties = tokio::process::Command::new(Self::PROGRAM)
+                .args(["-t", "-o", "PerSourcePenalties=no", "-f"])
+                .arg(at("sshd_config"))
+                .output()
+                .await
+                .unwrap();
+            if penalties.status.success() {
+                std::fs::write(at("sshd_config"), format!("{config}PerSourcePenalties no\n"))
+                    .unwrap();
+            }
             let sshd = tokio::process::Command::new(Self::PROGRAM)
                 .arg("-D")
                 .arg("-f")
@@ -114,7 +125,11 @@ mod askpass_helper {
                 .checked_add(std::time::Duration::from_secs(10))
                 .unwrap();
             while tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-                assert!(tokio::time::Instant::now() < deadline, "sshd listens on {port}");
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "sshd listens on {port}: {}",
+                    std::fs::read_to_string(at("sshd.log")).unwrap_or_default()
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
             Some(Self { dir, port, _daemon: sshd })
