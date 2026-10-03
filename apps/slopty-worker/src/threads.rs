@@ -932,7 +932,7 @@ fn opening(
     }
 }
 
-/// A server's tasks start their threads here ([`slopty_worker::orchestrate::Verb::StartThread`]),
+/// A server's tasks start their threads here ([`slopty_proto::orchestration::Verb::StartThread`]),
 /// each through its agent's own adapter, at the seat the server chose.
 impl orchestrate::TaskThreads for Threads {
     fn start(
