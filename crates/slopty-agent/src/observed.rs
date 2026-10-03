@@ -62,13 +62,14 @@ pub enum Out {
 
 /// The capabilities an observed Claude Code has through Slopty before its hooks are heard;
 /// [`Cap::APPROVALS`] joins them once they are.
-pub const CAPS: [&str; 9] = [
+pub const CAPS: [&str; 10] = [
     Cap::FORK,
     Cap::INTERRUPT,
     Cap::LIVE_TEXT,
     Cap::LIVE_TUI,
     Cap::QUEUE,
     Cap::SET_MODEL,
+    Cap::SCHEDULE,
     Cap::SLEEP,
     Cap::SNAPSHOTS,
     Cap::STEER,

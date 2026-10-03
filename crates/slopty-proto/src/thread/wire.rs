@@ -258,6 +258,9 @@ impl Intent {
     pub const fn needs(&self) -> &'static str {
         match self {
             Self::Send { delivery: Delivery::Steer, .. } | Self::Promote { .. } => Cap::STEER,
+            Self::Send { delivery: Delivery::At { .. } | Delivery::After { .. }, .. } => {
+                Cap::SCHEDULE
+            }
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
             | Self::Edit { .. }

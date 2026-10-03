@@ -8,10 +8,12 @@
 
 use slopty_proto::thread::{BackgroundTask, Liveness, Phase, ThreadState, TurnState};
 
-/// Why `state`'s agent is not put to sleep now, in words; `None` when it may be. `armed` says
-/// whether a message is scheduled for the thread, which a sleeping agent would miss.
+/// Why `state`'s agent is not put to sleep now, in words; `None` when it may be. A message
+/// scheduled for the thread ([`super::schedule`]) holds it awake too: asleep, it would miss it.
 #[must_use]
-pub fn refusal(state: &ThreadState, armed: bool) -> Option<&'static str> {
+pub fn refusal(state: &ThreadState) -> Option<&'static str> {
+    let (scheduled, waiting): (Vec<_>, Vec<_>) =
+        state.pending.iter().partition(|p| p.delivery.is_scheduled());
     let at_rest = state.last_turn().is_none_or(|turn| turn.state != TurnState::Active)
         && !matches!(state.status.phase, Phase::Working | Phase::Waiting);
     match state.status.liveness {
@@ -27,11 +29,11 @@ pub fn refusal(state: &ThreadState, armed: bool) -> Option<&'static str> {
                 Some("It waits on your answer")
             } else if !at_rest {
                 Some("It is working")
-            } else if !state.pending.is_empty() {
+            } else if !waiting.is_empty() {
                 Some("A message waits to go to it")
             } else if state.tasks.iter().any(BackgroundTask::is_running) {
                 Some("Its background work still runs")
-            } else if armed {
+            } else if !scheduled.is_empty() {
                 Some("A scheduled message waits for it")
             } else {
                 None
@@ -117,28 +119,28 @@ mod tests {
     /// under way is put to sleep; each other case says why.
     #[test]
     fn only_an_agent_at_rest_with_nothing_under_way_sleeps() {
-        assert_eq!(refusal(&resting(), false), None);
+        assert_eq!(refusal(&resting()), None);
 
         let mut never = ThreadState::new(meta());
         never.status.phase = Phase::Idle;
-        assert_eq!(refusal(&never, false), Some("It has not been asked anything yet"));
+        assert_eq!(refusal(&never), Some("It has not been asked anything yet"));
 
         let mut working = resting();
         working.turns[0].state = TurnState::Active;
-        assert_eq!(refusal(&working, false), Some("It is working"));
+        assert_eq!(refusal(&working), Some("It is working"));
         let mut waiting = resting();
         waiting.status.phase = Phase::Waiting;
-        assert_eq!(refusal(&waiting, false), Some("It is working"));
+        assert_eq!(refusal(&waiting), Some("It is working"));
 
         let mut asking = resting();
         asking.status.phase = Phase::NeedsYou;
-        assert_eq!(refusal(&asking, false), Some("It waits on your answer"));
+        assert_eq!(refusal(&asking), Some("It waits on your answer"));
         let mut open = resting();
         open.requests.push(request(RequestState::Open));
-        assert_eq!(refusal(&open, false), Some("It waits on your answer"));
+        assert_eq!(refusal(&open), Some("It waits on your answer"));
         let mut settled = resting();
         settled.requests.push(request(RequestState::Withdrawn));
-        assert_eq!(refusal(&settled, false), None, "a settled request holds nothing");
+        assert_eq!(refusal(&settled), None, "a settled request holds nothing");
 
         let mut queued = resting();
         queued.pending.push(Pending {
@@ -148,7 +150,7 @@ mod tests {
             delivery: Delivery::Queue,
             state: PendingState::Waiting,
         });
-        assert_eq!(refusal(&queued, false), Some("A message waits to go to it"));
+        assert_eq!(refusal(&queued), Some("A message waits to go to it"));
 
         let mut shell = resting();
         let mut task = BackgroundTask {
@@ -162,21 +164,29 @@ mod tests {
             ended_ms: None,
         };
         shell.tasks.push(task.clone());
-        assert_eq!(refusal(&shell, false), Some("Its background work still runs"));
+        assert_eq!(refusal(&shell), Some("Its background work still runs"));
         BackgroundTask::COMPLETED.clone_into(&mut task.state);
         shell.tasks = vec![task];
-        assert_eq!(refusal(&shell, false), None, "work that ended holds nothing");
+        assert_eq!(refusal(&shell), None, "work that ended holds nothing");
 
-        assert_eq!(refusal(&resting(), true), Some("A scheduled message waits for it"));
+        let mut armed = resting();
+        armed.pending.push(Pending {
+            intent: IntentId::new(),
+            text: "later".to_owned(),
+            attachments: Vec::new(),
+            delivery: Delivery::At { at_ms: WallMs::from_millis(9) },
+            state: PendingState::Waiting,
+        });
+        assert_eq!(refusal(&armed), Some("A scheduled message waits for it"));
 
         let mut gone = resting();
         gone.status.liveness = Liveness::Exited { resumable: true };
-        assert_eq!(refusal(&gone, false), Some("Its agent is not running"));
+        assert_eq!(refusal(&gone), Some("Its agent is not running"));
         let mut asleep = resting();
         asleep.status.liveness = Liveness::Asleep { since_ms: WallMs::ZERO };
-        assert_eq!(refusal(&asleep, false), Some("It is asleep already"));
+        assert_eq!(refusal(&asleep), Some("It is asleep already"));
         let mut wakeup = resting();
         wakeup.status.liveness = Liveness::Sleeping { until_ms: WallMs::ZERO };
-        assert_eq!(refusal(&wakeup, false), Some("It waits on a wakeup of its own"));
+        assert_eq!(refusal(&wakeup), Some("It waits on a wakeup of its own"));
     }
 }

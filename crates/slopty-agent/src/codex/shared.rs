@@ -55,13 +55,14 @@ use super::protocol::{
 use crate::attach::Attached;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 8] = [
+pub const CAPS: [&str; 9] = [
     Cap::APPROVALS,
     Cap::FORK,
     Cap::INTERRUPT,
     Cap::LIVE_TEXT,
     Cap::LIVE_TUI,
     Cap::QUEUE,
+    Cap::SCHEDULE,
     Cap::SLEEP,
     Cap::STEER,
 ];

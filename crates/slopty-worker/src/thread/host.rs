@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
-    Action, AgentId, Cap, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Liveness, PendingState,
-    Phase, Status, ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId,
+    Action, AgentId, Cap, Cursor, Delivery, Edge, Fork, IntentId, ItemBody, ItemId, Liveness,
+    Pending, PendingState, Phase, Status, ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -89,6 +89,8 @@ struct Inner {
     edges: broadcast::Sender<TurnEdge>,
     /// What the worker adds to a seat's variables, once the daemon says.
     seat_env: Option<EnvOf>,
+    /// Told whenever a scheduled message is added or changed ([`Host::schedule_changed`]).
+    scheduling: Arc<tokio::sync::Notify>,
 }
 
 /// A [`SeatEnv`], which shows as nothing more.
@@ -113,7 +115,13 @@ struct Hosted {
 
 impl Hosted {
     fn open(dir: &Path, log: Log) -> io::Result<Self> {
+        let mut log = log;
         let mut own = Own::of(log.state());
+        let mut pending = log.state().pending.clone();
+        own.pending(&mut pending);
+        if pending != log.state().pending {
+            log.append(&[Action::PendingSet(pending)])?;
+        }
         own.seated = match std::fs::read(dir.join(SEAT_FILE)) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .inspect_err(|e| tracing::warn!(dir = %dir.display(), "a seat is unreadable: {e}"))
@@ -150,6 +158,9 @@ struct Own {
     seated: Option<Seated>,
     /// Whether the person put its agent to sleep: an adapter tells only that it ended.
     sleep: Sleep,
+    /// The messages the worker holds until their moment ([`super::schedule`]), which no
+    /// adapter knows: put back in every pending list an adapter tells.
+    scheduled: Vec<Pending>,
 }
 
 /// Where the person's sleep of a thread's agent is ([`Host::sleep`]).
@@ -189,7 +200,26 @@ impl Own {
             Liveness::Asleep { since_ms } => Sleep::Asleep(since_ms),
             _ => Sleep::Awake,
         };
-        Self { typed: VecDeque::new(), sent, trees, fork, seat, seated: None, sleep }
+        // One going as the worker stopped is never sent again.
+        let scheduled = state
+            .pending
+            .iter()
+            .filter(|p| p.delivery.is_scheduled())
+            .map(|p| match p.state {
+                PendingState::Sending => Pending {
+                    state: PendingState::Held { reason: super::schedule::CUT_OFF.to_owned() },
+                    ..p.clone()
+                },
+                _ => p.clone(),
+            })
+            .collect();
+        Self { typed: VecDeque::new(), sent, trees, fork, seat, seated: None, sleep, scheduled }
+    }
+
+    /// `pending`, an adapter's list, with the messages the worker holds put back after it.
+    fn pending(&self, pending: &mut Vec<Pending>) {
+        pending.retain(|p| !p.delivery.is_scheduled());
+        pending.extend(self.scheduled.iter().cloned());
     }
 
     /// `meta` with what the worker knows of it: where it branched, the seat it was started at.
@@ -230,6 +260,7 @@ impl Own {
             match action {
                 Action::Meta(meta) => self.meta(meta),
                 Action::Status(status) => self.status(status),
+                Action::PendingSet(pending) => self.pending(pending),
                 Action::ItemStarted(item)
                 | Action::ItemUpdated(item)
                 | Action::ItemCompleted(item) => {
@@ -307,6 +338,7 @@ impl Host {
                 starts,
                 edges: broadcast::Sender::new(EDGES),
                 seat_env: None,
+                scheduling: Arc::default(),
             })),
         })
     }
@@ -573,12 +605,11 @@ impl Host {
     }
 
     /// Put `thread`'s agent to sleep for intent `id` once, on the person's word: only one that
-    /// can be ([`Cap::SLEEP`]) and may be now ([`super::sleep::refusal`], with `armed` saying a
-    /// message is scheduled for it). `end` asks its adapter to end the agent. When it is done or
-    /// taken, the agent's end, whenever its adapter tells it, is told as its sleep
-    /// ([`Liveness::Asleep`]). Decided under the lock, so no message slips in between the look
-    /// and the mark. `None` for a thread not held.
-    pub fn sleep<F>(&self, thread: ThreadId, id: IntentId, armed: bool, end: F) -> Option<Outcome>
+    /// can be ([`Cap::SLEEP`]) and may be now ([`super::sleep::refusal`]). `end` asks its
+    /// adapter to end the agent. When it is done or taken, the agent's end, whenever its adapter
+    /// tells it, is told as its sleep ([`Liveness::Asleep`]). Decided under the lock, so no
+    /// message slips in between the look and the mark. `None` for a thread not held.
+    pub fn sleep<F>(&self, thread: ThreadId, id: IntentId, end: F) -> Option<Outcome>
     where
         F: FnOnce(&ThreadState) -> Outcome,
     {
@@ -590,7 +621,7 @@ impl Host {
         let state = hosted.log.state();
         let outcome = if !state.meta.can(Cap::SLEEP) {
             Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) }
-        } else if let Some(why) = super::sleep::refusal(state, armed) {
+        } else if let Some(why) = super::sleep::refusal(state) {
             Outcome::Refused { reason: why.to_owned() }
         } else {
             end(state)
@@ -602,6 +633,118 @@ impl Host {
             tracing::warn!(%thread, "an intent could not be recorded: {e}");
         }
         Some(outcome)
+    }
+
+    /// Change `thread`'s scheduled messages for intent `id` once ([`super::schedule::act`]):
+    /// `change` decides from the thread's state what comes of it and edits the list the worker
+    /// holds, which goes into the thread's pending list and log. `None` for a thread not held.
+    pub fn schedule<F>(&self, thread: ThreadId, id: IntentId, change: F) -> Option<Outcome>
+    where
+        F: FnOnce(&ThreadState, &mut Vec<Pending>) -> Outcome,
+    {
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let hosted = inner.threads.get_mut(&thread)?;
+        if let Some(outcome) = hosted.intents.outcome(&id) {
+            return Some(outcome.clone());
+        }
+        let mut scheduled = hosted.own.scheduled.clone();
+        let outcome = change(hosted.log.state(), &mut scheduled);
+        if scheduled != hosted.own.scheduled {
+            hosted.own.scheduled = scheduled;
+            let pending = hosted.log.state().pending.clone();
+            apply(hosted, &mut inner.table, &inner.edges, vec![Action::PendingSet(pending)]);
+            inner.scheduling.notify_one();
+        }
+        if let Err(e) = hosted.intents.record(id, outcome.clone()) {
+            tracing::warn!(%thread, "an intent could not be recorded: {e}");
+        }
+        Some(outcome)
+    }
+
+    /// Whether message `intent` waits on the worker in `thread` ([`Self::schedule`]).
+    #[must_use]
+    pub fn is_scheduled(&self, thread: ThreadId, intent: IntentId) -> bool {
+        self.inner
+            .lock()
+            .threads
+            .get(&thread)
+            .is_some_and(|h| h.own.scheduled.iter().any(|p| p.intent == intent))
+    }
+
+    /// Told whenever a scheduled message is added or changed.
+    #[must_use]
+    pub fn schedule_changed(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.inner.lock().scheduling)
+    }
+
+    /// The scheduled messages whose moment has come at `now`, each marked as going, and when
+    /// the next one may come; a message waiting on a thread no longer here is held, saying so.
+    /// Each goes queued where its thread's agent queues, else as a steer.
+    pub fn due(&self, now: WallMs) -> (Vec<super::schedule::Due>, Option<WallMs>) {
+        use super::schedule::{Due, When, when};
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        let mut next: Option<WallMs> = None;
+        let mut moved: Vec<(ThreadId, IntentId, PendingState)> = Vec::new();
+        let mut due = Vec::new();
+        for (thread, hosted) in &inner.threads {
+            for pending in hosted.own.scheduled.iter().filter(|p| p.state == PendingState::Waiting)
+            {
+                let watched = match pending.delivery {
+                    Delivery::After { thread: watched, .. } => {
+                        inner.threads.get(&watched).map(|h| h.log.state())
+                    }
+                    _ => None,
+                };
+                match when(pending, watched, now) {
+                    When::Now => {
+                        let meta = &hosted.log.state().meta;
+                        let delivery =
+                            if meta.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer };
+                        let send = slopty_proto::thread::wire::Intent::Send {
+                            text: pending.text.clone(),
+                            attachments: pending.attachments.clone(),
+                            delivery,
+                        };
+                        due.push(Due { thread: *thread, intent: pending.intent, send });
+                        moved.push((*thread, pending.intent, PendingState::Sending));
+                    }
+                    When::At(at) => next = Some(next.map_or(at, |n| n.min(at))),
+                    When::Later => {}
+                    When::Held(why) => {
+                        let held = PendingState::Held { reason: why.to_owned() };
+                        moved.push((*thread, pending.intent, held));
+                    }
+                }
+            }
+        }
+        for (thread, intent, state) in moved {
+            set_scheduled(inner, thread, intent, |p| p.state = state);
+        }
+        (due, next)
+    }
+
+    /// Scheduled message `intent` of `thread` went with `outcome`: gone from the list once
+    /// its agent took it, else held there with why not.
+    pub fn fired(&self, thread: ThreadId, intent: IntentId, outcome: &Outcome) {
+        let mut inner = self.inner.lock();
+        match outcome {
+            Outcome::Done | Outcome::Accepted | Outcome::Started { .. } => {
+                if let Some(hosted) = inner.threads.get_mut(&thread) {
+                    hosted.own.scheduled.retain(|p| p.intent != intent);
+                }
+                set_scheduled(&mut inner, thread, intent, |_| {});
+            }
+            Outcome::Refused { reason } => {
+                let held = PendingState::Held { reason: reason.clone() };
+                set_scheduled(&mut inner, thread, intent, |p| p.state = held);
+            }
+            Outcome::Unsupported { cap } => {
+                let held = PendingState::Held { reason: format!("Its agent cannot {}", cap.0) };
+                set_scheduled(&mut inner, thread, intent, |p| p.state = held);
+            }
+        }
     }
 
     /// The outcome intent `id` had as a start, if it was acted on.
@@ -651,6 +794,22 @@ impl Host {
         }
         outcome
     }
+}
+
+/// Change scheduled message `intent` of `thread` as `change` says, and tell the thread's
+/// pending list.
+fn set_scheduled(
+    inner: &mut Inner,
+    thread: ThreadId,
+    intent: IntentId,
+    change: impl FnOnce(&mut Pending),
+) {
+    let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+    if let Some(pending) = hosted.own.scheduled.iter_mut().find(|p| p.intent == intent) {
+        change(pending);
+    }
+    let pending = hosted.log.state().pending.clone();
+    apply(hosted, &mut inner.table, &inner.edges, vec![Action::PendingSet(pending)]);
 }
 
 /// Keep `seated` in thread directory `dir`, whole or not at all: it goes to a sibling that is

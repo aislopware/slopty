@@ -415,7 +415,7 @@ mod acp {
 
         let sleep = IntentId::new();
         let decide = |s: &ThreadState| acp.decide(s, sleep, &Intent::Sleep, rig.by());
-        assert_eq!(rig.host.sleep(thread, sleep, false, decide), Some(Outcome::Done));
+        assert_eq!(rig.host.sleep(thread, sleep, decide), Some(Outcome::Done));
         let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
         rig.until(thread, "the agent ends asleep", asleep).await;
 

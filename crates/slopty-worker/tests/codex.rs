@@ -776,7 +776,7 @@ mod codex {
                 Outcome::Refused { reason: "not served".to_owned() }
             }
         };
-        assert_eq!(host.sleep(thread, id, false, ends), Some(Outcome::Done));
+        assert_eq!(host.sleep(thread, id, ends), Some(Outcome::Done));
         let sent = until_sent(&mut heard, "thread/unsubscribe").await;
         assert_eq!(sent.last().unwrap()["params"], json!({ "threadId": native }));
         let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });

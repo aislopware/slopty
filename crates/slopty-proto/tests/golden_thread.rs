@@ -361,6 +361,25 @@ mod golden_thread {
                 ],
             }),
         );
+        snap(
+            "intent_send_at",
+            &send(Intent::Send {
+                text: "Run the nightly checks".to_owned(),
+                delivery: Delivery::At { at_ms: ms(1_800_000) },
+                attachments: Vec::new(),
+            }),
+        );
+        snap(
+            "intent_send_after",
+            &send(Intent::Send {
+                text: "Review what it changed".to_owned(),
+                delivery: Delivery::After {
+                    thread: ThreadId::from_uuid(Uuid::from_u128(0x9a)),
+                    settle_ms: 10_000,
+                },
+                attachments: Vec::new(),
+            }),
+        );
         snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
         snap(
             "intent_edit",
@@ -902,6 +921,7 @@ mod golden_thread {
                 working: 4,
                 waiting: 5,
                 idle: 6,
+                sleeping: 7,
             },
             top: Some(at),
             since_ms: ms(1_500),

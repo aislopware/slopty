@@ -482,3 +482,37 @@ proptest! {
         }
     }
 }
+
+/// An agent put to sleep stands on the lowest rung, said quietly, below one at rest; what it
+/// left that asks for a look (changes to review, its error) still ranks it, and so does an
+/// open request. Every rung is counted, and the ladder runs down to it.
+#[test]
+fn an_agent_put_to_sleep_stands_below_one_at_rest() {
+    use attention::{Counts, Rung};
+    let mut state = ThreadState::new(meta());
+    state.status = Status {
+        phase: Phase::Done,
+        wait: None,
+        liveness: Liveness::Asleep { since_ms: WallMs::from_millis(5) },
+        since_ms: WallMs::from_millis(5),
+    };
+    let rung = |state: &ThreadState| Rung::of(&state.row(WallMs::ZERO));
+    assert_eq!(rung(&state), Rung::Sleeping);
+    assert!(Rung::Sleeping < Rung::Idle);
+    assert_eq!(Rung::Sleeping.word(), Some("Asleep"));
+    assert_eq!(Rung::Idle.word(), None);
+    state.to_review = true;
+    assert_eq!(rung(&state), Rung::ToReview);
+    state.to_review = false;
+    state.status.phase = Phase::Failed;
+    assert_eq!(rung(&state), Rung::Failed);
+    state.status.phase = Phase::Done;
+    state.status.liveness = Liveness::Live;
+    assert_eq!(rung(&state), Rung::Idle, "awake again");
+    assert_eq!(Rung::DOWN.last(), Some(&Rung::Sleeping));
+    let mut counts = Counts::default();
+    for rung in Rung::DOWN {
+        counts.count(rung);
+    }
+    assert_eq!((counts.on(Rung::Sleeping), counts.total()), (1, 7));
+}

@@ -1284,7 +1284,7 @@ impl ThreadStand {
             Rung::Working => Some(Status::Working),
             Rung::Waiting => Some(Status::Running),
             Rung::ToReview => Some(Status::Done),
-            Rung::Idle => None,
+            Rung::Idle | Rung::Sleeping => None,
         }
     }
 

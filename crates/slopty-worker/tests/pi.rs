@@ -17,13 +17,13 @@ mod pi {
     use slopty_core::{ClientId, SessionId};
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase, RequestState,
-        ThreadId, ThreadState, ToolState, TurnId, TurnState,
+        Action, AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase,
+        RequestState, Status, ThreadId, ThreadState, ToolState, TurnId, TurnState,
     };
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::pi::tui::{Pending, Terminals};
     use slopty_worker::thread::pi::{self, Pi};
-    use slopty_worker::thread::{Host, Seated};
+    use slopty_worker::thread::{Host, Seated, schedule};
     use tokio::process::ChildStdin;
     use tokio::sync::watch;
 
@@ -469,7 +469,7 @@ mod pi {
 
         let sleep = IntentId::new();
         let decide = |s: &ThreadState| pi.decide(s, sleep, &Intent::Sleep, rig.by());
-        assert_eq!(rig.host.sleep(thread, sleep, false, decide), Some(Outcome::Done));
+        assert_eq!(rig.host.sleep(thread, sleep, decide), Some(Outcome::Done));
         let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
         let state = rig.until(thread, "pi ends asleep", asleep).await;
         assert_eq!(state.turns.len(), 1, "the thread kept");
@@ -486,6 +486,60 @@ mod pi {
         assert_eq!(record["unexpected"], serde_json::json!([]));
         let (_, again) = rig.intent(&pi, thread, &Intent::Wake);
         assert_eq!(again, Outcome::Done, "awake already");
+    }
+
+    /// A message scheduled to go once another thread rests waits on the worker, not in pi; once
+    /// that thread has rested for the settle, it goes to pi as the person's message, and leaves
+    /// the pending list.
+    #[tokio::test]
+    async fn a_message_scheduled_after_another_thread_goes_to_pi_once_it_rests() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let Outcome::Started { thread } = pi.start(IntentId::new(), rig.start("Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        let mut watched = state.meta.clone();
+        watched.id = ThreadId::new();
+        let other = watched.id;
+        rig.host.create(watched).unwrap();
+        let working = Status {
+            phase: Phase::Working,
+            wait: None,
+            liveness: Liveness::Live,
+            since_ms: slopty_core::WallMs::now(),
+        };
+        rig.host.apply(other, vec![Action::Status(working.clone())]);
+
+        // As the daemon sends it: the person's message, decided once per id.
+        let (sending, host, by) = (pi.clone(), rig.host.clone(), rig.by());
+        let fire: schedule::Fire = Arc::new(move |thread, id, intent| {
+            let decide = |s: &ThreadState| (sending.decide(s, id, &intent, by.clone()), vec![]);
+            host.intent(thread, id, decide)
+                .unwrap_or_else(|| Outcome::Refused { reason: "gone".into() })
+        });
+        let _scheduler = schedule::spawn(rig.host.clone(), fire);
+        let later = IntentId::new();
+        let send = Intent::Send {
+            text: "Make a file called made-by-pi.".to_owned(),
+            delivery: Delivery::After { thread: other, settle_ms: 100 },
+            attachments: vec![],
+        };
+        assert_eq!(schedule::act(&rig.host, thread, later, &send), Some(Outcome::Accepted));
+        let state = rig.until(thread, "it waits on the worker", |s| s.pending.len() == 1).await;
+        assert!(state.pending[0].delivery.is_scheduled());
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(rig.host.state(thread).unwrap().0.turns.len(), 1, "not while it works");
+
+        let rested = Status { phase: Phase::Done, since_ms: slopty_core::WallMs::now(), ..working };
+        rig.host.apply(other, vec![Action::Status(rested)]);
+        let state = rig.until(thread, "the scheduled message's ask", asking(1)).await;
+        assert!(state.pending.is_empty(), "it went");
+        let users = users(&state);
+        let sent = users.last().unwrap();
+        assert_eq!(sent.0, "Make a file called made-by-pi.");
+        assert_eq!(sent.1, Some(schedule::sent_as(later)), "as the person's message");
     }
 
     /// The worker going while the gate asks closes pi's stdin and ends pi with no answer sent,

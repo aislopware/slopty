@@ -34,7 +34,7 @@ use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
-use slopty_worker::thread::{Composer, Follower, Host, Seated};
+use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
@@ -252,6 +252,13 @@ pub fn start(daemon: &Daemon, asks: Observing) {
         Arc::new(move || slopty_settings::Settings::load(&settings).settings.worker.acp);
     drop(pi::spawn(threads.host.clone(), asks.data, None, terminals, asks.pi));
     drop(acp::spawn(threads.host.clone(), None, own, asks.acp));
+    // A scheduled message goes as the person's own, the way a client's does.
+    let (sending, at) = (threads.clone(), daemon.clone());
+    let fire: schedule::Fire = Arc::new(move |thread, id, intent| {
+        let who = Who { daemon: &at, link: ORCHESTRATION, client: ClientId::nil() };
+        act_as(&who, &sending, thread, id, &intent)
+    });
+    drop(schedule::spawn(threads.host.clone(), fire));
 }
 
 /// What a request needs of the connection it came on.
@@ -553,7 +560,7 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
 /// once the decision is made.
 async fn sleep(threads: &Threads, thread: ThreadId, id: IntentId, by: Answerer) -> Outcome {
     let mut terminal = None;
-    let outcome = threads.host.sleep(thread, id, false, |state| {
+    let outcome = threads.host.sleep(thread, id, |state| {
         if codex::is_shared(state) {
             if state.meta.terminal.is_some() {
                 return refused("Codex's own terminal holds this thread".to_owned());
@@ -747,6 +754,10 @@ fn act_as(
     id: IntentId,
     intent: &Intent,
 ) -> Outcome {
+    // A scheduled message is the worker's to hold: no agent hears of it until its moment.
+    if let Some(outcome) = schedule::act(&threads.host, thread, id, intent) {
+        return outcome;
+    }
     let decided = threads.host.intent(thread, id, |state| decide(who, threads, state, id, intent));
     decided.unwrap_or_else(|| refused("no such thread".to_owned()))
 }

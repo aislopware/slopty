@@ -45,7 +45,8 @@ use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
 
 /// What every ACP agent can do through Slopty: its requests are answered here, its turn is
 /// cancelled, its text streams, and a message waits on the worker for the turn to end.
-pub const CAPS: [&str; 4] = [Cap::APPROVALS, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::QUEUE];
+pub const CAPS: [&str; 5] =
+    [Cap::APPROVALS, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::QUEUE, Cap::SCHEDULE];
 
 /// The protocol version spoken.
 pub const PROTOCOL: ProtocolVersion = ProtocolVersion::V1;

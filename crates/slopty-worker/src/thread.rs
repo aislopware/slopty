@@ -28,6 +28,7 @@ pub mod intents;
 pub mod log;
 pub mod pi;
 pub mod review;
+pub mod schedule;
 pub mod sleep;
 pub mod table;
 pub mod terminals;

@@ -1710,7 +1710,7 @@ impl WorkspaceView {
         let mut found: Vec<(ThreadId, &super::faces::ThreadStand)> = self
             .thread_stands()
             .filter(|(thread, stand)| {
-                stand.rung != Rung::Idle
+                stand.rung > Rung::Idle
                     && !tiled_threads.contains(thread)
                     && stand.terminal.is_none_or(|s| !tiled_sessions.contains(&s))
             })

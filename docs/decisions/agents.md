@@ -1323,7 +1323,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - an open request;
     - a message waiting to go;
     - background work still running;
-    - a message scheduled for the thread.
+    - a message scheduled for the thread (it would miss it).
   - **How each agent ends.** Each ends the way it ends on its own, and the thread is kept:
     - pi's and an ACP agent's stdin are closed;
     - Codex lets the thread go at once (`thread/unsubscribe`);
@@ -1342,13 +1342,51 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
 
     The next message wakes a driven agent too, and following a Codex thread already takes it
     up again.
-  - **Not yet.** The thread view's door for an asleep thread (Wake beside Resume) and a
-    "Sleeping" rung below Idle on the server's ladder are the client's and the server's half.
+  - **On the ladder.** An asleep thread stands on `Rung::Sleeping`, below Idle, and is counted
+    apart (`Counts::sleeping`). It is said quietly ("Asleep") and never as needing the person.
+    What it left that asks for a look still ranks it: changes to review, or its error.
+  - **Not yet.** The thread view's door for an asleep thread (Wake beside Resume) is the
+    client's half.
     The daemon's Claude Code sleep (its terminal closed) has no daemon-level test yet.
   - Tests: `only_an_agent_at_rest_with_nothing_under_way_sleeps` (`thread::sleep`);
     `an_agent_put_to_sleep_ends_asleep_until_it_runs_again` and
     `a_seat_outlives_a_read_again_and_a_restart` (`slopty-worker/tests/threads.rs`);
     `a_pi_put_to_sleep_is_woken_on_its_session`,
     `an_acp_agent_put_to_sleep_is_woken_by_loading_its_session`,
-    `a_thread_put_to_sleep_is_let_go_and_woken_by_resuming_it`; goldens `intent_sleep`,
-    `intent_wake` and `frame_actions`.
+    `a_thread_put_to_sleep_is_let_go_and_woken_by_resuming_it`;
+    `an_agent_put_to_sleep_stands_below_one_at_rest` (`slopty-proto`); goldens `intent_sleep`,
+    `intent_wake`, `frame_actions` and `attention_ladder`.
+
+- ✅ **The person schedules a message for a time, or for when another thread rests** (2026-10-04,
+  from the Ghostex study's seventh idea). Two deliveries join the two a message already has:
+  `Delivery::At { at_ms }` and `Delivery::After { thread, settle_ms }`. They need
+  `Cap::SCHEDULE`, which every adapter has, since the worker holds the message and not the agent.
+  - **Kept on the worker.** A scheduled message is a pending one, so the thread view already
+    lists it, edits it and takes it back. The host holds the scheduled ones apart from what any
+    adapter knows, and puts them back in every pending list an adapter tells. They are in the
+    thread's log, so they outlive a restart. Withdraw, Edit and Promote of a scheduled message
+    are the worker's to act on and never reach the agent; Promote means send it now. Reorder is
+    refused, since each goes at its own moment.
+  - **Its moment.** `At` goes at its time. `After` goes once the thread it waits on has been at
+    rest for the settle, measured from when it came to rest. At rest means its turn ended,
+    nothing asks the person, and it has no wakeup or work of its own under way. Ghostex settles
+    for 10 s; the client picks. A thread already at rest counts from when it came to rest, so a
+    message after a thread that will not work again still goes. A message cannot wait on its own
+    thread, and one whose thread is gone is held, saying so.
+  - **How it goes.** A task on the worker (`schedule::spawn`) wakes when a schedule or the
+    thread table changes, and at the next due time. It sends each due message the way a
+    client's goes: through the daemon's intent path, as the person's own message, queued where
+    the agent queues, else as a steer. It is sent as an intent derived from the one that
+    scheduled it, so it goes once. One the agent takes leaves the list. One it turns down stays,
+    held with the agent's reason.
+  - **Never twice.** A message is marked as going, in the log, before it is sent. One the worker
+    stopped in the middle of sending comes back held ("It was being sent when the worker
+    stopped, so it may have gone") for the person to take back or send again, never sent on its
+    own. A message scheduled for a thread keeps its agent from being put to sleep.
+  - **Not yet.** The composer's way to pick a time or a thread is the client's half. So is
+    automation: a server project task on a schedule.
+  - Tests: `a_message_goes_at_its_time_or_once_its_thread_has_settled` (`thread::schedule`);
+    `a_scheduled_message_waits_on_the_worker_and_outlives_a_restart` and
+    `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`);
+    `a_message_scheduled_after_another_thread_goes_to_pi_once_it_rests`; goldens
+    `intent_send_at` and `intent_send_after`.

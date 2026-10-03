@@ -254,6 +254,9 @@ impl Cap {
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
     /// editing of what is held.
     pub const QUEUE: &'static str = "queue";
+    /// [`wire::Intent::Send`] with [`Delivery::At`] or [`Delivery::After`]: the worker holds the
+    /// message until its moment.
+    pub const SCHEDULE: &'static str = "schedule";
     /// [`wire::Intent::SetMode`].
     pub const SET_MODE: &'static str = "set-mode";
     /// [`wire::Intent::SetModel`].
@@ -988,6 +991,30 @@ pub enum Delivery {
     Steer,
     /// When the turn under way ends.
     Queue,
+    /// At a time: held on the worker until then, through a restart, and then queued
+    /// ([`Cap::SCHEDULE`]).
+    At {
+        /// When.
+        at_ms: WallMs,
+    },
+    /// Once another thread has rested for a while: held on the worker until thread `thread`
+    /// has been at rest for `settle_ms`, its turn ended and nothing asked, and then queued
+    /// ([`Cap::SCHEDULE`]).
+    After {
+        /// The thread waited on.
+        thread: ThreadId,
+        /// How long it rests first.
+        settle_ms: u32,
+    },
+}
+
+impl Delivery {
+    /// Whether the worker holds the message until its moment ([`Self::At`], [`Self::After`]),
+    /// rather than the agent's queue.
+    #[must_use]
+    pub const fn is_scheduled(self) -> bool {
+        matches!(self, Self::At { .. } | Self::After { .. })
+    }
 }
 
 /// Where a pending message is.

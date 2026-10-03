@@ -8,7 +8,7 @@ mod threads {
     use std::path::Path;
 
     use slopty_core::WallMs;
-    use slopty_proto::thread::wire::{Outcome, TableFrame, ThreadFrame};
+    use slopty_proto::thread::wire::{Intent, Outcome, TableFrame, ThreadFrame};
     use slopty_proto::thread::{
         Action, AgentId, Cap, Changed, Clipped, Cursor, Delivery, Drive, Edge, IntentId, Item,
         ItemBody, ItemId, Liveness, PartKey, Pending, PendingState, Phase, Status, TableState,
@@ -16,7 +16,7 @@ mod threads {
     };
     use slopty_worker::thread::compose::TYPED_NOT_SENT;
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::{Follower, Host, Seated};
+    use slopty_worker::thread::{Follower, Host, Seated, schedule};
 
     fn meta() -> ThreadMeta {
         ThreadMeta {
@@ -558,7 +558,7 @@ mod threads {
         let dir = tempfile::tempdir().unwrap();
         let host = open(dir.path());
         let mut sleepy = meta();
-        sleepy.caps.push(Cap::named(Cap::SLEEP));
+        sleepy.caps.extend([Cap::named(Cap::SLEEP), Cap::named(Cap::SCHEDULE)]);
         let thread = sleepy.id;
         host.create(sleepy).unwrap();
         let status = |liveness| {
@@ -572,14 +572,21 @@ mod threads {
         let liveness = |host: &Host| state(host, thread).0.status.liveness;
         let ends = |outcome| move |_: &ThreadState| outcome;
 
-        let never = host.sleep(thread, IntentId::new(), false, ends(Outcome::Done)).unwrap();
+        let never = host.sleep(thread, IntentId::new(), ends(Outcome::Done)).unwrap();
         assert!(matches!(never, Outcome::Refused { .. }), "never asked: {never:?}");
         host.apply(thread, vec![turn(1)]);
-        let busy = host.sleep(thread, IntentId::new(), false, ends(Outcome::Done)).unwrap();
+        let busy = host.sleep(thread, IntentId::new(), ends(Outcome::Done)).unwrap();
         assert!(matches!(busy, Outcome::Refused { .. }), "mid-turn: {busy:?}");
         host.apply(thread, vec![ended(1), status(Liveness::Live)]);
-        let armed = host.sleep(thread, IntentId::new(), true, ends(Outcome::Done)).unwrap();
+        let later = IntentId::new();
+        let at = Delivery::At { at_ms: WallMs::from_millis(u64::MAX) };
+        let schedule = Intent::Send { text: "later".to_owned(), delivery: at, attachments: vec![] };
+        let scheduled = schedule::act(&host, thread, later, &schedule);
+        assert_eq!(scheduled, Some(Outcome::Accepted));
+        let armed = host.sleep(thread, IntentId::new(), ends(Outcome::Done)).unwrap();
         assert!(matches!(armed, Outcome::Refused { .. }), "a message is scheduled: {armed:?}");
+        let withdraw = Intent::Withdraw { pending: later };
+        assert_eq!(schedule::act(&host, thread, IntentId::new(), &withdraw), Some(Outcome::Done));
         host.apply(thread, vec![status(Liveness::Exited { resumable: true })]);
         assert_eq!(liveness(&host), Liveness::Exited { resumable: true }, "a refusal marks none");
         host.apply(thread, vec![status(Liveness::Live)]);
@@ -590,8 +597,8 @@ mod threads {
             ended_by += 1;
             Outcome::Done
         };
-        assert_eq!(host.sleep(thread, id, false, &mut end), Some(Outcome::Done));
-        assert_eq!(host.sleep(thread, id, false, &mut end), Some(Outcome::Done), "once");
+        assert_eq!(host.sleep(thread, id, &mut end), Some(Outcome::Done));
+        assert_eq!(host.sleep(thread, id, &mut end), Some(Outcome::Done), "once");
         assert_eq!(ended_by, 1);
         host.apply(thread, vec![status(Liveness::Live)]);
         assert_eq!(liveness(&host), Liveness::Live, "awake until its agent ends");
@@ -614,7 +621,182 @@ mod threads {
         let other = plain.id;
         plain.caps.clear();
         host.create(plain).unwrap();
-        let cannot = host.sleep(other, IntentId::new(), false, ends(Outcome::Done)).unwrap();
+        let cannot = host.sleep(other, IntentId::new(), ends(Outcome::Done)).unwrap();
         assert_eq!(cannot, Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) });
+    }
+
+    fn scheduled(text: &str, delivery: Delivery) -> Intent {
+        Intent::Send { text: text.to_owned(), delivery, attachments: vec![] }
+    }
+
+    fn pending_of(host: &Host, thread: ThreadId) -> Vec<(String, Delivery, PendingState)> {
+        let (state, _) = state(host, thread);
+        state.pending.iter().map(|p| (p.text.clone(), p.delivery, p.state.clone())).collect()
+    }
+
+    /// A message the person schedules waits in the thread's pending list on the worker, once
+    /// per intent, whatever list the agent's adapter tells, and outlives a restart; it is taken
+    /// back or changed there, never moved, and one being sent as the worker stopped comes back
+    /// held, never sent twice. A message cannot wait on its own thread, nor be scheduled on a
+    /// thread that cannot take it.
+    #[tokio::test]
+    async fn a_scheduled_message_waits_on_the_worker_and_outlives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let mut plan = meta();
+        plan.caps.push(Cap::named(Cap::SCHEDULE));
+        let thread = plan.id;
+        host.create(plan.clone()).unwrap();
+        let at = Delivery::At { at_ms: WallMs::from_millis(u64::MAX) };
+        let after = Delivery::After { thread: ThreadId::new(), settle_ms: 10_000 };
+        let (first, second) = (IntentId::new(), IntentId::new());
+        let act = |id, intent: &Intent| schedule::act(&host, thread, id, intent);
+        assert_eq!(act(first, &scheduled("Run the checks", at)), Some(Outcome::Accepted));
+        assert_eq!(act(first, &scheduled("Run the checks", at)), Some(Outcome::Accepted), "once");
+        assert_eq!(act(second, &scheduled("Review it", after)), Some(Outcome::Accepted));
+        let own = Delivery::After { thread, settle_ms: 1 };
+        let refused = act(IntentId::new(), &scheduled("Me", own)).unwrap();
+        assert!(matches!(refused, Outcome::Refused { .. }), "{refused:?}");
+        let waiting = |text: &str, delivery| (text.to_owned(), delivery, PendingState::Waiting);
+        let both = vec![waiting("Run the checks", at), waiting("Review it", after)];
+        assert_eq!(pending_of(&host, thread), both);
+        assert!(host.is_scheduled(thread, first));
+        let now =
+            Intent::Send { text: "Now".to_owned(), delivery: Delivery::Steer, attachments: vec![] };
+        assert_eq!(act(IntentId::new(), &now), None, "a message now is the agent's");
+
+        // The adapter tells its own queue, which knows nothing of them: they stay.
+        let queued = Pending {
+            intent: IntentId::new(),
+            text: "Then this".to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+            state: PendingState::Waiting,
+        };
+        host.apply(thread, vec![Action::PendingSet(vec![queued])]);
+        let mut three = vec![waiting("Then this", Delivery::Queue)];
+        three.extend(both.iter().cloned());
+        assert_eq!(pending_of(&host, thread), three);
+        host.apply(thread, vec![Action::PendingSet(Vec::new())]);
+        assert_eq!(pending_of(&host, thread), both);
+
+        let edit = Intent::Edit { pending: second, text: "Review it all".to_owned() };
+        assert_eq!(act(IntentId::new(), &edit), Some(Outcome::Done));
+        let reorder = Intent::Reorder { pending: second, before: Some(first) };
+        let moved = act(IntentId::new(), &reorder).unwrap();
+        assert!(matches!(moved, Outcome::Refused { .. }), "goes at its own moment: {moved:?}");
+        let edited = vec![waiting("Run the checks", at), waiting("Review it all", after)];
+        assert_eq!(pending_of(&host, thread), edited);
+        drop(host);
+
+        let host = open(dir.path());
+        assert_eq!(pending_of(&host, thread), edited, "kept through a restart");
+        let (due, next) = host.due(WallMs::now());
+        assert_eq!((due, next), (Vec::new(), Some(WallMs::from_millis(u64::MAX))));
+        let promote = Intent::Promote { pending: first };
+        assert_eq!(schedule::act(&host, thread, IntentId::new(), &promote), Some(Outcome::Done));
+        let (due, _) = host.due(WallMs::now());
+        assert_eq!(due.len(), 1, "sent now: {due:?}");
+        assert_eq!(due[0].intent, first);
+        let send = Intent::Send {
+            text: "Run the checks".to_owned(),
+            attachments: vec![],
+            delivery: Delivery::Queue,
+        };
+        assert_eq!(due[0].send, send, "queued, as the agent queues");
+        assert_eq!(pending_of(&host, thread)[0].2, PendingState::Sending);
+        assert_eq!(host.due(WallMs::now()).0, Vec::new(), "never twice");
+        drop(host);
+
+        // The worker stopped while it went: held, saying it may have gone.
+        let host = open(dir.path());
+        let cut = PendingState::Held { reason: schedule::CUT_OFF.to_owned() };
+        assert_eq!(pending_of(&host, thread)[0].2, cut);
+        assert_eq!(host.due(WallMs::now()).0, Vec::new(), "never sent again");
+        let withdraw = Intent::Withdraw { pending: first };
+        assert_eq!(schedule::act(&host, thread, IntentId::new(), &withdraw), Some(Outcome::Done));
+        // The thread it waits on is not here: held, saying so.
+        assert_eq!(host.due(WallMs::now()).0, Vec::new());
+        let held = PendingState::Held { reason: "There is no such thread here".to_owned() };
+        assert_eq!(pending_of(&host, thread), [("Review it all".to_owned(), after, held)]);
+
+        let mut plain = meta();
+        plain.caps.clear();
+        let other = plain.id;
+        host.create(plain).unwrap();
+        let cannot = schedule::act(&host, other, IntentId::new(), &scheduled("Hi", at)).unwrap();
+        assert_eq!(cannot, Outcome::Unsupported { cap: Cap::named(Cap::SCHEDULE) });
+    }
+
+    /// The worker sends each scheduled message at its moment, once: one at its time, one once
+    /// the thread it waits on has rested for its settle (not while that thread works). One its
+    /// agent takes leaves the list; one it turns down stays, held with the reason.
+    #[tokio::test]
+    async fn the_worker_sends_a_scheduled_message_at_its_moment() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let mut plan = meta();
+        plan.caps.push(Cap::named(Cap::SCHEDULE));
+        let thread = plan.id;
+        host.create(plan).unwrap();
+        let watched = meta();
+        let other = watched.id;
+        host.create(watched).unwrap();
+        host.apply(other, vec![turn(1), status(Phase::Working, WallMs::now())]);
+
+        let (tx, mut sent) = tokio::sync::mpsc::unbounded_channel();
+        let fire: schedule::Fire = std::sync::Arc::new(move |thread, id, intent| {
+            let Intent::Send { text, .. } = &intent else { panic!("{intent:?}") };
+            let outcome = if text == "Turned down" {
+                Outcome::Refused { reason: "The agent is gone".to_owned() }
+            } else {
+                Outcome::Done
+            };
+            tx.send((thread, id, intent)).unwrap();
+            outcome
+        });
+        let _scheduler = schedule::spawn(host.clone(), fire);
+        let soon = WallMs::from_millis(WallMs::now().as_millis() + 150);
+        let (timed, waits, down) = (IntentId::new(), IntentId::new(), IntentId::new());
+        let act = |id, intent: &Intent| schedule::act(&host, thread, id, intent);
+        act(timed, &scheduled("On time", Delivery::At { at_ms: soon }));
+        let settle = Delivery::After { thread: other, settle_ms: 150 };
+        act(waits, &scheduled("After it", settle));
+        act(down, &scheduled("Turned down", Delivery::At { at_ms: WallMs::ZERO }));
+
+        let (_, id, _) = next(&mut sent).await;
+        assert_eq!(id, schedule::sent_as(down), "the one already due first");
+        let (to, id, intent) = next(&mut sent).await;
+        assert!(WallMs::now() >= soon, "not before its time");
+        assert_eq!((to, id), (thread, schedule::sent_as(timed)));
+        assert!(matches!(intent, Intent::Send { delivery: Delivery::Queue, .. }));
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(sent.try_recv().is_err(), "the thread waited on still works");
+
+        let rested = WallMs::now();
+        host.apply(other, vec![ended(1), status(Phase::Done, rested)]);
+        let (_, id, _) = next(&mut sent).await;
+        assert_eq!(id, schedule::sent_as(waits));
+        assert!(WallMs::now().as_millis() >= rested.as_millis() + 150, "after its settle");
+        let held = PendingState::Held { reason: "The agent is gone".to_owned() };
+        let left: Vec<(String, PendingState)> =
+            pending_of(&host, thread).into_iter().map(|(text, _, state)| (text, state)).collect();
+        assert_eq!(left, [("Turned down".to_owned(), held)], "taken ones leave; that one stays");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(sent.try_recv().is_err(), "each once");
+    }
+
+    type Sent = (ThreadId, IntentId, Intent);
+
+    /// What the scheduler sent next.
+    async fn next(sent: &mut tokio::sync::mpsc::UnboundedReceiver<Sent>) -> Sent {
+        tokio::time::timeout(std::time::Duration::from_secs(10), sent.recv())
+            .await
+            .expect("sent in time")
+            .expect("the scheduler runs")
+    }
+
+    fn status(phase: Phase, since: WallMs) -> Action {
+        Action::Status(Status { phase, wait: None, liveness: Liveness::Live, since_ms: since })
     }
 }
