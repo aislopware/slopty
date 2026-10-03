@@ -1348,6 +1348,8 @@ mod tests {
         assert!(workflow.contains("cargo xtask gate --ci --lane linux"), "ci.yml runs it");
         assert!(workflow.contains("cargo xtask setup --lane linux"), "with its tools");
         assert!(workflow.contains("needs: [gate, linux]"), "and main waits for it");
+        let zig = format!("version: {}.", crate::tools::ZIG);
+        assert!(workflow.contains(&zig), "CI's zig is the one setup asks for");
         let tested = super::linux_tested();
         assert!(tested.contains(&"slopty-ptyd") && tested.contains(&"slopty-cli"), "{tested:?}");
         assert!(tested.iter().all(|c| !crate::tools::LINUX_UNTESTED.contains(c)));

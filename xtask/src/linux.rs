@@ -349,12 +349,13 @@ fn smoke(built: &[Built]) -> Result<()> {
 
 /// zig and cargo-zigbuild, which every Linux build here goes through.
 fn need_zig(sh: &Shell) -> Result<()> {
-    for (tool, how) in [
-        ("zig", "`brew install zig` (0.16)"),
-        ("cargo-zigbuild", "`cargo binstall cargo-zigbuild`"),
-    ] {
-        ensure!(has(sh, tool), "{tool} is needed to cross-build for Linux: {how}");
+    if let Some(problem) = crate::tools::zig_problem(sh) {
+        bail!("{problem}");
     }
+    ensure!(
+        has(sh, "cargo-zigbuild"),
+        "cargo-zigbuild is needed to cross-build for Linux: `cargo binstall cargo-zigbuild`"
+    );
     Ok(())
 }
 

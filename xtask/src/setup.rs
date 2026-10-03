@@ -63,8 +63,8 @@ pub fn run(sh: &Shell, no_tools: bool, lanes: &[LaneId]) -> Result<()> {
         if !has(sh, "xcodegen") {
             println!("  note: `brew install xcodegen` is needed for iOS builds");
         }
-        if !has(sh, "zig") {
-            println!("  note: `brew install zig` (0.16) is needed to build libghostty-vt");
+        if let Some(problem) = crate::tools::zig_problem(sh) {
+            println!("  note: {problem}");
         }
     }
     if !no_tools && everything && !has(sh, "xcodegen") {
