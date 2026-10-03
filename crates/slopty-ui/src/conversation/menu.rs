@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(names("com"), ["commit", "compact", "review"], "the project's first");
         assert_eq!(names("mit"), ["commit", "review"], "a name before a description");
         assert_eq!(names(""), ["commit", "review", "compact", "model"]);
-        assert!(names("zzz").is_empty());
+        assert_eq!(names("zzz"), Vec::<String>::new());
     }
 
     /// The thread model's open sources rank as the known ones do, an unknown one after
@@ -332,6 +332,6 @@ mod tests {
         assert_eq!(found, ["@src/main.rs", "@\"a b.png\"", "@docs/"]);
         assert_eq!(mention_path("@\"a b.png\""), "a b.png");
         assert_eq!(mention_path("@src/main.rs"), "src/main.rs");
-        assert!(mentions("@ alone").is_empty());
+        assert_eq!(mentions("@ alone"), Vec::<std::ops::Range<usize>>::new());
     }
 }

@@ -411,7 +411,7 @@ mod tests {
              session",
             "where both are kept, said once"
         );
-        assert!(always_line(&[]).is_empty());
+        assert_eq!(always_line(&[]), Vec::<Said>::new());
         assert_eq!(mode_label("default"), "Asks permission", "a behaviour, not a key");
     }
 }

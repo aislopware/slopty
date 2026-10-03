@@ -346,24 +346,59 @@ impl ThreadView {
         })
     }
 
-    /// The mode chip: the permission mode the agent says it is in.
+    /// The mode chip: the permission mode the agent says it is in; a menu of the modes it
+    /// publishes when it can switch ([`Cap::SET_MODE`]).
     ///
     /// Where the agent says how far its sandbox reaches (Codex's), that follows: "On request ·
     /// Workspace write".
     fn mode_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
         let state = self.state(cx)?;
+        let switch = state.meta.can(Cap::SET_MODE) && !state.meta.modes.is_empty();
         let mode = state.meters.mode.as_deref().map(str::trim).filter(|m| !m.is_empty());
+        // The agent's own name for the mode it is in, where it published one.
+        let named = mode.map(|m| {
+            state
+                .meta
+                .modes
+                .iter()
+                .find(|known| known.id == m || known.label == m)
+                .map_or_else(|| sentence(m), |known| known.label.clone())
+        });
+        let named = named.or_else(|| switch.then(|| "Mode".to_owned()));
         let sandbox = state.meta.facts.get(SANDBOX).map(|f| f.trim()).filter(|f| !f.is_empty());
-        let words: Vec<String> = mode.into_iter().chain(sandbox).map(sentence).collect();
+        let words: Vec<String> = named.into_iter().chain(sandbox.map(sentence)).collect();
         if words.is_empty() {
             return None;
         }
         let words = words.join(" \u{b7} ");
+        let chip =
+            self.chip("thread-mode", format!("Mode, {words}")).child(SharedString::from(words));
+        if switch {
+            return Some(
+                crate::a11y::tab_stop(
+                    chip.role(Role::Button)
+                        .cursor_pointer()
+                        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                        .child(
+                            crate::icons::icon(
+                                theme,
+                                IconName::ChevronDown,
+                                IconSize::Inline,
+                                hsla(s.text_muted),
+                            )
+                            .size(self.z(theme.typography.meta())),
+                        )
+                        .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
+                    s.accent,
+                )
+                .into_any_element(),
+            );
+        }
         let hint = mode_hint(&state.meta).map(|hint| (hint, self.theme.clone()));
         Some(
-            self.chip("thread-mode", format!("Mode, {words}"))
-                .role(Role::Label)
-                .child(SharedString::from(words))
+            chip.role(Role::Label)
                 .when_some(hint, |el, (hint, theme)| {
                     el.tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::new(theme.clone());

@@ -1049,6 +1049,10 @@ impl WorkspaceView {
             .connect
             .filter(|_| !w.status.is_up())
             .map(|run| action(format!("hosts-connect-{key}"), "Connect", run));
+        // A worker on another build links again only once updated: its one way back.
+        let update = self.update_run(key, cx).map(|run| {
+            action(format!("hosts-update-{key}"), crate::add_worker::UPDATE, run).visible()
+        });
         let wake = actions.wake.map(|run| action(format!("hosts-wake-{key}"), "Wake", run));
         let forget = actions.forget.map(|run| action(format!("hosts-forget-{key}"), "Forget", run));
         let hover_actions = div()
@@ -1056,6 +1060,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.xxs))
+            .children(update)
             .children(wake)
             .children(connect)
             .children(forget);

@@ -20,7 +20,7 @@ fn width(cx: &mut VisualTestContext, tile: TileRef) -> f32 {
     cx.debug_bounds(selector("item", tile.item)).map(|b| f32::from(b.size.width)).expect("drawn")
 }
 
-/// ⌘⌥⇟/⇞ step between workspaces, ⌘⌥N jumps to one, ⌘⌥` goes back to the one before, and
+/// ⌘⌥⇟/⇞ step between workspaces, ⌘⌥N jumps to one, `` ⌘⌥` `` goes back to the one before, and
 /// the keyboard follows the focus into each terminal.
 #[gpui::test]
 fn the_workspace_keys_switch_workspaces(cx: &mut TestAppContext) {

@@ -193,7 +193,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         if self.menu == Some(which) {
-            self.close_menu(window, cx);
+            self.dismiss_menu(window, cx);
         } else {
             self.menu = Some(which);
             self.menu_keyed = window.last_input_was_keyboard();
@@ -221,6 +221,13 @@ impl WorkspaceView {
         self.menu = None;
         self.return_keyboard(window, cx);
         cx.notify();
+    }
+
+    /// Close the bar's menu with nothing chosen from it: a machine "+" was pointed at goes
+    /// with it, so the next ⌘T is not sent there unasked.
+    pub(super) fn dismiss_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_on = None;
+        self.close_menu(window, cx);
     }
 
     /// The bar. `safe_top` is the notch's inset on a phone, zero on a Mac.
@@ -612,7 +619,7 @@ impl WorkspaceView {
             .occlude()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _ev, window, cx| this.close_menu(window, cx)),
+                cx.listener(|this, _ev, window, cx| this.dismiss_menu(window, cx)),
             )
             .child(
                 div()

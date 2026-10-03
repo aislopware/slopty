@@ -174,6 +174,37 @@ fn the_model_chip_switches_the_agent_s_model(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
 }
 
+/// The mode chip names the mode by the agent's own name for it and opens the modes it
+/// publishes; picking one asks the agent to switch. With no modes published it is a label.
+#[gpui::test]
+fn the_mode_chip_switches_the_agent_s_mode(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Mode;
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.caps = vec![Cap::named(Cap::SET_MODE)];
+    let mode = |id: &str, label: &str| Mode {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        description: Some(format!("{label} things")),
+    };
+    state.meta.modes = vec![mode("ask", "Ask"), mode("code", "Code")];
+    state.meters.mode = Some("ask".to_owned());
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+
+    let chip = cx.debug_bounds("thread-mode").expect("the mode chip").center();
+    cx.simulate_click(chip, Modifiers::none());
+    assert!(cx.debug_bounds("thread-menu").is_some(), "the modes are listed");
+    let code = cx.debug_bounds("thread-menu-1").expect("both of them").center();
+    cx.simulate_click(code, Modifiers::none());
+    assert_eq!(intents(&sent), [Intent::SetMode { mode: "code".to_owned() }]);
+    assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
+}
+
 /// The composer's one solid stops the turn while it runs and nothing is typed, and sends what
 /// is typed.
 #[gpui::test]

@@ -1396,7 +1396,7 @@ const OVERVIEW_EDGE: f32 = 1.5;
 
 /// How wide the empty workspace's column stands: room for a directory beside its branch and
 /// worker, narrow enough to read as one block down the strip.
-const EMPTY_W: f32 = 400.0;
+pub(super) const EMPTY_W: f32 = 400.0;
 
 /// How many directories the empty workspace offers.
 const RECENT_PLACES: usize = 5;

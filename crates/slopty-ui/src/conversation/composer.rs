@@ -409,13 +409,13 @@ mod tests {
             "a command takes the path as its argument"
         );
         attached.clear();
-        assert!(attached.chips().is_empty());
+        assert_eq!(attached.chips(), []);
     }
 
     /// Blank text sends nothing; Esc is the key a person presses to stop.
     #[test]
     fn blank_sends_nothing_and_esc_stops() {
-        assert!(submission("  \n\n ", &[]).is_empty());
+        assert_eq!(submission("  \n\n ", &[]), Vec::<Step>::new());
         assert_eq!(interrupt(), Step::Key("escape"));
     }
 }

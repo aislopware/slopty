@@ -105,13 +105,20 @@ fn new_agent_opens_the_picker_with_the_last_choices(cx: &mut TestAppContext) {
     assert_eq!(step_lines(&view, cx), ["src/app", "~"], "only the studio has Codex: the folder");
     cx.simulate_keystrokes("enter");
     settle(cx);
+    assert!(starts(&mut studio).is_empty(), "nothing goes before the first message");
+    cx.simulate_input("fix the flaky test");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
     let sent = starts(&mut studio);
-    let [(_, agent, cwd, None)] = sent.as_slice() else { panic!("one start: {sent:?}") };
+    let [(_, agent, cwd, Some(prompt))] = sent.as_slice() else { panic!("one start: {sent:?}") };
     assert_eq!((agent, cwd.as_str()), (&AgentId::named(AgentId::CODEX), "/src/app"));
+    assert_eq!(prompt, "fix the flaky test", "the first message goes as the start's prompt");
 
     cx.simulate_keystrokes("cmd-shift-t");
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["Codex", "Claude Code"], "the last agent first");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
     cx.simulate_keystrokes("enter");
     settle(cx);
     cx.simulate_keystrokes("enter");
@@ -140,6 +147,8 @@ fn per_agent_lines_skip_the_agent_step(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     settle(cx);
     assert_eq!(step_lines(&view, cx), ["~"], "the laptop has no shell: its home");
+    cx.simulate_keystrokes("enter");
+    settle(cx);
     cx.simulate_keystrokes("enter");
     settle(cx);
     let sent = starts(&mut laptop);
@@ -181,8 +190,14 @@ fn with_no_agent_anywhere_new_agent_says_so(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, |v, _| v.toast_text()).as_deref(), Some(agent_start::NO_AGENT));
 }
 
-/// A start's answer opens its thread as a tile that takes the keyboard, and a second answer
-/// for it goes to that tile. A refusal is said in the machine's words and opens nothing.
+/// The tile of the newest thread on its way on `key`, and what it says.
+fn starting_tile(view: &Entity<WorkspaceView>, cx: &VisualTestContext) -> Option<TileRef> {
+    view.read_with(cx, |v, _| v.focused().filter(|t| v.starting.has(t.item)))
+}
+
+/// A start shows its tile at once, saying it is starting, and the machine's answer opens the
+/// thread in that same tile, which takes the keyboard. A refusal is said in the machine's
+/// words and takes the tile away; so does an answer that is no thread.
 #[gpui::test]
 fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -197,11 +212,11 @@ fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContex
     });
     let sent = starts(&mut studio);
     let [(intent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
-    assert_eq!(
-        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("Starting Claude Code on studio in ~\u{2026}"),
-        "the start shows before the machine answers"
-    );
+    settle(cx);
+    let placeholder = starting_tile(&view, cx).expect("the start's tile, before any answer");
+    let selector = format!("starting-{}", placeholder.item.as_uuid());
+    let says = cx.debug_bounds(selector.leak()).is_some();
+    assert!(says, "it says the agent is starting");
 
     let thread = ThreadId::new();
     let started = IntentDone { id: *intent, outcome: Outcome::Started { thread } };
@@ -217,6 +232,7 @@ fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContex
         .collect();
     let [item] = added.as_slice() else { panic!("one thread item: {added:?}") };
     assert_eq!(item.kind, ItemKind::Thread { thread });
+    assert_eq!(item.id, placeholder.item, "the thread fills the start's own tile");
 
     let by = studio.me;
     let op = ItemOp::Add(item.clone());
@@ -240,8 +256,12 @@ fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContex
         id: *intent,
         outcome: Outcome::Refused { reason: "claude is not on this machine's PATH".into() },
     };
+    settle(cx);
+    let refused_tile = starting_tile(&view, cx).expect("the second start's tile");
     view.update_in(cx, |v, _w, cx| v.thread_done(studio_key, &refused, cx));
     settle(cx);
+    let gone = view.read_with(cx, |v, _| !v.layout.contains(refused_tile));
+    assert!(gone, "a refused start's tile goes");
     assert!(
         !studio.drain().iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(_)))),
         "a refusal adds no tile"
@@ -262,7 +282,7 @@ fn a_started_thread_opens_as_a_tile_and_a_refusal_is_said(cx: &mut TestAppContex
     settle(cx);
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("studio can\u{2019}t start Codex here"),
+        Some("studio can\u{2019}t start Codex"),
         "a start the machine cannot make is said, not dropped"
     );
 }
@@ -293,6 +313,8 @@ fn an_open_palette_takes_the_agents_as_they_arrive(cx: &mut TestAppContext) {
     assert_eq!(step_lines(&view, cx), ["src/app", "~"], "one machine: the folder");
     cx.simulate_keystrokes("enter");
     settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
     let sent = starts(&mut studio);
     let [(_, agent, ..)] = sent.as_slice() else { panic!("one start: {sent:?}") };
     assert_eq!(agent, &AgentId::named(AgentId::CODEX), "the line that arrived, chosen");
@@ -313,6 +335,48 @@ fn the_plus_menus_machine_is_not_asked_again(cx: &mut TestAppContext) {
     assert_eq!(step_lines(&view, cx), ["~"], "the laptop's one agent: straight to its folders");
     cx.simulate_keystrokes("enter");
     settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
     let sent = starts(&mut laptop);
     assert_eq!(sent.len(), 1, "started on the laptop: {sent:?}");
+}
+
+/// A start's tile waits for its first message with nothing sent, and ⌘W takes it away with
+/// nothing started. Once sent, a link that goes takes the tile with it and says so, since the
+/// answer may never come; a tile still waiting for its first message stays.
+#[gpui::test]
+fn a_start_on_its_way_closes_and_goes_with_its_link(cx: &mut TestAppContext) {
+    let (view, cx) = still_workspace(cx);
+    let Two { mut studio, .. } = two_machines(&view, cx);
+    let key = studio.key;
+    studio.drain();
+    let codex = AgentId::named(AgentId::CODEX);
+    view.update_in(cx, |v, window, cx| {
+        v.begin_start(key, codex.clone(), "/src/app".into(), window, cx);
+    });
+    settle(cx);
+    let waiting = starting_tile(&view, cx).expect("the start's tile, waiting for its message");
+    assert!(starts(&mut studio).is_empty(), "nothing sent while it waits");
+    cx.simulate_keystrokes("cmd-w");
+    settle(cx);
+    assert!(!view.read_with(cx, |v, _| v.layout.contains(waiting)), "⌘W took it away");
+    assert!(starts(&mut studio).is_empty(), "and started nothing");
+
+    view.update_in(cx, |v, window, cx| {
+        v.begin_start(key, codex.clone(), "/src/app".into(), window, cx);
+    });
+    settle(cx);
+    let unsent = starting_tile(&view, cx).expect("a tile waiting for its message");
+    view.update_in(cx, |v, _w, cx| v.start_thread(key, codex, "~".into(), None, cx));
+    settle(cx);
+    let sent = starting_tile(&view, cx).expect("a start sent");
+    assert_eq!(starts(&mut studio).len(), 1);
+    view.update_in(cx, |v, _w, cx| v.threads_unlinked(key, cx));
+    settle(cx);
+    let (sent_gone, unsent_kept) =
+        view.read_with(cx, |v, _| (!v.layout.contains(sent), v.layout.contains(unsent)));
+    assert!(sent_gone, "a sent start goes with its link");
+    assert!(unsent_kept, "a start not sent keeps its field");
+    let said = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
+    assert!(said.starts_with("studio went out of reach before Codex started"), "{said}");
 }

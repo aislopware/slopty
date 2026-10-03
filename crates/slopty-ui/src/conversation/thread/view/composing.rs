@@ -8,7 +8,8 @@
 //!   keys. ↑/↓ move, ↵ or ⇥ pick, Esc closes the menu until the caret leaves the word. Picking only
 //!   writes into the draft.
 //! - **Models.** The model chip opens a menu of the models the agent can switch to; picking one
-//!   asks the agent to switch (`Intent::SetModel`), and the chip reads as the agent then says.
+//!   asks the agent to switch (`Intent::SetModel`), and the chip reads as the agent then says. The
+//!   mode chip does the same with the modes the agent publishes (`Intent::SetMode`).
 //! - **Attachments.** A pasted picture, files copied here, a drop on the tile or the picker's files
 //!   go up through the workspace as a drop on the face does; each shows as a chip
 //!   ([`crate::conversation::chips`]) until the message goes, which carries their paths after its
@@ -34,7 +35,7 @@ use gpui::{
 };
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Command, Delivery, IntentId, Model};
+use slopty_proto::thread::{Cap, Command, Delivery, IntentId, Mode, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
@@ -66,6 +67,8 @@ pub(super) enum MenuRows {
     Hint,
     /// The models the agent can switch to, opened from the model chip.
     Models(Vec<Model>),
+    /// The modes the agent can switch to, opened from the mode chip.
+    Modes(Vec<Mode>),
 }
 
 impl MenuRows {
@@ -75,6 +78,7 @@ impl MenuRows {
             Self::Paths(paths) => paths.as_ref().map_or(0, Vec::len),
             Self::Hint => 0,
             Self::Models(models) => models.len(),
+            Self::Modes(modes) => modes.len(),
         }
     }
 }
@@ -112,6 +116,8 @@ pub(super) struct Composing {
     editing: Option<Editing>,
     /// The model chip's menu is open.
     models: bool,
+    /// The mode chip's menu is open.
+    modes: bool,
     /// What the composer says above the field until the draft changes: an attachment it cannot
     /// take, a message waiting for its uploads.
     notice: Option<String>,
@@ -178,6 +184,10 @@ impl ThreadView {
         if self.composing.models {
             let models = self.state(cx).map(|s| s.meta.models.clone()).unwrap_or_default();
             return (!models.is_empty()).then_some(MenuRows::Models(models));
+        }
+        if self.composing.modes {
+            let modes = self.state(cx).map(|s| s.meta.modes.clone()).unwrap_or_default();
+            return (!modes.is_empty()).then_some(MenuRows::Modes(modes));
         }
         match self.menu_token(cx)? {
             Token::Command { query } => {
@@ -304,8 +314,9 @@ impl ThreadView {
 
     /// Esc with the menu open closes it for the word the caret is in. Whether it was open.
     pub(super) fn menu_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.composing.models {
+        if self.composing.models || self.composing.modes {
             self.composing.models = false;
+            self.composing.modes = false;
             cx.notify();
             return true;
         }
@@ -327,6 +338,13 @@ impl ThreadView {
                 let Some(model) = models.get(ix) else { return };
                 self.composing.models = false;
                 let _id = self.intent(Intent::SetModel { model: model.id.clone() }, cx);
+                cx.notify();
+                return;
+            }
+            (MenuRows::Modes(modes), _) => {
+                let Some(mode) = modes.get(ix) else { return };
+                self.composing.modes = false;
+                let _id = self.intent(Intent::SetMode { mode: mode.id.clone() }, cx);
                 cx.notify();
                 return;
             }
@@ -383,6 +401,7 @@ impl ThreadView {
         let label = match &rows {
             MenuRows::Commands(_) => "Commands",
             MenuRows::Models(_) => "Models",
+            MenuRows::Modes(_) => "Modes",
             MenuRows::Paths(_) | MenuRows::Hint => "Files",
         };
         let body: Vec<AnyElement> = match &rows {
@@ -399,6 +418,14 @@ impl ThreadView {
             }
             MenuRows::Paths(None) => vec![self.menu_note("Searching…")],
             MenuRows::Hint => vec![self.menu_note("Type to find a file or folder")],
+            MenuRows::Modes(modes) => {
+                let now = self.state(cx).and_then(|s| s.meters.mode.clone());
+                modes
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, mode)| self.mode_row(ix, mode, now.as_deref(), cx))
+                    .collect()
+            }
             MenuRows::Models(models) => {
                 let now = self.state(cx).and_then(|s| s.meters.model_id.clone());
                 models
@@ -509,9 +536,57 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// The mode chip's menu open or shut; open, the keyboard walks it from its first row.
+    pub(super) fn toggle_modes(&mut self, cx: &mut Context<Self>) {
+        self.composing.modes = !self.composing.modes;
+        self.composing.models = false;
+        self.composing.selected = 0;
+        cx.notify();
+    }
+
+    /// A mode the agent can switch to, with what it does in the agent's words, and a check on
+    /// the one it is in (by its id or its name, as the agent says it).
+    fn mode_row(
+        &self,
+        ix: usize,
+        mode: &Mode,
+        now: Option<&str>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let current = now.is_some_and(|n| n == mode.id || n == mode.label);
+        let label = if mode.label.trim().is_empty() { &mode.id } else { &mode.label };
+        self.menu_row(ix, label.clone(), cx)
+            .child(
+                div()
+                    .flex_none()
+                    .max_w(gpui::relative(0.5))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(self.z(theme.typography.small()))
+                    .child(SharedString::from(label.clone())),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(self.z(theme.typography.meta()))
+                    .text_color(hsla(s.text_muted))
+                    .children(mode.description.clone().map(SharedString::from)),
+            )
+            .when(current, |el| el.child(self.icon(IconName::Check, s.text_secondary)))
+            .into_any_element()
+    }
+
     /// The model chip's menu open or shut; open, the keyboard walks it from its first row.
     pub(super) fn toggle_models(&mut self, cx: &mut Context<Self>) {
         self.composing.models = !self.composing.models;
+        self.composing.modes = false;
         self.composing.selected = 0;
         cx.notify();
     }

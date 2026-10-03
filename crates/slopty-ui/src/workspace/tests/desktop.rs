@@ -110,7 +110,7 @@ fn the_clipboard_is_typed_into_the_focused_window(cx: &mut TestAppContext) {
 
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
     type_it(cx);
-    assert!(typed(&sent(&mut fake, cx)).is_empty());
+    assert_eq!(typed(&sent(&mut fake, cx)), Vec::<String>::new());
     let said = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(said.as_deref(), Some("The clipboard holds no text"));
 }

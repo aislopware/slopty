@@ -454,3 +454,47 @@ fn a_dropped_window_keeps_its_picture_until_the_new_stream_has_one(cx: &mut Test
     let waiting = view.read_with(cx, |v, _| v.workers.get(&key).map(|w| w.fresh_screens.len()));
     assert_eq!(waiting, Some(0));
 }
+
+/// ⌘T and ⌘O on a worker out of reach make nothing and say so, rather than dropping the ask
+/// unseen: the only worker, or the one "+" chose with another up. ⌘O asks for no list, so no
+/// picker turns up once the worker is back. A machine "+" was pointed at is let go when the
+/// menu closes with nothing chosen.
+#[gpui::test]
+fn opens_on_a_worker_out_of_reach_are_said_and_not_kept(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut fake = connect(&view, cx, 1, "studio");
+    let _tile = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
+    goes_away(&view, cx, &fake);
+    fake.drain();
+
+    cx.simulate_keystrokes("cmd-t");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The terminal did not open: studio is lost; reconnecting…")
+    );
+    let mut laptop = connect(&view, cx, 2, "laptop");
+    let key = fake.key;
+    view.update_in(cx, |v, _w, _cx| v.new_on = Some(key));
+    cx.simulate_keystrokes("cmd-o");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("The window picker did not open: studio is lost; reconnecting…"),
+        "the machine \"+\" chose, not the one that is up"
+    );
+    assert!(laptop.drain().is_empty(), "nothing went to the laptop");
+    let (picker, wanted) =
+        view.read_with(cx, |v, _| (v.picker.is_some(), v.workers[&key].picker_wanted));
+    assert!(!picker && !wanted, "no picker now, and none asked for later");
+    relink(&view, cx, &mut fake, Vec::new());
+    let sent = fake.drain();
+    assert!(!sent.iter().any(|m| matches!(m, ClientMsg::OpenSession { .. })), "{sent:?}");
+
+    view.update_in(cx, |v, window, cx| {
+        v.new_on = Some(key);
+        v.menu = Some(titlebar::MenuKind::New);
+        v.dismiss_menu(window, cx);
+    });
+    assert_eq!(view.read_with(cx, |v, _| v.new_on), None, "the choice went with the menu");
+}

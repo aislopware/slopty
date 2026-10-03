@@ -43,6 +43,7 @@ mod folders;
 mod grouping;
 mod handoffs;
 mod inbox;
+mod kept_items;
 mod marks;
 mod miniature;
 mod navigator;
@@ -57,6 +58,7 @@ mod restore;
 mod reviews;
 mod rollup;
 mod secure;
+mod starting;
 mod statusbar;
 mod strip;
 mod tile;
@@ -684,6 +686,10 @@ pub struct WorkspaceView {
     ask: ask::Ask,
     /// The last agent started, where and in which folder: what "New agent…" lists first.
     last_start: Option<agent_start::LastStart>,
+    /// The tiles of threads on their way.
+    starting: starting::Starts,
+    /// Each worker's items kept on this device.
+    kept_items: kept_items::KeptItems,
     /// The tiles, the faces or the links changed since the faces were last brought in step
     /// with them: the next frame does it ([`Self::sync_faces`] makes a face with the window).
     faces_dirty: bool,
@@ -952,6 +958,8 @@ impl WorkspaceView {
             attention_at: None,
             ask: ask::Ask::default(),
             last_start: None,
+            starting: starting::Starts::default(),
+            kept_items: kept_items::KeptItems::default(),
             faces_dirty: true,
             twins: HashMap::new(),
             derived: HashMap::new(),
@@ -1629,7 +1637,7 @@ impl WorkspaceView {
         if self.menu.is_some() && ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified()
         {
             cx.stop_propagation();
-            self.close_menu(window, cx);
+            self.dismiss_menu(window, cx);
         }
     }
 
@@ -1758,6 +1766,7 @@ impl WorkspaceView {
         if let Some(thread) = self.pending_focus_review.take() {
             self.focus_review(thread, window, cx);
         }
+        self.settle_starting_focus(window, cx);
     }
 }
 

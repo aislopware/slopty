@@ -90,6 +90,7 @@ mod asking;
 mod composer;
 mod composing;
 pub mod denying;
+pub mod editing;
 pub mod exited;
 mod notes;
 mod pictures;
@@ -182,6 +183,8 @@ pub struct ThreadView {
     asking: Option<asking::Asking>,
     /// A request being denied with a reason.
     denying: Option<denying::Denying>,
+    /// A request whose call is being changed before it is allowed.
+    editing: Option<editing::Editing>,
     /// The agent's terminal comes into view once the thread names one: the person asked for
     /// it before the worker had opened it.
     reveal_terminal: bool,
@@ -288,6 +291,7 @@ impl ThreadView {
             pictures: RefCell::default(),
             asking: None,
             denying: None,
+            editing: None,
             reveal_terminal: false,
             marks: Cell::default(),
             #[cfg(test)]

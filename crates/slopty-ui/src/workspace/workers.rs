@@ -68,13 +68,19 @@ impl WorkspaceView {
     }
 
     /// A worker this client has added, before its first connection: its tiles (from the
-    /// saved layout) stay where they were, waiting.
+    /// saved layout) stay where they were, drawn from its items as this device last saw them
+    /// until its first snapshot.
     pub fn add_worker(&mut self, key: WorkerKey, name: String, cx: &mut Context<Self>) {
-        match self.workers.get_mut(&key) {
-            Some(w) => w.name = name,
-            None => {
-                self.workers.insert(key, Worker::new(name));
+        if let Some(w) = self.workers.get_mut(&key) {
+            w.name = name;
+        } else {
+            let mut w = Worker::new(name);
+            if let Some(doc) = self.kept_doc(key) {
+                w.doc = doc;
+                self.items_dirty = true;
             }
+            self.workers.insert(key, w);
+            self.note_changed(key, ItemChange::Reset);
         }
         // The settings share the clipboard by the worker's name.
         self.clip_sharing_changed();
@@ -497,7 +503,8 @@ impl WorkspaceView {
                     w.doc.items().map(|i| i.id).collect();
                 // A tile whose item the worker no longer has leaves; the rest stay where this
                 // device put them, and anything new joins at the end of its workspace.
-                self.layout.retain_worker(key, |id| present.contains(&id));
+                let starting = &self.starting;
+                self.layout.retain_worker(key, |id| present.contains(&id) || starting.has(id));
                 let new: Vec<ItemId> = w
                     .doc
                     .items()
@@ -548,6 +555,9 @@ impl WorkspaceView {
                 self.after_focus_moved(cx);
             }
             ItemChange::Changed(_) | ItemChange::Echo | ItemChange::Pointed(_) => {}
+        }
+        if !matches!(change, ItemChange::Echo | ItemChange::Pointed(_)) {
+            self.keep_items(key, cx);
         }
         self.layout_touched(cx);
         self.reconcile(cx);

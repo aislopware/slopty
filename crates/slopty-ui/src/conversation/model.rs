@@ -637,7 +637,7 @@ mod tests {
         ))]));
         assert_eq!(model.pending().iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["!ls"]);
         model.apply(ConversationEvent::Changes(vec![upsert(prompt("p3", "ls", Some("!")))]));
-        assert!(model.pending().is_empty());
+        assert_eq!(model.pending(), []);
         model.sent("/help".to_owned(), false, WallMs::from_millis(20));
         assert!(!model.expire_pending(WallMs::from_millis(20)), "not older than the bound");
         assert!(

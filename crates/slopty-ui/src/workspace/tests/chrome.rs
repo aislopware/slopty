@@ -820,7 +820,7 @@ fn measure_a_pointer_frame_beside_the_chrome(cx: &mut TestAppContext) {
     let drawn = terminal.read_with(cx, |t, _| t.renders());
     for n in 0..WARM + FRAMES {
         let step = f32::from(u16::try_from(n % 200).unwrap_or(0));
-        let at = body.origin + point(px(20.0 + step * 2.0), body.size.height / 2.0);
+        let at = body.origin + point(px(f32::mul_add(step, 2.0, 20.0)), body.size.height / 2.0);
         let start = Instant::now();
         cx.simulate_mouse_move(at, None, Modifiers::default());
         cx.update(|_w, cx| cx.notify(strip));

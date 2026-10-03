@@ -1013,3 +1013,69 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   line under it. The row is left out when its command is the command running now, which names
   the tile, or the title the program set. Test: `a_sticky_header_does_not_repeat_the_title`.
 
+
+- ✅ **Upload and download from the keyboard on a Mac** (2026-10-04, readiness N21). Dragging was
+  the only way files crossed on a Mac: the palette's Files picker lines were iOS-only, and a
+  clashing upload landed in the drop directory, where it seemed to vanish.
+  - "Upload…" and "Download…" are palette lines and File menu items. Upload asks the open panel
+    for files and folders, which go up to the focused shell, folder or window as a drop would.
+    Download asks the save panel, in `~/Downloads` on the entry's name, where the folder tile's
+    selected entry goes. It comes down beside the chosen path and is renamed into place, so a
+    half-arrived file never sits under that name, as "Save a copy…" does. The person hears
+    "Downloaded ~/Downloads/report.pdf", or "<name> was not downloaded: <why>".
+  - A top-level entry whose name is taken where it goes lands beside it under the next free
+    name, as Finder's Keep Both names it (`report 2.pdf`, `proj 2`, `archive 2.tar.gz`). A file
+    is renamed into place only where nothing is, so nothing is written over. A folder drop
+    that was renamed says so: "report 2.pdf (report.pdf was there already)".
+  - A failed upload names what was sent and where: "report.pdf did not reach studio: <why>",
+    or "3 files" for more than one.
+  - Tests: worker `a_taken_name_is_numbered_as_finder_numbers_it`,
+    `a_clash_lands_under_the_next_free_name_and_finish_names_the_entries`,
+    `a_name_taken_while_the_file_came_is_kept_and_the_file_lands_beside_it`,
+    `a_renamed_entry_resumes_into_the_name_it_was_given`; `slopty-ui`
+    `download_brings_the_selected_entry_where_the_save_panel_says`,
+    `a_drop_on_a_folder_goes_up_into_it_and_lists_it_again`, `an_upload_outlives_its_workers_link`,
+    `upload_and_download_are_offered_on_every_device`; the app's File menu test.
+
+- ✅ **`open <folder>` opens a folder tile** (2026-10-04, readiness N19). `open .` in a worker's
+  shell ran the worker's own Finder, which nobody at the client sees, and `xdg-open` on a
+  Linux worker had no screen at all.
+  - The shell's `open` sends one folder as an absolute path ending in `/` (`..` resolved), not
+    waiting. The client opens a path ending in `/` as a folder tile, as it does a typed one.
+  - A package stays the system's to open: an `.app` and the other bundle extensions, and any
+    folder with a `Contents` folder inside.
+  - Tests: `open_shows_one_existing_file_or_folder_in_a_tile` (`slopty-cli`),
+    `a_folder_a_shell_hands_over_opens_as_a_folder_tile` (`slopty-ui`).
+
+- ✅ **An open on a machine out of reach is said, never dropped** (2026-10-04, readiness N18).
+  ⌘T, a "New terminal in…" line and ⌘O sent their ask on a link that was not there, which
+  dropped it with only a debug line, so the person saw nothing happen.
+  - `open_session_on` and ⌘O check the link first (`reachable_for`). With none they make
+    nothing and say "The terminal did not open: studio is unreachable". A shell is not queued
+    for the link's return: it would open minutes later where the person no longer is. A note
+    still goes through the item queue, since it lands where it was put.
+  - ⌘O on a machine out of reach asks for no list, so no picker turns up unasked once the
+    machine is back.
+  - A machine "+" was pointed at is let go when the menu closes with nothing chosen (a click
+    away, Esc, "+" again), so the next ⌘T goes where the focus is.
+  - Test: `opens_on_a_worker_out_of_reach_are_said_and_not_kept` (`workspace/tests/away.rs`).
+
+- ✅ **A cold launch draws every tile from its worker's items as last seen** (2026-10-04,
+  readiness N2). The layout came back with each tile's place, but a tile's item came only with
+  its worker's first snapshot. Every worker not yet linked was a hole: no name, no
+  "Reconnecting…". After an app update every worker runs another build and never links, so
+  the tile pill's Update, the one way out, was never drawn.
+  - `slopty_client::items::ItemCache` keeps each worker's registry under the data dir
+    (`items/<worker>.items`): postcard, 0600, replaced whole. It is written after every change
+    off the UI thread, one write per worker at a time with the latest last.
+  - `add_worker` seeds the registry from it at version 0. The tiles draw as they were under
+    the pill that says where the worker is, Update included. The first snapshot replaces the
+    seed whole, and a tile whose item it no longer has leaves, as on any snapshot. A file from
+    another build reads as nothing.
+  - **Update where the worker is named.** A worker on another build offers Update on its
+    navigator row, at rest, in place of its readouts, and in the hosts popover. Each runs the
+    app's update against the host the notice names, as the pill does, and neither offers it
+    while one runs.
+  - Tests: `the_items_kept_read_back_and_a_broken_file_goes` (`slopty-client`),
+    `a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back` (`tests/relaunch.rs`),
+    `a_worker_on_another_build_offers_update_where_it_is_named` (`tests/bars.rs`).

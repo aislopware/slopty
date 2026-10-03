@@ -96,7 +96,7 @@ mod tests {
     fn a_query_finds_what_the_reader_can_read() {
         let model = scenario("tools");
         let thread = main(&model);
-        assert!(matches(thread, "   ", true).is_empty());
+        assert_eq!(matches(thread, "   ", true), Vec::<String>::new());
         let all: Vec<String> = thread.entries().iter().map(|e| e.id.clone()).collect();
         let first_prompt = thread
             .entries()

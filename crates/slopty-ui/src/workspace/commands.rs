@@ -531,20 +531,31 @@ impl WorkspaceView {
     }
 
     /// A shell on `key`, in the active workspace: the empty workspace's rows, one per worker.
-    /// One out of reach says so.
     pub(super) fn new_terminal_on(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
-        let Some(w) = self.workers.get(&key) else { return };
-        if w.link.is_none() {
-            let text = format!("{} is {}", w.name, w.status.text());
-            self.show_notice(text, cx);
-            return;
-        }
         self.open_session_on(key, None, Vec::new(), None, cx);
+    }
+
+    /// Whether `key` is linked, so what is asked of it now is heard: one out of reach says so
+    /// in words, naming `what` would have opened, rather than dropping it unseen.
+    pub(super) fn reachable_for(
+        &mut self,
+        key: WorkerKey,
+        what: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(w) = self.workers.get(&key) else { return false };
+        if w.link.is_some() {
+            return true;
+        }
+        let what = crate::palette::sentence_case(what);
+        let text = format!("{what} did not open: {} is {}", w.name, w.status.text());
+        self.show_notice(text, cx);
+        false
     }
 
     /// Open a session running `command` (the login shell when empty) on the context worker.
     /// The self-test socket's way to put load in the workspace.
-    pub fn open_command(&self, command: Vec<String>, cx: &mut Context<Self>) {
+    pub fn open_command(&mut self, command: Vec<String>, cx: &mut Context<Self>) {
         let Some(key) = self.context_worker() else { return };
         let title = command.first().cloned();
         let cwd = self.active_cwd();
@@ -553,14 +564,19 @@ impl WorkspaceView {
 
     /// Open a session on `key` in `cwd` (the worker's default when `None`; `~` its home). The
     /// worker makes its item, and the item's arrival (ours) opens a column right of the focus.
+    /// A worker out of reach makes nothing, so that is said ([`Self::reachable_for`]).
     pub(super) fn open_session_on(
-        &self,
+        &mut self,
         key: WorkerKey,
         cwd: Option<String>,
         command: Vec<String>,
         title: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let what = if command.is_empty() { "the terminal" } else { "the command" };
+        if !self.reachable_for(key, what, cx) {
+            return;
+        }
         let request = self.next_open.get();
         self.next_open.set(request.wrapping_add(1));
         tracing::debug!(?command, ?cwd, %key, request, "open session");
@@ -637,6 +653,11 @@ impl WorkspaceView {
     /// ⌘O: ask the context worker for its windows, and show the picker while it answers.
     pub fn add_window(&mut self, _: &AddWindow, _window: &mut Window, cx: &mut Context<Self>) {
         let Some((key, _)) = self.new_tile_target() else { return };
+        // Asked of a worker out of reach, the list would come only once it is back, and its
+        // picker then, unasked.
+        if !self.reachable_for(key, "the window picker", cx) {
+            return;
+        }
         let Some(w) = self.workers.get_mut(&key) else { return };
         // A worker that cannot capture lists no window worth picking: say why rather than show
         // an empty picker (a Mac without Screen Recording, a Linux worker with no capture).
@@ -652,10 +673,7 @@ impl WorkspaceView {
         }
         w.picker_wanted = true;
         w.send(ClientMsg::Screen(ScreenRequest::List));
-        // A worker out of reach will not answer; the picker would wait on nothing.
-        if w.link.is_some() {
-            self.show_picker_loading(key, cx);
-        }
+        self.show_picker_loading(key, cx);
         cx.notify();
     }
 
@@ -822,7 +840,10 @@ impl WorkspaceView {
     /// ⌘W: close the focused tile.
     pub fn close_item(&mut self, _: &CloseItem, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(tile) = self.focused() else { return };
-        let Some(item) = self.item(tile).cloned() else { return };
+        let Some(item) = self.item(tile).cloned() else {
+            self.close_starting(tile, cx);
+            return;
+        };
         tracing::debug!(item = %tile.item, kind = ?item.kind, "close tile");
         match item.kind {
             // A live session closes through the worker, which removes the item; a shell whose

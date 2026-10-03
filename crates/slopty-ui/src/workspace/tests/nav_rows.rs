@@ -961,7 +961,7 @@ fn the_filter_takes_a_facet(cx: &mut TestAppContext) {
     assert_eq!(narrowed(cx, "branch:main"), [a, c], "any fact a tile has");
     assert_eq!(narrowed(cx, "project:SITE"), [c], "a project by its name, any case");
     assert_eq!(narrowed(cx, "machine:studio atlas"), [a], "a facet and words together");
-    assert!(narrowed(cx, "branch:nowhere").is_empty());
+    assert_eq!(narrowed(cx, "branch:nowhere"), Vec::<TileRef>::new());
     assert!(shown(cx, "nav-nothing"), "and says so");
 }
 

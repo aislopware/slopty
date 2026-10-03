@@ -1012,7 +1012,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `an_open_palette_takes_the_agents_as_they_arrive` (`workspace/tests/thread_start.rs`).
 
 - ✅ **An edit can be allowed as the person changed it, through the hook's `updatedInput`**
-  (2026-10-04, rulings §5a; the wire and the adapter, the tray's "Edit…" to follow). The
+  (2026-10-04, rulings §5a). The
   hooks reference documents `updatedInput` on a `PermissionRequest` allow as the call's changed
   input, which Claude Code checks against its rules again before it runs it.
   - `PermissionPrompt::editable` and `Request::editable` carry the parts of the call the person
@@ -1025,12 +1025,40 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     for editing that the call holds as text. An edit can neither add a field, point the call at
     another path, nor change one that is not text, and words that are not a JSON object of
     texts leave the call as asked.
-  - Tests: `an_edited_allow_carries_the_edited_input` (`slopty-agent::permission`),
+  - *The tray.* "Edit…" stands after the plain allow where the request offers a part. It puts
+    each part in a field in the code face, in the answers' place, the first taking the
+    keyboard. "Allow edited" sends them as they are now, and Cancel brings the answers back.
+    It is a field rather than Slopty's diff editor: the change is one call's text, and the
+    proposed diff stays drawn above it.
+  - Tests: `edit_then_allow_sends_the_persons_text` (`conversation::thread::tests::doors`),
+    `only_an_approval_with_parts_and_a_plain_allow_is_editable`,
+    `an_edited_allow_carries_the_edited_input` (`slopty-agent::permission`),
     `an_edited_allow_reads_back_and_nothing_else_does` (`slopty-proto::thread`), goldens
     `machine_permission_editable`, `machine_answer_edited` and `intent_answer_edited`.
 
 - ✅ **A thread lists the modes its agent publishes** (2026-10-04). `ThreadMeta::modes` (id,
   label, the agent's own description) answers the proposed change above. An ACP agent's session
   modes, or its mode config option, fill it. Claude Code, Codex and pi publish none on their
-  doors, so theirs stay empty and the TUI changes their mode. The chip that sends
-  `Intent::SetMode` from the list is next. Golden `frame_snapshot`.
+  doors, so theirs stay empty and the TUI changes their mode. Where the thread can switch
+  (`Cap::SET_MODE`) and lists modes, the mode chip names the mode by the agent's own label and
+  opens them as a menu, each with the agent's description; a pick sends `Intent::SetMode`, and
+  the chip reads as the agent then says. Golden `frame_snapshot`; test
+  `the_mode_chip_switches_the_agent_s_mode`.
+
+- ✅ **A start opens its tile at once, and its first message goes as the start's prompt**
+  (2026-10-04, readiness N11). A start drew nothing until the machine answered, and a start
+  from the palette carried no prompt, so the agent booted idle and the task was typed after.
+  - The last step of "New agent…" opens the thread's tile at once, focused, with a field
+    asking "What should Codex do?" and where it will run. Nothing goes to the machine until ↵.
+    What was typed goes as `Start::prompt`, so the first turn begins as the agent boots, and ↵
+    on nothing starts it bare. This is the empty workspace's question, in the tile itself.
+  - Once sent, the tile says "Starting Codex" and where. The thread's item lands under the
+    tile's own id, so the thread takes its place with nothing moving, and its composer takes
+    the keyboard. A refusal or an answer with no thread takes the tile away and says why.
+  - The tile is the layout's alone until then (`workspace/starting.rs`): a worker's snapshot
+    keeps it, ⌘W closes it, and a link that drops after the start was sent takes it away and
+    says the answer may never come. A start not sent yet keeps its field.
+  - Tests: `a_started_thread_opens_as_a_tile_and_a_refusal_is_said`,
+    `a_start_on_its_way_closes_and_goes_with_its_link` and
+    `new_agent_opens_the_picker_with_the_last_choices` (the prompt) in
+    `workspace/tests/thread_start.rs`.

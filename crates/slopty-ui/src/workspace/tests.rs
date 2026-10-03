@@ -525,9 +525,15 @@ fn cmd_t_asks_the_worker_for_a_shell_and_its_echo_opens_a_focused_column(cx: &mu
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
+    // The start's tile takes the first message; ↵ on nothing starts it bare.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
     let sent = thread_starts(&mut fake);
     let claude = slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned();
     assert_eq!(sent, [(claude, "/tmp/work".to_owned(), None)], "a Claude Code thread there");
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), Some(tile), "the start's tile closed: back to the shell");
     let second = opens(&view, cx, &fake, SessionId::new(), fake.me, 2);
     assert_eq!(
         column_of(&view, cx, second),

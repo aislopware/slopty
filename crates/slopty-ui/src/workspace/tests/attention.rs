@@ -698,7 +698,7 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
     cx.executor().advance_clock(SYNCED);
     cx.run_until_parked();
     assert_eq!(toast(cx).as_deref(), Some(NO_LONGER_WAITING), "the worker sent all it holds");
-    assert!(conversation(&mut link).is_empty());
+    assert_eq!(conversation(&mut link), Vec::<ConversationRequest>::new());
 
     view.update_in(cx, |v, _window, cx| {
         v.set_app_active(false, cx);
@@ -816,7 +816,7 @@ fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
     cx.run_until_parked();
     view.update(cx, |v, _| {
         assert_eq!(v.inbox_count(), 0, "read by its focus; nothing else earned a row");
-        assert!(v.attention_look().turns.is_empty());
+        assert_eq!(v.attention_look().turns, Vec::<Turn>::new());
     });
 }
 

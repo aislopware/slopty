@@ -242,6 +242,10 @@ fn the_empty_workspace_asks_what_an_agent_should_do(cx: &mut TestAppContext) {
         [(claude.clone(), "~".to_owned(), Some(prompt))],
         "an agent's thread, given the task"
     );
+    assert!(cx.debug_bounds("ask").is_none(), "its tile is there, starting: no question now");
+    // The start's tile closed, the workspace is empty again and asks again.
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(
@@ -249,6 +253,8 @@ fn the_empty_workspace_asks_what_an_agent_should_do(cx: &mut TestAppContext) {
         [(claude, "~".to_owned(), None)],
         "the field is clear again, and on nothing an agent starts bare"
     );
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
 
     click(cx, "empty-terminal");
     assert!(
@@ -287,6 +293,9 @@ fn the_questions_chips_choose_where_the_agent_starts(cx: &mut TestAppContext) {
     let started = |cx: &mut VisualTestContext, fake: &mut Fake| {
         click(cx, "ask-field");
         cx.simulate_keystrokes("enter");
+        cx.run_until_parked();
+        // The start's tile goes again, so the workspace asks again.
+        cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         thread_starts(fake).into_iter().next().map(|(_, cwd, _)| cwd)
     };

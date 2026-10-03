@@ -4,10 +4,18 @@
 //! changes as [`ItemOp`]s, each carrying only the field it changes. So that a rename or a new
 //! note shows at once, the client applies its own proposals immediately (optimistic) and
 //! recognises the worker's echo of them.
+//!
+//! The list as last seen is kept on this device ([`ItemCache`]), so a cold launch draws each
+//! tile of a worker not yet linked as what it was, under the pill saying where the worker is,
+//! rather than a hole, until the worker's first snapshot replaces it.
 
 use std::collections::BTreeMap;
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use slopty_core::{ClientId, ItemId, SessionId};
+use slopty_proto::codec;
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 
 /// The registry mirror.
@@ -43,6 +51,13 @@ pub enum ItemChange {
 }
 
 impl ItemDoc {
+    /// The registry as this device last saw it ([`ItemCache`]), at version 0: the worker's
+    /// first snapshot replaces it whole.
+    #[must_use]
+    pub fn cached(items: Vec<Item>) -> Self {
+        Self { version: 0, items: items.into_iter().map(|i| (i.id, i)).collect() }
+    }
+
     /// Registry version (0 before the first snapshot).
     #[must_use]
     pub const fn version(&self) -> u64 {
@@ -128,6 +143,80 @@ impl ItemDoc {
                 Some(Ok(false) | Err(_)) | None => ItemChange::Echo,
             },
         }
+    }
+}
+
+/// Why the item cache could not be written.
+#[derive(Debug, thiserror::Error)]
+pub enum ItemCacheError {
+    /// The file system refused.
+    #[error("item cache: {0}")]
+    Io(#[from] io::Error),
+    /// The list did not encode.
+    #[error("item cache: {0}")]
+    Codec(#[from] codec::CodecError),
+}
+
+/// Each worker's items as this device last saw them, a file per worker under one directory.
+///
+/// The directory and files are the user's alone (0700 and 0600, as a note's text is in them),
+/// in postcard, replaced whole so a crash mid-write leaves the one before. A file from another
+/// build, or cut short, reads as nothing and goes.
+#[derive(Clone, Debug)]
+pub struct ItemCache {
+    dir: PathBuf,
+}
+
+impl ItemCache {
+    /// The cache under `dir`, made when first written.
+    #[must_use]
+    pub const fn new(dir: PathBuf) -> Self {
+        Self { dir }
+    }
+
+    fn file(&self, worker: &str) -> PathBuf {
+        self.dir.join(format!("{worker}.items"))
+    }
+
+    /// `worker`'s items as last kept; none when they were not, or the file is unreadable.
+    #[must_use]
+    pub fn items(&self, worker: &str) -> Vec<Item> {
+        let path = self.file(worker);
+        match fs::read(&path) {
+            Ok(bytes) => codec::decode_body(&bytes).unwrap_or_else(|error| {
+                tracing::debug!(%error, path = %path.display(), "item cache dropped");
+                let _gone = fs::remove_file(&path);
+                Vec::new()
+            }),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// What [`Self::write`] keeps of `items`: encoded where the registry lives, written off it.
+    ///
+    /// # Errors
+    /// The encoder's.
+    pub fn encode<'a>(items: impl Iterator<Item = &'a Item>) -> Result<Vec<u8>, ItemCacheError> {
+        let items: Vec<&Item> = items.collect();
+        Ok(codec::encode_body(&items)?)
+    }
+
+    /// Keep `bytes` ([`Self::encode`]) as `worker`'s items.
+    ///
+    /// # Errors
+    /// The file system's.
+    pub fn write(&self, worker: &str, bytes: &[u8]) -> Result<(), ItemCacheError> {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(&self.dir)?;
+        let path = self.file(worker);
+        slopty_platform::fs::replace(&path, bytes)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(())
+    }
+
+    /// Where it is.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 }
 
@@ -312,5 +401,29 @@ mod tests {
         let again = ItemSync::Snapshot { version: 2, items };
         doc.apply_sync(again, me);
         assert_eq!(doc.get(review.id).map(|i| i.kind.clone()), Some(ItemKind::Review { thread }));
+    }
+
+    /// What is kept reads back as it was, the user's alone; a file cut short reads as nothing
+    /// and goes, and a worker never kept has nothing.
+    #[test]
+    fn the_items_kept_read_back_and_a_broken_file_goes() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache = ItemCache::new(dir.path().join("items"));
+        let note = Item { kind: ItemKind::Note { text: "plan".to_owned() }, ..term() };
+        let items = [term(), note];
+        let bytes = ItemCache::encode(items.iter()).unwrap();
+        cache.write("w1", &bytes).unwrap();
+        assert_eq!(cache.items("w1"), items);
+        let file = cache.dir().join("w1.items");
+        assert_eq!(fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        let doc = ItemDoc::cached(cache.items("w1"));
+        assert_eq!((doc.version(), doc.len()), (0, 2), "before any snapshot");
+
+        fs::write(&file, &bytes[..bytes.len() / 2]).unwrap();
+        assert_eq!(cache.items("w1"), []);
+        assert!(!file.exists(), "a broken file goes");
+        assert_eq!(cache.items("never"), []);
     }
 }

@@ -203,3 +203,46 @@ fn a_relaunch_keeps_how_far_each_board_was_read(cx: &mut TestAppContext) {
     assert_eq!(back, [(project, read)], "the cursor came back");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A cold launch draws a worker's tiles from its items as this device last saw them, each under
+/// the pill saying the worker is away, rather than holes; its first snapshot then replaces
+/// them, and a tile whose item it no longer has leaves.
+#[gpui::test]
+fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppContext) {
+    let (dir, path) = layout_file();
+    let items = dir.join("items");
+    let (shell, note) = {
+        let (view, vcx) = workspace(cx);
+        view.update(vcx, |v, _| {
+            v.set_layout_path(path.clone());
+            v.set_item_cache(items.clone());
+        });
+        let studio = connect(&view, vcx, 1, "studio");
+        let shell = opens(&view, vcx, &studio, SessionId::new(), studio.me, 1);
+        let note = arrives(&view, vcx, &studio, ItemKind::Note { text: "plan".into() }, 2);
+        vcx.executor().advance_clock(SAVE_AFTER);
+        vcx.run_until_parked();
+        (shell, note)
+    };
+
+    let (view, cx) = relaunched(cx, &path);
+    let key = shell.worker;
+    view.update_in(cx, |v, _w, cx| {
+        v.set_item_cache(items.clone());
+        v.add_worker(key, "studio".to_owned(), cx);
+    });
+    cx.run_until_parked();
+    for tile in [shell, note] {
+        let id = tile.item.as_uuid();
+        assert!(cx.debug_bounds(format!("item-{id}").leak()).is_some(), "drawn, not a hole");
+        assert!(cx.debug_bounds(format!("state-{id}").leak()).is_some(), "saying it is away");
+    }
+
+    let kept = view.read_with(cx, |v, _| v.item(note).cloned()).expect("the note, kept");
+    let _studio = back(&view, cx, 1, Vec::new(), vec![kept]);
+    let (shell_gone, note_kept) =
+        view.read_with(cx, |v, _| (!v.layout.contains(shell), v.layout.contains(note)));
+    assert!(shell_gone, "the snapshot no longer has the shell: its tile leaves");
+    assert!(note_kept);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

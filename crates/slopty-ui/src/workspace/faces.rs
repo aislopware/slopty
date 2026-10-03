@@ -137,8 +137,9 @@ pub(super) struct ThreadFaces {
     server: HashMap<ThreadId, ThreadStand>,
     /// Each machine's plan windows as its agents' rows last said them, for the status bar.
     meters: slopty_client::meters::PlanMeters,
-    /// Starts sent and not yet answered: the worker each went to, and its agent.
-    starts: HashMap<IntentId, (WorkerKey, AgentId)>,
+    /// Starts sent and not yet answered: the worker each went to, its agent, and the tile it
+    /// fills.
+    starts: HashMap<IntentId, (WorkerKey, AgentId, ItemId)>,
     /// The thread tile whose view takes the keyboard once it is made.
     focus_item: Option<ItemId>,
 }
@@ -227,8 +228,8 @@ impl WorkspaceView {
     }
 
     /// Start a thread of `agent` on `key`, in `cwd`, with `prompt` as its first word or nothing
-    /// said yet: the worker answers with the thread, which opens as a tile
-    /// ([`Self::thread_done`]), or in words why not.
+    /// said yet: its tile opens at once saying it is starting, and the worker answers with the
+    /// thread, which takes the tile ([`Self::thread_done`]), or in words why not.
     pub fn start_thread(
         &mut self,
         key: WorkerKey,
@@ -237,20 +238,34 @@ impl WorkspaceView {
         prompt: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let item = ItemId::new();
+        self.open_starting(item, super::starting::Starting::new(key, agent, cwd, None), cx);
+        self.send_start(item, prompt, cx);
+    }
+
+    /// Send the start of the thread on its way in `item`'s tile, with `prompt` as its first
+    /// message.
+    pub(super) fn send_start(
+        &mut self,
+        item: ItemId,
+        prompt: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(starting) = self.starting.get(item) else { return };
+        let key = starting.worker;
         let id = IntentId::new();
-        // Said at once, so the start shows before the machine answers with its thread.
-        let starting = format!(
-            "Starting {} on {} in {}\u{2026}",
-            super::projects::agent_label(&agent),
-            self.worker_name(key),
-            super::tile::cwd_tail(&cwd, self.home_of(key)),
-        );
-        let start = Start { agent, cwd, drive: None, prompt, model: None, args: Vec::new() };
-        tracing::info!(%key, %id, agent = %start.agent.0, cwd = start.cwd, "start thread");
-        self.faces.threads.starts.insert(id, (key, start.agent.clone()));
+        let start = Start {
+            agent: starting.agent.clone(),
+            cwd: starting.cwd.clone(),
+            drive: None,
+            prompt,
+            model: None,
+            args: Vec::new(),
+        };
+        tracing::info!(%key, %id, %item, agent = %start.agent.0, cwd = start.cwd, "start thread");
+        self.faces.threads.starts.insert(id, (key, start.agent.clone(), item));
         self.send(key, ClientMsg::Thread(ThreadRequest::Start { id, start: Box::new(start) }));
-        self.show_notice(starting, cx);
-        cx.notify();
+        self.starting_sent(item, cx);
     }
 
     /// The thread view a thread tile shows, once made.
@@ -367,10 +382,12 @@ impl WorkspaceView {
     }
 
     /// The link to `key` went: its thread views show what they last knew.
-    pub fn threads_unlinked(&self, key: WorkerKey, cx: &mut Context<Self>) {
+    pub fn threads_unlinked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         if let Some(hub) = self.faces.threads.hubs.get(&key) {
             hub.update(cx, ThreadHub::disconnected);
         }
+        self.faces.threads.starts.retain(|_, (at, ..)| *at != key);
+        self.starts_unlinked(key, cx);
     }
 
     /// A frame of `key`'s thread table.
@@ -403,18 +420,20 @@ impl WorkspaceView {
     /// `key`'s answer to one of this client's intents. A start answered with its thread
     /// opens the thread as a tile there; one refused says why.
     pub fn thread_done(&mut self, key: WorkerKey, done: &IntentDone, cx: &mut Context<Self>) {
-        if self.faces.threads.starts.get(&done.id).is_some_and(|(at, _)| *at == key) {
-            let Some((_, agent)) = self.faces.threads.starts.remove(&done.id) else { return };
+        if self.faces.threads.starts.get(&done.id).is_some_and(|(at, ..)| *at == key) {
+            let Some((_, agent, item)) = self.faces.threads.starts.remove(&done.id) else {
+                return;
+            };
             match &done.outcome {
-                Outcome::Started { thread } => self.open_thread(key, *thread, cx),
-                Outcome::Refused { reason } => self.show_notice(reason.clone(), cx),
+                Outcome::Started { thread } => self.start_landed(key, item, *thread, &agent, cx),
+                Outcome::Refused { reason } => self.start_failed(key, item, reason.clone(), cx),
                 Outcome::Unsupported { .. } | Outcome::Done | Outcome::Accepted => {
                     let text = format!(
-                        "{} can\u{2019}t start {} here",
+                        "{} can\u{2019}t start {}",
                         self.worker_name(key),
                         super::projects::agent_label(&agent)
                     );
-                    self.show_notice(text, cx);
+                    self.start_failed(key, item, text, cx);
                 }
             }
             return;
@@ -430,8 +449,19 @@ impl WorkspaceView {
             self.go_to(tile.item, cx);
             return;
         }
+        self.open_thread_as(key, thread, ItemId::new(), cx);
+    }
+
+    /// Add `thread`'s tile on `key` as item `id`: a start's tile keeps its place under it.
+    pub(super) fn open_thread_as(
+        &mut self,
+        key: WorkerKey,
+        thread: ThreadId,
+        id: ItemId,
+        cx: &mut Context<Self>,
+    ) {
         let item = Item {
-            id: ItemId::new(),
+            id,
             kind: ItemKind::Thread { thread },
             sleeping: false,
             name: None,

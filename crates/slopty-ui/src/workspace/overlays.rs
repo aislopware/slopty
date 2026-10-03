@@ -197,18 +197,18 @@ impl WorkspaceView {
         self.show_notice(format!("{label} does not apply here"), cx);
     }
 
-    /// The last step of "New agent…": the keyboard stays where it was until the thread's tile
-    /// opens, and the choice is what each step lists first next time.
+    /// The last step of "New agent…": the thread's tile opens at once, its field for the first
+    /// message taking the keyboard, and the choice is what each step lists first next time.
     pub(super) fn start_thread_action(
         &mut self,
         start: &StartThread,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let StartThread { worker, agent, cwd } = start.clone();
         let last = super::agent_start::LastStart { agent: agent.clone(), worker, cwd: cwd.clone() };
         self.last_start = Some(last);
-        self.start_thread(worker, agent, cwd, None, cx);
+        self.begin_start(worker, agent, cwd, window, cx);
     }
 
     /// ⌘⇧P: the command palette over whatever has the keyboard; the choice runs once it is

@@ -499,6 +499,24 @@ fn update_state(state: &BodyState, cx: &App) -> Option<UpdateState> {
 /// The pill's words while an update has no step to name yet.
 const UPDATING: &str = "Updating Slopty on the machine";
 
+impl WorkspaceView {
+    /// The way to update `key` where it runs a different build and the app can run one now (not
+    /// while one is under way): what the navigator's row and the hosts popover offer as Update,
+    /// as its tiles' pills do.
+    pub(super) fn update_run(&self, key: WorkerKey, cx: &App) -> Option<super::MenuRun> {
+        let WorkerStatus::NeedsUpdate(notice) = &self.workers.get(&key)?.status else {
+            return None;
+        };
+        let updates = cx.try_global::<add_worker::Updates>()?;
+        if updates.runs.get(&notice.host).is_some_and(|run| run.failed.is_none()) {
+            return None;
+        }
+        let start = updates.start.clone()?;
+        let host = notice.host.clone();
+        Some(std::rc::Rc::new(move |window, cx| start(&host, window, cx)))
+    }
+}
+
 /// What a tile's header leads with: what the tile is. A file shows its type; a terminal an
 /// agent runs in and a thread show the agent's mark (`agent`, an `AgentId`'s name).
 pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
@@ -769,7 +787,9 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
         let tile = placed.tile;
-        let item = self.item(tile)?;
+        let Some(item) = self.item(tile) else {
+            return self.render_starting(placed, chrome, cx);
+        };
         let theme = &self.theme;
         let id = item.id;
         let worker_up = self.workers.get(&tile.worker).is_some_and(|w| w.link.is_some());

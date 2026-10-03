@@ -75,6 +75,7 @@ impl ThreadView {
             }
         });
         field.update(cx, |f, cx| f.focus(window, cx));
+        self.editing = None;
         self.denying = Some(Denying { ask, choice, field, _entered: entered });
         cx.notify();
     }

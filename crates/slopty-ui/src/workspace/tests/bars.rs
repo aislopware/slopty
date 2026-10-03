@@ -761,3 +761,50 @@ fn the_status_bar_shows_the_focused_machines_plan_windows(cx: &mut TestAppContex
     cx.run_until_parked();
     assert!(cx.debug_bounds("status-plan").is_none(), "the laptop's agents said nothing");
 }
+
+/// A worker on another build shows Update where it is named, not only on its tiles: on its
+/// navigator row, at rest, and in the hosts popover. Each runs the app's update against the
+/// host the notice names; with one under way, neither offers it again.
+#[gpui::test]
+fn a_worker_on_another_build_offers_update_where_it_is_named(cx: &mut TestAppContext) {
+    use slopty_client::update::{Of, UpdateNotice};
+
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let asked: Rc<std::cell::RefCell<Vec<String>>> = Rc::default();
+    let seen = Rc::clone(&asked);
+    cx.update(|_w, cx| {
+        let start: crate::add_worker::Update =
+            Rc::new(move |host: &str, _w, _cx| seen.borrow_mut().push(host.to_owned()));
+        cx.set_global(crate::add_worker::Updates { start: Some(start), ..Default::default() });
+    });
+    let key = studio.key;
+    let notice =
+        UpdateNotice { of: Of::Worker, host: "studio.ts.net".to_owned(), peer: "0.0.9".to_owned() };
+    view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::NeedsUpdate(notice), cx));
+    cx.run_until_parked();
+
+    click(cx, leak(format!("nav-update-{key}")));
+    cx.run_until_parked();
+    assert_eq!(*asked.borrow(), ["studio.ts.net"], "the navigator's Update");
+
+    click(cx, "status-workers");
+    let update = leak(format!("hosts-update-{key}"));
+    assert!(cx.debug_bounds(update).is_some(), "shown at rest in the popover");
+    click(cx, update);
+    cx.run_until_parked();
+    assert_eq!(asked.borrow().len(), 2, "the popover's Update");
+
+    cx.update(|_w, cx| {
+        let install = crate::add_worker::Install {
+            steps: Vec::new(),
+            bar: crate::add_worker::Bar::Busy,
+            failed: None,
+        };
+        cx.global_mut::<crate::add_worker::Updates>().runs.insert("studio.ts.net".into(), install);
+    });
+    view.update(cx, |_v, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds(leak(format!("nav-update-{key}"))).is_none(), "not while it runs");
+}

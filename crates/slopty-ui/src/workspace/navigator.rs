@@ -2755,6 +2755,30 @@ impl WorkspaceView {
                 }));
         let chevron = if folded { IconName::ChevronRight } else { IconName::ChevronDown };
         let side = theme.typography.icon_large();
+        // A worker on another build: Update in place of its readouts, at rest too, since it
+        // links again only once updated.
+        let update = self.update_run(key, cx).map(|run| {
+            let el = div()
+                .id(SharedString::from(format!("nav-update-{key}")))
+                .debug_selector(move || format!("nav-update-{key}"))
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Update {}", worker.name)))
+                .flex_none()
+                .px(px(theme.spacing.xs))
+                .rounded(px(theme.radii.xs))
+                .cursor_pointer()
+                .text_size(px(theme.typography.small()))
+                .text_color(hsla(s.accent))
+                .hover(move |el| el.bg(hsla(s.overlay)))
+                .child(crate::add_worker::UPDATE)
+                .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
+                .on_click(cx.listener(move |_this, _ev, window, cx| {
+                    cx.stop_propagation();
+                    let run = std::rc::Rc::clone(&run);
+                    cx.defer_in(window, move |_this, window, cx| run(window, cx));
+                }));
+            tab_stop(el, s.accent)
+        });
         let add = worker.linked.then(|| {
             let el = div()
                 .id(SharedString::from(format!("nav-new-shell-{key}")))
@@ -2800,8 +2824,10 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .justify_end()
-            .child(rest)
-            .child(hover);
+            .map(|el| match update {
+                Some(update) => el.child(update),
+                None => el.child(rest).child(hover),
+            });
         let lines = if worker.warning.is_some() { kit::Row::Two } else { kit::Row::One };
         row(
             theme,

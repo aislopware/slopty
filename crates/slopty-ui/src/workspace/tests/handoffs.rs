@@ -309,7 +309,7 @@ fn a_page_opens_or_is_offered_by_its_host_until_withdrawn(cx: &mut TestAppContex
     cx.simulate_click(open_button.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(cx.opened_url().as_deref(), Some("https://github.com@evil.test/"));
-    assert!(view.read_with(cx, |v, _| v.offered_hosts()).is_empty());
+    assert_eq!(view.read_with(cx, |v, _| v.offered_hosts()), Vec::<String>::new());
     assert!(replies(&studio.drain()).is_empty(), "opening an offered page says nothing more");
 }
 

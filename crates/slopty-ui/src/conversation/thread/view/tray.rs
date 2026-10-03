@@ -351,8 +351,8 @@ impl ThreadView {
     /// where it has one in a terminal; a request that offers nothing here (a secret Codex
     /// keeps to its own terminal) makes that way its one solid.
     pub(super) fn answer_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
-        if let Some(reason) = self.deny_row(request, cx) {
-            return vec![reason];
+        if let Some(row) = self.deny_row(request, cx).or_else(|| self.edit_row(request, cx)) {
+            return vec![row];
         }
         let mut answers = self.choice_buttons(request, cx);
         answers.extend(self.release_button(request, cx));
@@ -363,6 +363,12 @@ impl ThreadView {
     fn choice_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
         let ask = request.id.clone();
         let plain_deny = super::denying::deny_choice(request).map(|c| c.id.clone());
+        // "Edit…" follows the first plain allow, the one it sends.
+        let plain_allow = request
+            .options
+            .iter()
+            .find(|c| c.effect == Effect::Allow && c.scope.is_none())
+            .map(|c| c.id.clone());
         let mut answers: Vec<AnyElement> = Vec::new();
         for (choice, kind) in request.options.iter().zip(answer_kinds(&request.options)) {
             let (ask, id) = (ask.clone(), choice.id.clone());
@@ -378,6 +384,9 @@ impl ThreadView {
                 }))
                 .into_any_element(),
             );
+            if plain_allow.as_deref() == Some(choice.id.as_str()) {
+                answers.extend(self.edit_button(request, cx));
+            }
             if plain_deny.as_deref() == Some(choice.id.as_str()) {
                 answers.extend(self.deny_with_reason_button(request, cx));
             }
@@ -469,10 +478,11 @@ impl ThreadView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (choices, release) = match self.deny_row(request, cx) {
-            Some(reason) => (vec![reason], None),
-            None => (self.choice_buttons(request, cx), self.release_button(request, cx)),
-        };
+        let (choices, release) =
+            match self.deny_row(request, cx).or_else(|| self.edit_row(request, cx)) {
+                Some(row) => (vec![row], None),
+                None => (self.choice_buttons(request, cx), self.release_button(request, cx)),
+            };
         let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
         let (title, counter) = match asking {
             Some(asking) => {
