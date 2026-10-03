@@ -23,7 +23,7 @@ use slopty_media::{
 use slopty_proto::ClientMsg;
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::media::{ClockEcho, Kind, MAX_DATAGRAM, MediaHeader, flags};
-use slopty_proto::screen::{Feedback, ReceiverReport, ScreenRequest, Stripe, VideoCodec};
+use slopty_proto::screen::{Feedback, ReceiverReport, Region, ScreenRequest, Stripe, VideoCodec};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -321,6 +321,10 @@ pub struct Presentable {
     pub stamp: FrameStamp,
     /// For a striped stream, the lower stripe and where the two meet; `None` for one picture.
     pub stripes: Option<Stitched>,
+    /// The part of the target the picture shows, in the target's native pixels; `None` for all
+    /// of it ([`slopty_proto::media::FramePrefix::region`]). A zoomed picture's frames show its
+    /// region, and the view draws each at that region's place in the whole picture.
+    pub region: Option<Region>,
 }
 
 /// The two stripes of one capture, each decoded by a session of its own, to be shown one over
@@ -840,11 +844,13 @@ pub fn spawn_screen(
 const STITCH_WAIT: Duration = Duration::from_micros(16_667);
 
 /// How a frame was coded, from its prefix: the stripes coded from its capture (zero for one
-/// picture) and the build of the worker's sessions that coded it.
+/// picture), the build of the worker's sessions that coded it, and the region of the target it
+/// shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 struct Coded {
     stripes: u8,
     build: u8,
+    region: Option<Region>,
 }
 
 /// Where decoded pictures go, from every coded picture's decoder: the stitch, the present hook
@@ -877,7 +883,7 @@ impl Output {
                 return;
             }
             self.stitch.lock().whole();
-            Some(Presentable { frame, stamp, stripes: None })
+            Some(Presentable { frame, stamp, stripes: None, region: coded.region })
         } else {
             let joined = self.stitch.lock().decoded(index, frame, stamp, coded, decoded);
             joined.map(Joined::presentable)
@@ -911,7 +917,8 @@ impl Output {
 struct Shown<F> {
     frame: F,
     stamp: FrameStamp,
-    build: u8,
+    /// The build and the region of the capture it was coded from ([`Coded`]).
+    coded: Coded,
 }
 
 /// The capture the stitch waits on.
@@ -930,6 +937,8 @@ struct Joined<F> {
     top: F,
     lower: F,
     stamp: FrameStamp,
+    /// The region of the target the capture shows, which both stripes of one build share.
+    region: Option<Region>,
 }
 
 impl Joined<DecodedFrame> {
@@ -946,6 +955,7 @@ impl Joined<DecodedFrame> {
                 top_rows: top_height.saturating_sub(overlap),
                 lower_from: overlap,
             }),
+            region: self.region,
         }
     }
 }
@@ -1008,7 +1018,7 @@ impl<F: Clone> Stitch<F> {
         // only this stripe's newest picture, for the next capture to go up beside.
         let behind = self.newest.iter().flatten().any(|shown| shown.stamp.pts_us > pts);
         if let Some(slot) = self.newest.get_mut(index) {
-            *slot = Some(Shown { frame, stamp, build: coded.build });
+            *slot = Some(Shown { frame, stamp, coded });
         }
         if !behind {
             let since = self.waiting.map_or(now, |waiting| waiting.since);
@@ -1053,10 +1063,15 @@ impl<F: Clone> Stitch<F> {
     }
 
     /// The two stripes' newest pictures as one, stamped as `waiting`'s capture: arrived when
-    /// the later of the two did. `None` until both stripes have a picture of its build.
+    /// the later of the two did. `None` until both stripes have a picture of its build and its
+    /// region: a region that moves keeps the build, and a stripe of the old region beside one
+    /// of the new would be a picture of neither place.
     fn joined(&self, waiting: Waiting) -> Option<Joined<F>> {
         let [Some(top), Some(lower)] = &self.newest else { return None };
-        if top.build != waiting.coded.build || lower.build != waiting.coded.build {
+        let fits = |shown: &Shown<F>| {
+            (shown.coded.build, shown.coded.region) == (waiting.coded.build, waiting.coded.region)
+        };
+        if !fits(top) || !fits(lower) {
             return None;
         }
         let stamp = [top, lower].into_iter().find(|shown| shown.stamp.pts_us == waiting.pts)?.stamp;
@@ -1069,6 +1084,7 @@ impl<F: Clone> Stitch<F> {
             top: top.frame.clone(),
             lower: lower.frame.clone(),
             stamp: FrameStamp { arrived, ..stamp },
+            region: waiting.coded.region,
         })
     }
 }
@@ -1567,7 +1583,11 @@ impl Worker {
                 ltr_token: frame.info.ltr_token,
                 restarts,
                 discardable,
-                coded: Coded { stripes: frame.info.stripes, build: frame.info.build },
+                coded: Coded {
+                    stripes: frame.info.stripes,
+                    build: frame.info.build,
+                    region: frame.info.region,
+                },
             });
             if restarts {
                 lane.restart_pts = Some(pts);
@@ -1862,7 +1882,7 @@ mod arrival_tests {
         restarts: bool,
         discardable: bool,
     ) -> Parked {
-        let coded = Coded { stripes: 0, build: 0 };
+        let coded = Coded { stripes: 0, build: 0, region: None };
         Parked { pts_us, arrived, ltr_token, restarts, discardable, coded }
     }
 
@@ -2016,7 +2036,7 @@ mod stitch_tests {
         (stripes, build): (u8, u8),
         at: Instant,
     ) -> Option<(Picture, Picture)> {
-        let coded = Coded { stripes, build };
+        let coded = Coded { stripes, build, region: None };
         stitch.decoded(index, (pts, index), stamp(pts, at), coded, at).map(|j| (j.top, j.lower))
     }
 
@@ -2032,7 +2052,7 @@ mod stitch_tests {
             1,
             (10, 1),
             stamp(10, t.at(3.0)),
-            Coded { stripes: BOTH, build: 1 },
+            Coded { stripes: BOTH, build: 1, region: None },
             t.at(3.0),
         );
         let joined = joined.expect("both in");
@@ -2138,6 +2158,37 @@ mod stitch_tests {
         assert_eq!(decode(&mut stitch, 0, 30, (BOTH, 2), t.at(48.0)), None, "stalled or not");
         stitch.set_stalled(1, false);
         assert_eq!(decode(&mut stitch, 1, 40, (0b10, 2), t.at(60.0)), Some(((30, 0), (40, 1))));
+    }
+
+    /// Stripes of two regions of one build never go up together: a region that moves at the
+    /// size in force keeps the build, and a stripe of each would draw one place's rows at the
+    /// other's. A joined picture says the region its capture shows.
+    #[test]
+    fn stripes_of_two_regions_never_go_up_together() {
+        let t = Clock(Instant::now());
+        let (a, b) = (
+            Some(Region { x: 0, y: 0, w: 3840, h: 2160 }),
+            Some(Region { x: 640, y: 360, w: 3840, h: 2160 }),
+        );
+        let mut stitch = Stitch::default();
+        let mut decode_in = |index, pts, stripes, region, at| {
+            let coded = Coded { stripes, build: 1, region };
+            stitch.decoded(index, (pts, index), stamp(pts, at), coded, at)
+        };
+        assert!(decode_in(0, 10, BOTH, a, t.at(0.0)).is_none());
+        let joined = decode_in(1, 10, BOTH, a, t.at(1.0)).expect("both of a");
+        assert_eq!(joined.region, a);
+        assert!(decode_in(0, 20, BOTH, b, t.at(8.0)).is_none(), "the lower is of a");
+        assert!(stitch.settle(t.at(40.0)).is_none(), "not even past the wait");
+        let joined = stitch.decoded(
+            1,
+            (20, 1),
+            stamp(20, t.at(41.0)),
+            Coded { stripes: BOTH, build: 1, region: b },
+            t.at(41.0),
+        );
+        let joined = joined.expect("both of b");
+        assert_eq!((joined.top, joined.lower, joined.region), ((20, 0), (20, 1), b));
     }
 
     /// A picture of the whole stream ends the stripes: nothing of them is kept.
@@ -2563,6 +2614,7 @@ mod worker_tests {
             discardable: false,
             capture_ts_us,
             stripes: 0,
+            region: None,
         };
         packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
     }
@@ -2756,6 +2808,7 @@ mod worker_tests {
                 discardable: false,
                 capture_ts_us: n.saturating_mul(16_667),
                 stripes: 0,
+                region: None,
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
             let x = i32::try_from(n).unwrap();

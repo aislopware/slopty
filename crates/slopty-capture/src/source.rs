@@ -163,6 +163,10 @@ pub struct CaptureConfig {
     /// Sample only this part of the target (a window's frame on a display target); the
     /// whole target when `None`.
     pub crop: Option<Crop>,
+    /// Sample only this part of what `crop` names, or of the whole target without one, in its
+    /// own points from its top-left corner: a zoomed picture's region
+    /// (`slopty_proto::screen::Quality::region`). `None` for all of it.
+    pub region: Option<Crop>,
 }
 
 impl CaptureConfig {
@@ -171,6 +175,24 @@ impl CaptureConfig {
     #[must_use]
     pub const fn surface(&self) -> (u32, u32) {
         (pad(self.width, self.align), pad(self.height, self.align))
+    }
+
+    /// What `SCStreamConfiguration.sourceRect` is set to: the region inside the crop, the crop,
+    /// the region, or nothing (the whole target). The crop is in the display's points and the
+    /// region in the crop's own, so the region moves with the window it is a part of. On the
+    /// window filter there is no crop and the region is in the window's own points, which is
+    /// the space `sourceRect` is read in there.
+    #[must_use]
+    pub fn source_rect(&self) -> Option<Crop> {
+        match (self.crop, self.region) {
+            (Some(crop), Some(region)) => Some(Crop {
+                x: crop.x + region.x.clamp(0.0, crop.w),
+                y: crop.y + region.y.clamp(0.0, crop.h),
+                w: region.w.min(crop.w - region.x.clamp(0.0, crop.w)),
+                h: region.h.min(crop.h - region.y.clamp(0.0, crop.h)),
+            }),
+            (crop, region) => region.or(crop),
+        }
     }
 }
 

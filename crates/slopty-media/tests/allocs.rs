@@ -33,6 +33,7 @@ mod allocs {
             discardable: false,
             capture_ts_us: n,
             stripes: 0,
+            region: None,
         }
     }
 

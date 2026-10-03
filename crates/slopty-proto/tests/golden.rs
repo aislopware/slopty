@@ -1133,8 +1133,25 @@ mod golden {
                     fps: 60,
                     bitrate_bps: 30_000_000,
                     scale: 1.0,
+                    region: None,
                     codec: VideoCodec::Hevc,
                     chroma: Chroma::Full,
+                },
+            }),
+        );
+    }
+
+    /// A zoomed picture's ask: its region of the target, in native pixels, at native scale.
+    #[test]
+    fn screen_quality_region() {
+        use slopty_proto::screen::{Quality, Region};
+        snap(
+            "client_screen_set_quality_region",
+            &ClientMsg::Screen(ScreenRequest::SetQuality {
+                stream: StreamId(7),
+                quality: Quality {
+                    region: Some(Region { x: 1680, y: 562, w: 1756, h: 988 }),
+                    ..Quality::default()
                 },
             }),
         );
@@ -1178,12 +1195,12 @@ mod golden {
     }
 
     /// A stream opened as one picture, one opened as two stripes (the lower on its own media
-    /// stream), a resize that moves the seam, and a frame prefix naming the stripes coded from
-    /// its capture.
+    /// stream), a resize that moves the seam, a frame prefix naming the stripes coded from its
+    /// capture, and one naming the region of the target its frame shows.
     #[test]
     fn screen_stripes() {
         use slopty_proto::media::FramePrefix;
-        use slopty_proto::screen::{CaptureTarget, Stripe, VideoCodec};
+        use slopty_proto::screen::{CaptureTarget, Region, Stripe, VideoCodec};
         use zerocopy::IntoBytes as _;
         use zerocopy::little_endian::{U32, U64};
         let stream = StreamId(7);
@@ -1234,8 +1251,12 @@ mod golden {
             stripes: 0b11,
             build: 5,
             reserved: [0; 2],
+            region: FramePrefix::region_of(None),
         };
         insta::assert_snapshot!("frame_prefix_striped", hex(prefix.as_bytes()));
+        let region = Region { x: 1680, y: 562, w: 1756, h: 988 };
+        let zoomed = FramePrefix { region: FramePrefix::region_of(Some(region)), ..prefix };
+        insta::assert_snapshot!("frame_prefix_region", hex(zoomed.as_bytes()));
     }
 
     #[test]

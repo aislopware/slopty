@@ -148,6 +148,7 @@ impl Worker {
                     capture_ts_us: 0,
                     discardable: false,
                     stripes: 0,
+                    region: None,
                 };
                 let _sent = self.packetizer.packetize(&frame, 0, |_| {});
             }

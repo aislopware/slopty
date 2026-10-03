@@ -1,6 +1,6 @@
 ---
 source: crates/slopty-proto/tests/golden.rs
-expression: hex(prefix.as_bytes())
+expression: hex(zoomed.as_bytes())
 ---
 b0 04 00 00 04 03 02 01 00 00 00 00 00 00 00 00
-03 05 00 00 00 00 00 00 00 00 00 00
+03 05 00 00 90 06 32 02 dc 06 dc 03

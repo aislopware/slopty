@@ -598,6 +598,7 @@ impl Capture {
             format: PixelFormat::Nv12Full,
             queue_depth: 3,
             crop: None,
+            region: None,
         };
         let pictures = Box::new(|_frame: CapturedFrame| {});
         Self::start_with(target, &config, pictures, Some(audio), Box::new(on_stop), done)
@@ -828,7 +829,7 @@ fn stream_configuration(config: &CaptureConfig, audio: bool) -> Retained<SCStrea
     unsafe {
         c.setCaptureDynamicRange(SCCaptureDynamicRange::SDR);
     }
-    if let Some(crop) = config.crop {
+    if let Some(crop) = config.source_rect() {
         let rect = CGRect {
             origin: CGPoint { x: crop.x, y: crop.y },
             size: CGSize { width: crop.w, height: crop.h },
@@ -863,6 +864,7 @@ mod tests {
                 format: asked,
                 queue_depth: 2,
                 crop: None,
+                region: None,
             };
             let c = stream_configuration(&config, false);
             // SAFETY: plain getter on a valid configuration object.
@@ -874,6 +876,43 @@ mod tests {
             let bt709 = unsafe { kCGDisplayStreamYCbCrMatrix_ITU_R_709_2 };
             assert_eq!(matrix.to_string(), bt709.to_string(), "{asked:?}");
         }
+    }
+
+    /// A zoomed picture's region is sampled inside the window's crop on the crop path, and in
+    /// the target's own points without one; with neither, `sourceRect` is left alone (the whole
+    /// target). A region running past the crop stops at its edge.
+    #[test]
+    fn the_region_is_sampled_inside_the_crop() {
+        let base = CaptureConfig {
+            width: 1756,
+            height: 988,
+            align: 16,
+            fps: 0,
+            format: PixelFormat::Nv12Full,
+            queue_depth: 3,
+            crop: None,
+            region: None,
+        };
+        let crop = Crop { x: 100.0, y: 50.0, w: 1200.0, h: 800.0 };
+        let region = Crop { x: 300.0, y: 200.0, w: 878.0, h: 494.0 };
+        let rect = |config: &CaptureConfig| {
+            let c = stream_configuration(config, false);
+            // SAFETY: plain getter on a valid configuration object.
+            let r = unsafe { c.sourceRect() };
+            (r.origin.x, r.origin.y, r.size.width, r.size.height)
+        };
+        let whole = rect(&base);
+        assert!(whole.2 <= 0.0 || whole.3 <= 0.0 || whole.2.is_infinite(), "unset: {whole:?}");
+        assert_eq!(
+            rect(&CaptureConfig { region: Some(region), ..base }),
+            (300.0, 200.0, 878.0, 494.0)
+        );
+        assert_eq!(rect(&CaptureConfig { crop: Some(crop), ..base }), (100.0, 50.0, 1200.0, 800.0));
+        let both = CaptureConfig { crop: Some(crop), region: Some(region), ..base };
+        assert_eq!(rect(&both), (400.0, 250.0, 878.0, 494.0));
+        let past = Crop { x: 1000.0, ..region };
+        let clipped = CaptureConfig { region: Some(past), ..both };
+        assert_eq!(rect(&clipped), (1100.0, 250.0, 200.0, 494.0), "held to the crop");
     }
 
     /// A 3024 × 1964 picture is captured into a 3024 × 1968 surface, drawn at its top-left at
@@ -891,6 +930,7 @@ mod tests {
                 format: PixelFormat::Nv12Full,
                 queue_depth: 3,
                 crop: None,
+                region: None,
             };
             let c = stream_configuration(&config, false);
             // SAFETY: plain getter on a valid configuration object.

@@ -28,6 +28,24 @@ mod units {
         assert_eq!(TunnelRefusal::from_code(4), None);
     }
 
+    /// A region is held to its target: edges on even pixels, a side of at least
+    /// `Region::MIN_SIDE`, moved in from an edge it would cross to keep that side, cut at an
+    /// edge it runs past, nothing for one off the target, and nothing for the whole target.
+    #[test]
+    fn a_region_is_held_to_its_target() {
+        use slopty_proto::screen::Region;
+        let r = |x, y, w, h| Region { x, y, w, h };
+        let native = (3024, 1964);
+        assert_eq!(r(401, 301, 1755, 987).within(native), Some(r(400, 300, 1756, 988)));
+        assert_eq!(r(2500, 1500, 1756, 988).within(native), Some(r(2500, 1500, 524, 464)));
+        assert_eq!(r(3000, 1950, 10, 10).within(native), Some(r(2960, 1900, 64, 64)), "min");
+        assert_eq!(r(100, 100, 0, 50).within(native), None, "no width");
+        assert_eq!(r(3024, 0, 64, 64).within(native), None, "off the right edge");
+        assert_eq!(r(0, 0, 3024, 1964).within(native), None, "the whole target");
+        assert_eq!(r(0, 0, u16::MAX, u16::MAX).within(native), None, "more than the target");
+        assert_eq!(r(0, 0, 32, 32).within((48, 40)), None, "a target under the minimum is all");
+    }
+
     /// A stripe's media stream names its stream and its place, and the top stripe's is the
     /// stream's own.
     #[test]
@@ -43,7 +61,7 @@ mod units {
             assert_eq!(Stripe::stream_of(stream), (stream, 0));
         }
         assert_eq!(Stripe::MAX, 2);
-        assert_eq!(slopty_proto::media::FRAME_PREFIX_BYTES, 20);
+        assert_eq!(slopty_proto::media::FRAME_PREFIX_BYTES, 28);
     }
 
     #[test]

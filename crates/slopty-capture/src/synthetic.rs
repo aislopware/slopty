@@ -927,7 +927,16 @@ mod tests {
     use super::*;
 
     fn config(width: u32, height: u32, format: PixelFormat) -> CaptureConfig {
-        CaptureConfig { width, height, align: 16, fps: 60, format, queue_depth: 3, crop: None }
+        CaptureConfig {
+            width,
+            height,
+            align: 16,
+            fps: 60,
+            format,
+            queue_depth: 3,
+            crop: None,
+            region: None,
+        }
     }
 
     /// A picture spells the input count in its strip, and the reader gets it back, in either

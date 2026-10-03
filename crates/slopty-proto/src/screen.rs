@@ -182,6 +182,53 @@ impl Stripe {
 /// other bits name. A worker numbers its streams upwards from 1 and never reaches it.
 const STRIPE_BIT: u32 = 1 << 31;
 
+/// A part of a stream's target, in the target's native pixels from its top-left corner.
+///
+/// What a zoomed picture streams ([`Quality::region`]) and what each of its frames shows
+/// ([`crate::media::FramePrefix::region`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct Region {
+    /// Left edge.
+    pub x: u16,
+    /// Top edge.
+    pub y: u16,
+    /// Width.
+    pub w: u16,
+    /// Height.
+    pub h: u16,
+}
+
+impl Region {
+    /// The smallest side a region keeps: a capture and an encoder session have floors of their
+    /// own, and a region this small is a zoom past anything a screen shows.
+    pub const MIN_SIDE: u16 = 64;
+
+    /// The part of a target `native` pixels in size this region can stream: held inside the
+    /// target, at least [`Self::MIN_SIDE`] a side where the target has it, its edges on even
+    /// pixels (a 4:2:0 picture's chroma is sampled per two). `None` when nothing of it is on
+    /// the target, or when it is the whole target: the stream then shows all of it.
+    #[must_use]
+    pub fn within(self, native: (u32, u32)) -> Option<Self> {
+        let side = |at: u16, len: u16, of: u32| -> Option<(u16, u16)> {
+            let of = u16::try_from(of.min(u32::from(u16::MAX))).ok()?;
+            let end = at.saturating_add(len).min(of);
+            if at >= end {
+                return None;
+            }
+            let start = at & !1;
+            let end = end.saturating_add(end & 1).min(of);
+            let min = Self::MIN_SIDE.min(of);
+            let len = end.saturating_sub(start).max(min);
+            let start = start.min(of.saturating_sub(len)) & !1;
+            Some((start, len.min(of.saturating_sub(start))))
+        };
+        let (x, w) = side(self.x, self.w, native.0)?;
+        let (y, h) = side(self.y, self.h, native.1)?;
+        let whole = u32::from(w) >= native.0 && u32::from(h) >= native.1;
+        (!whole).then_some(Self { x, y, w, h })
+    }
+}
+
 /// Stream quality request.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Quality {
@@ -191,6 +238,14 @@ pub struct Quality {
     pub bitrate_bps: u32,
     /// Scale factor applied to the capture (1.0 = native points × scale).
     pub scale: f32,
+    /// The part of the target to stream, at `scale`; `None` for all of it
+    /// (`docs/decisions/video.md`, "A zoomed picture streams its region"). A zoomed picture
+    /// asks for what it shows and a margin round it. Input, the cursor and every size the
+    /// worker reports stay in the whole target's stream pixels, so nothing but the frames
+    /// changes: each says which region it shows ([`crate::media::FramePrefix::region`]). The
+    /// worker holds it to the target ([`Region::within`]), and again whenever the target
+    /// changes size.
+    pub region: Option<Region>,
     /// Preferred codec.
     pub codec: VideoCodec,
     /// The most colour the client wants. [`Chroma::Full`] is an ask, not an order: the worker
@@ -206,6 +261,7 @@ impl Default for Quality {
             fps: 60,
             bitrate_bps: 30_000_000,
             scale: 1.0,
+            region: None,
             codec: VideoCodec::Hevc,
             chroma: Chroma::Subsampled,
         }

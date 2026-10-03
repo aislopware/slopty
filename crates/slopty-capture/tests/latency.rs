@@ -186,6 +186,7 @@ mod tests {
             format: PixelFormat::Nv12Full,
             queue_depth: depth,
             crop,
+            region: None,
         }
     }
 

@@ -215,6 +215,7 @@ impl Run {
             capture_ts_us: 0,
             discardable: false,
             stripes: 0,
+            region: None,
         };
         let number = self.packetizer.next_frame();
         let mut shipped = Vec::new();

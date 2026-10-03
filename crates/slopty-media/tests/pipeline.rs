@@ -109,6 +109,7 @@ mod tests {
                 discardable,
                 capture_ts_us: 1_000,
                 stripes: 0,
+                region: None,
             };
             let stamp = self.send_ms_lo();
             self.tx.packetize(&frame, stamp, |_| {}).unwrap().clone()
@@ -189,6 +190,7 @@ mod tests {
             discardable: false,
             capture_ts_us: 1_000,
             stripes: 0b10,
+            region: None,
         };
         let stamp = h.send_ms_lo();
         let sent = h.tx.packetize(&frame, stamp, |_| {}).unwrap().clone();
@@ -1742,6 +1744,7 @@ mod tests {
                 discardable: false,
                 capture_ts_us: 0,
                 stripes: 0,
+                region: None,
             };
             let sent = tx.packetize(&frame, 0, |_| {}).unwrap().clone();
             let parity = usize::from(sent.layout.parity_count);

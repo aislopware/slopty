@@ -191,6 +191,9 @@ pub struct FrameInfo {
     /// The build of the worker's sessions that coded it
     /// ([`slopty_proto::media::FramePrefix::build`]).
     pub build: u8,
+    /// The part of the target the frame shows; `None` for all of it
+    /// ([`slopty_proto::media::FramePrefix::region`]).
+    pub region: Option<slopty_proto::screen::Region>,
     /// Needed parity or a retransmission.
     pub recovered: bool,
 }
@@ -1523,6 +1526,7 @@ fn assemble(
             capture_ts_us: prefix.capture_ts_us.get(),
             stripes: prefix.stripes,
             build: prefix.build,
+            region: prefix.region(),
             recovered: fec || partial.retransmitted,
         },
         data,
@@ -1631,6 +1635,7 @@ mod cost_tests {
                         discardable: false,
                         capture_ts_us: n,
                         stripes: 0,
+                        region: None,
                     };
                     packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone()
                 })

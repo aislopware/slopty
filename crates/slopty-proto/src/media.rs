@@ -11,6 +11,7 @@ use zerocopy::little_endian::{I32, U16, U32, U64};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
 
 use crate::datagram::Channel;
+use crate::screen::Region;
 
 /// Largest datagram we will ever send. Under the 1280-byte IPv6 minimum MTU after QUIC/UDP
 /// overhead, so it never fragments on a `WireGuard` or cellular path.
@@ -139,7 +140,7 @@ impl MediaHeader {
 const _: () = assert!(size_of::<MediaHeader>() == HEADER_BYTES, "header layout drifted");
 
 /// Bytes of [`FramePrefix`].
-pub const FRAME_PREFIX_BYTES: usize = 20;
+pub const FRAME_PREFIX_BYTES: usize = 28;
 
 /// Per-frame metadata carried *inside* the fragmented payload, ahead of the encoded bitstream.
 ///
@@ -170,6 +171,11 @@ pub struct FramePrefix {
     pub build: u8,
     /// Zero.
     pub reserved: [u8; 2],
+    /// The part of the target this frame shows, in the target's native pixels: left, top,
+    /// width and height ([`crate::screen::Region`]); all zero for the whole target. It rides
+    /// in the frame, under its parity, so a frame in flight across a change of region still
+    /// says where it goes, with nothing between the control stream and the datagrams to order.
+    pub region: [U16; 4],
 }
 
 impl FramePrefix {
@@ -177,6 +183,21 @@ impl FramePrefix {
     #[must_use]
     pub fn parse(body: &[u8]) -> Option<(&Self, &[u8])> {
         Self::ref_from_prefix(body).ok()
+    }
+
+    /// The prefix's form of `region`: all zero for the whole target.
+    #[must_use]
+    pub fn region_of(region: Option<Region>) -> [U16; 4] {
+        region.map_or([U16::ZERO; 4], |Region { x, y, w, h }| {
+            [U16::new(x), U16::new(y), U16::new(w), U16::new(h)]
+        })
+    }
+
+    /// The region the frame shows; `None` for the whole target, or a region of no size.
+    #[must_use]
+    pub fn region(&self) -> Option<Region> {
+        let [x, y, w, h] = self.region.map(U16::get);
+        (w > 0 && h > 0).then_some(Region { x, y, w, h })
     }
 }
 
@@ -308,6 +329,7 @@ mod tests {
             stripes: 0b10,
             build: 9,
             reserved: [0; 2],
+            region: FramePrefix::region_of(Some(Region { x: 0x0102, y: 3, w: 640, h: 0x0400 })),
         };
         let mut body = prefix.as_bytes().to_vec();
         body.push(0xcc);
@@ -317,7 +339,12 @@ mod tests {
         assert_eq!(&body[..4], &[4, 3, 2, 1]);
         assert_eq!(&body[8..16], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(&body[16..20], &[2, 9, 0, 0], "the stripes and the build after the token");
+        assert_eq!(&body[20..28], &[2, 1, 3, 0, 128, 2, 0, 4], "the region last");
+        assert_eq!(parsed.region(), Some(Region { x: 0x0102, y: 3, w: 640, h: 0x0400 }));
         assert!(FramePrefix::parse(&body[..FRAME_PREFIX_BYTES - 1]).is_none());
+        let whole = FramePrefix { region: FramePrefix::region_of(None), ..prefix };
+        assert_eq!(&whole.as_bytes()[20..28], &[0; 8], "the whole target is all zero");
+        assert_eq!(whole.region(), None);
 
         let cursor = CursorUpdate { x: I32::new(-1), y: I32::new(2), visible: 1, reserved: [0; 3] };
         assert_eq!(cursor.as_bytes(), &[255, 255, 255, 255, 2, 0, 0, 0, 1, 0, 0, 0]);

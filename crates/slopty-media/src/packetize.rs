@@ -9,6 +9,7 @@ use slopty_proto::datagram::Channel;
 use slopty_proto::media::{
     FRAME_PREFIX_BYTES, FramePrefix, HEADER_BYTES, Kind, MAX_PAYLOAD, MediaHeader, flags,
 };
+use slopty_proto::screen::Region;
 use zerocopy::little_endian::{U16, U32, U64};
 use zerocopy::{FromBytes as _, IntoBytes as _};
 
@@ -54,6 +55,8 @@ pub struct EncodedFrame<'a> {
     /// The stripes coded from this capture ([`FramePrefix::stripes`]); zero for a stream coded
     /// as one picture.
     pub stripes: u8,
+    /// The part of the target the frame shows ([`FramePrefix::region`]); `None` for all of it.
+    pub region: Option<Region>,
 }
 
 /// How a frame is cut up.
@@ -238,6 +241,7 @@ impl Packetizer {
             stripes: frame.stripes,
             build: self.build,
             reserved: [0; 2],
+            region: FramePrefix::region_of(frame.region),
         };
         let mut header = MediaHeader {
             channel: Channel::Media as u8,
@@ -380,7 +384,9 @@ mod tests {
 
     #[test]
     fn layout_balances_fragments() {
-        for len in [1, 100, 1161, 1162, 1163, 2333, 30_000, 1_000_000] {
+        // The most a frame of one fragment carries.
+        let one = MAX_PAYLOAD - FRAME_PREFIX_BYTES;
+        for len in [1, 100, one - 1, one, one + 1, 2333, 30_000, 1_000_000] {
             let l = layout(len, 200, MAX_PAYLOAD).unwrap();
             let total = len + FRAME_PREFIX_BYTES;
             assert!(
@@ -397,11 +403,11 @@ mod tests {
             ));
         }
         assert_eq!(
-            layout(1162, 200, MAX_PAYLOAD).unwrap(),
+            layout(one, 200, MAX_PAYLOAD).unwrap(),
             Layout { data_count: 1, shard_bytes: 1182, parity_count: 2 }
         );
-        assert_eq!(layout(1163, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
-        assert_eq!(layout(1163, 200, MAX_PAYLOAD).unwrap().data_count, 2);
+        assert_eq!(layout(one + 1, 0, MAX_PAYLOAD).unwrap().parity_count, 0);
+        assert_eq!(layout(one + 1, 200, MAX_PAYLOAD).unwrap().data_count, 2);
         assert!(matches!(layout(0, 200, MAX_PAYLOAD), Err(MediaError::Empty)));
         assert!(matches!(
             layout(MAX_DATA_FRAGMENTS * MAX_PAYLOAD, 200, MAX_PAYLOAD),
@@ -447,6 +453,7 @@ mod tests {
                 discardable: false,
                 capture_ts_us: 0,
                 stripes: 0,
+                region: None,
             };
             p.packetize(&frame, 0, |_| {}).unwrap().layout.shard_bytes
         };
@@ -478,6 +485,7 @@ mod tests {
             discardable: false,
             capture_ts_us: 99,
             stripes: 0,
+            region: None,
         };
         let sent = p.packetize(&frame, 7, |_| {}).unwrap().clone();
         assert_eq!(sent.frame, 0);
@@ -515,6 +523,7 @@ mod tests {
             discardable: false,
             capture_ts_us: 0,
             stripes: 0,
+            region: None,
         };
         for _ in 0..HISTORY_FRAMES + 2 {
             p.packetize(&frame, 0, |_| {}).unwrap();
@@ -559,6 +568,7 @@ mod tests {
             discardable: false,
             capture_ts_us: 0,
             stripes: 0,
+            region: None,
         };
         let sent = p.packetize(&frame, 0, |_| {}).unwrap();
         let wire = sent.bytes();
@@ -599,6 +609,7 @@ mod tests {
             discardable: false,
             capture_ts_us: 5,
             stripes: 0b10,
+            region: Some(Region { x: 64, y: 32, w: 1280, h: 720 }),
         };
         let sent = p.packetize(&frame, 3, |_| {}).unwrap().clone();
         let stride = HEADER_BYTES + sent.layout.shard_bytes;
@@ -619,6 +630,7 @@ mod tests {
             (4000, 5, 7)
         );
         assert_eq!((prefix.stripes, prefix.build), (0b10, 4), "the stripes and the build");
+        assert_eq!(prefix.region(), frame.region, "the region");
         assert_eq!(&rest[..4000], data.as_slice());
         assert!(rest[4000..].iter().all(|&b| b == 0), "zero padded");
 
@@ -660,6 +672,7 @@ mod tests {
                 discardable: false,
                 capture_ts_us: 0,
                 stripes: 0,
+                region: None,
             };
             for permille in [DEFAULT_PARITY_PERMILLE, 0] {
                 let mut p = Packetizer::new(StreamId(1));
@@ -699,6 +712,7 @@ mod tests {
             discardable: true,
             capture_ts_us: 1,
             stripes: 0,
+            region: None,
         };
         let flags_of = |sent: &SentFrame| MediaHeader::parse(&sent.datagrams[0]).unwrap().0.flags;
         let with_token = flags_of(p.packetize(&frame(Some(9)), 0, |_| {}).unwrap());

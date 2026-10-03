@@ -1233,6 +1233,7 @@ mod tests {
             discardable: false,
             capture_ts_us: 1,
             stripes: 0,
+            region: None,
         };
         let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
         assert!(datagrams.len() >= 3);
@@ -1307,6 +1308,7 @@ mod tests {
                 discardable: false,
                 capture_ts_us: n,
                 stripes: 0,
+                region: None,
             };
             let datagrams = packetizer.packetize(&frame, 0, |_| {}).unwrap().datagrams.clone();
             let sent = Instant::now();
