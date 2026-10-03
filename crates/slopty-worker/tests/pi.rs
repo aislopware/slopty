@@ -18,7 +18,7 @@ mod pi {
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
         AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase, RequestState,
-        ThreadId, ThreadState, ToolState, TurnState,
+        ThreadId, ThreadState, ToolState, TurnId, TurnState,
     };
     use slopty_worker::thread::Host;
     use slopty_worker::thread::log::Limits;
@@ -584,5 +584,141 @@ mod pi {
         let missing = bare.start(IntentId::new(), rig.start("Say hello.")).await;
         assert_eq!(missing, Outcome::Refused { reason: "pi is not installed".to_owned() });
         assert!(!rig.record.exists(), "no pi ran");
+    }
+
+    const PNG: [u8; 12] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+
+    /// A picture sent with a message goes to pi whole, beside the person's words, which stay
+    /// as they were written; a file that is not here is refused before anything goes.
+    #[tokio::test]
+    async fn a_picture_goes_to_pi_with_the_message() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let mut start = rig.start("");
+        start.prompt = None;
+        let Outcome::Started { thread } = pi.start(IntentId::new(), start).await else {
+            panic!("not started");
+        };
+        let shot = rig.work.join("shot.dat");
+        std::fs::write(&shot, PNG).unwrap();
+        let send = |paths: Vec<String>| Intent::Send {
+            text: "Say hello.".to_owned(),
+            delivery: Delivery::Steer,
+            attachments: paths,
+        };
+        let gone = rig.work.join("gone.png").to_string_lossy().into_owned();
+        let (_, refused) = rig.intent(&pi, thread, &send(vec![gone]));
+        assert!(matches!(refused, Outcome::Refused { .. }), "{refused:?}");
+        let (id, sent) = rig.intent(&pi, thread, &send(vec![shot.to_string_lossy().into()]));
+        assert_eq!(sent, Outcome::Done);
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        assert_eq!(users(&state), [("Say hello.".to_owned(), Some(id))]);
+        let record = rig.record();
+        let prompt =
+            record["heard"].as_array().unwrap().iter().find(|c| c["type"] == "prompt").unwrap();
+        let picture = slopty_agent::attach::Attached::Picture {
+            path: String::new(),
+            media_type: "image/png",
+            bytes: PNG.to_vec(),
+        };
+        let data = picture.base64();
+        assert_eq!(
+            prompt["images"],
+            serde_json::json!([{"type": "image", "data": data, "mimeType": "image/png"}])
+        );
+        assert_eq!(record["unexpected"], serde_json::json!([]));
+    }
+
+    /// A fork runs pi on a new session, named by the fork's intent, that copies the whole of
+    /// the thread's (`--fork`) with the thread's own flags, and reads the new thread from the
+    /// copy; the new thread says which thread and turn it came from, and keeps saying so once
+    /// read again. A fork from an earlier turn is refused: pi copies whole sessions.
+    #[tokio::test]
+    async fn a_fork_copies_the_whole_session_into_a_new_thread() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let id = IntentId::new();
+        let Outcome::Started { thread } = pi.start(id, rig.start("Say hello.")).await else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.meta.can(Cap::FORK));
+        let last = state.turns[0].id;
+        let early = pi.fork(thread, IntentId::new(), Some(TurnId(last.0 + 7))).await;
+        assert!(matches!(early, Outcome::Refused { .. }), "{early:?}");
+
+        let fork = IntentId::new();
+        let Outcome::Started { thread: forked } = pi.fork(thread, fork, Some(last)).await else {
+            panic!("not forked");
+        };
+        assert_ne!(forked, thread);
+        assert_eq!(pi.fork(thread, fork, Some(last)).await, Outcome::Started { thread: forked });
+        let record = rig.record_once(|r| r["heard"][0]["type"] == "get_entries").await;
+        let argv: Vec<&str> =
+            record["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        let (new, old) = (fork.to_string(), id.to_string());
+        assert_eq!(argv[4..], ["--session-id", &new, "--offline", "--fork", &old]);
+        let state = rig.until(forked, "the copy read", |s| s.turns.len() == 4).await;
+        let from = slopty_proto::thread::Fork { thread, turn: Some(last) };
+        assert_eq!(state.meta.forked_from, Some(from));
+        assert_eq!(state.meta.origin, slopty_proto::thread::ThreadMeta::FORK);
+        assert_eq!(state.meta.native, new);
+        assert_eq!(slopty_agent::pi::driven::args_of(&state.meta), ["--offline"], "no --fork kept");
+    }
+
+    /// pi's sessions in a folder are listed from its session directory, the last written
+    /// first, each called by its name or first message; one taken up again (`--session`) runs
+    /// pi on that session, read from its entries first, and a second start finds the same
+    /// thread.
+    #[tokio::test]
+    async fn a_past_session_is_listed_and_taken_up_again() {
+        let rig = Rig::new();
+        let agent = rig.data.join("pi-agent");
+        let cwd = rig.work.to_string_lossy().into_owned();
+        assert_eq!(pi::sessions(&agent, &cwd, 10).await, Ok(Vec::new()), "no folder yet");
+        let folder = slopty_agent::pi::sessions::folder(&agent, &cwd);
+        std::fs::create_dir_all(&folder).unwrap();
+        let first = concat!(
+            r#"{"type":"session","version":3,"id":"s-1","cwd":"/w"}"#,
+            "\n",
+            r#"{"type":"message","id":"1","message":{"role":"user","content":"Fix the login","timestamp":1}}"#,
+            "\n",
+        );
+        let at = |secs: u64| std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+        for (name, words, secs) in [
+            ("2026-10-01T10-00-00-000Z_s-1.jsonl", first, 100),
+            ("2026-10-02T10-00-00-000Z_s-2.jsonl", "{}\n", 200),
+        ] {
+            let file = folder.join(name);
+            std::fs::write(&file, words).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(at(secs))
+                .unwrap();
+        }
+        std::fs::write(folder.join("notes.txt"), "not a session").unwrap();
+        let listed = pi::sessions(&agent, &cwd, 10).await.unwrap();
+        let names: Vec<_> =
+            listed.iter().map(|s| (s.native.as_str(), s.title.as_deref())).collect();
+        assert_eq!(names, [("s-2", None), ("s-1", Some("Fix the login"))]);
+        assert_eq!(pi::sessions(&agent, &cwd, 1).await.unwrap().len(), 1);
+
+        let (pi, _served) = rig.serve();
+        let mut start = rig.start("");
+        start.prompt = None;
+        start.args = [listed[1].resume.clone(), vec!["--offline".to_owned()]].concat();
+        let Outcome::Started { thread } = pi.start(IntentId::new(), start.clone()).await else {
+            panic!("not started");
+        };
+        assert_eq!(thread, slopty_agent::pi::driven::thread_of("s-1"));
+        let record = rig.record_once(|r| r["heard"][0]["type"] == "get_entries").await;
+        assert_eq!(record["argv"][5], "s-1");
+        assert_eq!(record["argv"][6], "--offline");
+        let state = rig.until(thread, "read from its entries", |s| s.turns.len() == 4).await;
+        assert_eq!(state.meta.native, "s-1");
+        assert_eq!(pi.start(IntentId::new(), start).await, Outcome::Started { thread });
+        assert_eq!(rig.host.threads(), [thread]);
     }
 }

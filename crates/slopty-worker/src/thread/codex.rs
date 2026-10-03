@@ -49,10 +49,10 @@ use slopty_agent::codex::protocol::{self as p, Method, RequestId, ServerNotifica
 use slopty_agent::codex::rpc::{self, Incoming};
 use slopty_agent::codex::shared::{Send, Shared};
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::wire::{Outcome, Start};
+use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Delivery, Drive, IntentId, ItemBody, Link, Liveness, Phase,
-    Status, ThreadId, ThreadState,
+    Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Liveness,
+    Phase, Status, ThreadId, ThreadState, TurnId,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -108,13 +108,52 @@ pub const NO_TUI: &str = "Codex isn't running on this machine, so its own termin
 /// What a client asks of a Codex thread.
 #[derive(Debug)]
 enum Ask {
-    Answer { thread: ThreadId, ask: AskId, choice: String, by: Answerer },
-    Send { thread: ThreadId, text: String, delivery: Delivery, intent: IntentId },
-    Withdraw { thread: ThreadId, intent: IntentId },
-    Edit { thread: ThreadId, intent: IntentId, text: String },
-    Interrupt { thread: ThreadId },
-    Start { id: IntentId, start: Box<Start>, reply: oneshot::Sender<Outcome> },
-    Release { thread: ThreadId, id: IntentId, reply: oneshot::Sender<Outcome> },
+    Answer {
+        thread: ThreadId,
+        ask: AskId,
+        choice: String,
+        by: Answerer,
+    },
+    Send {
+        thread: ThreadId,
+        text: String,
+        attachments: Vec<String>,
+        delivery: Delivery,
+        intent: IntentId,
+    },
+    Withdraw {
+        thread: ThreadId,
+        intent: IntentId,
+    },
+    Edit {
+        thread: ThreadId,
+        intent: IntentId,
+        text: String,
+    },
+    Interrupt {
+        thread: ThreadId,
+    },
+    Start {
+        id: IntentId,
+        start: Box<Start>,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Release {
+        thread: ThreadId,
+        id: IntentId,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Fork {
+        thread: ThreadId,
+        id: IntentId,
+        after: Option<TurnId>,
+        reply: oneshot::Sender<Outcome>,
+    },
+    Sessions {
+        cwd: String,
+        limit: u32,
+        reply: oneshot::Sender<Result<Vec<PastSession>, String>>,
+    },
 }
 
 /// How the person's own `codex` is launched for a start or a request: the `PATH` it is looked
@@ -220,9 +259,39 @@ impl Codex {
         let _gone = self.0.send(Ask::Answer { thread, ask, choice, by });
     }
 
-    /// Send `text` to `thread` as intent `intent`.
-    pub fn send(&self, thread: ThreadId, text: String, delivery: Delivery, intent: IntentId) {
-        let _gone = self.0.send(Ask::Send { thread, text, delivery, intent });
+    /// Send `text` and the files at `attachments` to `thread` as intent `intent`.
+    pub fn send(
+        &self,
+        thread: ThreadId,
+        text: String,
+        attachments: Vec<String>,
+        delivery: Delivery,
+        intent: IntentId,
+    ) {
+        let _gone = self.0.send(Ask::Send { thread, text, attachments, delivery, intent });
+    }
+
+    /// Branch a new thread off `thread` through turn `after`, or the whole of it, for intent
+    /// `id`, once: started when Codex has made it and it is followed here.
+    pub async fn fork(&self, thread: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        if self.0.send(Ask::Fork { thread, id, after, reply }).is_err() {
+            return refused("Codex threads are not served here".to_owned());
+        }
+        outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
+    }
+
+    /// Codex's threads in folder `cwd`, the latest first, at most `limit`; why not, in words.
+    ///
+    /// # Errors
+    ///
+    /// When Codex's daemon is not running, or did not answer.
+    pub async fn sessions(&self, cwd: String, limit: u32) -> Result<Vec<PastSession>, String> {
+        let (reply, listed) = oneshot::channel();
+        if self.0.send(Ask::Sessions { cwd, limit, reply }).is_err() {
+            return Err("Codex threads are not served here".to_owned());
+        }
+        listed.await.unwrap_or_else(|_| Err("the Codex threads stopped".to_owned()))
     }
 
     /// Take back the message `intent` queued in `thread`.
@@ -263,6 +332,12 @@ impl Codex {
 
 const fn refused(reason: String) -> Outcome {
     Outcome::Refused { reason }
+}
+
+/// Intent `id` for `thread` came to `outcome`, noted once: the outcome it first had when it was
+/// noted before.
+fn once(host: &Host, thread: ThreadId, id: IntentId, outcome: Outcome) -> Outcome {
+    host.intent(thread, id, |_| (outcome.clone(), Vec::new())).unwrap_or(outcome)
 }
 
 /// What a start of a Codex thread asks of Codex.
@@ -388,6 +463,12 @@ pub fn spawn(
                         Some(Ask::Release { thread, id, reply }) => {
                             let _gone = reply.send(open.refuse(&host, thread, id, NO_TUI));
                         }
+                        Some(Ask::Fork { thread, id, reply, .. }) => {
+                            let _gone = reply.send(once(&host, thread, id, refused(NOT_RUNNING.to_owned())));
+                        }
+                        Some(Ask::Sessions { reply, .. }) => {
+                            let _gone = reply.send(Err(NOT_RUNNING.to_owned()));
+                        }
                         Some(_) => {}
                         None => return,
                     },
@@ -499,6 +580,16 @@ enum Waiting {
         id: IntentId,
         prompt: Option<String>,
     },
+    /// A thread branched off `from` through `turn` for intent `id`.
+    Fork {
+        id: IntentId,
+        from: ThreadId,
+        turn: Option<TurnId>,
+    },
+    /// The threads of a folder, for whoever asked.
+    List {
+        reply: oneshot::Sender<Result<Vec<PastSession>, String>>,
+    },
 }
 
 /// A followed thread.
@@ -535,6 +626,8 @@ struct Session {
     /// The call that started each subagent's thread, by the subagent's thread, whether or not
     /// it is followed yet.
     parents: HashMap<ThreadId, Link>,
+    /// Who waits on each fork Codex has not answered yet, and the thread it branches off.
+    forking: HashMap<IntentId, (ThreadId, Vec<oneshot::Sender<Outcome>>)>,
 }
 
 impl Session {
@@ -554,6 +647,7 @@ impl Session {
             reopening: HashMap::new(),
             limits: None,
             parents: HashMap::new(),
+            forking: HashMap::new(),
         }
     }
 
@@ -564,6 +658,12 @@ impl Session {
             _ => None,
         });
         self.reopening.clear();
+        for (id, (thread, waiting)) in self.forking.drain() {
+            let outcome = once(&self.host, thread, id, refused(reason.to_owned()));
+            for reply in waiting {
+                let _gone = reply.send(outcome.clone());
+            }
+        }
         let starting: Vec<_> = self.starting.drain().chain(held).collect();
         for (id, waiting) in starting {
             let outcome = self.host.record_start(id, refused(reason.to_owned()));
@@ -743,13 +843,51 @@ impl Session {
                 };
                 self.answer_start(id, outcome.clone());
                 if let (Outcome::Started { thread }, Some(prompt)) = (outcome, prompt) {
-                    let ask =
-                        Ask::Send { thread, text: prompt, delivery: Delivery::Queue, intent: id };
+                    let ask = Ask::Send {
+                        thread,
+                        text: prompt,
+                        attachments: Vec::new(),
+                        delivery: Delivery::Queue,
+                        intent: id,
+                    };
                     self.ask(ask).await?;
                 }
             }
             (Waiting::Start { id, .. }, Err(e)) => {
                 self.answer_start(id, refused(format!("Codex did not start the thread: {e}")));
+            }
+            (Waiting::Fork { id, from, turn }, Ok(result)) => {
+                let outcome = match rpc::response::<p::ThreadForkParams>(result) {
+                    Ok(forked) => {
+                        if !self.threads.contains_key(&forked.thread.id) {
+                            self.follow(&forked.thread);
+                        }
+                        self.settled(&forked.thread.id, forked.approval_policy, &forked.sandbox);
+                        match self.threads.get(&forked.thread.id).map(|f| f.id) {
+                            Some(thread) => {
+                                self.host.forked(thread, Fork { thread: from, turn });
+                                Outcome::Started { thread }
+                            }
+                            None => refused("Codex's fork could not be kept here".to_owned()),
+                        }
+                    }
+                    Err(e) => refused(format!("Codex's answer did not read: {e}")),
+                };
+                self.answer_fork(id, outcome);
+            }
+            (Waiting::Fork { id, .. }, Err(e)) => {
+                self.answer_fork(id, refused(format!("Codex did not fork the thread: {e}")));
+            }
+            (Waiting::List { reply }, Ok(result)) => {
+                let listed = rpc::response::<p::ThreadListParams>(result)
+                    .map(|listed| {
+                        listed.data.iter().map(slopty_agent::codex::shared::past).collect()
+                    })
+                    .map_err(|e| format!("Codex's answer did not read: {e}"));
+                let _gone = reply.send(listed);
+            }
+            (Waiting::List { reply }, Err(e)) => {
+                let _gone = reply.send(Err(format!("Codex did not list its threads: {e}")));
             }
             (Waiting::Usage { native }, Ok(result)) => {
                 let read = rpc::response::<p::GetAccountTokenUsageParams>(result);
@@ -924,8 +1062,50 @@ impl Session {
         }
     }
 
+    /// Fork intent `id` came to `outcome`: noted once on the thread it branched off, and told to
+    /// whoever waits on it.
+    fn answer_fork(&mut self, id: IntentId, outcome: Outcome) {
+        let Some((from, waiting)) = self.forking.remove(&id) else { return };
+        let outcome = once(&self.host, from, id, outcome);
+        for reply in waiting {
+            let _gone = reply.send(outcome.clone());
+        }
+    }
+
     async fn ask(&mut self, ask: Ask) -> Result<(), String> {
         match ask {
+            Ask::Fork { thread, id, after, reply } => {
+                if let Some(first) = self.host.outcome(thread, id) {
+                    let _gone = reply.send(first);
+                    return Ok(());
+                }
+                if let Some((_, waiting)) = self.forking.get_mut(&id) {
+                    waiting.push(reply);
+                    return Ok(());
+                }
+                let params = match self.followed(thread).map(|f| f.shared.fork(after)) {
+                    Some(Ok(params)) => params,
+                    Some(Err(why)) => {
+                        let _gone = reply.send(once(&self.host, thread, id, refused(why)));
+                        return Ok(());
+                    }
+                    None => {
+                        let why = refused("Codex does not hold this thread".to_owned());
+                        let _gone = reply.send(once(&self.host, thread, id, why));
+                        return Ok(());
+                    }
+                };
+                self.forking.insert(id, (thread, vec![reply]));
+                // A fork of the whole thread shares every turn it has now.
+                let turn = after.or_else(|| {
+                    self.host.state(thread).and_then(|(s, _)| s.last_turn().map(|t| t.id))
+                });
+                self.request(&params, Waiting::Fork { id, from: thread, turn }).await
+            }
+            Ask::Sessions { cwd, limit, reply } => {
+                let params = slopty_agent::codex::shared::list(&cwd, limit);
+                self.request(&params, Waiting::List { reply }).await
+            }
             Ask::Start { id, start, reply } => {
                 if let Some(first) = self.host.started(id) {
                     let _gone = reply.send(first);
@@ -968,9 +1148,13 @@ impl Session {
                 let frame = rpc::answer(&id, &result).map_err(|e| e.to_string())?;
                 self.send(frame).await
             }
-            Ask::Send { thread, text, delivery, intent } => {
+            Ask::Send { thread, text, attachments, delivery, intent } => {
+                if !self.native.contains_key(&thread) {
+                    return Ok(());
+                }
+                let attached = crate::thread::attach::read(&attachments).await;
                 let Some(followed) = self.followed(thread) else { return Ok(()) };
-                match followed.shared.send(&text, delivery, intent) {
+                match followed.shared.send(&text, attached, delivery, intent) {
                     Send::Start(params) => {
                         self.request(params.as_ref(), Waiting::Turn { thread }).await
                     }

@@ -39,11 +39,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use slopty_agent::pi::driven::Driven;
+use slopty_agent::pi::sessions;
 use slopty_core::WallMs;
-use slopty_proto::thread::wire::{Intent, Outcome, Start};
+use slopty_proto::thread::wire::{Intent, Outcome, PastSession, Start};
 use slopty_proto::thread::{
-    Action, AgentId, Answerer, AskId, Cap, Delivery, Drive, IntentId, Liveness, Phase,
-    RequestState, ThreadId, ThreadState,
+    Action, AgentId, Answerer, AskId, Cap, Delivery, Drive, Fork, IntentId, Liveness, Phase,
+    RequestState, ThreadId, ThreadState, TurnId,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -75,13 +76,14 @@ type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>, Next)>;
 #[derive(Debug)]
 enum Ask {
     Start { id: IntentId, start: Box<Start>, reply: oneshot::Sender<Outcome> },
+    Fork { thread: ThreadId, id: IntentId, after: Option<TurnId>, reply: oneshot::Sender<Outcome> },
     Thread { thread: ThreadId, ask: ThreadAsk },
 }
 
 /// What a client asks of one thread.
 #[derive(Debug)]
 enum ThreadAsk {
-    Send { text: String, intent: IntentId },
+    Send { text: String, attachments: Vec<String>, intent: IntentId },
     Interrupt,
     Answer { ask: AskId, choice: String, message: Option<String>, by: Answerer },
     SetModel { model: String },
@@ -117,6 +119,16 @@ impl Pi {
         outcome.await.unwrap_or_else(|_| refused("the pi threads stopped"))
     }
 
+    /// Branch a new thread off the whole of `thread`'s session for intent `id`, once: pi, run
+    /// for the new thread, copies the session (`--fork`).
+    pub async fn fork(&self, thread: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        if self.0.send(Ask::Fork { thread, id, after, reply }).is_err() {
+            return refused("pi threads are not served here");
+        }
+        outcome.await.unwrap_or_else(|_| refused("the pi threads stopped"))
+    }
+
     /// What comes of intent `id` on the driven pi thread `state`, from `by` when it answers:
     /// done when it went to pi (or to a pi started again for it), and why not when it did not.
     /// Meant to run once per id, as [`Host::intent`] runs its decision.
@@ -141,13 +153,17 @@ impl Pi {
             Intent::Send { delivery: Delivery::Queue, .. } => {
                 return Outcome::Unsupported { cap: Cap::named(Cap::QUEUE) };
             }
-            Intent::Send { attachments, .. } if !attachments.is_empty() => {
-                return refused("Files are not sent to pi yet");
-            }
-            Intent::Send { text, .. } if text.trim().is_empty() => {
+            Intent::Send { text, attachments, .. }
+                if text.trim().is_empty() && attachments.is_empty() =>
+            {
                 return refused("There is nothing to send");
             }
-            Intent::Send { text, .. } => ThreadAsk::Send { text: text.clone(), intent },
+            Intent::Send { text, attachments, .. } => {
+                if let Err(why) = super::attach::check(attachments) {
+                    return refused(&why);
+                }
+                ThreadAsk::Send { text: text.clone(), attachments: attachments.clone(), intent }
+            }
             Intent::Interrupt => {
                 if !live || !matches!(state.status.phase, Phase::Working | Phase::NeedsYou) {
                     return refused("pi is not working");
@@ -251,6 +267,10 @@ pub fn spawn(
                         let outcome = served.begin(id, &start).await;
                         let _gone = reply.send(outcome);
                     }
+                    Some(Ask::Fork { thread, id, after, reply }) => {
+                        let outcome = served.fork(thread, id, after).await;
+                        let _gone = reply.send(outcome);
+                    }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
                     None => return,
                 },
@@ -301,20 +321,44 @@ impl Served {
         Ok(launcher)
     }
 
-    /// Start the thread of intent `id` as `start` says, once.
+    /// Start the thread of intent `id` as `start` says, once. A start that names one of pi's
+    /// sessions (`--session <id>`) takes it up again: in the thread this worker keeps of it when
+    /// there is one, else in a new thread read from the session's entries.
     async fn begin(&mut self, id: IntentId, start: &Start) -> Outcome {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
         }
+        let first: Vec<ThreadAsk> = start
+            .prompt
+            .clone()
+            .filter(|p| !p.trim().is_empty())
+            .map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id })
+            .into_iter()
+            .collect();
+        let resumed = sessions::resumed(&start.args);
+        let (session, own) = match resumed {
+            Some((session, rest)) => (session.to_owned(), rest),
+            None => (id.to_string(), start.args.as_slice()),
+        };
+        if resumed.is_some() {
+            let thread = slopty_agent::pi::driven::thread_of(&session);
+            if self.host.state(thread).is_some_and(|(s, _)| is_pi(&s)) {
+                if self.running.contains_key(&thread) {
+                    self.route(thread, first).await;
+                } else {
+                    self.drive(thread, first).await;
+                }
+                return self.host.record_start(id, Outcome::Started { thread });
+            }
+        }
         let found = self.launcher().await;
-        let session = id.to_string();
         let mut begun = None;
         // What is refused is refused once, as what is started is started once.
         let outcome = self.host.start(id, || {
             if start.drive.as_ref().is_some_and(|d| !d.is(Drive::DRIVEN)) {
                 return Err("pi is only driven over RPC".to_owned());
             }
-            let args = slopty_agent::pi::checked(&start.args)?.to_vec();
+            let args = slopty_agent::pi::checked(own)?.to_vec();
             if !Path::new(&start.cwd).is_dir() {
                 return Err(format!("There is no folder {} here", start.cwd));
             }
@@ -339,12 +383,48 @@ impl Served {
             args.extend(["--provider".to_owned(), provider.to_owned()]);
             args.extend(["--model".to_owned(), model.to_owned()]);
         }
-        let first = start
-            .prompt
-            .clone()
-            .filter(|p| !p.trim().is_empty())
-            .map(|text| ThreadAsk::Send { text, intent: id });
-        self.run(&launch, thread, driven, &args, Ready::Now(first.into_iter().collect()));
+        // A session taken up again is read from its entries before the first message goes.
+        let ready = if resumed.is_some() { Ready::AfterEntries(first) } else { Ready::Now(first) };
+        self.run(&launch, thread, driven, &args, ready);
+        outcome
+    }
+
+    /// Branch a new thread off the whole of `from`'s session for intent `id`, once: pi, run for
+    /// the new thread on a session of the intent's id, copies `from`'s first (`--fork`), and the
+    /// thread is read from the copy's entries.
+    async fn fork(&mut self, from: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
+        if let Some(outcome) = self.host.started(id) {
+            return outcome;
+        }
+        let Some((state, _)) = self.host.state(from).filter(|(s, _)| is_pi(s)) else {
+            return self.host.record_start(id, refused("There is no such pi thread here"));
+        };
+        let found = self.launcher().await;
+        let session = id.to_string();
+        let mut begun = None;
+        let outcome = self.host.start(id, || {
+            let turn = crate::thread::fork::whole(&state, after, "pi")?;
+            let launch = found.clone()?;
+            let version = launch.pi.version.clone().unwrap_or_default();
+            let (mut driven, mut actions) =
+                Driven::new(&session, &version, &state.meta.cwd, WallMs::now());
+            let args = kept_args(&state.meta);
+            actions.extend(driven.started_with(&args));
+            actions.extend(driven.forked(Fork { thread: from, turn }));
+            let meta = driven.meta().clone();
+            begun = Some((driven, actions, args, launch));
+            Ok(meta)
+        });
+        let (Outcome::Started { thread }, Some((driven, actions, args, launch))) =
+            (&outcome, begun)
+        else {
+            return outcome;
+        };
+        let thread = *thread;
+        self.host.apply(thread, actions);
+        // Only this first run copies the session; every later one opens the copy by its id.
+        let args = [args, sessions::fork_args(&state.meta.native).to_vec()].concat();
+        self.run(&launch, thread, driven, &args, Ready::AfterEntries(Vec::new()));
         outcome
     }
 
@@ -508,4 +588,62 @@ fn driven_of(state: &ThreadState) -> (Driven, Vec<Action>) {
 
 fn refused(reason: &str) -> Outcome {
     Outcome::Refused { reason: reason.to_owned() }
+}
+
+/// pi's sessions in folder `cwd`, kept under pi's directory `agent`
+/// ([`sessions::agent_dir`]), the last written first, at most `limit`.
+///
+/// Each is named by its file and read only at its two ends ([`sessions::READ`]).
+///
+/// # Errors
+///
+/// When the folder's sessions cannot be listed, in words.
+pub async fn sessions(agent: &Path, cwd: &str, limit: u32) -> Result<Vec<PastSession>, String> {
+    let dir = sessions::folder(agent, cwd);
+    let mut listing = match tokio::fs::read_dir(&dir).await {
+        Ok(listing) => listing,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("pi's sessions could not be listed: {e}")),
+    };
+    let mut found = Vec::new();
+    while let Some(entry) = listing.next_entry().await.map_err(|e| e.to_string())? {
+        let name = entry.file_name();
+        let Some(id) = name.to_str().and_then(sessions::id_of) else { continue };
+        let Ok(meta) = entry.metadata().await else { continue };
+        if meta.is_file() {
+            found.push((meta.modified().ok(), meta.len(), id.to_owned(), entry.path()));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.2.cmp(&b.2)));
+    found.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    let mut past = Vec::with_capacity(found.len());
+    for (modified, size, id, path) in found {
+        let title = match ends(&path, size).await {
+            Ok((head, tail)) => sessions::title(&head, &tail),
+            Err(e) => {
+                tracing::debug!(path = %path.display(), "a pi session could not be read: {e}");
+                None
+            }
+        };
+        past.push(sessions::past(&id, title, modified.map(WallMs::of)));
+    }
+    Ok(past)
+}
+
+/// The first and last [`sessions::READ`] bytes of the `size`-byte file at `path`, as text; the
+/// tail is empty when the head holds it all.
+async fn ends(path: &Path, size: u64) -> std::io::Result<(String, String)> {
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut head = Vec::new();
+    (&mut file).take(sessions::READ).read_to_end(&mut head).await?;
+    let mut tail = Vec::new();
+    if size > sessions::READ {
+        file.seek(std::io::SeekFrom::Start(
+            size.saturating_sub(sessions::READ).max(sessions::READ),
+        ))
+        .await?;
+        file.take(sessions::READ).read_to_end(&mut tail).await?;
+    }
+    Ok((String::from_utf8_lossy(&head).into_owned(), String::from_utf8_lossy(&tail).into_owned()))
 }

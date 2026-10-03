@@ -29,11 +29,11 @@ pub(super) struct Process {
     stderr: JoinHandle<Vec<String>>,
 }
 
-/// Run the agent `launch` says in `cwd`, for `thread`.
+/// Run the agent `launch` says in `cwd`, for `thread` (what its log lines are told by).
 pub(super) fn start_agent(
     launch: &Launcher,
     cwd: &str,
-    thread: ThreadId,
+    thread: String,
 ) -> Result<(ChildStdin, Process), String> {
     let mut command = tokio::process::Command::new(&launch.program);
     command
@@ -73,6 +73,9 @@ pub(super) enum Opening {
     New { model: Option<String> },
     /// The thread's own session loaded again, which replays it.
     Load,
+    /// A fork of the agent's session `from`, loaded once made when the agent can load it, which
+    /// replays what it shares with `from`.
+    Fork { from: String },
 }
 
 /// What an answer to one of our requests is read as.
@@ -81,6 +84,7 @@ enum Expect {
     Initialize,
     New,
     Load,
+    Fork,
     /// A prompt, sent as this intent.
     Prompt,
     Mode(String),
@@ -243,12 +247,12 @@ impl Task {
     async fn ask(&mut self, ask: ThreadAsk) {
         let now = WallMs::now();
         match ask {
-            ThreadAsk::Send { text, intent } => {
+            ThreadAsk::Send { text, attachments, intent } => {
                 if self.session.running() {
-                    let actions = self.session.queue(intent, &text);
+                    let actions = self.session.queue(intent, &text, attachments);
                     self.apply(actions);
                 } else {
-                    self.prompt(&text, intent).await;
+                    self.prompt(&text, &attachments, intent).await;
                 }
             }
             ThreadAsk::Withdraw { intent } => {
@@ -302,8 +306,10 @@ impl Task {
         }
     }
 
-    async fn prompt(&mut self, text: &str, intent: IntentId) {
-        let (request, actions) = self.session.prompt(text, intent, WallMs::now());
+    /// Prompt with `text` and the files at `attachments`, read as they go.
+    async fn prompt(&mut self, text: &str, attachments: &[String], intent: IntentId) {
+        let attached = crate::thread::attach::read(attachments).await;
+        let (request, actions) = self.session.prompt(text, &attached, intent, WallMs::now());
         self.apply(actions);
         self.request("session/prompt", &request, Expect::Prompt).await;
     }
@@ -411,15 +417,36 @@ impl Task {
                     Err(e) => self.lost = Some(format!("The agent's session did not read: {e}")),
                 }
             }
-            (Expect::Initialize | Expect::New | Expect::Load, Err(error)) => {
+            (Expect::Fork, Ok(value)) => {
+                match serde_json::from_value::<acp::ForkSessionResponse>(value) {
+                    Ok(response) => {
+                        let options = response.config_options.as_deref();
+                        let actions = self.session.opened(
+                            Some(&response.session_id),
+                            response.modes.as_ref(),
+                            options,
+                            now,
+                        );
+                        self.apply(actions);
+                        if self.session.resumable() {
+                            self.opening = Some(Opening::Load);
+                            self.open().await;
+                        } else {
+                            self.opened().await;
+                        }
+                    }
+                    Err(e) => self.lost = Some(format!("The agent's fork did not read: {e}")),
+                }
+            }
+            (Expect::Initialize | Expect::New | Expect::Load | Expect::Fork, Err(error)) => {
                 self.lost = Some(driven::said(&error));
             }
             (Expect::Prompt, outcome) => {
                 let actions = self.session.prompted(outcome.as_ref(), now);
                 self.apply(actions);
-                if let Some((intent, text, actions)) = self.session.next_queued() {
+                if let Some((next, actions)) = self.session.next_queued() {
                     self.apply(actions);
-                    self.prompt(&text, intent).await;
+                    self.prompt(&next.text, &next.attachments, next.intent).await;
                 }
             }
             (Expect::Mode(mode), Ok(_)) => {
@@ -463,6 +490,10 @@ impl Task {
                     }
                 }
             }
+            Some(Opening::Fork { from }) => {
+                let request = self.session.session_fork(&from);
+                self.request("session/fork", &request, Expect::Fork).await;
+            }
             None => {}
         }
     }
@@ -476,6 +507,104 @@ impl Task {
         }
         for ask in self.held.take().unwrap_or_default() {
             self.ask(ask).await;
+        }
+    }
+}
+
+/// How long a run of an agent started to list its sessions has to answer.
+const LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The agent `launch` says, run in `cwd` for this alone: its sessions there, as it lists them
+/// (`session/list`), at most `limit`, the latest first; why not, in words. The run ends once
+/// they are listed.
+pub(super) async fn list(
+    launch: &Launcher,
+    cwd: &str,
+    limit: u32,
+) -> Result<Vec<slopty_proto::thread::wire::PastSession>, String> {
+    let (stdin, Process { mut child, stdout, stderr }) =
+        start_agent(launch, cwd, format!("sessions in {cwd}"))?;
+    let mut asking = Asking { stdin, lines: BufReader::new(stdout).split(b'\n'), next: 0 };
+    let listed = tokio::time::timeout(LIST_WAIT, asking.sessions(cwd, limit)).await;
+    drop(asking);
+    if tokio::time::timeout(SHUTDOWN, child.wait()).await.is_err() {
+        let _killed = child.start_kill();
+        let _reaped = child.wait().await;
+    }
+    stderr.abort();
+    listed.unwrap_or_else(|_| Err("The agent did not list its sessions in time".to_owned()))
+}
+
+/// An agent asked one thing at a time, its answers read in turn.
+struct Asking {
+    stdin: ChildStdin,
+    lines: tokio::io::Split<BufReader<ChildStdout>>,
+    next: u64,
+}
+
+impl Asking {
+    async fn sessions(
+        &mut self,
+        cwd: &str,
+        limit: u32,
+    ) -> Result<Vec<slopty_proto::thread::wire::PastSession>, String> {
+        let greeting: acp::InitializeResponse =
+            self.ask("initialize", &driven::initialize()).await?;
+        if greeting.protocol_version != driven::PROTOCOL {
+            return Err(format!("The agent speaks ACP version {}", greeting.protocol_version));
+        }
+        let can = &greeting.agent_capabilities;
+        if can.session_capabilities.list.is_none() {
+            return Err("The agent keeps no list of its sessions".to_owned());
+        }
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let mut sessions = Vec::new();
+        let mut cursor = None;
+        while sessions.len() < limit {
+            let page: acp::ListSessionsResponse =
+                self.ask("session/list", &driven::list(cwd, cursor.take())).await?;
+            let room = limit.saturating_sub(sessions.len());
+            sessions
+                .extend(page.sessions.iter().take(room).map(|s| driven::past(s, can.load_session)));
+            match page.next_cursor {
+                Some(next) if !page.sessions.is_empty() => cursor = Some(next),
+                _ => break,
+            }
+        }
+        Ok(sessions)
+    }
+
+    /// Ask `method` with `params`: its answer, read as `T`, or why not. What the agent asks
+    /// meanwhile is refused, and what it tells is passed over.
+    async fn ask<T: serde::de::DeserializeOwned>(
+        &mut self,
+        method: &str,
+        params: &impl Serialize,
+    ) -> Result<T, String> {
+        self.next = self.next.saturating_add(1);
+        let line = rpc::request(self.next, method, params).map_err(|e| e.to_string())?;
+        self.stdin.write_all(&line).await.map_err(|e| format!("The agent went: {e}"))?;
+        let want = self.next.to_string();
+        loop {
+            let line = match self.lines.next_segment().await {
+                Ok(Some(line)) => line,
+                Ok(None) => return Err("The agent ended before it answered".to_owned()),
+                Err(e) => return Err(format!("The agent went: {e}")),
+            };
+            match rpc::incoming(&line) {
+                Ok(Incoming::Response { id, outcome }) if rpc::id_text(&id) == want => {
+                    let value = outcome.map_err(|e| driven::said(&e))?;
+                    return serde_json::from_value(value)
+                        .map_err(|e| format!("The agent's answer did not read: {e}"));
+                }
+                Ok(Incoming::Request { id, .. }) => {
+                    let refusal = rpc::error(&id, acp::Error::method_not_found());
+                    if let Ok(refusal) = refusal {
+                        let _gone = self.stdin.write_all(&refusal).await;
+                    }
+                }
+                Ok(_) | Err(_) => {}
+            }
         }
     }
 }

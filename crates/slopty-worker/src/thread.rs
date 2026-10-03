@@ -15,10 +15,12 @@
 //! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one.
 
 pub mod acp;
+pub mod attach;
 pub mod claude;
 pub mod codex;
 pub mod compose;
 pub mod follow;
+pub mod fork;
 pub mod host;
 pub mod intents;
 pub mod log;

@@ -813,4 +813,50 @@ mod threads {
         let release = Intent::Release { ask: request.id };
         assert_eq!(a.intent(IntentId::new(), thread, release).await, Outcome::Done);
     }
+
+    /// A folder's past Claude Code sessions are listed from the names and times of the
+    /// transcripts under the worker's home alone, the last written first, and one Slopty keeps a
+    /// thread of is named by it; an agent the worker cannot list says why in words.
+    #[tokio::test]
+    async fn past_sessions_are_listed_per_agent_and_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let project = slopty_agent::discover::project_dir(&root, &work);
+        std::fs::create_dir_all(&project).unwrap();
+        for (name, secs) in [("older-1", 100_u64), ("newer-2", 200)] {
+            let file = std::fs::File::create(project.join(format!("{name}.jsonl"))).unwrap();
+            let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+            file.set_modified(at).unwrap();
+        }
+        let daemons = daemons(&root).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let claude = AgentId::named(AgentId::CLAUDE_CODE);
+        let cwd = work.to_string_lossy().into_owned();
+        a.send(ThreadRequest::Sessions { agent: claude.clone(), cwd: cwd.clone(), limit: 10 })
+            .await;
+        let listed = a
+            .heard(|msg| match msg {
+                WorkerMsg::Sessions(listed) if listed.agent == claude => Some(listed),
+                _ => None,
+            })
+            .await;
+        assert_eq!(listed.absent, None);
+        assert_eq!(listed.cwd, cwd);
+        let names: Vec<&str> = listed.sessions.iter().map(|s| s.native.as_str()).collect();
+        assert_eq!(names, ["newer-2", "older-1"]);
+        assert_eq!(listed.sessions[0].resume, ["--resume", "newer-2"]);
+
+        let nobody = AgentId::named("nobody");
+        a.send(ThreadRequest::Sessions { agent: nobody.clone(), cwd, limit: 10 }).await;
+        let listed = a
+            .heard(|msg| match msg {
+                WorkerMsg::Sessions(listed) if listed.agent == nobody => Some(listed),
+                _ => None,
+            })
+            .await;
+        assert_eq!(listed.sessions, []);
+        assert!(listed.absent.is_some(), "why, in words");
+    }
 }

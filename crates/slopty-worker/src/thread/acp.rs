@@ -37,10 +37,10 @@ use std::time::Duration;
 use slopty_agent::acp::driven::{self, Session};
 use slopty_agent::acp::registry;
 use slopty_core::WallMs;
-use slopty_proto::thread::wire::{Intent, Outcome, Start};
+use slopty_proto::thread::wire::{Intent, Outcome, PastSession, Start};
 use slopty_proto::thread::{
-    Answerer, AskId, Cap, Delivery, Drive, IntentId, Liveness, Phase, RequestState, ThreadId,
-    ThreadState,
+    Action, AgentId, Answerer, AskId, Cap, Delivery, Drive, Fork, IntentId, Liveness, Phase,
+    RequestState, ThreadId, ThreadState, TurnId,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -63,12 +63,17 @@ type Ended = mpsc::UnboundedSender<(ThreadId, Vec<ThreadAsk>)>;
 enum Ask {
     Start { id: IntentId, start: Box<Start>, reply: oneshot::Sender<Outcome> },
     Thread { thread: ThreadId, ask: ThreadAsk },
+    Fork { thread: ThreadId, id: IntentId, after: Option<TurnId>, reply: oneshot::Sender<Outcome> },
+    Sessions { agent: AgentId, cwd: String, limit: u32, reply: Listed },
 }
+
+/// Where a list of an agent's sessions goes, or why there is none.
+type Listed = oneshot::Sender<Result<Vec<PastSession>, String>>;
 
 /// What a client asks of one thread.
 #[derive(Debug)]
 enum ThreadAsk {
-    Send { text: String, intent: IntentId },
+    Send { text: String, attachments: Vec<String>, intent: IntentId },
     Withdraw { intent: IntentId },
     Edit { intent: IntentId, text: String },
     Interrupt,
@@ -103,6 +108,35 @@ impl Acp {
         outcome.await.unwrap_or_else(|_| refused("the ACP threads stopped"))
     }
 
+    /// Branch a new thread off `thread` through turn `after`, or all of it, for intent `id`,
+    /// once.
+    pub async fn fork(&self, thread: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        if self.0.send(Ask::Fork { thread, id, after, reply }).is_err() {
+            return refused("ACP threads are not served here");
+        }
+        outcome.await.unwrap_or_else(|_| refused("the ACP threads stopped"))
+    }
+
+    /// ACP agent `agent`'s sessions in folder `cwd`, at most `limit`, as the agent lists them
+    /// (`session/list`) to a run of it started for the asking; why not, in words.
+    ///
+    /// # Errors
+    ///
+    /// When the agent is not installed, does not list its sessions, or did not answer.
+    pub async fn sessions(
+        &self,
+        agent: AgentId,
+        cwd: String,
+        limit: u32,
+    ) -> Result<Vec<PastSession>, String> {
+        let (reply, listed) = oneshot::channel();
+        if self.0.send(Ask::Sessions { agent, cwd, limit, reply }).is_err() {
+            return Err("ACP threads are not served here".to_owned());
+        }
+        listed.await.unwrap_or_else(|_| Err("the ACP threads stopped".to_owned()))
+    }
+
     /// What comes of intent `id` on the ACP thread `state`, from `by` when it answers: done when
     /// it went to the agent (or to an agent started again for it), and why not when it did not.
     /// Meant to run once per id, as [`Host::intent`] runs its decision.
@@ -118,7 +152,11 @@ impl Acp {
         // person's next message, queued behind the turn under way.
         let reason = match ask {
             Intent::Answer { message: Some(why), .. } if !why.trim().is_empty() => {
-                Some(ThreadAsk::Send { text: why.trim().to_owned(), intent })
+                Some(ThreadAsk::Send {
+                    text: why.trim().to_owned(),
+                    attachments: Vec::new(),
+                    intent,
+                })
             }
             _ => None,
         };
@@ -126,16 +164,20 @@ impl Acp {
             Intent::Send { delivery: Delivery::Steer, .. } => {
                 return Outcome::Unsupported { cap: Cap::named(Cap::STEER) };
             }
-            Intent::Send { attachments, .. } if !attachments.is_empty() => {
-                return refused("Files are not sent to an ACP agent yet");
-            }
-            Intent::Send { text, .. } if text.trim().is_empty() => {
+            Intent::Send { text, attachments, .. }
+                if text.trim().is_empty() && attachments.is_empty() =>
+            {
                 return refused("There is nothing to send");
             }
             Intent::Send { .. } if !live && !driven::resumable(&state.meta) => {
                 return refused("The agent cannot take this session up again; start a new thread");
             }
-            Intent::Send { text, .. } => ThreadAsk::Send { text: text.clone(), intent },
+            Intent::Send { text, attachments, .. } => {
+                if let Err(why) = super::attach::check(attachments) {
+                    return refused(&why);
+                }
+                ThreadAsk::Send { text: text.clone(), attachments: attachments.clone(), intent }
+            }
             Intent::Withdraw { pending } | Intent::Edit { pending, .. }
                 if !state.pending.iter().any(|p| p.intent == *pending) =>
             {
@@ -223,6 +265,13 @@ pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks)
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
+                    Some(Ask::Fork { thread, id, after, reply }) => {
+                        let outcome = served.fork(thread, id, after).await;
+                        let _gone = reply.send(outcome);
+                    }
+                    Some(Ask::Sessions { agent, cwd, limit, reply }) => {
+                        served.sessions(&agent, cwd, limit, reply).await;
+                    }
                     None => return,
                 },
                 Some((thread, left)) = ended.recv() => {
@@ -271,12 +320,23 @@ impl Served {
         Ok(Launcher { program: found.program, path: found.path, args: agent.args })
     }
 
-    /// Start the thread of intent `id` as `start` says, once.
+    /// Start the thread of intent `id` as `start` says, once. A start that names one of the
+    /// agent's sessions (`resume <session>`) takes it up again: in the thread this worker keeps
+    /// of it when there is one, else in a new thread that loads it.
     async fn begin(&mut self, id: IntentId, start: &Start) -> Outcome {
         if let Some(outcome) = self.host.started(id) {
             return outcome;
         }
         let name = slopty_agent::acp::name_of(&start.agent).unwrap_or_default().to_owned();
+        let resumed = driven::resumed(&start.args).map(str::to_owned);
+        if let Some(native) = &resumed
+            && let Some(thread) = self.kept(&start.agent, native)
+        {
+            if !self.running.contains_key(&thread) {
+                self.reopen(thread, Vec::new()).await;
+            }
+            return self.host.record_start(id, Outcome::Started { thread });
+        }
         let found = self.launcher(&name).await;
         let mut begun = None;
         // What is refused is refused once, as what is started is started once.
@@ -287,9 +347,9 @@ impl Served {
             if start.drive.as_ref().is_some_and(|d| !d.is(Drive::DRIVEN)) {
                 return Err("An ACP agent is only driven".to_owned());
             }
-            if !start.args.is_empty() {
+            if resumed.is_none() && !start.args.is_empty() {
                 return Err(
-                    "An ACP agent takes no arguments from a start; name its command line in the settings"
+                    "An ACP agent takes no arguments from a start but resume <session>; name its command line in the settings"
                         .to_owned(),
                 );
             }
@@ -298,8 +358,12 @@ impl Served {
             }
             let launch = found.clone()?;
             let agent = slopty_agent::acp::agent_id(&name);
-            let (session, actions) =
+            let (mut session, mut actions) =
                 Session::new(agent, driven::thread_of(id), &start.cwd, WallMs::now());
+            if let Some(native) = &resumed {
+                session.resuming(native);
+                actions.push(Action::Meta(Box::new(session.meta().clone())));
+            }
             let meta = session.meta().clone();
             begun = Some((session, actions, launch));
             Ok(meta)
@@ -314,9 +378,82 @@ impl Served {
             .prompt
             .clone()
             .filter(|p| !p.trim().is_empty())
-            .map(|text| ThreadAsk::Send { text, intent: id });
-        let opening = Opening::New { model: start.model.clone() };
+            .map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id });
+        let opening = if resumed.is_some() {
+            Opening::Load
+        } else {
+            Opening::New { model: start.model.clone() }
+        };
         self.run(&launch, thread, session, opening, first.into_iter().collect());
+        outcome
+    }
+
+    /// List `agent`'s sessions in `cwd` to `reply`, from a run of the agent of its own, off this
+    /// loop.
+    async fn sessions(&self, agent: &AgentId, cwd: String, limit: u32, reply: Listed) {
+        let Some(name) = slopty_agent::acp::name_of(agent).map(str::to_owned) else {
+            let _gone = reply.send(Err(format!("{} is no ACP agent", agent.0)));
+            return;
+        };
+        match self.launcher(&name).await {
+            Ok(launch) => {
+                tokio::spawn(async move {
+                    let _gone = reply.send(task::list(&launch, &cwd, limit).await);
+                });
+            }
+            Err(why) => {
+                let _gone = reply.send(Err(why));
+            }
+        }
+    }
+
+    /// The thread this worker keeps of `agent`'s session `native`, when it keeps one.
+    fn kept(&self, agent: &AgentId, native: &str) -> Option<ThreadId> {
+        self.host.threads().into_iter().find(|thread| {
+            self.host
+                .state(*thread)
+                .is_some_and(|(s, _)| s.meta.agent == *agent && s.meta.native == native)
+        })
+    }
+
+    /// Branch a new thread off `from` through turn `after`, or all of it, for intent `id`,
+    /// once: the agent, run afresh for the new thread, forks its session (`session/fork`).
+    async fn fork(&mut self, from: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
+        if let Some(outcome) = self.host.started(id) {
+            return outcome;
+        }
+        let Some((state, _)) = self.host.state(from).filter(|(s, _)| is_acp(s)) else {
+            return self.host.record_start(id, refused("There is no such ACP thread here"));
+        };
+        let name = slopty_agent::acp::name_of(&state.meta.agent).unwrap_or_default().to_owned();
+        let found = self.launcher(&name).await;
+        let mut begun = None;
+        let outcome = self.host.start(id, || {
+            let turn = crate::thread::fork::whole(&state, after, "This agent")?;
+            if state.meta.native.is_empty() {
+                return Err("The agent has not made its session yet".to_owned());
+            }
+            let launch = found.clone()?;
+            let (mut session, mut actions) = Session::new(
+                state.meta.agent.clone(),
+                driven::thread_of(id),
+                &state.meta.cwd,
+                WallMs::now(),
+            );
+            session.forked(Fork { thread: from, turn });
+            actions.push(Action::Meta(Box::new(session.meta().clone())));
+            let meta = session.meta().clone();
+            begun = Some((session, actions, launch));
+            Ok(meta)
+        });
+        let (Outcome::Started { thread }, Some((session, actions, launch))) = (&outcome, begun)
+        else {
+            return outcome;
+        };
+        let thread = *thread;
+        self.host.apply(thread, actions);
+        let opening = Opening::Fork { from: state.meta.native.clone() };
+        self.run(&launch, thread, session, opening, Vec::new());
         outcome
     }
 
@@ -345,6 +482,11 @@ impl Served {
         if sends.is_empty() {
             return;
         }
+        self.reopen(thread, sends).await;
+    }
+
+    /// Run `thread`'s agent again on its session, loaded, and send `sends` once it is.
+    async fn reopen(&mut self, thread: ThreadId, sends: Vec<ThreadAsk>) {
         let Some((state, _)) = self.host.state(thread).filter(|(s, _)| is_acp(s)) else {
             return;
         };
@@ -372,7 +514,7 @@ impl Served {
     ) {
         let mut session = session;
         let cwd = session.meta().cwd.clone();
-        match start_agent(launch, &cwd, thread) {
+        match start_agent(launch, &cwd, thread.to_string()) {
             Ok((stdin, agent)) => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let task = Task::new(self.host.clone(), thread, session, stdin, opening, first);

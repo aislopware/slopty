@@ -14,7 +14,8 @@ use std::sync::Arc;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, ReviewScope, TableFrame, ThreadFrame, ThreadRequest,
+    Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, TableFrame, ThreadFrame,
+    ThreadRequest,
 };
 use slopty_proto::thread::{
     Action, AgentId, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, ThreadId, ThreadState,
@@ -393,6 +394,15 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // A fork starts a thread: on a task of its own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Fork { after } } => {
+                tracing::info!(client = %at.client, %id, %thread, "fork");
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let outcome = fork(&threads, thread, id, after).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             ThreadRequest::Intent { id, thread, intent } => {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
@@ -443,15 +453,13 @@ impl Following {
                 tracing::info!(client = %at.client, on, "approvals");
                 crate::follow::approvals(at.daemon, at.link, on, |msg| at.post(msg));
             }
-            ThreadRequest::Sessions { agent, cwd, .. } => {
-                let absent = Some("Past sessions are not listed here yet".to_owned());
-                let sessions = slopty_proto::thread::wire::PastSessions {
-                    agent,
-                    cwd,
-                    sessions: Vec::new(),
-                    absent,
-                };
-                at.post(WorkerMsg::Sessions(sessions));
+            // An agent is asked, or its session directory listed: on a task of its own.
+            ThreadRequest::Sessions { agent, cwd, limit } => {
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let listed = sessions(&threads, agent, cwd, limit).await;
+                    let _gone = out.send(WorkerMsg::Sessions(listed)).await;
+                });
             }
         }
     }
@@ -466,6 +474,73 @@ impl Following {
             }
         }
     }
+}
+
+/// Branch a new thread off `thread` through turn `after`, or all of it, for intent `id`, once,
+/// as its agent forks: Codex `thread/fork`, an ACP agent `session/fork`, pi `--fork`, Claude
+/// Code `--fork-session`.
+async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<TurnId>) -> Outcome {
+    if let Some(outcome) = threads.host.started(id) {
+        return outcome;
+    }
+    let Some((state, _)) = threads.host.state(thread) else {
+        return threads.host.record_start(id, refused("no such thread".to_owned()));
+    };
+    if !state.meta.can(Cap::FORK) {
+        return threads.host.record_start(id, Outcome::Unsupported { cap: Cap::named(Cap::FORK) });
+    }
+    if codex::is_shared(&state) {
+        threads.codex.fork(thread, id, after).await
+    } else if pi::is_pi(&state) {
+        threads.pi.fork(thread, id, after).await
+    } else if acp::is_acp(&state) {
+        threads.acp.fork(thread, id, after).await
+    } else if state.meta.agent.is(AgentId::CLAUDE_CODE) {
+        threads.claude_start.fork(thread, id, after).await
+    } else {
+        let reason = format!("{} threads are not forked here", state.meta.agent.0);
+        threads.host.record_start(id, refused(reason))
+    }
+}
+
+/// Agent `agent`'s past sessions in folder `cwd`, at most `limit`, the last first, as the agent
+/// keeps them: each named by the thread held of it here, if one is; why there are none, when
+/// they could not be had.
+async fn sessions(threads: &Threads, agent: AgentId, cwd: String, limit: u32) -> PastSessions {
+    let cwd = slopty_worker::file::expand_home(Path::new(&cwd)).to_string_lossy().into_owned();
+    let listed = if agent.is(AgentId::CLAUDE_CODE) {
+        let (home, dir) = (slopty_platform::dirs::home(), PathBuf::from(&cwd));
+        let most = usize::try_from(limit).unwrap_or(usize::MAX);
+        tokio::task::spawn_blocking(move || slopty_agent::discover::sessions(&home, &dir, most))
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|listed| listed.map_err(|e| format!("Claude Code's sessions: {e}")))
+    } else if agent.is(AgentId::CODEX) {
+        threads.codex.sessions(cwd.clone(), limit).await
+    } else if agent.is(AgentId::PI) {
+        match slopty_agent::pi::sessions::agent_dir() {
+            Some(dir) => pi::sessions(&dir, &cwd, limit).await,
+            None => Err("pi's directory is not known here".to_owned()),
+        }
+    } else if slopty_agent::acp::name_of(&agent).is_some() {
+        threads.acp.sessions(agent.clone(), cwd.clone(), limit).await
+    } else {
+        Err(format!("{} keeps no sessions this machine can list", agent.0))
+    };
+    let (mut sessions, absent) = match listed {
+        Ok(sessions) => (sessions, None),
+        Err(why) => (Vec::new(), Some(why)),
+    };
+    sessions.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    for past in &mut sessions {
+        if let Some((thread, title)) = threads.host.session(&agent, &past.native) {
+            past.thread = Some(thread);
+            if past.title.is_none() && !title.trim().is_empty() {
+                past.title = Some(title);
+            }
+        }
+    }
+    PastSessions { agent, cwd, sessions, absent }
 }
 
 const fn refused(reason: String) -> Outcome {
@@ -577,15 +652,20 @@ fn shared(
             };
             codex.answer(thread, ask.clone(), choice.clone(), by);
             if let Some(why) = message.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
-                codex.send(thread, why.to_owned(), Delivery::Steer, id);
+                codex.send(thread, why.to_owned(), Vec::new(), Delivery::Steer, id);
             }
             Outcome::Done
         }
-        Intent::Send { attachments, .. } if !attachments.is_empty() => {
-            refused("Files are not sent to Codex yet".to_owned())
+        Intent::Send { text, attachments, .. }
+            if text.trim().is_empty() && attachments.is_empty() =>
+        {
+            refused("There is nothing to send".to_owned())
         }
-        Intent::Send { text, delivery, .. } => {
-            codex.send(thread, text.clone(), *delivery, id);
+        Intent::Send { text, attachments, delivery } => {
+            if let Err(why) = slopty_worker::thread::attach::check(attachments) {
+                return refused(why);
+            }
+            codex.send(thread, text.clone(), attachments.clone(), *delivery, id);
             Outcome::Done
         }
         Intent::Withdraw { pending } | Intent::Edit { pending, .. }

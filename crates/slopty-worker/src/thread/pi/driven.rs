@@ -251,8 +251,9 @@ impl Task {
 
     async fn ask(&mut self, ask: ThreadAsk) {
         match ask {
-            ThreadAsk::Send { text, intent } => {
-                let command = self.driven.send(&text, intent);
+            ThreadAsk::Send { text, attachments, intent } => {
+                let attached = crate::thread::attach::read(&attachments).await;
+                let command = self.driven.send(&text, &attached, intent);
                 self.ask_for(command, Some(Expect::Prompt(intent))).await;
             }
             ThreadAsk::Interrupt => {

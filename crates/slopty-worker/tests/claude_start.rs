@@ -16,7 +16,8 @@ mod claude_start {
     use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Drive, IntentId, ItemBody, Liveness, ThreadId, ThreadState,
+        AgentId, Drive, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta, ThreadState,
+        TurnId,
     };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
@@ -330,5 +331,46 @@ mod claude_start {
         assert_eq!(outcome, want);
         assert_eq!(rig.starter.start(id, rig.start(None)).await, want, "refused once");
         assert_eq!(rig.opened(), []);
+    }
+
+    /// A fork opens the person's `claude` in a new terminal, resuming the thread's conversation
+    /// into a new one of an id chosen for it (`--fork-session`), and the new thread, named by
+    /// that id, says which thread and turn it came from. Before the first message there is no
+    /// conversation to fork, and a fork from an earlier turn is refused: Claude Code forks whole
+    /// conversations.
+    #[tokio::test]
+    async fn a_fork_resumes_the_conversation_into_a_new_thread() {
+        let rig = Rig::new();
+        let Outcome::Started { thread } = rig.starter.start(IntentId::new(), rig.start(None)).await
+        else {
+            panic!("started");
+        };
+        let early = rig.starter.fork(thread, IntentId::new(), None).await;
+        let want = Outcome::Refused { reason: "There is nothing to fork yet".to_owned() };
+        assert_eq!(early, want);
+        rig.write("edit");
+        let state = until(&rig.host, thread, |s| !s.turns.is_empty()).await;
+        let last = state.last_turn().map(|t| t.id);
+        let earlier = Some(TurnId(last.unwrap().0 + 9));
+        let refused = rig.starter.fork(thread, IntentId::new(), earlier).await;
+        assert!(matches!(refused, Outcome::Refused { .. }), "{refused:?}");
+        assert_eq!(rig.opened().len(), 1, "nothing opened");
+
+        let fork = IntentId::new();
+        let Outcome::Started { thread: branch } = rig.starter.fork(thread, fork, last).await else {
+            panic!("not forked");
+        };
+        assert_eq!(rig.starter.fork(thread, fork, last).await, Outcome::Started { thread: branch });
+        let opened = rig.opened();
+        assert_eq!(opened.len(), 2, "one terminal for the fork");
+        let (command, cwd, ..) = &opened[1];
+        let new = command[5].clone();
+        let native = state.meta.native.as_str();
+        assert_eq!(command[1..], ["--resume", native, "--fork-session", "--session-id", &new]);
+        assert_eq!(*cwd, rig.work.to_string_lossy());
+        assert_eq!(branch, thread_of(&new));
+        let (forked, _) = rig.host.state(branch).unwrap();
+        assert_eq!(forked.meta.forked_from, Some(Fork { thread, turn: last }));
+        assert_eq!(forked.meta.origin, ThreadMeta::FORK);
     }
 }

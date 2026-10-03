@@ -464,4 +464,40 @@ mod threads {
         let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
         assert_eq!(states, [(waiting, PendingState::Waiting), (sending, typed)]);
     }
+
+    /// Where a thread was branched from outlives the agent's own account of it: a meta that
+    /// does not say, a read again from nothing, and a worker that starts again. An agent that
+    /// names the thread but not the turn has the turn put back.
+    #[tokio::test]
+    async fn where_a_fork_came_from_outlives_a_read_again_and_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let branch = meta();
+        let thread = branch.id;
+        host.create(branch.clone()).unwrap();
+        let from = slopty_proto::thread::Fork { thread: ThreadId::new(), turn: Some(TurnId(3)) };
+        host.forked(thread, from);
+        let kept = |host: &Host| {
+            let (state, _) = state(host, thread);
+            assert_eq!(state.meta.forked_from, Some(from));
+            assert_eq!(state.meta.origin, ThreadMeta::FORK);
+        };
+        kept(&host);
+        host.apply(thread, vec![Action::Meta(Box::new(branch.clone()))]);
+        kept(&host);
+        let mut named = branch.clone();
+        named.forked_from = Some(slopty_proto::thread::Fork { thread: from.thread, turn: None });
+        host.apply(thread, vec![Action::Meta(Box::new(named))]);
+        kept(&host);
+        let mut fresh = ThreadState::new(branch.clone());
+        fresh.meta.forked_from = None;
+        host.reset(thread, fresh).unwrap();
+        kept(&host);
+        drop(host);
+
+        let host = open(dir.path());
+        kept(&host);
+        host.apply(thread, vec![Action::Meta(Box::new(branch))]);
+        kept(&host);
+    }
 }

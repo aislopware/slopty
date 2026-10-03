@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
-    Action, Cursor, Edge, IntentId, ItemBody, ItemId, PendingState, Phase, ThreadId, ThreadMeta,
-    ThreadState, TreeRef, TurnId,
+    Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, PendingState, Phase, ThreadId,
+    ThreadMeta, ThreadState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -119,6 +119,9 @@ struct Own {
     sent: HashMap<ItemId, IntentId>,
     /// Each turn's snapshots.
     trees: HashMap<TurnId, (Option<TreeRef>, Option<TreeRef>)>,
+    /// Where the thread branched, when the worker forked it: an agent that records a fork names
+    /// only the thread it came from, or nothing.
+    fork: Option<Fork>,
 }
 
 /// Messages typed whose items are waited for; past it the oldest is given up.
@@ -140,13 +143,26 @@ impl Own {
             .filter(|t| t.before.is_some() || t.after.is_some())
             .map(|t| (t.id, (t.before.clone(), t.after.clone())))
             .collect();
-        Self { typed: VecDeque::new(), sent, trees }
+        let fork = state.meta.forked_from;
+        Self { typed: VecDeque::new(), sent, trees, fork }
     }
 
-    /// `actions` with what the worker knows put back in: an item's intent, a turn's trees.
+    /// `meta` with where the worker branched it, unless its agent says more: an agent that
+    /// records a fork knows the thread it came from, not the turn.
+    fn branched(&self, meta: &mut ThreadMeta) {
+        let Some(fork) = self.fork else { return };
+        if meta.forked_from.is_none_or(|t| t.thread == fork.thread && t.turn.is_none()) {
+            meta.forked_from = Some(fork);
+            ThreadMeta::FORK.clone_into(&mut meta.origin);
+        }
+    }
+
+    /// `actions` with what the worker knows put back in: an item's intent, a turn's trees,
+    /// where the thread branched.
     fn mark(&mut self, actions: &mut [Action]) {
         for action in actions {
             match action {
+                Action::Meta(meta) => self.branched(meta),
                 Action::ItemStarted(item)
                 | Action::ItemUpdated(item)
                 | Action::ItemCompleted(item) => {
@@ -260,6 +276,16 @@ impl Host {
         Some(apply(hosted, &mut inner.table, &inner.edges, actions))
     }
 
+    /// The thread held of agent `agent`'s session `native`, and its title, when one is.
+    #[must_use]
+    pub fn session(&self, agent: &AgentId, native: &str) -> Option<(ThreadId, String)> {
+        let inner = self.inner.lock();
+        inner.threads.iter().find_map(|(id, hosted)| {
+            let meta = &hosted.log.state().meta;
+            (meta.agent == *agent && meta.native == native).then(|| (*id, meta.title.clone()))
+        })
+    }
+
     /// Apply what `change` makes of `thread` as it stands, in one step: nothing else changes
     /// it between the look and the actions. `None` for a thread not held, else what `change`
     /// returned beside its actions.
@@ -291,6 +317,7 @@ impl Host {
         // no agent's session has: they stay.
         // One that was being typed may be in the terminal already, so it is not typed again.
         let mut state = state;
+        hosted.own.branched(&mut state.meta);
         state.pending.clone_from(&hosted.log.state().pending);
         state.to_review = hosted.log.state().to_review;
         for pending in &mut state.pending {
@@ -319,6 +346,18 @@ impl Host {
             Some(hosted) => hosted.log.delete(),
             None => Ok(()),
         }
+    }
+
+    /// `thread` was branched off another as `fork` says, by the worker: kept with it from now on,
+    /// whatever its adapter tells of it, across a restart and a read again from its agent.
+    pub fn forked(&self, thread: ThreadId, fork: Fork) {
+        let meta = {
+            let mut inner = self.inner.lock();
+            let Some(hosted) = inner.threads.get_mut(&thread) else { return };
+            hosted.own.fork = Some(fork);
+            hosted.log.state().meta.clone()
+        };
+        self.apply(thread, vec![Action::Meta(Box::new(meta))]);
     }
 
     /// Message `text` was typed for intent `id` into `thread`'s agent: the item the agent

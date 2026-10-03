@@ -12,7 +12,9 @@ mod codex {
     use serde_json::{Value, json};
     use slopty_agent::codex::shared;
     use slopty_proto::thread::wire::{Outcome, Start};
-    use slopty_proto::thread::{AgentId, IntentId, ItemBody, ThreadId, ThreadState, TurnState};
+    use slopty_proto::thread::{
+        AgentId, Delivery, Fork, IntentId, ItemBody, ThreadId, ThreadMeta, ThreadState, TurnState,
+    };
     use slopty_worker::thread::Host;
     use slopty_worker::thread::codex::{self, Codex};
     use slopty_worker::thread::log::Limits;
@@ -453,5 +455,120 @@ mod codex {
             let followed = handle.start(IntentId::new(), again).await;
             assert_eq!(followed, outcome, "followed already: the same thread at once");
         }
+    }
+
+    /// A stand-in daemon with no thread loaded that takes the recording's thread up again, forks
+    /// it into `forked-1`, lists it among the folder's threads under the name Codex keeps, and
+    /// answers a turn as the recording did. Every frame the worker sent goes to `heard`.
+    async fn brancher(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let mut answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [], "nextCursor": null } })
+                }
+                Some("thread/resume") => resumed(),
+                Some("thread/fork") => {
+                    let mut forked = resumed();
+                    let from = forked["result"]["thread"]["id"].clone();
+                    forked["result"]["thread"]["id"] = json!("forked-1");
+                    forked["result"]["thread"]["forkedFromId"] = from;
+                    forked
+                }
+                Some("thread/list") => {
+                    let mut listed = resumed()["result"]["thread"].clone();
+                    listed["name"] = json!("Fix the login");
+                    listed["updatedAt"] = json!(1_700_000_000);
+                    json!({ "result": { "data": [listed], "nextCursor": null } })
+                }
+                Some("turn/start") => lines[recorded(&lines, "turn/start").1].msg.clone(),
+                _ => continue,
+            };
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+        }
+    }
+
+    /// Sent with files, a turn gives Codex the person's words with each file's path after
+    /// them, and each picture as a local image Codex reads itself. A fork asks Codex to branch
+    /// the thread and follows the branch, which says where it came from; Codex's threads in a
+    /// folder are listed with the words that take each up again.
+    #[tokio::test]
+    async fn files_go_by_path_and_a_fork_and_a_listing_go_to_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(brancher(listener, tx));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let mut again = start(dir.path(), "");
+        again.prompt = None;
+        again.args = shared::resume_args(&native);
+        let Outcome::Started { thread } = handle.start(IntentId::new(), again).await else {
+            panic!("not taken up again");
+        };
+
+        let shot = dir.path().join("shot.png");
+        std::fs::write(&shot, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).unwrap();
+        let notes = dir.path().join("my notes.md");
+        std::fs::write(&notes, "# notes").unwrap();
+        let paths = [&notes, &shot].map(|p| p.to_string_lossy().into_owned());
+        let send = IntentId::new();
+        handle.send(thread, "Look.".to_owned(), paths.to_vec(), Delivery::Steer, send);
+        let turn = tokio::time::timeout(BOUND, async {
+            loop {
+                let msg = heard.recv().await.unwrap();
+                if msg["method"] == "turn/start" {
+                    return msg;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let words = format!("Look. '{}'", paths[0]);
+        assert_eq!(
+            turn["params"]["input"],
+            json!([
+                { "type": "text", "text": words, "text_elements": [] },
+                { "type": "localImage", "path": paths[1] },
+            ])
+        );
+
+        let fork = IntentId::new();
+        let outcome = tokio::time::timeout(BOUND, handle.fork(thread, fork, None)).await.unwrap();
+        let forked = shared::thread_of("forked-1");
+        assert_eq!(outcome, Outcome::Started { thread: forked });
+        assert_eq!(handle.fork(thread, fork, None).await, outcome, "forked once");
+        let state = until(&host, forked, |s| s.meta.forked_from.is_some()).await;
+        let from = host.state(thread).unwrap().0.last_turn().map(|t| t.id);
+        assert_eq!(state.meta.forked_from, Some(Fork { thread, turn: from }));
+        assert_eq!(state.meta.origin, ThreadMeta::FORK);
+
+        let cwd = dir.path().to_string_lossy().into_owned();
+        let listed = handle.sessions(cwd.clone(), 5).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].native, native);
+        assert_eq!(listed[0].title.as_deref(), Some("Fix the login"));
+        assert_eq!(listed[0].resume, shared::resume_args(&native));
+        assert_eq!(listed[0].updated_ms, Some(slopty_core::WallMs::from_millis(1_700_000_000_000)));
+        let mut sent = Vec::new();
+        while let Ok(msg) = heard.try_recv() {
+            sent.push(msg);
+        }
+        let forks: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/fork").collect();
+        assert_eq!(forks.len(), 1, "asked once: {sent:?}");
+        assert_eq!(forks[0]["params"], json!({ "threadId": native }));
+        let lists: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/list").collect();
+        assert_eq!(lists[0]["params"]["cwd"], json!(cwd));
+        assert_eq!(lists[0]["params"]["limit"], 5);
     }
 }

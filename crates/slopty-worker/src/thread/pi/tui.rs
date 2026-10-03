@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use slopty_agent::pi::driven::{self, Driven};
 use slopty_agent::pi::rpc::{Entries, Entry};
+use slopty_agent::pi::sessions;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::{ThreadId, ThreadMeta, ThreadState};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
@@ -23,22 +24,26 @@ pub const FOLLOW: Duration = Duration::from_millis(250);
 pub use crate::thread::terminals::{Pending, Terminals};
 
 /// Where pi keeps the session of `meta`: the file pi named, else the one of its id in pi's
-/// session directory for the thread's folder (`<pi dir>/sessions/--<folder>--/<time>_<id>.jsonl`).
+/// session directory for the thread's folder ([`find`]).
 #[must_use]
 pub fn session_file(meta: &ThreadMeta) -> Option<PathBuf> {
     if let Some(file) = meta.facts.get(driven::SESSION_FILE_FACT) {
         return Some(PathBuf::from(file));
     }
-    let agent = std::env::var_os("PI_CODING_AGENT_DIR").map(PathBuf::from).or_else(|| {
-        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi").join("agent"))
-    })?;
-    let folder = format!("--{}--", meta.cwd.trim_start_matches('/').replace(['/', '\\', ':'], "-"));
-    let ending = format!("_{}.jsonl", meta.native);
-    std::fs::read_dir(agent.join("sessions").join(folder))
+    find(&meta.cwd, &meta.native)
+}
+
+/// The file of pi session `id` in pi's session directory for folder `cwd`
+/// (`<pi dir>/sessions/--<folder>--/<time>_<id>.jsonl`), when there is one.
+#[must_use]
+pub fn find(cwd: &str, id: &str) -> Option<PathBuf> {
+    std::fs::read_dir(sessions::folder(&sessions::agent_dir()?, cwd))
         .ok()?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.to_string_lossy().ends_with(&ending))
+        .find(|path| {
+            path.file_name().and_then(|n| n.to_str()).and_then(sessions::id_of) == Some(id)
+        })
 }
 
 /// The session's file as it is read: how far, the line begun and not ended, and every entry.

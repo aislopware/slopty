@@ -15,8 +15,8 @@ mod acp {
     use slopty_core::ClientId;
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase, RequestState,
-        ThreadId, ThreadState, ToolState, TurnState,
+        AgentId, Answerer, Cap, Delivery, Drive, Fork, IntentId, ItemBody, Liveness, Phase,
+        RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, TurnState,
     };
     use slopty_worker::thread::Host;
     use slopty_worker::thread::acp::{self, Acp};
@@ -439,5 +439,134 @@ mod acp {
         refused(&acp.start(IntentId::new(), nowhere).await, "no folder");
         refused(&acp.start(IntentId::new(), rig.start("acp:gemini", "Hi.")).await, "installed");
         assert_eq!(rig.host.threads(), []);
+    }
+
+    /// The lines of fixture `name`.
+    fn lines(name: &str) -> Vec<String> {
+        std::fs::read_to_string(fixture(name)).unwrap().lines().map(str::to_owned).collect()
+    }
+
+    impl Rig {
+        /// The stand-in started from now on replays `lines`, a recording the test wrote.
+        fn replay_lines(&self, lines: &[String]) {
+            let written = self.record.with_file_name("written.jsonl");
+            std::fs::write(&written, lines.join("\n")).unwrap();
+            let config = serde_json::json!({ "fixture": written, "record": self.record });
+            std::fs::write(self.programs.join("stub-acp.json"), config.to_string()).unwrap();
+        }
+    }
+
+    const PNG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+    /// Sent with files to an agent that takes pictures, a message goes as the person's words, a
+    /// picture as an image block with its bytes and where it is, and any other file as a link to
+    /// it; the words in the thread stay as they were written.
+    #[tokio::test]
+    async fn a_picture_goes_as_an_image_and_a_file_as_a_link() {
+        let rig = Rig::new();
+        let shot = rig.work.join("shot.png");
+        std::fs::write(&shot, PNG).unwrap();
+        let notes = rig.work.join("my notes.md");
+        std::fs::write(&notes, "# notes").unwrap();
+        let uri = |p: &Path| format!("file://{}", p.to_string_lossy().replace(' ', "%20"));
+        let session = "ses_00000000000000000000000001";
+        let prompt = serde_json::json!({"id": 3, "jsonrpc": "2.0", "method": "session/prompt",
+        "params": {"sessionId": session, "prompt": [
+            {"type": "text", "text": "Look."},
+            {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png", "uri": uri(&shot)},
+            {"type": "resource_link", "name": "my notes.md", "uri": uri(&notes)},
+        ]}});
+        let ended =
+            r#"{"dir":"out","msg":{"id":3,"jsonrpc":"2.0","result":{"stopReason":"end_turn"}}}"#;
+        let turns = lines("turns.jsonl");
+        let mut recording = turns[..4].to_vec();
+        recording.push(serde_json::json!({"dir": "in", "msg": prompt}).to_string());
+        recording.push(ended.to_owned());
+        rig.replay_lines(&recording);
+        let (acp, _served) = rig.serve();
+        let mut start = rig.start("acp:opencode", "");
+        start.prompt = None;
+        let Outcome::Started { thread } = acp.start(IntentId::new(), start).await else {
+            panic!("not started");
+        };
+        rig.until(thread, "the session made", |s| !s.meta.native.is_empty()).await;
+        let send = Intent::Send {
+            text: "Look.".to_owned(),
+            delivery: Delivery::Queue,
+            attachments: [&shot, &notes].map(|p| p.to_string_lossy().into_owned()).to_vec(),
+        };
+        let (id, outcome) = rig.intent(&acp, thread, &send);
+        assert_eq!(outcome, Outcome::Done);
+        let state = rig.until(thread, "the turn", turn_ended(1, TurnState::Complete)).await;
+        assert_eq!(users(&state), [("Look.".to_owned(), Some(id))]);
+        let record = rig.record();
+        assert_eq!(record["heard"][2]["params"]["prompt"], prompt["params"]["prompt"]);
+        assert_eq!(record["unexpected"], serde_json::json!([]));
+    }
+
+    /// A fork runs the agent afresh, which forks the thread's session (`session/fork`) and then
+    /// loads the fork, replaying its history into the new thread; the new thread says which
+    /// thread and turn it came from. The agent's sessions in a folder are listed by a run of
+    /// its own (`session/list`) with the words that take each up again, and one taken up again
+    /// is the thread already kept of it.
+    #[tokio::test]
+    async fn a_fork_and_a_listing_go_to_the_agent() {
+        let rig = Rig::new();
+        let (acp, _served) = rig.serve();
+        let Outcome::Started { thread } =
+            acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.meta.can(Cap::FORK), "the agent forks: {:?}", state.meta.caps);
+        let last = state.turns[0].id;
+
+        let (from, to) = ("ses_00000000000000000000000001", "ses_fork");
+        let turns = lines("turns.jsonl");
+        let mut recording = turns[..2].to_vec();
+        let ask = serde_json::json!({"dir": "in", "msg": {"id": 2, "jsonrpc": "2.0",
+            "method": "session/fork", "params": {"sessionId": from, "cwd": "/work"}}});
+        let forked = serde_json::json!({"dir": "out", "msg": {"id": 2, "jsonrpc": "2.0",
+            "result": {"sessionId": to}}});
+        recording.extend([ask.to_string(), forked.to_string()]);
+        recording.extend(lines("load.jsonl")[2..].iter().map(|l| l.replace(from, to)));
+        rig.replay_lines(&recording);
+        let fork = IntentId::new();
+        let Outcome::Started { thread: branch } = acp.fork(thread, fork, Some(last)).await else {
+            panic!("not forked");
+        };
+        assert_eq!(acp.fork(thread, fork, Some(last)).await, Outcome::Started { thread: branch });
+        let state = rig.until(branch, "the fork loaded", |s| s.turns.len() == 4).await;
+        assert_eq!(state.meta.native, to);
+        assert_eq!(state.meta.forked_from, Some(Fork { thread, turn: Some(last) }));
+        assert_eq!(state.meta.origin, ThreadMeta::FORK);
+        let record = rig.record();
+        assert_eq!(record["heard"][1]["params"]["sessionId"], from);
+        assert_eq!(record["heard"][2]["method"], "session/load");
+        assert_eq!(record["unexpected"], serde_json::json!([]));
+
+        let mut recording = turns[..2].to_vec();
+        let ask = serde_json::json!({"dir": "in", "msg": {"id": 2, "jsonrpc": "2.0",
+            "method": "session/list", "params": {"cwd": "/work"}}});
+        let listed = serde_json::json!({"dir": "out", "msg": {"id": 2, "jsonrpc": "2.0",
+            "result": {"sessions": [{"sessionId": from, "cwd": "/work", "title": "Greetings",
+                "updatedAt": "2026-10-03T10:00:00Z"}], "nextCursor": null}}});
+        recording.extend([ask.to_string(), listed.to_string()]);
+        rig.replay_lines(&recording);
+        let agent = AgentId::named("acp:opencode");
+        let cwd = rig.work.to_string_lossy().into_owned();
+        let past = acp.sessions(agent, cwd, 10).await.unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].native, from);
+        assert_eq!(past[0].title.as_deref(), Some("Greetings"));
+        assert!(past[0].updated_ms.is_some());
+        assert_eq!(past[0].resume, ["resume", from]);
+        assert_eq!(rig.record()["heard"][1]["params"]["cwd"], rig.work.to_string_lossy().as_ref());
+
+        let mut again = rig.start("acp:opencode", "");
+        again.prompt = None;
+        again.args = past[0].resume.clone();
+        assert_eq!(acp.start(IntentId::new(), again).await, Outcome::Started { thread });
     }
 }
