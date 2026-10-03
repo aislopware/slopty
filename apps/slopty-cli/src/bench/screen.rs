@@ -26,6 +26,9 @@ use crate::client::{Session, connect_to};
 /// The paint beat standing in for the display: the one the app self-test's pacing uses.
 const PAINT_PERIOD: Duration = Duration::from_micros(16_667);
 
+/// An arrival gap worth saying when it happened: past two periods of a 60 Hz source.
+const LONG_GAP: Duration = Duration::from_millis(40);
+
 /// What to stream and for how long.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenBench {
@@ -155,6 +158,8 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
     paint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut latency_us: Vec<u64> = Vec::new();
     let mut gaps_us: Vec<u64> = Vec::new();
+    // Arrival gaps past `LONG_GAP`, with when each ended after the Open, milliseconds.
+    let mut long_gaps: Vec<(f64, f64)> = Vec::new();
     let mut first_frame: Option<Instant> = None;
     let mut last_arrival: Option<Instant> = None;
     // The worker's bitrate decisions as they arrive: (seconds into the run, target, verdict).
@@ -184,8 +189,12 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
                 let lat = i64::from(now_lo.wrapping_sub(pts_lo).cast_signed()).max(0);
                 latency_us.push(u64::try_from(lat).unwrap_or(0));
                 if let Some(prev) = last_arrival {
-                    let gap = now.saturating_duration_since(prev).as_micros();
-                    gaps_us.push(u64::try_from(gap).unwrap_or(u64::MAX));
+                    let gap = now.saturating_duration_since(prev);
+                    gaps_us.push(u64::try_from(gap.as_micros()).unwrap_or(u64::MAX));
+                    if gap > LONG_GAP {
+                        let ended = now.saturating_duration_since(opened_at).as_secs_f64() * 1e3;
+                        long_gaps.push((gap.as_secs_f64() * 1e3, ended));
+                    }
                 }
                 last_arrival = Some(now);
             }
@@ -255,6 +264,9 @@ pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -
         pacing.latency_max.as_secs_f64() * 1e3
     );
     println!("  arrival gap: {}", quantiles(&mut gaps_us));
+    let long: Vec<String> =
+        long_gaps.iter().map(|(gap, at)| format!("{gap:.0} ms ending at {at:.0} ms")).collect();
+    println!("  arrival gaps over {} ms, after Open: [{}]", LONG_GAP.as_millis(), long.join(", "));
     println!(
         "  last report: hold p50 {:.1} ms p95 {:.1} ms  jitter {:.1} ms  queue {}",
         stats.hold_p50.as_secs_f64() * 1e3,

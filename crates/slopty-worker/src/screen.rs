@@ -4162,7 +4162,8 @@ impl<P: Platform> Pipeline<P> {
         let t_encoder = Instant::now();
         let sessions = [shared.next_session(), shared.next_session()];
         let shown = (capture_config.width, capture_config.height);
-        let mut layout = striping::<P>(knob, None, &capture_config, encoder_config.chroma, false);
+        let at_open = stripes::time_at_open();
+        let mut layout = striping::<P>(knob, None, &capture_config, encoder_config.chroma, at_open);
         let weak = Arc::downgrade(&shared);
         let built = match build_encoder(&weak, encoder_config, shown, sessions, layout).await {
             Err(e) if chroma == Chroma::Full => {

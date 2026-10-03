@@ -124,6 +124,17 @@ impl Gate {
     }
 }
 
+/// Whether a stream's open times the engines for a size not yet known, beside its own first
+/// keyframe, as the open did before the timing waited for idle engines: `SLOPTY_TIME_AT_OPEN=1`,
+/// the measurements' knob for that schedule (MEASUREMENTS.md, "the stripe timing beside a new
+/// stream"). Off otherwise.
+pub(super) fn time_at_open() -> bool {
+    static AT_OPEN: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+        std::env::var("SLOPTY_TIME_AT_OPEN").is_ok_and(|value| value == "1")
+    });
+    *AT_OPEN
+}
+
 /// A surface's width, height and chroma.
 type Size = (u32, u32, Chroma);
 

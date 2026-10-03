@@ -14132,3 +14132,45 @@ SLOPTY_WIDE=1 target/release/deps/slopty_worker-<hash> --ignored --exact \
   --nocapture screen::synthetic::tests::measure_a_new_streams_first_seconds   # after
 cargo test -p slopty-worker --lib -- engines:: stripes:: a_new_stream_codes_its_first_frames
 ```
+
+**Through the real path.** The same question end to end: a fresh `slopty-worker` (release) on
+the drawn screen with its own `slopty-ptyd`, and `slopty bench screen` streaming the drawn
+editor window at its own 2560 × 1600 over QUIC on loopback, decoding with VideoToolbox and
+painting through the app's pacer on a 60 Hz timer. "Before" sets `SLOPTY_TIME_AT_OPEN=1` on the
+worker, which times the stripes at the open as the open did (the worker's log says "stripes
+timed … whole 11.0–11.7 ms striped 12.5–12.9 ms pays=false" each time); "after" is the worker as
+it is. Each run has new processes, the two are alternated, and every daemon is killed at the run's
+end. The bench now also says when each arrival gap over 40 ms ended.
+
+| batch (load average) | runs | longest arrival gap, before | after |
+| --- | --- | --- | --- |
+| 1 (14–20), 5 s | 8 + 8 | median 60.1 ms (48.0–68.2) | median 36.4 ms (33.3–52.8, one run 156.7) |
+| 2 (33–50), 6 s, in the first second | 10 + 10 | over 40 ms in 8 runs (40–63, 400–950 ms in) | over 40 ms in 5 runs (41–61) |
+| 3 (41–52), 6 s, workers' own figures | 6 + 6 | 34–54 ms | 35–65 ms |
+
+- The client's stall counter read 0 (0 ms stalled) in all 48 runs, before and after. The 66 ms
+  stall did not come back on the old schedule either, so the old one adds a hole, not a stall
+  by itself. No datagram was lost, no frame refreshed, and nothing failed to decode. QUIC lost
+  0 packets. Ten runs had 1–9 NACKs for datagrams that came late under load.
+- At moderate load the old schedule's gap is the longest of the run, 400–600 ms in. With
+  the timing waiting for idle engines it is gone, and the longest gap is about two frame
+  periods.
+- At load averages of 40–52 both schedules have 40–65 ms gaps anywhere in the run. The
+  worker's own figures put them in the encoder's turns, not on the wire. Capture to callback
+  stays under 3.4 ms (8.5 once), encode p95 rises from 11 to 13–16 ms, and 2–16 captures a run are
+  superseded before encoding. That is this Mac running other lanes' builds, and nothing the
+  link or the client does.
+- The one 156.7 ms gap (batch 1, after) came with a 160 ms capture-to-decoded figure for the
+  same frame. It did not recur in the 16 runs after it.
+
+```sh
+cargo build --release -p slopty-workerd --bin slopty-worker -p slopty-cli --bin slopty -p slopty-ptyd
+# per run, in a fresh directory $root:
+target/release/slopty-ptyd --socket $root/ptyd.sock --shell-dir $root/shell &
+SLOPTY_SYNTHETIC_SCREEN=1 [SLOPTY_TIME_AT_OPEN=1] target/release/slopty-worker \
+  --ptyd-socket $root/ptyd.sock --ctl-socket $root/worker.sock --data-dir $root/worker \
+  --drop-dir $root/drops --print-addr --port 0 > $root/addr &
+SLOPTY_WORKER_SOCKET=$root/worker.sock target/release/slopty bench screen --data-dir $root/cli \
+  --worker 127.0.0.1:<port from $root/addr> --window 7001 --scale 1 --seconds 6
+# then kill the worker and ptyd
+```

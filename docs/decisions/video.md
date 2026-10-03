@@ -2696,6 +2696,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Not taken: deriving the verdict from the stream's own encode time. The whole picture's
     half could come from it, but whether two stripes run side by side cannot be seen without
     coding two stripes.
+  - Through the real path (worker, QUIC on loopback, VideoToolbox decode, the app's pacer),
+    48 alternated runs at 2560 × 1600: the old schedule's 48–68 ms opening gap is gone at
+    moderate load (the longest gap's median 60.1 → 36.4 ms), and the client counted no stall
+    on either schedule. The gaps left under heavy load are the encoder's turns on a busy Mac,
+    on both schedules alike. `SLOPTY_TIME_AT_OPEN=1` brings the old schedule back for a
+    measurement.
   - Tests: `the_engines_are_timed_only_where_they_are_idle` (`stripes`),
     `the_engines_are_quiet_a_second_after_the_last_frame` (`engines`), and
     `a_new_stream_codes_its_first_frames_with_the_engines_to_itself` (`synthetic`, a 2560 ×
