@@ -824,10 +824,6 @@ impl Hub {
             Verb::TaskStart { project, task, pin } => {
                 self.task_start(key, project, task, pin).await
             }
-            Verb::TaskTell { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "telling a task's agent is the person's; an agent reports with task_report",
-            ),
             Verb::PlacementSuggest { project, task, placement } => {
                 self.placement_suggest(project.as_ref(), task, placement).await
             }
@@ -882,7 +878,7 @@ impl Hub {
             | Verb::TaskReport { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectNeeds { .. }
-            | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
+            | Verb::TaskMerge { .. }) => self.project_change((caller, from), key, &verb),
             other => self.forward(key, other).await,
         }
     }
@@ -1181,8 +1177,8 @@ impl Hub {
     /// Log and push each project change, and send the store what it keeps. Called under the
     /// state lock, as [`Self::happen`] is, so the store and every link see the changes in the
     /// order they were made.
-    fn projects_moved(&self, state: &mut State, changes: Vec<Change>) {
-        self.hear(state);
+    fn projects_moved(&self, state: &mut State, mut changes: Vec<Change>) {
+        changes.extend(self.hear(state));
         if changes.is_empty() {
             return;
         }
@@ -1389,7 +1385,7 @@ impl Lease {
                         hub.happen(Happening::SessionExited { term, status });
                         // The program in a task's terminal ended: the node above hears.
                         state.projects.exited(term);
-                        hub.hear(&mut state);
+                        hub.projects_moved(&mut state, Vec::new());
                     }
                 } else {
                     entry.sessions.push(summary.clone());

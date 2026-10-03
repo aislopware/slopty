@@ -1,11 +1,12 @@
 //! What a task's agent came to reaches the node above it through its worker, with no report
-//! from the agent; and a finished task's agent stops counting and is closed once it rests.
+//! from the agent; a finished task's agent stops counting and is closed once it rests; and an
+//! agent tells the tasks under it in its own words.
 
 use std::time::Duration;
 
 use slopty_proto::agent::BlockReason;
 use slopty_proto::project::{
-    LimitsChange, Moment, Placement, Report, ReportKind, TaskChange, TaskState,
+    LimitsChange, Moment, Placement, Report, ReportKind, TaskChange, TaskSpec, TaskState,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::Phase;
@@ -13,8 +14,8 @@ use slopty_proto::thread::attention::Seat;
 
 use super::ladder::tests::{Client, asking, row, snapshot};
 use super::project_tests::{
-    agent, announce, claude, create, create_with, new_task, opened, project, request, spawn,
-    status, worker_on,
+    agent, announce, claude, create, create_with, new_task, opened, project, refused, request,
+    spawn, status, worker_on,
 };
 use super::settle::SETTLE_AFTER;
 use super::*;
@@ -84,6 +85,11 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
         |e| matches!(e.what, Moment::Delivered { term, reports: 1 } if term == orchestrator),
     );
     assert_eq!(delivered.count(), 1, "the timeline says it reached the orchestrator");
+    let rests = async || {
+        let rested = Moment::State { from: TaskState::Running, to: TaskState::Waiting };
+        status(&hub).await.timeline.iter().filter(|e| e.what == rested).count()
+    };
+    assert_eq!(rests().await, 1, "the timeline says the turn ended unreported");
 
     let bash = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
     lease.handle(agent(working, AgentStatus::Working));
@@ -116,6 +122,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     assert!(!own.2.contains("waits on the person"), "taken back: {}", own.2);
     ack(&own);
     assert_eq!(a_batch_within(&mut rx, Duration::from_mins(5)).await, None, "its own word");
+    assert_eq!(rests().await, 1, "a turn that reported is not marked");
 
     lease.handle(ToServer::SessionClosed {
         session: working,
@@ -176,4 +183,87 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     });
     let said = said.unwrap_or_default();
     assert!(said.starts_with("The server closed its agent, at rest 10 min after"), "{said}");
+}
+
+/// The orchestrator tells a task's agent something, and a task's agent tells a task split from
+/// its own: each reaches that agent through its hooks, marked as an agent's words, and the
+/// timeline says who told. An agent never tells a task outside its own subtree, the node
+/// above it, or a task that waits on the person, and an agent's surface that proves no
+/// terminal tells nothing.
+#[tokio::test]
+async fn an_agent_tells_the_tasks_under_it_in_its_own_words() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let (orchestrating, above, below, beside) =
+        (SessionId::new(), SessionId::new(), SessionId::new(), SessionId::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrating, true);
+    for session in [above, below, beside] {
+        announce(&lease, session, false);
+    }
+    create(&hub, Some(TermRef { worker, session: orchestrating })).await;
+    let role = next_batch(&mut rx).await;
+    lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
+    let parent = new_task(&hub, Placement::default()).await;
+    let spec = TaskSpec { title: "Child".to_owned(), parent: Some(parent), ..TaskSpec::default() };
+    let made = hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await;
+    let Outcome::Task(child) = made else { panic!("{made:?}") };
+    let sibling = new_task(&hub, Placement::default()).await;
+    for (task, session) in [(parent, above), (child.id, below), (sibling, beside)] {
+        let term = TermRef { worker, session };
+        let assigned = hub.dispatch(Verb::TaskAssign { project: project(), task, term }).await;
+        assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
+    }
+    let tell = |who, task, text: &str| {
+        let verb = Verb::TaskTell { project: project(), task, text: text.to_owned() };
+        hub.dispatch_as(who, None, verb)
+    };
+
+    let said = tell(Speaker::Proven(orchestrating), Some(parent), "Also cover the iPad.").await;
+    assert_eq!(said, Outcome::Done);
+    let (session, batch, context) = next_batch(&mut rx).await;
+    assert_eq!(session, above);
+    assert!(
+        context.contains("Your orchestrator says (an agent, not the person; it answers nothing")
+            && context.contains("  Also cover the iPad."),
+        "{context}"
+    );
+    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
+    let said = tell(Speaker::Proven(above), Some(child.id), "Start with the layout.").await;
+    assert_eq!(said, Outcome::Done);
+    let (session, _, context) = next_batch(&mut rx).await;
+    assert_eq!(session, below);
+    assert!(context.contains("The agent of task 1, which split your task off, says"), "{context}");
+
+    for (who, task, why) in [
+        (Speaker::Proven(above), Some(sibling), "not split from its task"),
+        (Speaker::Proven(above), None, "the node above it"),
+        (Speaker::Proven(below), Some(parent), "its parent"),
+        (Speaker::Agent, Some(child.id), "proves no terminal"),
+    ] {
+        let said = tell(who, task, "Stop.").await;
+        refused(&said, ErrorCode::Forbidden);
+        assert!(matches!(said, Outcome::Error { .. }), "{why}");
+    }
+    lease.handle(agent(below, AgentStatus::Blocked(BlockReason::Question)));
+    let said = tell(Speaker::Proven(orchestrating), Some(child.id), "Pick the first.").await;
+    assert!(refused(&said, ErrorCode::Conflict).contains("waits on the person"), "{said:?}");
+
+    let notes: Vec<String> = status(&hub)
+        .await
+        .timeline
+        .into_iter()
+        .filter_map(|e| match e.what {
+            Moment::Note { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notes,
+        [
+            "The orchestrator told it: Also cover the iPad.",
+            "Task 1's agent told it: Start with the layout."
+        ]
+    );
+    delivering.abort();
 }

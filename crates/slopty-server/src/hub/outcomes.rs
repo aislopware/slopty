@@ -6,25 +6,32 @@
 //! are read again until then: the row with the agent's final line may come after the status
 //! that ended the turn.
 
+use slopty_core::WallMs;
 use slopty_proto::agent::BlockReason;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{ReportKind, TaskId};
 
 use super::{Hub, State};
-use crate::project::{Heard, Upshot, clipped};
+use crate::project::{Change, Heard, Upshot, clipped};
 
 /// The most of an agent's last words an outcome carries, in bytes.
 pub(super) const LAST_WORDS_MAX: usize = 2048;
 
 impl Hub {
-    /// Hand what the nodes above tasks are to hear to the deliveries.
-    pub(super) fn hear(&self, state: &mut State) {
+    /// Hand what the nodes above tasks are to hear to the deliveries. A rest goes on the
+    /// timeline too, as the task's move from running to waiting, so whoever follows the
+    /// project (`task_wait`, a board) sees the turn end; the changes that makes come back.
+    pub(super) fn hear(&self, state: &mut State) -> Vec<Change> {
         let heard = state.projects.heard();
         if heard.is_empty() {
-            return;
+            return Vec::new();
         }
         let at = tokio::time::Instant::now();
+        let mut changes = Vec::new();
         for Heard { project, task, parent, term, upshot } in heard {
+            if upshot == Upshot::Rested {
+                changes.extend(state.projects.rested(&project, task, WallMs::now()));
+            }
             let node = (project, parent);
             let Some(kind) = upshot.kind() else {
                 state.deliveries.moved_on(&node, task);
@@ -34,6 +41,7 @@ impl Hub {
             state.deliveries.outcome(node, task, kind, &words, at);
         }
         self.inner.deliver.notify_one();
+        changes
     }
 
     /// Read again the words of every rest and wait still waiting: the row with the agent's

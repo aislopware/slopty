@@ -948,3 +948,48 @@ fn a_finished_task_s_agent_counts_only_while_it_works() {
     p.agent_status(at, &AgentStatus::Working, now());
     assert_eq!(p.status(&id(), None, &fleet.running()).unwrap().live.project, 1, "at work again");
 }
+
+/// An agent tells only a task under it, never the node above it nor its own, and never one
+/// that waits on the person; the timeline says which agent told, apart from the person's
+/// words.
+#[test]
+fn an_agent_tells_only_a_task_under_it_that_does_not_wait_on_the_person() {
+    let mut p = project(Some(term()));
+    let parent = task(&mut p, "Parent", &[]);
+    let child = p
+        .create_task(&id(), TaskSpec { parent: Some(parent), ..spec("Child", &[]) }, now())
+        .unwrap()
+        .0
+        .id;
+    let (above, below) = (term(), term());
+    assign(&mut p, parent, above).unwrap();
+    assign(&mut p, child, below).unwrap();
+    let live = HashSet::from([above, below]);
+    let tell =
+        |p: &mut Projects, task, by| p.tell(&id(), (task, by), "Cover the iPad.", &live, now());
+
+    let (words, changes) = tell(&mut p, Some(child), Teller::Above(Some(parent))).unwrap();
+    assert_eq!(words, "Cover the iPad.");
+    let what = kept(&changes).first().and_then(|k| k.entry.clone()).map(|e| e.what);
+    let said = Moment::Note { text: "Task 1's agent told it: Cover the iPad.".to_owned() };
+    assert_eq!(what, Some(said));
+    let by_orchestrator = tell(&mut p, Some(parent), Teller::Above(None)).unwrap().1;
+    let what = kept(&by_orchestrator).first().and_then(|k| k.entry.clone()).map(|e| e.what);
+    let said = Moment::Note { text: "The orchestrator told it: Cover the iPad.".to_owned() };
+    assert_eq!(what, Some(said));
+
+    for (task, by) in
+        [(None, Teller::Above(Some(child))), (Some(child), Teller::Above(Some(child)))]
+    {
+        let refused = tell(&mut p, task, by).unwrap_err();
+        assert!(message(&refused).contains("task_report"), "{}", message(&refused));
+    }
+    let bash = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+    p.agent_status(below, &bash, now());
+    let refused = tell(&mut p, Some(child), Teller::Above(None)).unwrap_err();
+    assert_eq!(code(&refused), ErrorCode::Conflict);
+    assert!(message(&refused).contains("waits on the person"), "{}", message(&refused));
+    let person = tell(&mut p, Some(child), Teller::Person).unwrap().1;
+    let what = kept(&person).first().and_then(|k| k.entry.clone()).map(|e| e.what);
+    assert_eq!(what, Some(Moment::Told { text: "Cover the iPad.".to_owned() }), "the person may");
+}

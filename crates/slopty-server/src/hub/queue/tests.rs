@@ -409,8 +409,8 @@ async fn a_conflict_goes_back_to_the_agent_with_its_paths() {
 
 /// The person's next step reaches the task's own agent through its hooks, at once and in
 /// their words, and the timeline keeps it; their words to the orchestrator reach it the same
-/// way. An agent may not speak as the person, and a task
-/// with no agent running has nobody to tell.
+/// way. The orchestrator's words reach it marked as its own, never as the person's, an agent
+/// that proves no terminal tells nothing, and a task with no agent running has nobody to tell.
 #[tokio::test]
 async fn the_person_s_words_reach_the_task_s_agent() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -446,8 +446,12 @@ async fn the_person_s_words_reach_the_task_s_agent() {
         s.timeline
     );
 
-    let as_agent = hub.dispatch_as(Speaker::Proven(orchestrator.session), None, tell("Go")).await;
-    refused(&as_agent, ErrorCode::Forbidden);
+    let by_orchestrator =
+        hub.dispatch_as(Speaker::Proven(orchestrator.session), None, tell("Go on.")).await;
+    assert_eq!(by_orchestrator, Outcome::Done);
+    let told = studio.told(agent.session, "Your orchestrator says").await;
+    assert!(told.contains("an agent, not the person") && told.contains("  Go on."), "{told}");
+    refused(&hub.dispatch_as(Speaker::Agent, None, tell("Go")).await, ErrorCode::Forbidden);
     refused(&hub.dispatch(tell("  ")).await, ErrorCode::Invalid);
     studio.lease.handle(ToServer::SessionClosed {
         session: agent.session,

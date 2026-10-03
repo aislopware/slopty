@@ -33,8 +33,8 @@ use super::{
 use crate::deliver::{Batch, plain};
 use crate::placement::{self, Candidate, Ranking};
 use crate::project::{
-    Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Watched,
-    clipped,
+    Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,
+    Watched, clipped,
 };
 
 /// How long a start still counts once its worker answered (or its answer was lost), until its
@@ -211,6 +211,7 @@ pub(super) fn agent_scope(
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
             | Verb::TaskAssign { .. }
+            | Verb::TaskTell { .. }
     );
     if !changes {
         return Ok(verb);
@@ -301,6 +302,20 @@ pub(super) fn agent_scope(
             in_own(project)?;
             under(project, *task)?;
             named(project, *term)?;
+        }
+        // An agent tells a task under it: the orchestrator any of its project's, a task's
+        // agent those split from its own. Upward it reports.
+        Verb::TaskTell { project, task, .. } => {
+            in_own(project)?;
+            match task {
+                Some(task) if Some(*task) != task_of => under(project, *task)?,
+                _ => {
+                    return refuse(
+                        "an agent tells only a task under it; to the node above, report with \
+                         task_report",
+                    );
+                }
+            }
         }
         _ => {}
     }
@@ -710,7 +725,8 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
              what you made). Say done; never merge."
         ),
         "- To split your work, read project_status first, then task_create subtasks under your \
-         task and task_spawn them; their reports reach you in <slopty-reports> blocks."
+         task and task_spawn them; their reports reach you in <slopty-reports> blocks, and \
+         task_tell says more to their agents."
             .to_owned(),
         "- Never type into another agent's terminal, and leave git remotes and git config as \
          they are."
@@ -749,7 +765,12 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         ),
         "- Split the goal into tasks that own disjoint paths (task_create), place and start \
          them (placement_suggest, task_spawn), and follow them with project_status. Reports \
-         come to you in <slopty-reports> blocks like this one."
+         come to you in <slopty-reports> blocks like this one, and so does what a task's agent \
+         came to when it ended a turn, exited or waits on the person without reporting; \
+         task_wait waits for that news where none comes unasked."
+            .to_owned(),
+        "- task_tell says more to a task's agent, marked as yours: the person's words go \
+         first, and nothing you say answers what the person was asked."
             .to_owned(),
         "- Implement nothing yourself, merge nothing, and answer no permission: approvals are \
          the person's."
@@ -984,7 +1005,7 @@ impl Hub {
     /// A project change the store answers at once: made once per key, logged and pushed.
     pub(super) fn project_change(
         &self,
-        caller: Caller,
+        (caller, from): (Caller, Option<SessionId>),
         key: Option<IdempotencyKey>,
         verb: &Verb,
     ) -> Outcome {
@@ -1108,8 +1129,13 @@ impl Hub {
                 state.projects.claim(&project, id, &paths, now).map(|(t, u)| (task(t), u))
             }
             Verb::TaskTell { project, task: id, text } => {
-                state.projects.tell(&project, id, &text, &terminals, now).map(|(words, u)| {
-                    told = Some((project, id, words));
+                // An agent's scope ([`agent_scope`]) proved the node it speaks for.
+                let by = match caller {
+                    Caller::Person => Teller::Person,
+                    Caller::Agent => Teller::Above(node_of(state, from).and_then(|(_, t)| t)),
+                };
+                state.projects.tell(&project, (id, by), &text, &terminals, now).map(|(words, u)| {
+                    told = Some((project, id, words, by));
                     (Outcome::Done, u)
                 })
             }
@@ -1195,8 +1221,12 @@ impl Hub {
         if let Some(project) = kick {
             self.kick(state, &project);
         }
-        if let Some((project, task, words)) = told {
-            state.deliveries.person(project, task, &words, tokio::time::Instant::now());
+        if let Some((project, task, words, by)) = told {
+            let at = tokio::time::Instant::now();
+            match by {
+                Teller::Person => state.deliveries.person(project, task, &words, at),
+                Teller::Above(from) => state.deliveries.above((project, task), from, &words, at),
+            }
             self.inner.deliver.notify_one();
         }
         if let Some(term) =

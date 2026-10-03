@@ -257,3 +257,41 @@ fn the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own() {
     let again = d.take(later, |_| Some(term()), |_| false);
     assert_eq!(again.len(), 1, "never read, so it goes again: {again:?}");
 }
+
+/// An agent above a node speaks to the node's agent at once, marked as an agent's words and
+/// after the person's, which it never replaces: its own latest replaces its earlier still
+/// unread. A project held at its budget holds it, as it holds reports, while the person's
+/// words go.
+#[test]
+fn an_agent_above_speaks_after_the_person_and_never_in_their_place() {
+    let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
+    let node = (project(), Some(TaskId(4)));
+    d.above(node.clone(), None, "Also cover the iPad.", t0);
+    d.person(project(), Some(TaskId(4)), "Keep it small.", t0);
+    d.above(node.clone(), None, "Also cover the iPad and the Mac.", t0);
+    assert_eq!(d.len(), 2, "its latest in place of its earlier, beside the person's");
+    assert_eq!(d.next_due(), Some(t0), "at once");
+    let batches = d.take(t0, |_| Some(to), |_| false);
+    let context = &batches.first().expect("a batch").context;
+    let (person, above) = (context.find("Keep it small"), context.find("the iPad and the Mac"));
+    assert!(person.is_some() && person < above, "the person's first: {context}");
+    assert!(
+        context.contains("Your orchestrator says (an agent, not the person; it answers nothing"),
+        "{context}"
+    );
+    assert!(!context.contains("cover the iPad.\n"), "replaced: {context}");
+    assert!(d.acked(to, batches[0].number).is_some());
+
+    d.above(node, Some(TaskId(2)), "Rebase first.", t0);
+    let held = d.take(t0, |_| Some(to), |_| true);
+    assert!(held.is_empty(), "held at the budget");
+    d.person(project(), Some(TaskId(4)), "Go on.", t0);
+    let batches = d.take(t0, |_| Some(to), |_| true);
+    let context = &batches.first().expect("the person's words").context;
+    assert!(context.contains("Go on.") && !context.contains("Rebase first."), "{context}");
+    assert!(d.acked(to, batches[0].number).is_some());
+    d.unpark();
+    let batches = d.take(t0, |_| Some(to), |_| false);
+    let context = &batches.first().expect("once the hold lifts").context;
+    assert!(context.contains("The agent of task 2, which split your task off, says"), "{context}");
+}

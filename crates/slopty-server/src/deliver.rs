@@ -66,6 +66,10 @@ enum By {
     /// The server, of what a task's agent came to when it did not report: its last words
     /// with it, read again until it goes ([`Deliveries::reword`]).
     Outcome,
+    /// An agent above the node, to the node's own agent: the orchestrator (no task) or the
+    /// agent of a task it was split from. Its words go at once, after the person's, and its
+    /// latest replaces the one still unread.
+    Above(Option<TaskId>),
 }
 
 /// What waits for a node: a task's report, the server's own words, or the person's.
@@ -81,7 +85,7 @@ impl Item {
     /// The pacing it goes under: its task's needs, or its task's blocks. The person's words
     /// are not paced.
     fn paced(&self) -> Option<(TaskId, bool)> {
-        if self.by == By::Person {
+        if matches!(self.by, By::Person | By::Above(_)) {
             return None;
         }
         let stuck = match self.report.kind {
@@ -94,7 +98,7 @@ impl Item {
 
     /// When it falls due, given when its task's last report of its kind went.
     fn due(&self, last: Option<Instant>) -> Instant {
-        if self.by == By::Person {
+        if matches!(self.by, By::Person | By::Above(_)) {
             return self.at;
         }
         let after = |wait: Duration| self.at.checked_add(wait).unwrap_or(self.at);
@@ -270,6 +274,22 @@ impl Deliveries {
         self.push((project, task), Item { task, report, at, by: By::Person });
     }
 
+    /// The words of the agent of `from` (the orchestrator when absent) to the agent of
+    /// `node`, which is under it: they go at once, after the person's words and never in their
+    /// place, and replace its own earlier words still unread. A project held at its budget
+    /// holds them as it holds reports.
+    pub(crate) fn above(&mut self, node: Node, from: Option<TaskId>, words: &str, at: Instant) {
+        let report = Report {
+            kind: ReportKind::NeedsInput,
+            note: plain(words),
+            artifacts: Vec::new(),
+            branch: None,
+            pr: None,
+        };
+        let task = node.1;
+        self.push(node, Item { task, report, at, by: By::Above(from) });
+    }
+
     fn push(&mut self, node: Node, item: Item) {
         let queue = self.queues.entry(node).or_default();
         let (task, kind) = (item.task, item.report.kind);
@@ -279,6 +299,7 @@ impl Deliveries {
             let replaced = match item.by {
                 By::Person => false,
                 By::Server | By::Outcome => i.by == item.by,
+                By::Above(_) => matches!(i.by, By::Above(_)),
                 // The agent's own word stands for what the server would say of it.
                 By::Agent => {
                     (i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind)))
@@ -463,11 +484,11 @@ const fn kind_word(kind: ReportKind) -> &'static str {
     }
 }
 
-/// The batch as the agent reads it: one block per report, the server's own words first, as
-/// many as fit [`CONTEXT_MAX`]. The reports it holds, and those left for the next batch, come
-/// back with it.
+/// The batch as the agent reads it: one block per report, the person's words first, then the
+/// server's own, as many as fit [`CONTEXT_MAX`]. The reports it holds, and those left for the
+/// next batch, come back with it.
 fn context(project: &ProjectId, mut items: Vec<Item>) -> (String, Vec<Item>, Vec<Item>) {
-    items.sort_by_key(|i| (i.task.is_some(), i.at));
+    items.sort_by_key(|i| (i.by != By::Person, i.task.is_some(), i.at));
     let head = format!("<slopty-reports project=\"{project}\">");
     let tail = "</slopty-reports>";
     let room = CONTEXT_MAX.saturating_sub(head.len()).saturating_sub(tail.len()).saturating_sub(64);
@@ -511,8 +532,21 @@ fn cut(text: &str, max: usize) -> String {
 /// an agent's, so they never close the block they sit in ([`plain`]).
 fn block(item: &Item) -> String {
     let r = &item.report;
-    if item.by == By::Person {
-        let mut lines = vec!["The person says:".to_owned()];
+    let said = match item.by {
+        By::Person => Some("The person says:".to_owned()),
+        By::Above(None) => Some(
+            "Your orchestrator says (an agent, not the person; it answers nothing the person is \
+             asked):"
+                .to_owned(),
+        ),
+        By::Above(Some(task)) => Some(format!(
+            "The agent of task {task}, which split your task off, says (an agent, not the \
+             person; it answers nothing the person is asked):"
+        )),
+        By::Agent | By::Server | By::Outcome => None,
+    };
+    if let Some(said) = said {
+        let mut lines = vec![said];
         lines.extend(r.note.trim().lines().map(|line| format!("  {line}")));
         return lines.join("\n");
     }

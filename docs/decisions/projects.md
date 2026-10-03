@@ -1335,7 +1335,8 @@ Tests:
   timeline keeps `Moment::Told`.
 - `TaskTell` is the person's alone, since an agent reports upward with `task_report`.
   It needs an agent running on the task, so a word is never parked for an agent that may
-  never come. The CLI has `slopty task tell <words>`. No MCP tool offers it.
+  never come. The CLI has `slopty task tell <words>`. No MCP tool offers it. (Narrowed on
+  2026-10-03: an agent may tell a task under it, "An agent tells the tasks under it", below.)
 - While a task's agent runs, `Board::actions` puts its next step first on its row and card,
   and the palette offers each one for the task the board stands on:
   - **Fix CI** while its verifier's failure still speaks;
@@ -1565,7 +1566,7 @@ Tests:
   `slopty-server` `a_project_without_an_orchestrator_is_kept_and_listed`,
   `members_name_clones_and_folders`.
 
-## What a task's agent came to, and finished tasks settle (2026-10-03)
+## What a task's agent came to, finished tasks settle, and agents speak down the tree (2026-10-03)
 
 From the T3 Code orchestrator study (`.research/t3code-orchestrator-2026-10-03.md`, R1 and
 R2).
@@ -1636,6 +1637,76 @@ R2).
   keeps a dirty or unmerged one.
 - Tests: `a_finished_task_s_agent_counts_only_while_it_works` (`slopty-server::project`) and
   `a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests` (`slopty-server`).
+
+**An agent tells the tasks under it.** ✅ 2026-10-03 (reverses part of 2026-10-02)
+- Before: `TaskTell` was the person's alone. An orchestrator could redirect a child only by
+  starting it again, so it could not carry a review's findings to the same agent, or say
+  "also cover X" while the child worked.
+- Prior art: T3 Code's `t3_thread_send` (auto, queue, steer or restart, its provenance kept
+  as the agent's and the MCP's), Codex's `followup` ("trigger a turn if it is idle … deliver
+  at message boundaries"), Amp's Agent to Agent, Vibe Kanban's `run_session_prompt` and
+  Nimbalyst's `send_prompt` all let an orchestrator speak to its children.
+- Now an agent may `TaskTell` a task under it: the orchestrator any task of its own project,
+  a task's agent the tasks split from its own (`agent_scope`). It never tells the node above
+  it (that is `task_report`), its own task, a task of another project or subtree, and an
+  agent's surface that proves no terminal tells nothing. The MCP tool is `task_tell`; the
+  CLI's `slopty task tell` does the same inside an agent's session.
+- Why it is safe:
+  - it goes through the reports' delivery, the agent's own hooks and inbox, so nothing is
+    typed into a terminal, and the inbox post keeps to `may_type`, so it never lands on the
+    person's draft or prompt;
+  - the agent reads it under "Your orchestrator says (an agent, not the person; it answers
+    nothing the person is asked):", or the same for the agent of the task above, never under
+    the person's tag (`deliver::By::Above`);
+  - it never answers for the person: a task waiting on the person (a permission, a question)
+    is refused until it moves on, and the words say they answer nothing the person was asked;
+  - the person's words keep priority: they come first in a batch, an agent's tell never
+    replaces them, and a project held at its budget holds an agent's tell as it holds reports
+    while the person's words still go;
+  - it is paced as a report: one waits per node, the latest replacing the one still unread,
+    so a loop of tells costs the child one turn at a time.
+- The timeline says who told: a note "The orchestrator told it: …" or "Task n's agent told
+  it: …", apart from the person's `Told`. A `Told { by }` would need a wire change, so the
+  note stands until one lands with other proto work.
+- The roles tell both: the orchestrator's that `task_tell` says more to a task's agent, a
+  task's agent's that it can tell the subtasks it split off.
+- Tests: `an_agent_tells_only_a_task_under_it_that_does_not_wait_on_the_person`
+  (`slopty-server::project`), `an_agent_above_speaks_after_the_person_and_never_in_their_place`
+  (`slopty-server::deliver`), `an_agent_tells_the_tasks_under_it_in_its_own_words`
+  (`slopty-server`, through a worker's link) and `task_tell_names_its_task_and_carries_the_words`
+  (`slopty-tools`).
+
+**An orchestrator without hooks waits for its tasks' news.** ✅ 2026-10-03
+- Before: a Claude Code orchestrator is woken by its hooks and inbox. A Codex orchestrator has
+  no such door, nor will a pi or ACP one, so each polled `project_status` and worked out from
+  the timeline what its tasks did.
+- Prior art: T3 Code's `t3_thread_wait` (a timeout "does not cancel the child"), Codex's `wait`
+  ("Returns empty status when timed out"), and Conductor's warning to wait for working before
+  trusting idle.
+- `task_wait { tasks, until: any | all, since, timeout_ms }` (MCP, and `slopty task wait`) is
+  built in `slopty-tools` over the `ProjectStatus` long wait, so it costs a read per change of
+  the project, never a poll, and needs no new verb. News of a task is a report, a move of its
+  state, its terminal gone, its verifier, review or checks, or a step that ended. A delivery,
+  a note or a tell is not.
+- A turn that ended with no report is news because the server now writes it on the timeline,
+  as the task's move from running to waiting, once per such turn (`Projects::rested`, from the
+  outcomes above). A turn that reported stays quiet there, as before. A wait on the person is
+  the block the timeline already kept.
+- From now when no `since` is given: what came before is the past, of which only each task's
+  latest report is kept, so a task started a moment ago and still idle is not mistaken for
+  one that finished. A task merged or failed when the wait begins is ready at once, since no
+  news may come of it.
+- It answers each task's card with its `news` and `last_report`, which are `ready`,
+  `timed_out`, and `next` to wait on from, so nothing between two waits is missed. Running out
+  of time stops and cancels nothing. The default is 50 s, under the minute many MCP clients
+  give a call, with progress every 10 s; it waits at most 30 min, a read at a time of up to
+  the server's 240 s.
+- The agent's last words are not in the answer yet: they need the thread's final message on
+  the wire (`ThreadRow::last_said`). Until then `read_conversation` on the task's `term` reads
+  them, and a hooked orchestrator gets them in the outcome notice.
+- Tests: `task_wait_waits_for_news_and_cancels_nothing` (`slopty-tools`, over a scripted
+  timeline on a paused clock) and the rest's timeline mark in
+  `a_task_s_outcome_reaches_the_orchestrator_without_a_report` (`slopty-server`).
 
 ## Phases
 

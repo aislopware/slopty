@@ -71,6 +71,16 @@ pub enum Caller {
     Agent,
 }
 
+/// Who tells a node's agent something ([`Projects::tell`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Teller {
+    /// The person.
+    Person,
+    /// An agent above the node told: the project's orchestrator when the task is absent, or
+    /// the agent of a task the node was split from.
+    Above(Option<TaskId>),
+}
+
 /// The store's file: every project whole, and the terminals the server watches, as of the
 /// `through`th change.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -1963,12 +1973,17 @@ impl Projects {
         Ok(vec![record.task_update(&task_now, entry)])
     }
 
-    /// The person tells `task`'s agent `text`: kept on the timeline, and handed back trimmed for
-    /// the hub to deliver. A task with no agent running has nobody to hear it.
+    /// `by` tells `task`'s agent `text`, or the orchestrator when it is absent: kept on the
+    /// timeline, and handed back trimmed for the hub to deliver. A task with no agent running
+    /// has nobody to hear it.
+    ///
+    /// An agent tells only a task under it, never the node above it (it reports up with
+    /// `task_report`), and never one that waits on the person: what it says must not pass for
+    /// an answer to the person's permission or question. The timeline keeps who told.
     pub(crate) fn tell(
         &mut self,
         id: &ProjectId,
-        task: Option<TaskId>,
+        (task, by): (Option<TaskId>, Teller),
         text: &str,
         terminals: &HashSet<TermRef>,
         now: WallMs,
@@ -1977,10 +1992,26 @@ impl Projects {
         if text.is_empty() {
             return Err(invalid("say something to the agent"));
         }
-        within("what the person says", Some(text), NOTE_MAX)?;
+        within("what is said", Some(text), NOTE_MAX)?;
         let record = self.record(id)?;
         if let Some(task) = task {
-            record.task_mut(task)?;
+            let t = record.task_mut(task)?;
+            if by != Teller::Person && t.state == TaskState::Blocked {
+                return Err(refuse(
+                    ErrorCode::Conflict,
+                    format!(
+                        "task {task} waits on the person, for a permission or a question only \
+                         they answer; tell it once it moves on"
+                    ),
+                ));
+            }
+        }
+        if let Teller::Above(from) = by
+            && (task.is_none() || task == from)
+        {
+            return Err(invalid(
+                "an agent tells only a task under it; to the node above, report with task_report",
+            ));
         }
         if self.node_term(id, task, terminals).is_none() {
             return Err(invalid(match task {
@@ -1991,7 +2022,16 @@ impl Projects {
             }));
         }
         let record = self.record(id)?;
-        let entry = record.log(task, Moment::Told { text: text.to_owned() }, now);
+        let what = match by {
+            Teller::Person => Moment::Told { text: text.to_owned() },
+            Teller::Above(None) => {
+                Moment::Note { text: format!("The orchestrator told it: {text}") }
+            }
+            Teller::Above(Some(from)) => {
+                Moment::Note { text: format!("Task {from}'s agent told it: {text}") }
+            }
+        };
+        let entry = record.log(task, what, now);
         let kept = Kept { entry: Some(entry), ..record.kept() };
         Ok((text.to_owned(), vec![Change { kept, durable: true }]))
     }
@@ -2129,6 +2169,20 @@ impl Projects {
             }
         }
         updates
+    }
+
+    /// `task`'s agent ended its turn without a word of its own ([`Upshot::Rested`]): the
+    /// timeline says the task moved from running to waiting, which it keeps quiet for a turn
+    /// that reported.
+    pub(crate) fn rested(&mut self, id: &ProjectId, task: TaskId, now: WallMs) -> Vec<Change> {
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let Ok(t) = record.task(task).cloned() else { return Vec::new() };
+        if t.state != TaskState::Waiting {
+            return Vec::new();
+        }
+        let moved = Moment::State { from: TaskState::Running, to: TaskState::Waiting };
+        let entry = record.log(Some(task), moved, now);
+        vec![record.task_update(&t, Some(entry))]
     }
 
     /// The live terminals the server started for tasks that are [`finished`], with their
