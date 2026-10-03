@@ -89,6 +89,18 @@ jobs:
       # libghostty-vt-sys builds its library with zig in every lane that compiles.
       - if: matrix.lane != 'tools'
         run: brew install zig
+      # Ghostty's zig packages are fetched into vendor/ghostty/zig-pkg ahead of the build, kept
+      # by the root manifest's hash (which pins every package's), and fetched again with
+      # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub
+      # (run 37080698786).
+      - if: matrix.lane != 'tools'
+        uses: actions/cache@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - if: matrix.lane != 'tools'
+        working-directory: vendor/ghostty
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # Every package of every platform, for the Mac lanes' cache entry this lane saves.
       - if: matrix.lane == 'clippy-host'
         run: cargo fetch --locked
@@ -157,6 +169,16 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      # Ghostty's zig packages are fetched into vendor/ghostty/zig-pkg ahead of the build, kept
+      # by the root manifest's hash (which pins every package's), and fetched again with
+      # retries on a miss: a fetch inside the build script failed a lane on one 502 from GitHub
+      # (run 37080698786).
+      - uses: actions/cache@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       - run: cargo xtask setup --lane linux
       - run: cargo xtask gate --ci --lane linux
       - if: always()
