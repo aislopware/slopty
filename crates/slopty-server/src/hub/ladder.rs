@@ -18,14 +18,14 @@ use std::sync::Arc;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentStatus, BlockReason};
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::SEAT_FACT;
+use slopty_proto::project::{AgentReport, SEAT_FACT};
 use slopty_proto::server::FromServer;
 use slopty_proto::thread::attention::{
     Ladder, NodeAt, Notice, NoticeKind, Presence, Present, Ranked, Rung, Seat, Standing, ThreadAt,
     Via,
 };
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
-use slopty_proto::thread::{Liveness, Phase, Request, ThreadId};
+use slopty_proto::thread::{AgentId, Liveness, Phase, Request, ThreadId};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 use super::{Hub, WeakHub};
@@ -53,6 +53,9 @@ pub(super) struct Board {
     seat_said: HashMap<TermRef, AgentStatus>,
     /// Every task's thread a table has shown, by its worker: one gone from it since ended.
     seen: std::collections::HashSet<(WorkerId, ThreadId)>,
+    /// Each subagent thread last told to the projects as a native ([`Self::native_moves`]),
+    /// with the seat it was told under and whether it had stopped.
+    natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
 }
 
 /// What one thread says it spent so far, under the terminal its agent runs in.
@@ -210,6 +213,66 @@ impl Board {
                 self.seat_said.insert(*term, status.clone()).as_ref() != Some(status)
             })
             .collect()
+    }
+
+    /// Each subagent thread on `worker` that started or stopped since last asked, as the
+    /// report a hook would make of it under the seat its family runs at: the natives of
+    /// every agent but Claude Code, whose own hooks report its subagents. A subagent gone
+    /// from the table stopped.
+    pub(super) fn native_moves(&mut self, worker: WorkerId) -> Vec<AgentReport> {
+        let mut reports = Vec::new();
+        let table = self.tables.get(&worker);
+        let now: Vec<(ThreadId, SessionId, &ThreadRow)> = table
+            .map(|table| {
+                table
+                    .values()
+                    .filter_map(|row| {
+                        let root = table.get(&root_of(table, row)).filter(|r| r.id != row.id)?;
+                        let hooked = root.agent == AgentId::named(AgentId::CLAUDE_CODE);
+                        Some((row.id, seat_of(root).filter(|_| !hooked)?, row))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (id, session, row) in &now {
+            let at_work =
+                matches!(row.status.phase, Phase::Working | Phase::Waiting | Phase::NeedsYou);
+            let stopped = !there(row) || !at_work;
+            let said = self.natives_said.insert((worker, *id), (*session, stopped));
+            let agent = id.to_string();
+            if said.is_none() {
+                let kind = Some(row.title.trim()).filter(|t| !t.is_empty());
+                let kind = kind.map_or_else(|| row.agent.0.clone(), str::to_owned);
+                let session = *session;
+                reports.push(AgentReport::SubagentStarted { session, agent: agent.clone(), kind });
+            }
+            if stopped && said.is_none_or(|(_, was)| !was) {
+                let last = row.last_line.clone().filter(|l| !l.trim().is_empty());
+                let session = *session;
+                reports.push(AgentReport::SubagentStopped {
+                    session,
+                    agent,
+                    transcript: None,
+                    last,
+                });
+            }
+        }
+        self.natives_said.retain(|(w, id), (session, stopped)| {
+            if *w != worker || now.iter().any(|(t, ..)| t == id) {
+                return true;
+            }
+            if !*stopped {
+                let (session, agent) = (*session, id.to_string());
+                reports.push(AgentReport::SubagentStopped {
+                    session,
+                    agent,
+                    transcript: None,
+                    last: None,
+                });
+            }
+            false
+        });
+        reports
     }
 
     /// The last line the agent in `term` wrote, as its thread's row says.

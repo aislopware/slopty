@@ -1496,6 +1496,10 @@ impl Lease {
                     hub.adopt(&mut state, term);
                     moved.extend(state.projects.agent_status(term, &status, now));
                 }
+                // A subagent of an agent with no hooks is a native as one a hook reports.
+                for report in state.board.native_moves(worker) {
+                    moved.extend(state.projects.report(worker, &report, now));
+                }
                 hub.projects_moved(&mut state, moved);
                 hub.threads_ended(&mut state, worker, now);
             }

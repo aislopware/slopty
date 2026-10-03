@@ -2071,3 +2071,21 @@ door is wired in the agents lane)
   `a_task_is_tried_by_several_agents_and_one_attempt_is_picked` (`slopty-tools`),
   `an_attempt_names_its_agent_then_its_model_and_worker` (`slopty-cli`), and the goldens
   `task_attempts` and `task_pick`, with `attempts` on every task golden.
+
+**A thread's subagents are its task's natives, whatever the agent.** ✅ 2026-10-04 (R7
+follow-up)
+- Before: the tree's natives came only from Claude Code's hooks. A Codex, pi or ACP task's
+  subagents were rows in its worker's thread table (`ThreadRow::parent`) and never reached
+  the board.
+- The hub reads each table it takes in (`Board::native_moves`). A row whose parent chain
+  reaches a thread seated at a task's seat or terminal is a subagent of that node. It is
+  reported as a hook would report it (`AgentReport::SubagentStarted` and `SubagentStopped`),
+  so the store, the tree, the counts and the bound on natives all treat it as they treat
+  Claude Code's.
+- A subagent runs while its phase is working, waiting or needs-you. It stops once it rests,
+  ends or exits, with its row's last line as what it answered. A row gone from the table has
+  stopped. Its id is its thread's id, and its kind is its row's title (the agent's id when
+  that is empty).
+- A family whose root is Claude Code adds none, because Claude Code's hooks report its
+  subagents already, under their own ids.
+- Test: `a_thread_s_subagents_are_its_task_s_natives` (`slopty-server`).

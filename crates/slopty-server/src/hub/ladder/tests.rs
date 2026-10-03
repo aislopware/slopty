@@ -63,7 +63,7 @@ fn moved(row: &ThreadRow, phase: Phase, since: u64) -> ThreadRow {
     ThreadRow { status, requests: Vec::new(), ..row.clone() }
 }
 
-fn under(mut child: ThreadRow, parent: &ThreadRow) -> ThreadRow {
+pub(in crate::hub) fn under(mut child: ThreadRow, parent: &ThreadRow) -> ThreadRow {
     child.parent = Some(Link { thread: parent.id, item: ItemId("call".to_owned()) });
     child
 }

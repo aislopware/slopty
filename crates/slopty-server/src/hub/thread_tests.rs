@@ -8,7 +8,7 @@ use slopty_proto::server::Os;
 use slopty_proto::thread::wire::TableFrame;
 use slopty_proto::thread::{AgentId, Cursor, Phase, ThreadId};
 
-use super::ladder::tests::{asking, row, snapshot};
+use super::ladder::tests::{asking, row, snapshot, under};
 use super::project_tests::{
     answer, claude, create, installed, new_task, project, refused, request, spawn, status,
     worker_on,
@@ -143,4 +143,75 @@ async fn read_where_it_is(
     };
     let by_agent = hub.dispatch_as(Speaker::Proven(term.session), None, answering).await;
     assert!(refused(&by_agent, ErrorCode::Forbidden).contains("the person's to answer"));
+}
+
+/// The subagents of a task's thread with no hooks are its node's natives, from the rows that
+/// hang from it: one running as it starts, stopped with its last line once it rests, and
+/// stopped when its row goes. A Claude Code thread's subagents are its hooks' to report, so
+/// its rows add none.
+#[tokio::test]
+async fn a_thread_s_subagents_are_its_task_s_natives() {
+    use slopty_proto::project::NodeDetail;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    lease.handle(ToServer::Facts(installed(&["pi"])));
+    create(&hub, None).await;
+    let task = new_task(&hub, Placement::default()).await;
+    let pi = AgentId::named(AgentId::PI);
+    let asked = spawn(
+        &hub,
+        Verb::TaskSpawn { project: project(), task, launch: as_thread(pi.clone(), &[]) },
+    );
+    let (id, verb) = request(&mut rx).await;
+    let Verb::StartThread { seat, .. } = verb else { panic!("{verb:?}") };
+    let thread = ThreadId::new();
+    answer(&lease, id, Outcome::ThreadStarted { thread, worktree: None });
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    let natives =
+        async || match hub.dispatch(Verb::TaskGet { project: project(), task: Some(task) }).await {
+            Outcome::Node(node) => {
+                let NodeDetail { natives, .. } = *node;
+                natives.agents
+            }
+            other => panic!("{other:?}"),
+        };
+
+    let mut root = row(Phase::Working, 1, None);
+    root.id = thread;
+    root.agent = pi.clone();
+    root.facts.insert(SEAT_FACT.to_owned(), seat.to_string());
+    let mut child = under(row(Phase::Working, 2, None), &root);
+    child.agent = pi.clone();
+    child.title = "explorer".to_owned();
+    lease.handle(snapshot(vec![root.clone(), child.clone()]));
+    let [running] = &*natives().await else { panic!("one subagent") };
+    assert_eq!(
+        (running.id.as_str(), running.kind.as_str()),
+        (child.id.to_string().as_str(), "explorer")
+    );
+    assert_eq!(running.stopped_ms, None);
+
+    let mut rested = child.clone();
+    rested.status.phase = Phase::Idle;
+    rested.last_line = Some("Found three callers.".to_owned());
+    lease.handle(snapshot(vec![root.clone(), rested]));
+    let [stopped] = &*natives().await else { panic!("still one") };
+    assert!(stopped.stopped_ms.is_some());
+    assert_eq!(stopped.last.as_deref(), Some("Found three callers."));
+
+    let mut again = child.clone();
+    again.id = ThreadId::new();
+    lease.handle(snapshot(vec![root.clone(), again.clone()]));
+    lease.handle(snapshot(vec![root.clone()]));
+    let gone = natives().await;
+    assert!(gone.iter().all(|a| a.stopped_ms.is_some()), "a row gone has stopped: {gone:?}");
+    assert_eq!(gone.len(), 2);
+
+    // Claude Code's own hooks say its subagents.
+    let mut claude_root = root.clone();
+    claude_root.agent = AgentId::named(AgentId::CLAUDE_CODE);
+    let mut third = child.clone();
+    third.id = ThreadId::new();
+    lease.handle(snapshot(vec![claude_root, third]));
+    assert_eq!(natives().await.len(), 2, "no native from a hooked agent's rows");
 }
