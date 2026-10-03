@@ -3345,7 +3345,7 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Limits { .. } | Moment::Needs { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
         Moment::Budget { share_bp, .. } if *share_bp >= 10_000 => (IconName::Hand, s.warn),
-        Moment::Budget { .. } => (IconName::Gauge, s.text_secondary),
+        Moment::Budget { .. } => (IconName::Activity, s.text_secondary),
         Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
         Moment::Proposed { .. } => (IconName::Hand, s.text_secondary),
         Moment::State { to, .. } => {
