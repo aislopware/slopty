@@ -199,10 +199,9 @@ mod optical_size {
     /// variable face whose optical size and tracking Core Text applies at each size; set in
     /// proportion to 13 pt the 26 pt line would be 238.26. A copy of a font made at another size
     /// carries the new size's tracking, so GPUI keeping one font and copying it to each size
-    /// loses nothing: it sets 119.13 / 171.61 / 217.56. The 0.18 pt at 20 pt is GPUI shaping
-    /// its first run a float step over the size (to keep a ligature from spanning two runs),
-    /// which crosses SF's step at 20 pt; Core Text at that size sets 171.61 too. So GPUI needs
-    /// no tracking of its own (study §3 #12).
+    /// loses nothing: it sets the same widths. It set 171.61 at 20 pt until gpui-fast#25, from
+    /// shaping alternate runs a float step over the size, which crossed SF's step there. So
+    /// GPUI needs no tracking of its own (study §3 #12).
     #[test]
     fn gpui_sets_the_system_face_at_its_optical_size_and_tracking() {
         const TEXT: &str = "Connect to a server";
@@ -222,12 +221,10 @@ mod optical_size {
             let (_, copied) = measure(f64::from(size), Some(13.0));
             assert!((copied - system).abs() < 0.01, "{size} pt: a copy keeps the size's tracking");
             let gpui = f64::from(gpui_width(TEXT, size));
-            let (_, shaped) = measure(f64::from(size.next_up()), None);
             assert!(
-                (gpui - shaped).abs() < 0.01,
-                "{size} pt: GPUI {gpui:.2}, Core Text {shaped:.2}"
+                (gpui - system).abs() < 0.01,
+                "{size} pt: GPUI {gpui:.2}, Core Text {system:.2}"
             );
-            assert!((gpui - system).abs() / system < 0.002, "{size} pt: {gpui:.2} for {system:.2}");
             per_point.push(system / f64::from(size));
         }
         assert!(
