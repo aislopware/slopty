@@ -720,7 +720,15 @@ mod golden_thread {
 
     #[test]
     fn table() {
-        let row = state().row(ms(2_500));
+        let row = slopty_proto::thread::wire::ThreadRow {
+            repo: Some("/w/slopty".to_owned()),
+            repo_id: Some(slopty_proto::terminal::RepoId {
+                origin: Some("github.com/aislopware/slopty".to_owned()),
+                root: Some("c08d4c1e5b2a9f7d3e6a1b8c4d2f0e9a7b5c3d1e".to_owned()),
+                url: None,
+            }),
+            ..state().row(ms(2_500))
+        };
         snap(
             "table_snapshot",
             &TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 3 }, rows: vec![row.clone()] },

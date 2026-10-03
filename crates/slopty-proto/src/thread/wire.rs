@@ -403,6 +403,12 @@ pub struct ThreadRow {
     pub changed: Changed,
     /// The terminal its TUI runs in.
     pub terminal: Option<SessionId>,
+    /// The directory it works in, as its agent said.
+    pub cwd: Option<String>,
+    /// The root of the repository that directory is in, once the worker has looked.
+    pub repo: Option<String>,
+    /// Which repository that is on every machine, once the worker has read it.
+    pub repo_id: Option<crate::terminal::RepoId>,
     /// For a subagent: where it hangs.
     pub parent: Option<Link>,
     /// How Slopty reaches it.

@@ -52,6 +52,11 @@ mod golden_project {
         }
     }
 
+    /// A member: the folder at `cwd` on `machine`.
+    fn notes_on(machine: &str, cwd: &str) -> slopty_proto::project::Matcher {
+        [("machine".to_owned(), machine.to_owned()), ("cwd".to_owned(), cwd.to_owned())].into()
+    }
+
     fn project_id() -> ProjectId {
         ProjectId::new("slopty").expect("a name")
     }
@@ -77,6 +82,7 @@ mod golden_project {
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
             created_ms: at(),
+            members: vec![notes_on("studio", "~/notes")],
         }
     }
 
@@ -259,6 +265,7 @@ mod golden_project {
                 orchestrator: Some(term()),
                 limits,
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
+                members: vec![notes_on("studio", "~/notes")],
             }),
         );
         snap(
@@ -272,6 +279,7 @@ mod golden_project {
                 ask_to_start: None,
                 limits: LimitsChange { depth: Some(3), ..LimitsChange::default() },
                 metadata: None,
+                members: Some(vec![notes_on("studio", "~/notes"), notes_on("devbox", "/w/notes")]),
             }),
         );
         snap("project_list", &request(Verb::ProjectList));

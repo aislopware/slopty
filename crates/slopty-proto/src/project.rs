@@ -423,13 +423,27 @@ pub struct Live {
     pub project: u16,
 }
 
+/// What a project's member is known by.
+///
+/// Fact keys a tile has (`repo`, `machine`, `cwd`, any other) to the value it must have, or for
+/// a path the directory it must be in. A tile matches when every key does; an empty one
+/// matches nothing.
+pub type Matcher = BTreeMap<String, String>;
+
 /// A project: its goal's home on the server.
+///
+/// A project is a name and its members; what orchestrates it (its repository, target branch,
+/// verifier, orchestrator and tasks) is a part it may have.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Project {
     /// Its name.
     pub id: ProjectId,
     /// What it is for, in a line.
     pub title: String,
+    /// What else is in it beside its repository's clones: a matcher each, so one project may
+    /// hold two repositories, or one folder name on two machines. At most
+    /// [`Project::MEMBERS_MAX`], each within [`Project::member_fits`].
+    pub members: Vec<Matcher>,
     /// The repository its tasks work in, as the orchestrator names it (a path or a URL).
     pub repo: String,
     /// Which repository that is on every machine ([`RepoId`]), learned from where its
@@ -462,6 +476,30 @@ pub struct Project {
     pub needs: Vec<Need>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
+}
+
+impl Project {
+    /// The most facts one member's matcher names.
+    pub const MATCHER_KEYS_MAX: usize = 8;
+    /// The longest value a matcher names, in bytes: a path's length.
+    pub const MATCHER_VALUE_MAX: usize = 1024;
+    /// The most members a project names.
+    pub const MEMBERS_MAX: usize = 32;
+
+    /// Whether `matcher` may be a member: one to [`Self::MATCHER_KEYS_MAX`] keys, each within
+    /// [`crate::items::FACT_KEY_MAX`] characters with no space in it, each value not blank and
+    /// at most [`Self::MATCHER_VALUE_MAX`] bytes.
+    #[must_use]
+    pub fn member_fits(matcher: &Matcher) -> bool {
+        (1..=Self::MATCHER_KEYS_MAX).contains(&matcher.len())
+            && matcher.iter().all(|(key, value)| {
+                (1..=crate::items::FACT_KEY_MAX).contains(&key.chars().count())
+                    && !key.chars().any(|c| c.is_whitespace() || c.is_control())
+                    && !value.trim().is_empty()
+                    && value.len() <= Self::MATCHER_VALUE_MAX
+                    && !value.chars().any(char::is_control)
+            })
+    }
 }
 
 /// Another task or a worker, for a task to run beside or away from.
@@ -1831,6 +1869,25 @@ impl AgentReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A member names one to a few facts, each a key with no space and a value that is not
+    /// blank; anything else is refused.
+    #[test]
+    fn a_member_names_facts_within_bounds() {
+        let member = |pairs: &[(&str, &str)]| -> Matcher {
+            pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        };
+        assert!(Project::member_fits(&member(&[("repo", "github.com/o/api")])));
+        assert!(Project::member_fits(&member(&[("machine", "studio"), ("cwd", "~/notes")])));
+        assert!(!Project::member_fits(&member(&[])), "an empty one would match nothing");
+        assert!(!Project::member_fits(&member(&[("two words", "v")])));
+        assert!(!Project::member_fits(&member(&[("cwd", " ")])));
+        let long = "/".repeat(Project::MATCHER_VALUE_MAX + 1);
+        assert!(!Project::member_fits(&member(&[("cwd", &long)])));
+        let many: Matcher =
+            (0..=Project::MATCHER_KEYS_MAX).map(|n| (format!("k{n}"), "v".to_owned())).collect();
+        assert!(!Project::member_fits(&many));
+    }
 
     #[test]
     fn a_project_name_is_what_a_branch_and_a_variable_take() {

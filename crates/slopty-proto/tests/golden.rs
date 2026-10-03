@@ -817,6 +817,7 @@ mod golden {
                     },
                     sleeping: false,
                     name: None,
+                    facts: std::collections::BTreeMap::new(),
                 }),
             }),
         );
@@ -832,6 +833,7 @@ mod golden {
                     },
                     sleeping: false,
                     name: None,
+                    facts: std::collections::BTreeMap::new(),
                 }),
             }),
         );
@@ -847,6 +849,7 @@ mod golden {
                     },
                     sleeping: false,
                     name: Some("build box".to_owned()),
+                    facts: std::collections::BTreeMap::new(),
                 }),
             }),
         );
@@ -875,6 +878,30 @@ mod golden {
                 url: "http://localhost:3000/docs".to_owned(),
             }),
         );
+        snap(
+            "client_item_set_fact",
+            &ClientMsg::Items(slopty_proto::items::ItemOp::SetFact {
+                id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7b)),
+                key: "project".to_owned(),
+                value: Some("atlas".to_owned()),
+            }),
+        );
+        snap(
+            "worker_item_pinned",
+            &WorkerMsg::Items(slopty_proto::items::ItemSync::Delta {
+                version: 12,
+                by: ClientId::from_uuid(Uuid::from_u128(0x42)),
+                op: slopty_proto::items::ItemOp::Add(slopty_proto::items::Item {
+                    id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7f)),
+                    kind: slopty_proto::items::ItemKind::Window {
+                        window: slopty_core::WindowId(3),
+                    },
+                    sleeping: false,
+                    name: None,
+                    facts: [("project".to_owned(), "atlas".to_owned())].into(),
+                }),
+            }),
+        );
     }
 
     /// Folder tiles: the item, a move to another directory, the listing asked for and its
@@ -896,6 +923,7 @@ mod golden {
                     kind: ItemKind::Folder { path: "/w/slopty".to_owned() },
                     sleeping: false,
                     name: None,
+                    facts: std::collections::BTreeMap::new(),
                 }),
             }),
         );
@@ -916,6 +944,7 @@ mod golden {
                     },
                     sleeping: false,
                     name: None,
+                    facts: std::collections::BTreeMap::new(),
                 }),
             }),
         );
@@ -931,6 +960,7 @@ mod golden {
                     },
                     sleeping: false,
                     name: None,
+                    facts: std::collections::BTreeMap::new(),
                 }),
             }),
         );
@@ -2158,7 +2188,13 @@ mod orchestration {
         let open = Verb::OpenItem { worker, kind: kind.clone(), name: Some("app".to_owned()) };
         snap("server_request_open_item", &request(open));
         snap("server_reply_item", &reply(Outcome::Item(item)));
-        let listed = Item { id: item.item, kind, sleeping: false, name: None };
+        let listed = Item {
+            id: item.item,
+            kind,
+            sleeping: false,
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
         snap("server_reply_items", &reply(Outcome::Items(vec![listed])));
         let rename = Verb::RenameItem { item, name: Some("docs".to_owned()) };
         snap("server_request_rename_item", &request(rename));

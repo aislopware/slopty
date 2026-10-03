@@ -506,6 +506,8 @@ pub enum Verb {
         project: ProjectId,
         /// What it is for, in a line.
         title: String,
+        /// What else is in it ([`crate::project::Project::members`]).
+        members: Vec<crate::project::Matcher>,
         /// The repository its tasks work in.
         repo: String,
         /// The branch finished work lands on.
@@ -529,11 +531,13 @@ pub enum Verb {
         /// Anything its agents keep with it: the text of a JSON object.
         metadata: Option<String>,
     },
-    /// Change a project's orchestrator, verifier, pushing, limits or metadata; what is absent
-    /// stays. Answered with [`Outcome::Project`].
+    /// Change a project's members, orchestrator, verifier, pushing, limits or metadata; what is
+    /// absent stays. Answered with [`Outcome::Project`].
     ProjectSet {
         /// Which.
         project: ProjectId,
+        /// Its members, in place of the old ([`crate::project::Project::members`]).
+        members: Option<Vec<crate::project::Matcher>>,
         /// The orchestrator's terminal.
         orchestrator: Option<TermRef>,
         /// The verifier command; empty for none.
