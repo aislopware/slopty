@@ -11,12 +11,12 @@ mod threads {
     use slopty_proto::thread::wire::{Outcome, TableFrame, ThreadFrame};
     use slopty_proto::thread::{
         Action, AgentId, Cap, Changed, Clipped, Cursor, Delivery, Drive, Edge, IntentId, Item,
-        ItemBody, ItemId, PartKey, Pending, PendingState, TableState, ThreadId, ThreadMeta,
-        ThreadState, TreeRef, Turn, TurnId, TurnState, Usage, UserMessage,
+        ItemBody, ItemId, Liveness, PartKey, Pending, PendingState, Phase, Status, TableState,
+        ThreadId, ThreadMeta, ThreadState, TreeRef, Turn, TurnId, TurnState, Usage, UserMessage,
     };
     use slopty_worker::thread::compose::TYPED_NOT_SENT;
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::{Follower, Host};
+    use slopty_worker::thread::{Follower, Host, Seated};
 
     fn meta() -> ThreadMeta {
         ThreadMeta {
@@ -499,5 +499,122 @@ mod threads {
         kept(&host);
         host.apply(thread, vec![Action::Meta(Box::new(branch))]);
         kept(&host);
+    }
+
+    /// The seat a server's task started a thread at outlives the agent's own account of the
+    /// thread, a read again and a restart: the row keeps naming it, and the whole seat comes
+    /// back from the thread's directory. What the worker adds for the seat (its token among it)
+    /// is never kept, only given where the agent runs.
+    #[tokio::test]
+    async fn a_seat_outlives_a_read_again_and_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let started = meta();
+        let thread = started.id;
+        host.create(started.clone()).unwrap();
+        let seat = slopty_core::SessionId::new();
+        let seated = Seated {
+            seat,
+            env: vec![("SLOPTY_TASK".to_owned(), "task-1".to_owned())],
+            role: Some("You review.".to_owned()),
+            relay: Some("/opt/slopty/bin/slopty".to_owned()),
+        };
+        host.seated(thread, &seated);
+        let kept = |host: &Host| {
+            let (state, _) = state(host, thread);
+            let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
+            assert_eq!(fact, Some(&seat.to_string()));
+            assert_eq!(host.seated_of(thread).as_ref(), Some(&seated));
+            assert_eq!(host.seated_at(seat), Some(thread));
+        };
+        kept(&host);
+        host.apply(thread, vec![Action::Meta(Box::new(started.clone()))]);
+        kept(&host);
+        host.reset(thread, ThreadState::new(started)).unwrap();
+        kept(&host);
+        drop(host);
+
+        let host = open(dir.path());
+        kept(&host);
+        assert_eq!(host.env_of(&seated), seated.env, "the server's alone, until the daemon says");
+        host.set_seat_env(std::sync::Arc::new(|seat, extra| {
+            let mut env = extra.to_vec();
+            env.push(("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}")));
+            env
+        }));
+        let env = host.env_of(&seated);
+        assert_eq!(env[..1], seated.env);
+        assert_eq!(env[1], ("SLOPTY_SESSION_TOKEN".to_owned(), format!("token-for-{seat}")));
+        let file =
+            std::fs::read_to_string(dir.path().join(thread.to_string()).join("seat.json")).unwrap();
+        assert!(!file.contains("token"), "no token is kept: {file}");
+    }
+
+    /// The person's sleep is decided once per intent and only for an agent that can sleep and
+    /// rests; the agent's end that follows is told as its sleep, through a restart and the
+    /// adapter telling it gone again, until the agent runs again. An end after that is an end.
+    #[tokio::test]
+    async fn an_agent_put_to_sleep_ends_asleep_until_it_runs_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = open(dir.path());
+        let mut sleepy = meta();
+        sleepy.caps.push(Cap::named(Cap::SLEEP));
+        let thread = sleepy.id;
+        host.create(sleepy).unwrap();
+        let status = |liveness| {
+            Action::Status(Status {
+                phase: Phase::Done,
+                wait: None,
+                liveness,
+                since_ms: WallMs::from_millis(5),
+            })
+        };
+        let liveness = |host: &Host| state(host, thread).0.status.liveness;
+        let ends = |outcome| move |_: &ThreadState| outcome;
+
+        let never = host.sleep(thread, IntentId::new(), false, ends(Outcome::Done)).unwrap();
+        assert!(matches!(never, Outcome::Refused { .. }), "never asked: {never:?}");
+        host.apply(thread, vec![turn(1)]);
+        let busy = host.sleep(thread, IntentId::new(), false, ends(Outcome::Done)).unwrap();
+        assert!(matches!(busy, Outcome::Refused { .. }), "mid-turn: {busy:?}");
+        host.apply(thread, vec![ended(1), status(Liveness::Live)]);
+        let armed = host.sleep(thread, IntentId::new(), true, ends(Outcome::Done)).unwrap();
+        assert!(matches!(armed, Outcome::Refused { .. }), "a message is scheduled: {armed:?}");
+        host.apply(thread, vec![status(Liveness::Exited { resumable: true })]);
+        assert_eq!(liveness(&host), Liveness::Exited { resumable: true }, "a refusal marks none");
+        host.apply(thread, vec![status(Liveness::Live)]);
+
+        let id = IntentId::new();
+        let mut ended_by = 0;
+        let mut end = |_: &ThreadState| {
+            ended_by += 1;
+            Outcome::Done
+        };
+        assert_eq!(host.sleep(thread, id, false, &mut end), Some(Outcome::Done));
+        assert_eq!(host.sleep(thread, id, false, &mut end), Some(Outcome::Done), "once");
+        assert_eq!(ended_by, 1);
+        host.apply(thread, vec![status(Liveness::Live)]);
+        assert_eq!(liveness(&host), Liveness::Live, "awake until its agent ends");
+        host.apply(thread, vec![status(Liveness::Exited { resumable: true })]);
+        let Liveness::Asleep { since_ms } = liveness(&host) else {
+            panic!("{:?}", liveness(&host))
+        };
+        drop(host);
+
+        let host = open(dir.path());
+        assert_eq!(liveness(&host), Liveness::Asleep { since_ms });
+        host.apply(thread, vec![status(Liveness::Exited { resumable: true })]);
+        assert_eq!(liveness(&host), Liveness::Asleep { since_ms }, "told gone again");
+        host.apply(thread, vec![status(Liveness::Live)]);
+        assert_eq!(liveness(&host), Liveness::Live, "woken");
+        host.apply(thread, vec![status(Liveness::Exited { resumable: true })]);
+        assert_eq!(liveness(&host), Liveness::Exited { resumable: true }, "an end after waking");
+
+        let mut plain = meta();
+        let other = plain.id;
+        plain.caps.clear();
+        host.create(plain).unwrap();
+        let cannot = host.sleep(other, IntentId::new(), false, ends(Outcome::Done)).unwrap();
+        assert_eq!(cannot, Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) });
     }
 }

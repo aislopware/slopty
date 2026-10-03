@@ -384,6 +384,13 @@ impl Session {
             self.meta.caps.push(fork);
             self.meta.caps.sort();
         }
+        // Put to sleep, it wakes only by loading its session.
+        let sleep = Cap::named(Cap::SLEEP);
+        self.meta.caps.retain(|c| *c != sleep);
+        if self.loadable {
+            self.meta.caps.push(sleep);
+            self.meta.caps.sort();
+        }
         if let Some(info) = &response.agent_info {
             self.meta.agent_version.clone_from(&info.version);
         }
@@ -1332,6 +1339,9 @@ impl Session {
         // Whether it forks is said once, as it starts.
         if self.meta.can(Cap::FORK) {
             names.push(Cap::FORK);
+        }
+        if self.meta.can(Cap::SLEEP) {
+            names.push(Cap::SLEEP);
         }
         if mode.is_some() || !self.modes.is_empty() {
             names.push(Cap::SET_MODE);

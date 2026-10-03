@@ -229,6 +229,13 @@ pub enum Intent {
         /// The last turn the new thread shares with this one; `None` for all of them.
         after: Option<TurnId>,
     },
+    /// Put the agent to sleep at rest ([`Cap::SLEEP`]): its process ends and the thread is kept
+    /// with its session ([`Liveness::Asleep`](super::Liveness::Asleep)). Refused, in words, while
+    /// anything is under way: a turn, a question, a waiting message, background work.
+    Sleep,
+    /// Wake an agent put to sleep: its session is taken up again through the agent's own
+    /// resume. The next message wakes it too.
+    Wake,
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -264,6 +271,7 @@ impl Intent {
             Self::StopTask { .. } => Cap::STOP_TASK,
             Self::Fork { .. } => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
+            Self::Sleep | Self::Wake => Cap::SLEEP,
         }
     }
 }

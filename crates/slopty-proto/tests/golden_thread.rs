@@ -403,6 +403,8 @@ mod golden_thread {
         snap("intent_stop_task", &send(Intent::StopTask { task: "b1".to_owned() }));
         snap("intent_fork", &send(Intent::Fork { after: Some(TurnId(3)) }));
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
+        snap("intent_sleep", &send(Intent::Sleep));
+        snap("intent_wake", &send(Intent::Wake));
     }
 
     #[test]
@@ -480,6 +482,12 @@ mod golden_thread {
                 phase: Phase::Waiting,
                 wait: None,
                 liveness: Liveness::Sleeping { until_ms: ms(9) },
+                since_ms: ms(3),
+            }),
+            Action::Status(Status {
+                phase: Phase::Done,
+                wait: None,
+                liveness: Liveness::Asleep { since_ms: ms(5) },
                 since_ms: ms(3),
             }),
             Action::Status(Status {

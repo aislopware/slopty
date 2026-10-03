@@ -258,6 +258,9 @@ impl Cap {
     pub const SET_MODE: &'static str = "set-mode";
     /// [`wire::Intent::SetModel`].
     pub const SET_MODEL: &'static str = "set-model";
+    /// Its agent can be put to sleep at rest and woken on its own session: its process ends and
+    /// the thread is kept ([`Liveness::Asleep`]).
+    pub const SLEEP: &'static str = "sleep";
     /// The worker snapshots the working tree at each turn edge ([`Action::Snapshot`]).
     pub const SNAPSHOTS: &'static str = "snapshots";
     /// [`wire::Intent::Send`] with [`Delivery::Steer`]: a message taken mid-turn.
@@ -436,6 +439,12 @@ pub enum Liveness {
     },
     /// It runs but has said nothing for a while.
     Silent {
+        /// Since when.
+        since_ms: WallMs,
+    },
+    /// Put to sleep on the person's word: its agent was ended at rest, and the thread is kept
+    /// with its session, which a wake or the next message takes up again.
+    Asleep {
         /// Since when.
         since_ms: WallMs,
     },

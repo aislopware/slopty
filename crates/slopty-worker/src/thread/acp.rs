@@ -89,6 +89,14 @@ enum Ask {
         limit: u32,
         reply: Listed,
     },
+    /// The person put the thread's agent to sleep: it ends, its session kept.
+    Sleep {
+        thread: ThreadId,
+    },
+    /// The person woke it: the agent runs again and loads its session.
+    Wake {
+        thread: ThreadId,
+    },
 }
 
 /// Where a list of an agent's sessions goes, or why there is none.
@@ -194,6 +202,16 @@ impl Acp {
         by: Answerer,
     ) -> Outcome {
         let live = state.status.liveness == Liveness::Live;
+        let thread = state.meta.id;
+        match ask {
+            Intent::Sleep => return self.ask(Ask::Sleep { thread }),
+            Intent::Wake if live => return Outcome::Done,
+            Intent::Wake if !driven::resumable(&state.meta) => {
+                return refused("The agent cannot take this session up again");
+            }
+            Intent::Wake => return self.ask(Ask::Wake { thread }),
+            _ => {}
+        }
         // An ACP permission's answer carries no words: a reason given with it goes as the
         // person's next message, queued behind the turn under way.
         let reason = match ask {
@@ -280,11 +298,20 @@ impl Acp {
         if !live && !matches!(asked, ThreadAsk::Send { .. }) {
             return refused("The agent is not running");
         }
-        let thread = state.meta.id;
         for ask in std::iter::once(asked).chain(reason) {
             if self.0.send(Ask::Thread { thread, ask }).is_err() {
                 return refused("ACP threads are not served here");
             }
+        }
+        Outcome::Done
+    }
+}
+
+impl Acp {
+    /// Send `ask`: done once it is on its way.
+    fn ask(&self, ask: Ask) -> Outcome {
+        if self.0.send(ask).is_err() {
+            return refused("ACP threads are not served here");
         }
         Outcome::Done
     }
@@ -305,14 +332,8 @@ pub fn is_acp(state: &ThreadState) -> bool {
 pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks) -> JoinHandle<()> {
     tokio::spawn(async move {
         let (ended_tx, mut ended) = mpsc::unbounded_channel();
-        let mut served = Served {
-            host: host.clone(),
-            path,
-            own,
-            running: HashMap::new(),
-            ended: ended_tx,
-            seats: HashMap::new(),
-        };
+        let mut served =
+            Served { host: host.clone(), path, own, running: HashMap::new(), ended: ended_tx };
         for thread in host.threads() {
             let Some((state, _)) = host.state(thread) else { continue };
             if is_acp(&state) && state.status.liveness == Liveness::Live {
@@ -330,9 +351,16 @@ pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks)
                     Some(Ask::Close { thread, done }) => {
                         // Its task ends its agent once nothing can ask it more.
                         served.running.remove(&thread);
-                        served.seats.remove(&thread);
                         let _gone = done.send(());
                     }
+                    Some(Ask::Sleep { thread }) => {
+                        // Its task closes the agent's stdin once nothing can ask it more.
+                        served.running.remove(&thread);
+                    }
+                    Some(Ask::Wake { thread }) if !served.running.contains_key(&thread) => {
+                        served.reopen(thread, Vec::new()).await;
+                    }
+                    Some(Ask::Wake { .. }) => {}
                     Some(Ask::Fork { thread, id, after, reply }) => {
                         let outcome = served.fork(thread, id, after).await;
                         let _gone = reply.send(outcome);
@@ -372,8 +400,6 @@ struct Served {
     running: HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>,
     /// Told by a task when its agent has ended.
     ended: Ended,
-    /// The seat of each server task's thread: each run of its agent is given it.
-    seats: HashMap<ThreadId, Seated>,
 }
 
 impl Served {
@@ -449,8 +475,7 @@ impl Served {
             None => start.prompt.clone().filter(|p| !p.trim().is_empty()),
         };
         if let Some(seated) = seated {
-            self.host.seated(thread, seated.seat);
-            self.seats.insert(thread, seated);
+            self.host.seated(thread, &seated);
         }
         let first =
             prompt.map(|text| ThreadAsk::Send { text, attachments: Vec::new(), intent: id });
@@ -590,12 +615,12 @@ impl Served {
     ) {
         let mut session = session;
         let cwd = session.meta().cwd.clone();
-        let seated = self.seats.get(&thread);
-        if let Some((seated, relay)) = seated.and_then(|s| Some((s, s.relay.as_deref()?))) {
-            session.serve_tools(relay, &seated.env);
+        let seated = self.host.seated_of(thread);
+        let env = seated.as_ref().map(|seated| self.host.env_of(seated)).unwrap_or_default();
+        if let Some(relay) = seated.as_ref().and_then(|s| s.relay.as_deref()) {
+            session.serve_tools(relay, &env);
         }
-        let env = seated.map(|s| s.env.as_slice()).unwrap_or_default();
-        match start_agent(launch, &cwd, thread.to_string(), env) {
+        match start_agent(launch, &cwd, thread.to_string(), &env) {
             Ok((stdin, agent)) => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let task = Task::new(self.host.clone(), thread, session, stdin, opening, first);

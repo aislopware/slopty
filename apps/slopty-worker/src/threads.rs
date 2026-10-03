@@ -15,14 +15,14 @@ use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, TableFrame, ThreadFrame,
-    ThreadRequest,
+    Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Start, TableFrame,
+    ThreadFrame, ThreadRequest,
 };
 use slopty_proto::thread::{
-    Action, AgentId, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, ThreadId, ThreadState,
-    TurnId,
+    Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, Liveness,
+    ThreadId, ThreadState, TurnId,
 };
-use slopty_worker::conversation::Seen;
+use slopty_worker::conversation::{ORCHESTRATION, Seen};
 use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
 use slopty_worker::session::SessionHandle;
@@ -111,6 +111,8 @@ pub fn open(
 ) -> Option<(Threads, Observing)> {
     match Host::open(dir, slopty_worker::thread::log::Limits::default()) {
         Ok(host) => {
+            let seats = worker.clone();
+            host.set_seat_env(Arc::new(move |seat, extra| seats.seat_env(seat, extra)));
             let (claude, asks) = Driver::channel();
             let (claude_start, claude_start_asks) = claude::start::Starter::channel();
             let (codex, codex_asks) = Codex::channel();
@@ -270,6 +272,11 @@ pub struct Origin<'a> {
 }
 
 impl Origin<'_> {
+    /// Who acts through this connection.
+    const fn who(&self) -> Who<'_> {
+        Who { daemon: self.daemon, link: self.link, client: self.client }
+    }
+
     /// Queue `msg` for the client without waiting, as the connection's own answers are: a
     /// client that has not read a full queue loses it, and an intent's answer is had again by
     /// sending the intent again.
@@ -428,6 +435,23 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // A sleep may close a terminal, and a wake open one: on tasks of their own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Sleep } => {
+                tracing::info!(client = %at.client, %id, %thread, "sleep");
+                let (out, by) = (at.out.clone(), answerer(at.client));
+                at.tasks.spawn(async move {
+                    let outcome = sleep(&threads, thread, id, by).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
+            ThreadRequest::Intent { id, thread, intent: Intent::Wake } => {
+                tracing::info!(client = %at.client, %id, %thread, "wake");
+                let (out, by) = (at.out.clone(), answerer(at.client));
+                at.tasks.spawn(async move {
+                    let outcome = wake(&threads, thread, id, by).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             ThreadRequest::Intent { id, thread, intent } => {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
@@ -522,6 +546,99 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
         let reason = format!("{} threads are not forked here", state.meta.agent.0);
         threads.host.record_start(id, refused(reason))
     }
+}
+
+/// Put `thread`'s agent to sleep for intent `id`, once, when it rests with nothing under way
+/// ([`Host::sleep`]): each agent ends its own way, and Claude Code with its terminal, closed
+/// once the decision is made.
+async fn sleep(threads: &Threads, thread: ThreadId, id: IntentId, by: Answerer) -> Outcome {
+    let mut terminal = None;
+    let outcome = threads.host.sleep(thread, id, false, |state| {
+        if codex::is_shared(state) {
+            if state.meta.terminal.is_some() {
+                return refused("Codex's own terminal holds this thread".to_owned());
+            }
+            if threads.codex.sleep(thread) {
+                Outcome::Done
+            } else {
+                refused("Codex threads are not served here".to_owned())
+            }
+        } else if pi::is_pi(state) {
+            threads.pi.decide(state, id, &Intent::Sleep, by)
+        } else if acp::is_acp(state) {
+            threads.acp.decide(state, id, &Intent::Sleep, by)
+        } else if let Some(session) = state.meta.terminal {
+            terminal = Some(session);
+            Outcome::Done
+        } else {
+            refused("Its agent runs in no terminal here".to_owned())
+        }
+    });
+    // Claude Code ends with its terminal, as when the person closes it: its session is
+    // written as it goes.
+    if let Some(session) = terminal
+        && let Err(e) = threads.worker.close(session).await
+    {
+        tracing::warn!(%thread, %session, "the terminal of an agent put to sleep stayed: {e}");
+    }
+    outcome.unwrap_or_else(|| refused("no such thread".to_owned()))
+}
+
+/// Wake `thread`'s agent for intent `id`, once: its session is taken up again through the
+/// agent's own resume. An agent that runs is awake already.
+async fn wake(threads: &Threads, thread: ThreadId, id: IntentId, by: Answerer) -> Outcome {
+    if let Some(first) = threads.host.outcome(thread, id) {
+        return first;
+    }
+    let Some((state, _)) = threads.host.state(thread) else {
+        return refused("no such thread".to_owned());
+    };
+    let outcome = if !state.meta.can(Cap::SLEEP) {
+        Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) }
+    } else if codex::is_shared(&state) {
+        threads.codex.wake(thread);
+        Outcome::Done
+    } else if pi::is_pi(&state) {
+        threads.pi.decide(&state, id, &Intent::Wake, by)
+    } else if acp::is_acp(&state) {
+        threads.acp.decide(&state, id, &Intent::Wake, by)
+    } else {
+        claude_woken(threads, &state, id).await
+    };
+    threads.host.intent(thread, id, |_| (outcome.clone(), Vec::new())).unwrap_or(outcome)
+}
+
+/// Claude Code taken up again on `state`'s session in a terminal of its own (`--resume`).
+async fn claude_woken(threads: &Threads, state: &ThreadState, id: IntentId) -> Outcome {
+    match state.status.liveness {
+        Liveness::Live | Liveness::Silent { .. } | Liveness::Sleeping { .. } => Outcome::Done,
+        Liveness::Exited { resumable: false } => {
+            refused("Claude Code cannot take this session up again".to_owned())
+        }
+        Liveness::Exited { resumable: true } | Liveness::Asleep { .. } => {
+            let start = Start {
+                agent: state.meta.agent.clone(),
+                cwd: state.meta.cwd.clone(),
+                drive: None,
+                prompt: None,
+                model: None,
+                args: vec![slopty_agent::resume::RESUME_FLAG.to_owned(), state.meta.native.clone()],
+            };
+            let started = match threads.host.seated_of(state.meta.id) {
+                Some(seated) => threads.claude_start.start_at(id, start, seated).await,
+                None => threads.claude_start.start(id, start).await,
+            };
+            match started {
+                Outcome::Started { .. } => Outcome::Done,
+                other => other,
+            }
+        }
+    }
+}
+
+/// Who answers for a client: Slopty, on its behalf.
+fn answerer(client: ClientId) -> Answerer {
+    Answerer { client: Some(client), name: "Slopty".to_owned() }
 }
 
 /// The past sessions [`ThreadRequest::Sessions`] asks for, at most `limit`: agent `agent`'s in
@@ -619,13 +736,62 @@ fn act(
     id: IntentId,
     intent: &Intent,
 ) -> Outcome {
-    let decided = threads.host.intent(thread, id, |state| decide(at, threads, state, id, intent));
+    act_as(&at.who(), threads, thread, id, intent)
+}
+
+/// [`act`], for `who`.
+fn act_as(
+    who: &Who<'_>,
+    threads: &Threads,
+    thread: ThreadId,
+    id: IntentId,
+    intent: &Intent,
+) -> Outcome {
+    let decided = threads.host.intent(thread, id, |state| decide(who, threads, state, id, intent));
     decided.unwrap_or_else(|| refused("no such thread".to_owned()))
+}
+
+/// Who acts on a thread: a client's connection, or orchestration's verbs.
+struct Who<'a> {
+    /// The daemon.
+    daemon: &'a Daemon,
+    /// The link the held prompts know it by.
+    link: slopty_worker::clip::Link,
+    /// The client; the nil client for orchestration.
+    client: ClientId,
+}
+
+/// The daemon's threads as orchestration's verbs read and answer them
+/// ([`slopty_worker::orchestrate::ThreadReads`]): as [`ORCHESTRATION`], by the nil client,
+/// so a Claude Code prompt held for orchestration's read is answered here.
+#[derive(Clone)]
+pub struct Reads {
+    threads: Threads,
+    daemon: Daemon,
+}
+
+impl Reads {
+    /// `threads`, as `daemon`'s orchestration reaches them.
+    pub const fn new(threads: Threads, daemon: Daemon) -> Self {
+        Self { threads, daemon }
+    }
+}
+
+impl orchestrate::ThreadReads for Reads {
+    fn state(&self, thread: ThreadId) -> Option<ThreadState> {
+        self.threads.host.state(thread).map(|(state, _)| state)
+    }
+
+    fn intent(&self, thread: ThreadId, id: IntentId, intent: Intent) -> Outcome {
+        let who = Who { daemon: &self.daemon, link: ORCHESTRATION, client: ClientId::nil() };
+        tracing::info!(%thread, %id, "an intent from orchestration");
+        act_as(&who, &self.threads, thread, id, &intent)
+    }
 }
 
 /// What comes of `intent` on `state`'s thread, done as it is decided.
 fn decide(
-    at: &Origin<'_>,
+    who: &Who<'_>,
     threads: &Threads,
     state: &ThreadState,
     id: IntentId,
@@ -636,14 +802,14 @@ fn decide(
         return (Outcome::Unsupported { cap: Cap::named(needs) }, Vec::new());
     }
     if codex::is_shared(state) {
-        return (shared(at, &threads.codex, state, id, intent), Vec::new());
+        return (shared(who, &threads.codex, state, id, intent), Vec::new());
     }
     if pi::is_pi(state) {
-        let by = slopty_proto::thread::Answerer { client: Some(at.client), name: "Slopty".into() };
+        let by = answerer(who.client);
         return (threads.pi.decide(state, id, intent, by), Vec::new());
     }
     if acp::is_acp(state) {
-        let by = slopty_proto::thread::Answerer { client: Some(at.client), name: "Slopty".into() };
+        let by = answerer(who.client);
         return (threads.acp.decide(state, id, intent, by), Vec::new());
     }
     let Some(session) = state.meta.terminal else {
@@ -660,13 +826,13 @@ fn decide(
                 (None, _) => refused(format!("no request {}", ask.0)),
                 (_, None) => refused(format!("no choice {choice}")),
                 (Some(held), Some(verdict)) => answered(crate::follow::answer(
-                    at.daemon, at.link, at.client, session, held, verdict,
+                    who.daemon, who.link, who.client, session, held, verdict,
                 )),
             }
         }
         Intent::Release { ask } => match held(ask) {
             Some(held) => {
-                answered(crate::follow::hand_back(at.daemon, at.link, at.client, session, held))
+                answered(crate::follow::hand_back(who.daemon, who.link, who.client, session, held))
             }
             // Asked in the agent's own terminal with nothing held here: it is there already.
             None if asked_in_terminal(state, ask) => Outcome::Done,
@@ -683,14 +849,14 @@ fn decide(
 /// next words into the turn, since a Codex decision carries none. Nothing goes while Codex does
 /// not run the thread: it would be lost.
 fn shared(
-    at: &Origin<'_>,
+    who: &Who<'_>,
     codex: &Codex,
     state: &ThreadState,
     id: IntentId,
     intent: &Intent,
 ) -> Outcome {
     let thread = state.meta.id;
-    if matches!(state.status.liveness, slopty_proto::thread::Liveness::Exited { .. }) {
+    if matches!(state.status.liveness, Liveness::Exited { .. }) {
         return refused("Codex isn't running this thread".to_owned());
     }
     match intent {
@@ -709,10 +875,7 @@ fn shared(
             if !offered && slopty_proto::thread::detail::Answer::read(questions, choice).is_none() {
                 return refused("the answer does not answer each question".to_owned());
             }
-            let by = slopty_proto::thread::Answerer {
-                client: Some(at.client),
-                name: "Slopty".to_owned(),
-            };
+            let by = Answerer { client: Some(who.client), name: "Slopty".to_owned() };
             codex.answer(thread, ask.clone(), choice.clone(), by);
             if let Some(why) = message.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
                 codex.send(thread, why.to_owned(), Vec::new(), Delivery::Steer, id);
@@ -943,7 +1106,6 @@ impl orchestrate::TaskThreads for Threads {
             let orchestrate::TaskThread { start, seat, env, role } = thread;
             let relay = slopty_agent::hooks::relay_beside_this_binary()
                 .map(|relay| relay.to_string_lossy().into_owned());
-            let env = self.worker.seat_env(seat, &env);
             let seated = Seated { seat, env, role, relay };
             let agent = start.agent.clone();
             tracing::info!(%seat, agent = %agent.0, cwd = start.cwd, "start a task's thread");
@@ -1023,7 +1185,7 @@ impl Threads {
             if !state.meta.can(intent.needs()) {
                 return (Outcome::Unsupported { cap: Cap::named(intent.needs()) }, Vec::new());
             }
-            let by = slopty_proto::thread::Answerer { client: None, name: "Slopty".to_owned() };
+            let by = Answerer { client: None, name: "Slopty".to_owned() };
             let outcome = if codex::is_shared(state) {
                 self.codex.send(thread, text.to_owned(), Vec::new(), delivery, id);
                 Outcome::Done

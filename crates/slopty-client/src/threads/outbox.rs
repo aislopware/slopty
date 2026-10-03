@@ -80,7 +80,9 @@ impl Sent {
             | Intent::StopTask { .. }
             | Intent::Keep(_)
             | Intent::Revert(_)
-            | Intent::Fork { .. } => self.outcome.is_some(),
+            | Intent::Fork { .. }
+            | Intent::Sleep
+            | Intent::Wake => self.outcome.is_some(),
         }
     }
 

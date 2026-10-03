@@ -27,6 +27,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::Arc;
 
+use slopty_core::SessionId;
 use slopty_proto::thread::wire::{Outcome, Start};
 use slopty_proto::thread::{AgentId, Drive, Fork, IntentId, ThreadId, TurnId};
 use tokio::sync::{mpsc, oneshot};
@@ -83,8 +84,13 @@ impl Starter {
     /// variables as it does any terminal's, and the role as its system prompt's addition
     /// (`--append-system-prompt`).
     pub async fn start_seated(&self, start: Start, seated: Seated) -> Outcome {
+        self.start_at(seated.intent(), start, seated).await
+    }
+
+    /// Start Claude Code for intent `id` as `start` says, once, at `seated`'s seat: a seated
+    /// thread's session taken up again (`--resume`) runs where it was started.
+    pub async fn start_at(&self, id: IntentId, start: Start, seated: Seated) -> Outcome {
         let (reply, outcome) = oneshot::channel();
-        let id = seated.intent();
         if self.0.send(Ask { id, what: What::Start(start, Some(Box::new(seated))), reply }).is_err()
         {
             return refused("Claude Code threads are not started here");
@@ -172,12 +178,13 @@ async fn begin(
     if let Some(role) = seated.and_then(|s| s.role.as_deref()).filter(|r| !r.trim().is_empty()) {
         args.insert(0, format!("--append-system-prompt={role}"));
     }
-    let thread = match open(claude, args, native, &start.cwd, seated).await {
+    let at = seated.map(|seated| (seated.seat, host.env_of(seated)));
+    let thread = match open(claude, args, native, &start.cwd, at).await {
         Ok(thread) => thread,
         Err(why) => return refused(&why),
     };
     if let Some(seated) = seated {
-        host.seated(thread, seated.seat);
+        host.seated(thread, seated);
     }
     if let Some(prompt) = start.prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         host.typed(thread, id, prompt);
@@ -213,13 +220,14 @@ async fn fork(host: &Host, claude: &Claude<'_>, from: ThreadId, after: Option<Tu
 }
 
 /// Open the person's `claude` with `args` in folder `cwd`, in a terminal of its own, and begin
-/// the thread of its conversation `native`; why not, in words.
+/// the thread of its conversation `native`; why not, in words. `at` a server task's seat, the
+/// terminal opens under the seat's id with every variable of the seat.
 async fn open(
     Claude { driver, terminals, path }: &Claude<'_>,
     args: Vec<String>,
     native: String,
     cwd: &str,
-    seated: Option<&Seated>,
+    at: Option<(SessionId, Vec<(String, String)>)>,
 ) -> Result<ThreadId, String> {
     let installed = crate::facts::installed("claude", (*path).clone())
         .await
@@ -227,10 +235,10 @@ async fn open(
     let command =
         std::iter::once(installed.program.to_string_lossy().into_owned()).chain(args).collect();
     let mut env = vec![("PATH".to_owned(), installed.path.to_string_lossy().into_owned())];
-    let opened = match seated {
-        Some(seated) => {
-            env.extend(seated.env.iter().cloned());
-            terminals.open_at(seated.seat, command, cwd.to_owned(), env).await
+    let opened = match at {
+        Some((seat, seat_env)) => {
+            env.extend(seat_env);
+            terminals.open_at(seat, command, cwd.to_owned(), env).await
         }
         None => terminals.open(command, cwd.to_owned(), env).await,
     };

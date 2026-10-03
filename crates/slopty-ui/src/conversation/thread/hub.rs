@@ -462,6 +462,8 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Handoff => "Couldn't hand over to the terminal".to_owned(),
         Intent::TakeBack => "Couldn't take the session back".to_owned(),
         Intent::Fork { .. } => "Couldn't fork the thread".to_owned(),
+        Intent::Sleep => "Couldn't put the agent to sleep".to_owned(),
+        Intent::Wake => "Couldn't wake the agent".to_owned(),
     };
     format!("{what}: {why}")
 }

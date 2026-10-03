@@ -97,6 +97,14 @@ enum Ask {
         thread: ThreadId,
         done: oneshot::Sender<()>,
     },
+    /// The person put the thread's agent to sleep: its pi ends, its session kept.
+    Sleep {
+        thread: ThreadId,
+    },
+    /// The person woke it: pi runs on its session again.
+    Wake {
+        thread: ThreadId,
+    },
 }
 
 /// What a client asks of one thread.
@@ -185,6 +193,12 @@ impl Pi {
         if tui && !matches!(ask, Intent::Handoff | Intent::TakeBack) {
             return refused("pi's terminal holds the session; take it back first");
         }
+        match ask {
+            Intent::Sleep => return self.ask(Ask::Sleep { thread }),
+            Intent::Wake if live => return Outcome::Done,
+            Intent::Wake => return self.ask(Ask::Wake { thread }),
+            _ => {}
+        }
         let asked = match ask {
             Intent::Handoff if tui => return refused("pi's terminal holds the session already"),
             Intent::Handoff => ThreadAsk::Handoff,
@@ -258,6 +272,16 @@ impl Pi {
     }
 }
 
+impl Pi {
+    /// Send `ask`: done once it is on its way.
+    fn ask(&self, ask: Ask) -> Outcome {
+        if self.0.send(ask).is_err() {
+            return refused("pi threads are not served here");
+        }
+        Outcome::Done
+    }
+}
+
 /// Whether `state` is a pi thread, which this worker drives or whose TUI it follows.
 #[must_use]
 pub fn is_pi(state: &ThreadState) -> bool {
@@ -288,7 +312,6 @@ pub fn spawn(
             launcher: None,
             running: HashMap::new(),
             ended: ended_tx,
-            seats: HashMap::new(),
         };
         for thread in host.threads() {
             let Some((state, _)) = host.state(thread) else { continue };
@@ -313,10 +336,18 @@ pub fn spawn(
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
+                    Some(Ask::Sleep { thread }) => {
+                        // Its task closes pi's stdin, pi's own way to end, once nothing can
+                        // ask it more.
+                        served.running.remove(&thread);
+                    }
+                    Some(Ask::Wake { thread }) if !served.running.contains_key(&thread) => {
+                        served.drive(thread, Vec::new()).await;
+                    }
+                    Some(Ask::Wake { .. }) => {}
                     Some(Ask::Close { thread, done }) => {
                         // Its task ends its agent once nothing can ask it more.
                         served.running.remove(&thread);
-                        served.seats.remove(&thread);
                         let _gone = done.send(());
                     }
                     None => return,
@@ -351,8 +382,6 @@ struct Served {
     running: HashMap<ThreadId, mpsc::UnboundedSender<ThreadAsk>>,
     /// Told by a task when its pi or TUI has ended.
     ended: Ended,
-    /// The seat of each server task's thread: each run of its pi is given it.
-    seats: HashMap<ThreadId, Seated>,
 }
 
 impl Served {
@@ -432,8 +461,7 @@ impl Served {
         self.host.apply(thread, actions);
         let mut args = args;
         if let Some(seated) = seated {
-            self.host.seated(thread, seated.seat);
-            self.seats.insert(thread, seated);
+            self.host.seated(thread, &seated);
         }
         if let Some((provider, model)) = start.model.as_deref().and_then(|m| m.split_once('/')) {
             args.extend(["--provider".to_owned(), provider.to_owned()]);
@@ -610,7 +638,10 @@ impl Served {
     ) {
         let mut driven = driven;
         let (native, cwd) = (driven.meta().native.clone(), driven.meta().cwd.clone());
-        let env = self.seats.get(&thread).map(seat_env).unwrap_or_default();
+        let seated = self.host.seated_of(thread);
+        let env = seated
+            .map(|seated| seat_env(self.host.env_of(&seated), seated.relay.as_deref()))
+            .unwrap_or_default();
         match start_pi(launch, &native, &cwd, args, &env) {
             Ok((stdin, pi)) => {
                 let (tx, rx) = mpsc::unbounded_channel();
@@ -705,12 +736,12 @@ async fn ends(path: &Path, size: u64) -> std::io::Result<(String, String)> {
     Ok((String::from_utf8_lossy(&head).into_owned(), String::from_utf8_lossy(&tail).into_owned()))
 }
 
-/// What a seated thread's pi runs with: the seat's variables, and Slopty's tools for the gate to
-/// register ([`slopty_agent::pi::TOOLS_ENV`]) where Slopty's CLI is found.
-fn seat_env(seated: &Seated) -> Vec<(String, String)> {
-    let mut env = seated.env.clone();
-    if let Some(relay) = seated.relay.as_deref() {
-        let tools = slopty_agent::pi::tools(relay, &seated.env);
+/// What a seated thread's pi runs with: the seat's variables (`env`), and Slopty's tools for the
+/// gate to register ([`slopty_agent::pi::TOOLS_ENV`]) where Slopty's CLI is found.
+fn seat_env(env: Vec<(String, String)>, relay: Option<&str>) -> Vec<(String, String)> {
+    let mut env = env;
+    if let Some(relay) = relay {
+        let tools = slopty_agent::pi::tools(relay, &env);
         env.push((slopty_agent::pi::TOOLS_ENV.to_owned(), tools.to_string()));
     }
     env
@@ -724,20 +755,13 @@ mod tests {
     /// where Slopty's CLI was found.
     #[test]
     fn a_seated_pi_runs_with_the_seat_and_its_tools() {
-        let seat = slopty_core::SessionId::new();
-        let mut seated = Seated {
-            seat,
-            env: vec![("SLOPTY_SESSION".to_owned(), seat.to_string())],
-            role: None,
-            relay: None,
-        };
-        assert_eq!(seat_env(&seated), seated.env, "no tools without the CLI");
-        seated.relay = Some("/bin/slopty".to_owned());
-        let env = seat_env(&seated);
-        assert_eq!(env[..1], seated.env);
+        let seat = vec![("SLOPTY_SESSION".to_owned(), slopty_core::SessionId::new().to_string())];
+        assert_eq!(seat_env(seat.clone(), None), seat, "no tools without the CLI");
+        let env = seat_env(seat.clone(), Some("/bin/slopty"));
+        assert_eq!(env[..1], seat);
         let (name, tools) = &env[1];
         assert_eq!(name, slopty_agent::pi::TOOLS_ENV);
         let tools: serde_json::Value = serde_json::from_str(tools).unwrap_or_default();
-        assert_eq!(tools, slopty_agent::pi::tools("/bin/slopty", &seated.env));
+        assert_eq!(tools, slopty_agent::pi::tools("/bin/slopty", &seat));
     }
 }

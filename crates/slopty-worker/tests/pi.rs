@@ -454,6 +454,40 @@ mod pi {
         assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
+    /// Put to sleep at rest, pi's stdin is closed, pi's own way to end, and the thread is kept
+    /// asleep. A wake runs pi again on the same session, reads the thread again from its record
+    /// and sends nothing.
+    #[tokio::test]
+    async fn a_pi_put_to_sleep_is_woken_on_its_session() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let id = IntentId::new();
+        let Outcome::Started { thread } = pi.start(id, rig.start("Say hello.")).await else {
+            panic!("not started");
+        };
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+
+        let sleep = IntentId::new();
+        let decide = |s: &ThreadState| pi.decide(s, sleep, &Intent::Sleep, rig.by());
+        assert_eq!(rig.host.sleep(thread, sleep, false, decide), Some(Outcome::Done));
+        let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
+        let state = rig.until(thread, "pi ends asleep", asleep).await;
+        assert_eq!(state.turns.len(), 1, "the thread kept");
+        let (_, compact) = rig.intent(&pi, thread, &Intent::Compact);
+        assert!(matches!(compact, Outcome::Refused { .. }), "asleep, pi runs not: {compact:?}");
+
+        let (_, woken) = rig.intent(&pi, thread, &Intent::Wake);
+        assert_eq!(woken, Outcome::Done);
+        let awake = |s: &ThreadState| s.status.liveness == Liveness::Live && s.turns.len() == 4;
+        let state = rig.until(thread, "pi runs on its session again", awake).await;
+        assert_eq!(users(&state).len(), 5, "read again from the session, nothing sent");
+        let record = rig.record_once(|r| r["heard"][0]["type"] == "get_entries").await;
+        assert_eq!(record["argv"][5], id.to_string(), "the same session");
+        assert_eq!(record["unexpected"], serde_json::json!([]));
+        let (_, again) = rig.intent(&pi, thread, &Intent::Wake);
+        assert_eq!(again, Outcome::Done, "awake already");
+    }
+
     /// The worker going while the gate asks closes pi's stdin and ends pi with no answer sent,
     /// so the call never runs; the thread says so: the ask withdrawn, the call cancelled, the
     /// turn stopped.

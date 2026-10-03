@@ -294,6 +294,24 @@ mod claude_start {
         let state = until(&rig.host, thread, |s| !users(s).is_empty()).await;
         let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept through the transcript");
+
+        // Gone, its session is taken up again where it was started: under the seat, with the
+        // seat's variables and its role.
+        let native = thread_native(&rig, thread);
+        gone(&rig, seat, &native);
+        until(&rig.host, thread, |s| matches!(s.status.liveness, Liveness::Exited { .. })).await;
+        let mut resume = rig.start(None);
+        resume.args = vec!["--resume".to_owned(), native.clone()];
+        let seated = rig.host.seated_of(thread).expect("the seat is kept");
+        let woken = rig.starter.start_at(IntentId::new(), resume, seated).await;
+        assert_eq!(woken, Outcome::Started { thread });
+        let opened = rig.opened();
+        assert_eq!(opened.len(), 2);
+        let (command, _, env, terminal) = &opened[1];
+        assert_eq!(*terminal, seat, "under the seat again");
+        assert_eq!(command[1], "--append-system-prompt=You review.");
+        assert_eq!(command[2..4], ["--resume".to_owned(), native]);
+        assert!(env.contains(&variable), "{env:?}");
     }
 
     /// The Claude Code session `thread` is of.

@@ -28,6 +28,7 @@ pub mod intents;
 pub mod log;
 pub mod pi;
 pub mod review;
+pub mod sleep;
 pub mod table;
 pub mod terminals;
 
@@ -39,19 +40,30 @@ pub use host::Host;
 ///
 /// The seat it is known by, what its Slopty tools are told, and the role it plays. Each adapter
 /// hands these to its agent through the agent's own door.
-#[derive(Clone, PartialEq, Eq, Debug)]
+///
+/// The host keeps it with the thread ([`Host::seated`]), so a thread taken up again after the
+/// worker restarts is given the same. It holds nothing secret: the worker's own variables for
+/// the seat, its token among them, are added where the agent runs ([`Host::env_of`]).
+#[derive(Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Seated {
     /// The seat: the session its Slopty tools speak as, and the terminal an agent that runs
     /// in one runs in.
     pub seat: slopty_core::SessionId,
-    /// Every variable of the seat: the server's (its project and task) and the worker's for it
-    /// (the server, the seat as the session, the token that proves it).
+    /// The server's variables for it: its project and task.
     pub env: Vec<(String, String)>,
     /// What the agent is told it is for.
     pub role: Option<String>,
     /// Slopty's CLI, whose `mcp` serves the tools; `None` where it is not found.
     pub relay: Option<String>,
 }
+
+/// What the worker gives a seat's agent and tools to find in their environment.
+///
+/// The server's variables for the seat, with the worker's own for it (its server, the seat as the
+/// session, the token that proves it). The daemon gives it to the host ([`Host::set_seat_env`]).
+pub type SeatEnv = std::sync::Arc<
+    dyn Fn(slopty_core::SessionId, &[(String, String)]) -> Vec<(String, String)> + Send + Sync,
+>;
 
 impl Seated {
     /// The intent a start at this seat is acted on as: one per seat, so a start repeated after

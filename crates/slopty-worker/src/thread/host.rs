@@ -14,14 +14,15 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
-    Action, AgentId, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, PendingState, Phase, ThreadId,
-    ThreadMeta, ThreadState, TreeRef, TurnId,
+    Action, AgentId, Cap, Cursor, Edge, Fork, IntentId, ItemBody, ItemId, Liveness, PendingState,
+    Phase, Status, ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
 use super::intents::Intents;
 use super::log::{Catchup, Limits, Log};
 use super::table::Table;
+use super::{SeatEnv, Seated};
 
 /// Batches a slow follower may fall behind by before it catches up from the log instead.
 const FEED_BATCHES: usize = 1024;
@@ -86,7 +87,21 @@ struct Inner {
     /// Intents that start a thread, which have no thread of their own to be kept with yet.
     starts: Intents,
     edges: broadcast::Sender<TurnEdge>,
+    /// What the worker adds to a seat's variables, once the daemon says.
+    seat_env: Option<EnvOf>,
 }
+
+/// A [`SeatEnv`], which shows as nothing more.
+struct EnvOf(SeatEnv);
+
+impl std::fmt::Debug for EnvOf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SeatEnv")
+    }
+}
+
+/// The file in a thread's directory that keeps the seat it was started at ([`Seated`]).
+const SEAT_FILE: &str = "seat.json";
 
 #[derive(Debug)]
 struct Hosted {
@@ -98,7 +113,13 @@ struct Hosted {
 
 impl Hosted {
     fn open(dir: &Path, log: Log) -> io::Result<Self> {
-        let own = Own::of(log.state());
+        let mut own = Own::of(log.state());
+        own.seated = match std::fs::read(dir.join(SEAT_FILE)) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .inspect_err(|e| tracing::warn!(dir = %dir.display(), "a seat is unreadable: {e}"))
+                .ok(),
+            Err(_) => None,
+        };
         Ok(Self {
             log,
             intents: Intents::open(&dir.join("intents"))?,
@@ -125,6 +146,22 @@ struct Own {
     /// The seat a server's task started it at ([`slopty_proto::project::SEAT_FACT`]): an adapter
     /// that tells the thread's metadata again knows nothing of it.
     seat: Option<String>,
+    /// The seat it was started at, all of it, kept in its directory ([`SEAT_FILE`]).
+    seated: Option<Seated>,
+    /// Whether the person put its agent to sleep: an adapter tells only that it ended.
+    sleep: Sleep,
+}
+
+/// Where the person's sleep of a thread's agent is ([`Host::sleep`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Sleep {
+    /// Not asked for, or woken.
+    #[default]
+    Awake,
+    /// Asked for at this time: the agent's end, when it comes, is its sleep.
+    Falling(WallMs),
+    /// Its agent ended asleep at this time; the agent running again wakes it.
+    Asleep(WallMs),
 }
 
 /// Messages typed whose items are waited for; past it the oldest is given up.
@@ -148,7 +185,32 @@ impl Own {
             .collect();
         let fork = state.meta.forked_from;
         let seat = state.meta.facts.get(slopty_proto::project::SEAT_FACT).cloned();
-        Self { typed: VecDeque::new(), sent, trees, fork, seat }
+        let sleep = match state.status.liveness {
+            Liveness::Asleep { since_ms } => Sleep::Asleep(since_ms),
+            _ => Sleep::Awake,
+        };
+        Self { typed: VecDeque::new(), sent, trees, fork, seat, seated: None, sleep }
+    }
+
+    /// `meta` with what the worker knows of it: where it branched, the seat it was started at.
+    fn meta(&self, meta: &mut ThreadMeta) {
+        self.branched(meta);
+        if let Some(seat) = &self.seat {
+            meta.facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.clone());
+        }
+    }
+
+    /// `status` as the person's sleep makes it: the end of an agent put to sleep is its sleep,
+    /// and an agent that runs again after it is awake.
+    const fn status(&mut self, status: &mut Status) {
+        match (self.sleep, status.liveness) {
+            (Sleep::Falling(since) | Sleep::Asleep(since), Liveness::Exited { .. }) => {
+                status.liveness = Liveness::Asleep { since_ms: since };
+                self.sleep = Sleep::Asleep(since);
+            }
+            (Sleep::Asleep(_), Liveness::Live) => self.sleep = Sleep::Awake,
+            _ => {}
+        }
     }
 
     /// `meta` with where the worker branched it, unless its agent says more: an agent that
@@ -166,13 +228,8 @@ impl Own {
     fn mark(&mut self, actions: &mut [Action]) {
         for action in actions {
             match action {
-                Action::Meta(meta) => {
-                    self.branched(meta);
-                    if let Some(seat) = &self.seat {
-                        meta.facts
-                            .insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.clone());
-                    }
-                }
+                Action::Meta(meta) => self.meta(meta),
+                Action::Status(status) => self.status(status),
                 Action::ItemStarted(item)
                 | Action::ItemUpdated(item)
                 | Action::ItemCompleted(item) => {
@@ -249,6 +306,7 @@ impl Host {
                 table,
                 starts,
                 edges: broadcast::Sender::new(EDGES),
+                seat_env: None,
             })),
         })
     }
@@ -327,7 +385,8 @@ impl Host {
         // no agent's session has: they stay.
         // One that was being typed may be in the terminal already, so it is not typed again.
         let mut state = state;
-        hosted.own.branched(&mut state.meta);
+        hosted.own.meta(&mut state.meta);
+        hosted.own.status(&mut state.status);
         state.pending.clone_from(&hosted.log.state().pending);
         state.to_review = hosted.log.state().to_review;
         for pending in &mut state.pending {
@@ -370,16 +429,43 @@ impl Host {
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
     }
 
-    /// `thread` was started at `seat` for a server's task: its row says so
-    /// ([`slopty_proto::project::SEAT_FACT`]) from now on, whatever its adapter tells of it.
-    pub fn seated(&self, thread: ThreadId, seat: SessionId) {
+    /// `thread` was started at `seated`'s seat for a server's task: its row says so
+    /// ([`slopty_proto::project::SEAT_FACT`]) from now on, whatever its adapter tells of it,
+    /// and the seat is kept in its directory, so the thread taken up again after a restart is
+    /// given the same ([`Self::seated_of`]). A seat that cannot be written is warned of.
+    pub fn seated(&self, thread: ThreadId, seated: &Seated) {
         let meta = {
-            let mut inner = self.inner.lock();
+            let mut guard = self.inner.lock();
+            let inner = &mut *guard;
             let Some(hosted) = inner.threads.get_mut(&thread) else { return };
-            hosted.own.seat = Some(seat.to_string());
+            hosted.own.seat = Some(seated.seat.to_string());
+            hosted.own.seated = Some(seated.clone());
+            let dir = inner.dir.join(thread.to_string());
+            if let Err(e) = write_seat(&dir, seated) {
+                tracing::warn!(%thread, "its seat could not be kept: {e}");
+            }
             hosted.log.state().meta.clone()
         };
         self.apply(thread, vec![Action::Meta(Box::new(meta))]);
+    }
+
+    /// The seat `thread` was started at, if it was ([`Self::seated`]).
+    #[must_use]
+    pub fn seated_of(&self, thread: ThreadId) -> Option<Seated> {
+        self.inner.lock().threads.get(&thread)?.own.seated.clone()
+    }
+
+    /// Give the worker's own variables for a seat to every seated agent from now on.
+    pub fn set_seat_env(&self, env: SeatEnv) {
+        self.inner.lock().seat_env = Some(EnvOf(env));
+    }
+
+    /// Every variable `seated`'s agent and its Slopty tools run with: the server's, with the
+    /// worker's own for the seat ([`Self::set_seat_env`]) where the daemon gave them.
+    #[must_use]
+    pub fn env_of(&self, seated: &Seated) -> Vec<(String, String)> {
+        let env = self.inner.lock().seat_env.as_ref().map(|EnvOf(env)| Arc::clone(env));
+        env.map_or_else(|| seated.env.clone(), |env| env(seated.seat, &seated.env))
     }
 
     /// The thread started at `seat`, if one is.
@@ -486,6 +572,38 @@ impl Host {
         Some(outcome)
     }
 
+    /// Put `thread`'s agent to sleep for intent `id` once, on the person's word: only one that
+    /// can be ([`Cap::SLEEP`]) and may be now ([`super::sleep::refusal`], with `armed` saying a
+    /// message is scheduled for it). `end` asks its adapter to end the agent. When it is done or
+    /// taken, the agent's end, whenever its adapter tells it, is told as its sleep
+    /// ([`Liveness::Asleep`]). Decided under the lock, so no message slips in between the look
+    /// and the mark. `None` for a thread not held.
+    pub fn sleep<F>(&self, thread: ThreadId, id: IntentId, armed: bool, end: F) -> Option<Outcome>
+    where
+        F: FnOnce(&ThreadState) -> Outcome,
+    {
+        let mut inner = self.inner.lock();
+        let hosted = inner.threads.get_mut(&thread)?;
+        if let Some(outcome) = hosted.intents.outcome(&id) {
+            return Some(outcome.clone());
+        }
+        let state = hosted.log.state();
+        let outcome = if !state.meta.can(Cap::SLEEP) {
+            Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) }
+        } else if let Some(why) = super::sleep::refusal(state, armed) {
+            Outcome::Refused { reason: why.to_owned() }
+        } else {
+            end(state)
+        };
+        if matches!(outcome, Outcome::Done | Outcome::Accepted) {
+            hosted.own.sleep = Sleep::Falling(WallMs::now());
+        }
+        if let Err(e) = hosted.intents.record(id, outcome.clone()) {
+            tracing::warn!(%thread, "an intent could not be recorded: {e}");
+        }
+        Some(outcome)
+    }
+
     /// The outcome intent `id` had as a start, if it was acted on.
     #[must_use]
     pub fn started(&self, id: IntentId) -> Option<Outcome> {
@@ -533,6 +651,15 @@ impl Host {
         }
         outcome
     }
+}
+
+/// Keep `seated` in thread directory `dir`, whole or not at all: it goes to a sibling that is
+/// renamed into place.
+fn write_seat(dir: &Path, seated: &Seated) -> io::Result<()> {
+    let bytes = serde_json::to_vec(seated).map_err(io::Error::other)?;
+    let staging = dir.join(format!(".{SEAT_FILE}"));
+    std::fs::write(&staging, bytes)?;
+    std::fs::rename(&staging, dir.join(SEAT_FILE))
 }
 
 fn create(inner: &mut Inner, meta: ThreadMeta) -> io::Result<Cursor> {

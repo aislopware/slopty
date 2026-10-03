@@ -159,6 +159,24 @@ mod acp {
         fn record(&self) -> Value {
             serde_json::from_slice(&std::fs::read(&self.record).unwrap()).unwrap()
         }
+
+        /// The stand-in's record once `done` holds of it: it writes what it heard after it
+        /// answers.
+        async fn record_once(&self, done: impl Fn(&Value) -> bool) -> Value {
+            let waited = tokio::time::timeout(WAIT, async {
+                loop {
+                    let read = std::fs::read(&self.record).ok();
+                    if let Some(record) = read.and_then(|r| serde_json::from_slice(&r).ok())
+                        && done(&record)
+                    {
+                        return record;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await;
+            waited.unwrap_or_else(|_| panic!("the record: {:#}", self.record()))
+        }
     }
 
     fn turn_ended(n: usize, state: TurnState) -> impl Fn(&ThreadState) -> bool {
@@ -380,6 +398,37 @@ mod acp {
         assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
+    /// Put to sleep at rest, the agent's stdin is closed and the thread is kept asleep. A wake
+    /// runs the agent again, which loads the session, and the thread is read again from what it
+    /// replays, with nothing sent.
+    #[tokio::test]
+    async fn an_acp_agent_put_to_sleep_is_woken_by_loading_its_session() {
+        let rig = Rig::new();
+        let (acp, _served) = rig.serve();
+        let Outcome::Started { thread } =
+            acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.meta.can(Cap::SLEEP), "the agent loads sessions: {:?}", state.meta.caps);
+
+        let sleep = IntentId::new();
+        let decide = |s: &ThreadState| acp.decide(s, sleep, &Intent::Sleep, rig.by());
+        assert_eq!(rig.host.sleep(thread, sleep, false, decide), Some(Outcome::Done));
+        let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
+        rig.until(thread, "the agent ends asleep", asleep).await;
+
+        rig.replay("load.jsonl");
+        let (_, woken) = rig.intent(&acp, thread, &Intent::Wake);
+        assert_eq!(woken, Outcome::Done);
+        let awake = |s: &ThreadState| s.status.liveness == Liveness::Live && s.turns.len() == 4;
+        let state = rig.until(thread, "the session loaded", awake).await;
+        assert_eq!(users(&state).len(), 4, "read again, nothing sent");
+        let record = rig.record_once(|r| r["heard"][1]["method"] == "session/load").await;
+        assert_eq!(record["unexpected"], serde_json::json!([]));
+    }
+
     /// An agent that asks to be signed in is left as it is: the thread says so in words and
     /// is exited, the first message is not sent to an agent started over and over, and since
     /// the agent named no session there is nothing to take up again.
@@ -551,7 +600,7 @@ mod acp {
         let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
         let fact = state.meta.facts.get(slopty_proto::project::SEAT_FACT);
         assert_eq!(fact, Some(&seat.to_string()), "kept over what the agent says of the thread");
-        let record = rig.record();
+        let record = rig.record_once(|r| r["heard"][2]["method"] == "session/prompt").await;
         assert_eq!(record["unexpected"], serde_json::json!([]), "{record:#}");
         let opened = &record["heard"][1];
         assert_eq!(opened["method"], "session/new");

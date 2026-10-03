@@ -1294,9 +1294,13 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **Reports.** A seat with no terminal of its own takes the server's delivered reports as a
     message (`Intent::Send`), queued where the agent queues and steered where it does not, once
     per batch. It is acknowledged only when the message went.
-  - **Not yet.** The adapters hold a seat's variables in memory, so after the worker restarts, a
-    seated Codex, ACP or pi thread taken up again runs without the seat's tools until it is
-    started at the seat again. The seat fact itself is kept.
+  - **Kept.** The host keeps the seat in the thread's own directory (`seat.json`): the seat, the
+    server's variables, the role and the CLI. A thread taken up again after the worker restarts
+    is given the same, and a woken Claude Code reopens under the seat. The worker's own variables
+    for the seat, the token among them, are never written: the host adds them where the agent
+    runs (`Host::env_of`, through the daemon's `Worker::seat_env`), and clients never see the
+    file. `Host::reset` keeps the seat fact too, so a thread read again from its agent still
+    names it.
   - Tests: `a_seated_start_opens_claude_under_the_seat_with_its_role`,
     `a_seated_start_gives_codex_the_seat_its_tools_and_its_role`,
     `a_seated_acp_thread_gets_the_seat_its_tools_and_its_role`,
@@ -1304,3 +1308,47 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_seated_pi_runs_with_the_seat_and_its_tools` (`slopty-worker::thread::pi`);
     `a_seats_thread_is_loaded_with_its_variables_and_slopty_tools` and
     `the_tools_are_an_mcp_server_entry_the_gate_registers` (`slopty-agent`).
+
+- ✅ **The person puts an agent to sleep at rest, and wakes it on its own session** (2026-10-04,
+  from the Ghostex study's second idea). The item registry's `sleeping` flag only ever released
+  a client's view, and nothing set it, so it is gone. In its place, `Intent::Sleep` and
+  `Intent::Wake` act on a thread (`Cap::SLEEP`), and a thread put to sleep reads as
+  `Liveness::Asleep`.
+  - **Sleep is the person's word.** Nothing sleeps an agent on its own: no idle sweep, no lease.
+  - **The gates.** The host decides under its lock, so no message slips in between
+    (`slopty_worker::thread::sleep::refusal`). It refuses, in words:
+    - an agent that is not running, or that waits on its own wakeup;
+    - a thread never asked anything;
+    - a turn under way, or the agent waiting on its own work;
+    - an open request;
+    - a message waiting to go;
+    - background work still running;
+    - a message scheduled for the thread.
+  - **How each agent ends.** Each ends the way it ends on its own, and the thread is kept:
+    - pi's and an ACP agent's stdin are closed;
+    - Codex lets the thread go at once (`thread/unsubscribe`);
+    - Claude Code's terminal is closed. Its session is written as it goes, as when the person
+      closes the window.
+
+    A thread whose Codex TUI runs in a Slopty terminal is refused. The adapter then tells the
+    end as it tells any exit, and the host tells it as the sleep. The sleep is kept through a
+    restart and through the adapter telling it gone again, until the agent runs again.
+  - **Wake.** A wake takes the session up through each agent's own resume:
+    - pi runs on its `--session-id` and reads the session again;
+    - an ACP agent loads the session (`session/load`), so it has the cap only when it loads
+      sessions;
+    - Codex resumes the thread (`thread/resume`);
+    - Claude Code runs `--resume` in a new terminal, under the seat for a task's thread.
+
+    The next message wakes a driven agent too, and following a Codex thread already takes it
+    up again.
+  - **Not yet.** The thread view's door for an asleep thread (Wake beside Resume) and a
+    "Sleeping" rung below Idle on the server's ladder are the client's and the server's half.
+    The daemon's Claude Code sleep (its terminal closed) has no daemon-level test yet.
+  - Tests: `only_an_agent_at_rest_with_nothing_under_way_sleeps` (`thread::sleep`);
+    `an_agent_put_to_sleep_ends_asleep_until_it_runs_again` and
+    `a_seat_outlives_a_read_again_and_a_restart` (`slopty-worker/tests/threads.rs`);
+    `a_pi_put_to_sleep_is_woken_on_its_session`,
+    `an_acp_agent_put_to_sleep_is_woken_by_loading_its_session`,
+    `a_thread_put_to_sleep_is_let_go_and_woken_by_resuming_it`; goldens `intent_sleep`,
+    `intent_wake` and `frame_actions`.

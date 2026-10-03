@@ -14,7 +14,8 @@ mod codex {
     use slopty_core::SessionId;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Delivery, Fork, IntentId, ItemBody, ThreadId, ThreadMeta, ThreadState, TurnState,
+        AgentId, Delivery, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta, ThreadState,
+        TurnState,
     };
     use slopty_worker::thread::codex::{self, Codex};
     use slopty_worker::thread::log::Limits;
@@ -746,5 +747,44 @@ mod codex {
         until_sent(&mut heard, "thread/unsubscribe").await;
         handle.wake(thread);
         until_sent(&mut heard, "thread/resume").await;
+    }
+
+    /// Put to sleep at rest, the thread is let go at once (`thread/unsubscribe`) and kept
+    /// asleep; a wake takes it up again (`thread/resume`) and it is live once more.
+    #[tokio::test]
+    async fn a_thread_put_to_sleep_is_let_go_and_woken_by_resuming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(unloader(listener, tx));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        until_sent(&mut heard, "thread/resume").await;
+        let state = until(&host, thread, |s| !s.turns.is_empty()).await;
+        assert!(state.meta.can(slopty_proto::thread::Cap::SLEEP));
+
+        let id = IntentId::new();
+        let ends = |_: &ThreadState| {
+            if handle.sleep(thread) {
+                Outcome::Done
+            } else {
+                Outcome::Refused { reason: "not served".to_owned() }
+            }
+        };
+        assert_eq!(host.sleep(thread, id, false, ends), Some(Outcome::Done));
+        let sent = until_sent(&mut heard, "thread/unsubscribe").await;
+        assert_eq!(sent.last().unwrap()["params"], json!({ "threadId": native }));
+        let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
+        let state = until(&host, thread, asleep).await;
+        assert!(!state.turns.is_empty(), "the thread kept");
+
+        handle.wake(thread);
+        until_sent(&mut heard, "thread/resume").await;
+        until(&host, thread, |s| s.status.liveness == Liveness::Live).await;
     }
 }
