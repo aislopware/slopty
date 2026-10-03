@@ -3506,3 +3506,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: view `a_block_paints_no_band_and_a_hairline_parts_it` (no edge-to-edge fill but
     the grid's background, hairlines at the prompts),
     `cmd_up_and_down_walk_the_prompts_and_separators_follow`.
+
+- ✅ **A silent driver hands the seat to the viewer that types** (2026-10-04, readiness A21c).
+  The driver stayed the first attacher for as long as its connection lived. A Mac whose lid
+  closed keeps its QUIC connection, and so the size of every terminal it drove, until the
+  transport's idle timeout (45 s), while the iPad in hand typed into a grid sized for a screen
+  nobody looked at. "Latest input drives" stays rejected (`multi-client.md`): a phone typing
+  must not resize a desktop that is there.
+  - **A roll call, not a takeover.** When a viewer that is not the driver sends person input
+    (a key, a mouse event, a paste), the actor sends the driver a `TermEvent::Marker` and waits
+    `DRIVER_SILENCE` (3 s). Any request from the driver, a re-attach of it or a `Drive`
+    ends the question; silence passes the seat to the viewer that typed, at its size and
+    colours, and the old driver is told `Driver { you: false }`. One question at a time.
+  - **Who is asked.** A driver that has never answered a marker is a tool reading the stream
+    raw: it keeps its seat. A driver whose sink closed (`orphan`) is not sent anything; its
+    silence is the answer.
+  - Cost: one `Option` check per request on the input path; the marker goes only on the first
+    key while a question is open.
+  - Number: the seat passes 3.002 to 3.003 s after the other viewer's first key (three runs),
+    against 45 s before (MEASUREMENTS 2026-10-04, "driver handover after a lid close").
+  - Tests: worker `a_silent_driver_hands_the_seat_to_the_viewer_that_types` (an answering
+    driver keeps it, a silent one loses it within `DRIVER_SILENCE` + 1 s, at the typist's
+    size), `a_closed_sink_keeps_the_drivers_seat_until_its_connection_detaches_it`.

@@ -2123,6 +2123,87 @@ done"#
         let _killed = child.kill().await;
     }
 
+    /// A driver that answers the marker it is sent when another viewer types keeps its seat;
+    /// one that falls silent (a laptop whose lid closed, its connection not yet timed out)
+    /// hands it to the viewer that typed after `DRIVER_SILENCE`, at that viewer's size.
+    #[tokio::test]
+    async fn a_silent_driver_hands_the_seat_to_the_viewer_that_types() {
+        /// Applies `a`'s events, answering its markers, until `done` holds of what it read.
+        async fn read_answering(
+            a: &mut Viewer,
+            session: &session::SessionHandle,
+            me: ClientId,
+            mut done: impl FnMut(&TermEvent, &slopty_grid::Screen) -> bool,
+        ) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let out = tokio::time::timeout_at(deadline, a.rx.recv())
+                    .await
+                    .expect("in time")
+                    .expect("sink open");
+                let ev = event(&out);
+                for effect in a.state.apply(ev.clone()) {
+                    if let Effect::Request(req @ TermRequest::Reached { .. }) = effect {
+                        session.request(me, req).unwrap();
+                    }
+                }
+                if done(&ev, a.state.screen()) {
+                    return;
+                }
+            }
+        }
+        let script = "stty -echo; yes \"$(printf '%250s' '' | tr ' ' a)\" | head -n 100; cat";
+        let (session, mut child) = start(&["/bin/sh", "-c", script]);
+        let (a_id, b_id) = (ClientId::new(), ClientId::new());
+        let big = size(250, 100);
+        let (tx_a, rx_a) = mpsc::channel(256);
+        let mut a = Viewer { rx: rx_a, state: TermState::new(big) };
+        session.attach(a_id, big, tx_a).unwrap();
+        // A screenful of frames brings markers, and a answers them as the app does.
+        read_answering(&mut a, &session, a_id, |_, s| {
+            s.lines().iter().filter(|l| l.text().starts_with('a')).count() >= 99
+        })
+        .await;
+        let (tx_b, mut b) = viewer(256);
+        session.attach(b_id, size(60, 10), tx_b).unwrap();
+        wait_for(&mut b, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::Frame(f) if f.full)))
+            .await;
+        let drives = |events: &[TermEvent]| {
+            events.iter().any(|e| matches!(e, TermEvent::Driver { you: true }))
+        };
+        // b types while a is there: a is asked, answers, and keeps the seat.
+        session.request(b_id, TermRequest::Raw(b"x".to_vec())).unwrap();
+        read_answering(&mut a, &session, a_id, |e, _| matches!(e, TermEvent::Marker { .. })).await;
+        tokio::time::sleep(session::DRIVER_SILENCE + Duration::from_millis(500)).await;
+        let mut seen = Vec::new();
+        while let Ok(out) = b.rx.try_recv() {
+            seen.push(event(&out));
+        }
+        assert!(!drives(&seen), "a answered and keeps the seat: {seen:?}");
+        // a stops reading: the next key b sends takes the seat once a has been silent.
+        let asked = tokio::time::Instant::now();
+        session.request(b_id, TermRequest::Raw(b"y".to_vec())).unwrap();
+        let (events, _) = wait_for(&mut b, |ev, _| drives(ev)).await;
+        let handover = asked.elapsed();
+        assert!(
+            (session::DRIVER_SILENCE..session::DRIVER_SILENCE + Duration::from_secs(1))
+                .contains(&handover),
+            "{handover:?}"
+        );
+        let (..) = wait_for(&mut b, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::Resized { cols: 60, rows: 10 }))
+        })
+        .await;
+        assert_eq!(session.snapshot().await.unwrap().size.cols, 60, "{events:?}");
+        let mut told = false;
+        while let Ok(out) = a.rx.try_recv() {
+            told |= matches!(event(&out), TermEvent::Driver { you: false });
+        }
+        assert!(told, "a hears it no longer drives once it reads");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
     /// A viewer whose queue passed the cap while frames it had not confirmed waited in it
     /// (with the markers after them) is told everything again once it reads: what was dropped
     /// with the queue does not hold its frames back for good.

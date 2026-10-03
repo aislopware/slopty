@@ -56,6 +56,12 @@ const MARKER_EVERY_BYTES: usize = FRAMES_UNREACHED_BYTES / 4;
 /// Unanswered markers remembered per viewer. One that answers has about five out at a time;
 /// one that never answers would otherwise collect them for as long as it watches.
 const MARKERS_KEPT: usize = 16;
+/// How long a driver has to answer when another viewer types, before the seat passes on.
+///
+/// The driver is sent a marker. Without the question a laptop whose lid closed keeps its
+/// connection, and so the size of every terminal it drove, until the transport's idle timeout
+/// (45 s). A live client answers within a round trip and a frame.
+pub const DRIVER_SILENCE: Duration = Duration::from_secs(3);
 /// Events a viewer's sink had no room for wait in order, up to this many bytes. Past it they
 /// are dropped and the viewer is told everything again once its sink drains, as a joiner is.
 const QUEUED_MAX_BYTES: usize = 16 << 20;
@@ -740,6 +746,15 @@ impl Viewer {
     }
 }
 
+/// The driver asked whether it is still there ([`DRIVER_SILENCE`]): anything it sends ends the
+/// question; silence until `due` passes the seat to `asker`.
+#[derive(Debug)]
+struct RollCall {
+    driver: ClientId,
+    asker: ClientId,
+    due: tokio::time::Instant,
+}
+
 /// How the input on its way to the PTY came: a viewer typed, clicked or pasted it (with the
 /// key sequence number it carried, if any), or the engine answered a query.
 #[derive(Clone, Copy, Debug)]
@@ -835,6 +850,8 @@ struct Actor {
     /// like while the new attach is still on its way, and handing the size to another viewer
     /// then took it from a client that never left.
     orphan: Option<(ClientId, ClientSink)>,
+    /// The driver was asked whether it is still there, because another viewer typed.
+    roll: Option<RollCall>,
     /// The next `TermEvent::Marker` id.
     next_marker: u64,
     title: Option<String>,
@@ -1053,6 +1070,7 @@ impl Actor {
             driver: None,
             focused: Vec::new(),
             orphan: None,
+            roll: None,
             next_marker: 0,
             title,
             told_cwd: cwd.clone(),
@@ -1167,6 +1185,7 @@ impl Actor {
                     self.progress_told_now(tokio::time::Instant::now());
                 }
                 () = sleep_until_due(self.compress_due) => self.compress_step(),
+                () = sleep_until_due(self.roll.as_ref().map(|r| r.due)) => self.roll_call_over(),
                 () = paste::arrived(&mut self.arrivals), if self.pasting.is_some() => {
                     self.paste_progress(false);
                 }
@@ -2031,6 +2050,59 @@ impl Actor {
         }
     }
 
+    /// `asker`, a viewer that is not the driver, typed: the driver is sent a marker, and unless
+    /// it says anything within [`DRIVER_SILENCE`] the seat passes to `asker`
+    /// ([`Self::roll_call_over`]). A driver whose sink closed is not asked: its silence is the
+    /// answer. One that never answered a marker is a tool reading the stream raw, and keeps
+    /// its seat.
+    fn ask_driver(&mut self, asker: ClientId) {
+        let Some(driver) = self.driver else { return };
+        if self.roll.is_some() || !self.viewers.iter().any(|v| v.client == asker) {
+            return;
+        }
+        let Some(due) = tokio::time::Instant::now().checked_add(DRIVER_SILENCE) else { return };
+        let orphaned = self.orphan.as_ref().is_some_and(|(c, _)| *c == driver);
+        if !orphaned {
+            let Some(i) = self.viewers.iter().position(|v| v.client == driver) else { return };
+            if self.viewers.get(i).is_none_or(|v| v.reach.reached.is_none()) {
+                return;
+            }
+            let id = self.next_marker;
+            self.next_marker = self.next_marker.wrapping_add(1);
+            let Some(marker) = self.encode(&TermEvent::Marker { id }) else { return };
+            if let Some(v) = self.viewers.get_mut(i) {
+                v.reach.marker(id);
+            }
+            let _open = self.deliver(i, marker);
+        }
+        self.roll = Some(RollCall { driver, asker, due });
+    }
+
+    /// The driver did not answer in time: the viewer that typed drives from now on, at its
+    /// size, and the silent driver is told, should it ever read again.
+    fn roll_call_over(&mut self) {
+        let Some(roll) = self.roll.take() else { return };
+        if self.driver != Some(roll.driver) {
+            return;
+        }
+        let Some(size) = self.viewers.iter().find(|v| v.client == roll.asker).map(|v| v.size)
+        else {
+            return;
+        };
+        tracing::info!(
+            session = %self.id,
+            driver = %roll.driver,
+            to = %roll.asker,
+            "the driver did not answer; the viewer that typed drives"
+        );
+        self.orphan = None;
+        self.driver = Some(roll.asker);
+        self.send_to(roll.driver, &TermEvent::Driver { you: false });
+        self.send_to(roll.asker, &TermEvent::Driver { you: true });
+        self.apply_size(size);
+        self.apply_colors_of(roll.asker);
+    }
+
     /// The colours `client` paints with become the terminal's defaults (what colour queries
     /// answer), when it has said them; a driver that never did leaves the defaults alone.
     fn apply_colors_of(&mut self, client: ClientId) {
@@ -2085,6 +2157,9 @@ impl Actor {
                 self.viewers.retain(|v| v.client != client);
                 if self.orphan.as_ref().is_some_and(|(c, _)| *c == client) {
                     self.orphan = None;
+                }
+                if self.roll.as_ref().is_some_and(|r| r.driver == client) {
+                    self.roll = None;
                 }
                 self.viewers.push(Viewer::new(client, sink, size, colors));
                 if self.driver.is_none() {
@@ -2225,6 +2300,19 @@ impl Actor {
     fn request(&mut self, client: ClientId, req: TermRequest, at: tokio::time::Instant) {
         tracing::trace!(session = %self.id, queued_us = at.elapsed().as_micros(), "request");
         self.quiet_again();
+        if self.driver == Some(client) {
+            // Any word from the driver says it is there.
+            self.roll = None;
+        } else if matches!(
+            req,
+            TermRequest::Key(_)
+                | TermRequest::Mouse(_)
+                | TermRequest::Paste { .. }
+                | TermRequest::Raw(_)
+                | TermRequest::PastePicture(_)
+        ) {
+            self.ask_driver(client);
+        }
         let mut bytes = Vec::new();
         let mut key = None;
         let result = match req {
