@@ -129,7 +129,8 @@ impl Queue {
 
     /// Follow the contents of `folders`, each with its own directory's watch: one stream over
     /// them all, started again when the set changes. It starts off this thread, so the stream
-    /// over the folders before is kept until it is up. Once it is, the folders new to it are
+    /// over the folders before is kept until it is up, then retired once what it already heard
+    /// is handed over. Once it is, the folders new to it are
     /// listed again for what changed inside them while it started. Unfollowed on an empty set,
     /// and not at all when `FSEvents` refuses (their entries are still followed by kqueue).
     pub(super) fn follow_contents(&mut self, folders: Vec<(PathBuf, RawFd)>) {
@@ -276,7 +277,9 @@ impl Queue {
                             hits.push(Hit::Dir { id: *id, name: None, done: false, content: true });
                         }
                     }
-                    contents.covering = None;
+                    if let Some(before) = contents.covering.take() {
+                        before.retire();
+                    }
                     contents.whole.clear();
                     contents.settled = true;
                 }

@@ -22,10 +22,10 @@ use dispatch2::{DispatchQoS, DispatchQueue, DispatchRetained, GlobalQueueIdentif
 use objc2_core_foundation::{CFArray, CFString};
 use objc2_core_services::{
     ConstFSEventStreamRef, FSEventStreamContext, FSEventStreamCreate, FSEventStreamEventId,
-    FSEventStreamInvalidate, FSEventStreamRef, FSEventStreamRelease, FSEventStreamSetDispatchQueue,
-    FSEventStreamStart, FSEventStreamStop, kFSEventStreamCreateFlagFileEvents,
-    kFSEventStreamCreateFlagNoDefer, kFSEventStreamCreateFlagWatchRoot,
-    kFSEventStreamEventIdSinceNow,
+    FSEventStreamFlushSync, FSEventStreamInvalidate, FSEventStreamRef, FSEventStreamRelease,
+    FSEventStreamSetDispatchQueue, FSEventStreamStart, FSEventStreamStop,
+    kFSEventStreamCreateFlagFileEvents, kFSEventStreamCreateFlagNoDefer,
+    kFSEventStreamCreateFlagWatchRoot, kFSEventStreamEventIdSinceNow,
 };
 pub use objc2_core_services::{
     FSEventStreamEventFlags as Flags, kFSEventStreamEventFlagItemChangeOwner,
@@ -137,7 +137,7 @@ impl Stream {
 #[derive(Debug)]
 pub struct Starting {
     /// The stream once up, which lives as long as this does.
-    _stream: Arc<Mutex<Option<Stream>>>,
+    stream: Arc<Mutex<Option<Stream>>>,
 }
 
 impl Starting {
@@ -181,7 +181,33 @@ impl Starting {
             drop(slot);
             up();
         });
-        Self { _stream: slot }
+        Self { stream: slot }
+    }
+
+    /// Let it go once every event that already happened has reached its handler, so a stream
+    /// that takes over from this one misses none still held back by the latency. Done on a
+    /// global queue, since the flush waits for any other stream of the process starting.
+    pub fn retire(self) {
+        let queue = GlobalQueueIdentifier::QualityOfService(DispatchQoS::Utility);
+        DispatchQueue::global_queue(queue).exec_async(move || {
+            let up = self.stream.lock();
+            if let Some(stream) = up.as_ref() {
+                stream.flush();
+            }
+            drop(up);
+            drop(self);
+        });
+    }
+}
+
+impl Stream {
+    /// Hand the handler every event that happened before this call (FSEvents.h).
+    fn flush(&self) {
+        // SAFETY: a started stream, not yet invalidated: only `drop` does that. The callback
+        // runs on the stream's own queue, which this does not hold.
+        unsafe {
+            FSEventStreamFlushSync(self.raw);
+        }
     }
 }
 
