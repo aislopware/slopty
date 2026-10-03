@@ -2052,3 +2052,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     refused.
   - Tests: quinn's assembler tests, in `assembler.rs` (noq-proto, 453 of its tests pass with
     the patch).
+
+- ✅ **A Linux socket's receive buffer** (2026-10-03). The endpoint asks for a 4 MiB
+  `SO_RCVBUF` ("Every packet is 1232 bytes" above). Linux caps that at `net.core.rmem_max`,
+  208 KiB on Ubuntu, and reports double what it set, so the check against the ask was wrong
+  both ways there.
+  - **What the endpoint does.** It halves what Linux reports before comparing (`socket(7)`: the
+    other half is the kernel's bookkeeping). When the grant is short it asks again with
+    `SO_RCVBUFFORCE`, which a process with `CAP_NET_ADMIN` may set past the cap (a worker or
+    server run as a system service by root) and which anyone else is refused. Then it warns
+    once per socket, naming the setting that caps it: `net.core.rmem_max` on Linux,
+    `kern.ipc.maxsockbuf` on macOS. This is what quic-go does.
+  - **Why not more.** A user install (systemd user units) cannot set a sysctl, and Slopty never
+    asks for root. A Linux worker or server receives no media, only input, control and
+    uploads, which QUIC's flow control paces, so a short buffer there costs a retransmission,
+    not a frame. The 4 MiB is for the client that receives keyframes, which runs on macOS.
+  - **The test.** `the_socket_holds_a_large_keyframe_while_nobody_reads` holds on Linux where
+    the host allows 4 MiB. CI's Linux job sets `net.core.rmem_max` to 8 MiB, as macOS allows,
+    and the failure message names the setting to raise. Docker Desktop's VM allows 4 MiB.

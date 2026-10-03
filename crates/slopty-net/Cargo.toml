@@ -35,6 +35,10 @@ tracing.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 noq = { workspace = true, features = [ "fast-apple-datapath" ] }
 
+# `SO_RCVBUFFORCE`, a receive buffer past `net.core.rmem_max` where the process may (`endpoint`).
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 slopty-tailnet = { workspace = true, features = [ "fake" ] }
 slopty-shape.workspace = true

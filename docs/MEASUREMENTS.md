@@ -13960,3 +13960,24 @@ still owed on hardware.
   --exact screen::synthetic::tests::measure_a_region_change --nocapture) \
   > target/logs/region-change.log 2>&1
 ```
+
+## 2026-10-03 — a Linux socket's receive buffer
+
+`keyframe_report` (`crates/slopty-net/src/endpoint.rs`) on Linux: 1.5 MB of 1232-byte datagrams
+over loopback to a socket nobody reads. Docker Desktop's VM (arm64, kernel 7.0.14-linuxkit,
+`net.core.rmem_max` 4 MiB) in an Ubuntu 24.04 container; `SO_RCVBUF` is what the socket was set
+to, half what Linux reports. Ubuntu's own default cap is 212 992 B, which the first row stands
+for (the socket's default).
+
+| asked | as | `SO_RCVBUF` | held |
+| --- | --- | --- | --- |
+| nothing (`SLOPTY_UDP_RCVBUF=0`) | a user | 106 496 B | 92 of 1 217 |
+| 16 MiB | a user | 4 MiB (the cap) | 1 217 of 1 217 |
+| 16 MiB | root, no `CAP_NET_ADMIN` (Docker's default) | 4 MiB (the cap) | 1 217 of 1 217 |
+| 16 MiB | root with `CAP_NET_ADMIN` | 16 MiB (forced) | 1 217 of 1 217 |
+
+```sh
+SLOPTY_UDP_RCVBUF=16777216 target/debug/deps/slopty_net-<hash> --exact \
+  endpoint::tests::keyframe_report --ignored --nocapture
+docker run --rm --cap-add NET_ADMIN -u root -e SLOPTY_UDP_RCVBUF=16777216 … (the same)
+```

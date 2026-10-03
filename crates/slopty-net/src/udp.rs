@@ -230,7 +230,8 @@ mod tests {
     }
 
     /// Every datagram of `socket`'s longest transmit, twice over and three more, arrives once
-    /// and in order.
+    /// and in order. On Apple's batched path it goes as one transmit, which the batch cuts;
+    /// anywhere else as noq would send it, in transmits of at most that many.
     async fn a_long_transmit_arrives_whole(batched: bool) {
         let receiver = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let to = receiver.local_addr().unwrap();
@@ -238,11 +239,14 @@ mod tests {
             wrap(std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap(), batched).unwrap();
         let mut sender = socket.create_sender();
         let segments = sender.max_transmit_segments().get();
-        assert_eq!(segments > 1, batched, "the batched path batches");
+        // Linux cuts a transmit into datagrams itself (UDP GSO) on every path; macOS sends
+        // several in a call only on the batched one.
+        let segmented = batched || cfg!(target_os = "linux");
+        assert_eq!(segments > 1, segmented, "a transmit carries {segments} datagrams");
         let datagrams = segments.saturating_mul(2).saturating_add(3);
         let contents: Vec<u8> =
             (0..datagrams).flat_map(|i| [u8::try_from(i).unwrap(); 100]).collect();
-        let chunk = if batched { contents.len() } else { 100 };
+        let chunk = if batched { contents.len() } else { segments.saturating_mul(100) };
         for part in contents.chunks(chunk) {
             let transmit = transmit(to, part, 100);
             std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx)).await.unwrap();

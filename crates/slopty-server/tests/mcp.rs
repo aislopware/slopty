@@ -11,7 +11,7 @@ mod tests {
     use serde_json::{Value, json};
     use slopty_core::WorkerId;
     use slopty_net::HostAddr;
-    use slopty_net::admission::Admission;
+    use slopty_net::admission::{Admission, on_tailnet};
     use slopty_net::client::bind_client;
     use slopty_proto::server::{Os, Registration, Role, WorkerCaps};
     use slopty_server::{Config, Hub, Server};
@@ -291,20 +291,34 @@ mod tests {
         server.shutdown().await;
     }
 
-    /// This machine's link-local address on `lo0` is not loopback, so a listener that admits
-    /// only 10/8 turns it away; loopback is let in whatever the list says.
+    /// `port` on an address of this machine's that is not loopback, so a peer reaching it from
+    /// here comes from it: the link-local address macOS gives `lo0`, or on Linux, whose `lo` has
+    /// none, the one it sends from on its default route (nothing leaves the machine).
+    fn not_loopback(port: u16) -> SocketAddr {
+        if cfg!(target_os = "macos") {
+            return format!("[fe80::1%1]:{port}").parse().unwrap();
+        }
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        probe.connect("192.0.2.1:9").expect("a default route");
+        let ip = probe.local_addr().unwrap().ip();
+        assert!(!ip.is_loopback() && !on_tailnet(ip), "{ip} is let in whatever the ranges");
+        SocketAddr::new(ip, port)
+    }
+
+    /// This machine at an address that is not loopback is turned away by a listener that admits
+    /// only 192.0.2.0/24, a range no host is given (RFC 5737; not 10/8, where a runner's own
+    /// address can be); loopback is let in whatever the list says.
     #[tokio::test]
     async fn a_peer_outside_the_admitted_ranges_gets_no_answer() {
         let listener = slopty_server::mcp::bind("[::]:0".parse().unwrap()).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let admission = Admission::with_tailnet(vec!["10.0.0.0/8".parse().unwrap()], None);
+        let admission = Admission::with_tailnet(vec!["192.0.2.0/24".parse().unwrap()], None);
         let serving = tokio::spawn(slopty_server::mcp::serve(
             listener,
             admission,
             Hub::new("test".to_owned(), Vec::new()),
         ));
-        let outside: SocketAddr = format!("[fe80::1%1]:{port}").parse().unwrap();
-        let mut stream = tokio::net::TcpStream::connect(outside).await.unwrap();
+        let mut stream = tokio::net::TcpStream::connect(not_loopback(port)).await.unwrap();
         let _sent = stream.write_all(b"POST /mcp HTTP/1.1\r\nHost: x\r\n\r\n").await;
         let mut response = Vec::new();
         let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response))

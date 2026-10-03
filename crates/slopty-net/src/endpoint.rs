@@ -69,8 +69,15 @@ pub const PATH_MTU: u16 = 1232;
 pub const MIN_MTU: u16 = 1200;
 /// The socket's receive buffer. macOS gives a UDP socket 786 896 bytes
 /// (`net.inet.udp.recvspace`), which a 5K keyframe at 4:4:4 passes when it lands at once while the
-/// endpoint's task is late; `kern.ipc.maxsockbuf` allows 8 MiB.
+/// endpoint's task is late; `kern.ipc.maxsockbuf` allows 8 MiB. Linux gives 208 KiB
+/// (`net.core.rmem_default`) and allows as little past that unless [`RECEIVE_BUFFER_LIMIT`] is
+/// raised or the process may force it (`CAP_NET_ADMIN`).
 const RECEIVE_BUFFER: usize = 4 << 20;
+/// The setting that caps what a socket may ask for, named when it grants less.
+#[cfg(target_os = "linux")]
+const RECEIVE_BUFFER_LIMIT: &str = "net.core.rmem_max";
+#[cfg(not(target_os = "linux"))]
+const RECEIVE_BUFFER_LIMIT: &str = "kern.ipc.maxsockbuf";
 
 /// Environment override for the congestion controller: `cubic`, `bbr3` or `newreno`.
 ///
@@ -388,14 +395,41 @@ fn bind_socket(local: SocketAddr) -> std::io::Result<socket2::Socket> {
     }
     if let Some(bytes) = tuning().receive_buffer {
         socket.set_recv_buffer_size(bytes)?;
-        // The OS clamps what it grants (`kern.ipc.maxsockbuf` on macOS) and says nothing.
-        let granted = socket.recv_buffer_size()?;
+        // The OS clamps what it grants to [`RECEIVE_BUFFER_LIMIT`] and says nothing.
+        let granted = match receive_buffer(&socket)? {
+            short if short < bytes && forced(&socket, bytes) => receive_buffer(&socket)?,
+            granted => granted,
+        };
         if granted < bytes {
-            tracing::warn!(asked = bytes, granted, "UDP receive buffer smaller than asked");
+            tracing::warn!(
+                asked = bytes,
+                granted,
+                "UDP receive buffer smaller than asked; {RECEIVE_BUFFER_LIMIT} caps it"
+            );
         }
     }
     socket.bind(&local.into())?;
     Ok(socket)
+}
+
+/// The receive buffer `socket` was set to. Linux reports double what it set, the half it adds
+/// being its own bookkeeping (`socket(7)`, `SO_RCVBUF`).
+fn receive_buffer(socket: &socket2::Socket) -> std::io::Result<usize> {
+    let reported = socket.recv_buffer_size()?;
+    Ok(if cfg!(target_os = "linux") { reported / 2 } else { reported })
+}
+
+/// Whether `socket`'s receive buffer was set to `bytes` past the system's cap, which Linux lets
+/// a process with `CAP_NET_ADMIN` do (a worker or server run as a system service by root).
+#[cfg(target_os = "linux")]
+fn forced(socket: &socket2::Socket, bytes: usize) -> bool {
+    rustix::net::sockopt::set_socket_recv_buffer_size_force(socket, bytes).is_ok()
+}
+
+/// macOS has no override past `kern.ipc.maxsockbuf`.
+#[cfg(not(target_os = "linux"))]
+const fn forced(_socket: &socket2::Socket, _bytes: usize) -> bool {
+    false
 }
 
 /// [`bind`] on a socket that is not the OS's: `slopty_shape::sim`'s in-memory network, where a
@@ -690,10 +724,13 @@ mod tests {
         (arrived, count)
     }
 
+    /// On Linux this needs the host to allow it: `net.core.rmem_max` of at least
+    /// [`RECEIVE_BUFFER`], as CI's Linux job sets, or the test running as root.
     #[test]
     fn the_socket_holds_a_large_keyframe_while_nobody_reads() {
         let socket = bind_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-        assert!(socket.recv_buffer_size().unwrap() >= RECEIVE_BUFFER);
+        let granted = receive_buffer(&socket).unwrap();
+        assert!(granted >= RECEIVE_BUFFER, "{granted} B granted; raise {RECEIVE_BUFFER_LIMIT}");
         let (arrived, sent) = a_keyframe_sent_while_nobody_reads();
         assert_eq!(arrived, sent, "the socket held {arrived} of {sent}");
     }
@@ -703,7 +740,7 @@ mod tests {
     fn keyframe_report() {
         let (arrived, sent) = a_keyframe_sent_while_nobody_reads();
         let buffer =
-            bind_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap().recv_buffer_size().unwrap();
+            receive_buffer(&bind_socket(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap()).unwrap();
         println!("SO_RCVBUF {buffer}: {arrived} of {sent} datagrams of {PATH_MTU} B held");
     }
 

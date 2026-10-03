@@ -7847,6 +7847,7 @@ dependencies = [
  "noq",
  "noq-proto",
  "parking_lot",
+ "rustix",
  "serde",
  "serde_json",
  "slopty-core",

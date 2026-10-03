@@ -6,7 +6,7 @@ mod tests {
     use std::time::Duration;
 
     use slopty_core::{ClientId, SessionId, WallMs, WorkerId};
-    use slopty_net::admission::Admission;
+    use slopty_net::admission::{Admission, on_tailnet};
     use slopty_net::client::{bind_client, connect, connect_addr};
     use slopty_net::streams::{self, Uni};
     use slopty_net::worker::WorkerListener;
@@ -277,13 +277,28 @@ mod tests {
         }
     }
 
+    /// `port` on an address of this machine's that is not loopback, so a peer reaching it from
+    /// here comes from it: the link-local address macOS gives `lo0`, or on Linux, whose `lo` has
+    /// none, the one it sends from on its default route (nothing leaves the machine).
+    fn not_loopback(port: u16) -> SocketAddr {
+        if cfg!(target_os = "macos") {
+            return format!("[fe80::1%1]:{port}").parse().unwrap();
+        }
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        probe.connect("192.0.2.1:9").expect("a default route");
+        let ip = probe.local_addr().unwrap().ip();
+        assert!(!ip.is_loopback() && !on_tailnet(ip), "{ip} is let in whatever the ranges");
+        SocketAddr::new(ip, port)
+    }
+
     /// A peer outside the admitted ranges is refused at its first packet: the client hears so
     /// at once rather than waiting out a timeout, and the caller never sees it. The peer here is
-    /// this machine's own link-local address on `lo0`, which is not loopback, against a worker
-    /// that admits only 10/8.
+    /// this machine itself at an address that is not loopback, against a worker that admits only
+    /// 192.0.2.0/24, a range no host is given (RFC 5737). Not 10/8: a runner's own address can
+    /// be in it.
     #[tokio::test]
     async fn a_peer_outside_the_admitted_ranges_is_refused_before_the_handshake() {
-        let (listener, port, id) = worker(Admission::new(vec!["10.0.0.0/8".parse().unwrap()]));
+        let (listener, port, id) = worker(Admission::new(vec!["192.0.2.0/24".parse().unwrap()]));
         let seen = {
             let listener = listener.clone();
             tokio::spawn(async move {
@@ -293,9 +308,8 @@ mod tests {
             })
         };
         let endpoint = bind_client().unwrap();
-        let link_local: SocketAddr = format!("[fe80::1%1]:{port}").parse().unwrap();
         let started = Instant::now();
-        let err = connect_addr(&endpoint, link_local, hello()).await.unwrap_err();
+        let err = connect_addr(&endpoint, not_loopback(port), hello()).await.unwrap_err();
         let took = started.elapsed();
         assert!(matches!(&err, NetError::Connect(why) if why.contains("refused")), "{err:?}");
         assert!(took < Duration::from_secs(1), "refused at once, not timed out: {took:?}");
