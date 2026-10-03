@@ -17,6 +17,11 @@
 //!   closing it ends the agent.
 //! - **Once.** A start is acted on once per intent id: starts are taken one at a time, and a repeat
 //!   gets the first outcome back.
+//! - **Resumed.** A start whose arguments are `--resume <id>` takes an exited thread's session up
+//!   again ([`slopty_agent::resume::resumed`]): Claude Code goes on under the same id, so the
+//!   observer begins the same thread in the new terminal and reads it again from the transcript. It
+//!   is refused while a Claude Code runs that session already: a session has one writer. No other
+//!   argument is taken from a client.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -101,17 +106,26 @@ async fn begin(
     if start.drive.as_ref().is_some_and(|d| !d.is(Drive::OBSERVED)) {
         return refused("Claude Code runs in its own terminal, observed");
     }
-    if !start.args.is_empty() {
-        return refused("Claude Code takes no arguments from a start");
-    }
+    let (model, prompt) = (start.model.as_deref(), start.prompt.as_deref());
+    let (args, native) = match start.args.as_slice() {
+        [] => slopty_agent::resume::started(model, prompt),
+        [flag, session] if flag == slopty_agent::resume::RESUME_FLAG => {
+            let Some(args) = slopty_agent::resume::resumed(session, model, prompt) else {
+                return refused(&format!("{session} is no Claude Code session"));
+            };
+            if runs(host, session) {
+                return refused("Claude Code runs this session already");
+            }
+            (args, session.clone())
+        }
+        _ => return refused("Claude Code takes no arguments from a start but --resume <id>"),
+    };
     if !Path::new(&start.cwd).is_dir() {
         return refused(&format!("There is no folder {} here", start.cwd));
     }
     let Some(claude) = crate::facts::installed("claude", path).await else {
         return refused("Claude Code is not installed");
     };
-    let (args, native) =
-        slopty_agent::resume::started(start.model.as_deref(), start.prompt.as_deref());
     let command =
         std::iter::once(claude.program.to_string_lossy().into_owned()).chain(args).collect();
     let env = vec![("PATH".to_owned(), claude.path.to_string_lossy().into_owned())];
@@ -127,6 +141,13 @@ async fn begin(
         host.typed(thread, id, prompt);
     }
     Outcome::Started { thread }
+}
+
+/// Whether a live Claude Code holds session `native`'s thread here.
+fn runs(host: &Host, native: &str) -> bool {
+    let thread = slopty_agent::observed::thread_of(native);
+    host.state(thread)
+        .is_some_and(|(state, _)| state.status.liveness == slopty_proto::thread::Liveness::Live)
 }
 
 fn refused(reason: &str) -> Outcome {

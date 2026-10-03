@@ -114,6 +114,14 @@ impl Acp {
         by: Answerer,
     ) -> Outcome {
         let live = state.status.liveness == Liveness::Live;
+        // An ACP permission's answer carries no words: a reason given with it goes as the
+        // person's next message, queued behind the turn under way.
+        let reason = match ask {
+            Intent::Answer { message: Some(why), .. } if !why.trim().is_empty() => {
+                Some(ThreadAsk::Send { text: why.trim().to_owned(), intent })
+            }
+            _ => None,
+        };
         let asked = match ask {
             Intent::Send { delivery: Delivery::Steer, .. } => {
                 return Outcome::Unsupported { cap: Cap::named(Cap::STEER) };
@@ -171,8 +179,11 @@ impl Acp {
         if !live && !matches!(asked, ThreadAsk::Send { .. }) {
             return refused("The agent is not running");
         }
-        if self.0.send(Ask::Thread { thread: state.meta.id, ask: asked }).is_err() {
-            return refused("ACP threads are not served here");
+        let thread = state.meta.id;
+        for ask in std::iter::once(asked).chain(reason) {
+            if self.0.send(Ask::Thread { thread, ask }).is_err() {
+                return refused("ACP threads are not served here");
+            }
         }
         Outcome::Done
     }

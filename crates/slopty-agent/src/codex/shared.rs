@@ -21,8 +21,15 @@
 //!   answers Codex offers, answered by one choice for them all (`detail::Answer`); each answer goes
 //!   back under its question's id. A question for a secret is left to Codex's own terminal, since
 //!   an answer given here is kept in the thread's log.
+//! - **Forms.** An MCP server's form ([`super::form`]) is a request whose questions are its fields,
+//!   with declining and cancelling as its answers; its answers go back as the form's content. A
+//!   page to open or a device check is left to Codex's own terminal.
+//! - **The queue.** A message queued while a turn runs waits here, where it can be changed or taken
+//!   back, and goes as the next turn once Codex says the turn under way ended
+//!   ([`Shared::next_queued`]): Codex's own TUI queues in itself, and the app-server has no queue
+//!   of its own.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use serde_json::Value;
 use slopty_core::{SessionId, WallMs};
@@ -33,10 +40,12 @@ use slopty_proto::thread::detail::{
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, Changed, Choice, Clipped, Compaction, Delivery, Drive,
     Effect, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Notice, PartKey,
-    Patch, Phase, Plan, Request, RequestState, Retry, Status, Step, ThreadId, ThreadMeta, ToolCall,
-    ToolDetail, ToolState, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
+    Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Status, Step,
+    ThreadId, ThreadMeta, ToolCall, ToolDetail, ToolState, Turn, TurnId, TurnState, Usage,
+    UserMessage, Wait, kind,
 };
 
+use super::form::Form;
 use super::protocol::{
     self as p, CommandExecutionApprovalDecision, CommandExecutionStatus,
     FileChangeApprovalDecision, PatchApplyStatus, RequestId, ServerNotification, ServerRequest,
@@ -44,8 +53,14 @@ use super::protocol::{
 };
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 5] =
-    [Cap::APPROVALS, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::LIVE_TUI, Cap::STEER];
+pub const CAPS: [&str; 6] =
+    [Cap::APPROVALS, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::LIVE_TUI, Cap::QUEUE, Cap::STEER];
+
+/// A form's answer that declines it, and the one that cancels it. Their ids start with a
+/// colon, so words typed into a form's one field are not taken for them.
+pub const DECLINE: &str = ":decline";
+/// See [`DECLINE`].
+pub const CANCEL: &str = ":cancel";
 
 /// Who answered a request this worker's client did not: the Codex TUI beside it, or another
 /// client of the app-server.
@@ -60,6 +75,25 @@ const OUTPUT: Clip = Clip { lines: 40, chars: 4_000 };
 #[must_use]
 pub fn thread_of(native: &str) -> ThreadId {
     ThreadId::derived(&["codex thread", native])
+}
+
+/// What a start of a Codex thread takes to take thread `native` up again rather than begin one:
+/// `resume <native>`, the words of Codex's own `codex resume`.
+pub const RESUME: &str = "resume";
+
+/// The arguments of a start that takes Codex thread `native` up again.
+#[must_use]
+pub fn resume_args(native: &str) -> Vec<String> {
+    vec![RESUME.to_owned(), native.to_owned()]
+}
+
+/// The Codex thread a start's `args` take up again, when they are [`resume_args`].
+#[must_use]
+pub fn resumed(args: &[String]) -> Option<&str> {
+    match args {
+        [word, native] if word == RESUME && !native.trim().is_empty() => Some(native),
+        _ => None,
+    }
 }
 
 /// What asks the app-server for a new thread in `cwd` (`thread/start`).
@@ -91,6 +125,8 @@ struct Open {
     answers: BTreeMap<String, Value>,
     /// The questions it asks, each with Codex's id for it, which its answer is keyed by.
     questions: Vec<(String, Question)>,
+    /// For an MCP server's form: it, whose content the answers fill.
+    form: Option<Form>,
     /// Who answered from here, and with what, before Codex said it was settled.
     answered: Option<(Answerer, String)>,
 }
@@ -102,6 +138,8 @@ pub enum Send {
     Start(Box<p::TurnStartParams>),
     /// Into the turn under way.
     Steer(Box<p::TurnSteerParams>),
+    /// Held until the turn under way ends: these actions show it waiting.
+    Held(Vec<Action>),
 }
 
 /// A Codex thread as Slopty shows it.
@@ -130,6 +168,8 @@ pub struct Shared {
     /// The calls begun and not yet whole, as last told, so a request about one marks it
     /// waiting on the person: Codex begins a call before it asks about it.
     calls: HashMap<ItemId, Item>,
+    /// Messages held until the turn under way ends, in their order.
+    queued: VecDeque<Pending>,
 }
 
 impl Shared {
@@ -194,6 +234,7 @@ impl Shared {
             said: None,
             begun: HashMap::new(),
             calls: HashMap::new(),
+            queued: VecDeque::new(),
         };
         let mut actions = vec![Action::Meta(Box::new(shared.meta.clone()))];
         for turn in &thread.turns {
@@ -508,8 +549,16 @@ impl Shared {
             }
             ServerRequest::McpServerElicitationRequest(asked) => {
                 let title = format!("{} asks for input", asked.server_name);
-                (None, Request::ELICITATION, title, None, Vec::new(), BTreeMap::new())
+                let form = Form::of(&asked.mode);
+                let text =
+                    form.as_ref().map(|f| f.message.clone()).filter(|m| !m.trim().is_empty());
+                let options = if form.is_some() { form_choices() } else { Vec::new() };
+                (None, Request::ELICITATION, title, text, options, BTreeMap::new())
             }
+        };
+        let form = match request {
+            ServerRequest::McpServerElicitationRequest(asked) => Form::of(&asked.mode),
+            _ => None,
         };
         let item = item.map(ItemId);
         let open_item = item.clone();
@@ -523,13 +572,18 @@ impl Shared {
             }
             _ => Vec::new(),
         };
+        let shown: Vec<Question> = match &form {
+            Some(form) => form.questions(),
+            None => questions.iter().map(|(_, q)| q.clone()).collect(),
+        };
         let open = Open {
             id: id.clone(),
             item: item.clone(),
             title: title.clone(),
             kind,
             answers,
-            questions: questions.clone(),
+            questions,
+            form,
             answered: None,
         };
         self.open.insert(ask.clone(), open);
@@ -549,7 +603,7 @@ impl Shared {
             title,
             text: text.as_deref().map(Clipped::whole),
             options,
-            questions: questions.into_iter().map(|(_, q)| q).collect(),
+            questions: shown,
             proposed: None,
             schema_json: None,
             url: None,
@@ -580,7 +634,26 @@ impl Shared {
         by: Answerer,
     ) -> Option<(RequestId, Value)> {
         let open = self.open.get_mut(ask)?;
-        let result = if open.questions.is_empty() {
+        let result = if let Some(form) = &open.form {
+            let response = match choice {
+                DECLINE => p::McpServerElicitationRequestResponse {
+                    meta: None,
+                    action: p::McpServerElicitationAction::Decline,
+                    content: None,
+                },
+                CANCEL => p::McpServerElicitationRequestResponse {
+                    meta: None,
+                    action: p::McpServerElicitationAction::Cancel,
+                    content: None,
+                },
+                answers => p::McpServerElicitationRequestResponse {
+                    meta: None,
+                    action: p::McpServerElicitationAction::Accept,
+                    content: Some(form.content(answers)?),
+                },
+            };
+            serde_json::to_value(response).ok()?
+        } else if open.questions.is_empty() {
             serde_json::json!({ "decision": open.answers.get(choice)?.clone() })
         } else {
             let asked: Vec<Question> = open.questions.iter().map(|(_, q)| q.clone()).collect();
@@ -601,8 +674,17 @@ impl Shared {
 
     /// What goes to the app-server for `text`, sent as intent `intent` with `delivery`: into
     /// the turn under way when it steers and one is, else a turn of its own.
-    #[must_use]
-    pub fn send(&self, text: &str, delivery: Delivery, intent: IntentId) -> Send {
+    /// A message queued while a turn runs is held here until it ends ([`Self::next_queued`]).
+    pub fn send(&mut self, text: &str, delivery: Delivery, intent: IntentId) -> Send {
+        if delivery == Delivery::Queue && self.current.is_some() {
+            self.queued.push_back(Pending {
+                intent,
+                text: text.to_owned(),
+                delivery,
+                state: PendingState::Waiting,
+            });
+            return Send::Held(vec![self.pending_now()]);
+        }
         let input =
             vec![UserInput::Text { text: text.to_owned(), text_elements: Some(Vec::new()) }];
         let client = Some(intent.to_string());
@@ -622,6 +704,47 @@ impl Shared {
                 ..p::TurnStartParams::default()
             })),
         }
+    }
+
+    /// Take back the message held for `intent`; `None` when none is.
+    pub fn withdraw(&mut self, intent: IntentId) -> Option<Vec<Action>> {
+        let at = self.queued.iter().position(|p| p.intent == intent)?;
+        self.queued.remove(at);
+        Some(vec![self.pending_now()])
+    }
+
+    /// Make the message held for `intent` say `text`; `None` when none is.
+    pub fn edit(&mut self, intent: IntentId, text: &str) -> Option<Vec<Action>> {
+        let held = self.queued.iter_mut().find(|p| p.intent == intent)?;
+        text.clone_into(&mut held.text);
+        Some(vec![self.pending_now()])
+    }
+
+    /// The next message held, as the turn that sends it and the actions that take it off the
+    /// queue, once no turn is under way.
+    pub fn next_queued(&mut self) -> Option<(Box<p::TurnStartParams>, Vec<Action>)> {
+        if self.current.is_some() {
+            return None;
+        }
+        let next = self.queued.pop_front()?;
+        let Send::Start(params) = self.send(&next.text, Delivery::Steer, next.intent) else {
+            return None;
+        };
+        Some((params, vec![self.pending_now()]))
+    }
+
+    fn pending_now(&self) -> Action {
+        Action::PendingSet(self.queued.iter().cloned().collect())
+    }
+
+    /// The terminal Codex's own TUI runs in on this thread, opened by the worker, or none once
+    /// it closed: the thread names it, so a client can show it.
+    pub fn set_terminal(&mut self, terminal: Option<SessionId>) -> Vec<Action> {
+        if self.meta.terminal == terminal {
+            return Vec::new();
+        }
+        self.meta.terminal = terminal;
+        vec![Action::Meta(Box::new(self.meta.clone()))]
     }
 
     /// What stops the turn under way, when one is.
@@ -1184,6 +1307,18 @@ fn usage_of(tokens: &p::TokenUsageBreakdown) -> Usage {
     put(Usage::OUTPUT, tokens.output_tokens);
     put(Usage::REASONING, tokens.reasoning_output_tokens);
     Usage(usage)
+}
+
+/// A form's answers beside its questions: decline it, or cancel it and stop the turn.
+fn form_choices() -> Vec<Choice> {
+    let choice = |id: &str, label: &str, stops| Choice {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        effect: Effect::Deny,
+        scope: None,
+        stops,
+    };
+    vec![choice(DECLINE, "Decline", false), choice(CANCEL, "Cancel", true)]
 }
 
 /// A command approval's choices, in Codex's order, and the decision each sends.

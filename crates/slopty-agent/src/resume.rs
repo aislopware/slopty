@@ -59,7 +59,10 @@ impl Resume {
     /// The arguments that resume it: `--resume <id>` and the flags kept.
     #[must_use]
     pub fn args(&self) -> Vec<String> {
-        ["--resume".to_owned(), self.session.clone()].into_iter().chain(self.args.clone()).collect()
+        [RESUME_FLAG.to_owned(), self.session.clone()]
+            .into_iter()
+            .chain(self.args.clone())
+            .collect()
     }
 }
 
@@ -253,7 +256,7 @@ pub const SESSION_ID_FLAG: &str = "--session-id";
 /// Flags that pick the conversation themselves: an id of their own, or one to resume. Claude
 /// Code refuses `--session-id` beside a resume unless it forks.
 const PICKS_CONVERSATION: [&str; 6] =
-    [SESSION_ID_FLAG, "--resume", "-r", "--continue", "-c", "--from-pr"];
+    [SESSION_ID_FLAG, RESUME_FLAG, "-r", "--continue", "-c", "--from-pr"];
 
 /// `args` starting a conversation whose id is known before its first hook, and that id.
 ///
@@ -295,6 +298,32 @@ pub fn started(model: Option<&str>, prompt: Option<&str>) -> (Vec<String>, Strin
         args.extend(["--".to_owned(), prompt.to_owned()]);
     }
     (args, session)
+}
+
+/// The flag that takes a conversation up again by its id.
+pub const RESUME_FLAG: &str = "--resume";
+
+/// The arguments that take Claude Code's conversation `session` up again from a client's start.
+///
+/// They read `claude --resume <id> [--model=<model>] [-- <prompt>]`, as [`started`] spells the
+/// rest; `None` when `session` cannot be a session id.
+///
+/// Claude Code goes on under the same id unless asked to fork, so the thread it was is the
+/// one it comes back as. Only the model is given back: the flags the person started it with are
+/// theirs to give again, and what Slopty adds to any `claude` it opens is added afresh.
+#[must_use]
+pub fn resumed(session: &str, model: Option<&str>, prompt: Option<&str>) -> Option<Vec<String>> {
+    if !is_session_id(session) {
+        return None;
+    }
+    let mut args = vec![RESUME_FLAG.to_owned(), session.to_owned()];
+    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
+        args.push(format!("--model={model}"));
+    }
+    if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
+        args.extend(["--".to_owned(), prompt.to_owned()]);
+    }
+    Some(args)
 }
 
 /// Whether `id` can be a Claude Code session id: it is typed into a shell and names a file.

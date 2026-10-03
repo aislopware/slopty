@@ -169,7 +169,7 @@ mod codex {
         let server = tokio::spawn(daemon(listener, tx));
         let host = host(dir.path());
         let (handle, asks) = Codex::channel();
-        let served = codex::spawn(host.clone(), socket, asks);
+        let served = codex::spawn(host.clone(), socket, None, asks);
 
         let mut args = start(&work, "Say hello.");
         args.args = vec!["--yolo".to_owned()];
@@ -229,8 +229,212 @@ mod codex {
         let dir = tempfile::tempdir().unwrap();
         let host = host(dir.path());
         let (handle, asks) = Codex::channel();
-        let _served = codex::spawn(host, dir.path().join("none.sock"), asks);
+        let _served = codex::spawn(host, dir.path().join("none.sock"), None, asks);
         let outcome = handle.start(IntentId::new(), start(dir.path(), "Say hello.")).await;
         assert_eq!(outcome, Outcome::Refused { reason: codex::NOT_RUNNING.to_owned() });
+    }
+
+    /// A stand-in for the person's `codex`, alone in a folder of `dir`: it says its version,
+    /// and for anything else notes its arguments in `ran` and runs `daemon`, a shell line.
+    fn stand_in(dir: &Path, ran: &Path, daemon: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.157.0'; exit 0; fi\n\
+             printf '%s\\n' \"$*\" >> '{}'\n{daemon}\n",
+            ran.display()
+        );
+        let codex = bin.join("codex");
+        std::fs::write(&codex, script).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin
+    }
+
+    /// What the stand-in was run with, a line a run.
+    fn runs(ran: &Path) -> Vec<String> {
+        std::fs::read_to_string(ran)
+            .map(|r| r.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// A start with no daemon running brings the person's daemon up with Codex's own command,
+    /// once, however often the start is asked meanwhile, and goes on as a start does once the
+    /// daemon answers.
+    #[tokio::test]
+    async fn a_codex_start_with_no_daemon_starts_the_persons_daemon_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let ran = dir.path().join("ran");
+        // As Codex's start does, it answers once the app-server listens.
+        let script = format!(
+            "while [ ! -S '{0}' ]; do /bin/sleep 0.05; done\n\
+             printf '{{\"status\":\"started\",\"socketPath\":\"%s\"}}\\n' '{0}'",
+            socket.display()
+        );
+        let bin = stand_in(dir.path(), &ran, &script);
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let launch = codex::Launch::new(Some(bin.into_os_string()));
+        let _served = codex::spawn(host.clone(), socket.clone(), Some(launch), asks);
+
+        let id = IntentId::new();
+        let (first, again) = (handle.clone(), handle.clone());
+        let work_a = work.clone();
+        let asked =
+            tokio::spawn(async move { first.start(id, start(&work_a, "Say hello.")).await });
+        let asked_again =
+            tokio::spawn(async move { again.start(id, start(&work, "Say hello.")).await });
+        tokio::time::timeout(BOUND, async {
+            while runs(&ran).is_empty() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("Codex's start ran");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, _heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(daemon(listener, tx));
+
+        let outcome = tokio::time::timeout(BOUND, asked).await.unwrap().unwrap();
+        assert!(matches!(outcome, Outcome::Started { .. }), "{outcome:?}");
+        let repeat = tokio::time::timeout(BOUND, asked_again).await.unwrap().unwrap();
+        assert_eq!(repeat, outcome, "one start, however often asked");
+        assert_eq!(runs(&ran), ["app-server daemon start"], "Codex's own command, once");
+    }
+
+    /// A daemon Codex could not start refuses the start in Codex's own words, and a machine
+    /// with no `codex` says that; nothing tries again by itself.
+    #[tokio::test]
+    async fn a_failed_daemon_start_is_refused_in_codexs_words() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let failing = concat!(
+            "echo 'Error: app server is running but is not managed by codex app-server daemon' ",
+            ">&2\nexit 1"
+        );
+        let bin = stand_in(dir.path(), &ran, failing);
+        let first = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let launch = codex::Launch::new(Some(bin.into_os_string()));
+        let _served = codex::spawn(first, dir.path().join("none.sock"), Some(launch), asks);
+        let outcome = handle.start(IntentId::new(), start(dir.path(), "Say hello.")).await;
+        let words = "app server is running but is not managed by codex app-server daemon";
+        assert_eq!(outcome, Outcome::Refused { reason: codex::daemon_failed(words) });
+        tokio::time::sleep(codex::RETRY.saturating_mul(2)).await;
+        assert_eq!(runs(&ran).len(), 1, "not tried again");
+
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let second = host(&other);
+        let (handle, asks) = Codex::channel();
+        let launch = codex::Launch::new(Some(empty.into_os_string()));
+        let _served = codex::spawn(second, dir.path().join("none.sock"), Some(launch), asks);
+        let outcome = handle.start(IntentId::new(), start(dir.path(), "Say hello.")).await;
+        assert_eq!(outcome, Outcome::Refused { reason: codex::NO_CODEX.to_owned() });
+    }
+
+    /// A worker that follows Codex starts nothing of it by itself, however long no daemon runs.
+    #[tokio::test]
+    async fn a_worker_alone_never_starts_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("ran");
+        let bin = stand_in(dir.path(), &ran, "exit 0");
+        let host = host(dir.path());
+        let (_handle, asks) = Codex::channel();
+        let launch = codex::Launch::new(Some(bin.into_os_string()));
+        let _served = codex::spawn(host, dir.path().join("none.sock"), Some(launch), asks);
+        tokio::time::sleep(codex::RETRY.saturating_mul(3)).await;
+        assert!(runs(&ran).is_empty(), "nothing ran: {:?}", runs(&ran));
+    }
+
+    /// The recorded answer to the resume of client `b`, which took the thread up again.
+    fn resumed() -> Value {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../slopty-agent/tests/fixtures/codex/approval.jsonl"
+        );
+        let lines: Vec<Value> = std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|line| line["client"] == "b")
+            .collect();
+        let asked = lines
+            .iter()
+            .find(|l| l["dir"] == "sent" && l["msg"]["method"] == "thread/resume")
+            .unwrap();
+        let id = &asked["msg"]["id"];
+        lines.iter().find(|l| l["dir"] == "heard" && l["msg"]["id"] == *id).unwrap()["msg"].clone()
+    }
+
+    /// A stand-in daemon with no thread loaded that answers each `thread/resume` with the
+    /// recording's answer, or with an error once `refuse` says so.
+    async fn resumer(listener: UnixListener, refuse: bool) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let (heard, _kept) = mpsc::unbounded_channel();
+        let lines = starter();
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let answer = match msg["method"].as_str() {
+                Some("initialize") => {
+                    let mut answer = lines[recorded(&lines, "initialize").1].msg.clone();
+                    answer["id"] = id;
+                    answer
+                }
+                Some("thread/loaded/list") => {
+                    json!({ "id": id, "result": { "data": [], "nextCursor": null } })
+                }
+                Some("thread/resume") if refuse => {
+                    json!({ "id": id, "error": { "code": -32600, "message": "no rollout found" } })
+                }
+                Some("thread/resume") => {
+                    let mut answer = resumed();
+                    answer["id"] = id;
+                    answer
+                }
+                _ => continue,
+            };
+            say(&mut ws, &answer).await;
+        }
+    }
+
+    /// A start that names a Codex thread (`resume <thread>`) takes it up again under the same
+    /// thread, once, and one already followed is answered at once; a thread Codex cannot take up
+    /// again is refused in its words.
+    #[tokio::test]
+    async fn a_start_that_names_a_thread_takes_it_up_again() {
+        for refuse in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+            let socket: PathBuf = short.path().join("s.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            let _server = tokio::spawn(resumer(listener, refuse));
+            let host = host(dir.path());
+            let (handle, asks) = Codex::channel();
+            let _served = codex::spawn(host, socket, None, asks);
+
+            let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+            let mut again = start(dir.path(), "");
+            again.prompt = None;
+            again.args = shared::resume_args(&native);
+            let outcome = tokio::time::timeout(BOUND, handle.start(IntentId::new(), again.clone()))
+                .await
+                .unwrap();
+            if refuse {
+                let Outcome::Refused { reason } = &outcome else { panic!("{outcome:?}") };
+                assert!(reason.starts_with("Codex couldn't take the thread up again"), "{reason}");
+                continue;
+            }
+            assert_eq!(outcome, Outcome::Started { thread: shared::thread_of(&native) });
+            let followed = handle.start(IntentId::new(), again).await;
+            assert_eq!(followed, outcome, "followed already: the same thread at once");
+        }
     }
 }

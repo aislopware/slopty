@@ -765,4 +765,113 @@ mod tests {
         assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("workspaceWrite"));
         assert!(shared.settings(approval, &sandbox).is_empty(), "nothing moved");
     }
+
+    /// The recorded notification `method` of `name`'s fixture, as its params.
+    fn recorded_note(name: &str, method: &str) -> Value {
+        fixture(name).into_iter().find(|l| l.msg["method"] == method).unwrap().msg["params"].clone()
+    }
+
+    /// A message queued while a turn runs is held by the thread, not sent: it shows waiting,
+    /// can be changed or taken back, and goes as the next turn, changed, once Codex says the
+    /// turn ended; a message to a thread at rest goes at once.
+    #[test]
+    fn a_queued_message_waits_for_the_turn_and_goes_as_the_next() {
+        use slopty_proto::thread::{Delivery, IntentId};
+        let (mut shared, mut state) = begun();
+        let at_rest = shared.send("Now", Delivery::Queue, IntentId::new());
+        assert!(matches!(at_rest, shared::Send::Start(_)), "nothing runs: it goes at once");
+        hear(
+            &mut shared,
+            &mut state,
+            "turn/started",
+            &recorded_note("question.jsonl", "turn/started"),
+        );
+        assert!(shared.current().is_some());
+
+        let (kept, dropped) = (IntentId::new(), IntentId::new());
+        for (intent, text) in [(kept, "Then the docs"), (dropped, "And the changelog")] {
+            let shared::Send::Held(actions) = shared.send(text, Delivery::Queue, intent) else {
+                panic!("held while the turn runs")
+            };
+            for action in &actions {
+                state.apply(action);
+            }
+        }
+        assert_eq!(state.pending.len(), 2, "both show waiting");
+        for action in &shared.edit(kept, "Then the docs, briefly").unwrap() {
+            state.apply(action);
+        }
+        for action in &shared.withdraw(dropped).unwrap() {
+            state.apply(action);
+        }
+        assert_eq!(
+            state.pending.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            ["Then the docs, briefly"]
+        );
+        assert!(shared.withdraw(dropped).is_none(), "taken back once");
+        assert!(shared.next_queued().is_none(), "not while the turn runs");
+
+        hear(
+            &mut shared,
+            &mut state,
+            "turn/completed",
+            &recorded_note("question.jsonl", "turn/completed"),
+        );
+        let (turn, taken) = shared.next_queued().expect("the held message goes next");
+        for action in &taken {
+            state.apply(action);
+        }
+        let sent = serde_json::to_value(&*turn).unwrap();
+        assert_eq!(sent["input"][0]["text"], "Then the docs, briefly");
+        assert!(state.pending.is_empty(), "no longer waiting");
+        assert!(shared.next_queued().is_none());
+    }
+
+    /// An MCP server's form, asked through Codex, is a request whose questions are its fields,
+    /// beside a decline and a cancel; the answers go back as the form's content, each value of
+    /// its field's type, and a decline as a decline.
+    #[test]
+    fn an_mcp_form_is_answered_as_its_content() {
+        use slopty_proto::thread::detail::Answer;
+        let (mut shared, mut state) = begun();
+        let native = shared.meta().native.clone();
+        let asked = |id: u64| {
+            json!({"jsonrpc": "2.0", "id": id, "method": "mcpServer/elicitation/request", "params": {
+                "serverName": "linear", "threadId": native, "mode": "form",
+                "message": "File the issue?",
+                "requestedSchema": {"type": "object", "properties": {
+                    "notify": {"type": "boolean", "title": "Notify the team"}}}}})
+        };
+        let mut answered = Vec::new();
+        for (id, deny) in [(7, false), (8, true)] {
+            let msg = asked(id);
+            let Incoming::Request { id, request, .. } = rpc::read(&msg.to_string()).unwrap() else {
+                panic!("a request: {msg}")
+            };
+            for action in &shared.request(&id, &request, WallMs::from_millis(1)) {
+                state.apply(action);
+            }
+            let open = state.requests.last().unwrap().clone();
+            assert_eq!(open.questions.len(), 1, "one field, one question");
+            assert_eq!(
+                open.options.iter().map(|c| c.effect).collect::<Vec<_>>(),
+                [Effect::Deny, Effect::Deny],
+                "decline and cancel"
+            );
+            let choice = if deny {
+                open.options.iter().find(|c| !c.stops).unwrap().id.clone()
+            } else {
+                let given =
+                    Answer { question: open.questions[0].text.clone(), answer: "Yes".to_owned() };
+                Answer::choice(&open.questions, &[given])
+            };
+            let (_id, result) = shared
+                .answer(&open.id, &choice, Answerer { client: None, name: "Slopty".to_owned() })
+                .unwrap();
+            answered.push(result);
+        }
+        assert_eq!(answered[0], json!({"action": "accept", "content": {"notify": true}}));
+        assert_eq!(answered[1]["action"], "decline");
+        assert!(answered[1].get("content").is_none_or(Value::is_null));
+    }
 }

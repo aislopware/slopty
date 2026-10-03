@@ -6,6 +6,8 @@
 //! way the TUI would. [`protocol`] holds the wire's types, generated from the pinned Codex
 //! build.
 
+pub mod daemon;
+pub mod form;
 pub mod protocol;
 pub mod rpc;
 pub mod shared;

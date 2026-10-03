@@ -13,8 +13,11 @@ mod claude_start {
     use slopty_agent::observed::thread_of;
     use slopty_core::SessionId;
     use slopty_proto::WorkerMsg;
+    use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus};
     use slopty_proto::thread::wire::{Outcome, Start};
-    use slopty_proto::thread::{AgentId, Drive, IntentId, ItemBody, ThreadId, ThreadState};
+    use slopty_proto::thread::{
+        AgentId, Drive, IntentId, ItemBody, Liveness, ThreadId, ThreadState,
+    };
     use slopty_worker::conversation::Seen;
     use slopty_worker::orchestrate;
     use slopty_worker::thread::Host;
@@ -90,7 +93,7 @@ mod claude_start {
         terminals: Arc<Kept>,
         sources: Arc<Fake>,
         starter: claude::start::Starter,
-        _events: broadcast::Sender<WorkerMsg>,
+        events: broadcast::Sender<WorkerMsg>,
     }
 
     impl Rig {
@@ -116,7 +119,7 @@ mod claude_start {
             let opened: Arc<dyn Terminals> = Arc::<Kept>::clone(&terminals);
             let path = Some(programs.clone().into_os_string());
             drop(claude::start::spawn(host.clone(), driver, opened, path, asks));
-            Self { dir, work, programs, host, terminals, sources, starter, _events: events }
+            Self { dir, work, programs, host, terminals, sources, starter, events }
         }
 
         fn start(&self, prompt: Option<&str>) -> Start {
@@ -244,7 +247,66 @@ mod claude_start {
         assert_eq!(users(&state)[0], (prompt, Some(id)), "the first message, as the start sent it");
     }
 
-    /// What a start cannot be is refused in words, and opens nothing: arguments of a client's,
+    /// Claude Code in `terminal` says it is gone from session `native`, as the worker's tracker
+    /// says when its process ends.
+    fn gone(rig: &Rig, terminal: SessionId, native: &str) {
+        let event = AgentEvent {
+            session: terminal,
+            kind: AgentKind::ClaudeCode,
+            status: AgentStatus::None,
+            agent_session: Some(native.to_owned()),
+            detail: None,
+            attention: false,
+            source: AgentSource::Hook,
+            since_ms: slopty_core::WallMs::ZERO,
+            mode: None,
+        };
+        rig.events.send(WorkerMsg::Agent(event)).unwrap();
+    }
+
+    /// An exited thread is taken up again by a start of its own session: the person's `claude`
+    /// opens in a new terminal with `--resume <id>` and the model it last ran, and the same
+    /// thread goes on there, named by the same id and the new terminal. While a Claude Code
+    /// still runs that session, a resume is refused and opens nothing: a session has one
+    /// writer. A resume of what is no session id is refused too.
+    #[tokio::test]
+    async fn an_exited_thread_is_resumed_on_its_own_session_in_a_new_terminal() {
+        let rig = Rig::new();
+        let Outcome::Started { thread } = rig.starter.start(IntentId::new(), rig.start(None)).await
+        else {
+            panic!("started");
+        };
+        let (_, _, _, first) = rig.opened()[0].clone();
+        let (state, _) = rig.host.state(thread).unwrap();
+        let native = state.meta.native.clone();
+        let mut resume = rig.start(None);
+        resume.args = vec!["--resume".to_owned(), native.clone()];
+        let busy = rig.starter.start(IntentId::new(), resume.clone()).await;
+        let want = Outcome::Refused { reason: "Claude Code runs this session already".to_owned() };
+        assert_eq!(busy, want, "one writer");
+        assert_eq!(rig.opened().len(), 1, "nothing opened");
+
+        gone(&rig, first, &native);
+        until(&rig.host, thread, |s| matches!(s.status.liveness, Liveness::Exited { .. })).await;
+        let outcome = rig.starter.start(IntentId::new(), resume).await;
+        assert_eq!(outcome, Outcome::Started { thread }, "the same thread goes on");
+        let opened = rig.opened();
+        assert_eq!(opened.len(), 2);
+        let (command, cwd, _, second) = &opened[1];
+        assert_eq!(command[1..], ["--resume", native.as_str(), "--model=opus"]);
+        assert_eq!(*cwd, rig.work.to_string_lossy());
+        let state = until(&rig.host, thread, |s| s.meta.terminal == Some(*second)).await;
+        assert_eq!(state.meta.native, native, "under the same id");
+
+        let mut bogus = rig.start(None);
+        bogus.args = vec!["--resume".to_owned(), "$(rm -rf ~)".to_owned()];
+        let outcome = rig.starter.start(IntentId::new(), bogus).await;
+        assert!(matches!(outcome, Outcome::Refused { .. }), "{outcome:?}");
+        assert_eq!(rig.opened().len(), 2);
+    }
+
+    /// What a start cannot be is refused in words, and opens nothing: arguments of a client's
+    /// other than a resume,
     /// another way to drive it, a folder that is not here, and a worker with no `claude`.
     #[tokio::test]
     async fn a_start_claude_code_cannot_take_is_refused_and_opens_nothing() {

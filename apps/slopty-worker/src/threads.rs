@@ -17,7 +17,8 @@ use slopty_proto::thread::wire::{
     Expanded, Intent, IntentDone, Outcome, ReviewScope, TableFrame, ThreadFrame, ThreadRequest,
 };
 use slopty_proto::thread::{
-    Action, AgentId, AskId, Cap, ContentRef, Cursor, IntentId, ThreadId, ThreadState, TurnId,
+    Action, AgentId, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, ThreadId, ThreadState,
+    TurnId,
 };
 use slopty_worker::conversation::Seen;
 use slopty_worker::manager::Worker;
@@ -218,7 +219,8 @@ pub fn start(daemon: &Daemon, asks: Observing) {
         asks.claude_start,
     ));
     if let Some(home) = codex::codex_home() {
-        drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), asks.codex));
+        let launch = codex::Launch::new(None).with_terminals(Arc::clone(&terminals));
+        drop(codex::spawn(threads.host.clone(), codex::socket_of(&home), Some(launch), asks.codex));
     }
     // The registry's agents and the person's own, `[worker.acp]`, read at each start.
     let settings = slopty_settings::path_in(&asks.data);
@@ -300,7 +302,7 @@ impl Following {
         let Some(threads) = at.daemon.threads.clone() else {
             tracing::debug!(client = %at.client, "a thread request, with no threads here");
             if let ThreadRequest::Intent { id, .. } | ThreadRequest::Start { id, .. } = req {
-                let reason = "this worker keeps no threads".to_owned();
+                let reason = "this machine keeps no threads".to_owned();
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
             }
             return;
@@ -378,6 +380,19 @@ impl Following {
                     }
                 });
             }
+            // Codex's own TUI is found and opened on the thread: on a task of its own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Release { .. } }
+                if threads
+                    .host
+                    .state(thread)
+                    .is_some_and(|(state, _)| codex::is_shared(&state)) =>
+            {
+                let (codex, out) = (threads.codex, at.out.clone());
+                at.tasks.spawn(async move {
+                    let outcome = codex.release(thread, id).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             ThreadRequest::Intent { id, thread, intent } => {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
@@ -421,7 +436,7 @@ impl Following {
             }
             ThreadRequest::Start { id, start } => {
                 tracing::info!(client = %at.client, %id, agent = %start.agent.0, "start refused");
-                let reason = format!("{} is no agent this worker can start", start.agent.0);
+                let reason = format!("{} is no agent this machine can start", start.agent.0);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
             }
             ThreadRequest::Approvals { on } => {
@@ -516,7 +531,9 @@ fn decide(
 
 /// What comes of `intent` on a Codex thread: it goes to the app-server as the Codex TUI's own
 /// would. An answer to a request already settled, from the TUI or another client, is no
-/// error: the card shows who settled it.
+/// error: the card shows who settled it. A reason given with an answer goes as the person's
+/// next words into the turn, since a Codex decision carries none. Nothing goes while Codex does
+/// not run the thread: it would be lost.
 fn shared(
     at: &Origin<'_>,
     codex: &Codex,
@@ -525,8 +542,11 @@ fn shared(
     intent: &Intent,
 ) -> Outcome {
     let thread = state.meta.id;
+    if matches!(state.status.liveness, slopty_proto::thread::Liveness::Exited { .. }) {
+        return refused("Codex isn't running this thread".to_owned());
+    }
     match intent {
-        Intent::Answer { ask, choice, .. } => {
+        Intent::Answer { ask, choice, message } => {
             let Some(request) = state.requests.iter().find(|r| r.id == *ask) else {
                 return refused(format!("no request {}", ask.0));
             };
@@ -534,12 +554,11 @@ fn shared(
                 return Outcome::Done;
             }
             let questions = &request.questions;
-            if questions.is_empty() && !request.options.iter().any(|o| o.id == *choice) {
+            let offered = request.options.iter().any(|o| o.id == *choice);
+            if !offered && questions.is_empty() {
                 return refused(format!("no choice {choice}"));
             }
-            if !questions.is_empty()
-                && slopty_proto::thread::detail::Answer::read(questions, choice).is_none()
-            {
+            if !offered && slopty_proto::thread::detail::Answer::read(questions, choice).is_none() {
                 return refused("the answer does not answer each question".to_owned());
             }
             let by = slopty_proto::thread::Answerer {
@@ -547,10 +566,26 @@ fn shared(
                 name: "Slopty".to_owned(),
             };
             codex.answer(thread, ask.clone(), choice.clone(), by);
+            if let Some(why) = message.as_deref().map(str::trim).filter(|w| !w.is_empty()) {
+                codex.send(thread, why.to_owned(), Delivery::Steer, id);
+            }
             Outcome::Done
         }
         Intent::Send { text, delivery } => {
             codex.send(thread, text.clone(), *delivery, id);
+            Outcome::Done
+        }
+        Intent::Withdraw { pending } | Intent::Edit { pending, .. }
+            if !state.pending.iter().any(|p| p.intent == *pending) =>
+        {
+            refused("That message is not waiting".to_owned())
+        }
+        Intent::Withdraw { pending } => {
+            codex.withdraw(thread, *pending);
+            Outcome::Done
+        }
+        Intent::Edit { pending, text } => {
+            codex.edit(thread, *pending, text.clone());
             Outcome::Done
         }
         Intent::Interrupt => {
