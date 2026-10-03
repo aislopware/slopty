@@ -23,6 +23,7 @@
 mod e2e;
 pub mod finder;
 mod hangs;
+pub mod menus;
 pub mod net;
 mod presence;
 mod server;
@@ -128,11 +129,18 @@ const LINK_BATCH: usize = 256;
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
 /// non-printing keys). In the order a phone shows them before the row scrolls: the keys the
-/// soft keyboard has no way to type come first, the punctuation it only hides after.
-const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
+/// soft keyboard has no way to type come first, the punctuation it only hides after, then
+/// paging and the rarer modifiers.
+///
+/// The modifiers are the glyphs iPadOS's own shortcut sheet shows (⌃ ⌥ ⌘), square caps; the
+/// paging keys are a keyboard's legends (`PgUp`, `PgDn`), since ⇞ and ⇟ draw too small to read.
+/// The row spreads into its groups from an 11-inch iPad (820 pt) and scrolls a little on the
+/// narrowest (744 pt). ⌥ is Alt as Meta for the next key (readline's and Emacs' chords). Home
+/// and End are ⌘← and ⌘→, which the armed ⌘ already makes.
+const BAR_KEYS: [(&str, &str, Option<&str>); 15] = [
     ("Esc", "escape", None),
     ("Tab", "tab", None),
-    ("Ctrl", "", None),
+    (CONTROL_CAP, "", None),
     ("←", "left", None),
     ("↑", "up", None),
     ("↓", "down", None),
@@ -141,8 +149,15 @@ const BAR_KEYS: [(&str, &str, Option<&str>); 12] = [
     ("|", "|", Some("|")),
     ("/", "/", Some("/")),
     ("-", "-", Some("-")),
+    ("PgUp", "pageup", None),
+    ("PgDn", "pagedown", None),
+    (ALT_CAP, "alt", None),
     ("⌘", "cmd", None),
 ];
+/// The key bar's sticky Control.
+const CONTROL_CAP: &str = "⌃";
+/// The key bar's sticky Alt, sent as Meta.
+const ALT_CAP: &str = "⌥";
 /// Where the arrows end in [`BAR_KEYS`]: the clipboard key follows them.
 const ARROWS_END: usize = 7;
 
@@ -177,8 +192,8 @@ enum KeyGroup {
 /// The group `label`'s key belongs to.
 fn key_group(label: &str) -> KeyGroup {
     match label {
-        "Esc" | "Tab" | "Ctrl" | "⌘" => KeyGroup::Lead,
-        "←" | "↑" | "↓" | "→" => KeyGroup::Arrows,
+        "Esc" | "Tab" | CONTROL_CAP | ALT_CAP | "⌘" => KeyGroup::Lead,
+        "←" | "↑" | "↓" | "→" | "PgUp" | "PgDn" => KeyGroup::Arrows,
         word if word.chars().count() > 1 => KeyGroup::Words,
         _ => KeyGroup::Symbols,
     }
@@ -226,7 +241,7 @@ fn key_bar_fades(scrolled: f32, max: f32) -> (bool, bool) {
 const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
     ("Esc", "escape", None),
     ("Tab", "tab", None),
-    ("Ctrl", "", None),
+    (CONTROL_CAP, "", None),
     ("⌘", "cmd", None),
     ("←", "left", None),
     ("↑", "up", None),
@@ -2719,19 +2734,25 @@ impl Workspace {
         let accent = self.theme.surfaces.accent;
         let view = terminal.read(cx);
         let (armed, armed_command) = (view.sticky_control(), view.sticky_command());
+        let armed_alt = view.sticky_alt();
         let (has_selection, finding) = (view.selection().is_some(), view.finding());
         let mut keys: Vec<(&'static str, gpui::AnyElement)> =
             Vec::with_capacity(BAR_KEYS.len().saturating_add(2));
         for (label, key, typed) in BAR_KEYS {
             let is_control = key.is_empty();
             let is_command = key == "cmd";
-            let lit = (is_control && armed) || (is_command && armed_command);
+            let is_alt = key == "alt";
+            let lit =
+                (is_control && armed) || (is_command && armed_command) || (is_alt && armed_alt);
             let target = terminal.clone();
             let el = self.bar_key(format!("key-{label}"), label, lit, move |_window, cx| {
                 target.update(cx, |t, cx| {
                     if is_control {
                         let on = !t.sticky_control();
                         t.set_sticky_control(on, cx);
+                    } else if is_alt {
+                        let on = !t.sticky_alt();
+                        t.set_sticky_alt(on, cx);
                     } else if is_command {
                         let on = !t.sticky_command();
                         t.set_sticky_command(on, cx);
@@ -2886,8 +2907,11 @@ fn key_label(label: &str, lit: bool) -> String {
 fn key_spoken(label: &str) -> &str {
     match label {
         "Esc" => "Escape",
-        "Ctrl" => "Control",
+        CONTROL_CAP => "Control",
+        ALT_CAP => "Alt",
         "⌘" => "Command",
+        "PgUp" => "Page up",
+        "PgDn" => "Page down",
         "←" => "Left arrow",
         "↑" => "Up arrow",
         "↓" => "Down arrow",
@@ -3334,6 +3358,10 @@ fn app_key_bindings() -> Vec<gpui::KeyBinding> {
     slopty_ui::keymap::current().bindings(|scope| scope == slopty_ui::keymap::Scope::App)
 }
 
+/// The palette's way to the keyboard shortcuts: the Mac's Help menu has it, an iPad with a
+/// keyboard its menus, and a phone or a closed menu bar only this.
+const KEYBOARD_SHORTCUTS: &str = "Keyboard shortcuts";
+
 /// The app's lines for the command palette, after the workspace's.
 fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     use slopty_ui::icons::IconName;
@@ -3344,6 +3372,7 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     };
     let mut items = vec![
         item("Open settings", IconName::Settings, Box::new(OpenSettings)),
+        item(KEYBOARD_SHORTCUTS, IconName::Keyboard, Box::new(OpenKeyboardShortcuts)),
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
         item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
         item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
@@ -3509,6 +3538,8 @@ pub fn open_workspace(
         );
         // Each worker's threads, so an agent's thread draws in its first frame.
         view.set_thread_cache(slopty_platform::dirs::data_dir().join("threads"));
+        // Each worker's items, so a cold launch draws its tiles before it is linked.
+        view.set_item_cache(slopty_platform::dirs::data_dir().join("items"));
         view.set_pasteboard(pasteboard());
         view.set_hardware_keyboard(hardware_keyboard_attached(), cx);
         #[cfg(feature = "e2e")]
@@ -3777,7 +3808,8 @@ mod tests {
             assert!(spoken.chars().count() > 1, "{label} is named, not drawn");
             assert!(!label.starts_with(char::is_lowercase), "{label} is sentence case");
         }
-        assert_eq!(key_label("Ctrl", true), "Control, armed");
+        assert_eq!(key_label(CONTROL_CAP, true), "Control, armed");
+        assert_eq!(key_label(ALT_CAP, false), "Alt");
         assert_eq!(key_label("Esc", false), "Escape");
     }
 
@@ -3802,32 +3834,36 @@ mod tests {
         let line = key_row_width(terminal(), spacing);
         assert!((phone - (line - 402.0)).abs() < f32::EPSILON, "{phone} of {line}");
         assert_eq!(key_bar_fades(0.0, phone), (false, true));
-        assert!(key_row_overflow(terminal(), 744.0, spacing).abs() < f32::EPSILON, "an iPad");
+        assert!(key_row_overflow(terminal(), 820.0, spacing).abs() < f32::EPSILON, "an iPad");
     }
 
     /// The caps keep their widths: the terminal's row runs past a 402 pt phone, so it scrolls,
-    /// and fits the narrowest iPad (744 pt) with room to spare rather than stretching to it.
+    /// and fits an 11-inch iPad (820 pt) with room to spare rather than stretching to it.
     #[test]
     fn the_key_caps_keep_their_width() {
         let spacing = Theme::default().spacing;
         let labels = BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
         let row = key_row_width(labels, spacing);
-        assert!(row > 402.0 && row < 744.0, "{row}");
+        assert!(row > 402.0 && row < 820.0, "{row}");
         assert!((cap_width("|", spacing) - cap_side(spacing)).abs() < f32::EPSILON, "square");
         assert!(cap_side(spacing) < KEY_BAR_H, "a cap sits inside its bar");
     }
 
-    /// Every bar fits the narrowest iPad (744 pt) as one run of groups with its word keys
-    /// trailing, and a phone's (402 pt) never does, so it scrolls.
+    /// Every bar fits an 11-inch iPad (820 pt) as one run of groups with its word keys
+    /// trailing (a remote window's the narrowest, 744 pt, too), and a phone's (402 pt) never
+    /// does, so it scrolls.
     #[test]
     fn every_bar_spreads_on_an_ipad_and_scrolls_on_a_phone() {
         let spacing = Theme::default().spacing;
         let terminal = || BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Paste", "Find"]);
         let screen = || SCREEN_BAR_KEYS.iter().map(|(label, ..)| *label).chain(["Copy", "Paste"]);
-        for row in [spread_width(terminal(), spacing), spread_width(screen(), spacing)] {
-            assert!(row <= 744.0 && row > 402.0, "{row}");
+        for (row, ipad) in
+            [(spread_width(terminal(), spacing), 820.0), (spread_width(screen(), spacing), 744.0)]
+        {
+            assert!(row <= ipad && row > 402.0, "{row}");
         }
-        assert_eq!(key_group("Ctrl"), KeyGroup::Lead, "a word, but the soft keyboard's lack");
+        assert_eq!(key_group(CONTROL_CAP), KeyGroup::Lead, "the soft keyboard's lack");
+        assert_eq!(key_group("PgUp"), KeyGroup::Arrows, "paging moves as the arrows do");
         assert_eq!(key_group("Find"), KeyGroup::Words);
         assert_eq!(key_group("|"), KeyGroup::Symbols);
     }
@@ -3873,9 +3909,11 @@ mod tests {
             f32::from(at(cx, after).left() - at(cx, before).right())
         };
         assert!((f32::from(at(cx, "Esc").left()) - spacing.xs).abs() < 0.5, "leading");
-        assert!((gap(cx, "Tab", "Ctrl") - spacing.xs).abs() < 0.5, "caps in a group");
+        assert!((gap(cx, "Tab", CONTROL_CAP) - spacing.xs).abs() < 0.5, "caps in a group");
+        assert!((gap(cx, ALT_CAP, "⌘") - spacing.xs).abs() < 0.5, "the modifiers together");
         assert!((gap(cx, "⌘", "←") - spacing.md).abs() < 0.5, "the arrows follow the lead");
-        assert!((gap(cx, "→", "~") - spacing.md).abs() < 0.5, "the symbols follow the arrows");
+        assert!((gap(cx, "→", "PgUp") - spacing.xs).abs() < 0.5, "paging with the arrows");
+        assert!((gap(cx, "PgDn", "~") - spacing.md).abs() < 0.5, "the symbols follow them");
         assert!((f32::from(at(cx, "Find").right()) - (1032.0 - spacing.xs)).abs() < 0.5);
         assert!(gap(cx, "-", "Paste") > 200.0, "the word keys trail: {}", gap(cx, "-", "Paste"));
 
@@ -4859,6 +4897,13 @@ mod tests {
         cx.dispatch_action(RestartThisMacWorker);
         cx.run_until_parked();
         assert_eq!(host.asked(), ["doctor"], "nothing to restart");
+    }
+
+    /// The keyboard shortcuts are a palette line on every device, not only in a Mac's Help menu.
+    #[test]
+    fn the_palette_offers_the_keyboard_shortcuts() {
+        let offered = app_palette_items().iter().any(|item| item.label == KEYBOARD_SHORTCUTS);
+        assert!(offered);
     }
 
     /// The palette offers it on a Mac.

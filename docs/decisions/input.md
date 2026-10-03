@@ -1104,3 +1104,27 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   web view that holds them, and the page edits on its own, so on iOS the keymap never hears
   them and those entries only listed chords that did nothing. They are bound on macOS only.
 
+- ✅ **An iPad is a daily client: Meta and paging on the key bar, menus with a keyboard**
+  (2026-10-04, readiness N24). On an iPad the key bar had no Alt, Page Up or Page Down. With a
+  keyboard attached, the menu bar and the held-⌘ sheet were empty: `gpui_ios`'s `set_menus`
+  was a stub, and the app never called it. The keyboard shortcuts were reachable only from the
+  Mac's Help menu.
+  - *Key bar.* ⌥ arms Alt for the next key as Meta, whatever the ⌥ setting: a typed letter
+    goes as Alt and that letter, case kept, which the worker sends as `ESC b`, and ← → go as
+    the Mac's word motion. PgUp and PgDn page; ⇞ and ⇟ were tried and draw too small to read.
+    Home and End are not added: the armed ⌘ with ← → is already the line's start and end.
+    The modifiers became the glyphs iPadOS's own shortcut sheet uses (⌃ ⌥ ⌘), square caps.
+    The row spreads into its groups from an 11-inch iPad (820 pt), and on the narrowest one
+    (744 pt) it now scrolls a little, its trailing end fading. A screen reader still hears
+    each key's name ("Control", "Alt", "Page up").
+  - *Menus.* The menus are one builder (`slopty_app::menus`) for the Mac and the iPad. The iPad
+    gets no Window menu and none of the Mac's own items. Its Upload and Download are the Files
+    picker's, named as the palette names them. The iPad app sets them after the workspace
+    opens, as the Mac app does. The fork turns them into `UIMainMenuSystem` menus with key
+    commands (aislopware/gpui-fast#21, `feat/ios-menus`), and they show once Slopty pins that
+    commit; until then the call meets the old stub.
+  - *Palette.* "Keyboard shortcuts" is a palette line on every device.
+  - Tests: `sticky_alt_sends_the_next_key_as_meta` (`slopty-ui`);
+    `an_ipads_menus_are_the_macs_without_the_macs_own`,
+    `the_palette_offers_the_keyboard_shortcuts`, and the key bar's width and layout tests
+    (`slopty-app`); the fork's host menu tests and its simulator `menu-test`.

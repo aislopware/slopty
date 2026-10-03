@@ -210,7 +210,6 @@ pub const fn agent_alerts(settings: &Settings, window_active: bool) -> bool {
 }
 
 #[cfg(test)]
-#[expect(clippy::float_cmp, reason = "the values are literals passed through, not arithmetic")]
 mod tests {
     use super::*;
 

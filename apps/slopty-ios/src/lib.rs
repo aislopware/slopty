@@ -161,7 +161,12 @@ fn run() {
         gpui_kit::init(cx);
         if let Err(e) = slopty_app::open_workspace(cx, handle, |_| WindowOptions::default()) {
             tracing::error!(error = %e, "open workspace");
+            return;
         }
+        // After `open_workspace`, as on the Mac: the menus read their chords from the keymap
+        // the workspace fills in. An iPad with a keyboard shows them in its menu bar and in
+        // the sheet a held ⌘ brings up.
+        slopty_app::set_app_menus(cx, || slopty_app::menus::menus(Vec::new(), true));
     }));
     ffi::run_app_with_assets(slopty_ui::icons::Assets);
 }

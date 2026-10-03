@@ -375,6 +375,9 @@ pub struct TerminalView {
     marked: Option<String>,
     /// The next key (or typed character) gets Control: the phone key bar's ⌃ toggle.
     sticky_control: bool,
+    /// The next key (or typed character) gets Alt, as Meta whatever the ⌥ setting: the key
+    /// bar's Alt toggle, for readline's and Emacs' Meta chords a soft keyboard cannot make.
+    sticky_alt: bool,
     /// A key hid the pointer ("hide the pointer while typing") and it has not moved since.
     pointer_hidden: bool,
     /// The next tap opens the link under it, as ⌘-click does: the phone key bar's ⌘ toggle.
@@ -575,6 +578,7 @@ impl TerminalView {
             latency: Rc::default(),
             marked: None,
             sticky_control: false,
+            sticky_alt: false,
             pointer_hidden: false,
             sticky_command: false,
             block_menu: None,
@@ -2340,6 +2344,18 @@ impl TerminalView {
         self.sticky_control
     }
 
+    /// Arm or disarm Alt for the next key, sent as Meta (an escape before it).
+    pub fn set_sticky_alt(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.sticky_alt = on;
+        cx.notify();
+    }
+
+    /// Whether the next key gets Alt.
+    #[must_use]
+    pub const fn sticky_alt(&self) -> bool {
+        self.sticky_alt
+    }
+
     /// Arm or disarm ⌘ for the next tap: it opens the link under the finger, as ⌘-click
     /// does with a mouse (a phone has no ⌘ to hold).
     pub fn set_sticky_command(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -2396,12 +2412,32 @@ impl TerminalView {
             self.send(TermRequest::Raw(bytes.to_vec()), cx);
             return true;
         }
+        // An armed Alt with the bar's ← → is the Mac's word motion, as ⌥← ⌥→ are on the desktop.
+        if self.sticky_alt
+            && self.theme.behaviour.natural_editing
+            && let Some(bytes) = keys::natural_editing(&Keystroke {
+                modifiers: gpui::Modifiers { alt: true, ..gpui::Modifiers::default() },
+                key: keystroke.key.clone(),
+                ..Keystroke::default()
+            })
+        {
+            self.sticky_alt = false;
+            if self.state.view_offset() != 0 {
+                self.state.scroll_to_bottom();
+            }
+            self.send(TermRequest::Raw(bytes.to_vec()), cx);
+            return true;
+        }
         let unstuck = std::mem::take(&mut self.sticky_control);
         if unstuck {
             keystroke.modifiers.control = true;
         }
+        let meta = std::mem::take(&mut self.sticky_alt);
+        if meta {
+            keystroke.modifiers.alt = true;
+        }
         self.key_seq = self.key_seq.wrapping_add(1);
-        let key = keys::key_event(self.key_seq, &keystroke, held, self.alt_is_alt());
+        let key = keys::key_event(self.key_seq, &keystroke, held, meta || self.alt_is_alt());
         tracing::trace!(session = %self.session, ?key, "key");
         let scrolled = self.state.view_offset() != 0;
         if scrolled {
@@ -3833,12 +3869,14 @@ impl TerminalView {
         };
         let keys = arrows(if rows < 0 { "up" } else { "down" }, rows)
             .chain(arrows(if cells < 0 { "left" } else { "right" }, cells));
-        // The phone's armed ⌃ is for the next typed key, not for these.
+        // The phone's armed ⌃ and Alt are for the next typed key, not for these.
         let sticky_control = std::mem::take(&mut self.sticky_control);
+        let sticky_alt = std::mem::take(&mut self.sticky_alt);
         for key in keys {
             self.press(Keystroke { key: key.to_owned(), ..Keystroke::default() }, cx);
         }
         self.sticky_control = sticky_control;
+        self.sticky_alt = sticky_alt;
     }
 
     /// A selection just made goes to the clipboard when the theme asks for it.
@@ -3915,6 +3953,23 @@ impl EntityInputHandler for TerminalView {
                 modifiers: gpui::Modifiers::default(),
                 key: c.to_ascii_lowercase().to_string(),
                 key_char: None,
+            };
+            self.press(keystroke, cx);
+            return;
+        }
+        // Alt armed: a single typed character goes as Meta and that character (`ESC b`).
+        let mut chars = text.chars();
+        if self.sticky_alt
+            && let (Some(c), None) = (chars.next(), chars.next())
+            && c.is_ascii()
+        {
+            let keystroke = Keystroke {
+                modifiers: gpui::Modifiers {
+                    shift: c.is_ascii_uppercase(),
+                    ..gpui::Modifiers::default()
+                },
+                key: c.to_ascii_lowercase().to_string(),
+                key_char: Some(c.to_string()),
             };
             self.press(keystroke, cx);
             return;
@@ -5567,7 +5622,7 @@ mod tests {
         cx.run_until_parked();
         assert!(!view.read_with(cx, |v, _| v.close_asked()), "Esc keeps the shell");
         assert_eq!(confirmed.get(), 1);
-        assert!(drain_input(&mut rx).is_empty());
+        assert_eq!(drain_input(&mut rx), Vec::<String>::new());
         // Any other key keeps it and goes on to the program.
         assert!(view.update(cx, TerminalView::ask_close));
         cx.simulate_keystrokes("x");
@@ -6261,7 +6316,7 @@ mod tests {
             cx.run_until_parked();
             cx.update(|_window, cx| crate::terminal::captions_drawn(cx))
         };
-        assert!(captions(cx).is_empty());
+        assert_eq!(captions(cx), Vec::<String>::new());
         view.update(cx, |v, _cx| {
             v.set_took(LineIndex(0), Duration::from_millis(3_260));
             v.set_took(LineIndex(3), Duration::from_millis(400));
@@ -6304,7 +6359,7 @@ mod tests {
             view.apply(TermEvent::Frame(frame), cx);
         });
         assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(4))), None, "a new epoch forgets");
-        assert!(captions(cx).is_empty());
+        assert_eq!(captions(cx), Vec::<String>::new());
     }
 
     #[test]
@@ -7462,6 +7517,49 @@ mod tests {
             view.unmark_text(window, cx);
             assert_eq!(view.marked(), None);
         });
+    }
+
+    /// The key bar's Alt arms Meta for exactly one key: a typed letter goes as Alt and that
+    /// letter, its case kept, for the worker to send as `ESC b`, whatever the ⌥ setting; the
+    /// bar's ← goes as the Mac's word motion, as ⌥← does on the desktop.
+    #[gpui::test]
+    fn sticky_alt_sends_the_next_key_as_meta(cx: &mut TestAppContext) {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (view, cx) = cx.add_window_view(|_window, cx| {
+            TerminalView::new(SessionId::new(), TermSize::default(), tx, Theme::default(), cx)
+        });
+        while rx.try_recv().is_ok() {}
+        let sent = |rx: &mut mpsc::Receiver<ClientMsg>| {
+            let mut out = Vec::new();
+            while let Ok(ClientMsg::Term { req, .. }) = rx.try_recv() {
+                out.push(req);
+            }
+            out
+        };
+        view.update_in(cx, |view, window, cx| {
+            view.set_sticky_alt(true, cx);
+            view.replace_text_in_range(None, "B", window, cx);
+            assert!(!view.sticky_alt(), "consumed by the typed character");
+            view.replace_text_in_range(None, "d", window, cx);
+        });
+        let reqs = sent(&mut rx);
+        let [TermRequest::Key(meta), TermRequest::Raw(plain)] = reqs.as_slice() else {
+            panic!("one key event, then plain text: {reqs:?}")
+        };
+        assert!(meta.mods.contains(slopty_proto::input::Mods::ALT) && meta.option_as_alt);
+        assert_eq!(meta.text.as_deref(), Some("B"), "the letter, its case kept");
+        assert_eq!(plain.as_slice(), b"d");
+
+        view.update_in(cx, |view, _window, cx| {
+            view.set_sticky_alt(true, cx);
+            view.press(Keystroke { key: "left".into(), ..Keystroke::default() }, cx);
+        });
+        let reqs = sent(&mut rx);
+        assert!(
+            matches!(reqs.as_slice(), [TermRequest::Raw(bytes)] if bytes == b"\x1bb"),
+            "a word back: {reqs:?}"
+        );
+        assert!(!view.read_with(cx, |v, _| v.sticky_alt()));
     }
 
     /// The key bar's ⌃ arms Control for exactly one key, whether it comes from the bar

@@ -4,9 +4,7 @@
 #![forbid(unsafe_code)]
 
 use anyhow::Result;
-use gpui::{
-    Bounds, Menu, MenuItem, OsAction, SystemMenuType, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{Bounds, Menu, MenuItem, SystemMenuType, WindowBounds, WindowOptions, px, size};
 
 mod actions {
     #![expect(
@@ -31,35 +29,11 @@ mod actions {
 }
 use actions::{Hide, HideOthers, Quit, ShowAll};
 
-/// The application menu. Items name the same actions the key bindings do, so the shortcuts
-/// shown next to them come from the keymap in effect whenever the menu is built.
-///
-/// The File menu opens and saves what the palette does, by the same actions: Save is the file
-/// tile's own, so it is greyed unless a file has the keyboard. Upload sends files picked here up
-/// to the focused shell, folder or window; Download brings a folder tile's selected entry down.
-///
-/// The Edit menu names the text fields' own actions (gpui-kit's), which every field answers:
-/// the editors, the composer and the settings' search, and the terminal as its own. Cut, Copy,
-/// Paste and Select All also go down the responder chain as AppKit's selectors, so a web
-/// page's view answers them too. An item nothing focused answers is greyed, as macOS greys it.
+/// The menu bar: the shared menus (`slopty_app::menus`), whose application menu ends with the
+/// Mac's own items.
 fn menus() -> Vec<Menu> {
-    use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
-    use slopty_app::{Minimize, OpenHelp, ShowWindow, Zoom};
-    use slopty_ui::file::SaveFile;
-    use slopty_ui::folder::{SaveToFiles, UploadFromFiles};
-    use slopty_ui::terminal::{Find, FindNext, FindPrev};
-    use slopty_ui::workspace::{
-        AddWindow, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight, CycleWidth,
-        FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FontLarger, FontReset, FontSmaller,
-        FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveDown, MoveUp,
-        NewAgent, NewNote, NewTerminal, NextAttention, OpenFile, OpenFolder, OpenPalette, OpenUrl,
-        SaveCopy, ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed, UndoClose,
-    };
-    vec![
-        Menu::new("Slopty").items([
-            MenuItem::action("Settings…", slopty_app::OpenSettings),
-            MenuItem::separator(),
-            MenuItem::action("Add Machine…", slopty_app::AddWorker),
+    slopty_app::menus::menus(
+        vec![
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
@@ -68,84 +42,9 @@ fn menus() -> Vec<Menu> {
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
             MenuItem::action("Quit Slopty", Quit),
-        ]),
-        Menu::new("File").items([
-            MenuItem::action("New Shell", NewTerminal),
-            MenuItem::action("New Agent", NewAgent),
-            MenuItem::action("New Note", NewNote),
-            MenuItem::action("Add Window…", AddWindow),
-            MenuItem::separator(),
-            MenuItem::action("Open File…", OpenFile),
-            MenuItem::action("Open Folder…", OpenFolder),
-            MenuItem::action("Open URL…", OpenUrl),
-            MenuItem::separator(),
-            MenuItem::action("Upload…", UploadFromFiles),
-            MenuItem::action("Download…", SaveToFiles),
-            MenuItem::separator(),
-            MenuItem::action("Save", SaveFile),
-            MenuItem::action("Save a Copy…", SaveCopy),
-            MenuItem::separator(),
-            MenuItem::action("Close Tile", CloseItem),
-            MenuItem::action("Undo Close", UndoClose),
-        ]),
-        Menu::new("Edit").items([
-            MenuItem::os_action("Undo", Undo, OsAction::Undo),
-            MenuItem::os_action("Redo", Redo, OsAction::Redo),
-            MenuItem::separator(),
-            MenuItem::os_action("Cut", Cut, OsAction::Cut),
-            MenuItem::os_action("Copy", Copy, OsAction::Copy),
-            MenuItem::os_action("Paste", Paste, OsAction::Paste),
-            MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
-            MenuItem::separator(),
-            MenuItem::action("Find…", Find),
-            MenuItem::action("Find Next", FindNext),
-            MenuItem::action("Find Previous", FindPrev),
-        ]),
-        Menu::new("View").items([
-            MenuItem::action("Commands…", OpenPalette),
-            MenuItem::action("Overview", ToggleOverview),
-            MenuItem::separator(),
-            MenuItem::action("Bigger Text", FontLarger),
-            MenuItem::action("Smaller Text", FontSmaller),
-            MenuItem::action("Actual Text Size", FontReset),
-            MenuItem::separator(),
-            MenuItem::action("Stream Stats", ToggleStats),
-            MenuItem::action("Mute Sound", ToggleMute),
-        ]),
-        Menu::new("Layout").items([
-            MenuItem::action("Focus Column Left", FocusColumnLeft),
-            MenuItem::action("Focus Column Right", FocusColumnRight),
-            MenuItem::action("Focus Up", FocusUp),
-            MenuItem::action("Focus Down", FocusDown),
-            MenuItem::separator(),
-            MenuItem::action("Move Column Left", MoveColumnLeft),
-            MenuItem::action("Move Column Right", MoveColumnRight),
-            MenuItem::action("Move Up", MoveUp),
-            MenuItem::action("Move Down", MoveDown),
-            MenuItem::action("Consume or Expel Left", ConsumeOrExpelLeft),
-            MenuItem::action("Consume or Expel Right", ConsumeOrExpelRight),
-            MenuItem::separator(),
-            MenuItem::action("Cycle Column Width", CycleWidth),
-            MenuItem::action("Maximize Column", MaximizeColumn),
-            MenuItem::action("Fullscreen Tile", FullscreenTile),
-            MenuItem::action("Center Column", CenterColumn),
-            MenuItem::action("Tabbed Column", ToggleTabbed),
-            MenuItem::separator(),
-            MenuItem::action("Next Thing Needing You", NextAttention),
-        ]),
-        // Named "Window", AppKit lists the open windows under these and adds its own tiling.
-        Menu::new("Window").items([
-            MenuItem::action("Minimize", Minimize),
-            MenuItem::action("Zoom", Zoom),
-            MenuItem::separator(),
-            MenuItem::action("Slopty", ShowWindow),
-        ]),
-        // Named "Help", AppKit puts its search of the menus at the top.
-        Menu::new("Help").items([
-            MenuItem::action("Slopty Help", OpenHelp),
-            MenuItem::action("Keyboard Shortcuts", slopty_app::OpenKeyboardShortcuts),
-        ]),
-    ]
+        ],
+        false,
+    )
 }
 
 /// The main window's options at launch and whenever it opens again: 1280 × 800 in the middle
