@@ -8,13 +8,14 @@ use slopty_proto::agent::{AgentKind, SessionAgent};
 use slopty_proto::conversation::{ThreadId, Verdict};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
-    Command, ConversationPage, DirEntry, EventFilter, FileStat, HubEvent, IdempotencyKey, Input,
-    ItemRef, Line, Outcome, Port, Screen, Size, TermRef, Verb, WaitUntil, Waited,
+    Command, ConversationPage, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent,
+    IdempotencyKey, Input, ItemRef, Line, Outcome, Port, Screen, Size, TermRef, Verb, WaitUntil,
+    Waited,
 };
 use slopty_proto::project::{
-    BadProjectId, LimitsChange, NodeDetail, Peer, Placement, Preference, Project, ProjectId,
-    ProjectStatus, Report, Runner, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec,
-    WorkerFacts,
+    BadProjectId, LimitsChange, Moment, NodeDetail, Peer, Placement, Preference, Project,
+    ProjectId, ProjectStatus, Report, Runner, StepState, Suggestion, Task, TaskChange, TaskId,
+    TaskLaunch, TaskSpec, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
@@ -1001,11 +1002,15 @@ pub async fn task_merge<D: Dispatch>(
     task_answer(dispatch, key, Verb::TaskMerge { project, task }).await
 }
 
-/// Tell a task's agent something, as the person: their words reach it through its hooks as a
-/// report does, never typed into its terminal.
+/// Tell a task's agent something, through its hooks as a report goes.
+///
+/// The words are the person's, or an agent's to a task under it (the orchestrator to any of its
+/// project's, a task's agent to those split from its own), marked as that agent's. Nothing is
+/// typed into its terminal.
 ///
 /// # Errors
-/// As [`task_report`]; a task with no agent running, and an agent asking, are refused.
+/// As [`task_report`]; a task with no agent running is refused, and so is an agent's word to
+/// a task not under it or one that waits on the person.
 pub async fn task_tell<D: Dispatch>(
     dispatch: &D,
     project: Option<&str>,
@@ -1037,6 +1042,161 @@ pub async fn orchestrator_tell<D: Dispatch>(
         Outcome::Done => Ok(()),
         other => Err(ToolError::unexpected(other)),
     }
+}
+
+/// How long [`task_wait`] waits when the caller names no timeout: under the minute many MCP
+/// clients give a tool call.
+pub const DEFAULT_TASK_WAIT_MS: u32 = 50_000;
+/// The longest [`task_wait`] waits.
+pub const TASK_WAIT_MAX_MS: u32 = 30 * 60_000;
+/// The most tasks one [`task_wait`] follows.
+pub const TASK_WAIT_MOST: usize = 64;
+/// The longest one read of the project waits; the server caps it there too.
+const READ_WAIT_MS: u32 = 240_000;
+
+/// What [`task_wait`] saw.
+#[derive(Clone, Debug)]
+pub struct TaskWait {
+    /// The project as last read.
+    pub status: ProjectStatus,
+    /// The tasks followed, in the order named.
+    pub tasks: Vec<TaskId>,
+    /// What each of them did since the wait began, oldest first.
+    pub news: Vec<TimelineEntry>,
+    /// The latest report of each, from the news or what the project's timeline still held.
+    pub reports: Vec<TimelineEntry>,
+    /// Those with news, or merged or given up when the wait began.
+    pub ready: Vec<TaskId>,
+    /// The time ran out first. Nothing was stopped or cancelled for it.
+    pub timed_out: bool,
+    /// The cursor to wait on from, as `since`, so nothing between two waits is missed.
+    pub next: u64,
+}
+
+/// Whether a timeline entry is news of its task for [`task_wait`].
+///
+/// News is a report, a move of its state (its agent ending a turn without a report is one),
+/// its terminal gone, a verdict, its checks, or a step that ended.
+#[must_use]
+pub const fn news(what: &Moment) -> bool {
+    match what {
+        Moment::Reported { .. }
+        | Moment::State { .. }
+        | Moment::AgentGone { .. }
+        | Moment::Verified(_)
+        | Moment::Reviewed(_)
+        | Moment::Checks(_) => true,
+        Moment::Step(step) => !matches!(step.state, StepState::Running { .. }),
+        _ => false,
+    }
+}
+
+/// Wait for the next news of `tasks` in a project, any of them or `all` of them.
+///
+/// It waits from `since`, or from now, for up to `timeout_ms`. A task merged or given up when
+/// the wait begins is ready at once, since no news may come of it. Running out of time cancels
+/// nothing: the answer says so, and `next` picks the wait up where it stopped.
+///
+/// It follows the project's timeline with the server's own long wait, so it costs a read per
+/// change of the project, not a poll.
+///
+/// # Errors
+/// No task, too many, a number that is not one, a task not in the project, or the server
+/// could not be asked.
+pub async fn task_wait<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    (tasks, all): (&[String], bool),
+    since: Option<u64>,
+    timeout_ms: u32,
+) -> Result<TaskWait, ToolError> {
+    let project = project_named(project, &own(dispatch).await?)?;
+    let mut followed: Vec<TaskId> = Vec::new();
+    for given in tasks {
+        let task = task_number(given)?;
+        if !followed.contains(&task) {
+            followed.push(task);
+        }
+    }
+    if followed.is_empty() || followed.len() > TASK_WAIT_MOST {
+        return Err(ToolError::invalid(format!(
+            "name between 1 and {TASK_WAIT_MOST} tasks to wait for"
+        )));
+    }
+    let wait = std::time::Duration::from_millis(u64::from(timeout_ms.min(TASK_WAIT_MAX_MS)));
+    let started = tokio::time::Instant::now();
+    let read =
+        |since, timeout_ms| Verb::ProjectStatus { project: project.clone(), since, timeout_ms };
+    let mut status = project_answer(dispatch, None, read(since, 0)).await?;
+    if let Some(missing) = followed.iter().find(|t| !status.tasks.iter().any(|card| card.id == **t))
+    {
+        return Err(ToolError::new(
+            ErrorCode::UnknownTask,
+            format!("no task {missing} in project {project}"),
+        ));
+    }
+    let mut reports: Vec<TimelineEntry> = Vec::new();
+    let mut news_of = Vec::new();
+    let take = |status: &ProjectStatus, reports: &mut Vec<TimelineEntry>, news_of: &mut Vec<_>| {
+        for e in status.timeline.iter().filter(|e| e.task.is_some_and(|t| followed.contains(&t))) {
+            if matches!(e.what, Moment::Reported { .. }) {
+                reports.retain(|r: &TimelineEntry| r.task != e.task);
+                reports.push(e.clone());
+            }
+        }
+        news_of.extend(
+            status
+                .timeline
+                .iter()
+                .filter(|e| e.task.is_some_and(|t| followed.contains(&t)) && news(&e.what))
+                .cloned(),
+        );
+    };
+    let mut discard = Vec::new();
+    // With no cursor, what the timeline holds is the past: its reports only.
+    take(&status, &mut reports, if since.is_some() { &mut news_of } else { &mut discard });
+    let final_at_start: Vec<TaskId> = status
+        .tasks
+        .iter()
+        .filter(|c| followed.contains(&c.id) && !c.state.holds_paths())
+        .map(|c| c.id)
+        .collect();
+    let ready_of = |news_of: &[TimelineEntry]| -> Vec<TaskId> {
+        followed
+            .iter()
+            .copied()
+            .filter(|t| final_at_start.contains(t) || news_of.iter().any(|e| e.task == Some(*t)))
+            .collect()
+    };
+    let mut cursor = status.next;
+    let timed_out = loop {
+        let ready = ready_of(&news_of);
+        if if all { ready.len() == followed.len() } else { !ready.is_empty() } {
+            break false;
+        }
+        let left = wait.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break true;
+        }
+        let left_ms = u32::try_from(left.as_millis()).unwrap_or(u32::MAX).clamp(1, READ_WAIT_MS);
+        status = project_answer(dispatch, None, read(Some(cursor), left_ms)).await?;
+        let left = wait.saturating_sub(started.elapsed());
+        if status.next == cursor && !left.is_zero() {
+            // Answered with nothing new before its time was up: never spin on such a server.
+            tokio::time::sleep(std::time::Duration::from_millis(250).min(left)).await;
+        }
+        take(&status, &mut reports, &mut news_of);
+        cursor = status.next;
+    };
+    Ok(TaskWait {
+        ready: ready_of(&news_of),
+        status,
+        tasks: followed,
+        news: news_of,
+        reports,
+        timed_out,
+        next: cursor,
+    })
 }
 
 /// Say whether a task's work may merge, as the reviewer the server started for it or as the

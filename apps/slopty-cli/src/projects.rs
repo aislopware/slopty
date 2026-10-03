@@ -415,15 +415,34 @@ pub enum TaskCmd {
         #[arg(long, value_name = "WORKER")]
         on: Option<String>,
     },
-    /// Tell a task's agent something, as the person: the words reach it through its hooks as a
-    /// report does, never typed into its terminal (fix CI, address the comments, resolve the
-    /// conflicts).
+    /// Tell a task's agent something: the words reach it through its hooks as a report does,
+    /// never typed into its terminal (fix CI, address the comments, resolve the conflicts).
+    /// Inside an agent's session they are that agent's, to a task under it, and marked so.
     Tell {
         #[command(flatten)]
         which: TaskRef,
         /// What to say.
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
+    },
+    /// Wait for news of tasks: a report, a move of state, a terminal gone, a verdict, checks,
+    /// a step ended. Running out of time cancels nothing.
+    Wait {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The tasks, `3` or `#3`.
+        #[arg(required = true, num_args = 1..)]
+        tasks: Vec<String>,
+        /// Answer once each has news, not at the first.
+        #[arg(long)]
+        all: bool,
+        /// The timeline cursor to wait on from: the `next` a wait printed.
+        #[arg(long)]
+        since: Option<u64>,
+        /// How long to wait, in seconds.
+        #[arg(long, default_value_t = 50)]
+        timeout: u32,
     },
     /// Say whether a task's work may merge, as the person, over its reviewer's word or in its
     /// place: `--approve` puts verified work in the merge queue, `--changes` gives it back to
@@ -755,6 +774,17 @@ pub async fn task(
             ops::task_tell(link, project, task, words.join(" "), key).await?;
             println!("Told its agent");
             return Ok(());
+        }
+        TaskCmd::Wait { project, tasks, all, since, timeout } => {
+            let timeout_ms = timeout.saturating_mul(1_000);
+            let waited =
+                ops::task_wait(link, project.as_deref(), (&tasks, all), since, timeout_ms).await?;
+            return if json {
+                print_json(&view::task_wait(&waited))
+            } else {
+                print!("{}", view::task_wait_text(&waited));
+                Ok(())
+            };
         }
         TaskCmd::Review { which, approve, summary, findings, .. } => {
             let findings = findings.iter().map(|f| finding(f)).collect();

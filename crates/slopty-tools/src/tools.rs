@@ -51,7 +51,8 @@ any depth the project allows, and says where it may run as CEL rules over the wo
 outright; project_needs says once what each kind of the project's work needs of its machines. \
 Start what runs for a task, Claude Code, Codex or any command, with task_spawn, and follow \
 the tree with project_status (since and timeout_ms wait for news; bounds and live say how much \
-room there is). Agents started for a task have these tools too, their project and task the \
+room there is), or wait for tasks' news with task_wait; task_tell says something to a task's \
+agent under you. Agents started for a task have these tools too, their project and task the \
 defaults.";
 
 /// How often a `wait_for` with a progress sink reports that it is still waiting.
@@ -420,6 +421,49 @@ struct TaskReportArgs {
     pr: Option<u32>,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
     idempotency_key: Option<String>,
+}
+
+/// `task_tell`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskTellArgs {
+    /// The project; yours when omitted.
+    project: Option<String>,
+    /// The task to tell: one under you (any of your project's when you orchestrate it).
+    task: TaskArg,
+    /// What to say, in a few lines.
+    text: String,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
+/// `task_wait`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskWaitArgs {
+    /// The project; yours when omitted.
+    project: Option<String>,
+    /// The tasks to wait for, at most 64.
+    tasks: Vec<TaskArg>,
+    /// `any` (the default): answer at the first news of any of them; `all`: once each has
+    /// news.
+    until: Option<UntilArg>,
+    /// Timeline cursor: the `next` of the previous `task_wait` or `project_status`, so nothing in
+    /// between is missed. From now when omitted.
+    since: Option<u64>,
+    /// How long to wait, at most 1800000; 50000 when omitted. Running out cancels nothing.
+    timeout_ms: Option<u32>,
+}
+
+/// What `task_wait` waits for.
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum UntilArg {
+    /// The first news of any task named.
+    #[default]
+    Any,
+    /// News of every task named.
+    All,
 }
 
 /// `review_report`.
@@ -1416,6 +1460,26 @@ pub fn list() -> Vec<Tool> {
              timeline.",
             Kind::Write,
         ),
+        tool::<TaskTellArgs>(
+            "task_tell",
+            "Tell the agent of a task under you something: as the orchestrator any task of your \
+             project, as a task's agent a task split from yours. It reaches that agent through \
+             its hooks at once, after anything the person said and never in its place, marked \
+             as your words, not the person's; your latest replaces one still unread. It never \
+             answers a permission or a question the person was asked: a task waiting on the \
+             person is refused until it moves on. To the node above you, use task_report.",
+            Kind::Write,
+        ),
+        tool::<TaskWaitArgs>(
+            "task_wait",
+            "Wait for news of tasks: a report, a move of state (its agent ending a turn without \
+             a report is one, waiting on the person another), its terminal gone, its verifier, \
+             review or checks, a step that ended. `until` any (default) or all. A task merged or \
+             failed is ready at once. Returns each task's card with its `news` and \
+             `last_report`, `ready`, `timed_out`, and `next` to wait on from. Running out of time \
+             cancels nothing. For agents without hooks; hooks bring the same news unasked.",
+            Kind::Read,
+        ),
         tool::<ReviewReportArgs>(
             "review_report",
             "As the reviewer the server started for a task, say whether its work may merge: \
@@ -1714,6 +1778,22 @@ async fn run<D: Dispatch>(
                 ops::task_report(dispatch, a.project.as_deref(), task.as_deref(), a.report(), key);
             json(&view::projects::task(&reported.await?))
         }
+        "task_tell" => {
+            let a: TaskTellArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let task = a.task.text();
+            ops::task_tell(dispatch, a.project.as_deref(), Some(&task), a.text, key).await?;
+            json(&view::DONE)
+        }
+        "task_wait" => {
+            let a: TaskWaitArgs = args(arguments)?;
+            let tasks: Vec<String> = a.tasks.iter().map(TaskArg::text).collect();
+            let all = matches!(a.until.unwrap_or_default(), UntilArg::All);
+            let timeout = a.timeout_ms.unwrap_or(ops::DEFAULT_TASK_WAIT_MS);
+            let waited =
+                ops::task_wait(dispatch, a.project.as_deref(), (&tasks, all), a.since, timeout);
+            json(&view::projects::task_wait(&with_progress(waited, progress).await?))
+        }
         "review_report" => {
             let a: ReviewReportArgs = args(arguments)?;
             let key = checked_key(a.idempotency_key.clone())?;
@@ -1957,7 +2037,8 @@ mod tests {
     };
     use slopty_proto::project::{
         Assignment, Bounds, Fact, Limits, Live, NativeCounts, Natives, Peer, Placement, Preference,
-        Project, ProjectId, ProjectStatus, Runner, Task, TaskId, TaskState, WorkerFacts,
+        Project, ProjectId, ProjectStatus, Runner, Task, TaskId, TaskState, TimelineEntry,
+        WorkerFacts,
     };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -2382,6 +2463,8 @@ mod tests {
                 "task_claim",
                 "task_update",
                 "task_report",
+                "task_tell",
+                "task_wait",
                 "review_report",
                 "task_assign",
                 "task_spawn",
@@ -2693,5 +2776,145 @@ mod tests {
         assert_eq!(fake.verbs().pop(), Some(Verb::Wake { worker: studio() }));
         let (failed, text) = call_json(&fake, "wake_worker", json!({})).await;
         assert!(failed && text.contains("worker"), "a worker is named: {text}");
+    }
+
+    /// An agent tells a task by its number, its words going as they are; a task must be named,
+    /// since an agent never tells itself.
+    #[tokio::test]
+    async fn task_tell_names_its_task_and_carries_the_words() {
+        let scope =
+            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() };
+        let fake = Fake { scope, ..Fake::default() };
+        let (failed, text) =
+            call_json(&fake, "task_tell", json!({"task": "#7", "text": "Cover the iPad."})).await;
+        assert!(!failed, "{text}");
+        let told = Verb::TaskTell {
+            project: "slopty".parse().unwrap(),
+            task: Some(TaskId(7)),
+            text: "Cover the iPad.".to_owned(),
+        };
+        assert_eq!(fake.verbs().pop(), Some(told));
+        let (failed, text) = call_json(&fake, "task_tell", json!({"text": "Hello."})).await;
+        assert!(failed && text.contains("task"), "a task is named: {text}");
+    }
+
+    /// A project's timeline as a server answers it, read after read; with nothing left it
+    /// waits out the read's time and answers nothing new, as the server does.
+    struct Timeline {
+        reads: Mutex<std::collections::VecDeque<ProjectStatus>>,
+        last: Mutex<Option<ProjectStatus>>,
+        asked: Mutex<Vec<Verb>>,
+    }
+
+    impl Timeline {
+        fn new(reads: Vec<ProjectStatus>) -> Self {
+            Self {
+                reads: Mutex::new(reads.into()),
+                last: Mutex::new(None),
+                asked: Mutex::default(),
+            }
+        }
+    }
+
+    impl Dispatch for Timeline {
+        async fn send(&self, _key: Option<IdempotencyKey>, verb: Verb) -> Outcome {
+            self.asked.lock().push(verb.clone());
+            let Verb::ProjectStatus { timeout_ms, .. } = verb else { return Outcome::Done };
+            let next = self.reads.lock().pop_front();
+            let status = if let Some(status) = next {
+                status
+            } else {
+                tokio::time::sleep(Duration::from_millis(u64::from(timeout_ms))).await;
+                let last = self.last.lock().clone().expect("read once");
+                ProjectStatus { timeline: Vec::new(), ..last }
+            };
+            *self.last.lock() = Some(status.clone());
+            Outcome::Project(Box::new(status))
+        }
+
+        fn scope(&self) -> crate::Scope {
+            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() }
+        }
+    }
+
+    fn at(seq: u64, task: u32, what: slopty_proto::project::Moment) -> TimelineEntry {
+        TimelineEntry { seq, at_ms: WallMs::ZERO, task: Some(TaskId(task)), what }
+    }
+
+    fn read(next: u64, timeline: Vec<TimelineEntry>) -> ProjectStatus {
+        ProjectStatus { timeline, next, ..project_status("slopty".parse().unwrap()) }
+    }
+
+    /// `task_wait` follows the timeline from now with the server's own long wait: what came
+    /// before is the past (only its latest report is kept), a delivery or a note is no news, and
+    /// a turn ended or a report is. With `all` it waits for each; out of time it says so, asks
+    /// nothing to stop, and gives the cursor to go on from. A task merged is ready at once.
+    #[tokio::test(start_paused = true)]
+    async fn task_wait_waits_for_news_and_cancels_nothing() {
+        use slopty_proto::project::{Moment, Report, ReportKind};
+        let report = |note: &str| Moment::Reported {
+            report: Report {
+                kind: ReportKind::Checkpoint,
+                note: note.to_owned(),
+                artifacts: Vec::new(),
+                branch: None,
+                pr: None,
+            },
+        };
+        let rested = Moment::State { from: TaskState::Running, to: TaskState::Waiting };
+        let quiet = Moment::Note { text: "noted".to_owned() };
+        let timeline = Timeline::new(vec![
+            read(10, vec![at(9, 5, report("half way"))]),
+            read(12, vec![at(10, 5, quiet.clone()), at(11, 3, quiet)]),
+            read(13, vec![at(12, 5, rested.clone())]),
+        ]);
+        let tasks = ["5".to_owned(), "#3".to_owned()];
+        let waited = ops::task_wait(&timeline, None, (&tasks, false), None, 60_000).await.unwrap();
+        assert_eq!(
+            (waited.ready.as_slice(), waited.timed_out, waited.next),
+            (&[TaskId(5)][..], false, 13)
+        );
+        assert_eq!(waited.news, [at(12, 5, rested)]);
+        let view = serde_json::to_value(view::projects::task_wait(&waited)).unwrap();
+        assert_eq!(
+            view["tasks"][0]["last_report"]["text"],
+            json!("checkpoint: half way"),
+            "{view}"
+        );
+        let sinces: Vec<Option<u64>> = timeline
+            .asked
+            .lock()
+            .iter()
+            .map(|v| match v {
+                Verb::ProjectStatus { since, .. } => *since,
+                other => panic!("only reads: {other:?}"),
+            })
+            .collect();
+        assert_eq!(sinces, [None, Some(10), Some(12)]);
+
+        let timeline = Timeline::new(vec![read(13, Vec::new())]);
+        let started = tokio::time::Instant::now();
+        let waited =
+            ops::task_wait(&timeline, None, (&tasks, true), Some(13), 90_000).await.unwrap();
+        assert!(waited.timed_out && waited.ready.is_empty() && waited.next == 13);
+        assert_eq!(started.elapsed(), Duration::from_secs(90), "the whole wait, no more");
+        assert!(
+            timeline.asked.lock().iter().all(|v| matches!(v, Verb::ProjectStatus { .. })),
+            "nothing is stopped or cancelled"
+        );
+
+        let mut merged = read(20, Vec::new());
+        if let Some(card) = merged.tasks.iter_mut().find(|c| c.id == TaskId(5)) {
+            card.state = TaskState::Merged;
+        }
+        let timeline = Timeline::new(vec![merged]);
+        let waited =
+            ops::task_wait(&timeline, None, (&tasks[..1], true), None, 60_000).await.unwrap();
+        assert_eq!((waited.ready.as_slice(), waited.timed_out), (&[TaskId(5)][..], false));
+        let unknown = ["9".to_owned()];
+        let timeline = Timeline::new(vec![read(20, Vec::new())]);
+        let refused =
+            ops::task_wait(&timeline, None, (&unknown, false), None, 0).await.unwrap_err();
+        assert_eq!(refused.code, ErrorCode::UnknownTask);
     }
 }

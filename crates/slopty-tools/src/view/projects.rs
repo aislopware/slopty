@@ -670,6 +670,69 @@ pub fn status(s: &ProjectStatus) -> StatusView<'_> {
     }
 }
 
+/// What `task_wait` saw, for JSON.
+#[derive(Debug, Serialize)]
+pub struct WaitView<'a> {
+    /// The time ran out first; nothing was stopped or cancelled for it.
+    timed_out: bool,
+    /// The tasks with news, or merged or given up when the wait began.
+    ready: Vec<u32>,
+    /// Each task followed, with what it did since the wait began and its latest report.
+    tasks: Vec<WaitedView<'a>>,
+    /// The cursor to wait on from, as `since`.
+    next: u64,
+}
+
+/// One task `task_wait` followed, for JSON.
+#[derive(Debug, Serialize)]
+pub struct WaitedView<'a> {
+    #[serde(flatten)]
+    card: CardView<'a>,
+    news: Vec<EntryView>,
+    last_report: Option<EntryView>,
+}
+
+/// What `task_wait` saw, for JSON.
+#[must_use]
+pub fn task_wait(w: &crate::ops::TaskWait) -> WaitView<'_> {
+    let tasks = w
+        .tasks
+        .iter()
+        .filter_map(|id| {
+            let found = w.status.tasks.iter().find(|c| c.id == *id)?;
+            let mine = |e: &&TimelineEntry| e.task == Some(*id);
+            Some(WaitedView {
+                card: card(found),
+                news: w.news.iter().filter(mine).map(entry).collect(),
+                last_report: w.reports.iter().find(mine).map(entry),
+            })
+        })
+        .collect();
+    WaitView {
+        timed_out: w.timed_out,
+        ready: w.ready.iter().map(|t| t.0).collect(),
+        tasks,
+        next: w.next,
+    }
+}
+
+/// What `task_wait` saw, for a person: a line per task with what it did, then whether the
+/// time ran out and the cursor to go on from.
+#[must_use]
+pub fn task_wait_text(w: &crate::ops::TaskWait) -> String {
+    let mut out = String::new();
+    for id in &w.tasks {
+        let Some(card) = w.status.tasks.iter().find(|c| c.id == *id) else { continue };
+        let _infallible = writeln!(out, "#{} {}  {}", card.id, state_word(card.state), card.title);
+        for e in w.news.iter().filter(|e| e.task == Some(*id)) {
+            let _infallible = writeln!(out, "  {}", moment(&e.what).1);
+        }
+    }
+    let ended = if w.timed_out { "timed out; nothing was stopped" } else { "news came" };
+    let _infallible = writeln!(out, "{ended}  (next {})", w.next);
+    out
+}
+
 /// One rule's verdict on a worker, for JSON.
 #[derive(Debug, Serialize)]
 pub struct ReasonView<'a> {
