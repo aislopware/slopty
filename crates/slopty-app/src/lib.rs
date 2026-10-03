@@ -3223,7 +3223,9 @@ fn apply_link_event(
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
             | WorkerMsg::Handoff(_)
-            | WorkerMsg::Sessions(_),
+            | WorkerMsg::Sessions(_)
+            | WorkerMsg::FolderPage { .. }
+            | WorkerMsg::FsDone { .. },
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

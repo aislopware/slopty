@@ -170,6 +170,21 @@ pub enum ClientMsg {
     /// Something asked of the worker's agent threads ([`thread`]): the thread table, a
     /// thread to follow from a cursor, an intent.
     Thread(thread::wire::ThreadRequest),
+    /// The next page of a folder past [`folder::FOLDER_ENTRIES`] entries; answered with
+    /// `WorkerMsg::FolderPage`.
+    FolderPage {
+        /// The directory, as `ListFolder` named it.
+        path: String,
+        /// The last entry of the page before.
+        after: folder::After,
+    },
+    /// Make a folder, move or rename an entry, or trash one; answered with `WorkerMsg::FsDone`.
+    FsOp {
+        /// This client's number for it.
+        request: RequestId,
+        /// What to do.
+        op: folder::FsOp,
+    },
 }
 
 impl ClientMsg {
@@ -198,6 +213,8 @@ impl ClientMsg {
             Self::HandoffCaps(_) => "HandoffCaps",
             Self::WatchFolders { .. } => "WatchFolders",
             Self::Thread(_) => "Thread",
+            Self::FolderPage { .. } => "FolderPage",
+            Self::FsOp { .. } => "FsOp",
         }
     }
 }
@@ -329,6 +346,22 @@ pub enum WorkerMsg {
     IntentDone(thread::wire::IntentDone),
     /// An agent's past sessions in a folder (`ClientMsg::Thread`'s `Sessions`).
     Sessions(thread::wire::PastSessions),
+    /// The answer to `ClientMsg::FolderPage`.
+    FolderPage {
+        /// The path asked for, as asked.
+        path: String,
+        /// The entry the page starts after, as asked.
+        after: folder::After,
+        /// The entries after it.
+        listing: folder::Listing,
+    },
+    /// The answer to `ClientMsg::FsOp`.
+    FsDone {
+        /// The request's number.
+        request: RequestId,
+        /// How it went.
+        outcome: folder::FsOutcome,
+    },
 }
 
 impl WorkerMsg {
@@ -364,6 +397,8 @@ impl WorkerMsg {
             Self::Threads(_) => "Threads",
             Self::IntentDone(_) => "IntentDone",
             Self::Sessions(_) => "Sessions",
+            Self::FolderPage { .. } => "FolderPage",
+            Self::FsDone { .. } => "FsDone",
         }
     }
 }

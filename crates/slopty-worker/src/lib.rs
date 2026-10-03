@@ -6,8 +6,8 @@
 //! [`items::ItemStore`] is the authoritative, persisted item registry.
 //! [`repo`] answers which repository a session's working directory is in, which only the
 //! machine the shell runs on can know; [`file::read`] reads a file for a file tile,
-//! [`listing::folder`] a directory for a folder tile, and [`search`] searches the files under a
-//! directory for text.
+//! [`listing::folder`] a directory for a folder tile, [`fsop::apply`] makes, moves or trashes an
+//! entry for one, and [`search`] searches the files under a directory for text.
 //! [`orchestrate::Orchestrator`] answers the verbs the server forwards (open, type, read, wait,
 //! files, [`ports`]); [`caps`] says what this worker can do, and [`facts`] what it is and has
 //! for a project's placement.
@@ -22,6 +22,7 @@ pub mod file;
 pub mod find;
 #[cfg(target_os = "macos")]
 mod fsevents;
+pub mod fsop;
 pub mod fswatch;
 pub mod handoff;
 pub mod items;

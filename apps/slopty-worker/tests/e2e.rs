@@ -5740,4 +5740,138 @@ mod tests {
         writer.abort();
         reader.abort();
     }
+
+    /// The next control message `pick` takes, within a step.
+    async fn next_control<T>(
+        events: &mut tokio::sync::mpsc::Receiver<LinkEvent>,
+        mut pick: impl FnMut(WorkerMsg) -> Option<T>,
+    ) -> T {
+        let deadline = tokio::time::Instant::now().checked_add(STEP).unwrap();
+        loop {
+            let event = tokio::time::timeout_at(deadline, events.recv()).await.unwrap().unwrap();
+            if let LinkEvent::Control(msg) = event
+                && let Some(picked) = pick(msg)
+            {
+                return picked;
+            }
+        }
+    }
+
+    /// A folder tile's ops through a real worker: a folder made, a file renamed and moved into
+    /// it, a clash and a missing source refused with nothing touched, the home refused, and a
+    /// file sent to the OS's own trash, where it is found whole (and taken back out, so the
+    /// person's trash keeps nothing of the test). Prints each op's round trip on loopback.
+    #[tokio::test]
+    async fn folder_ops_make_move_and_trash_through_the_worker() {
+        use slopty_client::folders::{FsOps, sentence};
+        use slopty_proto::folder::{FsOp, FsOutcome, FsRefusal};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let work = std::fs::canonicalize(dir.path()).unwrap().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        std::fs::write(work.join("b.txt"), "b").unwrap();
+        let at = |name: &str| work.join(name).to_string_lossy().into_owned();
+
+        let mut ops = FsOps::default();
+        let mut took = Vec::new();
+        let mut run = async |op: FsOp| {
+            let started = std::time::Instant::now();
+            let msg = ops.ask(op);
+            let ClientMsg::FsOp { request, .. } = msg else { panic!("{msg:?}") };
+            link.send(msg).await.unwrap();
+            let outcome = next_control(&mut events, |msg| match msg {
+                WorkerMsg::FsDone { request: r, outcome } if r == request => Some(outcome),
+                _other => None,
+            })
+            .await;
+            took.push(started.elapsed());
+            let (op, outcome) = ops.done(request, outcome).unwrap();
+            println!("{}", sentence(&op, &outcome));
+            outcome
+        };
+
+        let made = run(FsOp::MakeDir { parent: at(""), name: "new".to_owned() }).await;
+        assert_eq!(made, FsOutcome::Done { path: at("new") });
+        assert!(work.join("new").is_dir());
+
+        let renamed = run(FsOp::Move { from: at("a.txt"), to: at("c.txt") }).await;
+        assert_eq!(renamed, FsOutcome::Done { path: at("c.txt") });
+        let clash = run(FsOp::Move { from: at("c.txt"), to: at("b.txt") }).await;
+        assert_eq!(clash, FsOutcome::Refused(FsRefusal::Clash { path: at("b.txt") }));
+        assert_eq!(std::fs::read_to_string(work.join("b.txt")).unwrap(), "b", "not replaced");
+        let moved = run(FsOp::Move { from: at("c.txt"), to: at("new/c.txt") }).await;
+        assert_eq!(moved, FsOutcome::Done { path: at("new/c.txt") });
+        let gone = run(FsOp::Move { from: at("a.txt"), to: at("d.txt") }).await;
+        assert_eq!(gone, FsOutcome::Refused(FsRefusal::Missing { path: at("a.txt") }));
+        let home = run(FsOp::Trash { path: "~".to_owned() }).await;
+        assert!(matches!(home, FsOutcome::Refused(FsRefusal::Protected { .. })), "{home:?}");
+
+        let trashed = run(FsOp::Trash { path: at("b.txt") }).await;
+        let FsOutcome::Done { path: landed } = trashed else { panic!("{trashed:?}") };
+        assert!(!work.join("b.txt").exists());
+        let kept = std::fs::read_to_string(&landed);
+        std::fs::rename(&landed, work.join("b.txt")).unwrap();
+        assert_eq!(kept.unwrap(), "b", "whole in the trash at {landed}");
+
+        took.sort_unstable();
+        println!(
+            "folder op round trip on loopback: p50 {:?}, max {:?} ({} ops)",
+            took[took.len() / 2],
+            took[took.len() - 1],
+            took.len()
+        );
+    }
+
+    /// A folder past one listing's cap is paged through a real worker: the first listing holds
+    /// the cap and the whole count, and the pages after it hold the rest, each entry once.
+    #[tokio::test]
+    async fn a_huge_folder_is_paged_through_the_worker() {
+        use slopty_client::folders::FolderPages;
+        use slopty_proto::folder::{FOLDER_ENTRIES, Listing};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let big = dir.path().join("big");
+        std::fs::create_dir_all(&big).unwrap();
+        let files = FOLDER_ENTRIES * 2 + 30;
+        for i in 0..files {
+            std::fs::write(big.join(format!("f{i:05}")), b"").unwrap();
+        }
+        let path = big.to_string_lossy().into_owned();
+        let mut pages = FolderPages::new(path.clone());
+        link.send(ClientMsg::ListFolder { path: path.clone() }).await.unwrap();
+        let first = next_control(&mut events, |msg| match msg {
+            WorkerMsg::Folder { path: p, listing } if p == path => Some(listing),
+            _other => None,
+        })
+        .await;
+        assert!(pages.listed(first).is_none());
+        let mut asked = pages.more();
+        let mut took = Vec::new();
+        while let Some(msg) = asked {
+            let started = std::time::Instant::now();
+            link.send(msg).await.unwrap();
+            let (after, listing) = next_control(&mut events, |msg| match msg {
+                WorkerMsg::FolderPage { path: p, after, listing } if p == path => {
+                    Some((after, listing))
+                }
+                _other => None,
+            })
+            .await;
+            took.push(started.elapsed());
+            asked = pages.page(&after, listing).or_else(|| pages.more());
+        }
+        let Some(Listing::Listed { entries, total, .. }) = pages.listing() else { panic!() };
+        assert_eq!(*total, files);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        let want: Vec<String> = (0..files).map(|i| format!("f{i:05}")).collect();
+        assert_eq!(names, want, "every entry once, in order");
+        println!("a page of {FOLDER_ENTRIES} entries on loopback: {took:?}");
+    }
 }

@@ -24,7 +24,7 @@ mod tests {
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_proto::agent::AgentStatus;
     use slopty_proto::file::FileRead;
-    use slopty_proto::folder::Listing;
+    use slopty_proto::folder::{FsOp, FsOutcome, Listing};
     use slopty_proto::handshake::{Hello, HelloAck};
     use slopty_proto::input::{KeyAction, KeyCode, KeyEvent, Mods};
     use slopty_proto::search::{SearchEvent, SearchQuery, SearchRequest};
@@ -496,6 +496,33 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(&read, FileRead::Text { text, .. } if text == "from linux"), "{read:?}");
+
+        // 3b. The note goes to the freedesktop.org trash, never unlinked: whole in the home
+        //     trash's `files`, its info file saying where it was.
+        let trash = FsOp::Trash { path: note.clone() };
+        shell.link.send(ClientMsg::FsOp { request: 1, op: trash }).await.unwrap();
+        let outcome = shell
+            .until_control("the trash", |msg| match msg {
+                WorkerMsg::FsDone { request: 1, outcome } => Some(outcome),
+                _other => None,
+            })
+            .await
+            .unwrap();
+        let can = format!("{home}/.local/share/Trash");
+        assert_eq!(outcome, FsOutcome::Done { path: format!("{can}/files/note.txt") });
+        let info = format!("{can}/info/note.txt.trashinfo");
+        shell.link.send(ClientMsg::ReadFile { path: info.clone() }).await.unwrap();
+        let read = shell
+            .until_control("the trash info", |msg| match msg {
+                WorkerMsg::File { path, read } if path == info => Some(read),
+                _other => None,
+            })
+            .await
+            .unwrap();
+        let FileRead::Text { text, .. } = &read else { panic!("{read:?}") };
+        assert!(text.starts_with("[Trash Info]"), "{text}");
+        assert!(text.contains(&format!("\nPath={home}/e2e/note.txt\n")), "{text}");
+        assert!(text.contains("\nDeletionDate="), "{text}");
 
         // 4. An agent's status: a hook played through the Linux `slopty hook` inside the container,
         //    finding the worker by the platform's socket rule, reaches this client.

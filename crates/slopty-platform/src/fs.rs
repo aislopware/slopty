@@ -13,6 +13,31 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Rename `from` to `to` unless something is at `to`.
+///
+/// Something there fails it with `AlreadyExists` and leaves both as they were. One step where
+/// the file system can (`renameat2`'s `RENAME_NOREPLACE`, `renamex_np`'s `RENAME_EXCL`); where
+/// it cannot (some Linux network and overlay file systems), a look at `to` and then a plain
+/// rename.
+///
+/// # Errors
+///
+/// `AlreadyExists`, or whatever the OS refuses.
+pub fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use rustix::io::Errno;
+    match renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE) {
+        Ok(()) => Ok(()),
+        Err(e) if [Errno::INVAL, Errno::NOSYS, Errno::NOTSUP].contains(&e) => {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
+            std::fs::rename(from, to)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Replace `path` with `bytes`, atomically.
 ///
 /// It writes a temporary file in the same directory, puts the bytes on the device ahead of

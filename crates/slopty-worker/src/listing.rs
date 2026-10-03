@@ -11,7 +11,7 @@ use std::collections::BinaryHeap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use slopty_proto::folder::{FOLDER_ENTRIES, FolderEntry, Listing};
+use slopty_proto::folder::{After, FOLDER_ENTRIES, FolderEntry, Listing};
 use slopty_proto::orchestration::FileKind;
 
 /// The names of the first `keep` entries of `path` in the order `key` gives them (a tie goes by
@@ -23,7 +23,18 @@ use slopty_proto::orchestration::FileKind;
 pub fn first<K: Ord>(
     path: &Path,
     keep: usize,
+    key: impl FnMut(&std::fs::DirEntry) -> K,
+) -> std::io::Result<(Vec<OsString>, u32)> {
+    first_after(path, keep, key, None)
+}
+
+/// [`first`], counting only the entries that come after `after` (a key and a name) in that
+/// order; the count is still of the whole directory.
+fn first_after<K: Ord>(
+    path: &Path,
+    keep: usize,
     mut key: impl FnMut(&std::fs::DirEntry) -> K,
+    after: Option<&(K, OsString)>,
 ) -> std::io::Result<(Vec<OsString>, u32)> {
     // The greatest kept entry on top, to be pushed out by a smaller one.
     let mut first: BinaryHeap<(K, OsString)> = BinaryHeap::with_capacity(keep.saturating_add(1));
@@ -32,6 +43,9 @@ pub fn first<K: Ord>(
         let entry = entry?;
         total = total.saturating_add(1);
         let at = (key(&entry), entry.file_name());
+        if after.is_some_and(|after| at <= *after) {
+            continue;
+        }
         if first.len() < keep {
             first.push(at);
         } else if first.peek().is_some_and(|last| at < *last) {
@@ -46,6 +60,13 @@ pub fn first<K: Ord>(
 /// name in any case; `NotFolder` when a file is there instead.
 #[must_use]
 pub fn folder(path: &Path) -> Listing {
+    folder_page(path, None)
+}
+
+/// A page of a directory for a folder tile: the [`FOLDER_ENTRIES`] entries that come after
+/// `after` in the folder's order, or its first ones; the count is of the whole directory.
+#[must_use]
+pub fn folder_page(path: &Path, after: Option<&After>) -> Listing {
     // Lexically clean (`a//b/./` is `a/b`), not resolved: a folder reached through a link keeps
     // the path it was reached by.
     let dir: PathBuf = crate::file::expand_home(path).components().collect();
@@ -55,7 +76,8 @@ pub fn folder(path: &Path) -> Listing {
         Err(e) => return Listing::Missing { error: crate::file::os_word(&e) },
     }
     let keep = usize::try_from(FOLDER_ENTRIES).unwrap_or(usize::MAX);
-    let (names, total) = match first(&dir, keep, folder_order) {
+    let after = after.map(|a| ((!a.folder, a.name.to_lowercase()), OsString::from(&a.name)));
+    let (names, total) = match first_after(&dir, keep, folder_order, after.as_ref()) {
         Ok(listed) => listed,
         Err(e) => return Listing::Missing { error: crate::file::os_word(&e) },
     };
@@ -63,7 +85,8 @@ pub fn folder(path: &Path) -> Listing {
     Listing::Listed { dir: dir.to_string_lossy().into_owned(), entries, total }
 }
 
-/// Folders before everything else, then the name with its case folded.
+/// Folders before everything else, then the name with its case folded; [`After`] is this key
+/// of the last entry a page showed.
 fn folder_order(entry: &std::fs::DirEntry) -> (bool, String) {
     let folder = entry.file_type().is_ok_and(|t| {
         if t.is_symlink() {
@@ -194,6 +217,44 @@ mod tests {
         assert_eq!(entries.len(), usize::try_from(FOLDER_ENTRIES).unwrap());
         assert_eq!(entries[0].name, "zz", "a folder is kept first, even past the cap");
         assert_eq!(entries[1].name, "f00000");
+    }
+
+    /// The pages of a huge folder hold every entry once, in the folder's order, however it is
+    /// cut: a page starts just after the last entry of the one before, so an entry added before
+    /// it meanwhile is not repeated and none after it is skipped.
+    #[test]
+    fn the_pages_of_a_huge_folder_hold_every_entry_once_in_order() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let files = FOLDER_ENTRIES * 2 + 7;
+        for i in 0..files {
+            let name = if i % 2 == 0 { format!("f{i:05}") } else { format!("F{i:05}") };
+            std::fs::write(dir.join(name), b"").unwrap();
+        }
+        for name in ["sub", "Zed"] {
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        }
+        let whole = files + 2;
+        let mut seen: Vec<FolderEntry> = Vec::new();
+        let mut after = None;
+        loop {
+            let (_, entries, total) = listed(folder_page(dir, after.as_ref()));
+            let now = if seen.is_empty() { whole } else { whole + 1 };
+            assert_eq!(total, now, "every page counts the whole folder as it is");
+            let Some(last) = entries.last() else { break };
+            after = Some(After::of(last));
+            if seen.is_empty() {
+                // Made before the cursor while the person reads the first page: not repeated.
+                std::fs::write(dir.join("a-new"), b"").unwrap();
+            }
+            seen.extend(entries);
+        }
+        let names: Vec<&str> = seen.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names.len(), usize::try_from(whole).unwrap(), "each once");
+        assert_eq!(names[..2], ["sub", "Zed"], "folders first, in any case");
+        let rest: Vec<String> = names[2..].iter().map(|n| n.to_lowercase()).collect();
+        assert!(rest.is_sorted(), "names in any case");
+        assert!(!names.contains(&"a-new"), "an entry made before the cursor waits for a relist");
     }
 
     /// A file asked for as a folder is said to be one; nothing there is missing with the OS's

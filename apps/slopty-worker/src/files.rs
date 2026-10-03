@@ -1,13 +1,15 @@
-//! The files a client reads, writes and watches, answered on tasks of their own: a read, a
-//! quick-open walk or a look at the watched files touches the disk, and none of it may hold up a
-//! terminal's echo on the same connection. A text or picture too big for the control stream goes
-//! on a bulk stream after its announcement (`slopty_worker::file::announce`). The watched files are
-//! followed on the kernel's events (`slopty_worker::fswatch`).
+//! The files a client reads, writes, watches and changes, answered on tasks of their own: a
+//! read, a quick-open walk, a folder op or a look at the watched files touches the disk, and
+//! none of it may hold up a terminal's echo on the same connection. A text or picture too big
+//! for the control stream goes on a bulk stream after its announcement
+//! (`slopty_worker::file::announce`). The watched files are followed on the kernel's events
+//! (`slopty_worker::fswatch`).
 
 use slopty_core::{ClientId, WallMs};
 use slopty_net::{Connection, NetError, WorkerMsg};
+use slopty_proto::RequestId;
 use slopty_proto::file::{FileRead, WriteResult};
-use slopty_proto::folder::Listing;
+use slopty_proto::folder::{After, FsOp, FsOutcome, Listing};
 use slopty_proto::transfer::{BulkHeader, Purpose};
 use slopty_worker::file::Rewrite;
 use tokio::sync::{mpsc, watch};
@@ -104,7 +106,8 @@ pub async fn write(
     let _sent = out.send(WorkerMsg::Written { path, result }).await;
 }
 
-/// A save, or the end of a waiting edit, in the order its client sent them.
+/// A save, a folder op, or the end of a waiting edit, in the order its client sent them: a file
+/// saved and then moved is moved with what was saved.
 #[derive(Debug)]
 pub enum Save {
     /// A file tile's save ([`write()`]).
@@ -119,6 +122,13 @@ pub enum Save {
     /// The person is done with a waiting edit: heard only once the saves before it are on disk,
     /// so the program that waited reads what was saved.
     Edited(slopty_proto::handoff::HandoffReply),
+    /// A folder tile's change ([`fs_op`]).
+    Fs {
+        /// The client's number for it.
+        request: RequestId,
+        /// What to do.
+        op: FsOp,
+    },
 }
 
 /// Take one client's saves and edit ends in order until the connection goes and the last one
@@ -135,8 +145,36 @@ pub async fn save_in_order(
                 write(&handoffs, client, &out, path, text, base_modified_ms).await;
             }
             Save::Edited(reply) => handoffs.lock().replied(client, reply),
+            Save::Fs { request, op } => fs_op(client, &out, request, op).await,
         }
     }
+}
+
+/// Make, move or trash an entry for a folder tile and answer how it went. The folder tiles that
+/// show the folders it changed hear of it from their watch ([`watch_folders`]).
+pub async fn fs_op(client: ClientId, out: &mpsc::Sender<WorkerMsg>, request: RequestId, op: FsOp) {
+    let what = format!("{op:?}");
+    let outcome = tokio::task::spawn_blocking(move || slopty_worker::fsop::apply(&op))
+        .await
+        .unwrap_or_else(|_| FsOutcome::Failed { error: "folder op failed".to_owned() });
+    tracing::info!(%client, request, op = %what, ?outcome, "folder op");
+    let _sent = out.send(WorkerMsg::FsDone { request, outcome }).await;
+}
+
+/// Answer a page of a folder past its first.
+pub async fn folder_page(
+    client: ClientId,
+    out: mpsc::Sender<WorkerMsg>,
+    path: String,
+    after: After,
+) {
+    let (dir, from) = (std::path::PathBuf::from(&path), after.clone());
+    let listing =
+        tokio::task::spawn_blocking(move || slopty_worker::listing::folder_page(&dir, Some(&from)))
+            .await
+            .unwrap_or_else(|_| Listing::Missing { error: "list failed".to_owned() });
+    tracing::info!(%client, %path, after = %after.name, "folder page");
+    let _sent = out.send(WorkerMsg::FolderPage { path, after, listing }).await;
 }
 
 /// Answer a quick-open query under `root`.

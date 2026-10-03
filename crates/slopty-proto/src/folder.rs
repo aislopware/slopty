@@ -1,4 +1,5 @@
-//! A folder tile's listing: the worker reads a directory and says what is in it.
+//! A folder tile's listing, page by page, and the changes it asks of the worker's files: a new
+//! folder, a move or rename, and a trip to the worker OS's own trash.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::WallMs;
@@ -14,8 +15,8 @@ pub const FOLDER_ENTRIES: u32 = 2000;
 /// What the worker found at a path asked for as a folder.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Listing {
-    /// A directory: its first [`FOLDER_ENTRIES`] entries, folders first, then by name in any
-    /// case.
+    /// A directory: at most [`FOLDER_ENTRIES`] of its entries in its order (folders first, then
+    /// by name in any case), the first of them or those after a page's [`After`].
     Listed {
         /// The directory listed, absolute (`~` spelled out), for the tile to say and to go up
         /// from.
@@ -52,6 +53,112 @@ pub struct FolderEntry {
     pub items: Option<u32>,
     /// Last modification.
     pub modified_ms: WallMs,
+}
+
+/// Where a page of a folder starts: just after this entry in the folder's order.
+///
+/// An entry added or removed meanwhile so neither repeats nor skips one. A page past the first
+/// is asked for with `ClientMsg::FolderPage` and answered with `WorkerMsg::FolderPage`.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct After {
+    /// The entry counts as a folder (a link to one does).
+    pub folder: bool,
+    /// Its name in the directory.
+    pub name: String,
+}
+
+impl After {
+    /// The page after `entry`, the last of the one before it.
+    #[must_use]
+    pub fn of(entry: &FolderEntry) -> Self {
+        Self { folder: entry.kind == FileKind::Dir, name: entry.name.clone() }
+    }
+}
+
+/// A change to the worker's files, asked with `ClientMsg::FsOp` and answered with
+/// `WorkerMsg::FsDone`.
+///
+/// Paths are absolute on the worker, or `~/…` in its home; none may climb with `..`. Nothing
+/// is ever replaced and nothing is ever unlinked.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum FsOp {
+    /// Make an empty folder `name` in `parent`.
+    MakeDir {
+        /// The folder to make it in, which must exist.
+        parent: String,
+        /// One plain name: no `/`, not `.` or `..`.
+        name: String,
+    },
+    /// Move `from` to `to`, a rename when both are in one folder. Refused when anything is at
+    /// `to`, when `to` is inside `from`, or when it is on another volume.
+    Move {
+        /// What to move.
+        from: String,
+        /// Where it goes, its new name last.
+        to: String,
+    },
+    /// Move `path` to the worker OS's own trash, where the person can put it back: the Finder's
+    /// on a Mac, the freedesktop.org trash on Linux.
+    Trash {
+        /// What to trash.
+        path: String,
+    },
+}
+
+/// How an [`FsOp`] went.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum FsOutcome {
+    /// Done: where the entry now is (the new folder, the moved entry, or its place in the
+    /// trash).
+    Done {
+        /// Absolute, `~` spelled out.
+        path: String,
+    },
+    /// Not tried: the op would do something it must not, or could not be done as asked.
+    Refused(FsRefusal),
+    /// Tried, and the OS said no.
+    Failed {
+        /// The OS's word for it.
+        error: String,
+    },
+}
+
+/// Why an [`FsOp`] was not tried.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum FsRefusal {
+    /// A path that is not absolute (nor `~/…`), or climbs with `..`.
+    NotAbsolute {
+        /// The path as asked.
+        path: String,
+    },
+    /// A name that is empty, holds a `/` or a NUL, or is `.` or `..`.
+    BadName {
+        /// The name as asked.
+        name: String,
+    },
+    /// A place no op may move or trash: the file system's root, a volume's, the home or a
+    /// folder holding it.
+    Protected {
+        /// The path.
+        path: String,
+    },
+    /// Something is already at the destination; it is left as it was.
+    Clash {
+        /// The destination.
+        path: String,
+    },
+    /// Nothing is at the source, or the folder to make or move into is not there.
+    Missing {
+        /// What is not there.
+        path: String,
+    },
+    /// A folder moved into itself or a folder inside it.
+    IntoItself,
+    /// The destination is on another volume, and a move only renames.
+    OtherVolume,
+    /// The volume keeps no trash the worker can use (a network share, a volume without a
+    /// writable trash).
+    NoTrash,
 }
 
 /// Where the worker's `path` is under its home `home`, as `/`-separated names.

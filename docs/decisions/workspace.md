@@ -982,6 +982,54 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `done_on_a_new_file_makes_it_then_answers` and
     `a_file_deleted_under_the_tile_keeps_its_text_and_a_save_makes_it_again`.
 
+- ✅ **A folder's entries are made, moved and trashed on the worker, and a huge folder is
+  paged** (2026-10-04, readiness N20; wire, worker and client, the tile's rows to follow).
+  A folder tile could only browse: the wire had no verb to change a file, and a folder past
+  2000 entries showed its first 2000 and a count.
+  - *Wire.* `ClientMsg::FsOp { request, op }`, answered with `WorkerMsg::FsDone { request,
+    outcome }`. The op is `MakeDir { parent, name }`, `Move { from, to }` (a rename when both
+    are in one folder) or `Trash { path }`. The outcome is `Done { path }` (where the entry now
+    is, in the trash too), `Refused(why)` or `Failed { error }` with the OS's word. A refusal
+    names its reason: not an absolute path or one that climbs, not one plain name, a protected
+    place, a clash, a missing source or folder, a folder into itself, another volume, a volume
+    with no trash. Goldens `golden_folder`.
+  - *Nothing is replaced, nothing is unlinked.* A move is a rename that fails when its
+    destination is taken, in one step (`renameat2` `RENAME_NOREPLACE`, `renamex_np`
+    `RENAME_EXCL`; a look then a rename where the file system has neither). A name whose case
+    alone changes, on a volume that ignores case, is the source itself and is renamed. A move
+    across volumes is refused rather than copied and deleted, so a half-copied tree can never
+    be left. Trash goes to the worker OS's own trash, where the person can put it back:
+    `NSFileManager trashItemAtURL` on a Mac (the Finder's own, with Put Back), and the
+    freedesktop.org trash specification on Linux (`$XDG_DATA_HOME/Trash`, else the volume's
+    `.Trash/$uid` or `.Trash-$uid`, the info file written before the entry moves). The
+    optional `directorysizes` cache is not written. `slopty_platform::trash`.
+  - *What is protected.* An admitted client can open a shell on the worker, so the ops are not
+    held to a few roots, which would only send the person to the shell. What no folder op
+    moves or trashes is a place that holds others' work: the file system's root, a volume's
+    root (a mount point), the home, and any folder holding it, looked at as named and as
+    resolved, so a link to the home counts. Paths are absolute or `~/…`, and none climbs with
+    `..`.
+  - *In order.* A client's ops go through the queue its saves take, so a file saved and then
+    moved is moved with what was saved. The folders they change reach their tiles through the
+    folder watch, as any change on disk does.
+  - *Pages.* `ClientMsg::FolderPage { path, after }` asks for the entries after one, in the
+    folder's order, and `WorkerMsg::FolderPage` answers with them and the whole count. A
+    cursor on the last entry, not an offset, so an entry made or removed meanwhile neither
+    repeats nor skips one. `slopty_client::folders::FolderPages` joins the pages, asks for one
+    more as the person wants it, and asks again for as many after a relist. `FsOps` numbers
+    the ops and holds them until answered, so the tile shows them at once, and `sentence` says
+    how one went.
+  - *No CLI verbs yet.* The CLI's `ls`, `cat` and `stat` are orchestration verbs through the
+    server. `mkdir`, `mv` and `trash` belong beside them as verbs answered by
+    `slopty_worker::fsop::apply`, not as a second path straight to the worker.
+  - Tests: worker `fsop` (made once and by a plain name only; a move never replaces and never
+    goes into itself; a case-only rename; the trash and its refusals; the protected places;
+    a mount point), `listing` `the_pages_of_a_huge_folder_hold_every_entry_once_in_order`;
+    `slopty_platform::trash` (the home trash and its info file, a link trashed itself, the
+    escaping, the Finder's trash); `slopty_client::folders`; and through a real worker
+    `folder_ops_make_move_and_trash_through_the_worker` and
+    `a_huge_folder_is_paged_through_the_worker`.
+
 - ✅ **A conflict can be compared before it is settled** (2026-10-04, design B9). "Changed on
   disk" offered only Reload, which drops the edit, and Overwrite, which drops the disk's text,
   with no way to see what either loses.

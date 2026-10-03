@@ -1037,6 +1037,13 @@ impl Peer<'_> {
                     let _sent = out.send(WorkerMsg::Folder { path, listing }).await;
                 });
             }
+            ClientMsg::FolderPage { path, after } => {
+                let (client, out) = (self.client, self.out.clone());
+                self.tasks.spawn(crate::files::folder_page(client, out, path, after));
+            }
+            ClientMsg::FsOp { request, op } => {
+                let _gone = self.saves.send(crate::files::Save::Fs { request, op });
+            }
             ClientMsg::WatchFiles { paths } => {
                 self.watch_files.send_replace(paths);
             }

@@ -15,6 +15,8 @@
 //!   folder, a machine, or any fact the caller names), and the frecency the palette ranks them by.
 //! * [`meters`] — [`meters::PlanMeters`]: each machine's plan windows as its agents publish them,
 //!   the freshest per agent, for the status bar.
+//! * [`folders`] — [`folders::FolderPages`]: a folder's listing joined across its pages, asked for
+//!   as the person wants more; [`folders::FsOps`], the folder ops on their way to the worker.
 //! * [`xfer`] — files both ways: uploads of dropped files (resumed after a cut stream), downloads
 //!   of a worker's files, and how a path is typed into a shell.
 //! * [`clip`] — [`clip::ClipCache`]: the bytes of the worker's clipboard offer, fetched ahead under
@@ -55,6 +57,7 @@ pub mod clip;
 pub mod directory;
 #[cfg(target_vendor = "apple")]
 pub mod dnd;
+pub mod folders;
 pub mod groups;
 pub mod handoff;
 pub mod items;

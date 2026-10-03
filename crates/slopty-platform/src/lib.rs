@@ -10,7 +10,7 @@
 //! worker daemon hold one for their whole run.
 //!
 //! The worker's and the server's half of this crate also builds for Linux: [`Activity`],
-//! [`user_interactive_thread`], [`open_url`], [`dirs`], [`fs`] and [`service`]. What Linux
+//! [`user_interactive_thread`], [`open_url`], [`dirs`], [`fs`], [`service`] and `trash`. What Linux
 //! cannot do yet says so where it is asked (`docs/decisions/platform.md`, "Linux seams"). The
 //! client's half (the pasteboard, drops, the browser tile, the Dock) is Apple-only.
 
@@ -57,6 +57,8 @@ pub mod secure_input;
 pub mod service;
 #[cfg(target_vendor = "apple")]
 pub mod system_keys;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod trash;
 #[cfg(target_vendor = "apple")]
 pub mod web;
 

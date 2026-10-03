@@ -57,8 +57,11 @@ objc2-foundation = { workspace = true, features = [
     "NSDistributedNotificationCenter",
     # A worker's pages keep their own data store, named by the worker (`web`).
     "NSUUID",
-    # The container the app shares with its File Provider extension (`files`).
+    # The container the app shares with its File Provider extension (`files`), and the
+    # Finder's trash (`trash`).
     "NSFileManager",
+    # Which of the trash's errors is a volume without one (`trash`).
+    "FoundationErrors",
 ] }
 # Local notifications, their taps and the icon badge (`notify`).
 objc2-user-notifications = { workspace = true, features = [
@@ -139,6 +142,10 @@ objc2-security = { workspace = true, features = [ "CSCommon", "SecCode" ] }
 serde_json.workspace = true
 slopty-core.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# A trashed entry's deletion date in local time, as the freedesktop.org trash asks (`trash`).
+libc.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2-avf-audio.workspace = true
