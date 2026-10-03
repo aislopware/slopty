@@ -262,7 +262,7 @@ impl WorkspaceView {
         }
         self.items_dirty = true;
         if self.picker.as_ref().is_some_and(|(k, _)| *k == key) {
-            self.picker = None;
+            self.let_picker_leave(cx);
             self.pending_focus_self = true;
         }
         self.update_awake(cx);

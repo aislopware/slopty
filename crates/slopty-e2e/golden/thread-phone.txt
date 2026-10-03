@@ -24,11 +24,11 @@ Button │ Deny…
 Button │ Deny and stop
 Group │ Edits · notes.txt
 Button │ Review
-Button │ Review the changes
 MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Opus 5.5
 Label │ Mode, Default
+Button │ Review the changes
 Label │ Context 34% of 200k
 Button │ Send
 Group │ Status

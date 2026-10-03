@@ -114,7 +114,7 @@ impl WorkspaceView {
             .font_family(t.ui_family.clone())
             .text_size(px(t.small()))
             .bg(hsla(theme.content()))
-            .border_t_1()
+            .border_t(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .child(name)
             .children(meta);

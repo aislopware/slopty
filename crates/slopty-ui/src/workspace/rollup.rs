@@ -109,7 +109,7 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
     let s = &theme.surfaces;
     let slot = div()
         .flex_none()
-        .w(px(if compact { theme.typography.meta() } else { slot_width(theme) }))
+        .w(px(if compact { theme.typography.small() } else { slot_width(theme) }))
         .flex()
         .items_center()
         .justify_end()
@@ -129,7 +129,7 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
                 status_icon(
                     theme,
                     Status::Working,
-                    px(theme.typography.meta()),
+                    px(theme.typography.small()),
                     hsla(s.text_muted),
                 ),
             ),
@@ -140,7 +140,7 @@ pub(super) fn rollup_slot(theme: &Theme, selector: String, rollup: Rollup, compa
                 status_icon(
                     theme,
                     Status::Running,
-                    px(theme.typography.meta()),
+                    px(theme.typography.small()),
                     hsla(s.text_muted),
                 ),
             ),

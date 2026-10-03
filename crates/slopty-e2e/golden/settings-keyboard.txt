@@ -35,8 +35,8 @@ ListItem │ New note │ ⇧⌘N
 Button │ Keys for New note │ ⇧⌘N
 ListItem │ Add a window or display │ ⌘O
 Button │ Keys for Add a window or display │ ⌘O
-ListItem │ Open file…
-Button │ Keys for Open file…
+ListItem │ Open file… │ ⌘P
+Button │ Keys for Open file… │ ⌘P
 ListItem │ Open folder…
 Button │ Keys for Open folder…
 ListItem │ Open URL…
@@ -438,6 +438,12 @@ ListItem │ Tell the task's agent to address the comments
 Button │ Keys for Tell the task's agent to address the comments
 ListItem │ Tell the task's agent to resolve the conflicts
 Button │ Keys for Tell the task's agent to resolve the conflicts
+ListItem │ Push the task's merge again
+Button │ Keys for Push the task's merge again
+ListItem │ Cancel the task
+Button │ Keys for Cancel the task
+ListItem │ Stop the task's agent
+Button │ Keys for Stop the task's agent
 ListItem │ Show the orchestrator's terminal │ T
 Button │ Keys for Show the orchestrator's terminal │ T
 ListItem │ Tell the orchestrator… │ C
@@ -458,6 +464,8 @@ ListItem │ Delete the project
 Button │ Keys for Delete the project
 ListItem │ Verifier and review…
 Button │ Keys for Verifier and review…
+ListItem │ Budget…
+Button │ Keys for Budget…
 Heading │ Search in files
 ListItem │ Toggle match case │ ⌥⌘C
 Button │ Keys for Toggle match case │ ⌥⌘C
@@ -472,6 +480,10 @@ ListItem │ Page forward │ ⌘→
 Button │ Keys for Page forward │ ⌘→
 ListItem │ Reload page
 Button │ Keys for Reload page
+ListItem │ Find next │ ⌘G
+Button │ Keys for Find next │ ⌘G
+ListItem │ Find previous │ ⇧⌘G
+Button │ Keys for Find previous │ ⇧⌘G
 ListItem │ Undo │ ⌘Z
 Button │ Keys for Undo │ ⌘Z
 ListItem │ Redo │ ⇧⌘Z
@@ -480,9 +492,5 @@ ListItem │ Cut │ ⌘X
 Button │ Keys for Cut │ ⌘X
 ListItem │ Select all │ ⌘A
 Button │ Keys for Select all │ ⌘A
-ListItem │ Find next │ ⌘G
-Button │ Keys for Find next │ ⌘G
-ListItem │ Find previous │ ⇧⌘G
-Button │ Keys for Find previous │ ⇧⌘G
 Button │ Edit as TOML
 Button │ Done

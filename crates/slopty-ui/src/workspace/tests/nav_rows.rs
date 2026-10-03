@@ -245,7 +245,7 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     assert!((separator.left() - words.right()).abs() < px(0.5), "{words:?} {separator:?}");
     assert!((place.left() - separator.right()).abs() < px(0.5), "{separator:?} {place:?}");
     let spaced = cx.update(|window, _cx| {
-        let font_size = px(Theme::default().typography.meta());
+        let font_size = px(Theme::default().typography.small());
         let run = |len| gpui::TextRun {
             len,
             font: window.text_style().font(),
@@ -688,7 +688,7 @@ fn a_phone_drawer_lists_the_workspaces(cx: &mut TestAppContext) {
     let plate = view.read_with(cx, |v, _| v.navigator_plate()).expect("the selection's plate");
     let focused = cx.debug_bounds(selector("nav-tile", tile.item)).expect("the focused row");
     assert!((plate.top() - focused.top()).abs() < px(0.5), "under the focused tile: {plate:?}");
-    let fills = [Theme::default().surfaces.overlay, Theme::default().surfaces.raised]
+    let fills = [Theme::default().surfaces.selected, Theme::default().surfaces.hover]
         .map(|fill| gpui::Background::from(crate::colors::hsla(fill)));
     let filled = cx.update(|window, _| {
         let scale = window.scale_factor();

@@ -256,7 +256,7 @@ impl ConversationView {
                 .cursor_pointer()
                 .map(|el| {
                     if chosen {
-                        el.bg(hsla(s.overlay))
+                        el.bg(hsla(s.selected))
                             .text_color(hsla(s.text))
                             .font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                     } else {

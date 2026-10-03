@@ -112,7 +112,7 @@ impl ConversationView {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(why)
                     .into_any_element()
@@ -133,9 +133,9 @@ impl ConversationView {
                 .h(self.z(h))
                 .rounded(radius)
                 .overflow_hidden()
-                .border_1()
+                .border(kit::hair(theme))
                 .border_color(hsla(s.border_subtle))
-                .bg(hsla(s.raised))
+                .bg(hsla(s.hover))
                 .cursor_pointer()
                 .child(body),
             s.accent,

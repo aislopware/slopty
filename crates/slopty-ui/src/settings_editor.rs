@@ -102,6 +102,8 @@ pub struct SettingsEditor {
     /// has the window the fields are set in.
     changed_file: Option<String>,
     theme: Theme,
+    /// Dismissed and fading out: it takes no more keys nor clicks.
+    leaving: bool,
     _subscriptions: [Subscription; 2],
 }
 
@@ -161,8 +163,18 @@ impl SettingsEditor {
             file: text.to_owned(),
             changed_file: None,
             theme,
+            leaving: false,
             _subscriptions: [typed, set],
         }
+    }
+
+    /// Stop taking the keys and the pointer and fade out where it stands, the dim with it. How
+    /// long that takes, for the owner to keep drawing it before dropping it; nothing under
+    /// Reduce Motion.
+    pub fn leave(&mut self, cx: &mut Context<Self>) -> std::time::Duration {
+        self.leaving = true;
+        cx.notify();
+        crate::kit::exit_time(cx).unwrap_or_default()
     }
 
     /// The file's text, as the field and the form both hold it.
@@ -434,7 +446,7 @@ impl Render for SettingsEditor {
                     .items_baseline()
                     .gap(px(spacing.sm))
                     .py(px(spacing.sm))
-                    .border_b_1()
+                    .border_b(crate::kit::hair(&theme))
                     .border_color(hsla(s.border))
                     .child(crate::kit::title(&theme, "Settings"))
                     .when(self.mode == Mode::Toml, |el| {
@@ -458,7 +470,7 @@ impl Render for SettingsEditor {
                     .items_center()
                     .gap(px(spacing.md))
                     .py(px(spacing.sm))
-                    .border_t_1()
+                    .border_t(crate::kit::hair(&theme))
                     .border_color(hsla(s.border))
                     .child(swap)
                     .when(external, |el| {
@@ -472,9 +484,15 @@ impl Render for SettingsEditor {
                     .child(div().flex_1())
                     .child(actions),
             );
-        // The dialog rises the base unit's half into place as it fades in, as the palette does.
-        let dialog =
-            crate::kit::slide_fade(dialog, "settings-rise", spacing.xs, crate::kit::Pace::Fade, cx);
+        let layer = crate::palette::Layer::Dialog.priority();
+        if self.leaving {
+            let dialog = dialog.debug_selector(|| "settings-leaving".to_owned());
+            let root = crate::kit::backdrop(&theme, window).child(dialog);
+            return gpui::deferred(crate::kit::fade_out(root, "settings-out")).with_priority(layer);
+        }
+        // The keyboard and the palette summon it, so it fades in where it stands, as the
+        // palette does, with no travel.
+        let dialog = crate::kit::fade_in(dialog, "settings-in", cx);
         let root = crate::kit::backdrop(&theme, window)
             .id("settings-backdrop")
             .key_context(CTX)
@@ -506,7 +524,7 @@ impl Render for SettingsEditor {
                 }),
             )
             .child(dialog);
-        gpui::deferred(root).with_priority(crate::palette::Layer::Dialog.priority())
+        gpui::deferred(root).with_priority(layer)
     }
 }
 

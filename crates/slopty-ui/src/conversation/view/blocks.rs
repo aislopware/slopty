@@ -110,7 +110,7 @@ impl ConversationView {
             .flex()
             .flex_col()
             .rounded(self.z(theme.radii.md))
-            .border_1()
+            .border(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .bg(hsla(s.panel))
             .overflow_hidden()
@@ -158,7 +158,7 @@ impl ConversationView {
             ToolDetail::Question(question) => Some(self.questions(question)),
             ToolDetail::Plan { plan } => Some(
                 div()
-                    .text_size(self.z(self.theme.typography.prose()))
+                    .text_size(self.z(self.theme.typography.title()))
                     .line_height(gpui::relative(self.theme.typography.markdown_line_height))
                     .child(self.markdown(
                         format!("plan-{}-{}", self.session, entry.id),
@@ -174,7 +174,7 @@ impl ConversationView {
                     .child(SharedString::from(d.clone()))
                     .into_any_element()
             }),
-            ToolDetail::TodoWrite { todos } => Some(self.task_lines(todos, true)),
+            ToolDetail::TodoWrite { todos } => Some(self.task_lines(todos)),
             ToolDetail::Mcp(mcp) => {
                 Some(self.input_and_result(&entry.id, Some(&mcp.input), call, level, cx))
             }
@@ -416,7 +416,7 @@ impl ConversationView {
                     div()
                         .px(self.z(theme.spacing.sm))
                         .py(self.z(theme.spacing.xs))
-                        .border_t_1()
+                        .border_t(crate::kit::hair(theme))
                         .border_color(hsla(s.border_subtle))
                         .flex()
                         .flex_col()
@@ -515,7 +515,7 @@ impl ConversationView {
                 el.child(
                     div()
                         .flex_none()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(facts)),
                 )
@@ -537,7 +537,7 @@ impl ConversationView {
             .children(report);
         match thread.filter(|_| opens) {
             Some(thread) => crate::a11y::tab_stop(
-                card.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))),
+                card.cursor_pointer().hover(move |el| el.bg(hsla(s.hover))),
                 s.accent,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.open_thread(thread.clone(), cx)))
@@ -582,7 +582,7 @@ impl ConversationView {
                         .px(self.z(theme.spacing.xs))
                         .rounded(self.z(theme.radii.sm))
                         .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.raised)))
+                        .hover(move |el| el.bg(hsla(s.hover)))
                         .child(self.icon(IconName::Globe, s.text_muted))
                         .child(
                             div()
@@ -596,7 +596,7 @@ impl ConversationView {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(self.z(theme.typography.meta()))
+                                .text_size(self.z(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(host)),
                         ),
@@ -639,7 +639,7 @@ impl ConversationView {
                             div()
                                 .px(self.z(theme.spacing.sm))
                                 .rounded(self.z(theme.radii.xs))
-                                .border_1()
+                                .border(crate::kit::hair(theme))
                                 .border_color(if picked {
                                     hsla(s.accent)
                                 } else {
@@ -653,15 +653,11 @@ impl ConversationView {
             .into_any_element()
     }
 
-    /// Tasks as a list of marks and subjects; `quiet` sets them at the meta size.
-    pub(super) fn task_lines(
-        &self,
-        tasks: &[slopty_proto::conversation::Task],
-        quiet: bool,
-    ) -> AnyElement {
+    /// Tasks as a list of marks and subjects, at the small size.
+    pub(super) fn task_lines(&self, tasks: &[slopty_proto::conversation::Task]) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let size = if quiet { theme.typography.meta() } else { theme.typography.small() };
+        let size = theme.typography.small();
         div()
             .flex()
             .flex_col()
@@ -809,7 +805,7 @@ impl ConversationView {
                     .aria_label(label.clone())
                     .px(self.z(theme.spacing.sm))
                     .py(self.z(theme.spacing.xxs))
-                    .border_t_1()
+                    .border_t(crate::kit::hair(theme))
                     .border_color(hsla(s.border_subtle))
                     .font_family(theme.typography.ui_family.clone())
                     .text_color(hsla(s.text_muted))
@@ -864,7 +860,7 @@ impl ConversationView {
             .items_center()
             .h(self.z(theme.density.row))
             .px(self.z(theme.spacing.sm))
-            .border_b_1()
+            .border_b(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .font_family(theme.typography.ui_family.clone())
             .text_size(self.z(theme.typography.small()))
@@ -889,7 +885,7 @@ impl ConversationView {
             .child(div().flex_1())
             .child(
                 div()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .child(self.changes_label(added, removed)),
             )
             .into_any_element()
@@ -935,6 +931,7 @@ impl ConversationView {
             .items_center()
             .child(self.icon(IconName::CornerDownLeft, muted))
             .child(div().absolute().left_0().right_0().top_1_2().h(gpui::px(1.0)).bg(hsla(muted)))
+            .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = std::rc::Rc::clone(&hint_theme);
                 gpui::AppContext::new(cx, |_| {
@@ -952,7 +949,7 @@ impl ConversationView {
 
     fn number(&self, n: Option<u32>, digits: u8) -> Div {
         let s = self.theme.surfaces;
-        let width = self.z(self.theme.typography.meta() * 0.62 * f32::from(digits));
+        let width = self.z(self.theme.typography.small() * 0.62 * f32::from(digits));
         crate::kit::tabular(div())
             .flex_none()
             .w(width)
@@ -1032,7 +1029,7 @@ impl ConversationView {
             .w_full()
             .flex()
             .child(half(left, true))
-            .child(div().flex_none().w(gpui::px(1.0)).bg(hsla(s.border_subtle)))
+            .child(crate::kit::rule_v(theme, s.border_subtle))
             .child(half(right, false))
             .into_any_element()
     }

@@ -1,7 +1,7 @@
 //! Theme tokens → GPUI colours.
 
 use gpui::{Hsla, Rgba};
-use slopty_theme::{Hairline, Rgb};
+use slopty_theme::{Rgb, Tint};
 
 /// A theme colour as GPUI draws it: an opaque one, or a hairline at its own opacity.
 pub trait Tone: Copy {
@@ -20,7 +20,7 @@ impl Tone for Rgb {
     }
 }
 
-impl Tone for Hairline {
+impl Tone for Tint {
     fn rgba(self) -> Rgba {
         Rgba { a: self.opacity(), ..self.ink.rgba() }
     }

@@ -201,7 +201,7 @@ impl ConversationView {
         // The menu is the section nearest the field it writes into.
         let menu = menu.map(|section| {
             div()
-                .border_b_1()
+                .border_b(kit::hair(&self.theme))
                 .border_color(hsla(s.border_subtle))
                 .px(z(spacing.xs))
                 .py(z(spacing.xxs))
@@ -332,7 +332,7 @@ impl ConversationView {
                 .debug_selector(|| "always-scope".to_owned())
                 .role(Role::Note)
                 .aria_label(plain.clone())
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .child(gpui::StyledText::new(plain).with_runs(runs))
         });
         let reason_field = self
@@ -375,7 +375,7 @@ impl ConversationView {
                         el.child(
                             kit::tabular(div())
                                 .flex_none()
-                                .text_size(self.z(theme.typography.meta()))
+                                .text_size(self.z(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(facts.join(" \u{b7} "))),
                         )
@@ -402,7 +402,7 @@ impl ConversationView {
                             .debug_selector(|| "approval-wait".to_owned())
                             .flex_1()
                             .min_w_0()
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(wait))
                     }))
@@ -448,7 +448,7 @@ impl ConversationView {
                         .role(Role::Button)
                         .aria_label(label.clone())
                         .font_family(theme.typography.ui_family.clone())
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.accent))
                         .cursor_pointer()
                         .hover(gpui::Styled::underline)
@@ -469,7 +469,7 @@ impl ConversationView {
                     .px(self.z(theme.spacing.sm))
                     .py(self.z(theme.spacing.xs))
                     .rounded(self.z(theme.radii.sm))
-                    .bg(hsla(s.raised))
+                    .bg(hsla(s.hover))
                     .child(self.code_text(&shown, s.text))
                     .children(more)
                     .into_any_element(),
@@ -535,6 +535,7 @@ impl ConversationView {
             .role(Role::Status)
             .aria_label(SharedString::from(format!("Permissions: {label}")))
             .when(ink == s.warn, |el| el.text_color(hsla(s.warn)))
+            .map(kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = Rc::clone(&hint_theme);
                 cx.new(|_| kit::Hint::new("Changes in the terminal", "", theme)).into()
@@ -579,7 +580,7 @@ impl ConversationView {
             .justify_center()
             .rounded_full()
             .cursor_pointer()
-            .map(|el| if lit { kit::solid(el, &theme) } else { el.bg(hsla(s.raised)) })
+            .map(|el| if lit { kit::solid(el, &theme) } else { el.bg(hsla(s.hover)) })
             .child(
                 crate::icons::icon(
                     &theme,
@@ -617,7 +618,7 @@ impl ConversationView {
             .children(self.attachment_chips(cx))
             .child(
                 div()
-                    .text_size(self.z(theme.typography.prose()))
+                    .text_size(self.z(theme.typography.title()))
                     .when(away, |el| el.opacity(slopty_theme::alpha::PRESSED))
                     .child(
                         Textarea::new(&self.composer)
@@ -692,7 +693,7 @@ impl ConversationView {
                 kit::tabular(div())
                     .debug_selector(|| "find-count".to_owned())
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(tally)),
             )
@@ -785,7 +786,7 @@ impl ConversationView {
                 .gap(self.z(theme.spacing.xs))
                 .px(self.z(theme.spacing.xs))
                 .bg(hsla(theme.content()))
-                .border_b_1()
+                .border_b(kit::hair(theme))
                 .border_color(hsla(s.border_subtle))
                 .text_size(self.z(theme.typography.small()))
                 .child(back)
@@ -803,7 +804,7 @@ impl ConversationView {
                 .children(kind.map(|k| {
                     kit::tabular(div())
                         .flex_none()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(k))
                 }))
@@ -903,8 +904,8 @@ impl ConversationView {
                         .px(px(theme.spacing.xs * k))
                         .rounded(px(theme.radii.sm * k))
                         .cursor_pointer()
-                        .when(open, |el| el.bg(hsla(s.raised)))
-                        .hover(move |el| el.bg(hsla(s.raised)))
+                        .when(open, |el| el.bg(hsla(s.hover)))
+                        .hover(move |el| el.bg(hsla(s.hover)))
                         .children(kit::changes(theme, added, removed)),
                     s.accent,
                 )
@@ -931,8 +932,8 @@ impl ConversationView {
                         .px(px(theme.spacing.xs * k))
                         .rounded(px(theme.radii.sm * k))
                         .cursor_pointer()
-                        .when(open, |el| el.bg(hsla(s.raised)))
-                        .hover(move |el| el.bg(hsla(s.raised)))
+                        .when(open, |el| el.bg(hsla(s.hover)))
+                        .hover(move |el| el.bg(hsla(s.hover)))
                         .text_color(hsla(s.text_muted))
                         .child(place)
                         .child(context_ring(theme, used, theme.typography.small() * k))

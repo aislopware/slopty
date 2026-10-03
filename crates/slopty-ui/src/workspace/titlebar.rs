@@ -218,7 +218,11 @@ impl WorkspaceView {
 
     /// Close the bar's menu and hand the keyboard back to the focused tile at once.
     pub(super) fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.menu = None;
+        if let Some(which) = self.menu.take()
+            && self.chrome_moves(cx)
+        {
+            self.keep_leaving(which, kit::Pace::Exit.duration(), |this| &mut this.menu_leaving, cx);
+        }
         self.return_keyboard(window, cx);
         cx.notify();
     }
@@ -253,7 +257,7 @@ impl WorkspaceView {
             let hint_theme = Rc::new(theme.clone());
             kit::icon_button(theme, "navigator-toggle", IconName::PanelLeft, "Navigator")
                 .when(SHORTCUT_HINTS, |el| {
-                    el.tooltip(move |_window, cx| {
+                    kit::hint_timing(el).tooltip(move |_window, cx| {
                         let keys =
                             crate::palette::keys_for(&ToggleNavigator, &super::key_bindings());
                         cx.new(|_| kit::Hint::new("Navigator", keys, Rc::clone(&hint_theme))).into()
@@ -294,7 +298,7 @@ impl WorkspaceView {
             let badge = (unread > 0).then(|| {
                 let count = SharedString::from(unread.to_string());
                 let side = theme.typography.caption() + spacing.xs + spacing.xxs;
-                let raised = hsla(s.raised);
+                let hovered = hsla(s.hover.over(s.canvas));
                 // A ring of the bar's colour cuts the disc out of the bell's stroke, as a
                 // badge on a Mac's dock is cut out of its icon; under the pointer it takes
                 // the button's hover fill.
@@ -313,9 +317,9 @@ impl WorkspaceView {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .border_1()
+                    .border(px(slopty_theme::stroke::EDGE))
                     .border_color(hsla(s.canvas))
-                    .group_hover(BELL, move |el| el.border_color(raised))
+                    .group_hover(BELL, move |el| el.border_color(hovered))
                     .bg(hsla(fill))
                     .text_color(hsla(ink))
                     .text_size(px(theme.typography.caption()))
@@ -470,7 +474,11 @@ impl WorkspaceView {
         // Rows run on the workspace itself: with nothing focused, a dispatched action would
         // never reach its handlers.
         type Run = MenuAction;
-        let which = self.menu?;
+        let (which, leaving) = match (self.menu, self.menu_leaving) {
+            (Some(open), _) => (open, false),
+            (None, Some(gone)) => (gone, true),
+            (None, None) => return None,
+        };
         let theme = &self.theme;
         let s = &theme.surfaces;
         let spacing = theme.spacing;
@@ -551,9 +559,7 @@ impl WorkspaceView {
                     div()
                         .debug_selector(move || format!("menu-separator-{i}"))
                         .flex_none()
-                        .my(px(spacing.xs))
-                        .h(px(1.0))
-                        .bg(hsla(s.border_subtle))
+                        .child(kit::list_rule(theme))
                         .into_any_element(),
                 );
             }
@@ -570,7 +576,8 @@ impl WorkspaceView {
                     .aria_label(entry.label.clone())
                     .gap(px(spacing.md))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .map(kit::eased)
+                    .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
                         div()
                             .flex_1()
@@ -605,22 +612,24 @@ impl WorkspaceView {
             }
         };
         let panel = if which == MenuKind::Inbox {
-            self.render_inbox(cx)
+            self.render_inbox(leaving, cx)
         } else {
-            self.menu_panel(rows, which, cx)
+            self.menu_panel(rows, which, leaving, cx)
         };
         // A click anywhere else closes it and goes no further, so a press on the button that
         // opened it closes it rather than opening it again. A popover, it paints over the frame
-        // and the navigator laid over it, under a dialog.
+        // and the navigator laid over it, under a dialog. Leaving, it lets the window have the
+        // pointer back at once: only its own fading panel holds a press.
         let away = div()
             .id("menu-away")
             .absolute()
             .inset_0()
-            .occlude()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, window, cx| this.dismiss_menu(window, cx)),
-            )
+            .when(!leaving, |el| {
+                el.occlude().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _ev, window, cx| this.dismiss_menu(window, cx)),
+                )
+            })
             .child(
                 div()
                     .absolute()
@@ -642,11 +651,13 @@ impl WorkspaceView {
         Some(gpui::deferred(away).with_priority(layer).into_any_element())
     }
 
-    /// A menu's panel around its rows, fading in as it drops a base unit from its button.
+    /// A menu's panel around its rows, fading in as it drops a base unit from its button, and
+    /// fading out where it is once `leaving`.
     fn menu_panel(
         &self,
         rows: Vec<gpui::AnyElement>,
         which: MenuKind,
+        leaving: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
@@ -664,6 +675,9 @@ impl WorkspaceView {
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .children(rows);
+        if leaving {
+            return kit::fade_out(panel.debug_selector(|| "menu-leaving".to_owned()), "menu-out");
+        }
         if self.menu_keyed || !self.chrome_moves(cx) {
             return panel.into_any_element();
         }

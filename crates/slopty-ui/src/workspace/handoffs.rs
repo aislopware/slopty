@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Instant;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, FontWeight, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
@@ -403,6 +404,7 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .whitespace_nowrap()
+            .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 cx.new(|_| crate::kit::Hint::new(url.clone(), "", Rc::clone(&hint_theme)).mono())
                     .into()

@@ -125,7 +125,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xxs))
                 .child(
                     div()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(label.clone()),
                 )

@@ -76,3 +76,4 @@ Button │ Model, Claude
 Button │ Send
 Group │ Status
 Status │ studio
+Status │ Ship the project board: #5 Check the wire goldens: its verifier failed

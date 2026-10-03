@@ -594,7 +594,7 @@ impl FileView {
     /// plane in squares, as Preview and Figma show one.
     fn checker(&self) -> AnyElement {
         let theme = &self.theme;
-        let (even, odd) = (hsla(theme.content()), hsla(theme.surfaces.raised));
+        let (even, odd) = (hsla(theme.content()), hsla(theme.surfaces.hover));
         let cell = px(theme.spacing.sm * self.zoom);
         canvas(
             |_, _, _| {},
@@ -657,7 +657,7 @@ impl FileView {
             .px(px(theme.spacing.inset() * k))
             .whitespace_nowrap()
             .font_family(theme.typography.ui_family.clone())
-            .text_size(px(theme.typography.meta() * k))
+            .text_size(px(theme.typography.small() * k))
             .text_color(hsla(s.text_muted))
             .child(
                 div()
@@ -765,7 +765,7 @@ impl FileView {
                     .w_full()
                     .aspect_ratio(w / h.max(1.0))
                     .bg(hsla(s.elevated))
-                    .border_1()
+                    .border(crate::kit::hair(theme))
                     .border_color(hsla(s.border))
                     .role(Role::Image)
                     .aria_label(SharedString::from(format!(

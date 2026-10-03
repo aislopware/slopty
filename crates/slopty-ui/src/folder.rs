@@ -588,14 +588,14 @@ impl FolderView {
             // the rows' icons and the header's glyph, not a pad's width right of them.
             .pl(px((theme.spacing.inset() - theme.spacing.xxs) * k))
             .pr(px(theme.spacing.inset() * k))
-            .border_b_1()
+            .border_b(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .text_size(px(theme.typography.small() * k))
             .child(trail)
             .child(
                 crate::kit::meta(crate::kit::tabular(div()), theme)
                     .flex_none()
-                    .text_size(px(theme.typography.meta() * k))
+                    .text_size(px(theme.typography.small() * k))
                     .child(count_label(total)),
             )
             .when(FILES_PICKER, |bar| {
@@ -651,7 +651,7 @@ impl FolderView {
             crate::kit::meta(crate::kit::tabular(div()), theme)
                 .flex_none()
                 .w(px(width * k))
-                .text_size(px(theme.typography.meta() * k))
+                .text_size(px(theme.typography.small() * k))
                 .text_right()
                 .whitespace_nowrap()
                 .overflow_hidden()
@@ -688,7 +688,7 @@ impl FolderView {
             .px(px((theme.spacing.inset() - pad) * k))
             .rounded(px(theme.radii.sm * k))
             .cursor_pointer()
-            .when(!chosen, |el| el.hover(move |st| st.bg(hsla(s.raised))))
+            .when(!chosen, |el| el.hover(move |st| st.bg(hsla(s.hover))))
             .opacity(ink.opacity)
             .on_mouse_down(
                 MouseButton::Left,
@@ -808,9 +808,9 @@ impl FolderView {
                 .items_center()
                 .h(px(theme.density.row * k))
                 .px(px(theme.spacing.inset() * k))
-                .border_t_1()
+                .border_t(crate::kit::hair(theme))
                 .border_color(hsla(theme.surfaces.border_subtle))
-                .text_size(px(theme.typography.meta() * k))
+                .text_size(px(theme.typography.small() * k))
                 .child(format!("Showing the first {shown} of {total}"))
                 .into_any_element(),
         )

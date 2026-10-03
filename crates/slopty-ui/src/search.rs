@@ -45,7 +45,6 @@ use slopty_theme::{Theme, Typography, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize};
-use crate::kit::Pace;
 use crate::palette::{Layer, Plate};
 
 #[expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
@@ -622,7 +621,7 @@ impl ProjectSearch {
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
             .when(!context, |el| {
-                el.active(move |st| st.bg(hsla(s.overlay))).on_mouse_move(cx.listener(
+                el.active(move |st| st.bg(hsla(s.pressed))).on_mouse_move(cx.listener(
                     move |this, _ev, _window, cx| {
                         if this.selected_index() != Some(ix) {
                             this.select(ix, cx);
@@ -898,7 +897,7 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.xs))
-            .border_t_1()
+            .border_t(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .child(div().flex_1().min_w_0().child(
                 Input::new(&self.replace).appearance(false).px_0().aria_label(REPLACE_PLACEHOLDER),
@@ -921,8 +920,8 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.md))
-            .border_t_1()
-            .border_b_1()
+            .border_t(crate::kit::hair(theme))
+            .border_b(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .text_size(px(theme.typography.small()))
             .child(
@@ -1015,7 +1014,7 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.md))
-            .bg(hsla(s.raised))
+            .bg(hsla(s.hover))
             .rounded_b(px(theme.radii.lg - 1.0))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))
@@ -1115,7 +1114,8 @@ impl Render for ProjectSearch {
             .child(self.fields(cx))
             .child(self.list(cx))
             .when(self.results.is_some(), |el| el.child(self.foot()));
-        let panel = crate::kit::slide_fade(panel, "search-open", theme.spacing.xs, Pace::Fade, cx);
+        // The keyboard summons it, so it fades in where it stands, with no travel.
+        let panel = crate::kit::fade_in(panel, "search-open", cx);
         let page = isize::try_from(PAGE).unwrap_or(1);
         let root = crate::kit::anchor(&theme, window)
             .id("search-backdrop")

@@ -20,3 +20,4 @@ Button │ Close tile
 Status │ Opening Safari on e2e-worker…
 Group │ Status
 Status │ e2e-worker
+Status │ Safari did not open. It is not there any more.

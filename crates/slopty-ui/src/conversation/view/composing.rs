@@ -365,8 +365,8 @@ impl ConversationView {
             .px(self.z(theme.spacing.sm))
             .rounded(self.z(theme.radii.sm))
             .cursor_pointer()
-            .when(selected, |el| el.bg(hsla(s.overlay)))
-            .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.raised))))
+            .when(selected, |el| el.bg(hsla(s.selected)))
+            .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))))
             .on_click(cx.listener(move |this, _ev, window, cx| this.menu_pick(ix, window, cx)))
     }
 
@@ -389,14 +389,14 @@ impl ConversationView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(command.description.clone())),
             )
             .children(menu::Listed::source_label(command).map(|source| {
                 div()
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(source)
             }))
@@ -429,7 +429,7 @@ impl ConversationView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(dir.to_owned())),
             )
@@ -452,7 +452,7 @@ impl ConversationView {
                 div()
                     .flex_none()
                     .font_family(self.mono())
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(format!("/model {alias}"))),
             )
@@ -481,16 +481,17 @@ impl ConversationView {
             crate::icons::IconSize::Inline,
             hsla(s.text_muted),
         )
-        .size(self.z(theme.typography.meta()));
+        .size(self.z(theme.typography.small()));
         let button = self
             .foot_chip("composer-model", IconName::Sparkles, s.text_muted, model.to_owned())
             .role(Role::Button)
             .aria_label(SharedString::from(format!("Model: {model}")))
             .aria_expanded(open)
-            .when(open, |el| el.bg(hsla(s.raised)))
-            .when(idle, |el| el.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))))
+            .when(open, |el| el.bg(hsla(s.hover)))
+            .when(idle, |el| el.cursor_pointer().hover(move |el| el.bg(hsla(s.hover))))
             .when(!idle, |el| el.opacity(slopty_theme::alpha::PRESSED))
             .child(chevron)
+            .map(kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = std::rc::Rc::clone(&hint_theme);
                 let title = if idle { "Change the model" } else { "After this turn" };
@@ -715,8 +716,8 @@ impl ConversationView {
                 .py(self.z(theme.spacing.xxs))
                 .rounded(self.z(theme.radii.sm))
                 .cursor_pointer()
-                .when(on, |el| el.bg(hsla(s.overlay)))
-                .when(!on, |el| el.hover(move |el| el.bg(hsla(s.raised))))
+                .when(on, |el| el.bg(hsla(s.selected)))
+                .when(!on, |el| el.hover(move |el| el.bg(hsla(s.hover))))
                 .child(self.icon(glyph, if picked { s.accent } else { s.text_muted }))
                 .child(
                     div()
@@ -732,7 +733,7 @@ impl ConversationView {
                         )
                         .children(option.description.clone().map(|d| {
                             div()
-                                .text_size(self.z(theme.typography.meta()))
+                                .text_size(self.z(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .whitespace_normal()
                                 .child(SharedString::from(d))
@@ -784,7 +785,7 @@ impl ConversationView {
                             kit::tabular(div())
                                 .debug_selector(|| "question-position".to_owned())
                                 .flex_none()
-                                .text_size(self.z(theme.typography.meta()))
+                                .text_size(self.z(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(format!("{at} of {count}"))),
                         )
@@ -792,7 +793,7 @@ impl ConversationView {
             )
             .child(
                 div()
-                    .text_size(self.z(theme.typography.prose()))
+                    .text_size(self.z(theme.typography.title()))
                     .text_color(hsla(s.text))
                     .whitespace_normal()
                     .child(SharedString::from(question.text.clone())),
@@ -810,7 +811,7 @@ impl ConversationView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child("Pick one or more")
                     }))
@@ -891,7 +892,7 @@ impl ConversationView {
                     .aria_label(SharedString::from(format!("Open {full}")))
                     .flex_none()
                     .max_w(self.z(MENTION_WIDTH))
-                    .bg(hsla(s.overlay))
+                    .bg(hsla(s.selected))
                     .text_color(hsla(s.text_secondary))
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text)))
@@ -908,6 +909,7 @@ impl ConversationView {
                             .text_ellipsis()
                             .child(SharedString::from(name)),
                     )
+                    .map(kit::hint_timing)
                     .tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::clone(&hint_theme);
                         cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
@@ -960,10 +962,11 @@ impl ConversationView {
                     .items_center()
                     .justify_center()
                     .rounded(self.z(theme.radii.xs))
-                    .when(idle, |el| el.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))))
+                    .when(idle, |el| el.cursor_pointer().hover(move |el| el.bg(hsla(s.hover))))
                     .when(!idle, |el| el.opacity(slopty_theme::alpha::PRESSED))
                     .when(!touch, |el| el.invisible().group_hover(group, gpui::Styled::visible))
                     .child(self.icon(IconName::Undo2, s.text_muted))
+                    .map(kit::hint_timing)
                     .tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::clone(&hint_theme);
                         let title = if idle { "Rewind in the terminal" } else { "After this turn" };

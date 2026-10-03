@@ -363,13 +363,6 @@ impl ThreadHub {
         self.threads.review(thread)
     }
 
-    /// Whether this client answers requests.
-    pub fn set_approvals(&mut self, on: bool, cx: &mut Context<Self>) {
-        if let Some(msg) = self.threads.set_approvals(on) {
-            cx.emit(HubEvent::Send(vec![msg]));
-        }
-    }
-
     // ----- the cache -------------------------------------------------------------------
 
     /// Keep `thread` once it has rested [`KEEP_AFTER`].

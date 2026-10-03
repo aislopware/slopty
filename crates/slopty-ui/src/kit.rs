@@ -99,6 +99,9 @@ pub enum Pace {
     /// A sheet, a drawer, the composer turning into an approval: [`Motion::sheet`] on the
     /// drawer's curve.
     Sheet,
+    /// An overlay, a menu or a popover leaving: [`Motion::exit`], eased out, shorter than its
+    /// way in, since what is dismissed is no longer looked at.
+    Exit,
 }
 
 impl Pace {
@@ -110,6 +113,7 @@ impl Pace {
             Self::Fade => m.fade,
             Self::Settle => m.settle,
             Self::Sheet => m.sheet,
+            Self::Exit => m.exit,
         }
     }
 
@@ -118,7 +122,7 @@ impl Pace {
     pub const fn curve(self) -> slopty_theme::Curve {
         let m = Motion::DEFAULT;
         match self {
-            Self::Fade | Self::Settle => m.ease_out,
+            Self::Fade | Self::Settle | Self::Exit => m.ease_out,
             Self::Sheet => m.drawer,
         }
     }
@@ -155,6 +159,46 @@ where
     }
     el.relative()
         .with_animation(id, pace.animation(), move |el, t| el.top(px(from * (1.0 - t))).opacity(t))
+        .into_any_element()
+}
+
+/// `el`'s fill and hairline following its states as a native control's do.
+///
+/// Into a hover or a press at once ([`Motion::hover`]), and back to rest over
+/// [`Motion::unhover`], eased out. Only colours ease; the state itself, and layout, change at once,
+/// and under Reduce Motion GPUI applies every change at once. Every kit control that answers the
+/// pointer wears it, so the durations live here and nowhere else.
+///
+/// Not on the rows of a list GPUI composites as a scroll layer (the navigator's): a fill easing
+/// out under rows that scroll past the pointer repaints the layer, and measured headless it
+/// composited 2 of 30 scroll frames where the list composites all 30
+/// (`nav_list::a_scroll_of_the_navigator_composites_its_layer`).
+pub fn eased<E: gpui::StatefulInteractiveElement>(el: E) -> E {
+    let m = Motion::DEFAULT;
+    el.transition(gpui::StateTransition::new(m.unhover).enter(m.hover).with_easing(ease_out()))
+}
+
+/// How long a dismissed overlay stays drawn while it leaves.
+///
+/// [`Pace::Exit`], or `None` under Reduce Motion, where it goes on the frame it is dismissed.
+/// Its owner keeps drawing it
+/// through [`fade_out`] for this long and then drops it; the keyboard has already gone back.
+#[must_use]
+pub fn exit_time(cx: &App) -> Option<std::time::Duration> {
+    motion(cx).then(|| Pace::Exit.duration())
+}
+
+/// `el` leaving: fading out where it is over [`Pace::Exit`], with no travel.
+///
+/// It fades the first time it is drawn under `id`. It takes no pointer while it goes: a blocker
+/// over it holds the clicks within its own bounds, so a row in a fading menu never runs and nothing
+/// under it is hit by a press aimed at the menu. Its owner draws it only for [`exit_time`].
+pub fn fade_out<E>(el: E, id: impl Into<gpui::ElementId>) -> gpui::AnyElement
+where
+    E: IntoElement + Styled + gpui::ParentElement + 'static,
+{
+    el.child(div().absolute().inset_0().occlude())
+        .with_animation(id, Pace::Exit.animation(), |el, t| el.opacity(1.0 - t))
         .into_any_element()
 }
 
@@ -236,9 +280,11 @@ pub const PILL_HEIGHT: f32 = 20.0;
 
 /// A pill's shape without its fill, at the chrome's zoom `k`.
 ///
-/// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end,
-/// `radii.xs`. A header's words that act (Take, Mute, the hooks' offer) wear it bare, so they
-/// stand as tall as the state's [`pill`] beside them.
+/// [`PILL_HEIGHT`] tall, the text centred on it at `small()`, `spacing.sm` at each end, a
+/// capsule: a pill says a state, and every reference draws a state as a capsule, where a 4 pt
+/// box at this height read as a 2018 tag or a button. A header's words that act (Take, Mute,
+/// the hooks' offer) wear it bare, so they stand as tall as the state's [`pill`] beside them
+/// and their hover takes the same capsule. Key caps keep their 4 pt corners: they are keys.
 #[must_use]
 pub fn pill_frame(theme: &Theme, k: f32) -> Div {
     div()
@@ -247,23 +293,33 @@ pub fn pill_frame(theme: &Theme, k: f32) -> Div {
         .h(px(PILL_HEIGHT * k))
         .gap(px(theme.spacing.xs * k))
         .px(px(theme.spacing.sm * k))
-        .rounded(px(theme.radii.xs * k))
+        .rounded(px(theme.radii.full))
         .overflow_hidden()
         .whitespace_nowrap()
         .text_size(px(theme.typography.small() * k))
 }
 
 /// A state's pill at the chrome's zoom `k`: [`pill_frame`] filled with `tone` at
-/// `alpha::FAINT`, its words in `tone` at the medium weight.
+/// [`pill_fill`], its words in `tone` at the medium weight.
 ///
 /// A header holds one of these at most, the state's (an agent waiting, working), so it is the
 /// one shape there that stands out. The caller adds the identity, the role and the words.
 #[must_use]
 pub fn pill(theme: &Theme, tone: Rgb, k: f32) -> Div {
     pill_frame(theme, k)
-        .bg(hsla_alpha(tone, alpha::FAINT))
+        .bg(hsla_alpha(tone, pill_fill(theme)))
         .text_color(hsla(tone))
         .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+}
+
+/// How strongly a pill's tone fills it: [`alpha::FAINT`], or [`alpha::FAINT_ON_PAPER`] in
+/// light, where a saturated tone reads heavier on white.
+#[must_use]
+pub const fn pill_fill(theme: &Theme) -> f32 {
+    match theme.variant() {
+        Variant::Dark => alpha::FAINT,
+        Variant::Light => alpha::FAINT_ON_PAPER,
+    }
 }
 
 /// How long something took or has run, the one way chrome says it: "850 ms", "6.2 s" (the
@@ -335,35 +391,152 @@ impl Overlay {
     }
 }
 
-/// The one elevation's shadow, as GPUI draws it: a tight contact layer and a soft one, from
+/// The floating elevation's shadow, as GPUI draws it: a tight contact layer and a soft one, from
 /// [`slopty_theme::Elevation::shadow`], and in dark the lit top edge
-/// ([`slopty_theme::Elevation::highlight`]).
-///
-/// GPUI paints an inset shadow under the element's border, so the edge is two points deep: the
-/// hairline covers the first and the second shows, the light just inside the rim.
+/// ([`slopty_theme::Rim::float`]).
 #[must_use]
 pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
     let e = &theme.elevation;
-    let drop = e.shadow.iter().map(|layer| BoxShadow {
-        color: hsla_alpha(e.shade, layer.alpha),
+    let drop = e.shadow.iter().map(|&layer| drop_shadow(theme, layer));
+    let edge = e.rim.float.map(|a| rim(theme, a, theme.hair()));
+    drop.chain(edge).collect()
+}
+
+/// `el` on the resting elevation.
+///
+/// For a raised thing that keeps its own fill and hairline (the composer and the tray over
+/// it): the rim ([`slopty_theme::Rim::rest`]) and, in light, a
+/// contact shadow ([`slopty_theme::Elevation::rest`]). A stack cut into parts passes `first`
+/// and `last` as [`card_part`] does, so only the lit edge's part takes the rim and only the
+/// last part casts the contact. `el` wears a hairline border; the rim lands just inside it.
+#[must_use]
+pub fn rests<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> E {
+    el.shadow(rest_layers(theme, theme.hair(), first, last))
+}
+
+/// The resting elevation's layers for one part of a stack whose border is `border` wide.
+fn rest_layers(theme: &Theme, border: f32, first: bool, last: bool) -> Vec<BoxShadow> {
+    let e = &theme.elevation;
+    let contact = e.rest.filter(|_| last).map(|layer| drop_shadow(theme, layer));
+    let lit = if e.rim.top { first } else { last };
+    let edge = lit.then(|| rim(theme, e.rim.rest, border));
+    contact.into_iter().chain(edge).collect()
+}
+
+/// One layer of the shade falling under a surface.
+fn drop_shadow(theme: &Theme, layer: slopty_theme::Shadow) -> BoxShadow {
+    BoxShadow {
+        color: hsla_alpha(theme.elevation.shade, layer.alpha),
         offset: point(px(0.0), px(layer.y)),
         blur_radius: px(layer.blur),
         spread_radius: px(0.0),
         inset: false,
-    });
-    let edge = e.highlight.map(|a| BoxShadow {
-        color: hsla_alpha(Rgb::hex(0xff_ffff), a),
-        offset: point(px(0.0), px(EDGE_DEPTH)),
+    }
+}
+
+/// The rim at `alpha`: a point of the rim's ink inside the lit edge, past a border `border`
+/// wide.
+///
+/// GPUI paints an inset shadow under the element's border, so the rim reaches the border and a
+/// point in: the border covers the first part and the point shows, just inside the edge.
+fn rim(theme: &Theme, alpha: f32, border: f32) -> BoxShadow {
+    let r = theme.elevation.rim;
+    let depth = border + RIM_DEPTH;
+    BoxShadow {
+        color: hsla_alpha(r.ink, alpha),
+        offset: point(px(0.0), px(if r.top { depth } else { -depth })),
         blur_radius: px(0.0),
         spread_radius: px(0.0),
         inset: true,
-    });
-    drop.chain(edge).collect()
+    }
 }
 
-/// How far down the lit edge reaches from a floating surface's top: its hairline, then one
-/// point of light.
-const EDGE_DEPTH: f32 = 2.0;
+/// How far a rim reaches in past its surface's border: one point.
+const RIM_DEPTH: f32 = 1.0;
+
+/// A card: what rests on a plane and holds a thing of its own (a board's task, a settings
+/// group, an expanded tool group, a question's option), on the resting elevation.
+///
+/// `radii.md`, the rim, and in light the floating surface's white with a hairline round it
+/// and a contact shadow, so it reads on the quiet well under it ([`well`]). In dark it is the
+/// hover wash, a step over whatever plane it rests on (+4.7 L on the content, the floating
+/// step's own), with its lit top edge, as coss's cards are; so a card on a sheet still rises
+/// from the sheet. Under Increase Contrast its hairline is drawn in dark too. The caller adds
+/// the identity and pads it.
+#[must_use]
+pub fn card(theme: &Theme) -> Div {
+    card_part(theme, true, true)
+}
+
+/// One part of a [`card`] cut across its width.
+///
+/// For a card whose rows are each a child of their own (a settings group, so finding a row
+/// scrolls to it): `first` takes the top corners
+/// and the top edge, `last` the bottom ones. In order the parts read as one card.
+#[must_use]
+pub fn card_part(theme: &Theme, first: bool, last: bool) -> Div {
+    let light = theme.variant() == Variant::Light;
+    let ringed = light || theme.contrast == slopty_theme::Contrast::Increased;
+    let r = px(theme.radii.md);
+    let border = if ringed { theme.hair() } else { 0.0 };
+    div()
+        .map(|el| {
+            if light {
+                el.bg(hsla(theme.surfaces.elevated))
+            } else {
+                el.bg(hsla(theme.surfaces.hover))
+            }
+        })
+        .when(first, |el| el.rounded_t(r))
+        .when(last, |el| el.rounded_b(r))
+        .when(ringed, |el| {
+            el.border_x(hair(theme))
+                .when(first, |el| el.border_t(hair(theme)))
+                .when(last, |el| el.border_b(hair(theme)))
+                .border_color(hsla(theme.surfaces.border))
+        })
+        .shadow(rest_layers(theme, border, first, last))
+}
+
+/// How far a segmented control's track holds its options in from its edge.
+pub const TRACK_PAD: f32 = 2.0;
+
+/// A segmented control's thumb at `bounds`, painted as a [`card`] is drawn.
+///
+/// The floating surface on the resting elevation (its rim, and in light its hairline and contact),
+/// at the radius nested in the track's `radii.sm` past [`TRACK_PAD`]. The selection plate paints it
+/// as it slides from option to option.
+pub fn paint_thumb(theme: &Theme, bounds: gpui::Bounds<gpui::Pixels>, window: &mut Window) {
+    let radius = gpui::Corners::all(px(thumb_radius(theme)));
+    let ringed =
+        theme.variant() == Variant::Light || theme.contrast == slopty_theme::Contrast::Increased;
+    let border = if ringed { hair_painted(theme, window.scale_factor()) } else { px(0.0) };
+    let layers = rest_layers(theme, f32::from(border), true, true);
+    window.paint_drop_shadows(bounds, radius, &layers);
+    let quad = gpui::fill(bounds, hsla(theme.surfaces.elevated)).corner_radii(radius);
+    window.paint_quad(if ringed {
+        quad.border_widths(border).border_color(hsla(theme.surfaces.border))
+    } else {
+        quad
+    });
+    window.paint_inset_shadows(bounds, radius, &layers);
+}
+
+/// A segmented thumb's radius: concentric with its track's.
+#[must_use]
+pub fn thumb_radius(theme: &Theme) -> f32 {
+    slopty_theme::Radii::nested(theme.radii.sm, 0.0, TRACK_PAD)
+}
+
+/// The ground cards rest on.
+///
+/// `band` in light, a hair under white, so a white card reads as the one thing raised
+/// (`HeroUI`'s background under its surfaces, Linear's content under its elevated). In dark the
+/// plane itself, which the cards already rise from.
+#[must_use]
+pub fn well<E: Styled>(el: E, theme: &Theme) -> E {
+    if theme.variant() == Variant::Light { el.bg(hsla(theme.surfaces.band)) } else { el }
+}
 
 /// `el` lifted off the chrome: the `elevated` surface, the `border` hairline, the shadow and,
 /// in dark, the lit top edge.
@@ -377,7 +550,7 @@ const EDGE_DEPTH: f32 = 2.0;
 #[must_use]
 pub fn elevate<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(theme.surfaces.elevated))
-        .border(px(SHEET_EDGE))
+        .border(hair(theme))
         .border_color(hsla(theme.surfaces.border))
         .shadow(elevation(theme))
 }
@@ -493,11 +666,37 @@ pub fn solid<E: Styled>(el: E, theme: &Theme) -> E {
     el.bg(hsla(s.solid)).text_color(hsla(s.solid_ink))
 }
 
-/// [`solid`] that answers the pointer: under it the solid gives a little toward the content,
-/// and more while pressed, as a native button darkens.
+/// [`solid`] that answers the pointer, with its finish.
+///
+/// Under the pointer the solid gives a little toward the content, and while pressed more, its point
+/// gone and a shade inside its top, so it presses in as a native button does
+/// ([`slopty_theme::Finish`]).
 pub fn solid_pressable(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
     let (hovered, pressed) = solid_states(theme);
-    solid(el, theme).hover(move |el| el.bg(hsla(hovered))).active(move |el| el.bg(hsla(pressed)))
+    let (rest, held) = solid_finish(theme);
+    eased(solid(el, theme))
+        .shadow(rest)
+        .hover(move |el| el.bg(hsla(hovered)))
+        .active(move |el| el.bg(hsla(pressed)).shadow(held))
+}
+
+/// The solid's finish at rest and held: its point and contact, then the shade pressed in.
+fn solid_finish(theme: &Theme) -> (Vec<BoxShadow>, Vec<BoxShadow>) {
+    let f = theme.elevation.finish;
+    let point_in = |ink: Rgb, a: f32, top: bool| BoxShadow {
+        color: hsla_alpha(ink, a),
+        offset: point(px(0.0), px(if top { RIM_DEPTH } else { -RIM_DEPTH })),
+        blur_radius: px(0.0),
+        spread_radius: px(0.0),
+        inset: true,
+    };
+    let rest = f
+        .contact
+        .map(|layer| drop_shadow(theme, layer))
+        .into_iter()
+        .chain([point_in(f.ink, f.alpha, f.top)])
+        .collect();
+    (rest, vec![point_in(theme.elevation.shade, f.pressed, true)])
 }
 
 /// The solid under the pointer and pressed: given [`alpha::FAINT`] and [`alpha::DIM`] toward
@@ -507,26 +706,40 @@ fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
     (solid.mix(content, alpha::FAINT), solid.mix(content, alpha::DIM))
 }
 
-/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): the raised fill with a
-/// hairline just inside its edge, the text's own ink, and the hover step under the pointer.
+/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): a step past its plane at rest,
+/// another under the pointer, a third while held.
 ///
-/// The hairline is what makes it a button on a raised card (a board's card, this Mac's
-/// checklist): there the fill alone is the card's own tone and the button read as words.
+/// At rest the hover wash with a hairline just inside its edge and the text's own ink; under the
+/// pointer the selected wash; held, the pressed one, so a press reads apart from a hover.
+///
+/// The hairline is what makes it a button on a card (a board's card, this Mac's checklist):
+/// there the fill alone is near the card's own tone and the button read as words.
 pub fn secondary(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    el.bg(hsla(s.raised))
-        .shadow(vec![ring_inside(theme)])
+    let mut layers = vec![ring_inside(theme)];
+    layers.push(rim(theme, theme.elevation.rim.rest, theme.hair()));
+    eased(el)
+        .bg(hsla(s.hover))
+        .shadow(layers)
         .text_color(hsla(s.text))
-        .hover(move |el| el.bg(hsla(s.overlay)))
-        .active(move |el| el.bg(hsla(s.overlay)))
+        .hover(move |el| el.bg(hsla(s.selected)))
+        .active(move |el| el.bg(hsla(s.pressed)))
 }
 
-/// `el` drawn as the selected row: the selected fill with a hairline ring just inside its edge.
+/// `el` drawn as the selected row of a list, live while that list has the keyboard.
+///
+/// `focused`: the selected wash with a hairline ring just inside its edge. A list without the
+/// keyboard keeps its selection at the hover's wash, with no ring, so only one list in the window
+/// shows a live selection (Apple's key and non-key selection, in Slopty's neutrals).
 ///
 /// The ring lets a selection read on a surface whose tone sits near the fill (a menu, a
-/// selected row on the bars) and hold its shape on any background. A hover is the fill alone.
-pub fn selected<E: Styled>(el: E, theme: &Theme) -> E {
-    el.bg(hsla(theme.surfaces.overlay)).shadow(vec![ring_inside(theme)])
+/// selected row on the bars) and hold its shape on any background. A hover is the wash alone.
+pub fn selected<E: Styled>(el: E, theme: &Theme, focused: bool) -> E {
+    if focused {
+        el.bg(hsla(theme.surfaces.selected)).shadow(vec![ring_inside(theme)])
+    } else {
+        el.bg(hsla(theme.surfaces.hover))
+    }
 }
 
 /// A hairline ring just inside an element's edge, in the border's tone: it holds a shape on a
@@ -536,7 +749,7 @@ fn ring_inside(theme: &Theme) -> BoxShadow {
         color: hsla(theme.surfaces.border),
         offset: point(px(0.0), px(0.0)),
         blur_radius: px(0.0),
-        spread_radius: px(SHEET_EDGE),
+        spread_radius: hair(theme),
         inset: true,
     }
 }
@@ -575,10 +788,10 @@ pub fn button(
     let el = match kind {
         ButtonKind::Primary => solid_pressable(el, theme),
         ButtonKind::Secondary => secondary(el, theme),
-        ButtonKind::Ghost => el
+        ButtonKind::Ghost => eased(el)
             .text_color(hsla(s.text_secondary))
-            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
-            .active(move |el| el.bg(hsla(s.overlay))),
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+            .active(move |el| el.bg(hsla(s.pressed))),
         ButtonKind::Link => el.text_color(hsla(s.text)).hover(Styled::underline),
     };
     crate::a11y::tab_stop(el, s.accent)
@@ -631,8 +844,61 @@ pub fn row(theme: &Theme, lines: Row) -> Div {
         .h(px(lines.height(theme)))
 }
 
-/// The hairline [`elevate`] draws round a floating sheet.
-pub const SHEET_EDGE: f32 = 1.0;
+/// How wide chrome draws a hairline: [`Theme::hair`], one device pixel, or a full point under
+/// Increase Contrast.
+///
+/// Every border chrome draws is this wide: a sheet's edge, a pane's divider, a rule under a bar,
+/// a ring just inside a button. A full point was two device pixels on a Retina screen, so the
+/// chrome read ruled; the hairline shares are set for this width. A line that marks something
+/// (the focus line, a failed block's bar) is a stroke of its own, not a hairline.
+#[must_use]
+pub const fn hair(theme: &Theme) -> gpui::Pixels {
+    px(theme.hair())
+}
+
+/// [`hair`] for a quad painted by hand at `scale` device pixels a point.
+///
+/// Whole device pixels, never under one, as GPUI snaps a border. A painted box's edges round on
+/// their own, so half a point at 3x would come out one pixel or two by where it fell.
+#[must_use]
+pub fn hair_painted(theme: &Theme, scale: f32) -> gpui::Pixels {
+    let device = theme.hair().mul_add(scale, -0.5).ceil().max(1.0);
+    px(device / scale)
+}
+
+/// A horizontal rule: a hairline in `tint` across its parent, taking its own width in the flow.
+///
+/// Drawn as a border rather than a box of the hairline's height, since GPUI snaps a border to
+/// at least one device pixel where a box half a point tall rounds to nothing on a 1x screen.
+#[must_use]
+pub fn rule(theme: &Theme, tint: slopty_theme::Tint) -> Div {
+    div().flex_none().w_full().border_t(hair(theme)).border_color(hsla(tint))
+}
+
+/// A rule parting a list's or a menu's groups.
+///
+/// A [`rule`] in `border_subtle` that fades out over its last
+/// [`spacing.xl`](slopty_theme::Spacing::xl) at each end, a base unit above and below it, so it
+/// reads as a pause between groups rather than a line drawn across (Raycast's list separators). The
+/// fade is GPUI's per-pixel `edge_fade` on the rule alone, never a gradient wash.
+#[must_use]
+pub fn list_rule(theme: &Theme) -> gpui::AnyElement {
+    div()
+        .flex_none()
+        .w_full()
+        .py(px(theme.spacing.xs))
+        .child(gpui::edge_fade(
+            rule(theme, theme.surfaces.border_subtle),
+            gpui::EdgeFade::x(px(theme.spacing.xl)),
+        ))
+        .into_any_element()
+}
+
+/// A vertical rule: [`rule`] standing up, the height of its parent.
+#[must_use]
+pub fn rule_v(theme: &Theme, tint: slopty_theme::Tint) -> Div {
+    div().flex_none().h_full().border_l(hair(theme)).border_color(hsla(tint))
+}
 
 /// The pad round the rows of a floating sheet (a menu, the palette's list, the inbox).
 ///
@@ -640,7 +906,7 @@ pub const SHEET_EDGE: f32 = 1.0;
 /// shares the sheet's centre (6 inside 12).
 #[must_use]
 pub fn sheet_pad(theme: &Theme) -> f32 {
-    theme.radii.lg - theme.radii.sm - SHEET_EDGE
+    theme.radii.lg - theme.radii.sm - theme.hair()
 }
 
 /// A row inside a floating sheet padded by [`sheet_pad`].
@@ -653,7 +919,7 @@ pub fn sheet_row(theme: &Theme, lines: Row) -> Div {
     let pad = sheet_pad(theme);
     row(theme, lines).pl(px(theme.spacing.inset() - pad)).rounded(px(slopty_theme::Radii::nested(
         theme.radii.lg,
-        SHEET_EDGE,
+        theme.hair(),
         pad,
     )))
 }
@@ -669,7 +935,7 @@ pub fn inset_x<E: Styled>(el: E, theme: &Theme) -> E {
 /// in `text_muted`; a status word then takes its tone's colour over it.
 #[must_use]
 pub fn meta<E: Styled>(el: E, theme: &Theme) -> E {
-    el.text_size(px(theme.typography.meta())).text_color(hsla(theme.surfaces.text_muted))
+    el.text_size(px(theme.typography.small())).text_color(hsla(theme.surfaces.text_muted))
 }
 
 /// A section's label: quiet, so the rows under it lead.
@@ -711,8 +977,8 @@ pub fn icon_button_at(
     k: f32,
 ) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    square_icon(theme, id.into(), icon, label, k, s.text_secondary)
-        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+    eased(square_icon(theme, id.into(), icon, label, k, s.text_secondary))
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
 /// The square an icon button is drawn in, its icon in `ink`, before its hover.
@@ -740,7 +1006,7 @@ fn square_icon(
         .rounded(px(theme.radii.sm * k))
         .cursor_pointer()
         .text_color(hsla(ink))
-        .active(move |el| el.bg(hsla(s.overlay)))
+        .active(move |el| el.bg(hsla(s.pressed)))
         .child(
             crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, hsla(ink))
                 .size(px(theme.typography.icon() * k)),
@@ -753,8 +1019,8 @@ fn square_icon(
 /// One name whatever its state, said as pressed or not (`aria_toggled`), the way iOS and
 /// Zed say a toggle. A label that flipped with the state ("Use as a trackpad", then "Touch the
 /// picture directly") named one control two ways and the palette's command a third. On, it
-/// rests on the selected fill with its icon in `text`, and the pointer over it keeps that
-/// fill: the hover's lighter `raised` read as the toggle letting go.
+/// rests on the selected wash with its icon in `text`, and the pointer over it keeps that
+/// wash: the hover's fainter one read as the toggle letting go.
 #[must_use]
 pub fn icon_toggle(
     theme: &Theme,
@@ -771,13 +1037,19 @@ pub fn icon_toggle(
     let s = theme.surfaces;
     square_icon(theme, id.into(), icon, label, k, s.text)
         .aria_toggled(gpui::accesskit::Toggled::True)
-        .bg(hsla(s.overlay))
+        .bg(hsla(s.selected))
 }
+
+/// The side of the disc an empty state's mark sits in, in points at zoom 1: `HeroUI`'s small
+/// empty state's, the glyph at the inline icon size in its middle.
+pub const NOTICE_DISC: f32 = 40.0;
 
 /// What a tile's body says when it has nothing to show, as one block in its middle.
 ///
-/// A mark, a line at `small()` in the medium weight saying what is so, and under it an optional
-/// `meta()` line saying why or where. The caller adds the identity and its actions under it.
+/// A mark seated in a [`NOTICE_DISC`] of the hover wash, which gives the empty body a centre of
+/// mass without decoration (a bare grey glyph floated in it), a line at `small()` in the medium
+/// weight saying what is so, and under it an optional muted line saying why or where. The
+/// caller adds the identity and its actions under it.
 ///
 /// A remote window on its way, a file that cannot be opened here and an empty or missing
 /// folder all say it this way. Before, a file printed its summary alone ("binary, 2 MB") and a
@@ -801,7 +1073,18 @@ pub fn notice(
         .px(px(theme.spacing.inset() * k))
         .font_family(theme.typography.ui_family.clone())
         .text_center()
-        .child(div().mb(px(theme.spacing.xs * k)).child(mark))
+        .child(
+            div()
+                .flex_none()
+                .size(px(NOTICE_DISC * k))
+                .mb(px(theme.spacing.xs * k))
+                .rounded(px(theme.radii.full))
+                .bg(hsla(s.hover))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(mark),
+        )
         .child(
             div()
                 .text_size(px(theme.typography.small() * k))
@@ -810,15 +1093,16 @@ pub fn notice(
                 .child(title.into()),
         )
         .children(detail.map(|detail| {
-            meta(div(), theme).text_size(px(theme.typography.meta() * k)).child(detail)
+            meta(div(), theme).text_size(px(theme.typography.small() * k)).child(detail)
         }))
 }
 
-/// A [`notice`]'s mark: a kind's icon at the large size in `text_muted`.
+/// A [`notice`]'s mark: a kind's icon at the inline size in `text_secondary`, for its disc.
 #[must_use]
 pub fn notice_mark(theme: &Theme, icon: crate::icons::IconName, k: f32) -> gpui::Svg {
-    crate::icons::icon(theme, icon, crate::icons::IconSize::Large, hsla(theme.surfaces.text_muted))
-        .size(px(theme.typography.icon_large() * k))
+    let ink = hsla(theme.surfaces.text_secondary);
+    crate::icons::icon(theme, icon, crate::icons::IconSize::Inline, ink)
+        .size(px(theme.typography.icon() * k))
 }
 
 /// What the app is called where it names itself.
@@ -876,7 +1160,7 @@ pub fn brand(theme: &Theme, under: Option<gpui::AnyElement>) -> gpui::Stateful<D
 /// A key cap: the keys on a small plate, the way the empty workspace teaches its chords and the
 /// palette's foot names its keys. `keys` comes from the key tables, or is a lone key.
 ///
-/// The plate is the selected fill with no hairline: a ring round every cap made a row of them
+/// The plate is the selected wash with no hairline: a ring round every cap made a row of them
 /// read as a row of buttons.
 #[must_use]
 pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
@@ -885,7 +1169,7 @@ pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
         .flex_none()
         .px(px(theme.spacing.xs))
         .rounded(px(theme.radii.xs))
-        .bg(hsla(s.overlay))
+        .bg(hsla(s.selected))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_secondary))
         .child(SharedString::from(crate::palette::drawn_keys(&keys.into())))
@@ -897,6 +1181,11 @@ pub fn key_cap(theme: &Theme, keys: impl Into<SharedString>) -> Div {
 /// there and none of it answered what a button does; zed and warp print none and keep the index
 /// in the command palette, which Slopty already has. A hint needs a pointer to hover, so this is
 /// the Mac's affordance — on a phone the palette is the only one, as it always was.
+///
+/// Hints come as a warm group: the first waits [`HINT_DELAY`] under a resting pointer, and
+/// while one was on screen in the last [`HINT_WARM`] the next shows at once, so running the
+/// pointer along a bar reads each button without waiting at each (Vercel's and Raycast's
+/// timing). GPUI is told to build it at once ([`hint_timing`]) and the hint keeps the wait.
 #[derive(Debug)]
 pub struct Hint {
     what: SharedString,
@@ -904,6 +1193,42 @@ pub struct Hint {
     theme: Rc<Theme>,
     /// `what` is text to read exactly (an address), set in the monospace face.
     mono: bool,
+    /// The wait is over and the hint is drawn.
+    shown: bool,
+    /// The wait under way, dropped with the hint when the pointer moves on first.
+    wait: Option<gpui::Task<()>>,
+}
+
+/// How long the pointer rests on a control before the first hint shows.
+pub const HINT_DELAY: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// How long after a hint goes the next one still shows at once.
+pub const HINT_WARM: std::time::Duration = std::time::Duration::from_secs(1);
+
+thread_local! {
+    /// When the last hint on screen went, for the next to know whether the group is warm.
+    static HINT_LEFT: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether a hint showing at `now` follows one that went at `left` closely enough to show at
+/// once.
+fn hint_warm(left: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    left.is_some_and(|left| now.saturating_duration_since(left) < HINT_WARM)
+}
+
+/// `el` building its hint the moment the pointer rests on it: the [`Hint`] keeps the wait
+/// itself, so a warm group can skip it. Every control with a hint wears it.
+pub fn hint_timing<E: gpui::StatefulInteractiveElement>(el: E) -> E {
+    el.tooltip_show_delay(std::time::Duration::ZERO)
+}
+
+impl Drop for Hint {
+    fn drop(&mut self) {
+        if self.shown {
+            HINT_LEFT.set(Some(std::time::Instant::now()));
+        }
+    }
 }
 
 impl Hint {
@@ -914,7 +1239,7 @@ impl Hint {
         key: impl Into<SharedString>,
         theme: Rc<Theme>,
     ) -> Self {
-        Self { what: what.into(), key: key.into(), theme, mono: false }
+        Self { what: what.into(), key: key.into(), theme, mono: false, shown: false, wait: None }
     }
 
     /// `what` in the monospace face: an address or a path, read character by character.
@@ -927,6 +1252,22 @@ impl Hint {
 
 impl Render for Hint {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.shown && self.wait.is_none() {
+            if hint_warm(HINT_LEFT.get(), std::time::Instant::now()) {
+                self.shown = true;
+            } else {
+                self.wait = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(HINT_DELAY).await;
+                    let _gone = this.update(cx, |this, cx| {
+                        this.shown = true;
+                        cx.notify();
+                    });
+                }));
+            }
+        }
+        if !self.shown {
+            return gpui::Empty.into_any_element();
+        }
         let theme = &self.theme;
         let s = &theme.surfaces;
         let hint = elevate(div(), theme)
@@ -951,6 +1292,23 @@ impl Render for Hint {
     }
 }
 
+#[cfg(test)]
+mod hint_tests {
+    use std::time::{Duration, Instant};
+
+    use super::{HINT_WARM, hint_warm};
+
+    /// The first hint waits; one that follows another within the warm second shows at once,
+    /// and the group cools after it.
+    #[test]
+    fn hints_come_as_a_warm_group() {
+        let now = Instant::now();
+        assert!(!hint_warm(None, now), "the first one waits");
+        assert!(hint_warm(Some(now), now + Duration::from_millis(300)), "the next at once");
+        assert!(!hint_warm(Some(now), now + HINT_WARM), "cold again after a second");
+    }
+}
+
 /// Point gpui-kit's theme at `theme`: mode, then the colours its widgets read.
 pub fn sync(theme: &Theme, cx: &mut App) {
     let mode = match theme.variant() {
@@ -972,14 +1330,15 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     // are: colour is kept for meaning.
     c.caret = hsla(s.text);
     c.selection = hsla_alpha(s.text, alpha::TINT);
-    c.accent = hsla(s.raised);
+    // gpui-kit's hovers and wells are the same washes, so they ride on the plane under them.
+    c.accent = hsla(s.hover);
     c.accent_foreground = hsla(s.text);
-    c.muted = hsla(s.raised);
+    c.muted = hsla(s.hover);
     c.muted_foreground = hsla(s.text_muted);
-    c.secondary = hsla(s.raised);
+    c.secondary = hsla(s.hover);
     c.secondary_foreground = hsla(s.text);
-    c.secondary_hover = hsla(s.overlay);
-    c.secondary_active = hsla(s.overlay);
+    c.secondary_hover = hsla(s.selected);
+    c.secondary_active = hsla(s.pressed);
     // gpui-kit's primary (its buttons, switches, checkboxes) is Slopty's: the neutral solid.
     let (hovered, pressed) = solid_states(theme);
     c.primary = hsla(s.solid);
@@ -1006,8 +1365,8 @@ pub fn sync(theme: &Theme, cx: &mut App) {
     c.tab_active_foreground = hsla(s.text);
     c.table_row_border = hsla(s.border_subtle);
     c.list = hsla(s.panel);
-    c.list_hover = hsla(s.raised);
-    c.list_active = hsla(s.overlay);
+    c.list_hover = hsla(s.hover);
+    c.list_active = hsla(s.selected);
     c.danger = hsla(s.error);
     c.success = hsla(s.success);
     c.warning = hsla(s.warn);
@@ -1216,7 +1575,7 @@ mod tests {
             .iter()
             .any(|call| line.split(call).skip(1).any(|rest| !rest.starts_with("none")));
         if named || line.contains(".shadow(") {
-            return Some("a shadow of its own, not `kit::elevate`");
+            return Some("a shadow of its own, not `kit::elevate`, `kit::card` or `kit::rests`");
         }
         let dim = ["alpha::SCRIM", "elevation.scrim", "elevation.shade"];
         dim.iter()
@@ -1239,8 +1598,10 @@ mod tests {
         assert!(own_elevation(".bg(hsla_alpha(s.canvas, t.elevation.scrim))").is_some());
     }
 
-    /// What floats wears the one elevation: [`elevate`] and [`scrim`] are the only places a
-    /// shadow or a modal's dim is chosen, so an overlay cannot sit below the content again.
+    /// What floats wears the floating elevation and what rests the resting one: [`elevate`],
+    /// [`card`], [`rests`] and [`scrim`] are the only places a shadow, a rim or a modal's
+    /// dim is chosen, so an overlay cannot sit below the content again nor a card grow a
+    /// shadow of its own.
     #[test]
     fn a_floating_layer_wears_the_one_elevation() {
         let mut wrong = Vec::new();
@@ -1393,20 +1754,30 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// A pill is its fixed height at any zoom, and the state's pill is the frame filled.
+    /// A pill is its fixed height at any zoom and a capsule, and the state's pill is the frame
+    /// filled at the faint step, a notch fainter on white.
     #[test]
-    fn a_pill_is_twenty_points_at_its_zoom() {
-        let theme = Theme::default();
-        for k in [1.0, 0.5] {
-            let mut frame = pill_frame(&theme, k);
-            let height = frame.style().size.height;
-            assert_eq!(height, Some(px(PILL_HEIGHT * k).into()), "zoom {k}");
-            let mut filled = pill(&theme, theme.surfaces.warn, k);
-            assert_eq!(filled.style().size.height, Some(px(PILL_HEIGHT * k).into()));
-            let fill = filled.style().background.clone();
-            let faint = gpui::Fill::from(hsla_alpha(theme.surfaces.warn, alpha::FAINT));
-            assert_eq!(fill, Some(faint), "the tone at the faint step");
+    fn a_pill_is_a_twenty_point_capsule_at_its_zoom() {
+        for (variant, step) in
+            [(Variant::Dark, alpha::FAINT), (Variant::Light, alpha::FAINT_ON_PAPER)]
+        {
+            let theme = Theme::new(variant);
+            for k in [1.0, 0.5] {
+                let mut frame = pill_frame(&theme, k);
+                let height = frame.style().size.height;
+                assert_eq!(height, Some(px(PILL_HEIGHT * k).into()), "zoom {k}");
+                let corner = frame.style().corner_radii.top_left;
+                assert_eq!(corner, Some(px(theme.radii.full).into()), "a capsule");
+                let mut filled = pill(&theme, theme.surfaces.warn, k);
+                assert_eq!(filled.style().size.height, Some(px(PILL_HEIGHT * k).into()));
+                let fill = filled.style().background.clone();
+                let faint = gpui::Fill::from(hsla_alpha(theme.surfaces.warn, step));
+                assert_eq!(fill, Some(faint), "{variant:?}: the tone at the faint step");
+            }
         }
+        let mut cap = key_cap(&Theme::default(), "K");
+        let corner = cap.style().corner_radii.top_left;
+        assert_eq!(corner, Some(px(Theme::default().radii.xs).into()), "a key stays a key");
     }
 
     /// A share written with a space before its sign: "150 %" beside the "34%" of the context
@@ -1440,7 +1811,7 @@ mod tests {
     }
 
     /// A toggle is one control with one name: off it is a quiet icon button, on it rests on
-    /// the selected fill with its icon in `text`, and its width does not change.
+    /// the selected wash with its icon in `text`, and its width does not change.
     #[test]
     fn a_toggle_rests_on_the_selected_fill_only_while_on() {
         let theme = Theme::default();
@@ -1448,13 +1819,14 @@ mod tests {
         let mut off = icon_toggle(&theme, "t", icon, "Trackpad mode", false, 1.0);
         let mut on = icon_toggle(&theme, "t", icon, "Trackpad mode", true, 1.0);
         assert_eq!(off.style().background, None, "off is bare");
-        let selected = Some(gpui::Fill::from(hsla(theme.surfaces.overlay)));
-        assert_eq!(on.style().background, selected, "on rests on the selected fill");
+        let selected = Some(gpui::Fill::from(hsla(theme.surfaces.selected)));
+        assert_eq!(on.style().background, selected, "on rests on the selected wash");
         assert_eq!(on.style().size.width, off.style().size.width, "one size either way");
     }
 
-    /// The primary is the neutral solid, the secondary a neutral fill and the rest bare, all
-    /// one control's height, in both variants: no button wears the accent.
+    /// The primary is the neutral solid, the secondary the hover wash and the rest bare, all
+    /// one control's height, in both variants: no button wears the accent. A selection is the
+    /// selected wash with a hairline ring inside it.
     #[test]
     fn a_button_is_neutral_and_one_height() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -1462,17 +1834,20 @@ mod tests {
             let s = theme.surfaces;
             let fill = |kind| button(&theme, "b", "Go", kind).style().background.clone();
             assert_eq!(fill(ButtonKind::Primary), Some(gpui::Fill::from(hsla(s.solid))));
-            assert_eq!(fill(ButtonKind::Secondary), Some(gpui::Fill::from(hsla(s.raised))));
+            assert_eq!(fill(ButtonKind::Secondary), Some(gpui::Fill::from(hsla(s.hover))));
             assert_eq!(fill(ButtonKind::Ghost), None);
             assert_eq!(fill(ButtonKind::Link), None);
             for kind in [ButtonKind::Primary, ButtonKind::Secondary, ButtonKind::Ghost] {
                 let height = button(&theme, "b", "Go", kind).style().size.height;
                 assert_eq!(height, Some(px(theme.density.control).into()), "{kind:?}");
             }
-            let mut picked = selected(div(), &theme);
-            assert_eq!(picked.style().background, Some(gpui::Fill::from(hsla(s.overlay))));
+            let mut picked = selected(div(), &theme, true);
+            assert_eq!(picked.style().background, Some(gpui::Fill::from(hsla(s.selected))));
             let ring = picked.style().box_shadow.clone().unwrap_or_default();
-            assert!(ring.iter().all(|l| l.inset && l.spread_radius == px(1.0)), "{ring:?}");
+            assert!(ring.iter().all(|l| l.inset && l.spread_radius == hair(&theme)), "{ring:?}");
+            let mut away = selected(div(), &theme, false);
+            assert_eq!(away.style().background, Some(gpui::Fill::from(hsla(s.hover))), "not key");
+            assert!(away.style().box_shadow.is_none(), "no ring off the keyboard");
         }
     }
 
@@ -1643,7 +2018,7 @@ mod tests {
     fn the_colour_check_knows_a_literal_from_a_token() {
         assert!(raw_colour(".bg(gpui::rgb(0x00ff_0000))").is_some());
         assert!(raw_colour("let white = Rgb::hex(0xff_ffff);").is_some());
-        assert!(raw_colour(".bg(hsla(s.raised))").is_none());
+        assert!(raw_colour(".bg(hsla(s.hover))").is_none());
         assert!(raw_colour("/// not `Rgb::hex(0)`").is_none(), "a comment");
     }
 
@@ -1685,7 +2060,7 @@ mod tests {
         assert!(raw_size(".text_size(px(13.0))").is_some());
         assert!(raw_size(".rounded(px(6.0))").is_some());
         assert!(raw_size(".rounded_t(px(0.0))").is_none(), "square is no radius");
-        assert!(raw_size(".text_size(px(theme.typography.meta()))").is_none());
+        assert!(raw_size(".text_size(px(theme.typography.small()))").is_none());
         assert!(raw_size(".rounded(px(theme.radii.sm * k))").is_none());
         assert!(raw_size("// .text_size(px(13.0))").is_none(), "a comment");
     }
@@ -1843,6 +2218,81 @@ mod tests {
         }
     }
 
+    /// A card rests: in light white with a hairline round it, a contact shadow and a shade
+    /// along its bottom edge; in dark the hover wash, no shadow, light along its top edge, and
+    /// a hairline only under Increase Contrast. A card cut into parts lights only the edge its
+    /// rim is on and casts its contact only under the last part.
+    #[test]
+    fn a_card_rests_on_its_rim() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let light = variant == Variant::Light;
+            let mut whole = card(&theme);
+            let style = whole.style();
+            let fill = if light { hsla(s.elevated) } else { hsla(s.hover) };
+            assert_eq!(style.background, Some(gpui::Fill::from(fill)), "{variant:?}");
+            assert_eq!(style.border_widths.top.is_some(), light, "{variant:?}: ringed in light");
+            let layers = style.box_shadow.clone().unwrap_or_default();
+            let (drop, rims): (Vec<_>, Vec<_>) = layers.iter().partition(|l| !l.inset);
+            assert_eq!(drop.len(), usize::from(light), "{variant:?}: a contact in light only");
+            let [rim] = rims.as_slice() else { panic!("{variant:?}: one rim, {rims:?}") };
+            assert_eq!(rim.offset.y > px(0.0), !light, "{variant:?}: lit from above in dark");
+            assert!((rim.color.a - alpha::RIM).abs() < 1e-3, "{variant:?}: {:?}", rim.color);
+            let lit = |first, last| {
+                card_part(&theme, first, last)
+                    .style()
+                    .box_shadow
+                    .clone()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|l| l.inset)
+            };
+            assert_eq!((lit(true, false), lit(false, true)), (!light, light), "{variant:?}");
+            assert!(!lit(false, false), "{variant:?}: a middle part has no rim");
+        }
+        let theme = Theme { contrast: slopty_theme::Contrast::Increased, ..Theme::default() };
+        assert!(card(&theme).style().border_widths.top.is_some(), "ringed at more contrast");
+    }
+
+    /// The primary solid has its finish: a point inside its lit edge (the top on light's dark
+    /// solid, the bottom on dark's white one) and a contact in light; held, the point goes and
+    /// a shade presses in along its top.
+    #[test]
+    fn the_primary_presses_in() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let (rest, held) = solid_finish(&theme);
+            let point = rest.iter().find(|l| l.inset).expect("a point");
+            assert_eq!(point.offset.y > px(0.0), variant == Variant::Light, "{variant:?}");
+            let contact = rest.iter().filter(|l| !l.inset).count();
+            assert_eq!(contact, usize::from(variant == Variant::Light), "{variant:?}");
+            let [shade] = held.as_slice() else { panic!("{variant:?}: one shade, {held:?}") };
+            assert!(shade.inset && shade.offset.y > px(0.0), "pressed in from the top");
+            let mut b = button(&theme, "b", "Go", ButtonKind::Primary);
+            assert_eq!(
+                b.style().box_shadow.as_ref(),
+                Some(&rest),
+                "{variant:?}: the button wears it"
+            );
+        }
+    }
+
+    /// The secondary button rests too: its hairline ring and the rim inside it.
+    #[test]
+    fn a_secondary_button_catches_the_light() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let mut b = button(&theme, "b", "Go", ButtonKind::Secondary);
+            let layers = b.style().box_shadow.clone().unwrap_or_default();
+            let rim = theme.elevation.rim;
+            let rimmed = layers.iter().any(|l| {
+                l.inset && l.spread_radius == px(0.0) && (l.offset.y > px(0.0)) == rim.top
+            });
+            assert!(rimmed, "{variant:?}: {layers:?}");
+        }
+    }
+
     /// The motion curves are the theme's: they start at rest and land, and ease out, ahead of
     /// a straight line half way.
     #[test]
@@ -1854,6 +2304,151 @@ mod tests {
             assert!(curve(0.5) > 0.5, "eased out: {}", curve(0.5));
         }
         assert_eq!(FADE, Motion::DEFAULT.fade);
+    }
+
+    /// A border drawn a full point by hand (`border_1()`, `border_t_1()`, a `Styled::border_b_1`
+    /// handed on), or a box a point wide filled with a hairline's tint.
+    fn thick_hairline(line: &str) -> Option<&'static str> {
+        if line.trim_start().starts_with("//") {
+            return None;
+        }
+        let squeezed: String = line.split_whitespace().collect();
+        let preset = ["border_1()", "border_2()", "Styled::border_1", "Styled::border_2"]
+            .iter()
+            .any(|p| squeezed.contains(p))
+            || ["t", "b", "l", "r", "x", "y"]
+                .iter()
+                .any(|side| squeezed.contains(&format!("border_{side}_1")));
+        let boxed = (squeezed.contains(".h(px(1.0))") || squeezed.contains(".w(px(1.0))"))
+            && squeezed.contains(".bg(hsla(")
+            && squeezed.contains("border");
+        (preset || boxed).then_some("a hairline a point wide, not `kit::hair` or `kit::rule`")
+    }
+
+    #[test]
+    fn the_hairline_check_knows_a_hairline_from_a_point() {
+        assert!(thick_hairline(".border_b_1()").is_some());
+        assert!(thick_hairline(".border_1().border_color(hsla(s.border))").is_some());
+        assert!(thick_hairline(".when(first, gpui::Styled::border_t_1)").is_some());
+        assert!(thick_hairline("div().h(px(1.0)).bg(hsla(s.border_subtle))").is_some());
+        assert!(thick_hairline(".border_b(kit::hair(theme))").is_none());
+        assert!(thick_hairline(".border(px(slopty_theme::stroke::EDGE))").is_none(), "an edge");
+        assert!(thick_hairline(".border_x_0()").is_none(), "no border");
+        assert!(thick_hairline(".when(x, gpui::Styled::border_dashed)").is_none(), "a style");
+        assert!(thick_hairline("// .border_1()").is_none(), "a comment");
+    }
+
+    /// Every border chrome draws is a hairline, one device pixel ([`hair`], a point under
+    /// Increase Contrast), or a named stroke that marks something (`stroke::EDGE`,
+    /// `stroke::MARK`). At a full point each rule was two pixels on a Retina screen.
+    #[test]
+    fn a_chrome_border_is_kit_hair() {
+        // Call sites whose owners move them onto `kit::hair` in their next change.
+        const AWAITING: [&str; 3] =
+            ["slopty-ui/src/project/", "slopty-app/src/lib.rs", "slopty-app/src/ssh.rs"];
+        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
+            .into_iter()
+            .flat_map(chrome_lines)
+            .filter(|(file, ..)| {
+                !file.ends_with("slopty-ui/src/kit.rs")
+                    && !AWAITING.iter().any(|f| file.contains(f))
+            })
+            .filter_map(|(file, line_no, line)| {
+                thick_hairline(&line).map(|why| format!("{file}:{line_no}: {why}: {}", line.trim()))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Every hint keeps the warm group's timing: GPUI builds it at once ([`hint_timing`]) and
+    /// the [`Hint`] holds the wait, so a tooltip built on GPUI's own half-second delay would
+    /// wait twice and never join the group.
+    #[test]
+    fn a_hint_keeps_the_warm_timing() {
+        // Call sites whose owners move them onto `kit::hint_timing` in their next change.
+        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            let lines = chrome_lines(dir);
+            for (ix, (file, line_no, line)) in lines.iter().enumerate() {
+                if !line.contains(".tooltip(") || AWAITING.iter().any(|f| file.contains(f)) {
+                    continue;
+                }
+                let before = ix.checked_sub(1).and_then(|b| lines.get(b)).map(|l| l.2.as_str());
+                if !line.contains("hint_timing")
+                    && !before.unwrap_or_default().contains("hint_timing")
+                {
+                    wrong.push(format!("{file}:{line_no}: {}", line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "a hint on GPUI's own delay:\n{}", wrong.join("\n"));
+    }
+
+    /// A state painted as a solid step mixed for the content (`raised`, `overlay`), where the
+    /// washes (`hover`, `selected`, `pressed`) ride on whatever plane is under them.
+    fn solid_state(line: &str) -> Option<&'static str> {
+        let code = !line.trim_start().starts_with("//");
+        let solid = ["s.raised", "surfaces.raised", "s.overlay", "surfaces.overlay"];
+        (code && solid.iter().any(|t| line.contains(t)))
+            .then_some("a state's solid step, not its wash (`hover`, `selected`, `pressed`)")
+    }
+
+    #[test]
+    fn the_state_check_knows_a_step_from_a_wash() {
+        assert!(solid_state(".hover(move |el| el.bg(hsla(s.raised)))").is_some());
+        assert!(solid_state(".bg(hsla(theme.surfaces.overlay))").is_some());
+        assert!(solid_state(".hover(move |el| el.bg(hsla(s.hover)))").is_none());
+        assert!(solid_state("// `raised` was s.raised").is_none(), "a comment");
+    }
+
+    /// Hover, selection and press are washes of the ink over the plane under them, so a menu's
+    /// rows, a card's and the navigator's answer the pointer alike, and a float can rise +5 L
+    /// over the content with its rows' hover still showing.
+    #[test]
+    fn a_state_is_a_wash_over_its_plane() {
+        const AWAITING: [&str; 3] =
+            ["slopty-ui/src/project/", "slopty-app/src/lib.rs", "slopty-app/src/ssh.rs"];
+        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
+            .into_iter()
+            .flat_map(chrome_lines)
+            .filter(|(file, ..)| !AWAITING.iter().any(|f| file.contains(f)))
+            .filter_map(|(file, line_no, line)| {
+                solid_state(&line).map(|why| format!("{file}:{line_no}: {why}: {}", line.trim()))
+            })
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// One size has one name: `small()` and `title()`, not `meta()` and `prose()`, which were
+    /// the same sizes under second names, as a scale drifts.
+    #[test]
+    fn one_name_per_type_size() {
+        const AWAITING: [&str; 2] = ["slopty-ui/src/project/", "slopty-app/src/lib.rs"];
+        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
+            .into_iter()
+            .flat_map(chrome_lines)
+            .filter(|(file, ..)| !AWAITING.iter().any(|f| file.contains(f)))
+            .filter(|(.., line)| {
+                ["typography.meta()", "typography.prose()"].iter().any(|n| line.contains(n))
+            })
+            .map(|(file, line_no, line)| format!("{file}:{line_no}: {}", line.trim()))
+            .collect();
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A painted hairline is whole device pixels, never under one, as GPUI snaps a border: one
+    /// at 1x, 2x and 3x, and a point's worth under Increase Contrast.
+    #[test]
+    fn a_painted_hairline_is_one_device_pixel() {
+        let mut theme = Theme::default();
+        for scale in [1.0_f32, 2.0, 3.0] {
+            let device = f32::from(hair_painted(&theme, scale)) * scale;
+            assert!((device - 1.0).abs() < 1e-4, "{scale}x: {device} device pixels");
+        }
+        theme.contrast = slopty_theme::Contrast::Increased;
+        let device = f32::from(hair_painted(&theme, 2.0)) * 2.0;
+        assert!((device - 2.0).abs() < 1e-4, "a point at 2x: {device}");
     }
 
     /// The ruling in `docs/decisions/ui.md`, as a check rather than a paragraph: chrome takes
@@ -2143,8 +2738,8 @@ mod tests {
         assert!(first_top(cx).abs() < 0.5, "in place at once");
     }
 
-    /// Each pace is the theme's: a fade and a settle ease out, a sheet takes the drawer's
-    /// curve, and only a sheet takes longer than a settle.
+    /// Each pace is the theme's: a fade, an exit and a settle ease out, a sheet takes the
+    /// drawer's curve, an exit is the quickest and only a sheet takes longer than a settle.
     #[test]
     fn the_paces_are_the_motion_tokens() {
         let m = Motion::DEFAULT;
@@ -2154,6 +2749,9 @@ mod tests {
         assert_eq!(Pace::Fade.curve(), m.ease_out);
         assert_eq!(Pace::Settle.curve(), m.ease_out);
         assert_eq!(Pace::Sheet.curve(), m.drawer);
+        assert_eq!(Pace::Exit.duration(), m.exit);
+        assert_eq!(Pace::Exit.curve(), m.ease_out);
+        assert!(Pace::Exit.duration() < Pace::Fade.duration(), "out quicker than in");
         assert!(Pace::Fade.duration() < Pace::Settle.duration());
         assert!(Pace::Settle.duration() < Pace::Sheet.duration());
     }

@@ -210,7 +210,7 @@ impl WorkspaceView {
                 .child(
                     div()
                         .debug_selector(|| "ask-field".to_owned())
-                        .text_size(px(theme.typography.prose()))
+                        .text_size(px(theme.typography.title()))
                         .child(field),
                 )
                 // The chips' glyphs stand on the field's text edge.
@@ -251,7 +251,7 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
-            .when(pressable, |el| el.cursor_pointer().hover(|st| st.bg(hsla(s.raised))))
+            .when(pressable, |el| el.cursor_pointer().hover(|st| st.bg(hsla(s.hover))))
             .child(crate::icons::icon(
                 theme,
                 icon,

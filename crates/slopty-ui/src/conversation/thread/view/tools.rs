@@ -2,9 +2,10 @@
 //!
 //! A read, a search, a fetch: one muted line with its mark, a disclosure that shows under the
 //! pointer, and once opened its output under a hairline rule, unfilled. An edit, a write, a
-//! command, and any call that waits on the person: a card with a hairline, dashed once the call
-//! failed, its file named first and its folder after, its diff or its command and output under
-//! a hairline inside. A request whose call is on screen is answered on the call's card.
+//! command, and any call that waits on the person: a card resting on the thread, its edge in
+//! the warn tone while it waits and in the error tone once it failed, its file named first and
+//! its folder after, its diff or its command and output under a hairline inside. A request
+//! whose call is on screen is answered on the call's card.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -16,9 +17,10 @@ use gpui::{
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_proto::thread::{ItemBody, ItemId, ToolCall, ToolDetail, ToolState};
+use slopty_theme::{Rgb, Surfaces, alpha};
 
 use super::{PEEK_LINES, TOOL_ROW, ThreadView, call_path, patch_of, path_patch, tail, tool_icon};
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff;
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::rows;
@@ -92,6 +94,18 @@ const fn failed(state: &ToolState) -> bool {
     matches!(state, ToolState::Failed | ToolState::Rejected | ToolState::Cancelled)
 }
 
+/// The tone a call's card is edged in, and how much of it: the warn tone while the call waits
+/// on the person, the error tone once it failed; none for the rest, which rests as any card.
+const fn edge_tone(state: &ToolState, s: &Surfaces) -> Option<(Rgb, f32)> {
+    if matches!(state, ToolState::Pending { .. }) {
+        Some((s.warn, alpha::ASKING_EDGE))
+    } else if failed(state) {
+        Some((s.error, alpha::FAILED_EDGE))
+    } else {
+        None
+    }
+}
+
 impl ThreadView {
     pub(super) fn tool_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
         let Some(item) = self.item(ix, id, cx).cloned() else { return div().into_any_element() };
@@ -127,7 +141,7 @@ impl ThreadView {
                 .children(pictures.map(|p| div().pl(self.z(TOOL_ROW)).child(p)))
                 .children(answers)
                 .into_any_element(),
-            Look::Card => div()
+            Look::Card => kit::card(theme)
                 .debug_selector({
                     let id = id.0.clone();
                     move || format!("call-card-{id}")
@@ -136,13 +150,17 @@ impl ThreadView {
                 .flex()
                 .flex_col()
                 .overflow_hidden()
-                .rounded(self.z(theme.radii.sm))
-                .border_1()
-                .border_color(hsla(s.border))
-                .when(failed(&call.state), gpui::Styled::border_dashed)
+                .rounded(self.z(theme.radii.md))
+                // A dashed edge said "failed" by drawing, which GPUI fakes: the tone says it.
+                .map(|el| match edge_tone(&call.state, &s) {
+                    Some((tone, share)) => {
+                        el.border(kit::hair(theme)).border_color(hsla_alpha(tone, share))
+                    }
+                    None => el,
+                })
                 .child(line)
                 .children(body.map(|b| {
-                    div().w_full().border_t_1().border_color(hsla(s.border_subtle)).child(b)
+                    div().w_full().border_t(kit::hair(theme)).border_color(hsla(s.border_subtle)).child(b)
                 }))
                 .children(pictures.map(|p| div().p(self.z(theme.spacing.xs)).child(p)))
                 .children(answers)
@@ -274,7 +292,7 @@ impl ThreadView {
             .children(took.map(|t| {
                 kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(t))
             }))
@@ -359,7 +377,7 @@ impl ThreadView {
                 .w_full()
                 .pl(self.z(TOOL_ROW / 2.0 + theme.spacing.xs))
                 .py(self.z(theme.spacing.xxs))
-                .border_l_1()
+                .border_l(kit::hair(theme))
                 .border_color(hsla(theme.surfaces.border_subtle))
                 .text_color(hsla(theme.surfaces.text_muted))
                 .child(content),

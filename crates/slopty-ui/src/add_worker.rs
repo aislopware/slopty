@@ -138,12 +138,12 @@ const SWEEP: Duration = Duration::from_secs(2);
 /// The share of the track the busy bar's segment covers.
 const SEGMENT: f32 = 0.3;
 
-/// The steps, one line each, in one list a tone step off the page, as the add panel's rows are.
+/// The steps, one line each, in one card ([`kit::card`]): a step over the page in dark, white
+/// with its hairline in light.
 #[must_use]
 pub fn steps(theme: &Theme, install: &Install) -> gpui::Stateful<Div> {
-    let s = theme.surfaces;
     let lines = install.steps.iter().map(|line| step_line(theme, line));
-    div()
+    kit::card(theme)
         .id("install-steps")
         .debug_selector(|| "install-steps".to_owned())
         .role(Role::List)
@@ -151,8 +151,6 @@ pub fn steps(theme: &Theme, install: &Install) -> gpui::Stateful<Div> {
         .flex()
         .flex_col()
         .p(px(theme.spacing.xxs))
-        .rounded(px(theme.radii.md))
-        .bg(hsla(s.raised))
         .children(lines)
 }
 
@@ -257,7 +255,7 @@ pub fn failure(theme: &Theme, failed: &Failed) -> gpui::Stateful<Div> {
             .flex_col()
             .p(px(theme.spacing.sm))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.raised))
+            .bg(hsla(s.hover))
             .children(
                 failed
                     .lines

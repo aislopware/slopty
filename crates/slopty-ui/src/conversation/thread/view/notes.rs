@@ -143,7 +143,7 @@ impl ThreadView {
                 kit::tabular(div())
                     .debug_selector(move || format!("retry-{id}"))
                     .pl(indent)
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .child(SharedString::from(u))
             }))
             .children(more.filter(|_| open).map(|summary| {

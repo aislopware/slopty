@@ -274,8 +274,8 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .whitespace_nowrap()
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
-            .when(self.menu == Some(which), move |el| el.bg(hsla(s.raised)))
+            .hover(move |el| el.bg(hsla(s.hover)))
+            .when(self.menu == Some(which), move |el| el.bg(hsla(s.hover)))
             .child(measure)
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .on_click(

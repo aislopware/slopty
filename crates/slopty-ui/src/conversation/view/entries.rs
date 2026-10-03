@@ -33,7 +33,7 @@ use crate::conversation::tools::{self, State};
 use crate::icons::{IconName, IconSize, Status};
 use crate::kit::first_line;
 
-/// The widest the reading column grows, in points at zoom 1: between T3 Code's 768 and Amp's
+/// The widest the reading column grows, in points at zoom 1: between T3 Code's 736 and Amp's
 /// 672, the measure of a comfortable line at the prose size.
 pub(super) const READING: f32 = 720.0;
 
@@ -171,7 +171,7 @@ impl ConversationView {
         if matches!(state, Some(Expanded::Gone)) {
             return Some(
                 div()
-                    .text_size(self.z(self.theme.typography.meta()))
+                    .text_size(self.z(self.theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child("The transcript no longer has the rest")
                     .into_any_element(),
@@ -194,7 +194,7 @@ impl ConversationView {
                     .debug_selector(move || selector)
                     .role(Role::Button)
                     .aria_label(label.clone())
-                    .text_size(self.z(self.theme.typography.meta()))
+                    .text_size(self.z(self.theme.typography.small()))
                     .text_color(hsla(s.accent))
                     .cursor_pointer()
                     .hover(gpui::Styled::underline)
@@ -213,7 +213,7 @@ impl ConversationView {
     fn prose_style(&self) -> TextViewStyle {
         let theme = &self.theme;
         let z = self.zoom;
-        let base = theme.typography.prose();
+        let base = theme.typography.title();
         let mono = self.mono();
         let mut style = crate::markdown::style(theme, &mono, z);
         style.paragraph_gap = gpui::rems(PARAGRAPH / base);
@@ -229,7 +229,7 @@ impl ConversationView {
         style.code_block = gpui::StyleRefinement::default()
             .font_family(mono.to_string())
             .text_size(px(theme.typography.small() * z))
-            .bg(hsla(theme.surfaces.raised))
+            .bg(hsla(theme.surfaces.hover))
             .rounded(px(theme.radii.md * z))
             .px(px(theme.spacing.md * z))
             .py(px(theme.spacing.sm * z));
@@ -294,7 +294,7 @@ impl ConversationView {
                 .justify_center()
                 .rounded(self.z(self.theme.radii.xs))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .when(!touch && !copied, |el| {
                     el.invisible().group_hover(group, gpui::Styled::visible)
                 })
@@ -315,7 +315,7 @@ impl ConversationView {
         figures::clock(at_ms).map(|time| {
             crate::kit::tabular(div())
                 .flex_none()
-                .text_size(self.z(self.theme.typography.meta()))
+                .text_size(self.z(self.theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .when(!touch, |el| el.invisible().group_hover(group, gpui::Styled::visible))
                 .child(SharedString::from(time))
@@ -409,8 +409,8 @@ impl ConversationView {
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.sm))
             .rounded(self.z(theme.radii.lg))
-            .bg(hsla(s.raised))
-            .text_size(self.z(theme.typography.prose()))
+            .bg(hsla(s.hover))
+            .text_size(self.z(theme.typography.title()))
             .line_height(relative(theme.typography.prose_line_height))
             .children(images)
             .when(command.is_some() || !text.is_empty(), |el| {
@@ -450,13 +450,14 @@ impl ConversationView {
             .flex()
             .items_center()
             .gap(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(self.icon(IconName::Clock, s.text_muted))
             .child(word);
         let state = if pending.queued {
             let hint_theme = Rc::clone(&self.hint_theme);
             state
+                .map(crate::kit::hint_timing)
                 .tooltip(move |_window, cx| {
                     let theme = Rc::clone(&hint_theme);
                     cx.new(|_| crate::kit::Hint::new(QUEUED_HINT, "", theme)).into()
@@ -482,8 +483,8 @@ impl ConversationView {
                     .px(self.z(theme.spacing.md))
                     .py(self.z(theme.spacing.sm))
                     .rounded(self.z(theme.radii.lg))
-                    .bg(hsla_alpha(s.raised, alpha::STRONG))
-                    .text_size(self.z(theme.typography.prose()))
+                    .bg(hsla_alpha(s.hover, alpha::STRONG))
+                    .text_size(self.z(theme.typography.title()))
                     .text_color(hsla(s.text_secondary))
                     .child(
                         div().whitespace_normal().child(SharedString::from(pending.text.clone())),
@@ -553,22 +554,20 @@ impl ConversationView {
             .child(self.slot().child(self.icon(chevron, s.text_muted)))
             .children(parts)
             .child(
-                div()
+                crate::kit::rule(theme, s.border_subtle)
                     .flex_1()
                     .mx(self.z(theme.spacing.sm))
-                    .h(px(1.0))
-                    .bg(hsla(s.border_subtle))
-                    .group_hover("fold", |el| el.bg(hsla(s.border))),
+                    .group_hover("fold", |el| el.border_color(hsla(s.border))),
             )
             .children(meta.map(|meta| {
                 div()
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .child(SharedString::from(meta))
             }))
             .when_some(hint, |el, hint| {
                 let theme = Rc::clone(&self.hint_theme);
-                el.tooltip(move |_window, cx| {
+                crate::kit::hint_timing(el).tooltip(move |_window, cx| {
                     let (hint, theme) = (hint.clone(), Rc::clone(&theme));
                     cx.new(|_| crate::kit::Hint::new(hint, "", theme)).into()
                 })
@@ -617,7 +616,7 @@ impl ConversationView {
             .aria_label(SharedString::from(first_line(shown).to_owned()))
             .group(ANSWER_GROUP)
             .py(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.prose()))
+            .text_size(self.z(theme.typography.title()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .child(self.markdown(format!("md-{}-{id}", self.session), shown))
@@ -663,7 +662,7 @@ impl ConversationView {
             .when(many, |el| {
                 el.child(
                     div()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .child(self.changes_label(added, removed)),
                 )
             });
@@ -693,7 +692,7 @@ impl ConversationView {
                     .rounded(self.z(theme.radii.sm))
                     .text_size(self.z(theme.typography.small()))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .hover(move |el| el.bg(hsla(s.hover)))
                     .child(
                         div()
                             .flex_none()
@@ -714,7 +713,7 @@ impl ConversationView {
                     .child(
                         div()
                             .flex_none()
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .child(self.changes_label(file.added, file.removed)),
                     )
                     .child(div().flex_1())
@@ -849,7 +848,7 @@ impl ConversationView {
                     .child(div().flex_1())
                     .child(
                         crate::kit::tabular(div())
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(facts.join(" \u{b7} "))),
                     ),
@@ -969,7 +968,7 @@ impl ConversationView {
     fn rule_marker(&self, id: &str, icon: IconName, words: &str) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let rule = || div().flex_1().h(px(1.0)).bg(hsla(s.border_subtle));
+        let rule = || crate::kit::rule(theme, s.border_subtle).flex_1();
         crate::kit::tabular(div())
             .id(ElementId::Name(SharedString::from(id.to_owned())))
             .debug_selector({
@@ -1016,7 +1015,7 @@ impl ConversationView {
             if tokens.is_empty() { words.to_owned() } else { format!("{words} \u{b7} {tokens}") };
         let key = rows::entry_key(id);
         let open = level == Level::Full || self.toggled.contains(&key);
-        let rule = || div().flex_1().h(px(1.0)).bg(hsla(s.border_subtle));
+        let rule = || crate::kit::rule(theme, s.border_subtle).flex_1();
         let summary = compact.summary.as_ref().filter(|_| open).map(|summary| {
             div()
                 .pl(self.indent())
@@ -1118,7 +1117,7 @@ impl ConversationView {
                     .child(body)
                     .children(retry.map(|retry| {
                         crate::kit::tabular(div())
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(retry))
                     }))
@@ -1273,21 +1272,21 @@ impl ConversationView {
         });
         let failed = parts.failed.then(|| {
             crate::icons::icon(theme, IconName::X, IconSize::Inline, hsla(s.error))
-                .size(self.z(theme.typography.meta()))
+                .size(self.z(theme.typography.small()))
                 .flex_none()
         });
         let quiet = |text: String| {
             crate::kit::tabular(div())
                 .flex_none()
                 .whitespace_nowrap()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(text))
         };
         let changes = parts.changes.map(|(added, removed)| {
             div()
                 .flex_none()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .child(self.changes_label(added, removed))
         });
         let selector = id.to_owned();
@@ -1341,7 +1340,7 @@ impl ConversationView {
             );
         match parts.expandable {
             Some(_) => crate::a11y::tab_stop(
-                line.cursor_pointer().hover(move |el| el.bg(hsla(s.raised))),
+                line.cursor_pointer().hover(move |el| el.bg(hsla(s.hover))),
                 s.accent,
             )
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle(key, cx)))
@@ -1370,7 +1369,7 @@ impl ConversationView {
                 .role(Role::Article)
                 .aria_label(SharedString::from(format!("Writing: {}", first_line(&block.text))))
                 .py(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.prose()))
+                .text_size(self.z(theme.typography.title()))
                 .line_height(relative(theme.typography.prose_line_height))
                 .text_color(hsla(s.text_secondary))
                 .child(
@@ -1516,7 +1515,7 @@ pub(in crate::conversation) fn code_actions(
         .gap(px(theme.spacing.xs * zoom))
         .px(px(theme.spacing.xs * zoom))
         .font_family(theme.typography.ui_family.clone())
-        .text_size(px(theme.typography.meta() * zoom))
+        .text_size(px(theme.typography.small() * zoom))
         .text_color(hsla(s.text_muted))
         .children(lang.map(|lang| div().child(lang)))
         .child(
@@ -1530,7 +1529,7 @@ pub(in crate::conversation) fn code_actions(
                 .justify_center()
                 .rounded(px(theme.radii.xs * zoom))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(
                     crate::icons::icon(theme, IconName::Copy, IconSize::Inline, hsla(s.text_muted))
                         .size(px(theme.typography.icon() * zoom)),

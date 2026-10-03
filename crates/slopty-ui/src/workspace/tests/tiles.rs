@@ -233,10 +233,12 @@ fn a_divider_runs_only_between_neighbours(cx: &mut TestAppContext) {
     assert!(drawn(cx, "divider-below", second), "the third is below it");
     assert!(!drawn(cx, "divider-right", third) && !drawn(cx, "divider-below", third));
 
-    let border = gpui::Background::from(crate::colors::hsla(Theme::default().surfaces.border));
+    let border = crate::colors::hsla(Theme::default().surfaces.border);
     let line = cx.debug_bounds(selector("divider-below", second.item)).expect("drawn");
-    assert!((f32::from(line.size.height) - 1.0).abs() < 0.01, "a hairline");
-    assert!(quads_at(cx, line).iter().any(|q| q.background == border), "in the border colour");
+    let scale = cx.update(|window, _| window.scale_factor());
+    let device = f32::from(line.size.height) * scale;
+    assert!((device - 1.0).abs() < 0.01, "a hairline, one device pixel: {device}");
+    assert!(quads_at(cx, line).iter().any(|q| q.border_color == border), "in the border colour");
 }
 
 /// No body is veiled, focused or not: the header carries the focus, and a quad over every
@@ -888,7 +890,7 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
     let words = |cx: &mut VisualTestContext, text: &str| {
         cx.update(|window, _| {
             let run = window.text_style().to_run(text.len());
-            let size = px(theme.typography.meta());
+            let size = px(theme.typography.small());
             window.text_system().shape_line(text.to_owned().into(), size, &[run], None).width
         })
     };

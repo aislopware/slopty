@@ -160,6 +160,8 @@ pub struct SettingsForm {
     recording: Option<Recording>,
     scroll: ScrollHandle,
     font_scroll: ScrollHandle,
+    /// Each segmented row's thumb, by row, which slides to the option chosen.
+    thumbs: std::cell::RefCell<std::collections::HashMap<usize, crate::palette::Plate>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -233,6 +235,7 @@ impl SettingsForm {
             words: Vec::new(),
             key_handles: crate::keymap::current().commands().iter().map(|_| handle(cx)).collect(),
             recording: None,
+            thumbs: std::cell::RefCell::default(),
             scroll: ScrollHandle::new(),
             font_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
@@ -739,10 +742,13 @@ impl SettingsForm {
             )
     }
 
-    fn sidebar(&self, cx: &Context<Self>) -> Div {
+    /// The sections down the side. The page shown is the selected tab, live while the keyboard
+    /// is on the tabs and at the hover's wash while it is in the page.
+    fn sidebar(&self, window: &Window, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let searching = !self.query.trim().is_empty();
+        let keyed = self.tabs.iter().any(|tab| tab.is_focused(window));
         let tabs = Section::ALL.iter().zip(&self.tabs).map(|(&section, handle)| {
             let selected = !searching && section == self.section;
             let el = div()
@@ -763,12 +769,13 @@ impl SettingsForm {
                 .cursor_pointer()
                 .map(|el| {
                     if selected {
-                        el.bg(hsla(s.overlay))
+                        crate::kit::selected(el, theme, keyed)
                             .text_color(hsla(s.text))
                             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     } else {
                         el.text_color(hsla(s.text_secondary))
-                            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                            .map(crate::kit::eased)
+                            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     }
                 })
                 .on_click(
@@ -989,7 +996,7 @@ impl SettingsForm {
             .px(px(crate::kit::FIELD_INSET))
             .text_size(px(theme.typography.small()))
             .cursor_pointer()
-            .when(prompt.is_none(), |el| el.hover(move |el| el.bg(hsla(s.overlay))))
+            .when(prompt.is_none(), |el| el.hover(move |el| el.bg(hsla(s.selected))))
             .on_click(cx.listener(move |this, _ev, window, cx| this.record_keys(ix, window, cx)))
             .child(chords);
         let well = match self.key_handles.get(ix) {
@@ -1196,8 +1203,12 @@ impl SettingsForm {
             .px(px(theme.spacing.inset()))
             .pb(px(theme.spacing.md))
             .children(children);
-        gpui::edge_fade(page, gpui::EdgeFade::y(px(theme.spacing.lg)))
-            .hidden_by_scroll(&self.scroll)
+        // The well sits outside the fade, so the edge fades the rows into it, not into the
+        // dialog's white.
+        let page = gpui::edge_fade(page, gpui::EdgeFade::y(px(theme.spacing.lg)))
+            .hidden_by_scroll(&self.scroll);
+        crate::kit::well(div().flex_1().min_w_0().h_full().flex(), &theme)
+            .child(page)
             .into_any_element()
     }
 
@@ -1294,14 +1305,18 @@ impl SettingsForm {
         let (height, knob) = (spacing.lg, 2.0_f32.mul_add(-spacing.xxs, spacing.lg));
         let width = spacing.xl + spacing.xs;
         let travel = 2.0_f32.mul_add(-spacing.xxs, width - knob);
-        let (track, ink) = if on { (s.solid, s.solid_ink) } else { (s.overlay, s.text_secondary) };
+        let (track, ink) = if on {
+            (hsla(s.solid), hsla(s.solid_ink))
+        } else {
+            (hsla(s.selected), hsla(s.text_secondary))
+        };
         let to = if on { travel } else { 0.0 };
         let dot = div()
             .debug_selector(move || format!("settings-knob-{ix}"))
             .flex_none()
             .size(px(knob))
             .rounded_full()
-            .bg(hsla(ink));
+            .bg(ink);
         let dot = match self.moved {
             Some((moved, turn)) if moved == ix && crate::kit::motion(cx) => {
                 let from = travel - to;
@@ -1329,15 +1344,19 @@ impl SettingsForm {
             .items_center()
             .px(px(spacing.xxs))
             .rounded_full()
-            .bg(hsla(track))
+            .bg(track)
             .cursor_pointer()
             .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle(ix, cx)))
             .child(dot);
         self.stop(ix, row, el, cx).into_any_element()
     }
 
-    /// A segmented choice: the options side by side in a well, the chosen one on the selected
-    /// fill. ← and → move it.
+    /// A segmented choice: the options side by side in a track, the chosen one on a raised
+    /// thumb that slides to the next one chosen. ← and → move it.
+    ///
+    /// The chosen label is set at the medium weight in the room the medium weight takes, which
+    /// every label keeps, so choosing one reflows nothing. A hairline parts two options that
+    /// are not chosen, and goes beside the thumb.
     fn segmented(
         &self,
         ix: usize,
@@ -1349,10 +1368,42 @@ impl SettingsForm {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let current_label = current.map_or("", |c| c.title.as_str());
-        let segments = options.iter().enumerate().map(|(n, choice)| {
-            let chosen = current == Some(choice);
+        let thumb = self.thumbs.borrow_mut().entry(ix).or_default().clone();
+        let chosen_at = options.iter().position(|o| current == Some(o));
+        let mut segments: Vec<AnyElement> = Vec::with_capacity(options.len().saturating_mul(2));
+        for (n, choice) in options.iter().enumerate() {
+            let chosen = chosen_at == Some(n);
+            if let Some(before) = n.checked_sub(1) {
+                let beside = chosen || chosen_at == Some(before);
+                segments.push(
+                    div()
+                        .flex_none()
+                        .h(px(theme.typography.small()))
+                        .border_l(crate::kit::hair(theme))
+                        .border_color(hsla(s.border_subtle))
+                        .when(beside, gpui::Styled::invisible)
+                        .into_any_element(),
+                );
+            }
             let (value, label) = (choice.value.as_str(), choice.title.as_str());
-            div()
+            let words = div()
+                .relative()
+                .child(
+                    div()
+                        .invisible()
+                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .justify_center()
+                        .when(chosen, |el| el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT)))
+                        .child(label),
+                );
+            let el = div()
                 .id(("option", n))
                 .debug_selector(move || format!("settings-option-{ix}-{n}"))
                 .role(gpui::accesskit::Role::RadioButton)
@@ -1366,29 +1417,28 @@ impl SettingsForm {
                 .flex()
                 .items_center()
                 .px(px(spacing.sm))
-                .rounded(px(theme.radii.xs))
                 .text_size(px(theme.typography.small()))
                 .cursor_pointer()
                 .map(|el| {
                     if chosen {
-                        el.bg(hsla(s.overlay))
-                            .text_color(hsla(s.text))
-                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                        thumb.mark(el.text_color(hsla(s.text)), n)
                     } else {
                         el.text_color(hsla(s.text_secondary))
                             .hover(move |el| el.text_color(hsla(s.text)))
                     }
                 })
                 .on_click(cx.listener(move |this, _ev, _window, cx| this.choose(ix, value, cx)))
-                .child(label)
-        });
+                .child(words);
+            segments.push(el.into_any_element());
+        }
         let el = well(theme)
             .id(("settings-choice", ix))
             .debug_selector(move || format!("settings-choice-{ix}"))
             .role(gpui::accesskit::Role::RadioGroup)
             .aria_value(current_label)
-            .gap(px(spacing.xxs))
-            .p(px(spacing.xxs))
+            .relative()
+            .p(px(crate::kit::TRACK_PAD))
+            .child(thumb.under_thumb(theme, true, None))
             .children(segments);
         self.stop(ix, row, el, cx).into_any_element()
     }
@@ -1424,7 +1474,8 @@ impl SettingsForm {
                 .rounded(px(theme.radii.xs))
                 .when(live, |el| {
                     el.cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.overlay)))
+                        .map(crate::kit::eased)
+                        .hover(move |el| el.bg(hsla(s.hover)))
                         .on_click(cx.listener(move |this, _ev, _window, cx| this.nudge(ix, up, cx)))
                 })
                 .child(crate::icons::icon(theme, icon, IconSize::Inline, hsla(ink)))
@@ -1521,8 +1572,8 @@ impl SettingsForm {
                 .px(px(spacing.sm))
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
-                .when(at, |el| el.bg(hsla(s.overlay)))
-                .when(!at, |el| el.hover(move |el| el.bg(hsla(s.overlay))))
+                .when(at, |el| el.bg(hsla(s.selected)))
+                .when(!at, |el| crate::kit::eased(el).hover(move |el| el.bg(hsla(s.hover))))
                 .on_click(cx.listener(move |this, _ev, _window, cx| {
                     this.pick_font(ix, &picked, cx);
                 }))
@@ -1548,7 +1599,7 @@ impl SettingsForm {
             .mb(px(spacing.sm))
             .p(px(spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.raised))
+            .bg(hsla(s.hover))
             .text_size(px(theme.typography.ui_size))
             .children(rows)
             .into_any_element()
@@ -1572,7 +1623,7 @@ impl SettingsForm {
                         .flex_none()
                         .size(px(theme.typography.icon()))
                         .rounded(px(theme.radii.xs))
-                        .border_1()
+                        .border(crate::kit::hair(theme))
                         .border_color(hsla(s.border))
                         .bg(hsla(colour))
                 })
@@ -1619,7 +1670,7 @@ fn well(theme: &Theme) -> Div {
         .flex()
         .items_center()
         .rounded(px(theme.radii.sm))
-        .bg(hsla(theme.surfaces.raised))
+        .bg(hsla(theme.surfaces.hover))
 }
 
 /// What a child of the page is in a group's card.
@@ -1632,18 +1683,14 @@ enum Part {
     Apart,
 }
 
-/// The page's children with each run of rows set in a card, as System Settings and Zed's
-/// settings group them: the hover step's fill in dark and the floating surface with a hairline
-/// round it in light, rounded at the floating radius, its rows parted by the quiet hairline
-/// inset from the card's edges. Each row stays a child of the page, so scrolling to one still
-/// finds it.
+/// The page's children with each run of rows set in a card ([`crate::kit::card_part`]), as
+/// System Settings and Zed's settings group them: white on the page's quiet well in light, a
+/// step over the sheet in dark, its rows parted by the quiet hairline inset from the card's
+/// edges. Each row stays a child of the page, so scrolling to one still finds it.
 fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
     let s = theme.surfaces;
-    let dark = theme.variant() == slopty_theme::Variant::Dark;
-    let fill = if dark { s.raised } else { s.elevated };
     let rows: Vec<bool> = parts.iter().map(|(p, _)| matches!(p, Part::Row { .. })).collect();
     let row_at = |i: Option<usize>| i.and_then(|i| rows.get(i)).copied().unwrap_or(false);
-    let radius = px(theme.radii.lg);
     parts
         .into_iter()
         .enumerate()
@@ -1651,23 +1698,13 @@ fn carded(theme: &Theme, parts: Vec<(Part, AnyElement)>) -> Vec<AnyElement> {
             let Part::Row { parted } = part else { return child };
             let first = !row_at(i.checked_sub(1));
             let last = !row_at(i.checked_add(1));
-            div()
+            crate::kit::card_part(theme, first, last)
                 .debug_selector(move || format!("settings-card-{i}"))
-                .bg(hsla(fill))
                 .px(px(theme.spacing.inset()))
-                .when(first, |el| el.rounded_t(radius))
-                .when(last, |el| el.rounded_b(radius))
-                .when(!dark, |el| {
-                    el.border_l_1()
-                        .border_r_1()
-                        .when(first, gpui::Styled::border_t_1)
-                        .when(last, gpui::Styled::border_b_1)
-                        .border_color(hsla(s.border))
-                })
                 .child(
                     div()
                         .when(parted && !first, |el| {
-                            el.border_t_1().border_color(hsla(s.border_subtle))
+                            el.border_t(crate::kit::hair(theme)).border_color(hsla(s.border_subtle))
                         })
                         .child(child),
                 )
@@ -1824,7 +1861,7 @@ impl Render for SettingsForm {
                 )
                 .child(div().flex_1().min_h_0().flex().child(page))
         } else {
-            root.child(self.sidebar(cx)).child(page)
+            root.child(self.sidebar(window, cx)).child(page)
         }
     }
 }
@@ -1837,7 +1874,7 @@ mod tests {
 
     /// A group's rows are one card under its label: the label stands apart, the rows' parts
     /// meet edge to edge on one column, the first rounded at the top and the last at the
-    /// bottom, filled with the hover step in dark.
+    /// bottom, filled with the hover wash in dark.
     #[gpui::test]
     fn a_groups_rows_are_one_card_under_its_label(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -1859,14 +1896,14 @@ mod tests {
         }
         let first = parts.first().copied().expect("a part");
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
-        let fill = gpui::Background::from(hsla(theme.surfaces.raised));
+        let fill = gpui::Background::from(hsla(theme.surfaces.hover));
         let top = quads.iter().find(|q| {
             (q.bounds.origin.y.0 / scale - f32::from(first.top())).abs() < 0.5
                 && (q.bounds.origin.x.0 / scale - f32::from(first.left())).abs() < 0.5
                 && q.background == fill
         });
         let top = top.expect("the card's first part, in the hover step");
-        assert!((top.corner_radii.top_left.0 / scale - theme.radii.lg).abs() < 0.5, "rounded");
+        assert!((top.corner_radii.top_left.0 / scale - theme.radii.md).abs() < 0.5, "rounded");
         assert!(top.corner_radii.bottom_left.0.abs() < 0.5, "and open below");
     }
 

@@ -771,6 +771,8 @@ pub struct WorkspaceView {
     /// Remote tiles whose streams were let go for being off screen.
     parked: HashSet<ItemId>,
     picker: Option<(WorkerKey, Entity<WindowPicker>)>,
+    /// The picker just dismissed, drawn for the moment it takes to fade away.
+    picker_leaving: Option<Entity<WindowPicker>>,
     palette: Option<Entity<CommandPalette>>,
     /// A dismissed palette still drawing its way out, dropped once that has played.
     palette_leaving: Option<Entity<CommandPalette>>,
@@ -805,6 +807,8 @@ pub struct WorkspaceView {
     menu: Option<titlebar::MenuKind>,
     /// The bar's menu was opened by a key, so it arrives whole in its first frame.
     menu_keyed: bool,
+    /// The bar's menu just closed, drawn for the moment it takes to fade away.
+    menu_leaving: Option<titlebar::MenuKind>,
     /// The worker "+" chose for the next new tile, where there are several; the focused tile's
     /// worker otherwise.
     new_on: Option<WorkerKey>,
@@ -888,6 +892,8 @@ pub struct WorkspaceView {
     empty_mark: Entity<about::Mark>,
     /// The About panel, while it is open.
     about: Option<about::AboutPanel>,
+    /// The About panel just closed, drawn for the moment it takes to fade away.
+    about_leaving: Option<about::AboutPanel>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
     /// Downloads in flight, and the ledger that keeps transfers across a relaunch.
@@ -1017,6 +1023,7 @@ impl WorkspaceView {
             stream_grace: STREAM_GRACE,
             parked: HashSet::new(),
             picker: None,
+            picker_leaving: None,
             palette: None,
             palette_leaving: None,
             search: project_search::Surface::default(),
@@ -1039,6 +1046,7 @@ impl WorkspaceView {
             pending_focus_palette: false,
             menu: None,
             menu_keyed: false,
+            menu_leaving: None,
             new_on: None,
             anchors: titlebar::Anchors::default(),
             nav: navigator::NavState::default(),
@@ -1091,6 +1099,7 @@ impl WorkspaceView {
             kept: None,
             empty_mark,
             about: None,
+            about_leaving: None,
             uploads: HashMap::new(),
             transfers: remote::transfers::Transfers::default(),
             drop_landing: None,
@@ -1848,7 +1857,8 @@ impl gpui::Render for WorkspaceView {
         self.serve_browsers(cx);
         let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
         let menu = self.render_menu(window, cx);
-        let picker = self.picker.as_ref().map(|(_, p)| p.clone());
+        let picker =
+            self.picker.as_ref().map(|(_, p)| p.clone()).or_else(|| self.picker_leaving.clone());
         let palette = self.palette.clone().or_else(|| self.palette_leaving.clone());
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add("Workspace");

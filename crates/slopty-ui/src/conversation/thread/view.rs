@@ -755,7 +755,7 @@ impl ThreadView {
             .justify_center()
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.xs))
-            .border_1()
+            .border(kit::hair(theme))
             .rounded(self.z(theme.radii.sm))
             .text_size(self.z(theme.typography.small()))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
@@ -766,15 +766,15 @@ impl ThreadView {
             ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
             ButtonKind::Secondary => el
                 .border_color(gpui::transparent_black())
-                .bg(hsla(s.raised))
+                .bg(hsla(s.hover))
                 .text_color(hsla(s.text))
-                .hover(move |el| el.bg(hsla(s.overlay)))
-                .active(move |el| el.bg(hsla(s.overlay))),
+                .hover(move |el| el.bg(hsla(s.selected)))
+                .active(move |el| el.bg(hsla(s.pressed))),
             ButtonKind::Ghost | ButtonKind::Link => el
                 .border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
-                .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
-                .active(move |el| el.bg(hsla(s.overlay))),
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .active(move |el| el.bg(hsla(s.pressed))),
         };
         crate::a11y::tab_stop(el, s.accent)
     }
@@ -817,7 +817,7 @@ impl ThreadView {
     fn prose_style(&self) -> TextViewStyle {
         let theme = &self.theme;
         let z = self.zoom;
-        let base = theme.typography.prose();
+        let base = theme.typography.title();
         let mono = self.mono();
         let mut style = crate::markdown::style(theme, &mono, z);
         style.paragraph_gap = gpui::rems(PARAGRAPH / base);
@@ -833,7 +833,7 @@ impl ThreadView {
         style.code_block = gpui::StyleRefinement::default()
             .font_family(mono.to_string())
             .text_size(px(theme.typography.small() * z))
-            .bg(hsla(theme.surfaces.raised))
+            .bg(hsla(theme.surfaces.hover))
             .rounded(px(theme.radii.md * z))
             .px(px(theme.spacing.md * z))
             .py(px(theme.spacing.sm * z));
@@ -975,8 +975,8 @@ impl ThreadView {
                     .px(self.z(theme.spacing.md))
                     .py(self.z(theme.spacing.sm))
                     .rounded(self.z(theme.radii.lg))
-                    .bg(hsla(s.raised))
-                    .text_size(self.z(theme.typography.prose()))
+                    .bg(hsla(s.hover))
+                    .text_size(self.z(theme.typography.title()))
                     .line_height(relative(theme.typography.prose_line_height))
                     .text_color(hsla(s.text))
                     .whitespace_normal()
@@ -1005,7 +1005,7 @@ impl ThreadView {
             .flex()
             .flex_col()
             .gap(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.prose()))
+            .text_size(self.z(theme.typography.title()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .child(self.markdown(format!("text-{}", id.0), &text))
@@ -1059,9 +1059,15 @@ impl ThreadView {
                 let theme = &self.theme;
                 let mut style = crate::markdown::style(theme, &self.mono(), self.zoom);
                 style.paragraph_gap = gpui::rems(theme.spacing.xs / theme.typography.ui_size);
+                // Under its mark, past the hairline rule a quiet call's output hangs from, so a
+                // thought reads as the same kind of aside.
                 el.child(
                     div()
-                        .pl(self.z(TOOL_ROW + theme.spacing.xs))
+                        .ml(self.z(TOOL_ROW / 2.0))
+                        .pl(self.z(TOOL_ROW / 2.0 + theme.spacing.xs))
+                        .py(self.z(theme.spacing.xxs))
+                        .border_l(kit::hair(theme))
+                        .border_color(hsla(s.border_subtle))
                         .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_secondary))
                         .whitespace_normal()
@@ -1100,7 +1106,7 @@ impl ThreadView {
             if span.start > at {
                 runs.push(run(span.start.saturating_sub(at), ui, None, s.text_muted));
             }
-            runs.push(run(span.len(), &mono, Some(hsla(s.raised)), s.text_secondary));
+            runs.push(run(span.len(), &mono, Some(hsla(s.hover)), s.text_secondary));
             at = span.end;
         }
         if words.len() > at {
@@ -1152,17 +1158,17 @@ impl ThreadView {
                 div()
                     .debug_selector(move || format!("turn-model-{}", turn.0))
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .child(SharedString::from(m))
             }))
             .children(when.map(|w| {
                 kit::tabular(div())
                     .id(ElementId::Name(format!("turn-when-{}", turn.0).into()))
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .child(SharedString::from(w))
                     .when_some(spent, |el, spent| {
-                        el.tooltip(move |_window, cx| {
+                        kit::hint_timing(el).tooltip(move |_window, cx| {
                             let theme = Rc::new(hint_theme.clone());
                             cx.new(|_| kit::Hint::new(spent.clone(), "", theme)).into()
                         })
@@ -1259,7 +1265,7 @@ impl ThreadView {
             .children(elapsed.map(|e| {
                 kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(self.theme.typography.meta()))
+                    .text_size(self.z(self.theme.typography.small()))
                     .child(SharedString::from(e))
             }))
             .into_any_element()
@@ -1297,7 +1303,7 @@ impl ThreadView {
                     .into_any_element()
             }
             None => div()
-                .text_size(self.z(self.theme.typography.meta()))
+                .text_size(self.z(self.theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(if hub.threads().linked() {
                     "Sending"
@@ -1360,7 +1366,7 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.sm))
                 .px(self.z(theme.spacing.lg))
                 .min_h(self.z(kit::Row::Two.height(theme)))
-                .border_b_1()
+                .border_b(kit::hair(theme))
                 .border_color(hsla(s.border_subtle))
                 .child(self.agent_mark(agent, false, s.text_secondary))
                 .child(
@@ -1386,7 +1392,7 @@ impl ThreadView {
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
-                                .text_size(self.z(theme.typography.meta()))
+                                .text_size(self.z(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(w))
                         })),
@@ -1397,7 +1403,7 @@ impl ThreadView {
                         .flex()
                         .items_center()
                         .gap(self.z(theme.spacing.xxs))
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(st.tone(theme)))
                         .child(crate::icons::status_mark(theme, Some(st), k))
                         .child(st.label())
@@ -1412,7 +1418,7 @@ impl ThreadView {
                         .flex()
                         .items_center()
                         .gap(self.z(theme.spacing.xxs))
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(crate::conversation::view::context_ring(
                             theme,

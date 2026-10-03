@@ -61,6 +61,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 use std::mem::{Discriminant, discriminant};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use gpui::accesskit::Role;
@@ -187,6 +188,9 @@ pub(super) fn mode(window_w: f32, width: f32, phone_below: f32, touch: bool) -> 
 pub(super) struct NavState {
     /// Open over the strip, where it does not dock.
     pub open: bool,
+    /// The pointer is over the navigator, which then draws its nesting guides. Shared with
+    /// the hover listener, which draws the rows again only when it changes.
+    pub hovered: Rc<Cell<bool>>,
     /// Projects and workers whose tiles are folded away, by their group's key (a worker's is
     /// [`GroupKey::machine`]).
     pub folded: HashSet<GroupKey>,
@@ -569,7 +573,7 @@ pub(super) fn row(
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
         .text_size(px(theme.typography.ui_size))
-        .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.raised))));
+        .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.hover))));
     tab_stop(el, s.accent)
 }
 
@@ -660,6 +664,23 @@ const fn has_figure(progress: Progress) -> bool {
     let measured =
         matches!(progress.state, ProgressState::Set | ProgressState::Paused | ProgressState::Error);
     measured && progress.percent.is_some()
+}
+
+/// The guide down a nested row: a hairline under the middle of its parent's icon.
+///
+/// Drawn only while the pointer is over the navigator, so the tree reads as one where the hand
+/// is and the list stays quiet otherwise (`HeroUI` Pro's sidebar). Consecutive nested rows join
+/// it into one line. It is drawn rather than hidden by a group hover, so the rows' layer keeps
+/// its cache while the pointer moves about the list.
+fn nesting_guide(theme: &Theme) -> Div {
+    let x = theme.spacing.inset() - theme.spacing.xs + theme.typography.icon_large() / 2.0;
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(px(x))
+        .border_l(kit::hair(theme))
+        .border_color(hsla(theme.surfaces.border_subtle))
 }
 
 /// What an agent says, its subagents at work folded in as a count: "Editing parser.rs, 2
@@ -1947,7 +1968,7 @@ impl WorkspaceView {
                 .justify_center()
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(icon(theme, IconName::X, IconSize::Inline, hsla(s.text_muted)))
                 .on_click(
                     cx.listener(|this, _ev, window, cx| this.clear_navigator_filter(window, cx)),
@@ -1978,7 +1999,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.xs + spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.overlay))
+            .bg(hsla(s.selected))
             .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
             .children(scope)
             .children(input)
@@ -2250,6 +2271,14 @@ impl WorkspaceView {
             .role(Role::Navigation)
             .aria_label("Navigator")
             .occlude()
+            .on_hover({
+                let (hovered, rows) = (Rc::clone(&self.nav.hovered), self.chrome.nav_rows.downgrade());
+                move |over: &bool, _window, cx| {
+                    if hovered.replace(*over) != *over {
+                        let _gone = rows.update(cx, |_, cx| cx.notify());
+                    }
+                }
+            })
             .size_full()
             .pl(if mode == Mode::Docked { px(0.0) } else { safe.left })
             // Laid over the frame it runs through the home indicator's band; its rows stop
@@ -2260,12 +2289,12 @@ impl WorkspaceView {
             // The bars' surface: the navigator is chrome, one surface with them, and the panel
             // step is left to the unfocused tiles' headers.
             .bg(hsla(s.canvas))
-            .border_r_1()
+            .border_r(kit::hair(theme))
             .border_color(hsla(s.border))
             .font_family(theme.typography.ui_family.clone())
             // Over the frame it floats, as every floating layer does. It meets the window's
             // top, left and bottom edges, so only its trailing edge carries the hairline.
-            .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme).border_0().border_r_1())
+            .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme).border_0().border_r(kit::hair(theme)))
             // Esc in the filter empties it and hands the keyboard back; with it empty, Esc lets
             // go of the scope.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
@@ -2342,7 +2371,7 @@ impl WorkspaceView {
                 .justify_center()
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(icon(theme, glyph, IconSize::Inline, hsla(ink)))
                 .child(badge);
             tab_stop(el, s.accent)
@@ -2423,7 +2452,7 @@ impl WorkspaceView {
             .pt(px(spacing.sm))
             .gap(px(spacing.xs))
             .bg(hsla(s.canvas))
-            .border_r_1()
+            .border_r(kit::hair(theme))
             .border_color(hsla(s.border))
             .children(buttons)
             .into_any_element()
@@ -2783,12 +2812,12 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.accent))
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(crate::add_worker::UPDATE)
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |_this, _ev, window, cx| {
                     cx.stop_propagation();
-                    let run = std::rc::Rc::clone(&run);
+                    let run = Rc::clone(&run);
                     cx.defer_in(window, move |_this, window, cx| run(window, cx));
                 }));
             tab_stop(el, s.accent)
@@ -2806,7 +2835,7 @@ impl WorkspaceView {
                 .justify_center()
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -2939,7 +2968,7 @@ impl WorkspaceView {
                 .justify_center()
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_secondary)))
                 .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -3015,6 +3044,7 @@ impl WorkspaceView {
             false,
         )
         .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+        .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
         .child(lead)
         // "Board" is one short word and stays whole; the words beside it give way instead.
         .child(title(BOARD, hsla(s.text_secondary)).flex_none())
@@ -3061,6 +3091,7 @@ impl WorkspaceView {
         )
         .group(row_group.clone())
         .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+        .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
         .child(lead)
         .child(
             title(t.title.clone(), faded(ink))
@@ -3243,6 +3274,7 @@ impl WorkspaceView {
         // The kind's glyph under the worker's name, past its icon and the gap after it: the
         // slot is wider than the glyph centred in it, so it starts that margin to the left.
         .pl(px(theme.spacing.inset() + theme.typography.icon_large() - glyph_margin(theme)))
+        .when(self.nav.hovered.get(), |el| el.child(nesting_guide(theme)))
         .child(
             div()
                 .debug_selector(move || format!("nav-lines-{id}"))
@@ -3301,7 +3333,7 @@ fn heading(
             .child(status_icon(
                 theme,
                 Status::Working,
-                px(theme.typography.meta()),
+                px(theme.typography.small()),
                 hsla(s.text_muted),
             ))
     });

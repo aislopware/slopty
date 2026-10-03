@@ -1447,7 +1447,7 @@ impl FileView {
             .gap(px(theme.spacing.sm * k))
             .px(px(theme.spacing.inset() * k))
             .py(px(theme.spacing.xs * k))
-            .border_b_1()
+            .border_b(crate::kit::hair(theme))
             .border_color(hsla(s.border))
             .bg(wash)
             .text_size(px(theme.typography.small() * k))
@@ -1481,7 +1481,7 @@ impl FileView {
             .role(Role::Button)
             .aria_label(label)
             .flex_none()
-            .border_1()
+            .border(crate::kit::hair(theme))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .child(label);
@@ -1492,13 +1492,13 @@ impl FileView {
                 .border_color(hsla(s.border))
                 .bg(hsla(s.elevated))
                 .text_color(hsla(s.text))
-                .hover(move |st| st.bg(hsla(s.raised)))
-                .active(move |st| st.bg(hsla(s.overlay))),
+                .hover(move |st| st.bg(hsla(s.hover)))
+                .active(move |st| st.bg(hsla(s.pressed))),
             ButtonKind::Primary | ButtonKind::Ghost | ButtonKind::Link => button
                 .border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
-                .hover(move |st| st.bg(hsla(s.raised)).text_color(hsla(s.text)))
-                .active(move |st| st.bg(hsla(s.overlay))),
+                .hover(move |st| st.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                .active(move |st| st.bg(hsla(s.pressed))),
         };
         crate::a11y::tab_stop(button, s.accent).on_click(on_click).into_any_element()
     }

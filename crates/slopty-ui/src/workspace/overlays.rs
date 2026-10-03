@@ -338,15 +338,36 @@ impl WorkspaceView {
     /// palette opened meanwhile draws over it and is not dropped with it.
     fn let_palette_leave(&mut self, palette: Entity<CommandPalette>, cx: &mut Context<Self>) {
         let during = palette.update(cx, CommandPalette::leave);
+        self.keep_leaving(palette, during, |this| &mut this.palette_leaving, cx);
+    }
+
+    /// Close the picker, drawing it for as long as its way out takes.
+    pub(super) fn let_picker_leave(&mut self, cx: &mut Context<Self>) {
+        if let Some((_, picker)) = self.picker.take() {
+            let during = picker.update(cx, WindowPicker::leave);
+            self.keep_leaving(picker, during, |this| &mut this.picker_leaving, cx);
+        }
+    }
+
+    /// Keep `it` in `slot`, drawn as it leaves, for `during`, then drop it; one put there
+    /// meanwhile is not dropped with it. Nothing is kept for no time at all.
+    pub(super) fn keep_leaving<T: Clone + PartialEq + 'static>(
+        &mut self,
+        it: T,
+        during: std::time::Duration,
+        slot: fn(&mut Self) -> &mut Option<T>,
+        cx: &Context<Self>,
+    ) {
         if during.is_zero() {
             return;
         }
-        self.palette_leaving = Some(palette.clone());
+        *slot(self) = Some(it.clone());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(during).await;
             let _gone = this.update(cx, |this, cx| {
-                if this.palette_leaving.as_ref() == Some(&palette) {
-                    this.palette_leaving = None;
+                let kept = slot(this);
+                if kept.as_ref() == Some(&it) {
+                    *kept = None;
                     cx.notify();
                 }
             });
@@ -667,7 +688,7 @@ impl WorkspaceView {
             if let Some(w) = this.workers.get_mut(&key) {
                 w.picker_wanted = false;
             }
-            this.picker = None;
+            this.let_picker_leave(cx);
             // The jump focuses its terminal; every other outcome hands focus back.
             this.pending_focus_self = !matches!(event, PickerEvent::Jump(_));
             cx.notify();

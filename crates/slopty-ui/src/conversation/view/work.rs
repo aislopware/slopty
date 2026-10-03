@@ -238,7 +238,7 @@ impl ConversationView {
             .rounded(self.z(theme.radii.sm))
             .text_size(self.z(theme.typography.small()))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .hover(move |el| el.bg(hsla(s.hover)))
             .child(self.disclosure_slot(mark, open, "thinking"))
             .child(
                 div()
@@ -369,7 +369,7 @@ impl ConversationView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(word),
             )
@@ -421,7 +421,7 @@ impl ConversationView {
                 div()
                     .px(self.z(theme.spacing.md))
                     .pb(self.z(theme.spacing.sm))
-                    .text_size(self.z(theme.typography.prose()))
+                    .text_size(self.z(theme.typography.title()))
                     .line_height(relative(theme.typography.markdown_line_height))
                     .child(self.markdown(format!("plan-{}-{id}", self.session), &shown))
                     .children(open.then(|| self.expand_link(id, plan, cx)).flatten()),
@@ -485,7 +485,7 @@ impl ConversationView {
                 .pr(self.shell_trail())
                 .rounded(self.z(theme.radii.sm))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(self.disclosure_slot(
                     self.icon(IconName::ListTodo, s.text_muted),
                     open,
@@ -506,7 +506,7 @@ impl ConversationView {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(if all_done { s.success } else { s.text_muted }))
                         .child(SharedString::from(format!("{done}/{total}"))),
                 )
@@ -564,7 +564,7 @@ impl ConversationView {
                             kit::tabular(div())
                                 .flex_none()
                                 .pt(self.z(theme.spacing.xxs))
-                                .text_size(self.z(theme.typography.meta()))
+                                .text_size(self.z(theme.typography.small()))
                                 .text_color(hsla(s.text_muted))
                                 .child(SharedString::from(took))
                         }))
@@ -664,7 +664,7 @@ impl ConversationView {
                     .flex()
                     .items_center()
                     .pl(self.shell_lead() + self.indent())
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text)))
@@ -709,7 +709,7 @@ impl ConversationView {
         };
         let failed = (work.standing == Standing::Failed).then(|| {
             crate::icons::icon(theme, IconName::X, crate::icons::IconSize::Inline, hsla(s.error))
-                .size(self.z(theme.typography.meta()))
+                .size(self.z(theme.typography.small()))
                 .flex_none()
         });
         let running = work.standing == Standing::Running;
@@ -730,7 +730,7 @@ impl ConversationView {
                 .whitespace_nowrap()
                 .text_ellipsis_start()
                 .font_family(self.mono())
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(p))
         });
@@ -749,7 +749,7 @@ impl ConversationView {
             .pr(self.shell_trail())
             .rounded(self.z(theme.radii.sm))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .hover(move |el| el.bg(hsla(s.hover)))
             .child(if work.agent.is_some() {
                 self.slot().child(mark).into_any_element()
             } else {

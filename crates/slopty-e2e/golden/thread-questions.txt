@@ -37,10 +37,10 @@ Button │ Answer in the terminal
 Button │ Next
 Group │ Edits · notes.txt
 Button │ Review
-Button │ Review the changes
 MultilineTextInput │ Message
 Button │ Attach files
 Button │ Model, Opus 5.5
+Button │ Review the changes
 Label │ Context 34% of 200k
 Button │ Send
 Group │ Status

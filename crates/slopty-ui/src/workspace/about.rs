@@ -166,6 +166,7 @@ impl Render for Mark {
 }
 
 /// The About panel while it is open.
+#[derive(Clone, PartialEq)]
 pub(super) struct AboutPanel {
     mark: Entity<Mark>,
     focus: FocusHandle,
@@ -217,7 +218,15 @@ impl WorkspaceView {
 
     /// Close the About panel and give the keyboard back to the workspace.
     pub(super) fn close_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.about.take().is_some() {
+        if let Some(gone) = self.about.take() {
+            if self.chrome_moves(cx) {
+                self.keep_leaving(
+                    gone,
+                    kit::Pace::Exit.duration(),
+                    |this| &mut this.about_leaving,
+                    cx,
+                );
+            }
             window.focus(&self.focus, cx);
             cx.notify();
         }
@@ -230,13 +239,19 @@ impl WorkspaceView {
     }
 
     /// The About panel over the window: the mark, the name, and the version and build on one
-    /// quiet line. Esc or a click beside it closes it.
+    /// quiet line. Esc or a click beside it closes it, and it fades out where it stands.
+    ///
+    /// The palette summons it, so it arrives by fading in where it stands, with no travel.
     pub(super) fn render_about(
         &self,
         window: &Window,
         cx: &Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let about = self.about.as_ref()?;
+        let (about, leaving) = match (&self.about, &self.about_leaving) {
+            (Some(open), _) => (open, false),
+            (None, Some(gone)) => (gone, true),
+            (None, None) => return None,
+        };
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
         let (version, build) = crate::settings_form::schema::about();
@@ -277,7 +292,12 @@ impl WorkspaceView {
                     .child(kit::separator(theme))
                     .child(build),
             );
-        let panel = kit::slide_fade(panel, "about-rise", spacing.xs, kit::Pace::Fade, cx);
+        if leaving {
+            // The dim goes with it; for its moment it still holds the pointer, as it did.
+            let panel = panel.debug_selector(|| "about-leaving".to_owned());
+            return Some(kit::fade_out(kit::backdrop(theme, window).child(panel), "about-out"));
+        }
+        let panel = kit::fade_in(panel, "about-in", cx);
         Some(
             kit::backdrop(theme, window)
                 .id("about-backdrop")

@@ -169,6 +169,8 @@ pub struct WindowPicker {
     /// A keyboard is there to press Esc on. On glass without one the field ends in Cancel and
     /// a dim under the sheet shows where a tap closes it, as the palette does.
     chords: bool,
+    /// Dismissed and fading out: it takes no more keys nor picks.
+    leaving: bool,
 }
 
 impl std::fmt::Debug for WindowPicker {
@@ -225,7 +227,16 @@ impl WindowPicker {
             reveal: false,
             plate: Plate::default(),
             chords: true,
+            leaving: false,
         }
+    }
+
+    /// Stop taking the keys and the pointer and fade out where it stands. How long that takes,
+    /// for the owner to keep drawing it before dropping it; nothing under Reduce Motion.
+    pub fn leave(&mut self, cx: &mut Context<Self>) -> std::time::Duration {
+        self.leaving = true;
+        cx.notify();
+        crate::kit::exit_time(cx).unwrap_or_default()
     }
 
     /// Whether a keyboard is attached: without one the field ends in Cancel.
@@ -355,6 +366,9 @@ impl WindowPicker {
 
     /// ↩: the chosen row is picked.
     fn pick(&self, cx: &mut Context<Self>) {
+        if self.leaving {
+            return;
+        }
         let rows = self.visible();
         if let Some(row) = rows.get(self.selected(rows.len())) {
             cx.emit(row.on_pick.clone());
@@ -415,7 +429,7 @@ impl WindowPicker {
         let Line { icon, primary, secondary, hot, mark, worker } = line;
         let secondary_color = if hot { s.warn } else { s.text_muted };
         let icon_ink = if chosen { s.text_secondary } else { s.text_muted };
-        let overlay = s.overlay;
+        let pressed = s.pressed;
         let label =
             if secondary.is_empty() { primary.clone() } else { format!("{primary}, {secondary}") };
         let row = list_row(theme)
@@ -425,7 +439,7 @@ impl WindowPicker {
             .aria_label(SharedString::from(label))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .active(move |st| st.bg(hsla(overlay)))
+            .active(move |st| st.bg(hsla(pressed)))
             .on_mouse_move(cx.listener(move |this, _ev, _w, cx| this.point_at(ix, cx)))
             .child(status_slot(theme, icon, mark, hsla(icon_ink), 1.0))
             .child(
@@ -561,6 +575,21 @@ impl Render for WindowPicker {
                         .when(empty, |el| el.child(self.empty_state())),
                 ),
             );
+        // On glass the dim is what a finger taps to close it, where a desktop's Esc would.
+        let scrim = (!self.chords).then(|| {
+            div()
+                .debug_selector(|| "picker-scrim".to_owned())
+                .absolute()
+                .inset_0()
+                .bg(crate::kit::scrim(&theme))
+        });
+        let layer = crate::palette::Layer::Dialog.priority();
+        if self.leaving {
+            let root = crate::kit::anchor(&theme, window)
+                .children(scrim)
+                .child(panel.debug_selector(|| "picker-leaving".to_owned()));
+            return gpui::deferred(crate::kit::fade_out(root, "picker-out")).with_priority(layer);
+        }
         let root = crate::kit::anchor(&theme, window)
             .id("picker-backdrop")
             .track_focus(&self.focus)
@@ -588,22 +617,10 @@ impl Render for WindowPicker {
                     cx.stop_propagation();
                 }),
             )
-            // On glass the dim is what a finger taps to close it, where a desktop's Esc would.
-            .children((!self.chords).then(|| {
-                div()
-                    .debug_selector(|| "picker-scrim".to_owned())
-                    .absolute()
-                    .inset_0()
-                    .bg(crate::kit::scrim(&theme))
-            }))
-            .child(crate::kit::slide_fade(
-                panel,
-                "picker-rise",
-                theme.spacing.xs,
-                crate::kit::Pace::Fade,
-                cx,
-            ));
-        gpui::deferred(root).with_priority(crate::palette::Layer::Dialog.priority())
+            .children(scrim)
+            // The keyboard summons it, so it arrives fading in where it stands, with no travel.
+            .child(crate::kit::fade_in(panel, "picker-in", cx));
+        gpui::deferred(root).with_priority(layer)
     }
 }
 

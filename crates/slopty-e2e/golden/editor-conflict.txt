@@ -22,6 +22,7 @@ Button │ Fullscreen tile
 Button │ Close tile
 Document │ File $SCRATCH/project/main.rs │ 4 lines, Rust, edited, changed on disk
 Status │ Changed on disk
+Button │ Compare
 Button │ Reload
 Button │ Overwrite
 MultilineTextInput │ Text of $SCRATCH/project/main.rs │ // edited⏎xfn main() {⏎    println!("hello");⏎} (focused)

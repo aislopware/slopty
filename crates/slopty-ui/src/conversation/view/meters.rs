@@ -103,7 +103,7 @@ impl ConversationView {
             .p(self.z(theme.spacing.md))
             .rounded(self.z(theme.radii.lg))
             .font_family(theme.typography.ui_family.clone())
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .child(

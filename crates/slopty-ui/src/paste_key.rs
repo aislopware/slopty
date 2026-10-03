@@ -65,14 +65,14 @@ mod ios {
         _pastes: Task<()>,
     }
 
-    /// The key bar's caps as the system draws its button: `theme`'s text on its raised plate,
-    /// its small radius, the word alone.
+    /// The key bar's caps as the system draws its button: `theme`'s text on the hover wash over
+    /// the bar (solid, since the system paints it), its small radius, the word alone.
     fn style(theme: &Theme) -> Style {
         let s = &theme.surfaces;
         Style {
             mode: Mode::Label,
             foreground: rgba(s.text),
-            background: rgba(s.raised),
+            background: rgba(s.hover.over(s.panel)),
             corner_radius: f64::from(theme.radii.sm),
         }
     }

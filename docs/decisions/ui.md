@@ -490,7 +490,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `surfaces.panel` (1) | `14161B` | `FFFFFF` | title bars, panels, popovers, composer |
   | `surfaces.raised` (2) | `1B1E25` | `EEF0F3` | key caps, inputs, hovered rows |
   | `surfaces.overlay` (3) | `23272F` | `E4E7EC` | pressed rows, pill fills, HUD |
-  | `surfaces.border` | `24272E` | `D8DBE1` | every hairline (1 pt) |
+  | `surfaces.border` | `24272E` | `D8DBE1` | every hairline (1 pt; one device pixel since 2026-10-03) |
   | `surfaces.text` | `E6E6E6` | `1D1D1F` | primary |
   | `surfaces.text_secondary` | `B4B9C3` | `4B4F58` | labels, tool summaries, counts |
   | `surfaces.text_muted` | `8B919C` | `66666B` | hints, timestamps, folds, inactive titles |
@@ -506,7 +506,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `alpha::FAINT` | 0.12 | same | a quiet fill, a hover wash, the command-block hairline, the visual bell |
   | `alpha::TINT` | 0.25 | same | a tint that has to be seen: a text selection (a selected row is `overlay` since the second de-slop pass) |
   | `alpha::PRESSED` | 0.4 | same | under the pointer; a scrollbar thumb |
-  | `alpha::SCRIM` | 0.6 | same | modal backdrop |
+  | `alpha::SCRIM` | 0.6 (0.45 since 2026-10-03) | same | modal backdrop |
   | `alpha::STRONG` | 0.7 | same | the separator after a failed command, minimap item blocks |
   | `alpha::VEIL` | 0.9 | same | panels over video and the canvas: the stream HUD, the minimap, a looker's outline and tag |
 
@@ -521,7 +521,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   has the caret, the composer while it has the caret. Hover is a `HOVER` wash or a step up
   the surface ladder, pressed one step further, never opacity. Pills: `radii.xs`,
   `spacing.sm`/`spacing.xxs` padding, `small()` type, `TINT` fill of their tone with the tone
-  as text. Buttons: `radii.sm`, `spacing.md`/`spacing.xs` padding in a dialog and
+  as text. (Amended 2026-10-03: a pill is a capsule, `radii.full`, filled with its tone at
+  `FAINT` in dark and `FAINT_ON_PAPER` in light; a key cap stays at `radii.xs`. See the stage 3
+  entry at the end.) Buttons: `radii.sm`, `spacing.md`/`spacing.xs` padding in a dialog and
   `spacing.sm`/`spacing.xs` in a bar; the one primary action per surface is an accent fill
   with `accent_fg` text, a secondary one is `raised` → `overlay`. (Amended 2026-09-27 (design audit): a fill takes
   `accent_fill` with `fill_fg`, and `accent_fg` is gone; see **Fills are fills** below.) Key caps are `raised` on the
@@ -862,7 +864,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   560 wide and from `shadow_md` to `shadow_sm`. Nothing else.
   The rules that hold from here: chrome takes every padding and gap from `Spacing`, every corner
   from `Radii`, every transparency from `alpha`, and every colour from `Surfaces`; no gradient, no
-  glow, no second elevation; no emoji and no decorative glyph in chrome text; motion only where it
+  glow, no second elevation (amended 2026-10-03: two named elevations, resting and floating, both
+  drawn only by the kit, and the dark scrim at 0.45); no emoji and no decorative glyph in chrome text; motion only where it
   carries meaning (the camera flights, the take-back offer), never as decoration. Microcopy is a
   noun phrase or a verb in the imperative, never a sentence about what the program just achieved.
   Text that names a thing is sentence case; text that reports a value is lowercase. A heading, a
@@ -2654,7 +2657,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and prompts; `display()` is 22. `Radii::lg` (12) is the radius of what floats: dialogs,
     menus, the inbox, the workers' popover, toasts and the add-worker panel; a hint and a pill
     keep their control's radius, since at 12 a 20 pt hint is a lozenge. `slopty_theme::Motion`
-    holds the durations (hover 0, fade 120, settle 160, sheet 240 ms) and the two curves as
+    holds the durations (hover 0, fade 120, settle 160, sheet 240 ms; since 2026-10-03 also
+    `unhover` 150 and `exit` 100 ms) and the two curves as
     cubic-bezier points (ease-out `0.22, 1, 0.36, 1`; drawer `0.32, 0.72, 0, 1`), solved by
     `Curve::at`; `kit::FADE`, `kit::ease_out` and `kit::drawer` read them.
   - **One elevation, lit in dark.** The soft layer is now 12 down with a 32 blur (0.5 dark,
@@ -2746,7 +2750,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     ("go to", "run", "open"), as Raycast's action bar names its primary action where the eye
     ends. The caps are plates with no ring.
   - **Motion.** The palette and the picker rise 4 pt into place over the fade (120 ms,
-    ease-out) while the layer under them fades in. The phone's palette sheet reaches the top
+    ease-out) while the layer under them fades in. (Amended 2026-10-03: what the keyboard
+    summons fades in where it stands, with no travel, and every overlay leaves on
+    `Motion::exit`; see the stage 3 entry at the end.) The phone's palette sheet reaches the top
     edge under the status bar and the island, its field below them, and comes down 8 pt with a
     fade over the sheet's 240 ms on the drawer curve. The navigator laid over the frame (a
     phone's drawer, an iPad's overlay) slides in from its leading edge while the scrim comes up,
@@ -4329,6 +4335,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     this Mac's checklist (and an install's steps) sit on `raised`, with no hairline frame, and
     a row under the pointer steps up once to `overlay`, as a board card does (`first-run`,
     `add-worker`, `this-mac`). The terminal's prompt-row bands are the terminal lane's.
+    (Amended 2026-10-03 for light: white cards on a quiet well, see "Two named elevations".)
   - **No golden carries the machine's live round trip.** Under load the loopback round trip
     ran 30 to 70 ms, so "50 ms" showed in the navigator and the bar of whichever goldens were
     taken then. The readouts now read a figure the view can pin
@@ -5333,7 +5340,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   title keeps the medium weight in `text`. No ring, no frame, no dimming of the others; a lone
   tile and the overview draw none. The overview's active workspace keeps its elevation and
   takes a 1.5 pt ring of `text` at the new `alpha::RING` (0.5) in place of the accent. This
-  amends the 2026-10-02 rule that focus is the title's tone alone. Tests:
+  amends the 2026-10-02 rule that focus is the title's tone alone. (Numbers amended 2026-10-03,
+  see the stage 3 entry at the end: the line is 1.5 pt at `alpha::FOCUS` 0.45, inset at both
+  ends with round caps; the overview's ring is one device pixel at `RING` 0.3 outside a 2 pt
+  gap, and 1.5 pt whole under Increase Contrast.) Tests:
   `focus_line::the_focused_header_carries_a_text_line_while_two_tiles_show`,
   `focus_line::under_increase_contrast_the_focus_line_is_whole`,
   `strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one` (the ring in the
@@ -5416,3 +5426,236 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     behind the turn where the agent queues. It is the pointer's form of ⌘↵, so no button is added.
   - **"Answer in Codex"** replaces "Answer in the terminal" for an agent whose own TUI joins the
     thread, and brings that terminal into view once it runs.
+
+- ✅ **Hairlines one device pixel, states that ride on their plane, floats a clear step up**
+  (2026-10-03, `.research/design-systems-2026-10-03/study.md` §2.3 items 1 and 6, §3 #1 and
+  #2). The person wants the chrome as finished as the best design systems while staying in the
+  Zed, Warp and `MonoCode` school. The study read shadcn, coss, HeroUI, Radix, Geist, Linear,
+  Raycast and Apple from source and token files and found Slopty's palette already in their
+  band; what set it apart was the finish. Every line was a full point, two device pixels on a
+  Retina screen, so the composer's internal rules read as a ruled form. The hover and the
+  selection were solid steps mixed for the content, so a float had to sit under the hover step
+  (+3 OKLCH L) or a menu row's hover would vanish on it. This amends "Design tokens" (the
+  hairline's width) and "The chrome is derived from the content" (its shares and the grounds
+  the text lift reads).
+  - **Hairlines.** `stroke::HAIR` is half a point; GPUI rounds a stroke to whole device pixels
+    and never under one, so it is one pixel at 1x, 2x and 3x. `Theme::hair` gives it, a full
+    point under Increase Contrast. Every chrome border is `kit::hair` (sheets, rings inside
+    buttons and selections, pane dividers, rules under bars); a divider in the flow is
+    `kit::rule` or `kit::rule_v`, a border on an empty box, because a box half a point tall
+    rounds to nothing at 1x. A quad painted by hand (a terminal block's rule) takes
+    `kit::hair_painted`, GPUI's border rounding applied ahead. A line that is a thing's own
+    edge (an unticked box, a drop target's ring, the cut round the bell's badge) is
+    `stroke::EDGE`, a point. The shares grow a half again to keep the weight Linear keeps for
+    its thin borders: dark `border` 0.07 → 0.10 and `border_subtle` 0.045 → 0.065, light
+    0.095 → 0.13 and 0.06 → 0.085.
+  - **States are washes.** `Surfaces::hover`, `selected` and `pressed` are the ink at 0.05,
+    0.085 and 0.12 (light 0.05, 0.08, 0.12) laid over whatever plane is under them, as
+    Linear's hover is the plane plus a step and Raycast's is white at 5 %. A row rests bare,
+    takes `hover` under the pointer and `pressed` while held; a chosen row, an open menu's
+    button, a toggle that is on and a key cap's plate take `selected`; a well (a secondary
+    button, a code block, a chip, a field's ground) rests on `hover`. A button inside a hovered
+    row needs no step of its own any more: its hover composes over the row's. The bell's
+    badge cut takes the hover over the bars, solid, since it covers the bell's stroke.
+  - **What floats sits +5 L.** `elevated` is the ink at 0.055 in dark (`#232323`, +5.1 L over
+    the content, against +3.0 before), near Radix's +3.6 and shadcn's +6; a row's hover still
+    shows on it, +4.1 L. Light keeps white floats.
+  - **The text lift reads the grounds text lands on**: the planes (canvas, panel, content,
+    elevated, band) and the selected wash over each, the deepest that stays (a press lasts a
+    click). Muted text on a selected row of a float is the tightest pair, so the designed
+    shares move to where the lift has nothing to do: dark `text_muted` 0.57 → 0.625
+    (`#9c9c9c`) and `text_secondary` 0.70 → 0.715, light `text_muted` 0.66 → 0.675, and the
+    dark error red one notch lighter (`#f1767e`). Hairlines are thickened under Increase
+    Contrast against the planes and the hover wash over each.
+  - `Hairline` is renamed `Tint` (the ink at a share: a hairline or a wash). `raised` and
+    `overlay` remain only as the solid composites over the content for the call sites lane W
+    still holds (`slopty-ui/src/project`, `slopty-app/src/lib.rs`, `ssh.rs`), and go when
+    those move.
+  - Lints in `kit.rs`: `a_chrome_border_is_kit_hair` (no `border_1()`-style point borders or
+    point-wide boxes filled with a hairline's tint) and `a_state_is_a_wash_over_its_plane` (no
+    `raised` or `overlay`), each with its own check-the-check test. Tests: theme
+    `the_hairlines_and_washes_are_monocode_s_shares`,
+    `a_hairline_is_one_device_pixel_and_a_point_at_more_contrast`, `the_ladder_is_monotonic`
+    (each state a step past the last on every plane), `the_washes_stand_off_the_chrome`,
+    `a_float_rises_and_its_rows_still_answer_the_pointer`, `chrome_text_clears_wcag_aa`; kit
+    `a_painted_hairline_is_one_device_pixel`, `a_button_is_neutral_and_one_height`; ui
+    `tiles::a_divider_runs_only_between_neighbours` (one device pixel, in the border's colour),
+    the terminal's block rule tests.
+
+- ✅ **Two named elevations, cards on a quiet well, and the lit rim on everything raised**
+  (2026-10-03, `.research/design-systems-2026-10-03/study.md` §2.3 items 4 and 5, §3 #3, #4 and
+  #11). The kit had one elevation, for floats, so a card was either a flat fill or floating;
+  every reference has a pair (Geist base and menu, Radix shadow 2 and 5, HeroUI surface and
+  overlay, coss rim and large shadow). In light, cards and onboarding rows were grey slabs on
+  white where every reference sets white cards on a faintly grey well. This amends "One overlay
+  shell, one alpha ladder" (a second, resting elevation beside the floating one) and, for light
+  only, "Onboarding lists are tone steps".
+  - **`Elevation` names both.** `shadow` stays the floating one; `rest` is the resting contact,
+    light only (`0 1 2` at 5 %, coss's every shadow); `rim` is one rule for what is raised: a
+    point of white along the top edge in dark (`alpha::RIM` 0.04 at rest, `alpha::EDGE` 0.06
+    floating), a point of black along the bottom edge in light (0.04 at rest; a float's drop
+    shadow already ends it). The ad-hoc shadow the old ruling forbade stays forbidden: the
+    shadows and rims are drawn only by `kit::elevate`, `kit::card` and `kit::rests`, and
+    `a_floating_layer_wears_the_one_elevation` still fails on any other.
+  - **`kit::card`** (and `kit::card_part` for a card whose rows are children of their own) is
+    a thing resting on its plane: `radii.md`, the rim, and in light white with a hairline round
+    it and the contact; in dark the hover wash, a step over whatever it rests on (+4.7 L on the
+    content), so a card on a sheet still rises from the sheet, with a hairline only under
+    Increase Contrast. `kit::well` is the ground cards rest on: `band` in light, the plane
+    itself in dark.
+  - **Light cards are white on a quiet well**: the settings page is a well with its groups as
+    white cards (System Settings' layout), and an install's steps are a card. Dark keeps its
+    tone steps, now with the rim. Board lanes and cards and the first run's rows are lane W's
+    files and move onto `kit::well` and `kit::card` there.
+  - **The rim on everything raised**: the secondary button carries it inside its hairline ring,
+    the card and the floating sheet carry theirs; the composer's shell and the segmented
+    control's thumb take it as they are built (below).
+  - Tests: theme `elevation_and_density` (the pair, the rims' sides and steps); kit
+    `a_card_rests_on_its_rim`, `a_secondary_button_catches_the_light`,
+    `the_elevation_is_two_layers_of_the_shade_and_a_lit_edge_in_dark`; settings
+    `a_groups_rows_are_one_card_under_its_label`.
+
+- ✅ **Stage 3 of the design-systems study: one composer shell, capsules, quieter marks,
+  motion that respects frequency, and the finishing details** (2026-10-03,
+  `.research/design-systems-2026-10-03/study.md` §2.3, §3 #5 to #10 and #13 to #22, §4 items 5
+  to 7). Each item is the study's row; the evidence and the systems compared are there.
+  - **The composer is one shell** (#5). The checkout, branch and change count left their row
+    over the field and sit in the toolbar after the chips, giving up their room first, so the
+    composer is the field and its toolbar with no line inside. The tray over it parts its
+    request, plan, edits and queue by room alone; the only line in the stack is the quieter
+    hairline (`border_subtle`) where the tray meets the field. Composer and tray rest on the
+    resting elevation through `kit::rests` (the tray takes the dark rim on its top edge, the
+    composer the light contact under its foot). Tests: the kit's own elevation lint; goldens
+    `thread*`.
+  - **Pills are capsules** (#6), amending "Design tokens": `radii.full` at 20 pt, the tone at
+    `FAINT` in dark and the new `alpha::FAINT_ON_PAPER` (0.10) in light, since a 4 pt box at
+    20 pt reads as a tag or a button and these are states. Key caps keep `radii.xs`: they are
+    keys. Test: `a_pill_is_a_twenty_point_capsule_at_its_zoom`.
+  - **A quieter focus line and overview ring** (#7, #16), amending §4b's numbers: the line is
+    `stroke::MARK` 1.5 pt in `text` at the new `alpha::FOCUS` (0.45, 3.95:1 over the content,
+    above the 3:1 asked of what is seen), inset `radii.sm` at both ends with round caps, whole
+    under Increase Contrast. The overview's active workspace is ringed one device pixel of
+    `text` at `RING` (now 0.3) outside a 2 pt gap, 1.5 pt whole under Increase Contrast. Tests:
+    `focus_line::*`, `strip_marks::the_overview_lifts_each_workspace_and_offers_a_new_one`.
+  - **Pressed is its own step, and a hover lets go softly** (#8). Hover is the `hover` wash,
+    pressed the `pressed` wash, on every kit control. GPUI-fast's state transitions ease a
+    fill into a hover or press at once (`Motion::hover`) and back to rest over the new
+    `Motion::unhover` (150 ms, eased out), applied at once under Reduce Motion. One kit helper,
+    `kit::eased`, owns the durations; the kit's buttons and the rows of menus, the inbox, the
+    bars' popovers and the settings wear it. The navigator's rows do not: its list is a
+    composited scroll layer, and a fill easing out under rows scrolling past the pointer
+    repaints the layer (headless, 2 of 30 scroll frames composited against all 30;
+    `nav_list::a_scroll_of_the_navigator_composites_its_layer`).
+  - **Overlays leave, and what the keyboard summons does not travel** (#9), amending the
+    Motion doc. The palette, the picker, project search, About and the settings dialog fade in
+    where they stand; menus and popovers opened by the pointer keep their 4 pt drop. Every
+    overlay leaves on the new `Motion::exit` (100 ms, shorter than any entrance): its owner
+    keeps drawing it one exit longer through `kit::fade_out`, which holds the pointer only
+    within the leaving panel (a modal's dim holds it as the modal did) while the keyboard is
+    back where it was. Under Reduce Motion, and where the workspace holds its chrome still,
+    nothing is kept. Tests: `the_paces_are_the_motion_tokens`,
+    `the_palette_leaves_quicker_than_it_came`.
+  - **A finished primary** (#10): the solid carries a point of white at 0.14 inside its top and
+    a contact shadow in light, a shade of black at 0.10 inside its foot in dark; pressed, both
+    go and a shade at 0.08 presses in (`Elevation::finish`). Test: `the_primary_presses_in`.
+  - **A softer dark scrim** (#14), amending "One overlay shell, one alpha ladder":
+    `alpha::SCRIM` 0.6 → 0.45, Linear's 0.4 the bound. Light keeps `DIM`.
+  - **Empty states seat their mark** (#15): `kit::notice` puts it in a 40 pt disc of the hover
+    wash, the icon at the icon size in `text_secondary`.
+  - **A segmented control with a sliding thumb** (#13): a track of the hover wash held
+    `kit::TRACK_PAD` in, the chosen option on a thumb painted as a card (the floating surface,
+    the rim, in light its hairline and contact) at the concentric radius, sliding on the
+    selection plate's settle. A hairline parts two options not chosen. The chosen label is set
+    medium in the room the medium weight takes, which every label keeps, so nothing reflows.
+    The settings form's choices and the inbox's Unread and All take it.
+  - **Tool cards and thoughts** (#17): a call that acts is a `kit::card` at `radii.md`; a failed
+    one is edged in the error tone at the new `alpha::FAILED_EDGE` (0.30) where it was dashed,
+    one that waits on the person in the warn tone at `alpha::ASKING_EDGE` (0.40). An opened
+    thought hangs from the hairline rule a quiet call's output hangs from. Test:
+    `a_call_that_acts_is_a_card`.
+  - **One name per type size** (#18): `meta()` and `prose()` repeated `small()` and `title()`;
+    the scale reads caption, small, ui, title, heading, display. The two names remain only for
+    lane W's call sites until they move. Test: `one_name_per_type_size`.
+  - **Hints come as a warm group** (#19): the first hint waits 400 ms under a resting pointer;
+    while one was on screen in the last second the next shows at once. GPUI builds a hint at
+    once (`kit::hint_timing`) and the hint keeps the wait. Tests: `hints_come_as_a_warm_group`,
+    and the lint `a_hint_keeps_the_warm_timing`.
+  - **Group rules fade at their ends** (#20): `kit::list_rule` parts a menu's groups (and the
+    machines popover's add row) with a `border_subtle` hairline that fades over its last 24 pt
+    at each end through GPUI's per-pixel `edge_fade`, never a gradient. It draws only while a
+    menu is open, off the terminal and input paths.
+  - **Nesting guides on hover** (#21): a nested row in the navigator (a project's tiles, its
+    board and threads) carries a hairline in `border_subtle` under the middle of its parent's
+    icon, shown only while the pointer is over the navigator.
+  - **Selection follows key state** (#22): `kit::selected` takes whether its list has the
+    keyboard; without it the selection steps down to the hover wash with no ring, so one list
+    in the window shows a live selection. The settings sidebar follows it. The navigator's
+    selection is the focused tile, where the keys are, so it stays live. Test:
+    `a_button_is_neutral_and_one_height`.
+  - Deferred, as ruled: the shimmer on the working line (#23), hold-to-confirm (#24) and the
+    in-window backdrop blur (#25).
+
+- ✅ **The design lane's next stages are one ranked list from three more studies** (2026-10-03).
+  `.research/gpui-references-2026-10-03.md` (Frame, Waku, Sonora, bezel, tty7; the GPL ones are
+  read for ideas and rewritten, never copied), `.research/t3code-ui-2026-10-03.md` and
+  `.research/designeer-2026-10-03.md`, merged after the design-systems study's stage 3 above and
+  ranked by what the person sees per unit of effort. What stage 3 already built is left out
+  (capsules, the composer shell, exits, the segmented thumb, the warm hints, `kit::eased`); the
+  stale "T3 Code's 768" note on the reading column now says 736.
+  1. **An APCA floor for dark text** (designeer #1). `Rgb::apca` beside `Rgb::contrast`; the
+     lift takes the stricter of WCAG and APCA (secondary |Lc| ≥ 55, muted ≥ 45 on every
+     ground), and `alpha::FOCUS` 0.45 → 0.47 to clear Lc 30. The values come from a test that
+     computes them (`chrome_text_clears_apca`), never from the eye.
+  2. **Shadows that fall, and the sunk finish** (gpui-references T2 and T1). `Shadow` gains a
+     spread (the soft floating layer `0 12 32 −10`, a third heavier); `Elevation::sunk` shades
+     the top edge of what is sunk, with `kit::sunk` and `kit::track` on fields, the segmented
+     tracks and meters. The rule then reads whole: what is raised catches light at its top
+     edge, what is sunk holds shade there.
+  3. **Live marks breathe under Reduce Motion** (gpui-references T5): opacity only between 0.6
+     and 1 over `Motion::breath` (2.4 s), stepped on the spin clock, with no travel or scale,
+     since a frozen mark reads as hung and the platform keeps activity alive under Reduce
+     Motion. The Reduce Motion rule above is amended in the same change.
+  4. **Message actions in the thread view** (T3 #1): copy and a day-aware time on each message,
+     and "Fork from here" on a settled turn where the thread's caps hold `Cap::FORK`, sending
+     `Intent::Fork` (the wire is on main).
+  5. **The palette finds better** (T3 #3, designeer #3): a score per item (exact, prefix, word
+     start, substring, then context; recency breaks ties), the matched letters drawn in
+     `text` over `text_secondary`, `>` for commands only, ↑↓ through the navigator filter's
+     results, and Esc clearing a query before it closes the palette or the picker.
+  6. **The send button says what ↵ will do** (T3 #6, its UI half): Send, Steer, Queue or
+     Update with their glyphs and names; "Queue message" as a keymap action; ⌥↑ edits the last
+     queued message; the meter opens a popover with the windows, their resets, the cost and
+     Compact where `Cap::COMPACT` holds. Promote and reorder wait on their intents.
+  7. **Notices with a severity and a memory** (T3 #7, designeer #2): a failure stays until
+     dismissed and offers Copy; a notice's clock holds while the window is not key and gives
+     two seconds more once it is; a thread's notice shows three lines with "Show all".
+  8. **The thread view at the old face's level** (T3 #2): ↑ recalls earlier prompts at the first
+     line, the plan as a card with "Plan ready" in the tray, a picture opens the viewer, and the
+     live answer fades in once lane F pins the paced stream fade in gpui-kit.
+  9. **Review comments carry the code** (T3 #4): each comment a fenced excerpt with its line
+     range, a drag makes a range, and "Add to message" puts them in the draft instead of
+     sending.
+  10. **A terminal selection to an agent** (T3 #5): "Attach" on any selection, fenced and named
+      after its command, and a palette line for it.
+  11. **"3 new" on the Latest pill** (designeer #4), capped at 99+, said politely after 700 ms.
+  12. **Labels fade at their tail when they overflow** (gpui-references T8): `kit::fit_label` on
+      navigator rows, composer chips and tray rows, through `edge_fade`'s `hidden_by_scroll`;
+      tile titles keep their ruled ellipsis.
+  13. **A prompt and prose size of its own** (T3 §1.7): a setting that grows what is read
+      without growing the chrome.
+  14. **The phone's sheets follow the finger** (designeer #6), once phone work resumes.
+  - **Waiting on lane F, built here once pinned:** one reversible value for open and close
+    (the gpui-ce port, Apache; it would replace the leaving states stage 3 added), hints on
+    keyboard focus, and the paced stream fade.
+  - **Measured first:** the navigator on system glass (only if key-to-glass and the
+    compositor show no cost), and intent prefetch on the navigator.
+
+- ✅ **SF's optical size and tracking, measured** (2026-10-03, study §3 #12). The study asked
+  whether GPUI sets the system face as Core Text does. A test lays out "Connect to a server"
+  at 13, 20 and 26 pt through GPUI and through a Core Text line from `NSAttributedString`
+  and compares the advances and the face. Both name `.SFNS-Regular` at every size, and the
+  advances agree (13 pt 119.13 both; 26 pt 217.56 both; 20 pt 171.43 against GPUI's 171.61,
+  the 0.11 % being GPUI asking for the next float above 20 on its first run, which Core Text
+  at that size matches exactly). Set in proportion to 13 pt, the 26 pt line would be 238.26
+  wide, so the face carries Apple's tracking per size already; nothing needs `letter_spacing`
+  in the renderer. Test: `fonts::optical_size::gpui_sets_the_system_face_at_its_optical_size_and_tracking`.

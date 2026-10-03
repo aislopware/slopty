@@ -189,7 +189,8 @@ fn the_overview_lifts_each_workspace_and_offers_a_new_one(cx: &mut TestAppContex
         let hairline = quads_at(cx, at).iter().any(|q| q.border_widths.top.0 > 0.0);
         assert!(hairline, "a hairline round {at:?}");
     }
-    let (ring, gap) = (1.5, 0.0);
+    let ring = f32::from(crate::kit::hair_painted(&theme, scale));
+    let gap = strip::OVERVIEW_GAP;
     let ring_color = crate::colors::hsla_alpha(theme.surfaces.text, slopty_theme::alpha::RING);
     let ringed = |cx: &mut VisualTestContext, at: Bounds<Pixels>| {
         let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));

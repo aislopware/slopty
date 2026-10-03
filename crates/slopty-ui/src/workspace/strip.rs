@@ -912,8 +912,8 @@ impl WorkspaceView {
                     .items_center()
                     .gap(px(theme.spacing.xs))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)))
-                    .active(move |el| el.bg(hsla(s.overlay)))
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .active(move |el| el.bg(hsla(s.pressed)))
                     .text_size(px(theme.typography.ui_size))
                     .font_family(theme.typography.ui_family.clone())
                     .text_color(hsla(s.text_secondary))
@@ -957,18 +957,14 @@ impl WorkspaceView {
                 .opacity(fade)
                 .map(|el| {
                     if here {
-                        // Where you are: a neutral edge flush with the block, as a selected
-                        // thumbnail has it, in the text's tone since green means "done". The
-                        // keyboard's ring outside a gap read as focus round a block, not as the
-                        // block chosen.
-                        let ring = gpui::Outline {
-                            color: hsla_alpha(s.text, alpha::RING),
-                            width: px(OVERVIEW_EDGE),
-                            offset: px(0.0),
-                        };
+                        // Where you are: lifted, and a hairline in the text's tone outside a
+                        // gap of the strip's own ground, Geist's double ring, since green means
+                        // "done" and a heavy flush outline read as the old chosen-card tell.
+                        // Under Increase Contrast it is flush, wider and whole.
+                        let ring = overview_ring(theme);
                         kit::elevate(el, theme).outline_ring(ring)
                     } else {
-                        el.border_1().border_color(hsla(s.border))
+                        el.border(kit::hair(theme)).border_color(hsla(s.border))
                     }
                 })
                 // The panes' own surface, lifted or not: the block is what they sit on.
@@ -1001,7 +997,7 @@ impl WorkspaceView {
                 .child(
                     kit::tabular(div())
                         .flex_none()
-                        .text_size(px(theme.typography.meta()))
+                        .text_size(px(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(count)),
                 )
@@ -1191,8 +1187,8 @@ impl WorkspaceView {
                     .w_full()
                     .rounded(px(theme.radii.sm))
                     .cursor_pointer()
-                    .hover(|st| st.bg(hsla(s.raised)))
-                    .active(|st| st.bg(hsla(s.overlay)))
+                    .hover(|st| st.bg(hsla(s.hover)))
+                    .active(|st| st.bg(hsla(s.pressed)))
                     .child(crate::palette::icon_slot(theme, IconName::Server, muted))
                     .child(
                         div()
@@ -1302,8 +1298,8 @@ impl WorkspaceView {
             .w_full()
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .hover(|st| st.bg(hsla(s.raised)))
-            .active(|st| st.bg(hsla(s.overlay)))
+            .hover(|st| st.bg(hsla(s.hover)))
+            .active(|st| st.bg(hsla(s.pressed)))
             .child(crate::palette::icon_slot(theme, icon, hsla(s.text_muted)))
             .child(
                 div()
@@ -1358,9 +1354,9 @@ impl WorkspaceView {
             .w_full()
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .when(primary, |el| el.bg(hsla(s.overlay)))
-            .when(!primary, |el| el.hover(|st| st.bg(hsla(s.raised))))
-            .active(|st| st.bg(hsla(s.overlay)))
+            .when(primary, |el| el.bg(hsla(s.selected)))
+            .when(!primary, |el| el.hover(|st| st.bg(hsla(s.hover))))
+            .active(|st| st.bg(hsla(s.pressed)))
             .child(crate::palette::icon_slot(theme, icon, hsla(icon_ink)))
             .child(div().flex_none().text_color(hsla(s.text)).child(label))
             // Where it opens, as its meta: the worker "+" chose, else the one in context.
@@ -1391,8 +1387,25 @@ impl WorkspaceView {
     }
 }
 
-/// The active overview block's edge, in points.
+/// The active overview block's ring under Increase Contrast, in points.
 const OVERVIEW_EDGE: f32 = 1.5;
+
+/// The gap between the active overview block and its ring, in points.
+pub(super) const OVERVIEW_GAP: f32 = 2.0;
+
+/// The ring round the active overview block: a hairline of the text at `alpha::RING` outside
+/// [`OVERVIEW_GAP`], or flush, [`OVERVIEW_EDGE`] wide and whole under Increase Contrast.
+pub(super) fn overview_ring(theme: &slopty_theme::Theme) -> gpui::Outline {
+    let color = hsla_alpha(theme.surfaces.text, theme.set_back(alpha::RING));
+    match theme.contrast {
+        slopty_theme::Contrast::Standard => {
+            gpui::Outline { color, width: kit::hair(theme), offset: px(OVERVIEW_GAP) }
+        }
+        slopty_theme::Contrast::Increased => {
+            gpui::Outline { color, width: px(OVERVIEW_EDGE), offset: px(0.0) }
+        }
+    }
+}
 
 /// How wide the empty workspace's column stands: room for a directory beside its branch and
 /// worker, narrow enough to read as one block down the strip.

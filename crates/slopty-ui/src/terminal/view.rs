@@ -1667,7 +1667,7 @@ impl TerminalView {
                 // The grid's own background, the program's when it set one: the header stands
                 // where the top row was, parted from the output under it by the block hairline.
                 .bg(hsla(Colors::new(&theme.terminal, self.state.colors()).theme.bg))
-                .border_b_1()
+                .border_b(crate::kit::hair(theme))
                 .border_color(super::element::separator_color(theme))
                 .font_family(family)
                 .text_size(px(theme.typography.small()))
@@ -1811,7 +1811,9 @@ impl TerminalView {
                 .pr(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.xs))
                 .when(!on_band, |el| {
-                    el.border_1().border_color(hsla(s.border_subtle)).bg(hsla(s.raised))
+                    el.border(crate::kit::hair(theme))
+                        .border_color(hsla(s.border_subtle))
+                        .bg(hsla(s.hover))
                 })
                 .child(self.render_block_facts(prompt, cx))
                 .into_any_element(),
@@ -1854,7 +1856,7 @@ impl TerminalView {
                     .py(px(spacing.xxs))
                     .rounded(px(theme.radii.xs))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .hover(move |el| el.bg(hsla(s.hover)))
                     .child(SharedString::from(item.label()));
                 crate::a11y::tab_stop(row, s.accent).on_click(cx.listener(
                     move |this, _ev, window, cx| {
@@ -2837,7 +2839,7 @@ impl TerminalView {
             .font_family(theme.typography.ui_family.clone())
             .text_color(hsla(s.text_secondary))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .hover(move |el| el.bg(hsla(s.hover)))
             .child(
                 crate::icons::icon(
                     theme,
@@ -4096,7 +4098,7 @@ impl TerminalView {
                 bare("terminal-search-regex")
                     .role(gpui::accesskit::Role::Button)
                     .aria_label(if search.regex { "Plain text" } else { "Regular expression" })
-                    .when(search.regex, |el| crate::kit::selected(el, theme))
+                    .when(search.regex, |el| crate::kit::selected(el, theme, true))
                     .child(".*")
                     .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
             )
@@ -4601,7 +4603,8 @@ mod tests {
         };
         let mut out = Vec::new();
         for q in &quads {
-            if !(near(q.bounds.size.height, px(1.0))
+            let hair = crate::kit::hair_painted(&Theme::default(), scale);
+            if !(near(q.bounds.size.height, hair)
                 && near(q.bounds.size.width, bounds.size.width)
                 && near(q.bounds.origin.x, bounds.origin.x))
             {
@@ -5764,21 +5767,21 @@ mod tests {
             .collect()
     }
 
-    /// A hovered block's facts sit on a chip of the raised fill, except over a failed block,
+    /// A hovered block's facts sit on a chip of the hover wash, except over a failed block,
     /// where they sit on the band itself: a lighter patch there would cut into the one mark
     /// that says the command failed.
     #[gpui::test]
     fn a_failed_blocks_facts_sit_on_its_band_without_a_chip(cx: &mut TestAppContext) {
         let (view, _rx, cx) = terminal(cx);
         with_command_blocks(&view, cx);
-        let raised = hsla(Theme::default().surfaces.raised);
+        let hover = hsla(Theme::default().surfaces.hover);
         let m = view.read_with(cx, |v, _| v.metrics.expect("laid out"));
         let chip_fill = |cx: &mut VisualTestContext, row: f32| {
             let at = m.origin + point(m.cell_width * 1.5, m.line_height * (row + 0.5));
             cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
             cx.run_until_parked();
             let chip = cx.debug_bounds("block-chip").expect("the facts are drawn");
-            quads_over(cx, chip).iter().any(|q| q.background.as_solid() == Some(raised))
+            quads_over(cx, chip).iter().any(|q| q.background.as_solid() == Some(hover))
         };
         cx.simulate_keystrokes("cmd-up cmd-up");
         assert_eq!(top_line(&view, cx), LineIndex(3), "`$ false`, `$ seq 2`, `1`");

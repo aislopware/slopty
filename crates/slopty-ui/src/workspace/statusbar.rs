@@ -120,6 +120,51 @@ pub(super) struct Bar {
     plans_open: bool,
     /// The transfers' popover is up.
     transfers_open: bool,
+    /// The popover just closed, drawn for the moment it takes to fade away.
+    leaving: Option<Popover>,
+}
+
+/// One of the bar's popovers.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Popover {
+    Hosts,
+    Plans,
+    Transfers,
+}
+
+impl Popover {
+    /// The layer round it that a click closes it from, and its fades' names.
+    const fn ids(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Hosts => ("hosts-away", "hosts-fade", "hosts-out"),
+            Self::Plans => ("plans-away", "plans-fade", "plans-out"),
+            Self::Transfers => ("transfers-away", "transfers-fade", "transfers-out"),
+        }
+    }
+}
+
+impl Bar {
+    /// Whether `which` is up.
+    const fn open(&self, which: Popover) -> bool {
+        match which {
+            Popover::Hosts => self.hosts_open,
+            Popover::Plans => self.plans_open,
+            Popover::Transfers => self.transfers_open,
+        }
+    }
+
+    const fn set_open(&mut self, which: Popover, open: bool) {
+        match which {
+            Popover::Hosts => self.hosts_open = open,
+            Popover::Plans => self.plans_open = open,
+            Popover::Transfers => self.transfers_open = open,
+        }
+    }
+
+    /// Whether `which` is drawn: up, or on its way out.
+    fn shown(&self, which: Popover) -> bool {
+        self.open(which) || self.leaving == Some(which)
+    }
 }
 
 impl std::fmt::Debug for Bar {
@@ -337,7 +382,28 @@ impl WorkspaceView {
 
     /// Open or close the hosts popover.
     pub fn toggle_hosts(&mut self, cx: &mut Context<Self>) {
-        self.bar.hosts_open = !self.bar.hosts_open;
+        self.toggle_popover(Popover::Hosts, cx);
+    }
+
+    /// Open `which`, or close it if it is up.
+    fn toggle_popover(&mut self, which: Popover, cx: &mut Context<Self>) {
+        if self.bar.open(which) {
+            self.close_popover(which, cx);
+        } else {
+            self.bar.set_open(which, true);
+            cx.notify();
+        }
+    }
+
+    /// Close `which`, drawn fading out for the moment that takes.
+    fn close_popover(&mut self, which: Popover, cx: &mut Context<Self>) {
+        if !self.bar.open(which) {
+            return;
+        }
+        self.bar.set_open(which, false);
+        if self.chrome_moves(cx) {
+            self.keep_leaving(which, kit::Pace::Exit.duration(), |this| &mut this.bar.leaving, cx);
+        }
         cx.notify();
     }
 
@@ -618,9 +684,12 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.sm))
             .children(right_parts);
-        let hosts = (self.bar.hosts_open && !phone).then(|| self.render_hosts(window, cx));
-        let plans = (self.bar.plans_open && !phone).then(|| self.render_plans(window, cx));
-        let transfer_list = (self.bar.transfers_open && !phone && self.transfers_in_flight())
+        let hosts =
+            (self.bar.shown(Popover::Hosts) && !phone).then(|| self.render_hosts(window, cx));
+        let plans =
+            (self.bar.shown(Popover::Plans) && !phone).then(|| self.render_plans(window, cx));
+        let shows_transfers = self.bar.shown(Popover::Transfers);
+        let transfer_list = (shows_transfers && !phone && self.transfers_in_flight())
             .then(|| self.render_transfers(window, cx));
         let statusbar = self.chrome.statusbar.entity_id();
         let bar = div()
@@ -697,6 +766,7 @@ impl WorkspaceView {
                     readout("status-relay", text.clone())
                         .aria_description(fix)
                         .text_color(hsla(s.text_muted))
+                        .map(kit::hint_timing)
                         .tooltip(move |_window, cx| {
                             let theme = Rc::clone(&hint_theme);
                             cx.new(|_| kit::Hint::new(fix, "", theme)).into()
@@ -731,7 +801,7 @@ impl WorkspaceView {
                     .flex_none()
                     .flex()
                     .justify_end()
-                    .min_w(px(theme.typography.meta() * RTT_SLOT_EMS))
+                    .min_w(px(theme.typography.small() * RTT_SLOT_EMS))
                     .children(figure),
             )
     }
@@ -768,7 +838,7 @@ impl WorkspaceView {
         let el = button("status-workers", label.into(), theme)
             .child(dot)
             .child(tabular(div()).child(SharedString::from(text)))
-            .when(self.bar.hosts_open, |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+            .when(self.bar.hosts_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         Some(
             tab_stop(el, s.accent)
                 .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_hosts(cx))),
@@ -793,10 +863,9 @@ impl WorkspaceView {
         let el = button("status-plan", label, theme)
             .when(warn, |el| el.text_color(hsla(s.warn)))
             .child(words)
-            .when(self.bar.plans_open, |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+            .when(self.bar.plans_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         Some(tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| {
-            this.bar.plans_open = !this.bar.plans_open;
-            cx.notify();
+            this.toggle_popover(Popover::Plans, cx);
         })))
     }
 
@@ -820,10 +889,9 @@ impl WorkspaceView {
         let text = transfers_label(ups, rows.len().saturating_sub(ups), done, total);
         let el =
             spaced(tabular(button("status-transfers", text.clone().into(), theme)), &text, theme)
-                .when(self.bar.transfers_open, |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+                .when(self.bar.transfers_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         Some(tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _window, cx| {
-            this.bar.transfers_open = !this.bar.transfers_open;
-            cx.notify();
+            this.toggle_popover(Popover::Transfers, cx);
         })))
     }
 
@@ -863,26 +931,7 @@ impl WorkspaceView {
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .child(section_heading(theme, "transfers-heading".into(), TRANSFERS))
             .children(rows);
-        let viewport = window.viewport_size();
-        gpui::deferred(
-            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
-                div()
-                    .id("transfers-away")
-                    .relative()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _ev, _w, cx| {
-                            this.bar.transfers_open = false;
-                            cx.notify();
-                        }),
-                    )
-                    .child(kit::fade_in(panel, "transfers-fade", cx)),
-            ),
-        )
-        .with_priority(crate::palette::Layer::Popover.priority())
-        .into_any_element()
+        self.popover(Popover::Transfers, panel, window, cx)
     }
 
     /// One transfer in the popover: its way's mark, its name over its machine and progress, a
@@ -915,7 +964,8 @@ impl WorkspaceView {
             .cursor_pointer()
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
-            .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+            .map(kit::eased)
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
             .child("Cancel");
         let stop = tab_stop(stop, s.accent)
             .invisible()
@@ -950,7 +1000,8 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.sm))
             .rounded(px(theme.radii.sm))
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .map(kit::eased)
+            .hover(move |el| el.bg(hsla(s.hover)))
             .child(
                 div()
                     .flex_none()
@@ -1061,26 +1112,7 @@ impl WorkspaceView {
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .child(section_heading(theme, "plans-heading".into(), PLAN_USAGE))
             .children(rows);
-        let viewport = window.viewport_size();
-        gpui::deferred(
-            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
-                div()
-                    .id("plans-away")
-                    .relative()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _ev, _w, cx| {
-                            this.bar.plans_open = false;
-                            cx.notify();
-                        }),
-                    )
-                    .child(kit::fade_in(panel, "plans-fade", cx)),
-            ),
-        )
-        .with_priority(crate::palette::Layer::Popover.priority())
-        .into_any_element()
+        self.popover(Popover::Plans, panel, window, cx)
     }
 
     /// The hosts popover over the bar's right end: each worker with its link, and what can be
@@ -1107,7 +1139,8 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.sm))
                 .cursor_pointer()
                 .text_color(hsla(s.text_secondary))
-                .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(
                     div()
                         .flex_none()
@@ -1119,8 +1152,7 @@ impl WorkspaceView {
                 )
                 .child("Add a machine");
             tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, window, cx| {
-                this.bar.hosts_open = false;
-                cx.notify();
+                this.close_popover(Popover::Hosts, cx);
                 let run = Rc::clone(&run);
                 cx.defer_in(window, move |_this, window, cx| run(window, cx));
             }))
@@ -1144,30 +1176,38 @@ impl WorkspaceView {
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .child(section_heading(theme, "hosts-heading".into(), "Machines"))
             .children(rows)
-            .when(add.is_some(), |el| {
-                el.child(div().my(px(spacing.xs)).h(px(1.0)).bg(hsla(s.border_subtle)))
-            })
+            .when(add.is_some(), |el| el.child(kit::list_rule(theme)))
             .children(add);
+        self.popover(Popover::Hosts, panel, window, cx)
+    }
+
+    /// `panel` over the window as the bar's popover `which`: a click anywhere else closes it,
+    /// and it fades in. Once closed it fades out where it stands for [`kit::Pace::Exit`], the
+    /// window taking the pointer back at once but where the panel still shows.
+    fn popover(
+        &self,
+        which: Popover,
+        panel: Stateful<Div>,
+        window: &Window,
+        cx: &Draw<'_, Self>,
+    ) -> gpui::AnyElement {
+        let (away, fade, out) = which.ids();
         let viewport = window.viewport_size();
-        gpui::deferred(
-            gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(
-                div()
-                    .id("hosts-away")
-                    .relative()
-                    .w(viewport.width)
-                    .h(viewport.height)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _ev, _w, cx| {
-                            this.bar.hosts_open = false;
-                            cx.notify();
-                        }),
-                    )
-                    .child(kit::fade_in(panel, "hosts-fade", cx)),
-            ),
-        )
-        .with_priority(crate::palette::Layer::Popover.priority())
-        .into_any_element()
+        let layer = div().id(away).relative().w(viewport.width).h(viewport.height);
+        let layer = if self.bar.open(which) {
+            layer
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _ev, _w, cx| this.close_popover(which, cx)),
+                )
+                .child(kit::fade_in(panel, fade, cx))
+        } else {
+            let gone = format!("{}-leaving", away.trim_end_matches("-away"));
+            layer.child(kit::fade_out(panel.debug_selector(move || gone), out))
+        };
+        gpui::deferred(gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(layer))
+            .with_priority(crate::palette::Layer::Popover.priority())
+            .into_any_element()
     }
 
     /// One worker in the hosts popover: its mark, its name, its round trip or what is wrong,
@@ -1225,7 +1265,8 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
-                .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(label);
             // Hidden one by one, not by the strip that holds them: a hidden parent hides its
             // children whatever their own focus says.
@@ -1237,8 +1278,7 @@ impl WorkspaceView {
                 .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).visible());
             el.on_click(cx.listener(move |this, _ev, window, cx| {
                 cx.stop_propagation();
-                this.bar.hosts_open = false;
-                cx.notify();
+                this.close_popover(Popover::Hosts, cx);
                 let run = Rc::clone(&run);
                 cx.defer_in(window, move |_this, window, cx| run(window, cx));
             }))
@@ -1295,7 +1335,8 @@ impl WorkspaceView {
             .gap(px(spacing.sm))
             .rounded(px(theme.radii.sm))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.raised)))
+            .map(kit::eased)
+            .hover(move |el| el.bg(hsla(s.hover)))
             .child(
                 div()
                     .flex_none()
@@ -1332,7 +1373,7 @@ impl WorkspaceView {
             .child(div().flex_none().text_size(px(theme.typography.small())).child(detail));
         tab_stop(el, s.accent)
             .on_click(cx.listener(move |this, _ev, _w, cx| {
-                this.bar.hosts_open = false;
+                this.close_popover(Popover::Hosts, cx);
                 this.go_to_worker(key, cx);
             }))
             .into_any_element()
@@ -1429,7 +1470,8 @@ fn button(selector: &'static str, text: SharedString, theme: &Theme) -> Stateful
         .px(px(theme.spacing.xs))
         .rounded(px(theme.radii.xs))
         .cursor_pointer()
-        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+        .map(kit::eased)
+        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
 }
 
 #[cfg(test)]

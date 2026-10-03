@@ -131,9 +131,10 @@ pub struct Prepared {
     scrollbar: Option<(Bounds<Pixels>, Hsla)>,
     /// The command blocks' marks on the scrollbar's track, under the thumb, while it shows.
     block_ticks: Vec<(Bounds<Pixels>, Hsla)>,
-    /// The tops of the hairlines over the prompts that follow a row, and their colour.
+    /// The tops of the hairlines over the prompts that follow a row, their colour and width.
     rules: Vec<Pixels>,
     rule: Hsla,
+    rule_width: Pixels,
     /// The failed blocks' rows as `(top, height)` bands: a bar at the left edge.
     failed: Vec<(Pixels, Pixels)>,
     /// The failed blocks' heads (their prompt and command rows) as `(top, height)` bands,
@@ -2065,6 +2066,7 @@ impl Element for TerminalElement {
                 block_ticks,
                 rules,
                 rule: separator_color(theme),
+                rule_width: crate::kit::hair_painted(theme, window.scale_factor()),
                 failed,
                 failed_heads,
                 failed_look,
@@ -2223,7 +2225,10 @@ impl Element for TerminalElement {
             window.paint_quad(fill(bar, look.bar));
         }
         for &top in &prepared.rules {
-            let rule = Bounds::new(point(bounds.origin.x, top), size(bounds.size.width, px(1.0)));
+            let rule = Bounds::new(
+                point(bounds.origin.x, top),
+                size(bounds.size.width, prepared.rule_width),
+            );
             window.paint_quad(fill(rule, prepared.rule));
         }
         // Each pass over the rows paints a row as a stretch under a key, which GPUI draws

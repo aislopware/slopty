@@ -169,10 +169,7 @@ impl ThreadView {
             .gap(self.z(theme.spacing.xs))
             .px(self.z(theme.spacing.md))
             .py(self.z(theme.spacing.sm))
-            .map(|el| self.card_corners(el, capped))
-            .border_1()
-            .border_color(hsla(s.border))
-            .bg(hsla(s.elevated))
+            .map(|el| self.shell(el, capped))
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_secondary))
             .child(self.icon(IconName::SquareTerminal, s.text_muted))
@@ -227,7 +224,7 @@ impl ThreadView {
             .gap(self.z(theme.spacing.xs))
             .child(
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_muted))
-                    .size(self.z(theme.typography.meta())),
+                    .size(self.z(theme.typography.small())),
             )
             .child(
                 div()
@@ -239,18 +236,19 @@ impl ThreadView {
             )
     }
 
-    /// The composer's top row: the checkout, its branch, and what the thread changed (which
-    /// opens the review).
+    /// Where the thread works, in the composer's toolbar after its chips: the checkout, its
+    /// branch, and what the thread changed (which opens the review). It takes the room between
+    /// the chips and the meter and gives it up first, so the controls never shift.
+    ///
+    /// A row of its own over the field made the shell two strata; folded into the toolbar the
+    /// composer is one shell with no internal line.
     ///
     /// No mark of the agent at work: the thread's own working line says it in words, with
     /// how long, and an unlabelled ring in the card's corner said nothing more.
-    fn context_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+    fn where_facts(&self, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = theme.surfaces;
         let here = self.where_it_works(cx);
-        if here.checkout.is_none() && here.branch.is_none() {
-            return None;
-        }
         let thread = self.thread;
         let changes = kit::changes(theme, here.added, here.removed).map(|counts| {
             div()
@@ -262,28 +260,27 @@ impl ThreadView {
                 .px(self.z(theme.spacing.xs))
                 .rounded(self.z(theme.radii.xs))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
+                .hover(move |el| el.bg(hsla(s.hover)))
+                .active(move |el| el.bg(hsla(s.pressed)))
                 .child(counts)
                 .on_click(cx.listener(move |_this, _ev, _w, cx| {
                     cx.emit(ThreadViewEvent::Review { thread });
                 }))
         });
-        Some(
-            div()
-                .debug_selector(|| "thread-where".to_owned())
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(self.z(theme.spacing.sm))
-                .px(self.z(theme.spacing.md))
-                .pt(self.z(theme.spacing.sm))
-                .text_size(self.z(theme.typography.meta()))
-                .text_color(hsla(s.text_muted))
-                .children(here.checkout.map(|c| self.fact(IconName::Folder, c)))
-                .children(here.branch.map(|b| self.fact(IconName::GitBranch, b)))
-                .children(changes)
-                .into_any_element(),
-        )
+        div()
+            .debug_selector(|| "thread-where".to_owned())
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.sm))
+            .px(self.z(theme.spacing.xs))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .children(here.checkout.map(|c| self.fact(IconName::Folder, c).flex_shrink_1()))
+            .children(here.branch.map(|b| self.fact(IconName::GitBranch, b).flex_shrink_1()))
+            .children(changes)
     }
 
     /// A quiet chip in the composer's foot: the model, the mode.
@@ -327,7 +324,7 @@ impl ThreadView {
             crate::a11y::tab_stop(
                 chip.role(Role::Button)
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(
                         crate::icons::icon(
                             theme,
@@ -335,7 +332,7 @@ impl ThreadView {
                             IconSize::Inline,
                             hsla(s.text_muted),
                         )
-                        .size(self.z(theme.typography.meta())),
+                        .size(self.z(theme.typography.small())),
                     )
                     .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_models(cx))),
                 s.accent,
@@ -380,7 +377,7 @@ impl ThreadView {
                 crate::a11y::tab_stop(
                     chip.role(Role::Button)
                         .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                        .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                         .child(
                             crate::icons::icon(
                                 theme,
@@ -388,7 +385,7 @@ impl ThreadView {
                                 IconSize::Inline,
                                 hsla(s.text_muted),
                             )
-                            .size(self.z(theme.typography.meta())),
+                            .size(self.z(theme.typography.small())),
                         )
                         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_modes(cx))),
                     s.accent,
@@ -400,7 +397,7 @@ impl ThreadView {
         Some(
             chip.role(Role::Label)
                 .when_some(hint, |el, (hint, theme)| {
-                    el.tooltip(move |_window, cx| {
+                    kit::hint_timing(el).tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::new(theme.clone());
                         cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
                     })
@@ -423,7 +420,7 @@ impl ThreadView {
                         IconSize::Inline,
                         hsla(self.theme.surfaces.text_muted),
                     )
-                    .size(self.z(self.theme.typography.meta())),
+                    .size(self.z(self.theme.typography.small())),
                 )
                 .child(SharedString::from(words))
                 .into_any_element(),
@@ -457,8 +454,8 @@ impl ThreadView {
                     .role(Role::Button)
                     .aria_expanded(open)
                     .cursor_pointer()
-                    .when(open, |el| el.bg(hsla(s.raised)))
-                    .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                    .when(open, |el| el.bg(hsla(s.hover)))
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(mark)
                     .child(SharedString::from(words))
                     .on_click(cx.listener(|this, _ev, _w, cx| {
@@ -486,7 +483,7 @@ impl ThreadView {
         Some(
             self.chip("thread-meter", hint.replace('\n', ", "))
                 .role(Role::Label)
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .children(used.map(|u| {
                     crate::conversation::view::context_ring(
@@ -496,6 +493,7 @@ impl ThreadView {
                     )
                 }))
                 .children(used.map(|u| SharedString::from(share(u))))
+                .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
                     let theme = std::rc::Rc::new(hint_theme.clone());
                     cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
@@ -552,15 +550,21 @@ impl ThreadView {
         crate::a11y::tab_stop(el, s.accent).into_any_element()
     }
 
-    /// The composer card's corners: all round, or with the tray as its head only the foot's.
-    pub(super) fn card_corners<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
-        let r = self.z(self.theme.radii.lg);
-        if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) }
+    /// The composer's shell, which what stands in its place shares: the floating surface on
+    /// the resting elevation inside one hairline, all its corners round, or with the tray as
+    /// its head only the foot's (the tray then takes the rim's top edge in dark).
+    pub(super) fn shell<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let r = self.z(theme.radii.lg);
+        let el = if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) };
+        let el = el.border(kit::hair(theme)).border_color(hsla(s.border)).bg(hsla(s.elevated));
+        kit::rests(el, theme, !capped, true)
     }
 
     /// The composer card. While the agent's own TUI holds the session, where it is instead.
     /// `capped`: the tray stands on it as its head, so its top corners are square and its top
-    /// edge is the hairline between the two.
+    /// edge is the quieter hairline between the two.
     pub(super) fn composer_box(&self, capped: bool, cx: &Context<Self>) -> AnyElement {
         if self.tui_holds(cx) == Some(true) {
             return self.held_strip(capped, cx);
@@ -578,11 +582,10 @@ impl ThreadView {
             .w_full()
             .flex()
             .flex_col()
-            .map(|el| self.card_corners(el, capped))
-            .border_1()
-            .border_color(hsla(s.border))
-            .bg(hsla(s.elevated))
-            .children(self.context_row(cx))
+            .map(|el| self.shell(el, capped))
+            // Under the tray, the one line in the shell: the quieter hairline, where the
+            // tray's head meets the field.
+            .when(capped, |el| el.border_t_0().child(kit::rule(theme, s.border_subtle)))
             .child(
                 div()
                     .w_full()
@@ -591,7 +594,7 @@ impl ThreadView {
                     .gap(self.z(theme.spacing.xs))
                     .px(self.z(theme.spacing.md))
                     .pt(self.z(theme.spacing.sm))
-                    .text_size(self.z(theme.typography.prose()))
+                    .text_size(self.z(theme.typography.title()))
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
                     .children(self.notice_strip())
@@ -606,7 +609,7 @@ impl ThreadView {
                                 .with_size(Size::XSmall)
                                 .appearance(false)
                                 .bordered(false)
-                                .text_size(self.z(theme.typography.prose()))
+                                .text_size(self.z(theme.typography.title()))
                                 .line_height(gpui::relative(theme.typography.prose_line_height))
                                 .aria_label("Message")
                                 .on_paste(move |item, _window, cx| {
@@ -635,7 +638,7 @@ impl ThreadView {
                     .children(self.effort_chip(cx))
                     .children(self.mode_chip(cx))
                     .children(self.tasks_chip(cx))
-                    .child(div().flex_1())
+                    .child(self.where_facts(cx))
                     .children(self.meter(cx))
                     .children(self.handoff_button(cx))
                     .child(self.send_button(cx)),

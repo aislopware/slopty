@@ -36,6 +36,7 @@ Group │ Status
 Status │ e2e-worker
 Status │ 1 blocked
 Dialog │ Inbox (focused)
+TabList │ Views
 Tab │ Unread
 Tab │ All
 Button │ Mark all read

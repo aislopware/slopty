@@ -143,11 +143,11 @@ impl ThreadView {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .border_1()
+                    .border(kit::hair(theme))
                     .border_color(hsla(s.border))
                     .bg(hsla(s.elevated))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.raised)))
+                    .hover(move |el| el.bg(hsla(s.hover)))
                     .child(self.icon(IconName::ChevronDown, s.text_secondary))
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         this.list.scroll_to_end();
@@ -222,17 +222,13 @@ impl ThreadView {
                 .flex_col()
                 .max_h(max)
                 .overflow_y_scroll()
-                .when(parted, |el| el.border_t_1().border_color(hsla(s.border_subtle)))
-                .children(sections.into_iter().enumerate().map(|(ix, section)| {
-                    div()
-                        .w_full()
-                        .when(ix > 0, |el| el.border_t_1().border_color(hsla(s.border_subtle)))
-                        .child(section)
-                }))
+                .when(parted, |el| el.pt(self.z(theme.spacing.sm)))
+                .children(sections)
         });
         // Over the composer the tray is the card's head: as wide, its corners the composer's,
-        // and the composer's top edge the hairline between them, so one outline holds both and
-        // no row reads as cut by the composer. Alone, it is a card of its own.
+        // and the composer's top edge the one hairline between them, so one outline holds both
+        // and no row reads as cut by the composer. Alone, it is a card of its own. Inside, its
+        // parts stand apart by room and their rows' own height, never by a rule.
         let radius = self.z(if tucked { theme.radii.lg } else { theme.radii.md });
         Some(
             div()
@@ -244,17 +240,18 @@ impl ThreadView {
                 .flex_col()
                 .rounded_tl(radius)
                 .rounded_tr(radius)
-                .border_t_1()
-                .border_l_1()
-                .border_r_1()
+                .border_t(kit::hair(theme))
+                .border_l(kit::hair(theme))
+                .border_r(kit::hair(theme))
                 .when(!tucked, |el| {
-                    el.border_b_1()
+                    el.border_b(kit::hair(theme))
                         .rounded_bl(radius)
                         .rounded_br(radius)
                         .mb(self.z(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
-                .bg(hsla(s.raised))
+                .bg(hsla(s.hover))
+                .map(|el| kit::rests(el, theme, true, !tucked))
                 .overflow_hidden()
                 .children(request)
                 .children(rest)
@@ -536,7 +533,7 @@ impl ThreadView {
                 )
                 .child(
                     kit::tabular(div())
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(format!("{} of {of}", at.saturating_add(1)))),
                 )
@@ -590,7 +587,7 @@ impl ThreadView {
                     .children(counter.map(|c| {
                         kit::tabular(div())
                             .flex_none()
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(c))
                     }))
@@ -620,8 +617,8 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// A request's answers in a row of their own under a hairline, the quiet ones first and
-    /// the solid last, at the right.
+    /// A request's answers in a row of their own, the quiet ones first and the solid last, at
+    /// the right.
     pub(super) fn answers_row(&self, answers: Vec<AnyElement>) -> Div {
         let theme = &self.theme;
         div()
@@ -632,8 +629,6 @@ impl ThreadView {
             .justify_end()
             .gap(self.z(theme.spacing.xxs))
             .p(self.z(theme.spacing.xs))
-            .border_t_1()
-            .border_color(hsla(theme.surfaces.border_subtle))
             .children(answers)
     }
 
@@ -777,7 +772,7 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .text_size(self.z(self.theme.typography.meta()))
+                    .text_size(self.z(self.theme.typography.small()))
                     .text_color(hsla(if refused.is_some() { s.warn } else { s.text_muted }))
                     .child(SharedString::from(st))
             }))
@@ -850,14 +845,14 @@ impl ThreadView {
                         .text_ellipsis()
                         .whitespace_nowrap()
                         .font_family(self.mono())
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .children(last.map(|l| SharedString::from(l.trim().to_owned()))),
                 )
                 .child(
                     kit::tabular(div())
                         .flex_none()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(state)),
                 )
@@ -930,14 +925,14 @@ impl ThreadView {
                     .text_ellipsis()
                     .whitespace_nowrap()
                     .font_family(self.mono())
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .children(last.map(SharedString::from)),
             )
             .child(
                 kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(standing)),
             )

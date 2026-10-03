@@ -40,9 +40,6 @@ use crate::{add_worker, kit};
 /// tile (`miniature.rs`).
 pub(super) const SHAPES_BELOW: f32 = 0.5;
 
-/// The divider between neighbouring tiles: one hairline, whatever the zoom.
-const HAIRLINE: f32 = 1.0;
-
 /// The widest a page's address gets beside its title, in points at zoom 1: the title is what
 /// tells tiles apart, the address only says where.
 const HEADER_URL_MAX: f32 = 180.0;
@@ -851,7 +848,7 @@ impl WorkspaceView {
                 )
                 .when(takes_files, |el| {
                     el.drag_over::<ExternalPaths>(move |style, _, _, _| {
-                        style.border_1().border_color(hsla(accent))
+                        style.border(px(slopty_theme::stroke::EDGE)).border_color(hsla(accent))
                     })
                     .on_drop(cx.listener(
                         move |this, paths: &ExternalPaths, _w, cx| {
@@ -876,23 +873,28 @@ impl WorkspaceView {
         let rect = placed.rect;
         let (width, height) = (rect.w * placed.scale, rect.h * placed.scale);
         let (left, top) = (rect.x + (rect.w - width) / 2.0, rect.y + (rect.h - height) / 2.0);
-        let line = || div().absolute().opacity(placed.alpha).bg(hsla(self.theme.surfaces.border));
+        // Drawn as a border on an empty box: GPUI snaps a border to at least one device pixel,
+        // where a box half a point wide would round to nothing on a 1x screen.
+        let hair = self.theme.hair();
+        let line = || {
+            div().absolute().opacity(placed.alpha).border_color(hsla(self.theme.surfaces.border))
+        };
         let right = edges.right.then(|| {
             line()
                 .debug_selector(move || format!("divider-right-{}", id.as_uuid()))
-                .left(px(left + width - HAIRLINE))
+                .left(px(left + width - hair))
                 .top(px(top))
-                .w(px(HAIRLINE))
                 .h(px(height))
+                .border_l(px(hair))
                 .into_any_element()
         });
         let below = edges.below.then(|| {
             line()
                 .debug_selector(move || format!("divider-below-{}", id.as_uuid()))
                 .left(px(left))
-                .top(px(top + height - HAIRLINE))
+                .top(px(top + height - hair))
                 .w(px(width))
-                .h(px(HAIRLINE))
+                .border_t(px(hair))
                 .into_any_element()
         });
         right.into_iter().chain(below).collect()
@@ -1054,7 +1056,9 @@ impl WorkspaceView {
             .font_family(theme.typography.ui_family.clone())
             .cursor_grab()
             .bg(hsla(theme.content()))
-            .when(!shapes && foreign, |el| el.border_b_1().border_color(hsla(s.border_subtle)))
+            .when(!shapes && foreign, |el| {
+                el.border_b(kit::hair(theme)).border_color(hsla(s.border_subtle))
+            })
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -1108,6 +1112,7 @@ impl WorkspaceView {
                     .role(Role::Button)
                     .aria_label(INSTALL_HOOKS)
                     .aria_description(HOOKS_GIVE)
+                    .map(kit::hint_timing)
                     .tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::clone(&hint_theme);
                         cx.new(|_| kit::Hint::new(HOOKS_GIVE, "", theme)).into()
@@ -1185,7 +1190,7 @@ impl WorkspaceView {
                 .role(Role::Status)
                 .aria_label(SharedString::from(format!("{done} of {total} done")))
                 .flex_none()
-                .text_size(px(theme.typography.meta() * k))
+                .text_size(px(theme.typography.small() * k))
                 .text_color(hsla(s.text_muted))
                 .child(SharedString::from(note_count(done, total)))
                 .into_any_element()
@@ -1554,9 +1559,9 @@ impl WorkspaceView {
                     })
                     .map(|el| {
                         if shown {
-                            el.bg(hsla(s.raised))
+                            el.bg(hsla(s.hover))
                         } else {
-                            el.hover(move |el| el.bg(hsla(s.raised)))
+                            el.hover(move |el| el.bg(hsla(s.hover)))
                         }
                     })
                     .on_mouse_down(
@@ -1691,8 +1696,8 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.xxs * k))
                 .text_color(hsla(tone))
                 .cursor_pointer()
-                .hover(|el| el.bg(hsla(s.raised)))
-                .active(|el| el.bg(hsla(s.overlay)))
+                .hover(|el| el.bg(hsla(s.hover)))
+                .active(|el| el.bg(hsla(s.pressed)))
                 .child(
                     crate::icons::icon(theme, icon, IconSize::Inline, hsla(tone))
                         .size(px(theme.typography.small() * k)),
@@ -1723,6 +1728,7 @@ impl WorkspaceView {
                 .items_center()
                 .gap(px(theme.spacing.xxs * k))
                 .text_color(muted)
+                .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
                     let (hint, path) = (hint.clone(), path.clone());
                     let theme = std::rc::Rc::clone(&hint_theme);
@@ -1761,7 +1767,7 @@ impl WorkspaceView {
                     _ => format!("{number}"),
                 };
                 let tone = theme.surfaces.text_secondary;
-                let raised = theme.surfaces.raised;
+                let hover = theme.surfaces.hover;
                 let k = chrome.k;
                 // Words, not a chip: the header's one fill is the state's. The two ends share
                 // one corner, and each takes the hover fill alone under the pointer.
@@ -1775,7 +1781,7 @@ impl WorkspaceView {
                         .flex_none()
                         .rounded_none()
                         .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(raised)))
+                        .hover(move |el| el.bg(hsla(hover)))
                         .child(
                             ChromeText::new(label, px(theme.typography.small()), k)
                                 .zooming(chrome.zooming),
@@ -1850,6 +1856,7 @@ impl WorkspaceView {
         let toggle =
             kit::icon_toggle(theme, format!("mute-{}", id.as_uuid()), icon, MUTE, muted, chrome.k)
                 .aria_label(label)
+                .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
                     let theme = std::rc::Rc::clone(&hint_theme);
                     cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
@@ -2096,7 +2103,7 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let k = chrome.k;
         let item = tile.item;
-        let raised = s.raised;
+        let hover = s.hover;
         let took = SharedString::from(kit::duration(done.elapsed));
         let el = kit::tabular(div())
             .id("finished")
@@ -2106,11 +2113,11 @@ impl WorkspaceView {
             .flex_none()
             .px(px(theme.spacing.xs * k))
             .rounded(px(theme.radii.xs * k))
-            .text_size(px(theme.typography.meta() * k))
+            .text_size(px(theme.typography.small() * k))
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(raised)))
-            .child(ChromeText::new(took, px(theme.typography.meta()), k).zooming(chrome.zooming));
+            .hover(move |el| el.bg(hsla(hover)))
+            .child(ChromeText::new(took, px(theme.typography.small()), k).zooming(chrome.zooming));
         tab_stop(el, s.accent)
             .on_click(cx.listener(move |this, _ev, _window, cx| this.reveal_session(session, cx)))
             .into_any_element()
@@ -2298,7 +2305,7 @@ impl WorkspaceView {
                 .flex_none()
                 .text_color(hsla(tone))
                 .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.raised)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(ChromeText::new(label, px(theme.typography.small()), k));
             tab_stop(el, s.accent)
         };
@@ -2472,7 +2479,7 @@ impl WorkspaceView {
             .justify_center()
             .size(px(theme.typography.icon_large() * k))
             .rounded(px(theme.radii.xs * k))
-            .hover(|s| s.bg(hsla(theme.surfaces.raised)))
+            .hover(|s| s.bg(hsla(theme.surfaces.hover)))
             .cursor_grab()
             .on_mouse_down(
                 MouseButton::Left,
@@ -2616,7 +2623,7 @@ impl WorkspaceView {
             let mark = crate::icons::status_icon(
                 theme,
                 Status::Running,
-                px(theme.typography.icon_large() * k),
+                px(theme.typography.icon() * k),
                 hsla(s.text_muted),
             );
             let block = kit::notice(
@@ -2882,7 +2889,7 @@ fn pill(
     chrome: Chrome,
 ) -> Stateful<Div> {
     let k = chrome.k;
-    let (raised, pressed) = (theme.surfaces.raised, theme.surfaces.overlay);
+    let (hover, pressed) = (theme.surfaces.hover, theme.surfaces.pressed);
     let part: SharedString = part.into();
     let selector = format!("{part}-{}", item.as_uuid());
     kit::pill_frame(theme, k)
@@ -2891,7 +2898,7 @@ fn pill(
         .flex_none()
         .text_color(hsla(tone))
         .cursor_pointer()
-        .hover(move |el| el.bg(hsla(raised)))
+        .hover(move |el| el.bg(hsla(hover)))
         .active(move |el| el.bg(hsla(pressed)))
         .child(ChromeText::new(label, px(theme.typography.small()), k).zooming(chrome.zooming))
 }
@@ -2906,17 +2913,20 @@ pub(super) const fn title_ink(theme: &Theme, focused: bool) -> slopty_theme::Rgb
 
 /// The line along the top of the focused tile's header (or its column's shown tab) while
 /// several tiles are in view: a title's tone alone is too faint a sign across a strip of
-/// columns, so a 2 pt line in the text's tone says which one has the keyboard, set back a step
-/// and whole under Increase Contrast. No ring, no frame, no dimming of the others; a lone tile
-/// and the overview draw none.
+/// columns, so a line in the text's tone says which one has the keyboard. It is a marker, not a
+/// rule: `stroke::MARK` (1.5 pt) at `alpha::FOCUS`, inset by `radii.sm` at both ends with round
+/// caps, and whole under Increase Contrast. No ring, no frame, no dimming of the others; a lone
+/// tile and the overview draw none.
 fn focus_line(theme: &Theme, k: f32) -> Div {
-    let strength = theme.set_back(slopty_theme::alpha::STRONG);
+    let strength = theme.set_back(slopty_theme::alpha::FOCUS);
+    let inset = px(theme.radii.sm * k);
     div()
         .debug_selector(|| "focus-line".to_owned())
         .absolute()
         .top_0()
-        .left_0()
-        .right_0()
+        .left(inset)
+        .right(inset)
         .h(px(slopty_theme::stroke::MARK * k))
+        .rounded(px(theme.radii.full))
         .bg(crate::colors::hsla_alpha(theme.surfaces.text, strength))
 }

@@ -9,6 +9,7 @@
 use std::rc::Rc;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AppContext as _, Context, ElementId, InteractiveElement as _, IntoElement, ParentElement as _,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div,
@@ -137,6 +138,7 @@ impl Render for Rail {
                             el.bg(hsla(s.text_muted)).w(self.z(theme.spacing.md))
                         }),
                 )
+                .map(kit::hint_timing)
                 .tooltip(move |_window, cx| {
                     let (hint, theme) = (hint.clone(), Rc::clone(&hint_theme));
                     cx.new(|_| kit::Hint::new(hint, "", theme)).into()

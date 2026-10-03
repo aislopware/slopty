@@ -724,7 +724,7 @@ impl WorkspaceView {
             .when(waiting, |el| el.aria_description(SHOW_PROMPT))
             .when_some(ask, |el, ask| {
                 let theme = std::rc::Rc::new(theme.clone());
-                el.tooltip(move |_window, cx| {
+                crate::kit::hint_timing(el).tooltip(move |_window, cx| {
                     let (ask, theme) = (ask.clone(), std::rc::Rc::clone(&theme));
                     cx.new(|_| crate::kit::Hint::new(ask, "", theme)).into()
                 })
@@ -788,7 +788,7 @@ impl WorkspaceView {
             .aria_label(SharedString::from(full))
             .when_some(ask, |el, ask| {
                 let theme = std::rc::Rc::new(theme.clone());
-                el.tooltip(move |_window, cx| {
+                crate::kit::hint_timing(el).tooltip(move |_window, cx| {
                     let (ask, theme) = (ask.clone(), std::rc::Rc::clone(&theme));
                     cx.new(|_| crate::kit::Hint::new(ask, "", theme)).into()
                 })

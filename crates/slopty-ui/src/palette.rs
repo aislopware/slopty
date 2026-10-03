@@ -238,7 +238,7 @@ impl Plate {
     ) -> E {
         let glide = Rc::clone(&self.0);
         let key = key_of(key);
-        let fill = hsla(theme.surfaces.overlay);
+        let fill = hsla(theme.surfaces.selected);
         let radius = px(theme.radii.sm);
         row.child(
             gpui::canvas(
@@ -277,9 +277,36 @@ impl Plate {
         moves: bool,
         now: Option<Instant>,
     ) -> impl IntoElement + use<> {
-        let glide = Rc::clone(&self.0);
-        let fill = hsla(theme.surfaces.overlay);
+        let fill = hsla(theme.surfaces.selected);
         let radius = px(theme.radii.sm);
+        self.under_painted(moves, now, move |plate, window| {
+            window.paint_quad(gpui::fill(plate, fill).corner_radii(radius));
+        })
+    }
+
+    /// [`Self::under`] as a segmented control's thumb ([`crate::kit::paint_thumb`]): the
+    /// raised surface sliding from option to option.
+    /// `moves` and `now` as for [`Self::under_on`].
+    pub(crate) fn under_thumb(
+        &self,
+        theme: &Theme,
+        moves: bool,
+        now: Option<Instant>,
+    ) -> impl IntoElement + use<> {
+        let theme = theme.clone();
+        self.under_painted(moves, now, move |plate, window| {
+            crate::kit::paint_thumb(&theme, plate, window);
+        })
+    }
+
+    /// The plate laid under the rows, drawn by `paint` where it stands this frame.
+    fn under_painted<P: Fn(Bounds<Pixels>, &mut Window) + 'static>(
+        &self,
+        moves: bool,
+        now: Option<Instant>,
+        paint: P,
+    ) -> impl IntoElement + use<P> {
+        let glide = Rc::clone(&self.0);
         gpui::canvas(
             |_, _, _| {},
             move |region, (), window, cx| {
@@ -293,7 +320,7 @@ impl Plate {
                     return;
                 }
                 window.with_content_mask(Some(gpui::ContentMask { bounds: region }), |window| {
-                    window.paint_quad(gpui::fill(plate, fill).corner_radii(radius));
+                    paint(plate, window);
                 });
                 if glide.flight.is_some() {
                     window.request_animation_frame();
@@ -452,7 +479,7 @@ fn legend(theme: &Theme, verb: &'static str) -> gpui::Stateful<gpui::Div> {
         .flex()
         .items_center()
         .gap(px(theme.spacing.md))
-        .bg(hsla(s.raised))
+        .bg(hsla(s.hover))
         .rounded_b(px(inner))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_muted))
@@ -1751,7 +1778,7 @@ impl CommandPalette {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let pad = list_pad(theme);
-        let overlay = s.overlay;
+        let pressed = s.pressed;
         let icon_ink = if chosen { s.text_secondary } else { s.text_muted };
         let trailing = item.trailing().filter(|_| self.chords || !item.is_chord());
         let places =
@@ -1791,7 +1818,7 @@ impl CommandPalette {
             // on the edge grid.
             .mx(px(pad))
             .cursor_pointer()
-            .active(move |st| st.bg(hsla(overlay)))
+            .active(move |st| st.bg(hsla(pressed)))
             .on_mouse_move(cx.listener(move |this, _ev, _window, cx| this.point_at(ix, cx)))
             .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
             .on_click(cx.listener(move |this, _ev, _window, cx| {
@@ -1863,29 +1890,30 @@ impl CommandPalette {
         }
     }
 
-    /// Stop taking the keys and the pointer and draw the way out: a fade on a desktop, the sheet
-    /// back up on a phone, each in three quarters of its way in. How long that takes, for the
-    /// owner to keep drawing it before dropping it; nothing under Reduce Motion.
+    /// Stop taking the keys and the pointer and draw the way out: on a desktop a fade on
+    /// [`Pace::Exit`], as every overlay leaves; on a phone the sheet back up in three quarters of
+    /// its way in. How long that takes, for the owner to keep drawing it before dropping it;
+    /// nothing under Reduce Motion.
     pub fn leave(&mut self, cx: &mut Context<Self>) -> Duration {
         self.leaving = true;
         cx.notify();
         if !crate::kit::motion(cx) {
             return Duration::ZERO;
         }
-        leaving_time(if self.sheet { Pace::Sheet } else { Pace::Fade })
+        if self.sheet { sheet_leaving_time() } else { Pace::Exit.duration() }
     }
 }
 
-/// How long a sheet or the palette takes to leave: three quarters of its way in, since what is
+/// How long the phone's sheet takes to go back up: three quarters of its way in, since what is
 /// dismissed is no longer looked at.
-fn leaving_time(pace: Pace) -> Duration {
-    pace.duration().mul_f32(0.75)
+fn sheet_leaving_time() -> Duration {
+    Pace::Sheet.duration().mul_f32(0.75)
 }
 
-/// The one-shot animation of leaving on `pace`: [`leaving_time`] on its curve.
-fn leaving(pace: Pace) -> gpui::Animation {
-    let curve = pace.curve();
-    gpui::Animation::new(leaving_time(pace)).with_easing(move |t| curve.at(t))
+/// The one-shot animation of the sheet leaving: [`sheet_leaving_time`] on a sheet's curve.
+fn sheet_leaving() -> gpui::Animation {
+    let curve = Pace::Sheet.curve();
+    gpui::Animation::new(sheet_leaving_time()).with_easing(move |t| curve.at(t))
 }
 
 impl Render for CommandPalette {
@@ -2005,7 +2033,7 @@ impl Render for CommandPalette {
             (leave_panel(panel, sheet, cx), scrim.map(|scrim| leave_scrim(scrim, cx)))
         } else {
             let panel = if self.fades_in || sheet {
-                enter_panel(panel, sheet, &theme, cx)
+                enter_panel(panel, sheet, cx)
             } else {
                 panel.into_any_element()
             };
@@ -2043,17 +2071,13 @@ impl Render for CommandPalette {
     }
 }
 
-/// The palette arriving. On a desktop it rises the base unit into place as it fades in; the
-/// phone's sheet comes down its whole height from the window's top edge, on a sheet's time and
-/// curve. The field has the keys from the first frame either way: only paint moves.
-fn enter_panel(
-    panel: gpui::Stateful<gpui::Div>,
-    sheet: bool,
-    theme: &Theme,
-    cx: &App,
-) -> gpui::AnyElement {
+/// The palette arriving. On a desktop it fades in where it stands, with no travel: it is a
+/// surface for the keyboard, and what the keyboard summons does not move. The phone's sheet
+/// comes down its whole height from the window's top edge, on a sheet's time and curve. The
+/// field has the keys from the first frame either way: only paint moves.
+fn enter_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
     if !sheet {
-        return crate::kit::slide_fade(panel, "palette-open", theme.spacing.xs, Pace::Fade, cx);
+        return crate::kit::fade_in(panel, "palette-open", cx);
     }
     if !crate::kit::motion(cx) {
         return panel.into_any_element();
@@ -2066,8 +2090,9 @@ fn enter_panel(
         .into_any_element()
 }
 
-/// The palette leaving: on a desktop it fades where it is, with no travel; the sheet goes back
-/// up. Under Reduce Motion it is gone at once, as its owner drops it at once.
+/// The palette leaving: on a desktop it fades where it is on [`Pace::Exit`], with no travel;
+/// the sheet goes back up. Under Reduce Motion it is gone at once, as its owner drops it at
+/// once.
 fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui::AnyElement {
     if !crate::kit::motion(cx) {
         return panel.opacity(0.0).into_any_element();
@@ -2075,13 +2100,13 @@ fn leave_panel(panel: gpui::Stateful<gpui::Div>, sheet: bool, cx: &App) -> gpui:
     if sheet {
         panel
             .relative()
-            .with_animation("palette-sheet-out", leaving(Pace::Sheet), |el, t| {
+            .with_animation("palette-sheet-out", sheet_leaving(), |el, t| {
                 el.top(gpui::relative(-t))
             })
             .into_any_element()
     } else {
         panel
-            .with_animation("palette-close", leaving(Pace::Fade), |el, t| el.opacity(1.0 - t))
+            .with_animation("palette-close", Pace::Exit.animation(), |el, t| el.opacity(1.0 - t))
             .into_any_element()
     }
 }
@@ -2102,7 +2127,7 @@ fn leave_scrim(scrim: gpui::Div, cx: &App) -> gpui::AnyElement {
         return scrim.opacity(0.0).into_any_element();
     }
     scrim
-        .with_animation("palette-scrim-out", leaving(Pace::Sheet), |el, t| el.opacity(1.0 - t))
+        .with_animation("palette-scrim-out", sheet_leaving(), |el, t| el.opacity(1.0 - t))
         .into_any_element()
 }
 
@@ -2374,13 +2399,14 @@ mod tests {
         );
     }
 
-    /// The palette leaves in three quarters of its way in, a fade on a desktop and the sheet on
-    /// a phone, and at once under Reduce Motion; once leaving, it runs nothing more.
+    /// The palette leaves quicker than it came: a fade on the exit pace on a desktop, as every
+    /// overlay leaves, and the sheet in three quarters of its way in on a phone; at once under
+    /// Reduce Motion. Once leaving, it runs nothing more.
     #[gpui::test]
     fn the_palette_leaves_quicker_than_it_came(cx: &mut TestAppContext) {
         let (palette, cx) = palette_of(2, cx);
         let fade = palette.update(cx, CommandPalette::leave);
-        assert_eq!(fade, Pace::Fade.duration().mul_f32(0.75), "90 ms");
+        assert_eq!(fade, Pace::Exit.duration(), "100 ms");
         assert!(fade < Pace::Fade.duration());
         let sheet = palette.update(cx, |p, cx| {
             p.sheet = true;

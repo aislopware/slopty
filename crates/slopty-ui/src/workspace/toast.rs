@@ -356,7 +356,7 @@ impl WorkspaceView {
             .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
             // The selection's fill, which stands off the bar in both variants: a notice is
             // a thing on the bar, not one more of its readouts.
-            .bg(hsla(s.overlay))
+            .bg(hsla(s.selected))
             .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
             .children(icon.map(|icon| {

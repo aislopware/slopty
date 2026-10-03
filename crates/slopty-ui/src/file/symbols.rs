@@ -225,7 +225,7 @@ impl FileView {
                                         .role(Role::ListItem)
                                         .aria_label(SharedString::from(symbol.name.clone()))
                                         .when(ix == chosen, |el| {
-                                            el.bg(hsla(s.raised)).aria_selected(true)
+                                            el.bg(hsla(s.hover)).aria_selected(true)
                                         })
                                         .child(
                                             div()

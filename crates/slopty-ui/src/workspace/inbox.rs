@@ -422,9 +422,12 @@ impl WorkspaceView {
     }
 
     /// The popover's panel, dropping the base unit from the bell as it fades in; opened by a
-    /// key, whole in its first frame.
-    pub(super) fn render_inbox(&self, cx: &Context<Self>) -> gpui::AnyElement {
+    /// key, whole in its first frame. Once `leaving`, fading out where it is.
+    pub(super) fn render_inbox(&self, leaving: bool, cx: &Context<Self>) -> gpui::AnyElement {
         let panel = self.inbox_panel(cx);
+        if leaving {
+            return kit::fade_out(panel.debug_selector(|| "inbox-leaving".to_owned()), "inbox-out");
+        }
         if self.menu_keyed {
             return panel.into_any_element();
         }
@@ -501,8 +504,8 @@ impl WorkspaceView {
             )
     }
 
-    /// The head: the Unread and All views, and "Mark all read" while anything is unread. Their
-    /// words sit on the edge grid; their fills a base unit in, as the rows' do.
+    /// The head: the Unread and All views as a segmented control, its thumb sliding to the
+    /// view chosen, and "Mark all read" while anything is unread.
     fn inbox_head(&self, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -516,18 +519,16 @@ impl WorkspaceView {
                 .debug_selector(move || id.to_owned())
                 .role(Role::Tab)
                 .aria_label(label)
+                .h_full()
                 .flex()
                 .items_center()
                 .gap(px(spacing.xs))
-                .px(px(pad))
-                .py(px(spacing.xxs))
-                .rounded(px(theme.radii.sm))
+                .px(px(spacing.sm))
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
                 .when(on, |el| self.inbox.plate.mark(el.text_color(hsla(s.text)), id))
                 .when(!on, |el| {
-                    el.text_color(hsla(s.text_muted))
-                        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                    el.text_color(hsla(s.text_muted)).hover(move |el| el.text_color(hsla(s.text)))
                 })
                 .child(label)
                 .children(count.filter(|n| *n > 0).map(|n| {
@@ -549,7 +550,8 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .text_size(px(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
-                .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                 .child(MARK_ALL_READ);
             tab_stop(el, s.accent).on_click(cx.listener(|this, _ev, _w, cx| this.mark_all_read(cx)))
         });
@@ -558,18 +560,34 @@ impl WorkspaceView {
             .flex()
             .items_center()
             .gap(px(spacing.xxs))
-            .px(px(spacing.xs))
+            .px(px(kit::sheet_pad(theme)))
             .py(px(spacing.xs))
-            .border_b_1()
+            .border_b(kit::hair(theme))
             .border_color(hsla(s.border_subtle))
-            .child(self.inbox.plate.under_on(theme, true, Some(self.clock_instant())))
             .child(
-                tab("inbox-unread", "Unread", !all, Some(unread))
-                    .on_click(cx.listener(|this, _ev, _w, cx| this.show_inbox_all(false, cx))),
-            )
-            .child(
-                tab("inbox-all", "All", all, None)
-                    .on_click(cx.listener(|this, _ev, _w, cx| this.show_inbox_all(true, cx))),
+                div()
+                    .id("inbox-views")
+                    .role(Role::TabList)
+                    .aria_label("Views")
+                    .relative()
+                    .flex_none()
+                    .h(px(theme.density.control))
+                    .flex()
+                    .items_center()
+                    .p(px(kit::TRACK_PAD))
+                    .rounded(px(theme.radii.sm))
+                    .bg(hsla(s.hover))
+                    .child(self.inbox.plate.under_thumb(theme, true, Some(self.clock_instant())))
+                    .child(
+                        tab("inbox-unread", "Unread", !all, Some(unread)).on_click(
+                            cx.listener(|this, _ev, _w, cx| this.show_inbox_all(false, cx)),
+                        ),
+                    )
+                    .child(
+                        tab("inbox-all", "All", all, None).on_click(
+                            cx.listener(|this, _ev, _w, cx| this.show_inbox_all(true, cx)),
+                        ),
+                    ),
             )
             .child(div().flex_1())
             .children(mark_all)
@@ -615,7 +633,8 @@ impl WorkspaceView {
                 .cursor_pointer()
                 .invisible()
                 .group_hover(group.clone(), gpui::Styled::visible)
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(icon(theme, IconName::Check, IconSize::Inline, hsla(s.text_secondary)));
             tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
                 cx.stop_propagation();
@@ -694,8 +713,8 @@ impl WorkspaceView {
             .items_center()
             .cursor_pointer()
             // The keyboard's row sits on the selection's fill, a step over the pointer's.
-            .when(selected, |el| el.bg(hsla(s.overlay)))
-            .when(!selected, |el| el.hover(move |el| el.bg(hsla(s.raised))))
+            .when(selected, |el| el.bg(hsla(s.selected)))
+            .when(!selected, |el| kit::eased(el).hover(move |el| el.bg(hsla(s.hover))))
             .child(
                 div()
                     .flex_1()
@@ -755,7 +774,8 @@ impl WorkspaceView {
                 .rounded(px(theme.radii.xs))
                 .cursor_pointer()
                 .text_color(hsla(ink))
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(label);
             tab_stop(el, s.accent)
         };

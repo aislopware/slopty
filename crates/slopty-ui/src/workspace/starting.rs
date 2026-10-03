@@ -311,8 +311,8 @@ impl WorkspaceView {
                 let mark = crate::icons::status_icon(
                     theme,
                     Status::Working,
-                    px(theme.typography.icon_large() * k),
-                    hsla(s.text_muted),
+                    px(theme.typography.icon() * k),
+                    hsla(s.text_secondary),
                 );
                 let said = SharedString::from(format!("Starting {label} {place}\u{2026}"));
                 kit::notice(theme, k, mark, format!("Starting {label}"), Some(place.into()))
@@ -375,7 +375,7 @@ impl WorkspaceView {
             .gap(px(theme.spacing.sm * k))
             .p(px(theme.spacing.md * k))
             .rounded(px(theme.radii.lg * k))
-            .child(div().text_size(px(theme.typography.prose() * k)).child(field.view.clone()))
+            .child(div().text_size(px(theme.typography.title() * k)).child(field.view.clone()))
             .child(
                 div()
                     .ml(px(kit::FIELD_INSET))

@@ -93,7 +93,7 @@ fn remove_button(
         .on_click(remove)
         .child(
             crate::icons::icon(theme, IconName::X, IconSize::Inline, hsla(s.text_muted))
-                .size(px(theme.typography.meta() * zoom)),
+                .size(px(theme.typography.small() * zoom)),
         );
     crate::a11y::tab_stop(button, s.accent).into_any_element()
 }
@@ -115,7 +115,7 @@ fn picture_chip(
         .right(z(theme.spacing.xxs))
         .rounded_full()
         .overflow_hidden()
-        .hover(move |el| el.bg(hsla(s.raised)))
+        .hover(move |el| el.bg(hsla(s.hover)))
         .child(remove_button(theme, chip, z(theme.typography.icon_large()), zoom, remove));
     let progress = (!chip.landed()).then(|| {
         div()
@@ -137,9 +137,9 @@ fn picture_chip(
         .size(z(THUMBNAIL))
         .rounded(z(theme.radii.sm))
         .overflow_hidden()
-        .border_1()
+        .border(kit::hair(theme))
         .border_color(hsla(s.border_subtle))
-        .bg(hsla(s.raised))
+        .bg(hsla(s.hover))
         .child(img(picture).size_full().object_fit(ObjectFit::Cover))
         .children(progress)
         .child(disc)
@@ -165,7 +165,7 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
         .max_w(z(ATTACHMENT_WIDTH))
         // The way off sits in the pill's own end, a pad's width from its edge.
         .pr(z(theme.spacing.xxs))
-        .bg(hsla(s.raised))
+        .bg(hsla(s.hover))
         .text_color(hsla(s.text_secondary))
         .child(
             crate::icons::icon(theme, IconName::File, IconSize::Inline, hsla(s.text_muted))
@@ -182,7 +182,7 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
         .child(
             div()
                 .rounded(z(theme.radii.xs))
-                .hover(move |el| el.bg(hsla(s.overlay)))
+                .hover(move |el| el.bg(hsla(s.hover)))
                 .child(remove_button(theme, chip, z(side), zoom, remove)),
         )
         .into_any_element()

@@ -47,7 +47,7 @@ impl Ink<'_> {
         self.code()
             .overflow_hidden()
             .rounded(self.z(self.theme.radii.sm))
-            .border_1()
+            .border(crate::kit::hair(self.theme))
             .border_color(hsla(self.theme.surfaces.border_subtle))
     }
 
@@ -162,7 +162,7 @@ impl Ink<'_> {
             .w_full()
             .flex()
             .child(side(old, |l| l.old))
-            .child(div().flex_none().w(px(1.0)).bg(hsla(self.theme.surfaces.border_subtle)))
+            .child(crate::kit::rule_v(self.theme, self.theme.surfaces.border_subtle))
             .child(side(new, |l| l.new))
     }
 
@@ -175,10 +175,10 @@ impl Ink<'_> {
             .w_full()
             .px(self.z(self.theme.spacing.sm))
             .py(self.z(self.theme.spacing.xxs))
-            .border_y_1()
+            .border_y(crate::kit::hair(self.theme))
             .border_color(hsla(s.border_subtle))
             .text_color(hsla(s.text_muted))
-            .text_size(self.z(self.theme.typography.meta()))
+            .text_size(self.z(self.theme.typography.small()))
             .overflow_hidden()
             .text_ellipsis()
             .whitespace_nowrap()
