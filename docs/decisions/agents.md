@@ -1167,9 +1167,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     policy is added to, never replaced. Set empty, they name no terminal, and the CLI speaks
     as an agent, never for the person.
   - A daemon the worker starts gets none of them.
-  - Codex ignores `config` for a thread already loaded. A thread the person's TUI starts on a
-    daemon their shell started is not covered by this. Covering it needs the shell
-    integration to start the daemon without those variables.
+  - Codex ignores `config` for a thread already loaded, and a thread the person's TUI starts
+    gets none. So a `codex` typed in a Slopty shell runs without the four variables too: the
+    shell integration wraps it in `env -u` in zsh, bash and fish, as it wraps `claude`, and the
+    daemon it starts has no terminal to lend. A `codex` of the person's own is left alone.
+    Test: `a_typed_codex_runs_as_no_terminal` (a stand-in `codex`).
   - Tests: the start, resume and fork parameters in
     `a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn`,
     `a_rested_thread_nobody_follows_is_let_go_and_taken_up_again` and
@@ -1186,8 +1188,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     model went on in after an error completes. A limit with no quota recorded resets when the
     status line's full window does.
   - The main thread's done after a failed turn is a failure (`Phase::Failed`), whichever of
-    the hook and the transcript is heard first. The terminal's agent badge (`AgentStatus`)
-    still says done, since it has no failed state.
+    the hook and the transcript is heard first.
+  - The terminal's agent status says it too: `StopFailure` is `AgentStatus::Failed { error,
+    until_ms }`, at rest like done and with the same attention. For a `rate_limit`, `until_ms`
+    is when the full windows the status line last showed reset. Every reader that waits for an
+    agent at rest takes it as one. Tests: `a_stop_failure_fails_the_turn_until_a_limit_resets`,
+    `the_status_maps_to_a_phase`, and the golden `worker_agent_failed`.
   - Codex's `usageLimitExceeded` and `rateLimitExceeded`, once Codex gives up, fail the turn
     until its full window resets (`account/rateLimits/updated`).
   - Tests: `a_turn_a_usage_limit_stopped_fails_until_it_resets` (Claude Code and Codex) and

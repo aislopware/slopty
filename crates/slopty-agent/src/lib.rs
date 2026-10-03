@@ -699,6 +699,9 @@ pub struct Tracker {
     /// After a prompt (`UserPromptSubmit`) the transcript has not taken yet: how many probes in a
     /// row the title has said idle since.
     unwritten: Option<u8>,
+    /// When the status line's full usage windows reset, as it last said: what a turn a limit
+    /// stopped waits for.
+    limit_resets: Option<WallMs>,
 }
 
 /// `found` cut to what one [`AgentReport::Loosened`] carries.
@@ -722,7 +725,7 @@ const fn phase(status: &AgentStatus) -> u8 {
         AgentStatus::Idle => 1,
         AgentStatus::Working | AgentStatus::Tool { .. } => 2,
         AgentStatus::Blocked(_) => 3,
-        AgentStatus::Done => 4,
+        AgentStatus::Done | AgentStatus::Failed { .. } => 4,
         AgentStatus::Waiting { .. } => 5,
     }
 }
@@ -747,6 +750,7 @@ impl Default for Tracker {
             mode_ms: WallMs::ZERO,
             loosened: None,
             unwritten: None,
+            limit_resets: None,
         }
     }
 }
@@ -798,8 +802,15 @@ impl Tracker {
     /// otherwise post its whole hook set here. It takes over only when this agent is at rest
     /// (a restart after a crash) or when the human started it (`/clear`, `/resume`).
     pub fn apply(&mut self, session: SessionId, hook: &Hook) -> Option<AgentEvent> {
-        // The status line's meters ride the hook path but say nothing about the turn.
-        if hook.event == HookEvent::Statusline || !self.owns(hook) {
+        // The status line's meters ride the hook path but say nothing about the turn, only when
+        // a limit it stops on resets.
+        if hook.event == HookEvent::Statusline {
+            if let Some(meters) = &hook.meters {
+                self.limit_resets = statusline::full_resets(meters);
+            }
+            return None;
+        }
+        if !self.owns(hook) {
             return None;
         }
         self.hooked = true;
@@ -842,7 +853,7 @@ impl Tracker {
         let was_blocked = matches!(self.status, AgentStatus::Blocked(_));
         let attention = match status {
             AgentStatus::Blocked(_) => !was_blocked,
-            AgentStatus::Done => true,
+            AgentStatus::Done | AgentStatus::Failed { .. } => true,
             _ => false,
         };
         if status == self.status && detail == self.detail && self.source == AgentSource::Hook {
@@ -1089,8 +1100,7 @@ impl Tracker {
         if mine == theirs {
             return true;
         }
-        let at_rest =
-            matches!(self.status, AgentStatus::None | AgentStatus::Idle | AgentStatus::Done);
+        let at_rest = self.status.at_rest();
         let by_the_human =
             hook.event == HookEvent::SessionStart && hook.source.as_deref() != Some("startup");
         at_rest || by_the_human
@@ -1199,9 +1209,14 @@ impl Tracker {
                 }
                 None => (AgentStatus::Done, hook.last_said()),
             },
-            // A turn that ended on an API error ends as surely as one that finished; the detail is
-            // the error as shown.
-            HookEvent::StopFailure => (AgentStatus::Done, hook.last_said()),
+            // A turn that ended on an API error ends as surely as one that finished, but failed:
+            // the detail is the error as shown, and a limit waits for the full window to reset.
+            HookEvent::StopFailure => {
+                let error = hook.error.clone().filter(|e| !e.is_empty());
+                let error = error.unwrap_or_else(|| "unknown".to_owned());
+                let until_ms = (error == AgentStatus::RATE_LIMIT).then_some(self.limit_resets);
+                (AgentStatus::Failed { error, until_ms: until_ms.flatten() }, hook.last_said())
+            }
             // Any program's own word (`slopty hook report`): a wrapper around another agent
             // gets the same pill, badge and attention as Claude Code's hooks buy it.
             HookEvent::Report => {
@@ -1541,6 +1556,41 @@ mod tests {
 
     fn hook(json: &str) -> Hook {
         Hook::parse(json).expect("hook json")
+    }
+
+    /// A turn that ended on an API error fails, with attention, by the error's kind; a limit
+    /// waits for the full window the status line last showed to reset, and the agent is at rest
+    /// for whatever comes next.
+    #[test]
+    fn a_stop_failure_fails_the_turn_until_a_limit_resets() {
+        let sid = SessionId::new();
+        let mut t = Tracker::default();
+        let statusline = hook(
+            r#"{"hook_event_name":"Statusline","meters":{"model":null,"model_id":null,
+            "context_used_pct":null,"context_window":null,"cost_usd":null,
+            "five_hour":{"used_pct":100.0,"resets_at":1790018000},
+            "seven_day":{"used_pct":40.0,"resets_at":1790500000}}}"#,
+        );
+        assert_eq!(t.apply(sid, &statusline), None, "the meters say nothing of the turn");
+        let prompt = hook(r#"{"hook_event_name":"UserPromptSubmit","session_id":"s1"}"#);
+        t.apply(sid, &prompt);
+        let failure = |error: &str| {
+            hook(&format!(
+                r#"{{"hook_event_name":"StopFailure","session_id":"s1","error":"{error}",
+                "last_assistant_message":"You've hit your limit"}}"#
+            ))
+        };
+        let e = t.apply(sid, &failure("rate_limit")).expect("failed");
+        let until_ms = Some(WallMs::from_millis(1_790_018_000_000));
+        assert_eq!(e.status, AgentStatus::Failed { error: "rate_limit".to_owned(), until_ms });
+        assert!(e.attention);
+        assert!(e.status.at_rest());
+        t.apply(sid, &prompt);
+        let e = t.apply(sid, &failure("overloaded")).expect("failed");
+        assert_eq!(
+            e.status,
+            AgentStatus::Failed { error: "overloaded".to_owned(), until_ms: None }
+        );
     }
 
     /// `slopty hook report` speaks for any program: the five words walk the pill, a block

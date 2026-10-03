@@ -294,8 +294,8 @@ mod golden {
         );
     }
 
-    /// A turn paused on background work, and the pull request and worktree its status line
-    /// names.
+    /// A turn paused on background work, one a usage limit stopped, and the pull request and
+    /// worktree its status line names.
     #[test]
     fn agent_waiting_and_branch() {
         use slopty_proto::agent::{
@@ -311,6 +311,23 @@ mod golden {
                 agent_session: Some("6f1b".to_owned()),
                 detail: Some("Sleep then print a marker".to_owned()),
                 attention: false,
+                source: AgentSource::Hook,
+                since_ms: WallMs::from_millis(1_790_000_060_000),
+                mode: None,
+            }),
+        );
+        snap(
+            "worker_agent_failed",
+            &WorkerMsg::Agent(AgentEvent {
+                session: session(),
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Failed {
+                    error: AgentStatus::RATE_LIMIT.to_owned(),
+                    until_ms: Some(WallMs::from_millis(1_790_018_000_000)),
+                },
+                agent_session: Some("6f1b".to_owned()),
+                detail: Some("You've hit your limit".to_owned()),
+                attention: true,
                 source: AgentSource::Hook,
                 since_ms: WallMs::from_millis(1_790_000_060_000),
                 mode: None,

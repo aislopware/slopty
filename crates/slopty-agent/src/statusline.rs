@@ -21,7 +21,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use slopty_core::shell_quote;
+use slopty_core::{WallMs, shell_quote};
 use slopty_proto::agent::{PullRequest, Review, Worktree};
 
 use crate::{Hook, HookEvent};
@@ -52,6 +52,22 @@ pub fn meters(status: &Value) -> Meters {
         five_hour: window("five_hour"),
         seven_day: window("seven_day"),
     }
+}
+
+/// When every usage window `meters` shows full has reset: the latest of their resets. `None`
+/// when none is full, or a full one says no reset.
+#[must_use]
+pub fn full_resets(meters: &Meters) -> Option<WallMs> {
+    let full: Vec<Option<u64>> = [meters.five_hour, meters.seven_day]
+        .into_iter()
+        .flatten()
+        .filter(|w| w.used_pct >= 100.0)
+        .map(|w| w.resets_at)
+        .collect();
+    if full.is_empty() || full.iter().any(Option::is_none) {
+        return None;
+    }
+    full.into_iter().flatten().max().map(|s| WallMs::from_millis(s.saturating_mul(1000)))
 }
 
 /// The open pull request (or GitLab merge request) in a status-line input: `pr`, present

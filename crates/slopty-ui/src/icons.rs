@@ -508,6 +508,7 @@ impl Status {
             AgentStatus::Working | AgentStatus::Tool { .. } => Self::Working,
             AgentStatus::Blocked(_) => Self::NeedsYou,
             AgentStatus::Done => Self::Done,
+            AgentStatus::Failed { .. } => Self::Failed,
         })
     }
 

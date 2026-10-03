@@ -347,6 +347,7 @@ fn the_status_maps_to_a_phase() {
             Phase::NeedsYou,
         ),
         (AgentStatus::Done, Phase::Done),
+        (AgentStatus::Failed { error: "overloaded".to_owned(), until_ms: None }, Phase::Failed),
         (AgentStatus::Waiting { tasks: 2, crons: 0 }, Phase::Waiting),
         (AgentStatus::None, Phase::Idle),
     ];

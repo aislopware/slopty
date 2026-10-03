@@ -742,6 +742,7 @@ const fn follows(status: &AgentStatus) -> Option<TaskState> {
         AgentStatus::Blocked(BlockReason::IdlePrompt)
         | AgentStatus::Idle
         | AgentStatus::Done
+        | AgentStatus::Failed { .. }
         | AgentStatus::Waiting { .. } => Some(TaskState::Waiting),
         AgentStatus::Blocked(_) => Some(TaskState::Blocked),
     }

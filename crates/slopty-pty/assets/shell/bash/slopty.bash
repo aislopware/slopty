@@ -238,6 +238,18 @@ if [ -n "${SLOPTY_CLI-}" ] && [ -x "$SLOPTY_CLI" ] && ! declare -F claude >/dev/
     }
 fi
 
+# `codex` runs without what names this terminal (SLOPTY_SESSION, its token, SLOPTY_PROJECT and
+# SLOPTY_TASK). Codex's app-server daemon, which the first `codex` starts, keeps its starter's
+# environment for every thread's commands, so a daemon started here would have every Codex
+# thread, whoever started it, speak as this terminal. A `codex` of the user's own (an alias
+# or a function) is left alone.
+if [ -n "${SLOPTY_SESSION-}" ] && ! declare -F codex >/dev/null && ! alias codex >/dev/null 2>&1; then
+    function codex {
+        command env -u SLOPTY_SESSION -u SLOPTY_SESSION_TOKEN -u SLOPTY_PROJECT -u SLOPTY_TASK \
+            codex "$@"
+    }
+fi
+
 # `ssh` keeps a terminal the far side knows (ghostty's `ssh-env` and `ssh-terminfo`): `slopty
 # ssh` installs our terminfo entry on the host once, else the session gets xterm-256color, and
 # SLOPTY_NO_SSH_TERMINFO=1 leaves every host untouched. An `ssh` of the user's own (an alias or

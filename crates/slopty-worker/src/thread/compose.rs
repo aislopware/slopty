@@ -251,6 +251,7 @@ impl Composer {
                     agent.status,
                     AgentStatus::Idle
                         | AgentStatus::Done
+                        | AgentStatus::Failed { .. }
                         | AgentStatus::Waiting { .. }
                         | AgentStatus::Blocked(BlockReason::IdlePrompt)
                 )

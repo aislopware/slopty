@@ -466,6 +466,7 @@ impl Observed {
             AgentStatus::Done | AgentStatus::Blocked(BlockReason::IdlePrompt) => {
                 (Phase::Done, None, Liveness::Live)
             }
+            AgentStatus::Failed { .. } => (Phase::Failed, None, Liveness::Live),
             AgentStatus::Blocked(reason) => {
                 let (kind, text) = match reason {
                     BlockReason::Permission { tool } => {

@@ -504,6 +504,7 @@ impl ConversationView {
             AgentStatus::None
             | AgentStatus::Idle
             | AgentStatus::Done
+            | AgentStatus::Failed { .. }
             | AgentStatus::Waiting { .. } => false,
         })
     }

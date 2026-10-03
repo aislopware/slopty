@@ -950,6 +950,58 @@ mod tests {
         }
     }
 
+    /// A typed `codex` runs with nothing that names the terminal, its arguments as typed and the
+    /// rest of the environment kept, in every shell, so a Codex daemon it starts has no
+    /// terminal to lend its threads; the user's own `codex` is left alone.
+    #[tokio::test]
+    async fn a_typed_codex_runs_as_no_terminal() {
+        use slopty_proto::ctl::{SESSION_ENV, SESSION_TOKEN_ENV};
+        use slopty_proto::project::{PROJECT_ENV, TASK_ENV};
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let named = [SESSION_ENV, SESSION_TOKEN_ENV, PROJECT_ENV, TASK_ENV];
+        let shown = named.map(|v| format!("{v}[${{{v}-unset}}]")).concat();
+        let script = format!(
+            "#!/bin/sh\nprintf 'codex'; printf '[%s]' \"$@\"; echo \" {shown} kept[$KEPT]\"\n"
+        );
+        fs::write(bin.join("codex"), script).unwrap();
+        fs::set_permissions(bin.join("codex"), std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let mut env = vec![("PATH", path.as_str()), ("KEPT", "yes")];
+        env.extend(named.iter().map(|v| (*v, "mine")));
+        let unset = named.map(|v| format!("{v}[unset]")).concat();
+        let mut shells: Vec<(&str, &str, &str)> =
+            vec![("/bin/zsh", ".zshrc", "alias codex='command codex --mine'\n")];
+        shells.extend(
+            bashes().into_iter().map(|b| (b, ".bashrc", "alias codex='command codex --mine'\n")),
+        );
+        let fish = fish();
+        shells.extend(
+            fish.map(|f| (f, ".config/fish/config.fish", "alias codex 'command codex --mine'\n")),
+        );
+        for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
+            let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
+            let input = "codex resume 'a b'\nexit\n";
+            let text = run_shell_with(&format!("codex-{n}"), interactive(), &[], &env, input).await;
+            let ran = format!("codex[resume][a b] {unset} kept[yes]");
+            assert!(text.contains(&ran), "{shell}: {text:?}");
+            let own = run_shell_with(
+                &format!("codex-own-{n}"),
+                interactive(),
+                &[(rc, alias)],
+                &env,
+                input,
+            )
+            .await;
+            assert!(
+                own.contains("codex[--mine][resume][a b] SLOPTY_SESSION[mine]"),
+                "{shell}: {own:?}"
+            );
+        }
+    }
+
     /// A typed `ssh` goes through `slopty ssh --` with its arguments as typed, in every shell;
     /// the user's own `ssh` is left alone.
     #[tokio::test]

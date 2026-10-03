@@ -104,6 +104,12 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
         AgentStatus::Done => {
             detail.map_or_else(|| "Turn finished".to_owned(), |d| format!("Done: {d}"))
         }
+        AgentStatus::Failed { error, .. } if error == AgentStatus::RATE_LIMIT => {
+            "Hit its usage limit".to_owned()
+        }
+        AgentStatus::Failed { .. } => {
+            detail.map_or_else(|| "Turn failed".to_owned(), |d| format!("Failed: {d}"))
+        }
         // The turn ended with work still out: the first task's or the loop's own words.
         AgentStatus::Waiting { tasks: 1, .. } if let Some(d) = detail => format!("Waiting on {d}"),
         AgentStatus::Waiting { tasks: 0, .. } => {
@@ -130,6 +136,10 @@ pub(super) fn agent_status_word(agent: &AgentEvent) -> String {
         AgentStatus::Blocked(BlockReason::Question) => "Has a question".to_owned(),
         AgentStatus::Blocked(BlockReason::Elicitation) => "Needs input".to_owned(),
         AgentStatus::Done => "Turn finished".to_owned(),
+        AgentStatus::Failed { error, .. } if error == AgentStatus::RATE_LIMIT => {
+            "Limit reached".to_owned()
+        }
+        AgentStatus::Failed { .. } => "Failed".to_owned(),
         AgentStatus::Waiting { .. } => "Waiting".to_owned(),
     }
 }

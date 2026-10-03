@@ -1058,6 +1058,7 @@ fn at_its_prompt(agent: &SessionAgent) -> bool {
             agent.status,
             AgentStatus::Idle
                 | AgentStatus::Done
+                | AgentStatus::Failed { .. }
                 | AgentStatus::Waiting { .. }
                 | AgentStatus::Blocked(BlockReason::IdlePrompt)
         )

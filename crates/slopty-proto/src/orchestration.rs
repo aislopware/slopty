@@ -1037,7 +1037,10 @@ impl EventFilter {
                 Happening::Agent { event, .. }
                     if matches!(
                         event.status,
-                        AgentStatus::Blocked(_) | AgentStatus::Idle | AgentStatus::Done
+                        AgentStatus::Blocked(_)
+                            | AgentStatus::Idle
+                            | AgentStatus::Done
+                            | AgentStatus::Failed { .. }
                     )
             ),
         }

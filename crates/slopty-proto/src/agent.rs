@@ -47,6 +47,15 @@ pub enum AgentStatus {
     Blocked(BlockReason),
     /// A turn just finished; cleared on the next user action or after a delay.
     Done,
+    /// A turn ended on an error the agent gave up on (Claude Code's `StopFailure`): at rest,
+    /// like [`AgentStatus::Done`], but nothing was finished.
+    Failed {
+        /// The agent's kind of error ([`AgentStatus::RATE_LIMIT`], `overloaded`,
+        /// `authentication_failed`, …); `unknown` when it names none.
+        error: String,
+        /// For a limit, when it resets, where that is known.
+        until_ms: Option<WallMs>,
+    },
     /// The turn ended with work still out: background commands, subagents or monitors that
     /// wake the agent when they finish, or scheduled prompts (`/loop`). Paused, not done: no
     /// "done" is announced until a turn ends with nothing out.
@@ -56,6 +65,17 @@ pub enum AgentStatus {
         /// Prompts scheduled on the session.
         crons: u32,
     },
+}
+
+impl AgentStatus {
+    /// The error of a turn a usage or rate limit stopped ([`AgentStatus::Failed`]).
+    pub const RATE_LIMIT: &str = "rate_limit";
+
+    /// Whether the agent is at rest: no turn under way and nothing asked of the person.
+    #[must_use]
+    pub const fn at_rest(&self) -> bool {
+        matches!(self, Self::None | Self::Idle | Self::Done | Self::Failed { .. })
+    }
 }
 
 /// Which signal the worker read the status from, weakest first.

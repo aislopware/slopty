@@ -214,9 +214,15 @@ async fn output(
     }
 }
 
-/// Blocked on a human, idle at its prompt, or done with its turn.
+/// Blocked on a human, idle at its prompt, or done with its turn, finished or failed.
 const fn needs_input(status: &AgentStatus) -> bool {
-    matches!(status, AgentStatus::Blocked(_) | AgentStatus::Idle | AgentStatus::Done)
+    matches!(
+        status,
+        AgentStatus::Blocked(_)
+            | AgentStatus::Idle
+            | AgentStatus::Done
+            | AgentStatus::Failed { .. }
+    )
 }
 
 async fn agent_input(

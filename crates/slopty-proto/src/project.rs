@@ -1308,9 +1308,11 @@ impl Spent {
         match status {
             AgentStatus::Working | AgentStatus::Tool { .. } => true,
             AgentStatus::Waiting { tasks, .. } => *tasks > 0,
-            AgentStatus::None | AgentStatus::Idle | AgentStatus::Blocked(_) | AgentStatus::Done => {
-                false
-            }
+            AgentStatus::None
+            | AgentStatus::Idle
+            | AgentStatus::Blocked(_)
+            | AgentStatus::Done
+            | AgentStatus::Failed { .. } => false,
         }
     }
 

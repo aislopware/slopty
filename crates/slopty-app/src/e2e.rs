@@ -934,6 +934,7 @@ fn agent_line(status: &AgentStatus) -> String {
         AgentStatus::Blocked(BlockReason::Elicitation) => "blocked:elicitation".to_owned(),
         AgentStatus::Blocked(BlockReason::IdlePrompt) => "blocked:idle".to_owned(),
         AgentStatus::Done => "done".to_owned(),
+        AgentStatus::Failed { error, .. } => format!("failed:{error}"),
         AgentStatus::Waiting { tasks, crons } => format!("waiting:{tasks}:{crons}"),
     }
 }

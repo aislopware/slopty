@@ -449,6 +449,7 @@ fn reported(kind: AgentKind, status: &AgentStatus, source: Option<AgentSource>) 
             ("blocked", tool, Some(reason_key(reason)))
         }
         AgentStatus::Done => ("done", None, None),
+        AgentStatus::Failed { .. } => ("failed", None, None),
         AgentStatus::Waiting { .. } => ("paused", None, None),
     };
     AgentView {
@@ -476,6 +477,7 @@ fn status_text(status: &AgentStatus, source: Option<AgentSource>) -> String {
         AgentStatus::Tool { tool } => format!("running {tool}"),
         AgentStatus::Blocked(reason) => format!("waiting: {}", reason_text(reason)),
         AgentStatus::Done => "done".to_owned(),
+        AgentStatus::Failed { error, .. } => format!("failed: {}", error.replace('_', " ")),
         AgentStatus::Waiting { tasks, crons } => {
             format!("paused: {}", pending_text(*tasks, *crons))
         }
