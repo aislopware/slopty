@@ -50,7 +50,6 @@ fn shell_in_repo(
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

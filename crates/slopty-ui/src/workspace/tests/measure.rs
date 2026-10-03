@@ -26,23 +26,11 @@ fn measure_a_frame_over_a_large_registry(cx: &mut TestAppContext) {
     let mut sessions = Vec::new();
     for _ in 0..NOTES {
         let kind = ItemKind::Note { text: text.clone() };
-        items.push(Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        });
+        items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     for n in 0..FILES {
         let kind = ItemKind::File { path: format!("/w/src/file_{n}.rs") };
-        items.push(Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        });
+        items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     for _ in 0..SHELLS {
         let session = SessionId::new();
@@ -50,7 +38,6 @@ fn measure_a_frame_over_a_large_registry(cx: &mut TestAppContext) {
         items.push(Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         });
@@ -98,7 +85,6 @@ fn measure_an_echo_frame_beside_long_notes(cx: &mut TestAppContext) {
     let notes: Vec<Item> = std::iter::repeat_with(|| Item {
         id: ItemId::new(),
         kind: ItemKind::Note { text: text.clone() },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     })
@@ -108,7 +94,6 @@ fn measure_an_echo_frame_beside_long_notes(cx: &mut TestAppContext) {
     let shell = Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };
@@ -216,7 +201,6 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
         items.push(Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         });
@@ -227,19 +211,12 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
     items.push(Item {
         id: streamed,
         kind: ItemKind::Window { window },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     });
     for _ in 0..CROWD_NOTES {
         let kind = ItemKind::Note { text: "a note\n".into() };
-        items.push(Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        });
+        items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     let shell = sessions.last().map(|s| s.id).expect("a shell");
     let key = studio.key;

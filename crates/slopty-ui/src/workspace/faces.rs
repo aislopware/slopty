@@ -467,7 +467,6 @@ impl WorkspaceView {
         let item = Item {
             id,
             kind: ItemKind::Thread { thread },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
@@ -499,7 +498,6 @@ impl WorkspaceView {
         let item = Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

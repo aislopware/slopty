@@ -623,7 +623,6 @@ impl WorkspaceView {
         let item = Item {
             id: ItemId::new(),
             kind: ItemKind::Note { text },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
@@ -711,13 +710,8 @@ impl WorkspaceView {
             CaptureTarget::Window(window) => ItemKind::Window { window },
             CaptureTarget::Display(display) => ItemKind::Display { display },
         };
-        let item = Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
+        let item =
+            Item { id: ItemId::new(), kind, name: None, facts: std::collections::BTreeMap::new() };
         self.titles.insert(item.id, title);
         self.propose(key, ItemOp::Add(item), cx);
     }
@@ -758,7 +752,6 @@ impl WorkspaceView {
             let item = Item {
                 id: ItemId::new(),
                 kind: ItemKind::File { path: path.to_owned() },
-                sleeping: false,
                 name: None,
                 facts: std::collections::BTreeMap::new(),
             };

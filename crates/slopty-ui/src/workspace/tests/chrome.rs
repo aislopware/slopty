@@ -29,20 +29,13 @@ fn crowd(
         items.push(Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         });
     }
     for _ in 0..notes {
         let kind = ItemKind::Note { text: "a note\n".into() };
-        items.push(Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        });
+        items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     let sessions = summaries.iter().map(|s| s.id).collect();
     let key = fake.key;

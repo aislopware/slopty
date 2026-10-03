@@ -645,7 +645,6 @@ impl WorkspaceView {
         let item = slopty_proto::items::Item {
             id: slopty_core::ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

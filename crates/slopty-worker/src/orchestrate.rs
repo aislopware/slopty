@@ -20,14 +20,16 @@
 //! hook, or after it ended. An agent's first prompt waits for its hooks to say it is at its
 //! prompt, and is never typed blind.
 //!
-//! An agent's conversation and its held permission prompts come through the daemon's
-//! [`Conversations`] ([`conversation`]); a still picture from ScreenCaptureKit ([`still`]); a
+//! Any agent's thread is read and its requests answered through the daemon's [`ThreadReads`]
+//! ([`thread_read`]), a Claude Code TUI's held prompts followed through its [`Conversations`]
+//! ([`conversation`]); a still picture from ScreenCaptureKit ([`still`]); a
 //! file too large for one reply goes up in parts ([`upload`]).
 
 pub mod conversation;
 pub mod idempotency;
 pub mod keys;
 pub mod still;
+pub mod thread_read;
 pub mod upload;
 mod wait;
 
@@ -47,14 +49,15 @@ use slopty_proto::folder::{FsOutcome, FsRefusal};
 use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
-    Line, Outcome, Screen, Size, TermRef, Verb, WaitUntil,
+    Line, Outcome, Screen, Size, TermRef, ThreadOf, Verb, WaitUntil,
 };
 use slopty_proto::project::VERIFY_PLACES;
 use slopty_proto::screen::ScreenEvent;
 use slopty_proto::terminal::{
     CloseReason, OpenSession, SessionState, SessionSummary, TermRequest, TermSize,
 };
-use slopty_proto::thread::ThreadId;
+use slopty_proto::thread::wire::{self, Intent};
+use slopty_proto::thread::{IntentId, ThreadId, ThreadState};
 use tokio::sync::broadcast;
 pub use wait::{AgentFeed, wait_for};
 
@@ -134,7 +137,7 @@ pub trait Agents: Send + Sync {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TaskThread {
     /// What to start, in the folder it works in.
-    pub start: slopty_proto::thread::wire::Start,
+    pub start: wire::Start,
     /// The id it is known by: its row's [`slopty_proto::project::SEAT_FACT`], the session its
     /// Slopty tools speak as, and the terminal it runs in when its agent runs in one.
     pub seat: SessionId,
@@ -166,6 +169,17 @@ pub trait TaskThreads: Send + Sync {
     /// # Errors
     /// A thread there that could not be ended.
     fn close(&self, seat: SessionId) -> BoxFuture<'_, Result<bool, Failure>>;
+}
+
+/// The worker's threads as orchestration reads and answers them ([`Verb::ReadThread`],
+/// [`Verb::AnswerRequest`]). The daemon gives it ([`Orchestrator::set_thread_reads`]).
+pub trait ThreadReads: Send + Sync {
+    /// `thread` as it stands; `None` for one this worker does not hold.
+    fn state(&self, thread: ThreadId) -> Option<ThreadState>;
+
+    /// Do `intent` on `thread` once under `id`, as a client's would be done, by orchestration:
+    /// a prompt held in a terminal is answered as [`crate::conversation::ORCHESTRATION`].
+    fn intent(&self, thread: ThreadId, id: IntentId, intent: Intent) -> wire::Outcome;
 }
 
 /// A boxed future a [`TaskThreads`] answers with.
@@ -248,6 +262,8 @@ struct Inner {
     clone_progress: broadcast::Sender<(u64, crate::repo::cloning::Progress)>,
     /// The thread host the server's tasks start threads in, once the daemon gave it.
     task_threads: std::sync::OnceLock<Arc<dyn TaskThreads>>,
+    /// The threads orchestration reads and answers, once the daemon gave them.
+    thread_reads: std::sync::OnceLock<Arc<dyn ThreadReads>>,
 }
 
 /// What an agent the orchestrator starts is given.
@@ -293,6 +309,7 @@ impl Orchestrator {
             cloner: crate::repo::cloning::Cloner::default(),
             clone_progress: broadcast::channel(CLONE_PROGRESS).0,
             task_threads: std::sync::OnceLock::new(),
+            thread_reads: std::sync::OnceLock::new(),
         };
         Self { inner: Arc::new(inner) }
     }
@@ -303,6 +320,28 @@ impl Orchestrator {
         if self.inner.task_threads.set(threads).is_err() {
             tracing::warn!("the task threads were given twice; the first stay");
         }
+    }
+
+    /// Read and answer threads through `reads` from now on. The first one given stays.
+    pub fn set_thread_reads(&self, reads: Arc<dyn ThreadReads>) {
+        if self.inner.thread_reads.set(reads).is_err() {
+            tracing::warn!("the thread reads were given twice; the first stay");
+        }
+    }
+
+    /// The thread `of` names on this worker, and the threads to reach it through.
+    fn thread_of(&self, of: &ThreadOf) -> Result<(ThreadId, Arc<dyn ThreadReads>), Failure> {
+        let ThreadOf::On { worker, thread } = *of else {
+            return Err(Failure::new(
+                ErrorCode::Invalid,
+                "the server finds which worker holds a thread; a worker reads one it names",
+            ));
+        };
+        self.mine(worker)?;
+        let reads = self.inner.thread_reads.get().cloned().ok_or_else(|| {
+            Failure::new(ErrorCode::Unsupported, "this worker keeps no threads to read")
+        })?;
+        Ok((thread, reads))
     }
 
     /// Answer one verb, once per `key` when it changes something. Every failure is an
@@ -337,6 +376,8 @@ impl Orchestrator {
             | Verb::TaskReview { .. }
             | Verb::ProjectDelete { .. }
             | Verb::TaskStart { .. }
+            | Verb::TaskAttempts { .. }
+            | Verb::TaskPick { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectNeeds { .. }
             | Verb::ProjectList
@@ -525,7 +566,6 @@ impl Orchestrator {
                 let item = Item {
                     id: ItemId::new(),
                     kind,
-                    sleeping: false,
                     name,
                     facts: std::collections::BTreeMap::new(),
                 };
@@ -568,29 +608,29 @@ impl Orchestrator {
                     Err(e) => Err(Failure::new(ErrorCode::Failed, e.to_string())),
                 }
             }
-            Verb::ReadConversation { term, thread, since, max, hold } => {
-                self.session(term)?;
-                let held = if hold { inner.conversations.follow(term.session) } else { Vec::new() };
-                let sources = inner.conversations.sources(term.session);
-                let mut page =
-                    blocking(move || conversation::read_page(&sources, &thread, since, max))
-                        .await?;
-                page.held = held;
-                Ok(Outcome::Conversation(Box::new(page)))
+            Verb::ReadThread { of, view, after, hold } => {
+                let (thread, reads) = self.thread_of(&of)?;
+                let state = reads.state(thread).ok_or_else(|| no_thread(thread))?;
+                // Only Claude Code's prompts wait in its terminal unless someone follows it.
+                if hold && let Some(session) = state.meta.terminal {
+                    inner.conversations.follow(session);
+                }
+                let read = thread_read::read(&state, inner.id, view, after);
+                Ok(Outcome::Thread(Box::new(read)))
             }
-            Verb::AnswerPermission { term, ask, verdict } => {
-                self.session(term)?;
-                if inner.conversations.answer(term.session, ask, verdict) {
-                    Ok(Outcome::Done)
-                } else {
-                    Err(Failure::new(
-                        ErrorCode::Failed,
-                        format!(
-                            "no prompt {ask} waits for orchestration in this terminal: it was \
-                             answered, handed back to the TUI or withdrawn, or asked before \
-                             orchestration read this conversation"
-                        ),
-                    ))
+            Verb::AnswerRequest { of, ask, choice, message } => {
+                let (thread, reads) = self.thread_of(&of)?;
+                let intent = Intent::Answer { ask, choice, message };
+                match reads.intent(thread, IntentId::new(), intent) {
+                    wire::Outcome::Done | wire::Outcome::Accepted => Ok(Outcome::Done),
+                    wire::Outcome::Refused { reason } => {
+                        Err(Failure::new(ErrorCode::Failed, reason))
+                    }
+                    wire::Outcome::Unsupported { cap } => Err(Failure::new(
+                        ErrorCode::Unsupported,
+                        format!("this thread's agent cannot be answered here ({})", cap.0),
+                    )),
+                    wire::Outcome::Started { .. } => Err(unexpected()),
                 }
             }
             Verb::CaptureStill { worker, target } => {
@@ -1482,6 +1522,11 @@ fn refused(refusal: &FsRefusal) -> Failure {
         ),
     };
     Failure::new(code, format!("refused, nothing was touched: {message}"))
+}
+
+/// A thread this worker does not hold.
+fn no_thread(thread: ThreadId) -> Failure {
+    Failure::new(ErrorCode::Invalid, format!("this worker holds no thread {thread}"))
 }
 
 fn io_failure(path: &Path, e: &std::io::Error) -> Failure {

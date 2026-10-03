@@ -114,7 +114,6 @@ fn a_kept_edit_comes_back_on_its_tile_or_on_a_new_one(cx: &mut TestAppContext) {
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::File { path: PATH.to_owned() },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };
@@ -376,7 +375,6 @@ fn two_tiles_on_one_file_each_take_their_own_edit_back(cx: &mut TestAppContext) 
     let file_item = || Item {
         id: ItemId::new(),
         kind: ItemKind::File { path: PATH.to_owned() },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

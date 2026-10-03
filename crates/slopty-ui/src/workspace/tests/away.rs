@@ -130,7 +130,6 @@ fn a_shell_closed_while_its_worker_is_away_is_closed_when_it_is_back(cx: &mut Te
     let gone = Item {
         id: second.item,
         kind: ItemKind::Terminal { session: s2 },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

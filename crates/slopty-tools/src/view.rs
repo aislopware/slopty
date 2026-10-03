@@ -30,8 +30,8 @@ mod agents;
 pub mod projects;
 
 pub use agents::{
-    ConversationView, HeldView, MovedView, StillView, ThreadView, conversation, conversation_text,
-    moved, still, thread_key, thread_named,
+    ChoiceView, MovedView, ReadEntryView, RequestView, StillView, ThreadReadView, TurnView, moved,
+    phase_key, still, thread_read, thread_read_text,
 };
 
 /// The shortest session-id prefix text output uses. `UUIDv7`s start with their creation time,
@@ -1171,7 +1171,6 @@ pub struct ItemView<'a> {
     kind: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
-    sleeping: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     term: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1246,7 +1245,6 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 item: item_string(ItemRef { worker, item: i.id }),
                 kind: kind_word(&i.kind),
                 name: i.name.as_deref(),
-                sleeping: i.sleeping,
                 term: None,
                 window: None,
                 display: None,

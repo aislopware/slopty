@@ -212,7 +212,6 @@ fn opens_in(
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };
@@ -234,8 +233,7 @@ fn arrives(
     kind: ItemKind,
     version: u64,
 ) -> TileRef {
-    let item =
-        Item { id: ItemId::new(), kind, sleeping: false, name: None, facts: BTreeMap::new() };
+    let item = Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() };
     let tile = TileRef { worker: fake.key, item: item.id };
     let key = fake.key;
     view.update_in(cx, |v, _window, cx| {
@@ -1441,7 +1439,6 @@ fn the_summaries_seed_the_agents_before_any_event(cx: &mut TestAppContext) {
         let tile = |session| Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };

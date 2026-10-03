@@ -769,8 +769,6 @@ pub struct ItemInfo {
     pub bounds: [f32; 4],
     /// The focused tile.
     pub active: bool,
-    /// Sleeping.
-    pub sleeping: bool,
     /// A note's text, as the document holds it.
     #[serde(default)]
     pub note: Option<String>,

@@ -524,7 +524,6 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
     let item = Item {
         id: slopty_core::ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: std::collections::BTreeMap::new(),
     };

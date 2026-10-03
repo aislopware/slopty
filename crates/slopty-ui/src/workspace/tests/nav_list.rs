@@ -13,7 +13,6 @@ fn notes(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, fake: &Fake, 
     let note = || Item {
         id: ItemId::new(),
         kind: ItemKind::Note { text: "a note\nits second line\n".into() },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

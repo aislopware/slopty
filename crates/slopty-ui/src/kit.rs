@@ -1521,7 +1521,6 @@ mod tests {
             crate::workspace::TAKE,
             crate::workspace::MUTE,
             crate::workspace::ATTACHING,
-            crate::workspace::SLEEPING,
             crate::workspace::PAUSED,
             crate::workspace::OPENING,
             crate::workspace::READING,

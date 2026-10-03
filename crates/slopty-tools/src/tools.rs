@@ -18,7 +18,9 @@ use serde_json::{Map, Value};
 use slopty_core::{DisplayId, WindowId};
 use slopty_proto::folder::FsOp;
 use slopty_proto::items::ItemKind;
-use slopty_proto::orchestration::{ErrorCode, EventFilter, IdempotencyKey, Input, Size, WaitUntil};
+use slopty_proto::orchestration::{
+    ErrorCode, EventFilter, IdempotencyKey, Input, Size, ThreadView, WaitUntil,
+};
 use slopty_proto::project::{
     LimitsChange, Need, Preference, Report, ReportKind, Runner, TaskChange, TaskId,
 };
@@ -26,9 +28,8 @@ use slopty_proto::screen::CaptureTarget;
 use slopty_proto::search::SearchQuery;
 
 use crate::ops::{
-    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
-    DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS, LaunchSpec, NewTask, PlacementSpec, ProjectEdit,
-    ProjectSpec, Spec,
+    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS,
+    LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, Spec,
 };
 use crate::resolve::Resolver;
 use crate::view::{self, Encoding};
@@ -42,19 +43,19 @@ lists print it); copy it verbatim into the terminal tools. A `worker` argument t
 name or id. To run a command: send_input text \"cmd\\n\", then wait_for command_done, then \
 read_output from the line you started at. Prefer wait_for (one terminal) and events (the whole \
 fleet: agents needing you, terminals opening and closing, workers coming and going) to polling \
-read_screen or read_output in a loop. To work with another coding agent, read_conversation; its \
-permission prompts are the person's to answer, never an agent's, so never type its menu's digits. \
-For a \
-goal bigger than one agent, make a project (project_create) and split it into tasks \
+read_screen or read_output in a loop. To follow another coding agent's work, read_thread; its \
+requests are the person's to answer, never an agent's, so never type its menu's digits. \
+For a goal bigger than one agent, make a project (project_create) and split it into tasks \
 (task_create): each owns the paths it writes (or only reads), may depend on others and nest to \
 any depth the project allows, and says where it may run as CEL rules over the workers' facts \
 (list_workers shows them; placement_suggest ranks the workers with reasons) or pins a worker \
 outright; project_needs says once what each kind of the project's work needs of its machines. \
-Start what runs for a task, Claude Code, Codex or any command, with task_spawn, and follow \
-the tree with project_status (since and timeout_ms wait for news; bounds and live say how much \
-room there is), or wait for tasks' news with task_wait; task_tell says something to a task's \
-agent under you. Agents started for a task have these tools too, their project and task the \
-defaults.";
+Start what runs for a task, Claude Code, Codex or any command, with task_spawn; to compare \
+agents, models or machines on one task, task_attempts tries it several ways at once and \
+task_pick keeps the attempt that lands. Follow the tree with project_status (since and \
+timeout_ms wait for news; bounds and live say how much room there is), or wait for tasks' \
+news with task_wait; task_tell says something to a task's agent under you. Agents started for a \
+task have these tools too, their project and task the defaults.";
 
 /// How often a `wait_for` with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
@@ -610,6 +611,57 @@ struct TaskSpawnArgs {
     idempotency_key: Option<String>,
 }
 
+/// `task_attempts`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskAttemptsArgs {
+    /// The project; yours when omitted.
+    project: Option<String>,
+    /// The task to try; one no agent works on.
+    task: TaskArg,
+    /// One entry per attempt, 1 to 6 in all.
+    attempts: Vec<AttemptArgs>,
+    /// Working directory on each worker, usually the repository's root; beside a clone of the
+    /// project's repository, in a worktree of each attempt's own, when omitted.
+    cwd: Option<String>,
+    /// Start them though a task it depends on is not done yet.
+    #[serde(default)]
+    ignore_dependencies: bool,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
+/// One attempt: which agent, with what, where.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AttemptArgs {
+    /// Which agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
+    /// name.
+    agent: Option<String>,
+    /// The model, by the agent's own id.
+    model: Option<String>,
+    /// The agent's first prompt; say where its brief is.
+    prompt: Option<String>,
+    /// Arguments for the agent.
+    #[serde(default)]
+    args: Vec<String>,
+    /// This worker (name or id); where omitted, one that fits and no other attempt took, as
+    /// long as there is one.
+    worker: Option<String>,
+}
+
+/// `task_pick`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TaskPickArgs {
+    /// The project; yours when omitted.
+    project: Option<String>,
+    /// The attempt that lands.
+    attempt: TaskArg,
+    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
+    idempotency_key: Option<String>,
+}
+
 /// `project_needs`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -997,20 +1049,45 @@ struct RenameItemArgs {
     idempotency_key: Option<String>,
 }
 
-/// `read_conversation`.
+/// `read_thread`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-struct ReadConversationArgs {
-    /// The terminal the agent runs in, as the lists print it (`worker/session`).
-    term: String,
-    /// `main` (the default) for the agent's own conversation, or a subagent's id from
-    /// `threads`.
+struct ReadThreadArgs {
+    /// The task whose agent's thread to read; with `project`, yours when omitted.
+    task: Option<TaskArg>,
+    /// The task's project; yours when omitted.
+    project: Option<String>,
+    /// A thread's id instead: a subagent's `child` from an earlier read, say.
     thread: Option<String>,
-    /// First entry wanted, by its place in the thread: the `next` of the previous call. The
-    /// last `max` entries when omitted.
-    since: Option<u32>,
-    /// At most this many entries (default 50, at most 500).
-    max: Option<u32>,
+    /// The terminal an agent runs in instead, as the lists print it (`worker/session`).
+    term: Option<String>,
+    /// `messages` (the default) for what was said, `activity` for that and every tool call
+    /// with the end of its output.
+    #[serde(default)]
+    view: ViewArg,
+    /// The last turn already read: the `next` of the previous read. From the first turn held
+    /// when omitted.
+    after: Option<u32>,
+}
+
+/// How much of a thread a read gives.
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum ViewArg {
+    /// What was said.
+    #[default]
+    Messages,
+    /// What was said and done.
+    Activity,
+}
+
+impl ViewArg {
+    const fn view(self) -> ThreadView {
+        match self {
+            Self::Messages => ThreadView::Messages,
+            Self::Activity => ThreadView::Activity,
+        }
+    }
 }
 
 /// `capture_still`.
@@ -1343,8 +1420,8 @@ pub fn list() -> Vec<Tool> {
             "list_items",
             "The items on a worker's workspace, which every person's Slopty shows as tiles: \
              `item` (the handle the item tools take, copy it verbatim), `kind` (terminal, \
-             window, display, note, file, browser), `name` when one was given, `sleeping`, and \
-             what it shows (`term`, `window`, `display`, `text`, `path` or `url`).",
+             window, display, note, file, browser), `name` when one was given, and what it \
+             shows (`term`, `window`, `display`, `text`, `path` or `url`).",
             Kind::Read,
         ),
         tool::<OpenItemArgs>(
@@ -1380,14 +1457,17 @@ pub fn list() -> Vec<Tool> {
              (`display` id, width, height, scale, hz).",
             Kind::Read,
         ),
-        tool::<ReadConversationArgs>(
-            "read_conversation",
-            "The conversation of the coding agent in a terminal, as Slopty's conversation face \
-             shows it: `entries` (prompts, answers, thinking, tool calls with their results) \
-             from `start` to `next` of `total`, the other `threads` (subagents), `tasks`, \
-             `meters`, and `held`: the permission prompts the person holds, each with its `ask`, \
-             `tool` and what the call would do. Reading changes nothing: every prompt stays in \
-             the agent's terminal for the person. Pass `next` back as `since` to read on.",
+        tool::<ReadThreadArgs>(
+            "read_thread",
+            "What another agent's thread did, whatever its agent (Claude Code, Codex, pi, ACP): \
+             a task's (by `task`), a subagent's (by `thread`) or a terminal's (by `term`). \
+             Returns whole `turns` after `after`, each with its `entries` (`user` and `agent` \
+             messages; with view `activity` also each `tool` call with its `state`, the end of \
+             its `output` and the `child` thread it started, and the agent's `notice`s), its \
+             `phase` and what it `wait`s on, and the `requests` open on it, which are the \
+             person's to answer. Bounded: `truncated` says a text was cut or turns were left \
+             out. Pass `next` back as `after` to read on; a turn under way is read again until \
+             it ends. Reading changes nothing.",
             Kind::Read,
         ),
         tool::<CaptureStillArgs>(
@@ -1549,6 +1629,25 @@ pub fn list() -> Vec<Tool> {
              Returns the task with its terminal's `term`. When the person asks to start each \
              task themselves, it is `proposed` instead: it starts once they say so, and you \
              hear of it as for any start.",
+            Kind::Write,
+        ),
+        tool::<TaskAttemptsArgs>(
+            "task_attempts",
+            "Have several agents try one task at once, each an attempt: a sub-task of kind \
+             `attempt` with the task's brief, placement and verifier, owning no paths, started \
+             as task_spawn starts one. Name the agent, model or worker of each to compare \
+             them; an attempt with no worker goes to one that fits and no other attempt took, \
+             while there is one. Each is verified and reviewed as any task, but none merges \
+             until task_pick picks it. Returns the task with its `attempts`; an attempt that \
+             did not start says why in its status.",
+            Kind::Write,
+        ),
+        tool::<TaskPickArgs>(
+            "task_pick",
+            "Pick the attempt that lands: every other attempt at its task is given up, its \
+             agent closed and its worktree freed with its branch kept, and the one picked joins \
+             the merge queue once its work is done and checked. Once it merges, so is its \
+             task. Only the person or an agent above the task picks. Returns the task tried.",
             Kind::Write,
         ),
         tool::<PlacementSuggestArgs>(
@@ -1885,6 +1984,34 @@ async fn run<D: Dispatch>(
                 ops::task_spawn(&mut res, a.project.as_deref(), Some(&task), launch, key).await?;
             json(&view::projects::task(&started))
         }
+        "task_attempts" => {
+            let a: TaskAttemptsArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let cwd = a.cwd.unwrap_or_default();
+            let specs = a
+                .attempts
+                .into_iter()
+                .map(|t| LaunchSpec {
+                    pin: t.worker,
+                    cwd: cwd.clone(),
+                    run: ops::agent_runner(t.agent.as_deref(), t.prompt, t.model, t.args),
+                    env: Vec::new(),
+                    size: None,
+                    ignore_dependencies: a.ignore_dependencies,
+                })
+                .collect();
+            let task = a.task.text();
+            let tried =
+                ops::task_attempts(&mut res, a.project.as_deref(), Some(&task), specs, key).await?;
+            json(&view::projects::task(&tried))
+        }
+        "task_pick" => {
+            let a: TaskPickArgs = args(arguments)?;
+            let key = checked_key(a.idempotency_key)?;
+            let attempt = a.attempt.text();
+            let tried = ops::task_pick(res.dispatch(), a.project.as_deref(), &attempt, key).await?;
+            json(&view::projects::task(&tried))
+        }
         "placement_suggest" => {
             let a: PlacementSuggestArgs = args(arguments)?;
             let task = task_text(a.task.as_ref());
@@ -2045,13 +2172,17 @@ async fn run<D: Dispatch>(
             let (_worker, windows, displays) = ops::windows(&mut res, a.worker.as_deref()).await?;
             json(&view::screens(&windows, &displays))
         }
-        "read_conversation" => {
-            let a: ReadConversationArgs = args(arguments)?;
-            let thread = view::thread_named(a.thread.as_deref());
-            let max = a.max.unwrap_or(DEFAULT_MAX_ENTRIES_PAGE);
-            let (term, page) =
-                ops::read_conversation(&mut res, &a.term, thread, a.since, max).await?;
-            json(&view::conversation(term, &page))
+        "read_thread" => {
+            let a: ReadThreadArgs = args(arguments)?;
+            let task = task_text(a.task.as_ref());
+            let of = ops::ThreadArg {
+                thread: a.thread.as_deref(),
+                term: a.term.as_deref(),
+                project: a.project.as_deref(),
+                task: task.as_deref(),
+            };
+            let read = ops::read_thread(&mut res, of, a.view.view(), a.after).await?;
+            json(&view::thread_read(&read))
         }
         "upload_file" => {
             here(dispatch)?;
@@ -2093,15 +2224,14 @@ mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
     use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
-    use slopty_proto::conversation::{Clipped, PermissionPrompt, ThreadId, ToolDetail};
     use slopty_proto::items::Item;
     use slopty_proto::orchestration::{
-        ConversationPage, ItemRef, Outcome, TermRef, ThreadInfo, Verb, Waited,
+        ItemRef, Outcome, TermRef, ThreadOf, ThreadRead, Verb, Waited,
     };
     use slopty_proto::project::{
-        Assignment, Bounds, Fact, Limits, Live, NativeCounts, Natives, Peer, Placement, Preference,
-        Project, ProjectId, ProjectStatus, Runner, Task, TaskId, TaskState, TimelineEntry,
-        WorkerFacts,
+        Assignment, Attempts, Bounds, Fact, Limits, Live, NativeCounts, Natives, Peer, Placement,
+        Preference, Project, ProjectId, ProjectStatus, Runner, Task, TaskId, TaskState,
+        TimelineEntry, WorkerFacts,
     };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -2170,6 +2300,7 @@ mod tests {
             updated_ms: WallMs::ZERO,
             step: None,
             proposal: None,
+            attempts: None,
         }
     }
 
@@ -2282,32 +2413,27 @@ mod tests {
                 Verb::ListItems { .. } => Outcome::Items(vec![Item {
                     id: page(),
                     kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
-                    sleeping: false,
                     name: None,
                     facts: BTreeMap::new(),
                 }]),
-                Verb::ReadConversation { thread, .. } => {
-                    let text = Clipped { text: "{}".to_owned(), lines: 1, chars: 2, full: None };
-                    Outcome::Conversation(Box::new(ConversationPage {
-                        threads: vec![ThreadInfo { id: ThreadId::Main, origin: None, entries: 0 }],
+                Verb::ReadThread { of, after, .. } => {
+                    let thread = match of {
+                        ThreadOf::Thread(thread) => thread,
+                        _ => slopty_proto::thread::ThreadId::derived(&["task"]),
+                    };
+                    Outcome::Thread(Box::new(ThreadRead {
+                        worker: studio(),
                         thread,
-                        entries: Vec::new(),
-                        start: 0,
-                        next: 0,
-                        total: 0,
-                        tasks: Vec::new(),
-                        meters: None,
-                        held: vec![PermissionPrompt {
-                            editable: Vec::new(),
-                            session: shell(),
-                            ask: 3,
-                            tool: "Bash".to_owned(),
-                            detail: ToolDetail::Other { input: text },
-                            suggestions: Vec::new(),
-                            mode: None,
-                            asked_ms: WallMs::ZERO,
-                            until_ms: WallMs::ZERO,
-                        }],
+                        agent: AgentId::named(AgentId::PI),
+                        title: "Fix the build".to_owned(),
+                        parent: None,
+                        phase: slopty_proto::thread::Phase::Working,
+                        wait: None,
+                        turns: Vec::new(),
+                        requests: Vec::new(),
+                        next: after.unwrap_or(slopty_proto::thread::TurnId(0)),
+                        truncated: false,
+                        skipped: false,
                     }))
                 }
                 Verb::CaptureStill { .. } => {
@@ -2332,6 +2458,17 @@ mod tests {
                 }
                 Verb::TaskSpawn { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, None, "Fix the hub", true)))
+                }
+                Verb::TaskAttempts { task, launches, .. } => {
+                    let mut tried = made_task(task.0, None, "Fix the hub", false);
+                    let ids = (8..).take(launches.len()).map(TaskId).collect();
+                    tried.attempts = Some(Attempts { tried: ids, picked: None });
+                    Outcome::Task(Box::new(tried))
+                }
+                Verb::TaskPick { attempt, .. } => {
+                    let mut tried = made_task(3, None, "Fix the hub", false);
+                    tried.attempts = Some(Attempts { tried: vec![attempt], picked: Some(attempt) });
+                    Outcome::Task(Box::new(tried))
                 }
                 // The server's record of the terminal, over what its environment says.
                 Verb::FsChange { op: FsOp::Move { to, .. }, .. } if to == "/taken" => {
@@ -2553,7 +2690,7 @@ mod tests {
                 "remove_item",
                 "point_at",
                 "list_windows",
-                "read_conversation",
+                "read_thread",
                 "capture_still",
                 "upload_file",
                 "download_file",
@@ -2573,6 +2710,8 @@ mod tests {
                 "review_report",
                 "task_assign",
                 "task_spawn",
+                "task_attempts",
+                "task_pick",
                 "placement_suggest",
                 "wake_worker",
             ]
@@ -2844,29 +2983,91 @@ mod tests {
         assert_eq!(fake.verbs().pop(), Some(Verb::RenameItem { item, name: None }));
     }
 
-    /// A conversation is read from a thread and page, and its waiting prompt answered by its
-    /// `ask` under a key; a verdict's message goes with deny only.
+    /// Attempts name each agent and model, and a worker only where one was named; the task
+    /// comes back with its attempts, and a pick names the attempt and answers the task tried.
     #[tokio::test]
-    async fn a_conversation_is_read_and_its_prompts_are_not_an_agents_to_answer() {
+    async fn a_task_is_tried_by_several_agents_and_one_attempt_is_picked() {
         let fake = Fake::default();
-        let term = format!("{}/{}", studio(), shell());
-        let t = TermRef { worker: studio(), session: shell() };
-        let read = json!({ "term": term, "thread": "a1", "since": 4 });
-        let (failed, text) = call_json(&fake, "read_conversation", read).await;
+        let tries = json!({
+            "project": "slopty",
+            "task": 3,
+            "attempts": [
+                {"agent": "codex", "model": "o3", "worker": "mac-studio"},
+                {"agent": "pi", "model": "sonnet"},
+            ],
+        });
+        let (failed, text) = call_json(&fake, "task_attempts", tries).await;
+        assert!(!failed, "{text}");
+        let shown: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(shown["attempts"], json!({"tried": [8, 9], "picked": null}));
+        let Some(Verb::TaskAttempts { task, launches, .. }) = fake.verbs().pop() else { panic!() };
+        assert_eq!(task, TaskId(3));
+        let pins: Vec<_> = launches.iter().map(|l| l.pin).collect();
+        assert_eq!(pins, [Some(studio()), None], "placed by the server where none is named");
+        assert!(
+            matches!(&launches[0].run, Runner::Codex { args, .. } if args.contains(&"o3".to_owned()))
+        );
+        let pi = Runner::Agent {
+            agent: AgentId::named(AgentId::PI),
+            prompt: None,
+            model: Some("sonnet".to_owned()),
+            args: Vec::new(),
+        };
+        assert_eq!(launches[1].run, pi);
+
+        let pick = json!({"project": "slopty", "attempt": 9});
+        let (failed, text) = call_json(&fake, "task_pick", pick).await;
+        assert!(!failed, "{text}");
+        let shown: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(shown["attempts"]["picked"], json!(9));
+        let Some(Verb::TaskPick { attempt, .. }) = fake.verbs().pop() else { panic!() };
+        assert_eq!(attempt, TaskId(9));
+    }
+
+    /// A thread is read by a task, a thread's id or a terminal, in the view asked and from
+    /// the turn asked, and the server finds where it is; nothing names none. Answering a
+    /// request is the person's, so no tool does it.
+    #[tokio::test]
+    async fn a_thread_is_read_by_task_thread_or_term_and_answering_is_no_tool() {
+        let fake = Fake::default();
+        let child = slopty_proto::thread::ThreadId::derived(&["child"]);
+        let read = json!({ "thread": child.to_string(), "view": "activity", "after": 4 });
+        let (failed, text) = call_json(&fake, "read_thread", read).await;
         assert!(!failed, "{text}");
         let page: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(
-            (page["thread"].clone(), page["held"][0]["ask"].clone()),
-            (json!("a1"), json!(3))
+            (page["thread"].clone(), page["next"].clone()),
+            (json!(child.to_string()), json!(4))
         );
-        let thread = ThreadId::Agent("a1".to_owned());
-        let asked =
-            Verb::ReadConversation { term: t, thread, since: Some(4), max: 50, hold: false };
+        let asked = Verb::ReadThread {
+            of: ThreadOf::Thread(child),
+            view: ThreadView::Activity,
+            after: Some(slopty_proto::thread::TurnId(4)),
+            hold: false,
+        };
         assert_eq!(fake.verbs().pop(), Some(asked));
 
-        let Value::Object(args) = json!({ "term": term }) else { panic!() };
-        let unknown = call(&fake, "answer_permission", args, None).await;
-        assert!(unknown.is_err(), "the person answers permissions, never an agent");
+        let term = format!("{}/{}", studio(), shell());
+        call_json(&fake, "read_thread", json!({ "term": term })).await;
+        let t = TermRef { worker: studio(), session: shell() };
+        let Some(Verb::ReadThread { of, view, after: None, .. }) = fake.verbs().pop() else {
+            panic!()
+        };
+        assert_eq!((of, view), (ThreadOf::Term(t), ThreadView::Messages));
+        call_json(&fake, "read_thread", json!({ "project": "slopty", "task": 3 })).await;
+        let Some(Verb::ReadThread { of: ThreadOf::Task { task, .. }, .. }) = fake.verbs().pop()
+        else {
+            panic!()
+        };
+        assert_eq!(task, TaskId(3));
+        let (failed, text) = call_json(&fake, "read_thread", json!({})).await;
+        assert!(failed && text.contains("name a task, a thread or a terminal"), "{text}");
+        let (failed, text) = call_json(&fake, "read_thread", json!({ "thread": "t1" })).await;
+        assert!(failed && text.contains("not a thread id"), "{text}");
+
+        let Value::Object(args) = json!({ "thread": child.to_string() }) else { panic!() };
+        let unknown = call(&fake, "answer_request", args, None).await;
+        assert!(unknown.is_err(), "the person answers requests, never an agent");
     }
 
     /// A still comes back as an image after its size; the endpoint that runs elsewhere than

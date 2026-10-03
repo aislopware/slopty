@@ -843,7 +843,6 @@ mod golden {
                     kind: slopty_proto::items::ItemKind::Browser {
                         url: "http://localhost:5173/".to_owned(),
                     },
-                    sleeping: false,
                     name: None,
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -859,7 +858,6 @@ mod golden {
                     kind: slopty_proto::items::ItemKind::File {
                         path: "/w/slopty/src/main.rs".to_owned(),
                     },
-                    sleeping: false,
                     name: None,
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -875,7 +873,6 @@ mod golden {
                     kind: slopty_proto::items::ItemKind::Terminal {
                         session: SessionId::from_uuid(Uuid::from_u128(0x79)),
                     },
-                    sleeping: false,
                     name: Some("build box".to_owned()),
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -924,7 +921,6 @@ mod golden {
                     kind: slopty_proto::items::ItemKind::Window {
                         window: slopty_core::WindowId(3),
                     },
-                    sleeping: false,
                     name: None,
                     facts: [("project".to_owned(), "atlas".to_owned())].into(),
                 }),
@@ -949,7 +945,6 @@ mod golden {
                 op: ItemOp::Add(Item {
                     id,
                     kind: ItemKind::Folder { path: "/w/slopty".to_owned() },
-                    sleeping: false,
                     name: None,
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -970,7 +965,6 @@ mod golden {
                     kind: ItemKind::Review {
                         thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(0x7417)),
                     },
-                    sleeping: false,
                     name: None,
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -986,7 +980,6 @@ mod golden {
                     kind: ItemKind::Thread {
                         thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(0x7418)),
                     },
-                    sleeping: false,
                     name: None,
                     facts: std::collections::BTreeMap::new(),
                 }),
@@ -2241,13 +2234,8 @@ mod orchestration {
         let open = Verb::OpenItem { worker, kind: kind.clone(), name: Some("app".to_owned()) };
         snap("server_request_open_item", &request(open));
         snap("server_reply_item", &reply(Outcome::Item(item)));
-        let listed = Item {
-            id: item.item,
-            kind,
-            sleeping: false,
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
+        let listed =
+            Item { id: item.item, kind, name: None, facts: std::collections::BTreeMap::new() };
         snap("server_reply_items", &reply(Outcome::Items(vec![listed])));
         let rename = Verb::RenameItem { item, name: Some("docs".to_owned()) };
         snap("server_request_rename_item", &request(rename));
@@ -2271,80 +2259,16 @@ mod orchestration {
         snap("server_reply_screens", &reply(screens));
     }
 
-    /// The verbs an orchestrating agent reaches another agent and the screen with: a page of
-    /// the conversation and the prompt held in it, the answer, a still picture or the refusal of
-    /// one, and a file sent up in parts.
+    /// The verbs an orchestrating agent reaches the screen and files with: a still picture or
+    /// the refusal of one, and a file sent up in parts. Reading and answering another agent's
+    /// thread is in `golden_project`'s `thread_reads`.
     #[test]
     fn agent_verbs() {
         use slopty_core::XferId;
-        use slopty_proto::conversation::{
-            Body, Clipped, Entry, Meters, Origin, PermissionPrompt, Prompt, Task, ThreadId,
-            ToolDetail, Verdict,
-        };
-        use slopty_proto::orchestration::{ConversationPage, ThreadInfo, UploadPart};
+        use slopty_proto::orchestration::UploadPart;
         use slopty_proto::screen::CaptureTarget;
 
         let worker = term().worker;
-        let read = Verb::ReadConversation {
-            term: term(),
-            thread: ThreadId::Main,
-            since: Some(40),
-            max: 50,
-            hold: true,
-        };
-        snap("server_request_read_conversation", &request(read));
-        let text = |s: &str| Clipped { text: s.to_owned(), lines: 1, chars: 7, full: None };
-        let prompt =
-            Body::Prompt(Prompt { text: text("fix it"), images: Vec::new(), command: None });
-        let page = ConversationPage {
-            threads: vec![
-                ThreadInfo { id: ThreadId::Main, origin: None, entries: 41 },
-                ThreadInfo {
-                    id: ThreadId::Agent("a1".to_owned()),
-                    origin: Some(Origin {
-                        tool_use_id: Some("t1".to_owned()),
-                        agent_type: Some("Explore".to_owned()),
-                        description: None,
-                    }),
-                    entries: 3,
-                },
-            ],
-            thread: ThreadId::Main,
-            entries: vec![Entry {
-                id: "u1".to_owned(),
-                at_ms: WallMs::from_millis(7),
-                body: prompt,
-            }],
-            start: 40,
-            next: 41,
-            total: 41,
-            tasks: vec![Task {
-                id: "1".to_owned(),
-                subject: "Build".to_owned(),
-                status: "in_progress".to_owned(),
-            }],
-            meters: Some(Meters { model: Some("Opus".to_owned()), ..Meters::default() }),
-            held: vec![PermissionPrompt {
-                session: term().session,
-                ask: 3,
-                tool: "Bash".to_owned(),
-                detail: ToolDetail::Other { input: text("{}") },
-                suggestions: Vec::new(),
-                mode: Some("default".to_owned()),
-                editable: Vec::new(),
-                asked_ms: WallMs::from_millis(1_790_000_000_000),
-                until_ms: WallMs::from_millis(1_790_000_595_000),
-            }],
-        };
-        snap("server_reply_conversation", &reply(Outcome::Conversation(Box::new(page))));
-        let key = Some(IdempotencyKey::new("answer-3").expect("a key"));
-        let answer = Verb::AnswerPermission {
-            term: term(),
-            ask: 3,
-            verdict: Verdict::Deny { message: "not on main".to_owned(), interrupt: false },
-        };
-        snap("server_request_answer_permission", &FromServer::Request { id: 8, key, verb: answer });
-
         let still = Verb::CaptureStill { worker, target: CaptureTarget::Window(WindowId(4242)) };
         snap("server_request_capture_still", &request(still));
         let png = Outcome::Still { png: b"\x89PNG".to_vec(), width: 2560, height: 1600 };

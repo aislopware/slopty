@@ -268,7 +268,6 @@ mod tests {
         let note = Item {
             id: ItemId::new(),
             kind: ItemKind::Note { text: "kept".to_owned() },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

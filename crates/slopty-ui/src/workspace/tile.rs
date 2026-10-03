@@ -124,8 +124,6 @@ pub(super) fn mute_label(worker: &str) -> String {
 }
 /// A shell's body while its view attaches.
 pub const ATTACHING: &str = "Attaching…";
-/// A window or display asleep in the registry.
-pub const SLEEPING: &str = "Sleeping";
 /// A window or display whose stream was let go while it was off screen.
 pub const PAUSED: &str = "Paused off screen";
 /// A stream or a page on its way.
@@ -153,7 +151,7 @@ pub(super) struct Chrome {
 
 /// What a body with nothing to show yet says, and when.
 enum Wait {
-    /// A state that lasts (asleep, let go off screen): said at once.
+    /// A state that lasts (let go off screen): said at once.
     Lasting(SharedString),
     /// A wait the worker is about to end (opening, reading, attaching): said only past the
     /// loading grace.
@@ -1649,14 +1647,14 @@ impl WorkspaceView {
     }
 
     /// Whether a remote window or display is on its way: asked for and not yet drawn, while
-    /// its worker is up. Neither asleep nor let go off screen, which wait on nothing.
+    /// its worker is up. Not one let go off screen, which waits on nothing.
     fn opening(&self, item: &Item) -> bool {
         if !matches!(item.kind, ItemKind::Window { .. } | ItemKind::Display { .. }) {
             return false;
         }
         match self.screens.get(&item.id) {
             Some(_) => self.stream(item.id).is_some_and(|stream| stream.waiting),
-            None => !item.sleeping && !self.parked.contains(&item.id),
+            None => !self.parked.contains(&item.id),
         }
     }
 
@@ -2567,7 +2565,7 @@ impl WorkspaceView {
     }
 
     /// A body with nothing to show yet, saying why in one muted line: at once for a state
-    /// that lasts (asleep, let go off screen), and only past [`crate::screen::LOADING_GRACE`]
+    /// that lasts (let go off screen), and only past [`crate::screen::LOADING_GRACE`]
     /// for one the worker is about to end (opening, reading, attaching), so a fast answer
     /// never flashes a word. Blank in the overview's shapes-only zoom.
     fn waiting_body(&self, item: &Item, wait: Wait, k: f32) -> gpui::AnyElement {
@@ -2758,9 +2756,6 @@ impl WorkspaceView {
                         div().flex_1().w_full().overflow_hidden().child(body).into_any_element()
                     }
                     None if !worker_up => well(),
-                    None if item.sleeping => {
-                        self.waiting_body(item, Wait::Lasting(SLEEPING.into()), k)
-                    }
                     None if self.parked.contains(&item.id) => {
                         self.waiting_body(item, Wait::Lasting(PAUSED.into()), k)
                     }

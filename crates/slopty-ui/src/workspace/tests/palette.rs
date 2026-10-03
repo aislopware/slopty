@@ -670,7 +670,6 @@ pub(super) fn shell_in(
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

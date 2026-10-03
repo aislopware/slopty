@@ -133,8 +133,7 @@ impl ItemDoc {
                 Some(_) => ItemChange::Removed(id),
                 None => ItemChange::Echo,
             },
-            ItemOp::Sleep { .. }
-            | ItemOp::Rename { .. }
+            ItemOp::Rename { .. }
             | ItemOp::SetNote { .. }
             | ItemOp::SetUrl { .. }
             | ItemOp::SetFolder { .. }
@@ -230,7 +229,6 @@ mod tests {
         Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session: SessionId::new() },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         }
@@ -297,10 +295,10 @@ mod tests {
         let renamed = ItemOp::Rename { id: a.id, name: Some("logs".to_owned()) };
         let delta = ItemSync::Delta { version: 7, by: other, op: renamed };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(a.id));
-        let slept = ItemOp::Sleep { id: b.id, sleeping: true };
-        let delta = ItemSync::Delta { version: 8, by: other, op: slept };
+        let named = ItemOp::Rename { id: b.id, name: Some("build".to_owned()) };
+        let delta = ItemSync::Delta { version: 8, by: other, op: named };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(b.id));
-        assert_eq!(doc.get(b.id).map(|i| i.sleeping), Some(true));
+        assert_eq!(doc.get(b.id).and_then(|i| i.name.as_deref()), Some("build"));
 
         let delta = ItemSync::Delta { version: 9, by: other, op: ItemOp::Remove(a.id) };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Removed(a.id));

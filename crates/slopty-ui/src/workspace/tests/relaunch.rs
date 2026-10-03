@@ -127,7 +127,6 @@ fn a_relaunch_puts_a_popped_out_tile_back_in_its_window(cx: &mut TestAppContext)
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Window { window },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

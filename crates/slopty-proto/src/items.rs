@@ -76,8 +76,6 @@ pub struct Item {
     pub id: ItemId,
     /// Content.
     pub kind: ItemKind,
-    /// Sleeping: kept but its session or stream is released.
-    pub sleeping: bool,
     /// The name the human gave the item, shown as its title over whatever its content would
     /// say (a shell's title, a window's, a note's first line, a file's name); trimmed and at
     /// most [`NAME_MAX`] characters, or none.
@@ -124,13 +122,6 @@ pub enum ItemOp {
     Add(Item),
     /// Remove.
     Remove(ItemId),
-    /// Sleep or wake.
-    Sleep {
-        /// Item.
-        id: ItemId,
-        /// True to sleep.
-        sleeping: bool,
-    },
     /// Name the item, or clear its name with `None`.
     Rename {
         /// Item.
@@ -181,7 +172,6 @@ impl ItemOp {
         match self {
             Self::Add(item) => item.id,
             Self::Remove(id)
-            | Self::Sleep { id, .. }
             | Self::Rename { id, .. }
             | Self::SetNote { id, .. }
             | Self::SetUrl { id, .. }
@@ -227,7 +217,6 @@ impl Item {
         }
         Ok(match (op, &mut self.kind) {
             (ItemOp::Add(_) | ItemOp::Remove(_), _) => return Err(Refused::NotAnEdit),
-            (ItemOp::Sleep { sleeping, .. }, _) => set(&mut self.sleeping, sleeping),
             (ItemOp::Rename { name, .. }, _) => set(&mut self.name, name),
             (ItemOp::SetNote { text, .. }, ItemKind::Note { text: at }) => set(at, text),
             (ItemOp::SetUrl { url, .. }, ItemKind::Browser { url: at }) => set(at, url),
@@ -283,7 +272,7 @@ mod tests {
     use super::*;
 
     fn item(kind: ItemKind) -> Item {
-        Item { id: ItemId::nil(), kind, sleeping: false, name: None, facts: BTreeMap::new() }
+        Item { id: ItemId::nil(), kind, name: None, facts: BTreeMap::new() }
     }
 
     /// An edit reports a change only when the value moved, whatever the field; an edit of a
@@ -301,8 +290,6 @@ mod tests {
 
         let rename = ItemOp::Rename { id, name: Some("dev".to_owned()) };
         assert_eq!((page.apply(&rename), page.apply(&rename)), (Ok(true), Ok(false)));
-        let sleep = ItemOp::Sleep { id, sleeping: true };
-        assert_eq!((page.apply(&sleep), page.apply(&sleep)), (Ok(true), Ok(false)));
 
         let mut note = item(ItemKind::Note { text: String::new() });
         let text = ItemOp::SetNote { id, text: "plan".to_owned() };

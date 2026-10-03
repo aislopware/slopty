@@ -775,7 +775,7 @@ impl WorkspaceView {
             .filter(|(_, w)| w.link.is_some())
             .flat_map(|(key, w)| {
                 w.doc.items().filter_map(move |i| match i.kind {
-                    ItemKind::Terminal { session } if !i.sleeping => Some((*key, session)),
+                    ItemKind::Terminal { session } => Some((*key, session)),
                     _ => None,
                 })
             })
@@ -789,7 +789,7 @@ impl WorkspaceView {
             self.attach_terminal(key, session, cx);
         }
         // A worker away keeps its shells' views, showing their last rows, for its next link to
-        // attach again; one closed or put to sleep meanwhile lets go of its view.
+        // attach again; one closed meanwhile lets go of its view.
         let away: std::collections::HashSet<SessionId> = self
             .workers
             .iter()
@@ -798,7 +798,7 @@ impl WorkspaceView {
                 w.doc
                     .items()
                     .filter_map(|i| match i.kind {
-                        ItemKind::Terminal { session } if !i.sleeping => Some(session),
+                        ItemKind::Terminal { session } => Some(session),
                         _ => None,
                     })
                     .chain(
@@ -953,7 +953,7 @@ impl WorkspaceView {
                 let item = w.doc.items().find(|i| i.id == id);
                 if item.is_none() || key.is_none() {
                     w.sized = None;
-                } else if item.is_some_and(|i| i.sleeping) || self.parked.contains(&id) {
+                } else if self.parked.contains(&id) {
                     if let Some(s) = w.sized.as_mut() {
                         s.lost();
                     }
@@ -982,7 +982,7 @@ impl WorkspaceView {
             let wanted: Vec<(ItemId, CaptureTarget)> = w
                 .doc
                 .items()
-                .filter(|i| !i.sleeping && !self.parked.contains(&i.id) && Some(i.id) != sized)
+                .filter(|i| !self.parked.contains(&i.id) && Some(i.id) != sized)
                 .filter_map(|i| match i.kind {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),

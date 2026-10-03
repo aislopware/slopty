@@ -42,7 +42,6 @@ impl WorkspaceView {
         let item = Item {
             id: ItemId::new(),
             kind: ItemKind::Review { thread },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

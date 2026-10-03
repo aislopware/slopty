@@ -113,7 +113,6 @@ fn a_narrow_header_keeps_its_title_and_shortens_its_place(cx: &mut TestAppContex
     let named = |session| Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: Some("release notes".to_owned()),
         facts: BTreeMap::new(),
     };
@@ -541,7 +540,6 @@ fn an_exited_shell_offers_restart_and_close(cx: &mut TestAppContext) {
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

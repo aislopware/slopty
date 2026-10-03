@@ -168,7 +168,6 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Terminal { session },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };
@@ -418,20 +417,13 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         items.push(Item {
             id: ItemId::new(),
             kind: ItemKind::Terminal { session },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         });
     }
     for _ in 0..NOTES {
         let kind = ItemKind::Note { text: "a note\n".into() };
-        items.push(Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        });
+        items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     let key = studio.key;
     view.update_in(cx, |v, _window, cx| {

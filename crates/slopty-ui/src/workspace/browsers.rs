@@ -43,7 +43,6 @@ impl WorkspaceView {
         let item = Item {
             id: ItemId::new(),
             kind: ItemKind::Browser { url: url.clone() },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

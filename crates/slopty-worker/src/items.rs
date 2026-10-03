@@ -131,7 +131,6 @@ impl ItemStore {
             let item = Item {
                 id: ItemId::new(),
                 kind: ItemKind::Terminal { session },
-                sleeping: false,
                 name: None,
                 facts: BTreeMap::new(),
             };
@@ -253,10 +252,7 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
         ItemOp::SetFolder { path, .. } if !good_path(&path) => {
             return Err(WorkerError::Items("bad folder path".to_owned()));
         }
-        other @ (ItemOp::Remove(_)
-        | ItemOp::Sleep { .. }
-        | ItemOp::SetUrl { .. }
-        | ItemOp::SetFolder { .. }) => other,
+        other @ (ItemOp::Remove(_) | ItemOp::SetUrl { .. } | ItemOp::SetFolder { .. }) => other,
     })
 }
 
@@ -343,8 +339,7 @@ fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
         }
         // An edit that changes nothing is still taken and broadcast: the delta is how the
         // proposer hears its op went through.
-        ItemOp::Sleep { id, .. }
-        | ItemOp::Rename { id, .. }
+        ItemOp::Rename { id, .. }
         | ItemOp::SetNote { id, .. }
         | ItemOp::SetUrl { id, .. }
         | ItemOp::SetFolder { id, .. }
@@ -427,7 +422,6 @@ mod tests {
         let note = |name: &str| Item {
             id: ItemId::new(),
             kind: ItemKind::Note { text: String::new() },
-            sleeping: false,
             name: Some(name.to_owned()),
             facts: BTreeMap::new(),
         };
@@ -446,7 +440,6 @@ mod tests {
         let note = Item {
             id: ItemId::new(),
             kind: ItemKind::Note { text: "draft".to_owned() },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };
@@ -495,7 +488,6 @@ mod tests {
         let page = Item {
             id: ItemId::new(),
             kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };
@@ -521,7 +513,6 @@ mod tests {
         let folder = Item {
             id: ItemId::new(),
             kind: ItemKind::Folder { path: "/w".to_owned() },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };
@@ -548,13 +539,7 @@ mod tests {
         let file = dir.path().join("items.json");
         let store = ItemStore::open(&file).unwrap();
         let thread = slopty_proto::thread::ThreadId::new();
-        let item = |kind| Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        };
+        let item = |kind| Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() };
         let review = item(ItemKind::Review { thread });
         let shown = item(ItemKind::Thread { thread });
         for added in [&review, &shown] {
@@ -583,7 +568,6 @@ mod tests {
         let note = Item {
             id: ItemId::new(),
             kind: ItemKind::Note { text: String::new() },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };
@@ -603,13 +587,14 @@ mod tests {
         let by = ClientId::new();
         let err = store.apply(ItemOp::Remove(ItemId::new()), by).unwrap_err();
         assert!(matches!(err, WorkerError::NoSuchItem));
-        let err = store.apply(ItemOp::Sleep { id: ItemId::new(), sleeping: true }, by).unwrap_err();
+        let name = |id| ItemOp::Rename { id, name: Some("dev".to_owned()) };
+        let err = store.apply(name(ItemId::new()), by).unwrap_err();
         assert!(matches!(err, WorkerError::NoSuchItem));
         let item = added(store.ensure_terminal(SessionId::new(), by).unwrap());
-        let slept = store.apply(ItemOp::Sleep { id: item.id, sleeping: true }, by).unwrap();
-        assert!(matches!(slept, ItemSync::Delta { op: ItemOp::Sleep { sleeping: true, .. }, .. }));
+        let named = store.apply(name(item.id), by).unwrap();
+        assert!(matches!(named, ItemSync::Delta { op: ItemOp::Rename { .. }, .. }));
         let ItemSync::Snapshot { items, .. } = store.snapshot() else { panic!("snapshot") };
-        assert!(items[0].sleeping);
+        assert_eq!(items[0].name.as_deref(), Some("dev"));
     }
 
     /// A store is unreadable when its path is a directory and refused when its registry
@@ -683,13 +668,8 @@ mod tests {
     fn notes_and_paths_are_bounded() {
         let (_dir, store) = store();
         let by = ClientId::new();
-        let item = |kind: ItemKind| Item {
-            id: ItemId::new(),
-            kind,
-            sleeping: false,
-            name: None,
-            facts: BTreeMap::new(),
-        };
+        let item =
+            |kind: ItemKind| Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() };
         let note = |text: String| item(ItemKind::Note { text });
         store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX))), by).unwrap();
         let err = store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX + 1))), by).unwrap_err();
@@ -710,7 +690,6 @@ mod tests {
         let page = |url: &str| Item {
             id: ItemId::new(),
             kind: ItemKind::Browser { url: url.to_owned() },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };
@@ -743,7 +722,6 @@ mod tests {
         let window = Item {
             id: ItemId::new(),
             kind: ItemKind::Window { window: slopty_core::WindowId(4) },
-            sleeping: false,
             name: None,
             facts: BTreeMap::new(),
         };

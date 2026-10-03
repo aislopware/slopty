@@ -1199,7 +1199,6 @@ impl Workspace {
                 pos: [pos.workspace, pos.column, pos.tile],
                 bounds,
                 active: view.focused() == Some(tile),
-                sleeping: item.sleeping,
                 note,
                 file,
                 browser,

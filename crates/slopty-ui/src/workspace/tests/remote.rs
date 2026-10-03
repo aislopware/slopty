@@ -988,7 +988,6 @@ fn a_browser_item_is_the_worker_s_address_served_at_each_client_s_own_port(
     let item = Item {
         id: ItemId::new(),
         kind: ItemKind::Browser { url: url.to_owned() },
-        sleeping: false,
         name: None,
         facts: BTreeMap::new(),
     };

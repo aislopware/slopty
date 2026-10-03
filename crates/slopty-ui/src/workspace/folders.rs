@@ -73,7 +73,6 @@ impl WorkspaceView {
         let item = Item {
             id: ItemId::new(),
             kind: ItemKind::Folder { path: path.clone() },
-            sleeping: false,
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
