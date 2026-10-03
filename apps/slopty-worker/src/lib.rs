@@ -326,16 +326,31 @@ fn server_address(flag: Option<&str>, data_dir: &std::path::Path) -> Option<slop
     }
 }
 
+/// The registration with a server while it runs: dropping it ends its tasks.
+struct Joined(Vec<tokio::task::AbortHandle>);
+
+impl Drop for Joined {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
 /// Register with the server at `addr` on a task of its own that dials and keeps dialing
 /// (`server::run`), registering with the daemon's [`Daemon::caps`], and gather this worker's
 /// facts for it on another ([`slopty_worker::facts::watch`]), the person's labels and probes
-/// read from the settings under `data_dir` each time.
-fn join_server(daemon: &Daemon, addr: slopty_net::HostAddr, data_dir: &std::path::Path) {
+/// read from the settings under `data_dir` each time. `None` when no endpoint could be bound.
+fn join_server(
+    daemon: &Daemon,
+    addr: slopty_net::HostAddr,
+    data_dir: &std::path::Path,
+) -> Option<Joined> {
     let endpoint = match slopty_net::client::bind_client() {
         Ok(endpoint) => endpoint,
         Err(e) => {
             tracing::warn!(error = %e, "no endpoint to dial the server from; running on our own");
-            return;
+            return None;
         }
     };
     let launch = slopty_worker::orchestrate::Launch {
@@ -354,9 +369,110 @@ fn join_server(daemon: &Daemon, addr: slopty_net::HostAddr, data_dir: &std::path
     let settings = slopty_settings::path_in(data_dir);
     let own =
         move || server::own_facts(&slopty_settings::Settings::load(&settings).settings.worker);
-    tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
+    let facts_task = tokio::spawn(slopty_worker::facts::watch(facts_tx, own));
     let watched = server::Watched { caps: daemon.caps.clone(), facts };
-    tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));
+    let run = tokio::spawn(server::run(daemon.clone(), orchestrator, endpoint, addr, watched));
+    Some(Joined(vec![facts_task.abort_handle(), run.abort_handle()]))
+}
+
+/// What the sessions started from now on find in their environment: this daemon's control
+/// socket, where the `slopty hook` relay inside them reaches it; the server it registers with,
+/// so `slopty mcp` and the CLI in any of them, an agent's tools included, reach the fleet with
+/// no flag; and the Claude Code mod's, so a `claude` typed in one finds it.
+fn session_env(
+    ctl_path: &std::path::Path,
+    server: Option<&slopty_net::HostAddr>,
+    claude_mod: Option<&slopty_agent::claude_mod::Installed>,
+) -> Vec<(String, String)> {
+    let mut env =
+        vec![("SLOPTY_WORKER_SOCKET".to_owned(), ctl_path.to_string_lossy().into_owned())];
+    if let Some(addr) = server {
+        env.push((slopty_proto::project::SERVER_ENV.to_owned(), addr.to_string()));
+    }
+    if let Some(installed) = claude_mod {
+        env.extend(installed.session_env());
+    }
+    env
+}
+
+/// What a change of `settings.toml` from `before` to `now` asks of the running worker.
+#[derive(Debug, Default, PartialEq)]
+struct Changed {
+    /// `[worker] allow` changed: the ranges to let in from the next peer on.
+    allow: Option<Vec<slopty_net::admission::Cidr>>,
+    /// The server to register with changed. `flag` (`--server`, `SLOPTY_SERVER`) holds over
+    /// the file, so with one this never is.
+    reregister: bool,
+    /// The server registered with from now, when `reregister`; `None` runs on its own.
+    server: Option<slopty_net::HostAddr>,
+    /// The keys that take effect only when the worker starts again
+    /// ([`slopty_settings::schema::restart_keys`]).
+    waits: Vec<String>,
+}
+
+/// [`Changed`] for a file that went from `before` to `now`.
+fn changed(
+    before: &slopty_settings::Settings,
+    now: &slopty_settings::Settings,
+    flag: Option<&str>,
+) -> Changed {
+    let allow = (before.worker.allow != now.worker.allow)
+        .then(|| parse_allow(&now.worker.allow, "[worker]"));
+    let registers = |settings| server::configured(flag, settings).ok().flatten();
+    let (was, server) = (registers(before), registers(now));
+    let reregister = was != server;
+    let waits = slopty_settings::schema::restart_keys(before, now, "worker");
+    Changed { allow, reregister, server, waits }
+}
+
+/// Follow `settings.toml` under `data_dir` for as long as the daemon runs, applying each change
+/// of `[worker]` it can as it is read ([`Changed`]): the allowed ranges from the next peer on,
+/// and a new server registered with at once, `joined` (the registration running now) ended
+/// first. A key that waits for the next start says so in the log. A file that does not parse
+/// changes nothing.
+async fn follow_settings(
+    daemon: Daemon,
+    data_dir: PathBuf,
+    flag: Option<String>,
+    ctl_path: PathBuf,
+    mut joined: Option<Joined>,
+) -> ! {
+    let path = slopty_settings::path_in(&data_dir);
+    let mut seen = slopty_settings::follow::Seen::of(&path);
+    let mut applied = slopty_settings::Settings::load(&path).settings;
+    loop {
+        tokio::time::sleep(slopty_settings::follow::POLL).await;
+        if !seen.changed(&path) {
+            continue;
+        }
+        let loaded = slopty_settings::Settings::load(&path);
+        if let Some(e) = &loaded.error {
+            tracing::warn!(error = %e, "settings.toml ignored; what was applied stays");
+            continue;
+        }
+        let now = loaded.settings;
+        let Changed { allow, reregister, server, waits } = changed(&applied, &now, flag.as_deref());
+        if let Some(allow) = allow {
+            let ranges: Vec<String> = allow.iter().map(ToString::to_string).collect();
+            tracing::info!(?ranges, "[worker] allow changed: applied");
+            daemon.listener.admission().set_ranges(allow);
+        }
+        if reregister {
+            drop(joined.take());
+            let env = session_env(&ctl_path, server.as_ref(), daemon.claude_mod.as_ref());
+            daemon.worker.set_session_env(env);
+            if let Some(addr) = server {
+                tracing::info!(server = %addr, "[worker] server changed: registering");
+                joined = join_server(&daemon, addr, &data_dir);
+            } else {
+                tracing::info!("[worker] server cleared: running on our own");
+            }
+        }
+        for key in waits {
+            tracing::warn!(key, "changed; it takes effect when the worker restarts");
+        }
+        applied = now;
+    }
 }
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
@@ -669,21 +785,12 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         }
     });
 
-    // Sessions (and the `slopty hook` relay inside them) find this daemon through its socket,
-    // and a `claude` typed in one finds the mod (the shell integration's `claude` function).
-    let mut session_env =
-        vec![("SLOPTY_WORKER_SOCKET".to_owned(), ctl_path.to_string_lossy().into_owned())];
-    // And the server this worker registers with, so `slopty mcp` and the CLI in any of them,
-    // an agent's tools included, reach the fleet with no flag.
     let server = server_address(args.server.as_deref(), &data_dir);
-    if let Some(addr) = &server {
-        session_env.push((slopty_proto::project::SERVER_ENV.to_owned(), addr.to_string()));
-    }
-    if let Some(installed) = &daemon.claude_mod {
-        session_env.extend(installed.session_env());
+    if daemon.claude_mod.is_some() {
         tokio::spawn(modsock::serve(daemon.clone(), mod_path));
     }
-    daemon.worker.set_session_env(session_env);
+    let env = session_env(&ctl_path, server.as_ref(), daemon.claude_mod.as_ref());
+    daemon.worker.set_session_env(env);
     daemon.worker.set_presence_dir(presence_dir.clone());
     tokio::spawn(handoff::presence(presence_dir.clone(), presence_changes));
     // Sessions whose shells were lost to a reboot or to ptyd ending come back under their old
@@ -693,11 +800,16 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
             let _sent = daemon.events.send(slopty_proto::WorkerMsg::Items(delta));
         }
     }
-    tokio::spawn(ctl::serve(daemon.clone(), ctl_path));
+    tokio::spawn(ctl::serve(daemon.clone(), ctl_path.clone()));
 
-    if let Some(addr) = server {
-        join_server(&daemon, addr, &data_dir);
-    }
+    let joined = server.and_then(|addr| join_server(&daemon, addr, &data_dir));
+    tokio::spawn(follow_settings(
+        daemon.clone(),
+        data_dir.clone(),
+        args.server.clone(),
+        ctl_path,
+        joined,
+    ));
 
     let allow: Vec<String> =
         daemon.listener.admission().ranges().iter().map(ToString::to_string).collect();
@@ -818,7 +930,29 @@ async fn let_go() {}
 
 #[cfg(test)]
 mod tests {
-    use super::admission;
+    use super::{Changed, admission, changed};
+
+    /// A change of the file asks the running worker for what changed and nothing else: new
+    /// ranges, a new server or none, and the keys that wait for its next start; a server named
+    /// by `--server` holds over the file's.
+    #[test]
+    fn a_change_of_the_file_is_applied_or_said_to_wait() {
+        let before = slopty_settings::Settings::default();
+        assert_eq!(changed(&before, &before, None), Changed::default(), "nothing changed");
+        let mut now = before.clone();
+        now.worker.allow = vec!["10.0.0.0/8".to_owned(), "bogus".to_owned()];
+        now.worker.server = Some(slopty_net::HostAddr::new("hub", 45_560));
+        now.worker.display_linger_mins = 30;
+        let asked = changed(&before, &now, None);
+        let ranges: Vec<String> = asked.allow.iter().flatten().map(ToString::to_string).collect();
+        assert_eq!(ranges, ["10.0.0.0/8"], "a range that does not parse is skipped");
+        assert!(asked.reregister);
+        assert_eq!(asked.server, Some(slopty_net::HostAddr::new("hub", 45_560)));
+        assert_eq!(asked.waits, ["worker.display_linger_mins"]);
+        let cleared = changed(&now, &before, None);
+        assert_eq!((cleared.reregister, cleared.server), (true, None), "cleared: on its own");
+        assert!(!changed(&before, &now, Some("other")).reregister, "the flag holds");
+    }
 
     /// The ranges come from the settings, a range that does not parse is skipped, and with
     /// none listed no LAN is let in by address: only loopback and the tailnet.

@@ -54,6 +54,57 @@ fn settings(data_dir: &std::path::Path) -> slopty_settings::ServerSettings {
     loaded.settings.server
 }
 
+/// The `settings.toml` beside `data_dir`, which [`settings`] reads.
+fn settings_path(data_dir: &std::path::Path) -> PathBuf {
+    slopty_settings::path_in(data_dir.parent().unwrap_or(data_dir))
+}
+
+/// Which parts of `[server]` a change of the file touched.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Changed {
+    allow: bool,
+    projects: bool,
+}
+
+/// What changed from `before` to `now`, named field by field so a new key is decided here.
+fn changed(
+    before: &slopty_settings::ServerSettings,
+    now: &slopty_settings::ServerSettings,
+) -> Changed {
+    let slopty_settings::ServerSettings { allow, projects } = now;
+    Changed { allow: *allow != before.allow, projects: *projects != before.projects }
+}
+
+/// Follow the file at `path` for as long as the server runs, looking `every` so often, and
+/// hand `apply` each `[server]` that differs from the one applied before (`applied` at first)
+/// with what in it changed: every key takes effect as the file changes. A file that does not
+/// parse changes nothing.
+async fn follow_settings(
+    path: PathBuf,
+    every: std::time::Duration,
+    mut applied: slopty_settings::ServerSettings,
+    apply: impl Fn(&slopty_settings::ServerSettings, Changed),
+) -> ! {
+    let mut seen = slopty_settings::follow::Seen::of(&path);
+    loop {
+        tokio::time::sleep(every).await;
+        if !seen.changed(&path) {
+            continue;
+        }
+        let loaded = slopty_settings::Settings::load(&path);
+        if let Some(e) = &loaded.error {
+            tracing::warn!(error = %e, "settings.toml ignored; what was applied stays");
+            continue;
+        }
+        let now = loaded.settings.server;
+        let what = changed(&applied, &now);
+        if what != Changed::default() {
+            apply(&now, what);
+            applied = now;
+        }
+    }
+}
+
 /// Who may connect: loopback, the tailnet as this machine's Tailscale vouches for it, and the
 /// `[server] allow` ranges.
 fn admission(settings: &slopty_settings::ServerSettings) -> Admission {
@@ -114,6 +165,8 @@ async fn main() -> Result<()> {
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let settings = settings(&data_dir);
     let admission = admission(&settings);
+    let followed = admission.clone();
+    let settings_path = settings_path(&data_dir);
     let config = Config {
         name: args.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
             slopty_platform::computer_name().unwrap_or_else(|| "server".to_owned())
@@ -125,6 +178,18 @@ async fn main() -> Result<()> {
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
     server.hub().set_policy(policy(&settings.projects));
+    let hub = server.hub().clone();
+    let every = slopty_settings::follow::POLL;
+    tokio::spawn(follow_settings(settings_path, every, settings, move |now, changed| {
+        if changed.allow {
+            tracing::info!(ranges = ?now.allow, "[server] allow changed: applied");
+            followed.set_ranges(parse_allow(&now.allow, "[server]"));
+        }
+        if changed.projects {
+            tracing::info!("[server.projects] changed: applied");
+            hub.set_policy(policy(&now.projects));
+        }
+    }));
     if args.print_addr {
         let bound = serde_json::json!({
             "quic": server.quic_addr().to_string(),
@@ -149,7 +214,41 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectId, admission, policy, settings};
+    use super::{Changed, ProjectId, admission, follow_settings, policy, settings, settings_path};
+
+    /// An edit of the file reaches the running server within a poll: the ranges and the
+    /// project bounds it changed, each said by name, and nothing for an edit elsewhere in the
+    /// file or one that does not parse.
+    #[tokio::test]
+    async fn an_edit_of_the_file_is_applied_as_it_is_read() {
+        let every = std::time::Duration::from_millis(20);
+        let root = tempfile::tempdir().unwrap();
+        let data_dir = root.path().join("server");
+        let path = settings_path(&data_dir);
+        let (told, mut heard) = tokio::sync::mpsc::unbounded_channel();
+        let applied = settings(&data_dir);
+        let follow =
+            tokio::spawn(follow_settings(path.clone(), every, applied, move |now, what| {
+                let _heard = told.send((now.allow.clone(), what));
+            }));
+        let after_a_poll = || tokio::time::sleep(every * 10);
+        std::fs::write(&path, "[font]\nmono_size = 15.0\n").unwrap();
+        after_a_poll().await;
+        assert!(heard.try_recv().is_err(), "nothing of the server's changed");
+        std::fs::write(&path, "[server]\nallow = [\"10.8.0.0/24\"]\n").unwrap();
+        after_a_poll().await;
+        let allow = Changed { allow: true, projects: false };
+        assert_eq!(heard.try_recv().ok(), Some((vec!["10.8.0.0/24".to_owned()], allow)));
+        std::fs::write(&path, "[server\n").unwrap();
+        after_a_poll().await;
+        assert!(heard.try_recv().is_err(), "a file that does not parse changes nothing");
+        let text = "[server]\nallow = [\"10.8.0.0/24\"]\n[server.projects]\nlive_agents = 3\n";
+        std::fs::write(&path, text).unwrap();
+        after_a_poll().await;
+        let projects = Changed { allow: false, projects: true };
+        assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(projects));
+        follow.abort();
+    }
 
     /// The ranges come from the settings beside the server's own directory, and a range that
     /// does not parse is skipped; with none, only loopback and the tailnet get in.

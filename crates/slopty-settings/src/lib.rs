@@ -3,7 +3,7 @@
 //! Every field has a default and the file may be absent. Unknown keys are reported as
 //! warnings, never errors. A file that does not parse yields the defaults plus the error, so
 //! the app never fails to start over a typo; the caller shows the error and the next save
-//! heals it. Watching the file for changes is the app's job (`slopty-app`).
+//! heals it. Every reader follows the file for changes itself ([`follow`]).
 
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub use slopty_net::HostAddr;
 
 pub mod edit;
+pub mod follow;
 pub mod schema;
 
 /// What the app takes of each number, outside of which a value is a typo and its default
@@ -296,7 +297,7 @@ pub struct Font {
     /// Terminal font size in points.
     #[schemars(title = "Size", range(min = *bounds::MONO_SIZE.start(), max = *bounds::MONO_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
     pub mono_size: f32,
-    /// A multiple of the font's own; 1.0 is what it asks for.
+    /// A multiple of the font's own; 1.0 keeps it.
     ///
     /// Terminal line height as a multiple of the font's own (ghostty's `adjust-cell-height`):
     /// `1.0` is the font's, `1.2` airier, `0.9` tighter.
@@ -306,7 +307,7 @@ pub struct Font {
         extend("x-step" = 0.1, "x-unit" = "\u{d7}")
     )]
     pub mono_line_height: f32,
-    /// Draw => and != as one glyph in fonts that have them.
+    /// Draw => and != as one glyph where the font can.
     ///
     /// Whether the terminal font's ligatures are shaped.
     #[schemars(title = "Ligatures")]
@@ -426,13 +427,13 @@ pub struct TerminalSettings {
     /// Ghostty's `confirm-close-surface`.
     #[schemars(title = "Confirm close")]
     pub confirm_close: bool,
-    /// Command and Option with the arrows and delete edit the line as text fields do.
+    /// Edit the line with ⌘ and ⌥ and the arrows, as text fields do.
     ///
     /// The Mac's line-editing keys in a shell (ghostty's macOS "natural text editing"
     /// keybinds): ⌘← ⌘→ ⌘⌫ ⌥← ⌥→ ⌥⌫ sent as readline's bytes.
     #[schemars(title = "Natural text editing")]
     pub natural_editing: bool,
-    /// At passwords keeps them from other apps here, as Terminal's Secure Keyboard Entry.
+    /// Keeps passwords typed here from other apps, as Terminal does.
     ///
     /// When macOS keeps what is typed into Slopty from other programs on this Mac (secure
     /// event input): while a terminal waits for a password or a remote window's password
@@ -468,7 +469,7 @@ impl Default for TerminalSettings {
 #[serde(default)]
 #[schemars(title = "Remote windows and desktops")]
 pub struct RemoteSettings {
-    /// The most frames a second a stream asks for; under it, the screen's own refresh.
+    /// A stream follows its screen's refresh, never above this.
     ///
     /// The most frames per second the worker captures and encodes a stream at. A stream
     /// follows the refresh of the screen its tile is on (120 on a 120 Hz Mac or iPad, 60 on
@@ -490,7 +491,7 @@ pub struct RemoteSettings {
     /// A stream opens silenced on this client; the title-bar pill still toggles it.
     #[schemars(title = "Start muted")]
     pub muted: bool,
-    /// Colour at every pixel while the link carries it: crisper coloured text, more bits.
+    /// Full colour at every pixel when the link allows: crisper text.
     ///
     /// Asks the worker for 4:4:4 video. It streams 4:4:4 only while its bitrate target is
     /// high enough for 4:4:4 to be the sharper picture (about 10 Mbit/s at 1080p, more for a
@@ -506,21 +507,21 @@ impl Default for RemoteSettings {
     }
 }
 
-/// `[clipboard]`: the clipboard shared with the workers.
+/// `[clipboard]`: the clipboard shared with the machines.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Clipboard")]
 pub struct ClipboardSettings {
-    /// Copy on a worker, paste here, and the other way; off, each keeps its own.
+    /// Copy on a machine, paste here, and back; off, each keeps its own.
     ///
-    /// Shares the clipboard with the workers: what is copied on one is offered to this Mac and
-    /// to the others, and what is copied here is offered to the worker in front. Off, nothing
+    /// Shares the clipboard with the machines: what is copied on one is offered to this Mac
+    /// and to the others, and what is copied here is offered to the machine in front. Off, nothing
     /// crosses either way; a terminal's own copy and paste still work.
-    #[schemars(title = "Share the clipboard with the workers")]
+    #[schemars(title = "Share the clipboard")]
     pub sync: bool,
-    /// Workers by name, each shared with or not whatever `sync` says: a Mac others use can
+    /// Machines by name, each shared with or not whatever `sync` says: a Mac others use can
     /// be kept out of it.
-    #[schemars(title = "By worker")]
+    #[schemars(title = "By machine")]
     pub workers: BTreeMap<String, bool>,
 }
 
@@ -649,23 +650,27 @@ impl JsonSchema for Chords {
     }
 }
 
-/// `[worker]`: what `slopty-worker` reads from the same file when it starts.
+/// `[worker]`: what `slopty-worker` reads from the same file.
+///
+/// It follows the file, applying `allow` and `server` as they change; a key marked
+/// `x-restarts` waits for its next start ([`schema::restart_keys`]).
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
-#[schemars(title = "This Mac as a worker")]
+#[schemars(title = "Share this Mac's shells and windows")]
 pub struct WorkerSettings {
-    /// Ranges admitted besides loopback and the tailnet; empty admits only those two.
+    /// Address ranges let in besides loopback and the tailnet.
     ///
     /// Address ranges (`10.8.0.0/24`, `fd00::/8`, a bare address) whose peers may connect: a
-    /// VPN or LAN Tailscale does not vouch for (`slopty_net::admission`).
+    /// VPN or LAN Tailscale does not vouch for (`slopty_net::admission`). Applied to the next
+    /// peer as soon as the file changes.
     #[schemars(title = "Allowed addresses", example = ["100.64.0.0/10", "fd00::/8"])]
     pub allow: Vec<String>,
-    /// Read when the worker starts; empty runs it on its own.
+    /// The server it lists itself with; empty runs it on its own.
     ///
     /// The server to register with, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
     /// empty string in the file) runs the worker on its own. `--server` and `SLOPTY_SERVER`
-    /// take precedence.
+    /// take precedence. A change registers it with the new one at once.
     #[serde(with = "server_address")]
     #[schemars(title = "Register with", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
@@ -694,31 +699,33 @@ pub struct WorkerSettings {
     /// away. Its threads' agent is `acp:<name>`. Read at each start.
     #[schemars(
         title = "ACP agents",
+        extend("x-restarts" = "worker"),
         example = serde_json::json!({ "mine": ["/opt/mine/bin/agent", "--acp"], "goose": [] })
     )]
     pub acp: BTreeMap<String, Vec<String>>,
-    /// Off, the worker keeps its own source and each client composes its text itself.
+    /// Use the client's input source there; off, the client composes.
     ///
     /// While a remote window has the keyboard, the worker selects the client's keyboard input
     /// source, so keys go by their place and the remote app's own input methods compose. Off,
     /// the worker keeps its own source for the person at it, and each client composes on its
     /// side and sends the text. Read when the worker starts.
-    #[schemars(title = "Follow the client's input source")]
+    #[schemars(title = "Follow the client's input source", extend("x-restarts" = "worker"))]
     pub input_source_sync: bool,
     /// While working also counts an agent at work with nobody attached.
     ///
     /// What keeps this Mac out of idle sleep: a client attached or an agent at work, a client
     /// attached only, or nothing (the Mac sleeps as its own settings say, a streamed display
     /// too). Read when the worker starts.
-    #[schemars(title = "Keep awake")]
+    #[schemars(title = "Keep awake", extend("x-restarts" = "worker"))]
     pub keep_awake: KeepAwake,
-    /// How long a display made for a client waits for it to come back; 0 lets it go at once.
+    /// How long a client's display waits for it to return; 0 ends it.
     ///
     /// A display the worker made in a client's shape stays this many minutes after its last
     /// stream ends, windows in place, for the same client to take back. Read when the worker
     /// starts.
     #[schemars(
         title = "Keep a client's display",
+        extend("x-restarts" = "worker"),
         range(min = *bounds::DISPLAY_LINGER_MINS.start(), max = *bounds::DISPLAY_LINGER_MINS.end()),
         extend("x-step" = 5, "x-unit" = "min")
     )]
@@ -771,11 +778,13 @@ pub enum Label {
 }
 
 /// `[server]`: what `slopty-server` reads from the file of the data directory its own lives in.
+///
+/// It follows the file: each key applies as the file changes.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "This Mac as a server")]
 pub struct ServerSettings {
-    /// Beside loopback and the tailnet, as the worker's.
+    /// Address ranges let in besides loopback and the tailnet.
     ///
     /// Address ranges whose peers may connect besides loopback and the tailnet, as
     /// [`WorkerSettings::allow`].
@@ -797,10 +806,10 @@ pub struct ProjectBounds {
     /// The most live agents the server lets run across every worker at once.
     #[schemars(title = "Live agents", example = 24)]
     pub live_agents: u16,
-    /// The most a project may let run on one worker.
+    /// The most a project may let run on one machine.
     ///
     /// The highest per-worker limit of live agents any one project may set.
-    #[schemars(title = "Live agents per worker", example = 8)]
+    #[schemars(title = "Live agents per machine", example = 8)]
     pub live_per_worker: u16,
     /// The most a project may let run in all.
     ///
@@ -876,12 +885,12 @@ impl Default for ProjectBounds {
     }
 }
 
-/// `[client]`: how the app and the `slopty` CLI find the workers.
+/// `[client]`: how the app and the `slopty` CLI find the machines.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "This app")]
 pub struct ClientSettings {
-    /// Whose directory lists the workers; empty reaches those added by address.
+    /// Lists your machines; empty reaches only those added by address.
     ///
     /// The server whose directory lists the workers, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
@@ -1086,20 +1095,20 @@ natural_editing = {natural_editing}
 # Under it a stream follows the refresh of the screen its tile is on, so 120
 # follows any screen: 120 on a ProMotion Mac or iPad, 60 on most displays.
 fps = {fps}
-# Ceiling for one stream in megabits per second (1 to 200); the worker grows
+# Ceiling for one stream in megabits per second (1 to 200); the machine grows
 # towards it as the link allows.
 max_bitrate_mbps = {max_bitrate_mbps}
 # Open a stream with its audio silenced here; the title-bar pill still toggles it.
 muted = {muted}
 # Ask for colour at every pixel (4:4:4): crisper coloured text for about 1.6x the
-# bits. The worker sends it only while the link carries that rate, 4:2:0 below.
+# bits. The machine sends it only while the link carries that rate, 4:2:0 below.
 sharp_text = {sharp_text}
 
 [clipboard]
-# Share the clipboard with the workers: copy on one, paste here or on another.
+# Share the clipboard with the machines: copy on one, paste here or on another.
 # Off, nothing crosses either way; a terminal's own copy and paste still work.
 sync = {clipboard_sync}
-# Workers by name, each shared with or not whatever sync says.
+# Machines by name, each shared with or not whatever sync says.
 #
 # [clipboard.workers]
 # shared-mac = false
@@ -1128,7 +1137,8 @@ ansi = []
 # new_terminal = [\"cmd-t\", \"cmd-n\"]
 
 [worker]
-# Read when slopty-worker starts.
+# allow and server apply as this file changes; the rest when slopty-worker
+# starts again.
 #
 # Who may connect to the worker daemon on this Mac, as address ranges
 # (\"10.8.0.0/24\", \"fd00::/8\", \"192.168.1.20\"), besides loopback and the
@@ -1161,9 +1171,9 @@ server = \"\"
 # mine = [\"/opt/mine/bin/agent\", \"--acp\"]
 
 [client]
-# The server whose directory lists the workers this app and the slopty CLI
+# The server whose directory lists the machines this app and the slopty CLI
 # reach, \"host\" or \"host:port\" (port 45560 when absent). Empty reaches only
-# the workers added by address.
+# the machines added by address.
 server = \"\"
 ",
             mono_family = toml_string(&d.font.mono_family),
