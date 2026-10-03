@@ -10679,7 +10679,6 @@ dependencies = [
  "image",
  "indexmap 2.14.2",
  "insta",
- "itertools 0.13.0",
  "libc",
  "litemap",
  "log",

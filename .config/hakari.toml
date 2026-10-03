@@ -5,3 +5,8 @@ dep-format-version = "4"
 # Hakari's resolver 2 is cargo's resolver 3 without the MSRV-aware version pick.
 resolver = "2"
 platforms = [ "aarch64-apple-darwin", "aarch64-apple-ios", "aarch64-apple-ios-sim" ]
+
+# itertools 0.11, 0.13 and 0.14 are all in the graph, and the one the hack names changes the
+# graph it reads next, so each generation named the other: left out, the output is stable.
+[final-excludes]
+third-party = [ { name = "itertools" } ]
