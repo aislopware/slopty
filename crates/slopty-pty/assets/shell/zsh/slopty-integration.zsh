@@ -45,6 +45,13 @@ _slopty_precmd() {
     if [[ "${precmd_functions[-1]}" != _slopty_precmd ]]; then
         precmd_functions=("${(@)precmd_functions:#_slopty_precmd}" _slopty_precmd)
     fi
+    # The zle hooks go in at the first prompt, once every startup file has run: Debian's and
+    # Ubuntu's /etc/zsh/zshrc, read after this file, set zle-line-init and zle-line-finish by
+    # hand and would replace them.
+    if (( ! _slopty_zle_hooked )); then
+        _slopty_zle_hooked=1
+        _slopty_zle_hooks
+    fi
 }
 
 _slopty_preexec() {
@@ -53,6 +60,7 @@ _slopty_preexec() {
     _slopty_running=1
 }
 
+'builtin' 'typeset' -gi _slopty_zle_hooked=0
 'builtin' 'typeset' -ga precmd_functions preexec_functions
 precmd_functions+=(_slopty_precmd)
 preexec_functions+=(_slopty_preexec)
@@ -76,7 +84,7 @@ _slopty_zle_marks() {
         'builtin' 'print' -n -- $'\e]133;P;k=i\a\e]133;B\a'
     fi
 }
-() {
+_slopty_zle_hooks() {
     'builtin' 'local' hook widget func orig flag
     for hook in line-init line-finish keymap-select; do
         widget=zle-$hook

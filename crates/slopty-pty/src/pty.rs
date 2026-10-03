@@ -182,30 +182,37 @@ impl Pty {
 /// XNU's `EREDRIVEOPEN`: an open of a cloning device such as `/dev/ptmx` that raced another
 /// and has to be made again. The kernel means to redo it itself, but it reaches the caller
 /// (`posix_openpt` too): once in 80 000 opens from four threads at once, 23 times in 32 000
-/// from eight, and a soak met it after 1195 cycles. It never came twice in a row there.
+/// from eight, and a soak met it after 1195 cycles. It never came twice in a row there. Linux
+/// has no such errno, and rustix cannot even hold a negative one there.
+#[cfg(target_os = "macos")]
 const REDRIVE_OPEN: i32 = -6;
 
 /// How many times [`redriven`] makes an open the kernel keeps asking to redo.
+#[cfg(target_os = "macos")]
 const REDRIVES: usize = 64;
 
 /// A new master, close-on-exec from the start: set a moment later, a fork by another thread
 /// in between hands the master to that child for its whole life, and closing the tile then
 /// never hangs its shell up. `posix_openpt` is this `open` on macOS and Linux, and rustix
 /// passes it `O_CLOEXEC` only on Linux.
+fn open_ptmx() -> rustix::io::Result<OwnedFd> {
+    rustix::fs::open(c"/dev/ptmx", OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC, Mode::empty())
+}
+
+/// [`open_ptmx`], made again through XNU's two ways of refusing an open that would take.
+#[cfg(target_os = "macos")]
 fn open_master() -> io::Result<OwnedFd> {
-    regrown(|| {
-        redriven(|| {
-            rustix::fs::open(
-                c"/dev/ptmx",
-                OFlags::RDWR | OFlags::NOCTTY | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-        })
-    })
-    .map_err(exhausted)
+    regrown(|| redriven(open_ptmx)).map_err(exhausted)
+}
+
+/// [`open_ptmx`]. Linux's devpts allocates a pair under a lock and refuses only at its limit.
+#[cfg(not(target_os = "macos"))]
+fn open_master() -> io::Result<OwnedFd> {
+    open_ptmx().map_err(io::Error::from).map_err(exhausted)
 }
 
 /// How many times [`regrown`] makes again an open refused with ENXIO.
+#[cfg(target_os = "macos")]
 const REGROWS: usize = 16;
 
 /// `open`, made again while it fails with ENXIO, giving way to other threads in between, up to
@@ -218,6 +225,7 @@ const REGROWS: usize = 16;
 /// opening and closing, each with a multiple of 16 in use, and 0 times made again so, on a
 /// macOS 26.6 guest (`docs/MEASUREMENTS.md`, 2026-10-02). The open made again takes the freed
 /// slot; a system out of pairs refuses every time.
+#[cfg(target_os = "macos")]
 fn regrown<T>(mut open: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let refused = Some(rustix::io::Errno::NXIO.raw_os_error());
     for _ in 0..REGROWS {
@@ -229,14 +237,22 @@ fn regrown<T>(mut open: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     open()
 }
 
-/// ENXIO from the clone device, refused again after [`regrown`], means every pseudo-terminal
-/// the system allows is open: said so, with the limit to raise, instead of "Device not
-/// configured".
+/// How the clone device refuses an open when every pseudo-terminal the system allows is in
+/// use, and the limit to raise: ENXIO under XNU, after [`regrown`]; ENOSPC from Linux's devpts
+/// (`devpts_new_index`), whose limit is `kernel.pty.max`.
+#[cfg(target_os = "macos")]
+const EXHAUSTED: (rustix::io::Errno, &str) = (rustix::io::Errno::NXIO, "kern.tty.ptmx_max");
+#[cfg(not(target_os = "macos"))]
+const EXHAUSTED: (rustix::io::Errno, &str) = (rustix::io::Errno::NOSPC, "kernel.pty.max");
+
+/// An open of the clone device refused as [`EXHAUSTED`]: said so, with the limit to raise,
+/// instead of "Device not configured" or "No space left on device".
 fn exhausted(error: io::Error) -> io::Error {
-    if error.raw_os_error() == Some(rustix::io::Errno::NXIO.raw_os_error()) {
+    let (errno, limit) = EXHAUSTED;
+    if error.raw_os_error() == Some(errno.raw_os_error()) {
         io::Error::new(
             io::ErrorKind::ResourceBusy,
-            "every pseudo-terminal the system allows is in use (kern.tty.ptmx_max)",
+            format!("every pseudo-terminal the system allows is in use ({limit})"),
         )
     } else {
         error
@@ -246,6 +262,7 @@ fn exhausted(error: io::Error) -> io::Error {
 /// `open`, made again while it fails with [`REDRIVE_OPEN`], giving way to other threads in
 /// between, up to [`REDRIVES`] times; then `ResourceBusy`, naming the cause, rather than an
 /// errno no `strerror` knows. Any other result is returned as it is.
+#[cfg(target_os = "macos")]
 fn redriven<T>(mut open: impl FnMut() -> rustix::io::Result<T>) -> io::Result<T> {
     for _ in 0..REDRIVES {
         match open() {
@@ -694,9 +711,12 @@ mod tests {
         let mut dd = pty.spawn(&spec(&["dd", "if=/dev/tty", "of=/dev/null", "count=1"])).unwrap();
         let master = PtyMaster::new(pty.into_master()).unwrap();
         master.write_all(b"line\n").await.unwrap();
-        // Its closing statistics go to the tty, and it cannot finish exiting until they are all
-        // read: the last of its three lines, which may come in a read of its own.
-        read_until(&master, b"bytes transferred").await;
+        // Its closing statistics go to the tty, and on macOS it cannot finish exiting until they
+        // are all read: the last of its three lines, which may come in a read of its own, and
+        // which BSD's dd and GNU's word differently.
+        let last_line: &[u8] =
+            if cfg!(target_os = "macos") { b"bytes transferred" } else { b" copied, " };
+        read_until(&master, last_line).await;
         let status = dd.child.wait().await.unwrap();
         assert_eq!(status.code(), Some(0), "dd could not open /dev/tty: {status:?}");
 
@@ -878,7 +898,8 @@ mod tests {
 
     /// An open refused while the kernel's table of pairs grows is made again until it takes;
     /// one refused every time is refused as exhaustion, named so; any other failure comes back
-    /// at once.
+    /// at once. XNU's alone: Linux's devpts never refuses below its limit.
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_open_refused_as_the_table_grows_is_made_again() {
         let refused = || io::Error::from_raw_os_error(rustix::io::Errno::NXIO.raw_os_error());
@@ -909,12 +930,14 @@ mod tests {
         assert_eq!((error.kind(), tries), (io::ErrorKind::PermissionDenied, 1));
     }
 
+    /// The refusal this kernel gives at its limit names the limit; any other refusal stays as
+    /// it came.
     #[test]
     fn running_out_of_pseudo_terminals_says_so() {
-        let enxio = io::Error::from_raw_os_error(rustix::io::Errno::NXIO.raw_os_error());
-        let error = exhausted(enxio);
+        let (errno, limit) = EXHAUSTED;
+        let error = exhausted(io::Error::from_raw_os_error(errno.raw_os_error()));
         assert_eq!(error.kind(), io::ErrorKind::ResourceBusy, "{error}");
-        assert!(error.to_string().contains("kern.tty.ptmx_max"), "{error}");
+        assert!(error.to_string().contains(limit), "{error}");
         let other =
             exhausted(io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error()));
         assert_eq!(other.raw_os_error(), Some(rustix::io::Errno::ACCESS.raw_os_error()));
@@ -922,7 +945,8 @@ mod tests {
 
     /// An open the kernel asks to redo is made again until it takes; one it keeps asking for
     /// ends in a `ResourceBusy` that names the cause, never a panic or a bare -6; any other
-    /// failure comes back at once.
+    /// failure comes back at once. XNU's alone: no other kernel has the errno.
+    #[cfg(target_os = "macos")]
     #[test]
     fn an_open_the_kernel_asks_to_redo_is_redone_then_given_up_clearly() {
         let redo = || rustix::io::Errno::from_raw_os_error(REDRIVE_OPEN);

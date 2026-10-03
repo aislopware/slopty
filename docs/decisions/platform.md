@@ -646,3 +646,52 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the policy copies it from any client. It was first only in the log, where nobody reads.
   - Tests: `server::tests::a_refused_device_is_told_where_to_grant_it_once` and
     `the_grant_is_copied_for_the_policy_file`.
+
+- ✅ **The Linux lane's first run: what was Linux's and what was the Mac's in the tests**
+  (2026-10-03). CI's first Linux run failed 15 tests. Each was read as a Linux bug until shown
+  to be a Mac assumption, and each now asserts what is right on the platform it runs on.
+  - **Opening a pseudo-terminal.** The open of `/dev/ptmx` was made again on XNU's
+    `EREDRIVEOPEN` (-6) and on its ENXIO while the table of pairs grows. Neither exists on
+    Linux, and rustix cannot even hold a negative errno there (its debug assertion was the
+    failure). Both retries, and their tests, are macOS's alone now. Linux's devpts refuses an
+    open only at its limit, with ENOSPC, which is now said as every pseudo-terminal being in use
+    with `kernel.pty.max` named, as ENXIO names `kern.tty.ptmx_max` on macOS
+    (`running_out_of_pseudo_terminals_says_so`, on both).
+  - **Mac wording in tests.** GNU `dd` ends its statistics with "copied", BSD's with
+    "transferred" (`the_tty_is_the_controlling_terminal_of_the_child`). `/bin/sh` is a program
+    that runs bash on macOS and a link named `sh` on Linux, and the foreground process is named
+    as it was started (`a_ptys_foreground_process_is_the_program_it_runs`).
+  - **UDP on Linux segments every transmit.** noq-udp turns on UDP GSO on any Linux since
+    4.18, so a transmit there carries up to 64 datagrams on the plain path too. The test sends
+    as noq does, transmits of at most that many, and so covers GSO on Linux
+    (`datagrams_arrive_whole_on_the_plain_path`).
+  - **A peer that is this machine but not loopback.** The admission tests reached the worker at
+    `fe80::1%1`, the link-local address macOS gives `lo0`. Linux's `lo` has none, so on Linux the
+    peer is the address this machine sends from on its default route (the packets never leave
+    it). The admitted range became 192.0.2.0/24, which no host is given (RFC 5737), since a
+    GitHub runner's own address is in 10/8. The admission itself was right.
+  - **The receive buffer** is `docs/decisions/transport.md`, "A Linux socket's receive buffer".
+  - **Shells.** The zsh tests need zsh, which Ubuntu does not ship, so CI's Linux job installs
+    zsh and fish. fish is found at `/usr/bin/fish` too, so the fish cases run on Linux.
+  - **zsh on Debian and Ubuntu lost its cursor and its fallback marks.** Their
+    `/etc/zsh/zshrc`, read after the integration is sourced from `.zshenv`, sets
+    `zle-line-init` and `zle-line-finish` by hand (for the keypad's application mode), which
+    replaced Slopty's: no bar cursor at the prompt, and no `133;P` for a prompt a theme had
+    rebuilt. The zle hooks now go in at the first prompt, from the first precmd, once every
+    startup file has run, and wrap whatever widget is there then, as ghostty's deferred setup
+    does (`an_interactive_zsh_emits_prompt_marks`,
+    `a_theme_that_rebuilds_ps1_still_gets_its_prompt_marked`). The handoff test typed `open`,
+    which Linux's opener is not: it types `OPENER` (`xdg-open` there).
+  - **A process's descriptors and threads on Linux** come from `/proc/<pid>/fd` and
+    `/proc/<pid>/task` in `slopty_testkit::process`, which returned nothing off Apple
+    platforms, so `a_closed_session_gives_back_its_descriptor` had nothing to compare.
+  - **A test that hung one run in fifteen.**
+    `a_worker_that_dies_mid_attach_leaves_the_session_to_the_next` read ptyd's 12 MB reply
+    with tokio's `read`. Linux ends a read at the bytes that carry a descriptor, and tokio
+    takes a short read for a drained socket and waits for an edge that never comes, since
+    ptyd is itself waiting for room. The worker reads with `recvmsg`
+    (`fdpass::Inbox`), which tokio wakes only on `EAGAIN`, so the product was right and the test
+    now reads the same way: 150 runs, no hang, where 2 in 30 hung before.
+  - **A received descriptor closes on exec from the start on Linux.** `Inbox::recv` asks for
+    `MSG_CMSG_CLOEXEC` there; macOS has no such flag and keeps setting it right after
+    (`a_received_descriptor_closes_on_exec`).

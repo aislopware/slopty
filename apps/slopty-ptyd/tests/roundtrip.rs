@@ -11,7 +11,7 @@ mod roundtrip {
     use slopty_proto::terminal::TermSize;
     use slopty_pty::protocol::{MAX_CHECKPOINT_BYTES, OutputFrame, PtydRequest};
     use slopty_pty::{PtyError, PtyMaster, PtydClient, SpawnSpec};
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncWriteExt as _;
 
     struct Daemon {
         child: std::process::Child,
@@ -377,10 +377,19 @@ mod roundtrip {
         );
         drop(first);
 
-        let mut dying = attach_when_free_raw(&daemon, id).await;
-        // Some of the reply, then gone while ptyd still has megabytes to write.
-        let mut some = vec![0_u8; 64 << 10];
-        dying.read_exact(&mut some).await.unwrap();
+        let dying = attach_when_free_raw(&daemon, id).await;
+        // Some of the reply, then gone while ptyd still has megabytes to write. Read as a worker
+        // reads, with `recvmsg`: Linux ends a read at the bytes that carry the master, and
+        // tokio's `read` takes a short read for a drained socket and waits for more that never
+        // comes, since ptyd is waiting for room.
+        let mut inbox = slopty_pty::fdpass::Inbox::default();
+        let mut some = 0_usize;
+        while some < 64 << 10 {
+            let read = tokio::time::timeout(Duration::from_secs(10), inbox.recv(&dying)).await;
+            let n = read.expect("ptyd writes the reply").unwrap();
+            assert_ne!(n, 0, "ptyd hung up after {some} bytes");
+            some = some.saturating_add(n);
+        }
         drop(dying);
 
         let attached = attach_when_free(&daemon, id).await;

@@ -787,6 +787,13 @@ mod tests {
         assert!(rest.contains("\x1b]133;A"), "PS1 has them after: {rest:?}");
     }
 
+    /// fish, when installed: Homebrew's, or the distribution's on Linux.
+    fn fish() -> Option<&'static str> {
+        ["/opt/homebrew/bin/fish", "/usr/local/bin/fish", "/usr/bin/fish"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+    }
+
     /// Every bash on this Mac: Apple's 3.2 and Homebrew's, when installed.
     fn bashes() -> Vec<&'static str> {
         ["/bin/bash", "/opt/homebrew/bin/bash"]
@@ -844,10 +851,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_interactive_fish_emits_prompt_marks_and_runs_the_users_config() {
-        let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
-            .into_iter()
-            .find(|p| Path::new(p).is_file())
-        else {
+        let Some(fish) = fish() else {
             slopty_testkit::live::skip("fish is not installed (brew install fish)");
             return;
         };
@@ -910,9 +914,7 @@ mod tests {
         shells.extend(
             bashes().into_iter().map(|b| (b, ".bashrc", "alias claude='command claude --mine'\n")),
         );
-        let fish = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
-            .into_iter()
-            .find(|p| Path::new(p).is_file());
+        let fish = fish();
         shells.extend(
             fish.map(|f| (f, ".config/fish/config.fish", "alias claude 'command claude --mine'\n")),
         );
@@ -943,9 +945,7 @@ mod tests {
         let mut shells: Vec<(&str, &str, &str)> =
             vec![("/bin/zsh", ".zshrc", "alias ssh='echo mine'\n")];
         shells.extend(bashes().into_iter().map(|b| (b, ".bashrc", "alias ssh='echo mine'\n")));
-        let fish = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
-            .into_iter()
-            .find(|p| Path::new(p).is_file());
+        let fish = fish();
         shells.extend(fish.map(|f| (f, ".config/fish/config.fish", "alias ssh 'echo mine'\n")));
         for (n, (shell, rc, alias)) in shells.into_iter().enumerate() {
             let interactive = || Shell { program: shell, args: &["-i"], arg0: None };
@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     /// A shell whose files put the system's directories first (macOS's `path_helper` does, and
-    /// many `.zshrc` files) finds the handoff `open` first again by its prompt, in zsh, bash
+    /// many `.zshrc` files) finds the handoff opener first again by its prompt, in zsh, bash
     /// and fish. The session's browser and editor are the handoff commands by absolute path,
     /// `VISUAL` is not set, and an `EDITOR` or a `VISUAL` the user's files export is the one
     /// every program reads (`${VISUAL:-$EDITOR}`, as git and crontab do).
@@ -1058,16 +1058,18 @@ mod tests {
         let bin = tmp.path().join("bin");
         link_shims(&bin, Path::new("/bin/echo")).unwrap();
         let at = |name: &str| bin.join(name).to_string_lossy().into_owned();
-        let posix =
-            "command -v open; echo \"e=${VISUAL:-$EDITOR} b=$BROWSER v=${VISUAL-}\"\nexit\n";
-        let fish_input = "command -v open; if set -q VISUAL; echo \"e=$VISUAL b=$BROWSER v=$VISUAL\"; else; echo \"e=$EDITOR b=$BROWSER v=\"; end\nexit\n";
+        let posix = [
+            "command -v ",
+            OPENER,
+            "; echo \"e=${VISUAL:-$EDITOR} b=$BROWSER v=${VISUAL-}\"\nexit\n",
+        ]
+        .concat();
+        let fish_input = ["command -v ", OPENER, "; if set -q VISUAL; echo \"e=$VISUAL b=$BROWSER v=$VISUAL\"; else; echo \"e=$EDITOR b=$BROWSER v=\"; end\nexit\n"].concat();
+        let (posix, fish_input) = (posix.as_str(), fish_input.as_str());
         let mut shells: Vec<(&str, &str, &str, &str)> =
             vec![("/bin/zsh", ".zshrc", "export", posix)];
         shells.extend(bashes().into_iter().map(|b| (b, ".bashrc", "export", posix)));
-        if let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
-            .into_iter()
-            .find(|p| Path::new(p).is_file())
-        {
+        if let Some(fish) = fish() {
             shells.push((fish, ".config/fish/config.fish", "set -gx", fish_input));
         } else {
             slopty_testkit::live::skip("fish is not installed (brew install fish)");
@@ -1104,10 +1106,7 @@ mod tests {
         let input = "echo \"p=[$CLAUDE_CLIENT_PRESENCE_FILE]\"\nexit\n";
         let mut shells: Vec<&str> = vec!["/bin/zsh"];
         shells.extend(bashes());
-        if let Some(fish) = ["/opt/homebrew/bin/fish", "/usr/local/bin/fish"]
-            .into_iter()
-            .find(|p| Path::new(p).is_file())
-        {
+        if let Some(fish) = fish() {
             shells.push(fish);
         }
         for (n, shell) in shells.into_iter().enumerate() {

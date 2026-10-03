@@ -74,6 +74,14 @@ fn unsent<'a>(parts: &[&'a [u8]], sent: usize) -> Vec<IoSlice<'a>> {
     rest
 }
 
+/// A received fd is close-on-exec from the moment it arrives where the kernel can do that
+/// (`MSG_CMSG_CLOEXEC` on Linux), so a fork by another thread never hands it to that child.
+/// macOS has no such flag, and [`Inbox::recv`] sets it right after instead.
+#[cfg(target_os = "linux")]
+const RECV_FLAGS: RecvFlags = RecvFlags::CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECV_FLAGS: RecvFlags = RecvFlags::empty();
+
 /// Socket buffer each way. macOS gives a Unix stream 8 KiB, which cut a 3.5 MB checkpoint into
 /// some 430 reads; the tap stream carries every byte a session prints and its checkpoints.
 const SOCKET_BUFFER: usize = 1 << 20;
@@ -139,7 +147,7 @@ impl Inbox {
                 let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
                 let mut cmsg = RecvAncillaryBuffer::new(&mut space);
                 let mut iov = [IoSliceMut::new(scratch)];
-                let msg = recvmsg(stream, &mut iov, &mut cmsg, RecvFlags::empty())
+                let msg = recvmsg(stream, &mut iov, &mut cmsg, RECV_FLAGS)
                     .map_err(std::io::Error::from)?;
                 let mut got: Vec<OwnedFd> = Vec::new();
                 for message in cmsg.drain() {
@@ -153,11 +161,33 @@ impl Inbox {
             .map_err(|e| PtyError::os("recvmsg", e))?;
         self.buf.extend_from_slice(self.scratch.get(..n).unwrap_or_default());
         for fd in received {
-            // macOS has no MSG_CMSG_CLOEXEC; close the race window by hand.
-            rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
-                .map_err(|e| PtyError::os("fcntl", e))?;
+            if RECV_FLAGS.is_empty() {
+                rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)
+                    .map_err(|e| PtyError::os("fcntl", e))?;
+            }
             self.fds.push_back(fd);
         }
         Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsFd as _;
+
+    use super::*;
+
+    /// A descriptor comes through with the bytes it was sent on, close-on-exec on arrival.
+    #[tokio::test]
+    async fn a_received_descriptor_closes_on_exec() {
+        let (sender, receiver) = UnixStream::pair().unwrap();
+        let file = std::fs::File::open("/dev/null").unwrap();
+        send(&sender, b"x", Some(file.as_fd())).await.unwrap();
+        let mut inbox = Inbox::default();
+        assert_eq!(inbox.recv(&receiver).await.unwrap(), 1);
+        let fd = inbox.take_fd().expect("the descriptor sent");
+        let flags = rustix::io::fcntl_getfd(&fd).unwrap();
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC), "{flags:?}");
+        assert!(inbox.take_fd().is_none(), "one sent, one received");
     }
 }

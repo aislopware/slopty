@@ -429,8 +429,10 @@ mod tests {
         assert!(n > 0);
 
         let fg = foreground(master.as_fd()).expect("a foreground process");
-        // The executable's name is not `argv[0]`: `/bin/sh` on macOS is bash.
-        assert_eq!(fg.name, "bash", "{fg:?}");
+        // The name is the executable's, not `argv[0]`: macOS's `/bin/sh` is a program that
+        // runs bash. Linux's is a link (to dash or bash), named as it was started.
+        let name = if cfg!(target_os = "macos") { "bash" } else { "sh" };
+        assert_eq!(fg.name, name, "{fg:?}");
         assert_eq!(fg.argv.first().map(String::as_str), Some("/bin/sh"), "{fg:?}");
         assert!(fg.cwd.is_some(), "{fg:?}");
         child.start_kill().expect("kill");
