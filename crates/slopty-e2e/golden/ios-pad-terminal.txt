@@ -16,11 +16,14 @@ Terminal │ shell │ ~ %
 Button │ Escape
 Button │ Tab
 Button │ Control
+Button │ Alt
 Button │ Command
 Button │ Left arrow
 Button │ Up arrow
 Button │ Down arrow
 Button │ Right arrow
+Button │ Page up
+Button │ Page down
 Button │ Tilde
 Button │ Pipe
 Button │ Slash

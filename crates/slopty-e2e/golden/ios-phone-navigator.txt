@@ -21,7 +21,7 @@ TextInput │ Filter
 Heading │ Workspaces
 Button │ e2e-ios-worker, 2 tiles
 Button │ New workspace
-Heading │ Workers
+Heading │ Machines
 Button │ e2e-ios-worker
 Button │ New shell on e2e-ios-worker
 Button │ Terminal

@@ -27,7 +27,7 @@ ListBox │ Commands
 Heading │ Tiles
 ListBoxOption │ Terminal ~
 ListBoxOption │ scratch
-Heading │ Workers
+Heading │ Machines
 ListBoxOption │ e2e-ios-worker
 Heading │ Recent
 ListBoxOption │ Name this tile ⌘E

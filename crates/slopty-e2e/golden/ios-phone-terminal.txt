@@ -22,5 +22,8 @@ Button │ Tilde
 Button │ Pipe
 Button │ Slash
 Button │ Minus
+Button │ Page up
+Button │ Page down
+Button │ Alt
 Button │ Command
 Button │ Find
