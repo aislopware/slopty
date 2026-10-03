@@ -420,7 +420,7 @@ mod tests {
         .await;
         let facts = &listed[0]["facts"];
         assert_eq!(facts["labels"]["rack"], "b2", "{facts}");
-        assert_eq!(facts["os"], "macos", "{facts}");
+        assert_eq!(facts["os"], std::env::consts::OS, "{facts}");
 
         let repo = root.to_string_lossy().into_owned();
         slopty(&root, addr, &["project", "create", "demo", "--title", "Demo", "--repo", &repo])
