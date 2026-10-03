@@ -1097,3 +1097,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `secure_input::tests::secure_input_is_balanced_whatever_is_asked` (a counting switch),
   `workspace::tests::secure_entry_holds_while_the_focused_shell_reads_a_password`,
   `desktop::a_remote_password_field_holds_secure_entry`.
+
+- ✅ **No page chord on iOS that does nothing** (2026-10-04). ⌘Z, ⌘⇧Z, ⌘X and ⌘A in a page that
+  holds the keyboard are the page's own edits (`browser::Edit`), which the Mac's keymap does
+  because AppKit's menu would take them elsewhere. UIKit hands a hardware keyboard's keys to the
+  web view that holds them, and the page edits on its own, so on iOS the keymap never hears
+  them and those entries only listed chords that did nothing. They are bound on macOS only.
+

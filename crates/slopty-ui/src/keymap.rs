@@ -279,7 +279,7 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "new_agent", ws::NewAgent, &["cmd-shift-t"], W),
         c(Workspace, "new_note", ws::NewNote, &["cmd-shift-n"], W),
         c(Workspace, "add_window", ws::AddWindow, &["cmd-o"], W),
-        c(Workspace, "open_file", ws::OpenFile, &[], W),
+        c(Workspace, "open_file", ws::OpenFile, &["cmd-p"], W),
         c(Workspace, "open_folder", ws::OpenFolder, &[], W),
         c(Workspace, "open_url", ws::OpenUrl, &[], W),
         c(Workspace, "open_last_offer", ws::OpenLastOffer, &[], W),
@@ -422,12 +422,6 @@ pub fn defaults() -> Vec<Command> {
         c(Page, "back", ws::PageBack, &["cmd-left"], &[PAGE]),
         c(Page, "forward", ws::PageForward, &["cmd-right"], &[PAGE]),
         c(Page, "reload", ws::ReloadPage, &[], &[PAGE]),
-        // AppKit's menu and WebKit take these nowhere a page's field would expect; the page
-        // does them itself (`browser::Edit`).
-        c(Page, "undo", ws::PageUndo, &["cmd-z"], &[PAGE_HELD]),
-        c(Page, "redo", ws::PageRedo, &["cmd-shift-z"], &[PAGE_HELD]),
-        c(Page, "cut", ws::PageCut, &["cmd-x"], &[PAGE_HELD]),
-        c(Page, "select_all", ws::PageSelectAll, &["cmd-a"], &[PAGE_HELD]),
         c(Page, "find_next", t::FindNext, &["cmd-g"], &[PAGE_SEARCH]),
         c(Page, "find_previous", t::FindPrev, &["cmd-shift-g"], &[PAGE_SEARCH]),
         c(Conversation, "cycle_density", CycleDensity, &["ctrl-o"], &[FACE, FACE_INPUT]),
@@ -562,6 +556,18 @@ pub fn defaults() -> Vec<Command> {
         c(Terminal, "attach_block", t::AttachBlock, &[], &[TERMINAL]),
         c(Terminal, "clear_screen", t::ClearScreen, &["cmd-k"], &[TERMINAL]),
     ]);
+    // AppKit's menu and WebKit take these nowhere a page's field would expect; the page does
+    // them itself (`browser::Edit`). UIKit hands a hardware keyboard's keys to a page that holds
+    // them, which does its own edits, so on iOS the keymap never hears them there: no chord is
+    // listed that would do nothing.
+    if cfg!(target_os = "macos") {
+        out.extend([
+            c(Page, "undo", ws::PageUndo, &["cmd-z"], &[PAGE_HELD]),
+            c(Page, "redo", ws::PageRedo, &["cmd-shift-z"], &[PAGE_HELD]),
+            c(Page, "cut", ws::PageCut, &["cmd-x"], &[PAGE_HELD]),
+            c(Page, "select_all", ws::PageSelectAll, &["cmd-a"], &[PAGE_HELD]),
+        ]);
+    }
     out.extend(crate::project::key_bindings());
     out
 }

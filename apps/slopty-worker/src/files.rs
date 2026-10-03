@@ -41,6 +41,7 @@ pub async fn send_file(
         FileRead::Streamed { .. } => "streamed",
         FileRead::Binary { .. } => "binary",
         FileRead::Missing { .. } => "missing",
+        FileRead::Absent { .. } => "absent",
         FileRead::TooLarge { .. } => "too large",
         FileRead::Media { .. } => "media",
     };

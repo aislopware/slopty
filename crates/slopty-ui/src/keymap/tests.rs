@@ -198,7 +198,8 @@ fn the_files_chord_wins_over_a_deeper_default() {
 fn a_chords_words_come_with_the_keymap() {
     let keymap = Keymap::default();
     assert_eq!(keymap.label_of(&ws::NewTerminal), "⌘T");
-    assert_eq!(keymap.label_of(&ws::OpenFile), "", "no chord");
+    assert_eq!(keymap.label_of(&ws::OpenFile), "⌘P", "quick open");
+    assert_eq!(keymap.label_of(&ws::OpenFolder), "", "no chord");
     let keymap = Keymap::new(
         &keys("[keys.workspace]\nnew_terminal = \"cmd-alt-y\"\nnew_agent = \"\"\n"),
         Vec::new(),

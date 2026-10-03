@@ -25,14 +25,19 @@ use crate::listing::modified_ms;
 /// A picture or PDF is known by its first bytes ([`media::sniff`]) and read up to
 /// [`MEDIA_BYTES`]; past that it is `Binary`, since nothing of it could be shown. Any other file
 /// past [`FILE_BYTES`] is `TooLarge` and is not read. A NUL byte or invalid UTF-8 makes it
-/// `Binary`; anything the OS refuses (missing, a directory, not permitted) is `Missing` with the
-/// OS's word. The final newline is left off the text and reported, so a save can put it back.
+/// `Binary`. Nothing at the path in a folder that is there is `Absent`, a file to make;
+/// anything else the OS refuses (a missing folder, a directory, not permitted) is `Missing`
+/// with the OS's word. The final newline is left off the text and reported, so a save can put
+/// it back.
 #[must_use]
 pub fn read(path: &Path) -> FileRead {
     let path = expand_home(path);
     // Looked at before it is opened: opening a named pipe waits for a writer that may never come.
     let meta = match std::fs::metadata(&path) {
         Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && folder_is_there(&path) => {
+            return FileRead::Absent { editorconfig: editorconfig(&path) };
+        }
         Err(e) => return FileRead::Missing { error: os_word(&e) },
     };
     if !meta.is_file() {
@@ -83,6 +88,11 @@ pub fn read(path: &Path) -> FileRead {
         text.pop();
     }
     FileRead::Text { text, size, modified_ms, final_newline, editorconfig: editorconfig(&path) }
+}
+
+/// Whether the folder `path` would be in is a folder: a save there makes the file.
+fn folder_is_there(path: &Path) -> bool {
+    path.parent().is_some_and(Path::is_dir)
 }
 
 /// The properties the specification defines, whose values are case-insensitive.
@@ -316,6 +326,11 @@ mod tests {
         assert_eq!(read(&latin), FileRead::Binary { size: 6 });
         assert_eq!(
             read(&dir.path().join("gone")),
+            FileRead::Absent { editorconfig: Vec::new() },
+            "nothing there yet, in a folder that is: a file to make"
+        );
+        assert_eq!(
+            read(&dir.path().join("no-folder/gone")),
             FileRead::Missing { error: "No such file or directory".to_owned() },
             "the os word without its number"
         );
@@ -479,6 +494,37 @@ mod tests {
             WriteResult::Saved { modified_ms, .. } => *modified_ms,
             other => panic!("not saved: {other:?}"),
         }
+    }
+
+    /// A file that is not there yet, in a folder that is, reads as one to make, with the
+    /// `.editorconfig` it will have. A save of it from the epoch (what a tile's new file starts
+    /// from) makes it, and the same save once something made the file meanwhile conflicts
+    /// rather than writing over it.
+    #[test]
+    fn a_missing_file_in_a_folder_is_one_to_make_and_is_made_by_its_save() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".editorconfig"), "root = true\n[*.md]\nindent_size = 2\n")
+            .unwrap();
+        let path = dir.path().join("new.md");
+        let FileRead::Absent { editorconfig } = read(&path) else { panic!("{:?}", read(&path)) };
+        assert!(
+            editorconfig.contains(&("indent_size".to_owned(), "2".to_owned())),
+            "{editorconfig:?}"
+        );
+        saved(&write(&path, b"# New\n", Some(WallMs::ZERO), Rewrite::Replace));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# New\n");
+
+        let raced = dir.path().join("raced.md");
+        assert!(matches!(read(&raced), FileRead::Absent { .. }));
+        std::fs::write(&raced, "made meanwhile\n").unwrap();
+        assert!(
+            matches!(
+                write(&raced, b"mine\n", Some(WallMs::ZERO), Rewrite::Replace),
+                WriteResult::Conflict { .. }
+            ),
+            "a file made since the read is not written over"
+        );
+        assert_eq!(std::fs::read_to_string(&raced).unwrap(), "made meanwhile\n");
     }
 
     /// A save from the version on disk replaces it and keeps its mode; a save from an older

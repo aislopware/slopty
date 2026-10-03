@@ -19,6 +19,7 @@
 //! A picture or a PDF is shown instead (`preview`): the worker knows one by its first bytes
 //! and sends it whole, and the platform decodes it at the size the tile draws it.
 
+mod compare;
 pub mod complete;
 pub mod decode;
 pub mod edit;
@@ -120,6 +121,9 @@ pub(crate) const CHANGED_ON_DISK: &str = "Changed on disk";
 pub(crate) const RELOAD: &str = "Reload";
 /// The bar's way out that keeps the edit.
 pub(crate) const OVERWRITE: &str = "Overwrite";
+/// What a file tile's bar says of a file that is not on disk: not made yet, or deleted under a
+/// tile that keeps its text.
+pub(crate) const NOT_ON_DISK: &str = "Not on disk: saving makes it";
 /// Text a file tile colours at most; a larger file is plain text.
 ///
 /// The colours come from a parse of the whole text off the UI thread once typing pauses, about
@@ -208,6 +212,13 @@ impl Version {
             format.crlf = rules.crlf.unwrap_or(format.crlf);
         }
         Self { text: text.into_owned(), newline: final_newline, format, modified_ms, rules }
+    }
+
+    /// A file that is not on disk yet: empty, ending with a newline once it has a line (or as
+    /// its `EditorConfig` says), and based on the epoch, so its save makes it unless something
+    /// made it meanwhile ([`FileRead::Absent`]).
+    fn new_file(editorconfig: &[(String, String)]) -> Self {
+        Self::of("", true, WallMs::ZERO, editorconfig)
     }
 
     /// The bytes the file holds for this text.
@@ -388,6 +399,11 @@ pub struct FileView {
     saving: Option<Version>,
     /// What stops a save, shown as a line under the header with its way out.
     trouble: Option<Trouble>,
+    /// What the disk has under a conflicting edit, when it was read: what "Compare" shows the
+    /// edit against.
+    disk: Option<Version>,
+    /// The comparison of the disk's text and the edit, while the tile shows it.
+    comparing: Option<compare::Comparing>,
     /// The next read replaces the text whatever the edit ("Reload" was pressed).
     discard: bool,
     /// Why the file cannot be edited here (past the cap); none when it can.
@@ -492,6 +508,8 @@ impl FileView {
             base: None,
             saving: None,
             trouble: None,
+            disk: None,
+            comparing: None,
             discard: false,
             read_only: None,
             editor,
@@ -699,6 +717,27 @@ impl FileView {
                 self.preview = None;
                 self.take_version(incoming, cx);
             }
+            FileRead::Absent { editorconfig } => {
+                self.read_only = None;
+                self.preview = None;
+                let fresh = Version::new_file(editorconfig);
+                match self.base.take() {
+                    // Deleted under a clean tile: its text stays, unsaved, and a save makes the
+                    // file again with the line endings it had.
+                    Some(was)
+                        if !self.dirty && !self.discard && was.modified_ms != WallMs::ZERO =>
+                    {
+                        self.dirty = !was.text.is_empty();
+                        self.base =
+                            Some(Version { newline: was.newline, format: was.format, ..fresh });
+                        self.settle_conflict();
+                    }
+                    base => {
+                        self.base = base;
+                        self.take_version(fresh, cx);
+                    }
+                }
+            }
             // The link hands on the text it announces, never the announcement.
             FileRead::Streamed { .. } => return,
             FileRead::Binary { .. }
@@ -744,7 +783,7 @@ impl FileView {
             // The disk has what this tile has (or what it just sent): nothing to settle.
             self.dirty = current != incoming.text;
             self.base = Some(incoming);
-            self.trouble = None;
+            self.settle_conflict();
             return;
         }
         let stale = self
@@ -754,6 +793,15 @@ impl FileView {
         if !stale {
             self.trouble = Some(Trouble::Conflict);
         }
+        self.disk = Some(incoming);
+        self.refresh_compare(cx);
+    }
+
+    /// Nothing is in the way of a save any more: the conflict, and what it compared, go.
+    fn settle_conflict(&mut self) {
+        self.trouble = None;
+        self.disk = None;
+        self.comparing = None;
     }
 
     /// Lay `kept`, an edit from before the app last ended, over the first read: the tile holds
@@ -765,6 +813,7 @@ impl FileView {
             FileRead::Text { text, modified_ms, final_newline, editorconfig, .. } => {
                 Version::of(text, *final_newline, *modified_ms, editorconfig)
             }
+            FileRead::Absent { editorconfig } => Version::new_file(editorconfig),
             _ => Version {
                 text: String::new(),
                 newline: kept.mark.newline,
@@ -773,7 +822,7 @@ impl FileView {
                 rules: Rules::default(),
             },
         };
-        let text_read = matches!(read, FileRead::Text { .. });
+        let text_read = matches!(read, FileRead::Text { .. } | FileRead::Absent { .. });
         if text_read && kept.text == *disk.text {
             tracing::info!(path = %self.path, "a kept edit the disk already has");
             self.replace(disk, cx);
@@ -781,7 +830,8 @@ impl FileView {
         }
         let Mark { conflict, base_modified_ms, .. } = kept.mark;
         tracing::info!(path = %self.path, conflict, "an unsaved edit restored");
-        let moved = !text_read || conflict || base_modified_ms != Some(disk.modified_ms);
+        let moved =
+            !text_read || conflict || base_modified_ms.unwrap_or(WallMs::ZERO) != disk.modified_ms;
         self.replace(disk, cx);
         self.pending_text = Some(kept.text.to_string());
         self.pending_line = self.focus;
@@ -878,7 +928,7 @@ impl FileView {
         self.base = Some(incoming);
         self.dirty = false;
         self.discard = false;
-        self.trouble = None;
+        self.settle_conflict();
         // A save still out was of the text just dropped: its answer, if one comes, is about
         // nothing this tile holds, and must not keep ⌘S, "Overwrite" and "Reload" waiting.
         self.saving = None;
@@ -950,7 +1000,7 @@ impl FileView {
             self.waiting = Some(Waiting { finishing: false, ..waiting });
             return;
         }
-        if self.dirty {
+        if self.dirty || self.is_new() {
             self.save(cx);
             return;
         }
@@ -959,11 +1009,19 @@ impl FileView {
         cx.notify();
     }
 
+    /// Whether the file is not on disk yet: a save makes it, edited or not.
+    #[must_use]
+    pub fn is_new(&self) -> bool {
+        matches!(self.read, Some(FileRead::Absent { .. }))
+            && self.base.as_ref().is_some_and(|b| b.modified_ms == WallMs::ZERO)
+    }
+
     /// ⌘S: send the edit, based on the version it started from. Nothing when there is
-    /// nothing to save, a save is already out, or a conflict is waiting for "Reload" or
-    /// "Overwrite".
+    /// nothing to save (a file not on disk yet always has: itself), a save is already out, or
+    /// a conflict is waiting for "Reload" or "Overwrite".
     pub fn save(&mut self, cx: &mut Context<Self>) {
-        if !self.dirty || self.saving.is_some() || self.trouble == Some(Trouble::Conflict) {
+        let unsaved = self.dirty || self.is_new();
+        if !unsaved || self.saving.is_some() || self.trouble == Some(Trouble::Conflict) {
             return;
         }
         let Some(base) = self.base.clone() else { return };
@@ -983,7 +1041,8 @@ impl FileView {
         let text = self.text(cx);
         let (newline, format, rules) =
             self.base.as_ref().map(|b| (b.newline, b.format, b.rules)).unwrap_or_default();
-        let newline = rules.final_newline.unwrap_or(newline);
+        // A new file left empty is made empty, as `touch` makes it: no line, so none to end.
+        let newline = rules.final_newline.unwrap_or(newline) && !(text.is_empty() && self.is_new());
         let modified_ms = base_modified_ms.unwrap_or(WallMs::ZERO);
         let sent = Version { text, newline, format, modified_ms, rules };
         let file = sent.file_text(&sent.text);
@@ -1033,7 +1092,7 @@ impl FileView {
             WriteResult::Saved { modified_ms, .. } => {
                 self.dirty = self.text(cx) != sent.text;
                 self.base = Some(Version { modified_ms, ..sent });
-                self.trouble = None;
+                self.settle_conflict();
             }
             WriteResult::Conflict { modified_ms } => {
                 tracing::info!(path = %self.path, ?modified_ms, "save refused: changed on disk");
@@ -1160,11 +1219,14 @@ impl FileView {
     pub fn summary(&self, cx: &gpui::App) -> String {
         match &self.read {
             None | Some(FileRead::Streamed { .. }) => READING.to_owned(),
-            Some(FileRead::Text { .. }) => {
+            Some(FileRead::Text { .. } | FileRead::Absent { .. }) => {
                 let n = self.line_count(cx);
                 let mut parts =
                     vec![if n == 1 { "1 line".to_owned() } else { format!("{n} lines") }];
                 parts.extend(self.coloured_as().map(str::to_owned));
+                if self.is_new() {
+                    parts.push("not on disk".to_owned());
+                }
                 let state = if self.saving.is_some() {
                     Some("saving")
                 } else {
@@ -1282,6 +1344,12 @@ impl FileView {
                 (IconName::CircleAlert, s.warn, s.warn_fill),
                 vec![
                     self.bar_button(
+                        "file-compare",
+                        if self.comparing() { compare::BACK_TO_EDIT } else { compare::COMPARE },
+                        ButtonKind::Ghost,
+                        cx.listener(|this, _ev, _w, cx| this.toggle_compare(cx)),
+                    ),
+                    self.bar_button(
                         "file-reload",
                         RELOAD,
                         ButtonKind::Secondary,
@@ -1305,6 +1373,10 @@ impl FileView {
                 (IconName::CircleX, s.error, s.error_fill),
                 Vec::new(),
             ),
+            // A program waiting on it says so on its own line, which "Done" makes the file from.
+            None if self.is_new() && self.waiting.is_none() => {
+                (NOT_ON_DISK.into(), (IconName::FilePlus, s.text_muted, s.text_muted), Vec::new())
+            }
             None => return None,
         };
         Some(self.bar_line("file-bar", text, mark, actions))
@@ -1484,7 +1556,9 @@ impl Render for FileView {
         let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
+        let compared = self.comparing.as_ref().filter(|_| self.read.is_some());
         let body = match &self.read {
+            _ if let Some(comparing) = compared => self.render_compare(comparing),
             // Blank while a read in time would fill it; past the grace, a word.
             None if !crate::screen::past_grace("file-reading", window, cx) => {
                 div().size_full().into_any_element()

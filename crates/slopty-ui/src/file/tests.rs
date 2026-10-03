@@ -942,3 +942,114 @@ fn measure_the_reload_diff_at_its_bound() {
 }
 
 mod editing;
+
+/// A file not on disk yet opens as an empty editor that says so; ⌘S makes it unedited, based
+/// on the epoch so the worker refuses to write over a file made meanwhile, and the read that
+/// follows ends the note.
+#[gpui::test]
+fn a_missing_file_opens_as_a_new_one_and_its_save_makes_it(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/new.md");
+    let absent = FileRead::Absent { editorconfig: Vec::new() };
+    arrives(&view, cx, absent);
+    let id = view.read_with(cx, |v, _| *v.id().as_uuid());
+    assert!(cx.debug_bounds(Box::leak(format!("file-notice-{id}").into_boxed_str())).is_none());
+    assert!(cx.debug_bounds(Box::leak(format!("file-bar-{id}").into_boxed_str())).is_some());
+    view.read_with(cx, |v, cx| {
+        assert!(v.is_new() && v.shows_text());
+        assert!(v.summary(cx).contains("not on disk"), "{}", v.summary(cx));
+    });
+    view.update_in(cx, |v, window, cx| v.focus(window, cx));
+    cx.simulate_keystrokes("cmd-s");
+    assert_eq!(
+        events.borrow().as_slice(),
+        [FileViewEvent::Save { text: String::new(), base_modified_ms: Some(WallMs::ZERO) }],
+        "an unedited new file is saved too, from the epoch"
+    );
+    let saved = WriteResult::Saved { size: 0, modified_ms: WallMs::from_millis(2_000) };
+    view.update(cx, |v, cx| v.written(saved, cx));
+    arrives(&view, cx, text_read("", false, 2_000));
+    view.read_with(cx, |v, _| assert!(!v.is_new()));
+    assert!(cx.debug_bounds(Box::leak(format!("file-bar-{id}").into_boxed_str())).is_none());
+}
+
+/// `$EDITOR new.md`: the program waits on a file not there yet, and "Done" makes it with what
+/// was typed before answering, with no "Cannot read" in the way.
+#[gpui::test]
+fn done_on_a_new_file_makes_it_then_answers(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/new.md");
+    arrives(&view, cx, FileRead::Absent { editorconfig: Vec::new() });
+    view.update(cx, |v, cx| v.set_waiting(Some(3), cx));
+    types(&view, cx, "# Notes");
+    view.update(cx, FileView::finish_edit);
+    assert_eq!(
+        events.borrow().first(),
+        Some(&FileViewEvent::Save {
+            text: "# Notes\n".to_owned(),
+            base_modified_ms: Some(WallMs::ZERO)
+        })
+    );
+    assert!(edited(&events).is_empty(), "answered once it is on disk");
+    let saved = WriteResult::Saved { size: 8, modified_ms: WallMs::from_millis(2_000) };
+    view.update(cx, |v, cx| v.written(saved, cx));
+    assert_eq!(edited(&events), [(3, EditOutcome::Done)]);
+}
+
+/// "Compare" on a conflict shows the disk's text against the edit, the edit's lines as the
+/// additions, and goes back to the edit; a refused save, whose disk text is not in hand, reads
+/// the file again with the edit kept. Settling the conflict ends the comparison.
+#[gpui::test]
+fn compare_shows_the_disk_against_the_edit(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/a.md");
+    arrives(&view, cx, text_read("one\ntwo", true, 1_000));
+    types(&view, cx, "mine ");
+    cx.simulate_keystrokes("cmd-s");
+    view.update(cx, |v, cx| {
+        v.written(WriteResult::Conflict { modified_ms: WallMs::from_millis(1_700) }, cx);
+    });
+    let id = view.read_with(cx, |v, _| *v.id().as_uuid());
+    click(cx, format!("file-compare-{id}"));
+    assert_eq!(events.borrow().last(), Some(&FileViewEvent::Reload), "the disk is read");
+    assert!(view.read_with(cx, |v, _| v.comparing() && v.compared().is_none()));
+    arrives(&view, cx, text_read("one\nTWO", true, 1_700));
+    view.read_with(cx, |v, _| {
+        assert!(v.dirty(), "the edit is kept");
+        assert_eq!(v.trouble(), Some(&Trouble::Conflict));
+    });
+    assert_eq!(text(&view, cx), "mine one\ntwo");
+    let hunks = view.read_with(cx, |v, _| v.compared()).expect("worked out");
+    assert_eq!(hunks, [["-one", "-TWO", "+mine one", "+two"]]);
+    let body = Box::leak(format!("file-comparison-{id}").into_boxed_str());
+    assert!(cx.debug_bounds(body).is_some(), "the diff is the body");
+    click(cx, format!("file-compare-{id}"));
+    assert!(!view.read_with(cx, |v, _| v.comparing()), "back to the edit");
+    click(cx, format!("file-compare-{id}"));
+    assert!(view.read_with(cx, |v, _| v.compared().is_some()), "the disk was in hand");
+    click(cx, format!("file-overwrite-{id}"));
+    view.update(cx, |v, cx| {
+        v.written(WriteResult::Saved { size: 14, modified_ms: WallMs::from_millis(1_800) }, cx);
+    });
+    assert!(!view.read_with(cx, |v, _| v.comparing()), "settled: the comparison goes");
+}
+
+/// A file deleted under a clean tile keeps its text there, unsaved, and says it is not on disk;
+/// ⌘S makes it again from the epoch, so a file made there meanwhile is not written over.
+#[gpui::test]
+fn a_file_deleted_under_the_tile_keeps_its_text_and_a_save_makes_it_again(cx: &mut TestAppContext) {
+    let (view, events, cx) = tile(cx, "/w/a.md");
+    arrives(&view, cx, text_read("one\ntwo", true, 1_000));
+    arrives(&view, cx, FileRead::Absent { editorconfig: Vec::new() });
+    assert_eq!(text(&view, cx), "one\ntwo", "the text stays");
+    view.read_with(cx, |v, _| assert!(v.is_new() && v.dirty()));
+    let id = view.read_with(cx, |v, _| *v.id().as_uuid());
+    assert!(cx.debug_bounds(Box::leak(format!("file-bar-{id}").into_boxed_str())).is_some());
+    view.update_in(cx, |v, window, cx| v.focus(window, cx));
+    cx.simulate_keystrokes("cmd-s");
+    assert_eq!(
+        events.borrow().as_slice(),
+        [FileViewEvent::Save {
+            text: "one\ntwo\n".to_owned(),
+            base_modified_ms: Some(WallMs::ZERO)
+        }],
+        "made again as it was, final newline and all"
+    );
+}

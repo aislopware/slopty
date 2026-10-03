@@ -61,7 +61,8 @@ pub enum FileRead {
         /// Size on disk, bytes.
         size: u64,
     },
-    /// Nothing readable at the path: missing, a directory, or not permitted.
+    /// Nothing readable at the path: a directory, not permitted, or missing with its folder
+    /// ([`FileRead::Absent`] is a missing file whose folder is there).
     Missing {
         /// The OS's word for it.
         error: String,
@@ -95,6 +96,12 @@ pub enum FileRead {
         bytes: Bytes,
         /// Last modification.
         modified_ms: WallMs,
+    },
+    /// No file at the path, in a folder that is there: a save makes it. A tile opens it as a
+    /// new, empty file (`$EDITOR new.md`).
+    Absent {
+        /// The [`EditorConfig`] properties the new file would have.
+        editorconfig: EditorConfig,
     },
 }
 
