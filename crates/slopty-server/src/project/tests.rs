@@ -766,3 +766,65 @@ fn a_step_is_shown_as_it_goes_and_ends_with_the_server() {
     p.set_step(&id(), a, step(done, later), later).unwrap();
     assert_eq!(steps_logged(&p), 2, "an end is logged");
 }
+
+/// What the agents of a project say they spent is tallied on it, from its orchestrator and
+/// every task's agent, and from nobody else's. Passing 80 % of a cap and then the whole of it
+/// is each a moment, written; at the cap no task starts, with the words that say why, until
+/// the person raises it.
+#[test]
+fn a_project_at_its_budget_starts_nothing_until_it_is_raised() {
+    use slopty_proto::project::Budget;
+    use slopty_proto::thread::{Limit, ThreadId};
+
+    let mut fleet = Fleet::default();
+    let orchestrator = fleet.open();
+    let mut p = project(Some(orchestrator));
+    let budget = |cap| LimitsChange {
+        budget: Some(Budget(BTreeMap::from([(Budget::USD.to_owned(), cap)]))),
+        ..LimitsChange::default()
+    };
+    let raise = |p: &mut Projects, cap| {
+        let change = ProjectChange { limits: budget(cap), ..ProjectChange::default() };
+        p.set(&id(), change, &Fleet::default().running(), now()).unwrap().1
+    };
+    raise(&mut p, 10_000_000);
+    let (a, b) = (task(&mut p, "A", &["crates/a"]), task(&mut p, "B", &["crates/b"]));
+    let at = fleet.open();
+    assign(&mut p, a, at).unwrap();
+
+    let none: [Limit; 0] = [];
+    let (theirs, mine) = (ThreadId::new(), ThreadId::new());
+    let stranger = fleet.open();
+    assert_eq!(p.spent(stranger, ThreadId::new(), Some(9_000_000), &none, now()), Vec::new());
+    let quiet = p.spent(orchestrator, theirs, Some(3_000_000), &none, now());
+    assert!(matches!(quiet.as_slice(), [Change { kept: Kept { entry: None, .. }, .. }]));
+    let near = p.spent(at, mine, Some(5_000_000), &none, now());
+    let moments: Vec<Moment> =
+        kept(&near).into_iter().filter_map(|k| k.entry.map(|e| e.what)).collect();
+    assert_eq!(moments, [Moment::Budget { meter: Budget::USD.to_owned(), share_bp: 8_000 }]);
+    assert!(near.iter().all(|c| c.durable) && near.iter().any(|c| c.kept.tally.is_some()));
+    assert_eq!(status(&p).project.spend.cost_micro_usd, 8_000_000, "the stranger's is not");
+    assert_eq!(p.over_budget(&id()), None);
+
+    let reached = p.spent(at, mine, Some(7_500_000), &none, now());
+    let moments: Vec<Moment> =
+        kept(&reached).into_iter().filter_map(|k| k.entry.map(|e| e.what)).collect();
+    assert_eq!(moments, [Moment::Budget { meter: Budget::USD.to_owned(), share_bp: 10_500 }]);
+    let over = p.over_budget(&id()).expect("over");
+    assert!(over.contains("$10.50 of its $10.00 budget"), "{over}");
+    let refused = p.may_start(&id(), b, false, &fleet.running()).unwrap_err();
+    assert_eq!(code(&refused), ErrorCode::Limit);
+    assert!(message(&refused).contains("raises the budget"), "{}", message(&refused));
+
+    raise(&mut p, 20_000_000);
+    assert_eq!(p.over_budget(&id()), None, "raised");
+    p.may_start(&id(), b, false, &fleet.running()).unwrap();
+    let lowered = raise(&mut p, 10_000_000);
+    assert!(
+        kept(&lowered).iter().any(|k| matches!(
+            k.entry.as_ref().map(|e| &e.what),
+            Some(Moment::Budget { share_bp: 10_500, .. })
+        )),
+        "a cap lowered under the spend says it is reached: {lowered:?}"
+    );
+}

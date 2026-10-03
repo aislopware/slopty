@@ -401,6 +401,16 @@ const fn names_ask_to_start(verb: &Verb) -> bool {
     }
 }
 
+/// Whether `verb` sets a project's budget: what its agents may spend is the person's to say.
+const fn names_budget(verb: &Verb) -> bool {
+    match verb {
+        Verb::ProjectCreate { limits, .. } | Verb::ProjectSet { limits, .. } => {
+            limits.budget.is_some()
+        }
+        _ => false,
+    }
+}
+
 /// The arguments `claude` gets from a command line that runs it: `claude …`, a runtime running
 /// its script, or a shell line with `claude` as one of its programs (`sh -c "cd x && claude
 /// --allowedTools Bash"`), read as the shell reads it ([`slopty_agent::detect`]).
@@ -990,6 +1000,13 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "whether merged work is pushed to the forge is the person's choice, so only the \
                  person sets it",
+            );
+        }
+        if caller == Caller::Agent && names_budget(verb) {
+            return error(
+                ErrorCode::Forbidden,
+                "what a project's agents may spend is the person's to say, so only the person \
+                 sets its budget",
             );
         }
         if caller == Caller::Agent && names_ask_to_start(verb) {
@@ -2128,16 +2145,24 @@ impl Hub {
     pub(super) fn deliver_due(&self) -> Option<tokio::time::Instant> {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
+        let wall = WallMs::now();
+        let (respent, reset) = state.projects.windows_due(wall);
+        self.projects_moved(state, respent);
         let (terminals, _) = live(state);
         let projects = &state.projects;
         let now = tokio::time::Instant::now();
-        let batches = state
-            .deliveries
-            .take(now, |(project, node)| projects.node_term(project, *node, &terminals));
+        let batches = state.deliveries.take(
+            now,
+            |(project, node)| projects.node_term(project, *node, &terminals),
+            |project| projects.over_budget(project).is_some(),
+        );
         for batch in batches {
             Self::push_batch(state, &batch);
         }
-        let next = state.deliveries.next_due();
+        // A plan window that resets may lift a budget's hold with no agent saying so.
+        let reset =
+            reset.and_then(|at| now.checked_add(Duration::from_millis(at.millis_since(wall))));
+        let next = [state.deliveries.next_due(), reset].into_iter().flatten().min();
         drop(guard);
         next
     }

@@ -1446,6 +1446,13 @@ impl Lease {
                         hub.loosened(&mut state, term, found);
                         return;
                     }
+                    AgentReport::Spent { thread, cost_micro_usd, windows, .. } => {
+                        let now = WallMs::now();
+                        let moved =
+                            state.projects.spent(term, *thread, *cost_micro_usd, windows, now);
+                        hub.projects_moved(&mut state, moved);
+                        return;
+                    }
                     AgentReport::SubagentStarted { .. }
                     | AgentReport::SubagentStopped { .. }
                     | AgentReport::NativeTask { .. } => {}

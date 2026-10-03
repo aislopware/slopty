@@ -877,10 +877,10 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
 }
 
 /// A permission is the person's: an agent answering one is refused, as is an agent merging a
-/// task, recording its verifier or naming a verifier at all. The CLI in a terminal speaks for an
-/// agent when an agent runs there, when it works on a project, when the server does not know it,
-/// and when an agent opened it or typed into it; in the person's own shell it speaks for the
-/// person.
+/// task, recording its verifier, naming a verifier at all or setting a budget. The CLI in a
+/// terminal speaks for an agent when an agent runs there, when it works on a project, when the
+/// server does not know it, and when an agent opened it or typed into it; in the person's own shell
+/// it speaks for the person.
 #[tokio::test]
 async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -946,6 +946,27 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
         let said = hub.dispatch_as(orchestrating, None, verb).await;
         assert!(refused(&said, ErrorCode::Forbidden).contains("verifier"), "{said:?}");
     }
+
+    let budget = LimitsChange {
+        budget: Some(slopty_proto::project::Budget(BTreeMap::from([(
+            "usd".to_owned(),
+            1_000_000_000,
+        )]))),
+        ..LimitsChange::default()
+    };
+    let raise = Verb::ProjectSet {
+        project: project(),
+        orchestrator: None,
+        review: None,
+        verifier: None,
+        push: None,
+        ask_to_start: None,
+        limits: budget,
+        metadata: None,
+        members: None,
+    };
+    let said = hub.dispatch_as(orchestrating, None, raise).await;
+    assert!(refused(&said, ErrorCode::Forbidden).contains("budget"), "{said:?}");
 
     let input = Verb::SendInput {
         term: TermRef { worker, session: typed_into },

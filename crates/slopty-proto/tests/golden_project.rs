@@ -939,6 +939,19 @@ mod golden_project {
         );
         snap("report_delivered", &ToServer::Report(AgentReport::Delivered { session, batch: 7 }));
         snap(
+            "report_spent",
+            &ToServer::Report(AgentReport::Spent {
+                session,
+                thread: slopty_proto::thread::ThreadId::from_uuid(Uuid::from_u128(9)),
+                cost_micro_usd: Some(1_250_000),
+                windows: vec![slopty_proto::thread::Limit {
+                    name: "five-hour".to_owned(),
+                    used_bp: 4_200,
+                    resets_ms: Some(at()),
+                }],
+            }),
+        );
+        snap(
             "deliver",
             &FromServer::Deliver {
                 session,

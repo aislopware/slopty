@@ -1,0 +1,9 @@
+---
+source: crates/slopty-proto/tests/golden_project.rs
+assertion_line: 39
+expression: hex(&bytes)
+---
+3c 00 00 00 08 07 10 01 99 a1 b1 c3 d4 70 00 80
+00 00 00 00 00 ab cd 10 00 00 00 00 00 00 00 00
+00 00 00 00 00 00 00 09 01 d0 a5 4c 01 09 66 69
+76 65 2d 68 6f 75 72 e8 20 01 80 d8 c1 a2 8c 34

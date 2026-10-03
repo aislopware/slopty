@@ -112,6 +112,8 @@ pub const SAFE_MODES: [&str; 4] = ["default", "manual", "plan", "dontAsk"];
 pub const LOOSENED_MAX: usize = 16;
 /// The longest item of an [`AgentReport::Loosened`], in bytes.
 pub const LOOSENED_ITEM_MAX: usize = 256;
+/// The most plan windows one [`AgentReport::Spent`] names.
+pub const SPENT_WINDOWS_MAX: usize = 8;
 
 /// The longest placement expression, in bytes: a rule, not a program.
 pub const EXPR_MAX: usize = 1024;
@@ -1966,6 +1968,19 @@ pub enum AgentReport {
         /// Each thing that loosens, as a reader would name it.
         found: Vec<String>,
     },
+    /// What one thread of the agent in a session says it has spent so far, sent when it
+    /// changes. A subagent's thread is sent under the session its root agent runs in. The
+    /// figures are the agent's own, whole for the thread, so the latest replaces the last.
+    Spent {
+        /// The session.
+        session: SessionId,
+        /// The thread.
+        thread: crate::thread::ThreadId,
+        /// Its estimated cost, in millionths of a US dollar, when its agent says one.
+        cost_micro_usd: Option<u64>,
+        /// The plan's rate windows as it last read them, at most [`SPENT_WINDOWS_MAX`].
+        windows: Vec<crate::thread::Limit>,
+    },
 }
 
 impl AgentReport {
@@ -1979,7 +1994,8 @@ impl AgentReport {
             | Self::PermissionMode { session, .. }
             | Self::Loosened { session, .. }
             | Self::NativeTask { session, .. }
-            | Self::Delivered { session, .. } => *session,
+            | Self::Delivered { session, .. }
+            | Self::Spent { session, .. } => *session,
         }
     }
 }

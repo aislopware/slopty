@@ -220,6 +220,9 @@ impl Deliveries {
             };
             i.task != task || !replaced
         });
+        // The person's words are tried at once even where the rest waits parked: a hold
+        // ([`Self::take`]) lets them through.
+        queue.parked &= item.by != By::Person;
         queue.waiting.push(item);
         queue.fresh = true;
     }
@@ -232,10 +235,14 @@ impl Deliveries {
     /// The batches due by `now`, each for its node's live terminal as `term_of` names it. What
     /// waits for a node with no live terminal stays. A batch holds what its node had
     /// outstanding too, and replaces it.
+    ///
+    /// A project `held` (its budget spent) sends only the person's words: every other report
+    /// would start a turn, so it waits, parked, for the hold to lift ([`Self::unpark`]).
     pub(crate) fn take(
         &mut self,
         now: Instant,
         mut term_of: impl FnMut(&Node) -> Option<TermRef>,
+        held: impl Fn(&ProjectId) -> bool,
     ) -> Vec<Batch> {
         let mut out = Vec::new();
         for queue in self.queues.values_mut() {
@@ -245,14 +252,28 @@ impl Deliveries {
             if queue.due().is_none_or(|due| due > now) {
                 continue;
             }
-            let Some(term) = term_of(node) else {
+            let holding = held(&node.0);
+            let term = term_of(node)
+                .filter(|_| !holding || queue.waiting.iter().any(|i| i.by == By::Person));
+            let Some(term) = term else {
                 queue.parked = true;
                 continue;
             };
             let mut items = queue.outstanding.take().map(|o| o.items).unwrap_or_default();
-            items.append(&mut queue.waiting);
-            let (context, items, left) = context(&node.0, items);
-            // What did not fit waits for the next batch, due as it was.
+            let kept_back = if holding {
+                let (person, rest) = std::mem::take(&mut queue.waiting)
+                    .into_iter()
+                    .partition(|i| i.by == By::Person);
+                items.extend::<Vec<Item>>(person);
+                rest
+            } else {
+                items.append(&mut queue.waiting);
+                Vec::new()
+            };
+            let (context, items, mut left) = context(&node.0, items);
+            // What did not fit waits for the next batch, due as it was; what the hold kept back
+            // waits behind it.
+            left.extend(kept_back);
             queue.waiting = left;
             queue.fresh = false;
             for key in items.iter().filter_map(Item::paced) {

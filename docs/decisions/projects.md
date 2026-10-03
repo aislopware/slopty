@@ -1615,6 +1615,27 @@ N16)
   `checks_that_could_not_be_read_say_why_and_ask_nothing` (`slopty-ui::project`), and the
   goldens `outcome_checks` and `moment_checks`.
 
+**An orchestrator is an agent, named from the GUI; a project is made from a sheet; a task is
+stopped or cancelled from its card.** ✅ 2026-10-04 (readiness #16, N17)
+- Only the CLI could name an orchestrator, any shell could be made one, and nothing a board
+  told a shell was ever heard. Cancel and stop were CLI-only.
+- "Start a project here" opens a "New project" sheet over the workspace: the name, repository
+  and target filled from the terminal, a verifier, and whether a merge is pushed, with the
+  orchestrator (the terminal's agent and its machine) named but not asked. Create sends
+  `ProjectCreate`; the board opens once the server's word has that terminal as orchestrator.
+- "Make this agent X's orchestrator" is a palette line for each project the focused agent
+  does not orchestrate. It sends `ProjectSet` with the terminal, and the board turns to that
+  tile once the mirror says so (`opening` waits on the orchestrator, not just the project).
+- Both refuse a terminal with no agent at work and say why. The refusal is the client's: the
+  server keeps taking a live terminal, since the CLI, the tests and the merge lane name a
+  shell by its repository, and an agent may be started in it later.
+- The task the board stands on offers "Stop its agent" (`Close` on its open assignment's
+  terminal, whose session the agent can take up again) and "Cancel task" (`TaskUpdate` to
+  `Failed` with the person's note), quieter and after what the task waits for. Both are on
+  the palette too. Elsewhere the board stays quiet.
+- Tests: `a_project_starts_in_the_focused_terminal`, `an_agent_becomes_a_project_s_orchestrator`
+  and `a_task_stood_on_can_be_stopped_or_cancelled` (`slopty-ui::workspace`).
+
 **A project may have a budget per meter.** ✅ wire 2026-10-04 (rulings §5d; the gate to follow)
 - `Limits::budget` is an open map of a meter's name to its cap (`Budget`). `usd` caps the
   estimated cost in millionths of a dollar. Any other name is a plan window as the agents name
@@ -1623,7 +1644,44 @@ N16)
   server refuses one that does not fit, and an empty one takes the budget away.
 - `Project::spend` is what the server tallies (`Spend`), and `Moment::Budget` the timeline's
   near (80 %, `Budget::NEAR_BP`) and reached moments.
-- Next: tally every assignment's and subagent's meters (N21), stop placing and hold the
-  orchestrator's tells at the cap, and set it from the board, the CLI and the tools.
+- **The server tallies and enforces it** (N21, 2026-10-04). A worker says what each thread
+  spent (`AgentReport::Spent`: the thread's whole estimated cost and the plan windows it
+  read), sending a subagent's under its root's session. The server keeps every thread's
+  latest figure on the project it works for, as its orchestrator or on a task (`Tally`). A
+  later figure replaces the earlier one, a task given again or a subagent adds its own
+  thread, and a terminal working for no project counts for none. The cost is the sum; a
+  window is the fullest any thread read that has not reset since. Past 512 threads the least
+  recently heard folds into a settled sum, so the total stays whole.
+  - Rising past 80 % of a cap, and past the whole, is each a timeline moment, written. The
+    figures between are pushed and written at most once a minute: after a restart, each
+    agent's next figure puts its thread right. A cap lowered under the spend says it is
+    reached at once.
+  - At a cap, `task_spawn` and `task_start` are refused with `Limit` and words that say how
+    much of which meter was spent. Every report and notice to the project's agents waits,
+    parked, since each would start a turn; the person's own words still go. Raising the cap
+    lifts both. A plan window that resets lifts them with no agent speaking, since the
+    delivery loop wakes at the next reset of a capped window.
+  - Turns under way finish, so the spend may pass the cap by up to one turn per live agent.
+  - Only the person sets a budget: an agent's `project_update` naming one is refused, as
+    pushing and ask-to-start are.
+  - Next: the worker's sender of `Spent` from its thread table, Codex's cost from its usage,
+    and setting the budget from the board, the CLI and the tools.
+  - Tests: `a_project_at_its_budget_starts_nothing_until_it_is_raised`,
+    `every_thread_counts_its_latest_figure_once`, `a_thread_past_those_kept_still_counts`,
+    `a_meter_says_each_line_it_rises_past_once`, `a_held_project_hears_only_the_person`
+    (`slopty-server`), golden `report_spent`.
 - Tests: `a_budget_weighs_each_capped_meter_and_says_which_is_reached` (`slopty-proto`) and
   the goldens `project_create` and `project_event_pushed`.
+
+- ✅ **What holds a task up is said as it lands** (2026-10-04, readiness N16). A failed merge,
+  a red verifier or a spent budget showed only on the board, so it was seen only once someone
+  looked.
+  - Moments that hold a task up or wait on the person are news: failing checks with their
+    names, a verifier that failed, a step that stopped with why, an agent that reports it is
+    stuck, a proposed task waiting to be started, and a budget at or past a threshold. A
+    step done, a merge and a task's progress are not.
+  - With the app in front, the news is a toast "Title: #3 fix: its verifier failed", unless
+    that project's board is already in the focused tile. With the app away, it is a
+    notification that opens on the orchestrator, and it is withdrawn with the rest.
+  - Tests: `only_what_holds_a_task_up_or_waits_on_the_person_is_news` (`project/tests.rs`),
+    `a_project_s_failure_is_said_as_it_lands` (`tests/projects.rs`).

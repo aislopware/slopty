@@ -28,6 +28,8 @@ use slopty_proto::project::{
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
 use slopty_proto::terminal::RepoId;
+use slopty_proto::thread::{Limit, ThreadId};
+pub use tally::Tally;
 
 use crate::placement;
 
@@ -131,6 +133,8 @@ pub struct Kept {
     pub native: Option<NativeChange>,
     /// What happened, when it is worth the timeline.
     pub entry: Option<TimelineEntry>,
+    /// Every thread's figures the project's spend is tallied from, when this wrote them.
+    pub tally: Option<Box<Tally>>,
 }
 
 /// A change as the model makes it.
@@ -196,6 +200,9 @@ impl ProjectsFile {
             record.next_seq = record.next_seq.max(entry.seq.saturating_add(1));
             record.push_entry(entry.clone());
         }
+        if let Some(tally) = &kept.tally {
+            record.tally.clone_from(tally);
+        }
     }
 }
 
@@ -214,6 +221,12 @@ pub struct Record {
     pub timeline: VecDeque<TimelineEntry>,
     /// The next entry's number.
     pub next_seq: u64,
+    /// Every thread's figures its [`Project::spend`] is tallied from.
+    pub tally: Tally,
+    /// When the tally was last written, by the server's clock: it is pushed at every figure
+    /// and written at most once a minute unless a line of the budget is passed.
+    #[serde(skip)]
+    pub tally_kept_ms: WallMs,
     /// What [`Self::timeline`] takes, by [`TimelineEntry::approx_bytes`]; counted again when
     /// the file is read.
     #[serde(skip)]
@@ -228,12 +241,22 @@ struct Stored {
     natives: Vec<NodeNatives>,
     timeline: VecDeque<TimelineEntry>,
     next_seq: u64,
+    tally: Tally,
 }
 
 impl From<Stored> for Record {
     fn from(stored: Stored) -> Self {
-        let Stored { project, tasks, natives, timeline, next_seq } = stored;
-        let mut record = Self { project, tasks, natives, timeline, next_seq, timeline_bytes: 0 };
+        let Stored { project, tasks, natives, timeline, next_seq, tally } = stored;
+        let mut record = Self {
+            project,
+            tasks,
+            natives,
+            timeline,
+            next_seq,
+            tally,
+            tally_kept_ms: WallMs::default(),
+            timeline_bytes: 0,
+        };
         record.recount();
         record
     }
@@ -373,13 +396,15 @@ fn unknown_task(project: &ProjectId, id: TaskId) -> Refused {
 }
 
 impl Record {
-    const fn new(project: Project) -> Self {
+    fn new(project: Project) -> Self {
         Self {
             project,
             tasks: Vec::new(),
             natives: Vec::new(),
             timeline: VecDeque::new(),
             next_seq: 1,
+            tally: Tally::default(),
+            tally_kept_ms: WallMs::default(),
             timeline_bytes: 0,
         }
     }
@@ -406,6 +431,42 @@ impl Record {
         }
     }
 
+    /// Tally the spend again at `now`: pushed when it moved, with a moment for each line of the
+    /// budget it passed, and written when it passed one or the last write is
+    /// [`tally::WRITE_EVERY_MS`] old.
+    fn respend(&mut self, now: WallMs) -> Vec<Change> {
+        let spend = self.tally.spend(now);
+        if spend == self.project.spend {
+            return Vec::new();
+        }
+        let budget = self.project.limits.budget.as_ref();
+        let shares = |s: &slopty_proto::project::Spend| budget.map(|b| b.against(s));
+        let passed = tally::passed(
+            &shares(&self.project.spend).unwrap_or_default(),
+            &shares(&spend).unwrap_or_default(),
+        );
+        self.project.spend = spend;
+        let write =
+            !passed.is_empty() || now.millis_since(self.tally_kept_ms) >= tally::WRITE_EVERY_MS;
+        if write {
+            self.tally_kept_ms = now;
+        }
+        let mut changes: Vec<Change> = passed
+            .into_iter()
+            .map(|what| {
+                let entry = self.log(None, what, now);
+                self.record_update(Some(entry))
+            })
+            .collect();
+        if changes.is_empty() {
+            changes.push(Change { durable: write, ..self.record_update(None) });
+        }
+        if let Some(last) = changes.last_mut().filter(|_| write) {
+            last.kept.tally = Some(Box::new(self.tally.clone()));
+        }
+        changes
+    }
+
     /// Count [`Self::timeline_bytes`] again, for a record read from the file.
     fn recount(&mut self) {
         let bytes = self.timeline.iter().map(TimelineEntry::approx_bytes);
@@ -425,7 +486,7 @@ impl Record {
 
     fn kept(&self) -> Kept {
         let project = self.project.id.clone();
-        Kept { project, record: None, task: None, native: None, entry: None }
+        Kept { project, record: None, task: None, native: None, entry: None, tally: None }
     }
 
     /// The change of `task`, with the entry it made if any.
@@ -1134,10 +1195,18 @@ impl Projects {
             record.project.ask_to_start = ask;
         }
         if limits != record.project.limits {
+            let shares = |l: &Limits| {
+                l.budget.as_ref().map(|b| b.against(&record.project.spend)).unwrap_or_default()
+            };
+            let passed = tally::passed(&shares(&record.project.limits), &shares(&limits));
             record.project.limits = limits.clone();
             record.trim_timeline();
             let entry = record.log(None, Moment::Limits { limits }, now);
             updates.push(record.record_update(Some(entry)));
+            for what in passed {
+                let entry = record.log(None, what, now);
+                updates.push(record.record_update(Some(entry)));
+            }
             quiet = false;
         }
         if let Some(term) = change.orchestrator.filter(|t| record.project.orchestrator != Some(*t))
@@ -1632,6 +1701,15 @@ impl Projects {
         if t.state == TaskState::Merged {
             return Err(invalid(format!("task {task} is merged; make a new task")));
         }
+        if let Some(over) = self.over_budget(id) {
+            return Err(refuse(
+                ErrorCode::Limit,
+                format!(
+                    "{over}, so no task starts until the person raises the budget or stops the \
+                     project; turns under way finish"
+                ),
+            ));
+        }
         let live = record.live(running);
         let most = record.project.limits.live_per_project;
         if live >= most {
@@ -2090,11 +2168,73 @@ impl Projects {
                 | AgentReport::PermissionMode { .. }
                 | AgentReport::Loosened { .. }
                 | AgentReport::Delivered { .. }
+                | AgentReport::Spent { .. }
         );
         if !held && !leafless {
             self.hold_unclaimed(term, report, now);
         }
         updates
+    }
+
+    /// What thread `thread` of the agent in `term` says it has spent so far: counted on the
+    /// project it works for, as its orchestrator or on a task, with a timeline moment for each
+    /// line of the budget it passed.
+    pub(crate) fn spent(
+        &mut self,
+        term: TermRef,
+        thread: ThreadId,
+        cost_micro_usd: Option<u64>,
+        windows: &[Limit],
+        now: WallMs,
+    ) -> Vec<Change> {
+        let mut updates = Vec::new();
+        for record in self.records.values_mut() {
+            let works = record.project.orchestrator == Some(term)
+                || record.tasks.iter().any(|t| open_term(t) == Some(term));
+            if works && record.tally.take(thread, cost_micro_usd, windows, now) {
+                updates.extend(record.respend(now));
+            }
+        }
+        updates
+    }
+
+    /// Every budgeted project's spend tallied again at `now`, as a plan window that reset
+    /// lowers it with no agent saying so, and the soonest another such window resets.
+    pub(crate) fn windows_due(&mut self, now: WallMs) -> (Vec<Change>, Option<WallMs>) {
+        let mut updates = Vec::new();
+        let mut next: Option<WallMs> = None;
+        for record in self.records.values_mut() {
+            let Some(budget) = record.project.limits.budget.clone() else { continue };
+            updates.extend(record.respend(now));
+            if let Some(at) = record.tally.next_reset(&budget, now) {
+                next = Some(next.map_or(at, |n| n.min(at)));
+            }
+        }
+        (updates, next)
+    }
+
+    /// What says project `id`'s agents have spent a cap of its budget, while they have: it
+    /// starts no task and its agents' reports wait until the person raises the cap.
+    #[must_use]
+    pub(crate) fn over_budget(&self, id: &ProjectId) -> Option<String> {
+        let project = &self.records.get(id)?.project;
+        let budget = project.limits.budget.as_ref()?;
+        let meter = budget.reached(&project.spend)?;
+        let cap = *budget.0.get(&meter)?;
+        Some(if meter == Budget::USD {
+            format!(
+                "project {id} spent an estimated {} of its {} budget",
+                tally::figure(&meter, project.spend.cost_micro_usd),
+                tally::figure(&meter, cap)
+            )
+        } else {
+            let used = project.spend.windows.get(&meter).copied().unwrap_or_default();
+            format!(
+                "project {id} is at {}, its budget {}%",
+                tally::figure(&meter, used.into()),
+                cap / 100
+            )
+        })
     }
 
     fn hold_unclaimed(&mut self, term: TermRef, report: &AgentReport, now: WallMs) {
@@ -2202,7 +2342,8 @@ fn leaf(report: &AgentReport, natives: &mut Natives, now: WallMs) -> Option<Nati
         AgentReport::Branch(_)
         | AgentReport::PermissionMode { .. }
         | AgentReport::Loosened { .. }
-        | AgentReport::Delivered { .. } => return None,
+        | AgentReport::Delivered { .. }
+        | AgentReport::Spent { .. } => return None,
         AgentReport::SubagentStarted { agent, kind, .. } => Native::Agent(NativeAgent {
             id: clipped(agent, REF_MAX),
             kind: clipped(kind, KIND_MAX),
@@ -2276,6 +2417,7 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
 #[cfg(test)]
 mod cost;
 mod merge;
+mod tally;
 pub(crate) use merge::{Advance, Job, Queue, bounded as bounded_review};
 #[cfg(test)]
 mod tests;
