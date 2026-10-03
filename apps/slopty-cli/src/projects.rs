@@ -364,9 +364,13 @@ pub enum TaskCmd {
         /// Run the words after `--` as the program, not as the agent's arguments.
         #[arg(long)]
         command: bool,
-        /// Run the person's Codex rather than Claude Code, with the same tools.
+        /// The agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
+        /// name. Each gets Slopty's tools and its role.
         #[arg(long, conflicts_with = "command")]
-        codex: bool,
+        agent: Option<String>,
+        /// The model, by the agent's own id.
+        #[arg(long, conflicts_with = "command")]
+        model: Option<String>,
         /// An environment variable, `KEY=VALUE`; repeatable.
         #[arg(long = "env", value_name = "KEY=VALUE", value_parser = key_value)]
         env: Vec<(String, String)>,
@@ -375,7 +379,7 @@ pub enum TaskCmd {
         /// Start it though a task it depends on is not done yet.
         #[arg(long)]
         ignore_dependencies: bool,
-        /// Arguments for `claude`, or with `--command` the program and its arguments.
+        /// Arguments for the agent, or with `--command` the program and its arguments.
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -733,7 +737,8 @@ pub async fn task(
             cwd,
             prompt,
             command,
-            codex,
+            agent,
+            model,
             env,
             size,
             ignore_dependencies,
@@ -741,10 +746,8 @@ pub async fn task(
         } => {
             let run = if command {
                 Runner::Command { argv: args }
-            } else if codex {
-                Runner::Codex { prompt, args }
             } else {
-                Runner::Claude { prompt, args }
+                ops::agent_runner(agent.as_deref(), prompt, model, args)
             };
             let launch = LaunchSpec {
                 pin: worker,

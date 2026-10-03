@@ -1266,6 +1266,45 @@ pub struct LaunchSpec {
     pub ignore_dependencies: bool,
 }
 
+/// What runs for a task whose agent is named `agent`.
+///
+/// Claude Code (`claude`, the default) and Codex (`codex`) run in a terminal with their own
+/// TUI; pi (`pi`), an ACP agent (`acp:<name>`, or the registry's bare name) and any other run
+/// as a thread of the worker's thread host ([`Runner::Agent`]). `model`, by the agent's own id,
+/// goes as Claude Code's and Codex's `--model` argument.
+#[must_use]
+pub fn agent_runner(
+    agent: Option<&str>,
+    prompt: Option<String>,
+    mut model: Option<String>,
+    mut args: Vec<String>,
+) -> Runner {
+    use slopty_proto::thread::AgentId;
+    let mut with_model = |args: &mut Vec<String>| {
+        if let Some(model) = model.take() {
+            args.splice(0..0, ["--model".to_owned(), model]);
+        }
+    };
+    match agent.map(str::trim).filter(|a| !a.is_empty()) {
+        None | Some("claude" | AgentId::CLAUDE_CODE) => {
+            with_model(&mut args);
+            Runner::Claude { prompt, args }
+        }
+        Some(AgentId::CODEX) => {
+            with_model(&mut args);
+            Runner::Codex { prompt, args }
+        }
+        Some(name) => {
+            let agent = if name == AgentId::PI || name.starts_with(AgentId::ACP_PREFIX) {
+                AgentId::named(name)
+            } else {
+                AgentId::acp(name)
+            };
+            Runner::Agent { agent, prompt, model, args }
+        }
+    }
+}
+
 /// Start what runs for a task where the server places it, or on the worker named.
 pub async fn task_spawn<D: Dispatch>(
     res: &mut Resolver<'_, D>,

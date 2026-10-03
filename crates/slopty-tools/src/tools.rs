@@ -583,11 +583,14 @@ struct TaskSpawnArgs {
     /// Run this instead of Claude Code: any program and its arguments, such as a build or a
     /// benchmark; `[]` for the login shell.
     command: Option<Vec<String>>,
-    /// Which agent: `claude` (the default) or `codex`. Codex gets Slopty's tools and its
-    /// brief as its first prompt, and goes only to a worker with Codex installed.
-    agent: Option<AgentArg>,
+    /// Which agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
+    /// name (`gemini`, `acp:gemini`). Each gets Slopty's tools and its role, and goes only to
+    /// a worker with it installed.
+    agent: Option<String>,
     /// The agent's first prompt; say where its brief is.
     prompt: Option<String>,
+    /// The model, by the agent's own id.
+    model: Option<String>,
     /// Arguments for the agent, e.g. `["--model", "opus"]`. Flags that loosen Claude Code's
     /// permissions are refused unless the person allows them for the project.
     #[serde(default)]
@@ -604,16 +607,6 @@ struct TaskSpawnArgs {
     ignore_dependencies: bool,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
     idempotency_key: Option<String>,
-}
-
-/// Which agent a task runs.
-#[derive(Debug, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum AgentArg {
-    /// Claude Code.
-    Claude,
-    /// Codex.
-    Codex,
 }
 
 /// `project_needs`.
@@ -1815,18 +1808,18 @@ async fn run<D: Dispatch>(
             let a: TaskSpawnArgs = args(arguments)?;
             let key = checked_key(a.idempotency_key)?;
             let run = match (a.command, a.agent) {
-                (Some(argv), None) if a.prompt.is_none() && a.args.is_empty() => {
+                (Some(argv), None)
+                    if a.prompt.is_none() && a.model.is_none() && a.args.is_empty() =>
+                {
                     Runner::Command { argv }
                 }
                 (Some(_), _) => {
                     return Err(ToolError::invalid(
-                        "prompt, args and agent are an agent's; a command takes its own arguments",
+                        "prompt, model, args and agent are an agent's; a command takes its own \
+                         arguments",
                     ));
                 }
-                (None, Some(AgentArg::Codex)) => Runner::Codex { prompt: a.prompt, args: a.args },
-                (None, Some(AgentArg::Claude) | None) => {
-                    Runner::Claude { prompt: a.prompt, args: a.args }
-                }
+                (None, agent) => ops::agent_runner(agent.as_deref(), a.prompt, a.model, a.args),
             };
             let launch = LaunchSpec {
                 pin: a.worker,
@@ -2042,6 +2035,7 @@ mod tests {
     };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
+    use slopty_proto::thread::AgentId;
 
     use super::*;
 
@@ -2089,6 +2083,7 @@ mod tests {
             status: None,
             assignment: started.then(|| Assignment {
                 term: TermRef { worker: studio(), session: shell() },
+                thread: None,
                 since_ms: WallMs::ZERO,
                 ended_ms: None,
                 conversation: None,
@@ -2356,6 +2351,29 @@ mod tests {
         let mixed = json!({"task": 7, "agent": "codex", "command": ["codex"]});
         let (failed, text) = call_json(&fake, "task_spawn", mixed).await;
         assert!(failed && text.contains("an agent's"), "{text}");
+        for (named, agent) in [
+            ("pi", AgentId::named(AgentId::PI)),
+            ("acp:gemini", AgentId::acp("gemini")),
+            ("gemini", AgentId::acp("gemini")),
+        ] {
+            let thread = json!({"task": 7, "agent": named, "prompt": "Go", "model": "flash"});
+            let (failed, text) = call_json(&fake, "task_spawn", thread).await;
+            assert!(!failed, "{text}");
+            let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
+            let run = Runner::Agent {
+                agent,
+                prompt: Some("Go".to_owned()),
+                model: Some("flash".to_owned()),
+                args: Vec::new(),
+            };
+            assert_eq!(launch.run, run, "{named}");
+        }
+        let claude = json!({"task": 7, "prompt": "Go", "model": "opus"});
+        let (failed, text) = call_json(&fake, "task_spawn", claude).await;
+        assert!(!failed, "{text}");
+        let Some(Verb::TaskSpawn { launch, .. }) = fake.verbs().pop() else { panic!() };
+        let args = vec!["--model".to_owned(), "opus".to_owned()];
+        assert_eq!(launch.run, Runner::Claude { prompt: Some("Go".to_owned()), args });
 
         let needs = json!({"needs": [
             {"name": "Apple work", "paths": ["apps/ios"], "require": ["os == \"macos\""]},
