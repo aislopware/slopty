@@ -19,6 +19,7 @@ pub(crate) fn id(name: &str) -> ProjectId {
 /// A project whose orchestrator runs in `orchestrator`, when it has one.
 pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
     Project {
+        spend: slopty_proto::project::Spend::default(),
         orchestrator_spent: slopty_proto::project::Spent::default(),
         id: id(name),
         title: "Ship the project board".to_owned(),

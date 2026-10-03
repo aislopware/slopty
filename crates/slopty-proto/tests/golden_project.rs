@@ -14,12 +14,12 @@ mod golden_project {
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
-        AgentReport, Assignment, Bounds, Fact, Facts, Limits, LimitsChange, Live, Merge, Moment,
-        Native, NativeAgent, NativeChange, NativeTask, Natives, Need, NodeDetail, Peer, Placed,
-        Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart,
-        Reason, Report, ReportKind, RunOn, Runner, Spent, StepKind, StepState, Suggestion, Task,
-        TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
-        WorkerFacts,
+        AgentReport, Assignment, Bounds, Budget, Fact, Facts, Limits, LimitsChange, Live, Merge,
+        Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, Need, NodeDetail, Peer,
+        Placed, Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate,
+        ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Spend, Spent, StepKind, StepState,
+        Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep,
+        TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -63,6 +63,10 @@ mod golden_project {
 
     fn project() -> Project {
         Project {
+            spend: Spend {
+                cost_micro_usd: 4_200_000,
+                windows: BTreeMap::from([("five-hour".to_owned(), 3_100)]),
+            },
             needs: Vec::new(),
             orchestrator_spent: Spent { active_ms: 480_000, since_ms: None },
             id: project_id(),
@@ -250,6 +254,10 @@ mod golden_project {
             live_per_project: Some(6),
             depth: Some(4),
             timeline_kept: Some(1024),
+            budget: Some(Budget(BTreeMap::from([
+                (Budget::USD.to_owned(), 50_000_000),
+                ("five-hour".to_owned(), 8_000),
+            ]))),
         };
         snap(
             "project_create",
@@ -465,9 +473,19 @@ mod golden_project {
             head: commit('d'),
             at_ms: at(),
             pushed: true,
+            push_failed: None,
         };
         let card = Task { merge: Some(merged), state: TaskState::Merged, ..task() };
         snap("task_merged_card", &card.card(&Natives::default()));
+        let unpushed = Merge::Merged {
+            target: "main".to_owned(),
+            head: commit('d'),
+            at_ms: at(),
+            pushed: false,
+            push_failed: Some("! [rejected] main -> main (fetch first)".to_owned()),
+        };
+        let card = Task { merge: Some(unpushed), state: TaskState::Merged, ..task() };
+        snap("task_merged_unpushed_card", &card.card(&Natives::default()));
     }
 
     /// The person letting a project go.
@@ -801,6 +819,7 @@ mod golden_project {
             Moment::Created,
             Moment::Orchestrator { term: term() },
             Moment::Limits { limits: Limits::default() },
+            Moment::Budget { meter: Budget::USD.to_owned(), share_bp: 10_000 },
             Moment::TaskCreated { title: "Server store".to_owned() },
             Moment::Claimed { paths: vec!["crates/slopty-server".to_owned()] },
             Moment::Assigned { term: term(), spawned: false },

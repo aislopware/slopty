@@ -228,6 +228,7 @@ struct LimitsArgs {
 impl From<LimitsArgs> for LimitsChange {
     fn from(a: LimitsArgs) -> Self {
         Self {
+            budget: None,
             live_per_worker: a.live_per_worker,
             live_per_project: a.live_per_project,
             depth: a.depth,
@@ -2030,6 +2031,7 @@ mod tests {
     fn project_status(id: ProjectId) -> ProjectStatus {
         ProjectStatus {
             project: Project {
+                spend: slopty_proto::project::Spend::default(),
                 needs: Vec::new(),
                 orchestrator_spent: slopty_proto::project::Spent::default(),
                 id,
@@ -2149,6 +2151,7 @@ mod tests {
                         tasks: Vec::new(),
                         meters: None,
                         held: vec![PermissionPrompt {
+                            editable: Vec::new(),
                             session: shell(),
                             ask: 3,
                             tool: "Bash".to_owned(),

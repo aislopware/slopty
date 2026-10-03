@@ -17,7 +17,7 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::Review;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Checks, ChecksState, Fact, Finding, Moment, Native, NativeChange, NativeCounts, Natives,
+    Checks, ChecksState, Fact, Finding, Merge, Moment, Native, NativeChange, NativeCounts, Natives,
     Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, ReportKind, ReviewRun,
     Reviewer, StepKind, StepState, Suggestion, TaskCard, TaskId, TaskState, TaskStep,
     TimelineEntry, VerifierRun, WorkerFacts,
@@ -40,6 +40,21 @@ pub fn pull_words(card: &TaskCard) -> Option<(String, bool)> {
     }
     let failing = checks.is_some_and(|(_, failing)| failing);
     Some((words, failing || asked))
+}
+
+/// Where `merge` put a task, as its row says it; `None` until it merged.
+///
+/// A push asked for that failed left the target moved here but not on `origin`, and the row
+/// says so in git's first line unless `piped`, where its pipeline's Push stage says it.
+#[must_use]
+pub fn merged_words(merge: &Merge, piped: bool) -> Option<String> {
+    let Merge::Merged { target, head, pushed, push_failed, .. } = merge else { return None };
+    let at = format!("into {target} at {}", short_commit(head));
+    Some(match push_failed {
+        Some(why) if !piped => format!("{at}, push failed: {}", crate::kit::first_line(why)),
+        None if *pushed => format!("{at}, pushed"),
+        Some(_) | None => at,
+    })
 }
 
 /// A pull request's checks as its row says them, in neutral words, and whether one failed;
@@ -362,6 +377,8 @@ pub enum StageKind {
     PullReview,
     /// The agent's own task list.
     ToDos,
+    /// The push to `origin` after it merged, when that failed.
+    Push,
 }
 
 impl StageKind {
@@ -377,6 +394,7 @@ impl StageKind {
             Self::Checks => "checks",
             Self::PullReview => "pull-review",
             Self::ToDos => "todos",
+            Self::Push => "push",
         }
     }
 }
@@ -987,10 +1005,23 @@ impl Board {
             || card.merge.is_some()
             || card.pr.is_some()
             || matches!(card.state, TaskState::Verifying | TaskState::Done);
-        if !on_its_way || card.read_only || card.state == TaskState::Merged {
+        let stage = |kind, words: String, holds| Stage { kind, words, holds };
+        if card.state == TaskState::Merged {
+            let failed = card.merge.as_ref().and_then(|m| match m {
+                Merge::Merged { push_failed: Some(why), .. } => Some(why),
+                Merge::Merged { .. } | Merge::Queued { .. } => None,
+            });
+            return failed
+                .map(|why| {
+                    let words = format!("Push failed: {}", crate::kit::first_line(why));
+                    stage(StageKind::Push, words, true)
+                })
+                .into_iter()
+                .collect();
+        }
+        if !on_its_way || card.read_only {
             return Vec::new();
         }
-        let stage = |kind, words: String, holds| Stage { kind, words, holds };
         let running =
             |kind: StepKind| card.step.as_ref().is_some_and(|s| s.kind == kind && s.running());
         let mut out = Vec::new();
@@ -1185,6 +1216,7 @@ pub fn moment_line(
             "Limits: {} agents in all, {} per worker",
             limits.live_per_project, limits.live_per_worker
         ),
+        Moment::Budget { meter, share_bp } => super::spend::budget_line(meter, *share_bp),
         Moment::TaskCreated { title } => format!("Created: {title}"),
         Moment::Claimed { paths } => match paths.as_slice() {
             [] => "Owns nothing".to_owned(),

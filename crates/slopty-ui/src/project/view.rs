@@ -22,8 +22,8 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Merge, Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, RunOn, StepKind, StepState,
-    TaskCard, TaskId, TaskState, TaskStep, VerifierRun,
+    Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, RunOn, StepKind, StepState, TaskCard,
+    TaskId, TaskState, TaskStep, VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
@@ -1865,9 +1865,10 @@ impl ProjectView {
                     parts.push(format!("Passed at {}", short_commit(&run.head)));
                 }
             }
-            if let Some(Merge::Merged { target, head, pushed, .. }) = &card.merge {
-                let pushed = if *pushed { ", pushed" } else { "" };
-                parts.push(format!("into {target} at {}{pushed}", short_commit(head)));
+            if let Some(words) =
+                card.merge.as_ref().and_then(|m| super::model::merged_words(m, piped))
+            {
+                parts.push(words);
             }
             if let Some(status) = card.status.as_deref().filter(|s| !s.is_empty()) {
                 parts.push(crate::kit::first_line(status).to_owned());
@@ -3343,6 +3344,8 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
         Moment::Orchestrator { .. } => (IconName::Sparkles, s.text_secondary),
         Moment::Limits { .. } | Moment::Needs { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
+        Moment::Budget { share_bp, .. } if *share_bp >= 10_000 => (IconName::Hand, s.warn),
+        Moment::Budget { .. } => (IconName::Gauge, s.text_secondary),
         Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
         Moment::Proposed { .. } => (IconName::Hand, s.text_secondary),
         Moment::State { to, .. } => {

@@ -154,6 +154,7 @@ fn the_person_asks_for_a_merge_and_the_queue_takes_only_what_is_done() {
             head: "d".repeat(40),
             at_ms: at(4),
             pushed: false,
+            push_failed: None,
         }),
         ..Advance::default()
     };

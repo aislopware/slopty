@@ -890,6 +890,48 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
     assert_eq!(b.open_todos(TaskId(3)), 2);
 }
 
+/// A merge whose push to `origin` failed says so on its row and as a stage that holds, in
+/// git's first line, rather than reading as a merge like any other; one pushed, or never asked
+/// to be, has nothing more to say once merged.
+#[test]
+fn a_merge_whose_push_failed_says_so() {
+    use slopty_proto::project::Merge;
+
+    use super::model::{StageKind, merged_words};
+
+    let merged = |n, pushed, push_failed: Option<&str>| {
+        let mut c = card(n, "Merged", TaskState::Merged, None);
+        c.merge = Some(Merge::Merged {
+            target: "main".into(),
+            head: "abcdef0123".into(),
+            at_ms: AT,
+            pushed,
+            push_failed: push_failed.map(str::to_owned),
+        });
+        c
+    };
+    let why = "! [rejected] main -> main (fetch first)\nhint: Updates were rejected";
+    let mirror =
+        one(vec![merged(1, false, Some(why)), merged(2, true, None), merged(3, false, None)]);
+    let b = board(&mirror);
+    let said = |n| {
+        b.pipeline(TaskId(n)).into_iter().map(|s| (s.kind, s.words, s.holds)).collect::<Vec<_>>()
+    };
+    let failed = "Push failed: ! [rejected] main -> main (fetch first)".to_owned();
+    assert_eq!(said(1), [(StageKind::Push, failed, true)]);
+    assert!(said(2).is_empty() && said(3).is_empty());
+    let merge = |n| b.tasks.get(&TaskId(n)).and_then(|c| c.merge.as_ref());
+    let words = |n| merge(n).and_then(|m| merged_words(m, false));
+    assert_eq!(
+        words(1).as_deref(),
+        Some("into main at abcdef0, push failed: ! [rejected] main -> main (fetch first)")
+    );
+    assert_eq!(words(2).as_deref(), Some("into main at abcdef0, pushed"));
+    assert_eq!(words(3).as_deref(), Some("into main at abcdef0"));
+    let beside_its_stage = merge(1).and_then(|m| merged_words(m, true));
+    assert_eq!(beside_its_stage.as_deref(), Some("into main at abcdef0"), "said once");
+}
+
 /// Each node says where it is: the orchestrator and a running task where their agents run, an
 /// ended one where it ran, then a pin, then a proposal, with the worktree, branch and reason;
 /// only a task not started yet can move.

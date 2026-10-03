@@ -135,7 +135,7 @@ pub fn project(p: &Project) -> ProjectView<'_> {
         target: &p.target,
         verifier: p.verifier.as_deref(),
         orchestrator: p.orchestrator.map(term_string),
-        limits: p.limits,
+        limits: p.limits.clone(),
         metadata: metadata(p.metadata.as_deref()),
         needs: p
             .needs
@@ -465,6 +465,12 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
         Moment::Created => ("created", "project made".to_owned()),
         Moment::Orchestrator { .. } => ("orchestrator", "orchestrator named".to_owned()),
         Moment::Limits { limits } => ("limits", format!("limits now {}", limits_text(limits))),
+        Moment::Budget { meter, share_bp } if *share_bp >= 10_000 => {
+            ("budget", format!("budget reached on {meter}: no new work until it is raised"))
+        }
+        Moment::Budget { meter, share_bp } => {
+            ("budget", format!("{}% of the {meter} budget spent", share_bp / 100))
+        }
         Moment::TaskCreated { title } => ("task_created", format!("made: {title}")),
         Moment::Claimed { paths } => ("claimed", format!("owns {}", paths_text(paths))),
         Moment::Needs { names } if names.is_empty() => ("needs", "needs nothing".to_owned()),

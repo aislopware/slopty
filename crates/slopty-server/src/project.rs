@@ -17,12 +17,13 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
-    ARTIFACTS_MAX, AgentReport, Assignment, CHECK_NAME_MAX, CHECKS_NAMED, Checks, DEPENDS_MAX,
-    KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native,
-    NativeAgent, NativeChange, Natives, Need, NodeDetail, NodeNatives, Placed, Project,
-    ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent,
-    StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange,
-    TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    ARTIFACTS_MAX, AgentReport, Assignment, Budget, CHECK_NAME_MAX, CHECKS_NAMED, Checks,
+    DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Matcher, Merge, Moment,
+    NOTE_MAX, Native, NativeAgent, NativeChange, Natives, Need, NodeDetail, NodeNatives, Placed,
+    Project, ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn, STATUS_MAX,
+    SUMMARY_MAX, Spent, StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE,
+    TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry,
+    VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -703,6 +704,18 @@ fn limited(limits: Limits, change: LimitsChange, bounds: Bounds) -> Result<Limit
         timeline_kept: change
             .timeline_kept
             .unwrap_or_else(|| limits.timeline_kept.min(bounds.timeline_kept)),
+        budget: match change.budget {
+            Some(budget) if budget.0.is_empty() => None,
+            Some(budget) if !budget.fits() => {
+                return Err(invalid(format!(
+                    "a budget names at most {} meters, each a name with no space and a cap \
+                     above nothing; a plan window's at most 10000 (the whole window)",
+                    Budget::METERS_MAX
+                )));
+            }
+            Some(budget) => Some(budget),
+            None => limits.budget,
+        },
     })
 }
 
@@ -876,7 +889,7 @@ impl Projects {
         let bounds = self.policy.bounds;
         let mut updates = Vec::new();
         for record in self.records.values_mut() {
-            let within = limited(record.project.limits, LimitsChange::default(), bounds);
+            let within = limited(record.project.limits.clone(), LimitsChange::default(), bounds);
             if let Some(limits) = within.ok().filter(|l| *l != record.project.limits) {
                 record.project.limits = limits;
                 record.trim_timeline();
@@ -1017,7 +1030,7 @@ impl Projects {
 
     /// A project's limits.
     pub(crate) fn limits(&self, id: &ProjectId) -> Result<Limits, Refused> {
-        self.records.get(id).map(|r| r.project.limits).ok_or_else(|| unknown_project(id))
+        self.records.get(id).map(|r| r.project.limits.clone()).ok_or_else(|| unknown_project(id))
     }
 
     /// A task as it is.
@@ -1051,6 +1064,7 @@ impl Projects {
         let project = Project {
             needs: Vec::new(),
             orchestrator_spent: Spent::default(),
+            spend: slopty_proto::project::Spend::default(),
             id: new.id.clone(),
             title,
             members: members(new.members)?,
@@ -1088,7 +1102,7 @@ impl Projects {
     ) -> Changed<ProjectStatus> {
         let bounds = self.policy.bounds_for(Some(id));
         let record = self.record(id)?;
-        let limits = limited(record.project.limits, change.limits, bounds)?;
+        let limits = limited(record.project.limits.clone(), change.limits, bounds)?;
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let new_verifier = change.verifier.map(|v| verifier(Some(v))).transpose()?;
         let new_review = change.review.map(|r| review_brief(Some(r))).transpose()?;
@@ -1120,7 +1134,7 @@ impl Projects {
             record.project.ask_to_start = ask;
         }
         if limits != record.project.limits {
-            record.project.limits = limits;
+            record.project.limits = limits.clone();
             record.trim_timeline();
             let entry = record.log(None, Moment::Limits { limits }, now);
             updates.push(record.record_update(Some(entry)));
@@ -1647,7 +1661,7 @@ impl Projects {
         if occupied.contains(&term) {
             return Ok(());
         }
-        let limits = record.project.limits;
+        let limits = &record.project.limits;
         let live = count(occupied.len());
         let here = count(occupied.iter().filter(|t| t.worker == term.worker).count());
         if live >= limits.live_per_project || here >= limits.live_per_worker {

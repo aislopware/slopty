@@ -275,8 +275,9 @@ pub struct WorkerFacts {
     pub facts: Facts,
 }
 
-/// How many agents may run, set per project by whoever runs it, within the [`Bounds`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+/// How many agents may run and what they may spend, set per project by whoever runs it,
+/// within the [`Bounds`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Limits {
     /// Most live agents of this project on any one worker.
     pub live_per_worker: u16,
@@ -286,16 +287,97 @@ pub struct Limits {
     pub depth: u16,
     /// How many timeline entries it keeps.
     pub timeline_kept: u32,
+    /// What its agents may spend before it places no new work and asks the person.
+    pub budget: Option<Budget>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { live_per_worker: 4, live_per_project: 12, depth: 8, timeline_kept: 4096 }
+        Self {
+            live_per_worker: 4,
+            live_per_project: 12,
+            depth: 8,
+            timeline_kept: 4096,
+            budget: None,
+        }
     }
 }
 
+/// What a project's agents may spend, by meter: an open map of a meter's name to its cap.
+///
+/// [`Budget::USD`] caps the estimated cost, in millionths of a US dollar as the agents' meters
+/// say it. Any other name is a plan's rate window as the agents name it
+/// ([`crate::thread::Limit::name`]: `five-hour`, `seven-day`), capped in hundredths of a percent
+/// of it. At the cap the project starts no task and holds its orchestrator's tells until the
+/// person raises the cap or stops it; turns under way finish, so it may pass the cap by up to
+/// one turn per live agent.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Budget(pub BTreeMap<String, u64>);
+
+impl Budget {
+    /// The most meters one budget names.
+    pub const METERS_MAX: usize = 8;
+    /// The share of a cap at which the person hears it comes near, in hundredths of a percent.
+    pub const NEAR_BP: u64 = 8_000;
+    /// The estimated cost's meter.
+    pub const USD: &'static str = "usd";
+
+    /// Whether it may be set: up to [`Self::METERS_MAX`] meters, each named within
+    /// [`crate::items::FACT_KEY_MAX`] characters with no space, each cap above nothing, and a
+    /// window's no more than the whole of it.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        self.0.len() <= Self::METERS_MAX
+            && self.0.iter().all(|(name, cap)| {
+                (1..=crate::items::FACT_KEY_MAX).contains(&name.chars().count())
+                    && !name.chars().any(|c| c.is_whitespace() || c.is_control())
+                    && *cap > 0
+                    && (name == Self::USD || *cap <= 10_000)
+            })
+    }
+
+    /// How `spend` stands against it: each capped meter's use as a share of its cap, in
+    /// hundredths of a percent, fullest first.
+    #[must_use]
+    pub fn against(&self, spend: &Spend) -> Vec<(String, u64)> {
+        let mut shares: Vec<(String, u64)> = self
+            .0
+            .iter()
+            .filter_map(|(name, cap)| {
+                let used = if name == Self::USD {
+                    spend.cost_micro_usd
+                } else {
+                    u64::from(*spend.windows.get(name)?)
+                };
+                Some((name.clone(), used.saturating_mul(10_000).checked_div(*cap)?))
+            })
+            .collect();
+        shares.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        shares
+    }
+
+    /// The meter at or past its cap, the fullest first, when one is.
+    #[must_use]
+    pub fn reached(&self, spend: &Spend) -> Option<String> {
+        self.against(spend).into_iter().find(|(_, bp)| *bp >= 10_000).map(|(name, _)| name)
+    }
+}
+
+/// What a project's agents spent by their own meters.
+///
+/// The server tallies it from every thread that ever worked for it: each agent's session, its
+/// subagents', and every agent a task was given again. Estimates, as the agents say them.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Spend {
+    /// The estimated cost, in millionths of a US dollar.
+    pub cost_micro_usd: u64,
+    /// Each plan rate window its agents report, by name, at the fullest any of them says, in
+    /// hundredths of a percent.
+    pub windows: BTreeMap<String, u32>,
+}
+
 /// A change to a project's [`Limits`]. What is absent stays.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct LimitsChange {
     /// A new [`Limits::live_per_worker`].
     pub live_per_worker: Option<u16>,
@@ -305,6 +387,8 @@ pub struct LimitsChange {
     pub depth: Option<u16>,
     /// A new [`Limits::timeline_kept`].
     pub timeline_kept: Option<u32>,
+    /// A new [`Limits::budget`]; an empty one takes the budget away.
+    pub budget: Option<Budget>,
 }
 
 /// What the person allows across the fleet, from the server's settings (`[server.projects]`).
@@ -468,6 +552,9 @@ pub struct Project {
     /// How long the orchestrator worked, idle waits left out: its share, apart from its
     /// tasks'.
     pub orchestrator_spent: Spent,
+    /// What every agent that worked for it spent by its own meters, against
+    /// [`Limits::budget`].
+    pub spend: Spend,
     /// Its limits.
     pub limits: Limits,
     /// Anything its agents keep with it: the text of a JSON object.
@@ -901,6 +988,9 @@ pub enum Merge {
         at_ms: WallMs,
         /// Whether the target was pushed to its clone's `origin` too.
         pushed: bool,
+        /// Why a push asked for did not happen, in git's words: the target moved all the same,
+        /// and the person pushes again.
+        push_failed: Option<String>,
     },
 }
 
@@ -1459,9 +1549,11 @@ impl TaskCard {
             self.checks.as_ref().map_or(0, Checks::approx_bytes),
             self.merge.as_ref().map_or(0, |m| match m {
                 Merge::Queued { .. } => 16,
-                Merge::Merged { target, head, .. } => {
-                    target.len().saturating_add(head.len()).saturating_add(32)
-                }
+                Merge::Merged { target, head, push_failed, .. } => target
+                    .len()
+                    .saturating_add(head.len())
+                    .saturating_add(push_failed.as_deref().map_or(0, str::len))
+                    .saturating_add(32),
             }),
             self.assignment.as_ref().map_or(0, |a| {
                 let placed = a.placed.as_ref().map_or(0, |p| p.why.len().saturating_add(16));
@@ -1614,6 +1706,14 @@ pub enum Moment {
         /// Each need's name.
         names: Vec<String>,
     },
+    /// Its agents' spend came near a cap of its budget ([`Budget::NEAR_BP`]) or reached it,
+    /// where it starts no task until the person raises the cap.
+    Budget {
+        /// The meter ([`Budget::USD`], or a plan window's name).
+        meter: String,
+        /// How much of its cap is spent, in hundredths of a percent.
+        share_bp: u64,
+    },
 }
 
 impl TimelineEntry {
@@ -1635,6 +1735,7 @@ impl TimelineEntry {
                 .saturating_add(texts(&report.artifacts))
                 .saturating_add(report.branch.as_deref().map_or(0, text)),
             Moment::Step(step) => step.approx_bytes(),
+            Moment::Budget { meter, .. } => text(meter),
             Moment::Created
             | Moment::Orchestrator { .. }
             | Moment::Limits { .. }
@@ -1691,6 +1792,11 @@ impl Project {
             self.metadata.as_deref().map_or(0, str::len),
             self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
             self.needs.iter().map(Need::approx_bytes).sum(),
+            self.spend.windows.keys().map(|k| k.len().saturating_add(5)).sum(),
+            self.limits
+                .budget
+                .as_ref()
+                .map_or(0, |b| b.0.keys().map(|k| k.len().saturating_add(9)).sum()),
         ]
         .into_iter()
         .fold(128_usize, |sum, len| sum.saturating_add(len).saturating_add(10))
@@ -1869,6 +1975,38 @@ impl AgentReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A budget weighs each meter it caps: the cost in millionths of a dollar, a plan window in
+    /// hundredths of a percent; a meter its agents never reported weighs nothing. The fullest
+    /// comes first, and a cap is reached at its whole.
+    #[test]
+    fn a_budget_weighs_each_capped_meter_and_says_which_is_reached() {
+        let budget = Budget(BTreeMap::from([
+            (Budget::USD.to_owned(), 50_000_000),
+            ("five-hour".to_owned(), 8_000),
+            ("seven-day".to_owned(), 5_000),
+        ]));
+        let spend = Spend {
+            cost_micro_usd: 40_000_000,
+            windows: BTreeMap::from([("five-hour".to_owned(), 8_800)]),
+        };
+        assert_eq!(
+            budget.against(&spend),
+            [("five-hour".to_owned(), 11_000), (Budget::USD.to_owned(), 8_000)]
+        );
+        assert_eq!(budget.reached(&spend).as_deref(), Some("five-hour"));
+        let under = Spend { cost_micro_usd: 49_999_999, windows: BTreeMap::new() };
+        assert_eq!(budget.reached(&under), None);
+        assert!(budget.fits());
+        for bad in [
+            Budget(BTreeMap::from([(Budget::USD.to_owned(), 0)])),
+            Budget(BTreeMap::from([("five-hour".to_owned(), 10_001)])),
+            Budget(BTreeMap::from([("two words".to_owned(), 1)])),
+            Budget((0..=Budget::METERS_MAX).map(|n| (format!("m{n}"), 1)).collect()),
+        ] {
+            assert!(!bad.fits(), "{bad:?}");
+        }
+    }
 
     /// A member names one to a few facts, each a key with no space and a value that is not
     /// blank; anything else is refused.

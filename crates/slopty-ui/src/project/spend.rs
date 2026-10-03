@@ -193,6 +193,28 @@ pub fn worked(ms: u64) -> String {
     }
 }
 
+/// A budget's meter in words: the estimated cost, or a plan window by its name ("five-hour").
+#[must_use]
+pub fn meter_words(meter: &str) -> String {
+    if meter == slopty_proto::project::Budget::USD {
+        "cost".to_owned()
+    } else {
+        format!("{} window", meter.replace(['-', '_'], " "))
+    }
+}
+
+/// A budget moment in words: how much of a cap is spent, or that it was reached and no new work
+/// starts until the person raises it.
+#[must_use]
+pub fn budget_line(meter: &str, share_bp: u64) -> String {
+    let what = meter_words(meter);
+    if share_bp >= 10_000 {
+        format!("Reached its {what} budget: no new work starts until it is raised")
+    } else {
+        format!("Spent {}% of its {what} budget", share_bp / 100)
+    }
+}
+
 /// A cost in US dollars, to the cent: "$0.42", "$12.08".
 #[must_use]
 pub fn dollars(micro_usd: u64) -> String {

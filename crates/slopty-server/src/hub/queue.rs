@@ -757,6 +757,7 @@ impl Hub {
             head: head.to_owned(),
             at_ms: now,
             pushed,
+            push_failed: push_failed.clone(),
         };
         let advance = Advance {
             state: still.then_some(TaskState::Merged),
@@ -769,7 +770,15 @@ impl Hub {
             Ok((_, updates)) => self.projects_moved(&mut state, updates),
             Err(refused) => tracing::debug!(%project, %task, ?refused, "a merge not recorded"),
         }
-        let words = format!("task {task} merged into {} at {}.", place.target, short(head));
+        let words = match &push_failed {
+            Some(why) => format!(
+                "task {task} merged into {} at {}, but the push to origin failed: {why}. The \
+                 person pushes again from the board.",
+                place.target,
+                short(head)
+            ),
+            None => format!("task {task} merged into {} at {}.", place.target, short(head)),
+        };
         let at = tokio::time::Instant::now();
         // At once: a merge is final, and what depends on the task can start now.
         let kind = ReportKind::NeedsInput;

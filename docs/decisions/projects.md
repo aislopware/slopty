@@ -1582,3 +1582,28 @@ Tests:
    - The timeline, and tokens per agent.
 4. **Scale.** The shared build cache, channel push and moving agents between workers, each only
    after it is measured.
+
+**A failed push after a merge is said, not folded into the merge.** ✅ 2026-10-04 (readiness
+N16)
+- A merge whose push to `origin` failed left the target moved on its clone and read as a merge
+  like any other ("Merged: …, not pushed").
+- `Merge::Merged::push_failed` carries git's words. The orchestrator is told the push failed
+  and that the person pushes again. The task's row says "push failed: <git's first line>", and
+  its pipeline shows a Push stage that holds (the stronger ink, as every holding stage), which
+  the row then leaves to it.
+- "Push again" on the card is next. It needs a verb that pushes the target from the clone.
+- Tests: `a_merge_whose_push_failed_says_so` (`slopty-ui::project`) and the golden
+  `task_merged_unpushed_card`.
+
+**A project may have a budget per meter.** ✅ wire 2026-10-04 (rulings §5d; the gate to follow)
+- `Limits::budget` is an open map of a meter's name to its cap (`Budget`). `usd` caps the
+  estimated cost in millionths of a dollar. Any other name is a plan window as the agents name
+  it (`five-hour`), capped in hundredths of a percent. `Budget::fits` bounds it: at most 8
+  meters, a name with no space, a cap above nothing, a window's no more than the whole. The
+  server refuses one that does not fit, and an empty one takes the budget away.
+- `Project::spend` is what the server tallies (`Spend`), and `Moment::Budget` the timeline's
+  near (80 %, `Budget::NEAR_BP`) and reached moments.
+- Next: tally every assignment's and subagent's meters (N21), stop placing and hold the
+  orchestrator's tells at the cap, and set it from the board, the CLI and the tools.
+- Tests: `a_budget_weighs_each_capped_meter_and_says_which_is_reached` (`slopty-proto`) and
+  the goldens `project_create` and `project_event_pushed`.
