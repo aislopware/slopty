@@ -777,6 +777,8 @@ pub async fn upload(
     let mut following = line.follow(xfer);
     let to = To { xfer, dest, again };
     let (now, ended) = carry(up.clone(), line, &mut following.stop, files, to).await;
+    // Off the line before it is said to have ended, so whoever hears the end finds it gone.
+    drop(following);
     if let Err(error) = ended {
         let _gone = now.events.send(LinkEvent::XferFailed { xfer, error }).await;
     }
