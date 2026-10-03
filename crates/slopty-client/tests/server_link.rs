@@ -112,11 +112,12 @@ mod tests {
         );
     }
 
+    /// The port stays bound to a socket that never answers: freed, another test's server
+    /// running alongside could take it and let the client in.
     #[tokio::test]
     async fn a_server_that_is_not_there_is_reported() {
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let port = socket.local_addr().unwrap().port();
-        drop(socket);
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = silent.local_addr().unwrap().port();
         let endpoint = slopty_net::client::bind_client().unwrap();
         let (_task, mut events) = spawn(
             &tokio::runtime::Handle::current(),
