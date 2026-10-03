@@ -383,6 +383,39 @@ pub enum TaskCmd {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Have several agents try a task at once, an attempt each, and print the task: each
+    /// attempt goes to the worker it names, or to one that fits and no other attempt took.
+    Attempts {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The task's number.
+        task: String,
+        /// One attempt: the agent, then `model=` and `on=` (a worker) when wanted, such as
+        /// `codex,model=o3,on=studio` or `pi`; repeatable, up to 6.
+        #[arg(long = "try", value_name = "AGENT[,model=M][,on=WORKER]", required = true,
+              value_parser = attempt)]
+        tries: Vec<Attempt>,
+        /// Working directory on each worker; beside a clone of the project's repository when
+        /// omitted.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Each agent's first prompt.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Start them though a task it depends on is not done yet.
+        #[arg(long)]
+        ignore_dependencies: bool,
+    },
+    /// Pick the attempt that lands, and print the task it tries: every other attempt stops,
+    /// its agent closed and its worktree freed, its branch kept.
+    Pick {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The attempt's number.
+        attempt: String,
+    },
     /// Report on a task's work to whoever split it off (its parent task's agent, or the
     /// orchestrator), through that agent's hooks.
     Report {
@@ -629,6 +662,35 @@ fn state(word: Option<&str>) -> Result<Option<TaskState>> {
     }
 }
 
+/// One attempt of `slopty task attempts`: which agent, with which model, on which worker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    /// The agent, as `--agent` names one.
+    pub agent: String,
+    /// The model, by the agent's own id.
+    pub model: Option<String>,
+    /// The worker, by name or id.
+    pub on: Option<String>,
+}
+
+/// An attempt as typed: the agent, then `model=` and `on=` in any order, comma-separated.
+fn attempt(text: &str) -> Result<Attempt, String> {
+    let mut parts = text.split(',').map(str::trim);
+    let agent = parts.next().filter(|a| !a.is_empty() && !a.contains('='));
+    let Some(agent) = agent else {
+        return Err(format!("{text:?} names no agent first, as in codex,model=o3,on=studio"));
+    };
+    let mut tried = Attempt { agent: agent.to_owned(), model: None, on: None };
+    for part in parts {
+        match part.split_once('=') {
+            Some(("model", model)) if !model.is_empty() => tried.model = Some(model.to_owned()),
+            Some(("on", worker)) if !worker.is_empty() => tried.on = Some(worker.to_owned()),
+            _ => return Err(format!("{part:?} is not model=… or on=…")),
+        }
+    }
+    Ok(tried)
+}
+
 /// Run a `slopty task …`.
 pub async fn task(
     cmd: TaskCmd,
@@ -759,6 +821,23 @@ pub async fn task(
             };
             ops::task_spawn(&mut res, project.as_deref(), Some(&task), launch, key).await?
         }
+        TaskCmd::Attempts { project, task, tries, cwd, prompt, ignore_dependencies } => {
+            let specs = tries
+                .into_iter()
+                .map(|t| LaunchSpec {
+                    pin: t.on,
+                    cwd: cwd.clone().unwrap_or_default(),
+                    run: ops::agent_runner(Some(&t.agent), prompt.clone(), t.model, Vec::new()),
+                    env: Vec::new(),
+                    size: None,
+                    ignore_dependencies,
+                })
+                .collect();
+            ops::task_attempts(&mut res, project.as_deref(), Some(&task), specs, key).await?
+        }
+        TaskCmd::Pick { project, attempt } => {
+            ops::task_pick(link, project.as_deref(), &attempt, key).await?
+        }
         TaskCmd::Report { which, kind, note, artifacts, branch, pr } => {
             let report = Report { kind: kind.kind(), note, artifacts, branch, pr };
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
@@ -830,6 +909,11 @@ fn print_task(task: &Task, json: bool) -> Result<()> {
         .as_ref()
         .map_or_else(String::new, |a| format!("  {}", slopty_tools::view::term_string(a.term)));
     println!("#{} {}  {}{term}", task.id, view::state_word(task.state), task.title);
+    if let Some(attempts) = &task.attempts {
+        let tried: Vec<String> = attempts.tried.iter().map(|t| format!("#{t}")).collect();
+        let picked = attempts.picked.map_or_else(String::new, |p| format!(", #{p} picked"));
+        println!("  attempts {}{picked}", tried.join(" "));
+    }
     Ok(())
 }
 
@@ -865,5 +949,27 @@ fn finding(text: &str) -> slopty_proto::project::Finding {
         }
         _ if place.contains(char::is_whitespace) => blocker(None, None, text),
         _ => blocker(Some(place), None, body),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Attempt, attempt};
+
+    /// An attempt names its agent first, then a model and a worker in either order; anything
+    /// else is refused saying what it takes.
+    #[test]
+    fn an_attempt_names_its_agent_then_its_model_and_worker() {
+        let full = Attempt {
+            agent: "codex".to_owned(),
+            model: Some("o3".to_owned()),
+            on: Some("studio".to_owned()),
+        };
+        assert_eq!(attempt("codex,model=o3,on=studio"), Ok(full.clone()));
+        assert_eq!(attempt("codex, on=studio, model=o3"), Ok(full));
+        let acp = Attempt { agent: "acp:gemini".to_owned(), model: None, on: None };
+        assert_eq!(attempt("acp:gemini"), Ok(acp));
+        assert!(attempt("model=o3").unwrap_err().contains("names no agent"));
+        assert!(attempt("pi,size=9").unwrap_err().contains("not model="));
     }
 }

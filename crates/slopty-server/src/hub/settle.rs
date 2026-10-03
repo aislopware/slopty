@@ -81,26 +81,32 @@ impl Hub {
         closing
             .into_iter()
             .map(|(term, free)| {
-                self.close_and_free(term, free);
+                self.close_and_free(term, true, free);
                 term
             })
             .collect()
     }
 
-    /// Close `term`, then once it is closed free the worktree its task's agent worked in,
-    /// saying on the task's timeline how that went.
-    fn close_and_free(
+    /// Close `term` when `open`, then once it is closed free the worktree its task's agent
+    /// worked in on its worker, saying on the task's timeline how that went.
+    pub(super) fn close_and_free(
         &self,
         term: TermRef,
+        open: bool,
         free: Option<(ProjectId, TaskId, String, Vec<String>)>,
     ) {
         let Some((project, task, worktree, landed)) = free else {
-            self.close_soon(term);
+            if open {
+                self.close_soon(term);
+            }
             return;
         };
         let hub = self.clone();
         tokio::spawn(async move {
-            if let failed @ Outcome::Error { .. } = hub.forward(None, Verb::Close { term }).await {
+            if open
+                && let failed @ Outcome::Error { .. } =
+                    hub.forward(None, Verb::Close { term }).await
+            {
                 tracing::debug!(?failed, "a terminal not closed");
                 return;
             }

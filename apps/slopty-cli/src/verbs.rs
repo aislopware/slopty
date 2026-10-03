@@ -10,18 +10,18 @@ use clap::{Args, Subcommand};
 use serde::Serialize;
 use slopty_core::{DisplayId, SessionId, WindowId};
 use slopty_net::client::bind_client;
-use slopty_proto::conversation::Verdict;
 use slopty_proto::folder::FsOp;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{
-    EventFilter, Happening, IdempotencyKey, Input, Outcome, Size, Verb, WaitUntil, Waited,
+    EventFilter, Happening, IdempotencyKey, Input, Outcome, Size, ThreadView, Verb, WaitUntil,
+    Waited,
 };
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::search::SearchQuery;
 use slopty_proto::server::{Role, Vouch};
 use slopty_tools::ops::{
-    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_ENTRIES_PAGE, DEFAULT_MAX_LINES,
-    DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS, Spec,
+    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS,
+    Spec,
 };
 use slopty_tools::resolve::Resolver;
 use slopty_tools::{Dispatch as _, ToolError, bulk, view};
@@ -335,28 +335,28 @@ impl TargetArgs {
     }
 }
 
-/// How a permission prompt is answered: exactly one.
+/// Which thread: exactly one of a task, a thread's id and a terminal.
 #[derive(Args, Debug)]
 #[group(required = true, multiple = false)]
-pub struct VerdictArgs {
-    /// Allow this call.
+pub struct ThreadWhich {
+    /// The task whose agent's thread it is (its project with `--project`).
     #[arg(long)]
-    allow: bool,
-    /// Allow it and apply the rules the prompt suggests, as the agent's "don't ask again".
+    task: Option<String>,
+    /// A thread's id, a subagent's too.
     #[arg(long)]
-    always: bool,
-    /// Refuse the call, with this message for the agent (may be empty).
-    #[arg(long, value_name = "MESSAGE")]
-    deny: Option<String>,
+    thread: Option<String>,
+    /// The terminal an agent runs in: worker/session.
+    #[arg(long)]
+    term: Option<String>,
 }
 
-impl VerdictArgs {
-    fn verdict(self, interrupt: bool) -> Result<Verdict> {
-        match (self.allow, self.always, self.deny) {
-            (true, false, None) if !interrupt => Ok(Verdict::Allow),
-            (false, true, None) if !interrupt => Ok(Verdict::AllowAlways),
-            (false, false, Some(message)) => Ok(Verdict::Deny { message, interrupt }),
-            _ => bail!("give one of --allow, --always, --deny (--interrupt goes with --deny)"),
+impl ThreadWhich {
+    fn arg<'a>(&'a self, project: Option<&'a str>) -> ops::ThreadArg<'a> {
+        ops::ThreadArg {
+            thread: self.thread.as_deref(),
+            term: self.term.as_deref(),
+            project,
+            task: self.task.as_deref(),
         }
     }
 }
@@ -481,32 +481,35 @@ pub enum AgentCmd {
         #[arg(help = TERM_HELP)]
         term: String,
     },
-    /// The agent's conversation as its face shows it, a page at a time, with the permission
-    /// prompts waiting. Its prompts then wait for `slopty agent answer`.
-    Conversation {
-        #[arg(help = TERM_HELP)]
-        term: String,
-        /// `main`, or a subagent's id.
-        #[arg(long)]
-        thread: Option<String>,
-        /// First entry (the last `--max` when omitted).
-        #[arg(long)]
-        since: Option<u32>,
-        /// At most this many entries (at most 500).
-        #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES_PAGE)]
-        max: u32,
-    },
-    /// Answer a permission prompt the agent is waiting on, by its number.
-    Answer {
-        #[arg(help = TERM_HELP)]
-        term: String,
-        /// The prompt's number, from `slopty agent conversation`.
-        ask: u64,
+    /// What an agent's thread did, whatever its agent, whole turns at a time, with the
+    /// requests waiting on it. Its terminal's prompts then wait for `slopty agent answer`.
+    Read {
         #[command(flatten)]
-        verdict: VerdictArgs,
-        /// With `--deny`: also stop the agent's turn.
+        which: ThreadWhich,
+        /// The task's project (yours when omitted).
         #[arg(long)]
-        interrupt: bool,
+        project: Option<String>,
+        /// Every tool call and notice too, not only what was said.
+        #[arg(long)]
+        activity: bool,
+        /// The last turn already read: the `next` a read printed.
+        #[arg(long)]
+        after: Option<u32>,
+    },
+    /// Answer a request waiting on an agent's thread by one of the choices it offers.
+    Answer {
+        #[command(flatten)]
+        which: ThreadWhich,
+        /// The task's project (yours when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The request, as `slopty agent read` lists it.
+        ask: String,
+        /// The choice it offers, by its id (`allow`, `deny`), or the answers to its questions.
+        choice: String,
+        /// Words to go with it, where the agent takes them.
+        #[arg(long)]
+        message: Option<String>,
     },
 }
 
@@ -872,18 +875,19 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
                 print!("{}", view::screens_text(&windows, &displays));
             }
         }
-        VerbCmd::Agent { cmd: AgentCmd::Conversation { term, thread, since, max } } => {
-            let thread = view::thread_named(thread.as_deref());
-            let (term, page) = ops::read_conversation(&mut res, &term, thread, since, max).await?;
+        VerbCmd::Agent { cmd: AgentCmd::Read { which, project, activity, after } } => {
+            let view = if activity { ThreadView::Activity } else { ThreadView::Messages };
+            let read =
+                ops::read_thread(&mut res, which.arg(project.as_deref()), view, after).await?;
             if json {
-                print_json(&view::conversation(term, &page))?;
+                print_json(&view::thread_read(&read))?;
             } else {
-                print!("{}", view::conversation_text(term, &page));
+                print!("{}", view::thread_read_text(&read));
             }
         }
-        VerbCmd::Agent { cmd: AgentCmd::Answer { term, ask, verdict, interrupt } } => {
-            let verdict = verdict.verdict(interrupt)?;
-            ops::answer_permission(&mut res, &term, ask, verdict, key).await?;
+        VerbCmd::Agent { cmd: AgentCmd::Answer { which, project, ask, choice, message } } => {
+            let of = which.arg(project.as_deref());
+            ops::answer_request(&mut res, of, (ask, choice, message), key).await?;
             print_done(json)?;
         }
         VerbCmd::Capture { worker, target, out } => {
@@ -1209,31 +1213,31 @@ mod tests {
 
     #[test]
     fn the_agent_screen_and_file_verbs_parse() {
-        let VerbCmd::Agent { cmd: AgentCmd::Conversation { thread, since, max, .. } } =
-            parse(&["agent", "conversation", "t", "--thread", "a1", "--since", "4"]).unwrap()
+        let VerbCmd::Agent { cmd: AgentCmd::Read { which, activity, after, .. } } =
+            parse(&["agent", "read", "--thread", "a1", "--activity", "--after", "4"]).unwrap()
+        else {
+            panic!()
+        };
+        let of = which.arg(None);
+        assert_eq!((of.thread, of.task, activity, after), (Some("a1"), None, true, Some(4)));
+        let VerbCmd::Agent { cmd: AgentCmd::Read { which, project, .. } } =
+            parse(&["agent", "read", "--task", "3", "--project", "demo"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((which.arg(None).task, project.as_deref()), (Some("3"), Some("demo")));
+        parse(&["agent", "read"]).unwrap_err();
+        parse(&["agent", "read", "--task", "3", "--term", "t"]).unwrap_err();
+        let VerbCmd::Agent { cmd: AgentCmd::Answer { which, ask, choice, message, .. } } =
+            parse(&["agent", "answer", "--term", "t", "7", "deny", "--message", "no"]).unwrap()
         else {
             panic!()
         };
         assert_eq!(
-            (thread.as_deref(), since, max),
-            (Some("a1"), Some(4), DEFAULT_MAX_ENTRIES_PAGE)
+            (which.term.as_deref(), ask.as_str(), choice.as_str(), message.as_deref()),
+            (Some("t"), "7", "deny", Some("no"))
         );
-        let answer = |args: &[&str]| {
-            let VerbCmd::Agent { cmd: AgentCmd::Answer { ask, verdict, interrupt, .. } } =
-                parse(args).unwrap()
-            else {
-                panic!()
-            };
-            (ask, verdict.verdict(interrupt))
-        };
-        let (ask, verdict) = answer(&["agent", "answer", "t", "3", "--allow"]);
-        assert_eq!((ask, verdict.unwrap()), (3, Verdict::Allow));
-        let (_, verdict) = answer(&["agent", "answer", "t", "3", "--deny", "no", "--interrupt"]);
-        let deny = Verdict::Deny { message: "no".to_owned(), interrupt: true };
-        assert_eq!(verdict.unwrap(), deny);
-        answer(&["agent", "answer", "t", "3", "--always", "--interrupt"]).1.unwrap_err();
-        parse(&["agent", "answer", "t", "3"]).unwrap_err();
-        parse(&["agent", "answer", "t", "3", "--allow", "--always"]).unwrap_err();
+        parse(&["agent", "answer", "--term", "t", "7"]).unwrap_err();
 
         let VerbCmd::Capture { target, out, .. } =
             parse(&["capture", "--display", "1", "--out", "/tmp/d.png"]).unwrap()

@@ -5,12 +5,11 @@
 
 use slopty_core::WorkerId;
 use slopty_proto::agent::{AgentKind, SessionAgent};
-use slopty_proto::conversation::{ThreadId, Verdict};
 use slopty_proto::folder::FsOp;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
-    Command, ConversationPage, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent,
-    IdempotencyKey, Input, ItemRef, Line, Outcome, Port, Screen, Size, TermRef, Verb, WaitUntil,
+    Command, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, ItemRef,
+    Line, Outcome, Port, Screen, Size, TermRef, ThreadOf, ThreadRead, ThreadView, Verb, WaitUntil,
     Waited,
 };
 use slopty_proto::project::{
@@ -22,6 +21,7 @@ use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
 use slopty_proto::server::WorkerInfo;
 use slopty_proto::terminal::SessionSummary;
+use slopty_proto::thread::{AskId, TurnId};
 
 use crate::resolve::Resolver;
 use crate::view::Overview;
@@ -525,40 +525,75 @@ pub async fn windows<D: Dispatch>(
     }
 }
 
-/// Entries a page of a conversation returns when the caller names no limit.
-pub const DEFAULT_MAX_ENTRIES_PAGE: u32 = 50;
-
-/// A page of the conversation of the agent in a terminal.
+/// Which thread a read or an answer is about, as its caller names it.
 ///
-/// `thread`'s entries from `since`, or its last `max`. Read by the person (the CLI outside an
-/// agent's terminal), the session's permission prompts wait for [`answer_permission`] from then
-/// on; read by an agent, nothing changes.
-pub async fn read_conversation<D: Dispatch>(
+/// A thread's id (a subagent's too), the terminal an agent runs in, or a task (the caller's own
+/// project's when none is named). A thread wins over a terminal, a terminal over a task.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ThreadArg<'a> {
+    /// A thread's id.
+    pub thread: Option<&'a str>,
+    /// A terminal, as the lists print it.
+    pub term: Option<&'a str>,
+    /// The task's project.
+    pub project: Option<&'a str>,
+    /// A task.
+    pub task: Option<&'a str>,
+}
+
+/// The thread `arg` names, for the server to find.
+async fn thread_of<D: Dispatch>(
     res: &mut Resolver<'_, D>,
-    term: &str,
-    thread: ThreadId,
-    since: Option<u32>,
-    max: u32,
-) -> Result<(TermRef, ConversationPage), ToolError> {
-    let term = res.term(term).await?;
+    arg: ThreadArg<'_>,
+) -> Result<ThreadOf, ToolError> {
+    if let Some(thread) = arg.thread {
+        let id = thread.trim().parse().map_err(|e| {
+            ToolError::invalid(format!(
+                "{thread:?} is not a thread id ({e}): a uuid, as reads print it"
+            ))
+        })?;
+        return Ok(ThreadOf::Thread(id));
+    }
+    if let Some(term) = arg.term {
+        return Ok(ThreadOf::Term(res.term(term).await?));
+    }
+    if arg.task.is_none() {
+        return Err(ToolError::invalid("name a task, a thread or a terminal"));
+    }
+    let (project, task) = project_task(res.dispatch(), arg.project, arg.task).await?;
+    Ok(ThreadOf::Task { project, task })
+}
+
+/// What a thread did after turn `after`, whatever its agent: whole turns, bounded.
+///
+/// The requests open on it come too. Read by the person (the CLI outside an agent's terminal),
+/// a Claude Code TUI's prompts wait for [`answer_request`] from then on; read by an agent,
+/// nothing changes.
+pub async fn read_thread<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    arg: ThreadArg<'_>,
+    view: ThreadView,
+    after: Option<u32>,
+) -> Result<ThreadRead, ToolError> {
+    let of = thread_of(res, arg).await?;
     // The server says whether the read holds prompts: the person's alone.
-    let verb = Verb::ReadConversation { term, thread, since, max, hold: false };
+    let verb = Verb::ReadThread { of, view, after: after.map(TurnId), hold: false };
     match res.dispatch().call(verb).await {
-        Outcome::Conversation(page) => Ok((term, *page)),
+        Outcome::Thread(read) => Ok(*read),
         other => Err(ToolError::unexpected(other)),
     }
 }
 
-/// Answer a permission prompt held for orchestration in a terminal.
-pub async fn answer_permission<D: Dispatch>(
+/// Answer a request open on a thread by one of its choices: the person's alone.
+pub async fn answer_request<D: Dispatch>(
     res: &mut Resolver<'_, D>,
-    term: &str,
-    ask: u64,
-    verdict: Verdict,
+    arg: ThreadArg<'_>,
+    (ask, choice, message): (String, String, Option<String>),
     key: Option<IdempotencyKey>,
 ) -> Result<(), ToolError> {
-    let term = res.term(term).await?;
-    done(res.dispatch(), key, Verb::AnswerPermission { term, ask, verdict }).await
+    let of = thread_of(res, arg).await?;
+    let verb = Verb::AnswerRequest { of, ask: AskId(ask), choice, message };
+    done(res.dispatch(), key, verb).await
 }
 
 /// A still picture, as PNG.
@@ -1352,6 +1387,43 @@ pub async fn task_spawn<D: Dispatch>(
     let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = spec;
     let launch = TaskLaunch { pin, cwd, run, env, size, ignore_dependencies };
     task_answer(res.dispatch(), key, Verb::TaskSpawn { project, task, launch }).await
+}
+
+/// Have an agent try a task for each of `specs` at once, each an attempt of its own on the
+/// worker it names or, where several fit, one no other attempt took.
+///
+/// # Errors
+/// As [`task_spawn`]; refused when the task cannot be tried, or no attempt started.
+pub async fn task_attempts<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    project: Option<&str>,
+    task: Option<&str>,
+    specs: Vec<LaunchSpec>,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let (project, task) = project_task(res.dispatch(), project, task).await?;
+    let mut launches = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let pin = res.some_worker(spec.pin.as_deref()).await?;
+        let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = spec;
+        launches.push(TaskLaunch { pin, cwd, run, env, size, ignore_dependencies });
+    }
+    task_answer(res.dispatch(), key, Verb::TaskAttempts { project, task, launches }).await
+}
+
+/// Pick the attempt that lands: every other attempt at its task stops, its agent closed and
+/// its worktree freed. Answers the task tried.
+///
+/// # Errors
+/// As [`task_report`]; refused for a task that is no attempt, or once another is picked.
+pub async fn task_pick<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    attempt: &str,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let (project, attempt) = project_task(dispatch, project, Some(attempt)).await?;
+    task_answer(dispatch, key, Verb::TaskPick { project, attempt }).await
 }
 
 /// Every worker ranked for a placement: a task's own, `spec` in its stead, or `spec` alone.

@@ -49,7 +49,7 @@ use slopty_proto::agent::{AgentBranch, AgentStatus, SessionAgent};
 use slopty_proto::lan::{LanPort, MacAddr};
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, Happening, HubEvent, IdempotencyKey, KEY_LIFETIME, Outcome, TermRef,
-    Verb,
+    ThreadOf, Verb,
 };
 use slopty_proto::project::{AgentReport, Facts, ProjectId, ProjectStatus, ProjectsPart, TaskId};
 use slopty_proto::server::{FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo};
@@ -717,12 +717,16 @@ impl Hub {
     /// unless the person allows looser starts for the project (`[server.projects]
     /// permission_flags`).
     fn env_of_agent(&self, from: Option<SessionId>, verb: &Verb) -> Result<(), Outcome> {
-        let (env, project) = match verb {
-            Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. } => (env, None),
-            Verb::TaskSpawn { project, launch, .. } => (&launch.env, Some(project)),
+        let (envs, project) = match verb {
+            Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. } => (vec![env], None),
+            Verb::TaskSpawn { project, launch, .. } => (vec![&launch.env], Some(project)),
+            Verb::TaskAttempts { project, launches, .. } => {
+                (launches.iter().map(|l| &l.env).collect(), Some(project))
+            }
             _ => return Ok(()),
         };
-        let Some(name) = env.iter().map(|(name, _)| name.as_str()).find(|n| steers(n)) else {
+        let mut names = envs.into_iter().flatten().map(|(name, _)| name.as_str());
+        let Some(name) = names.find(|n| steers(n)) else {
             return Ok(());
         };
         let allowed = projects::allowance(&self.inner.state.lock(), Caller::Agent, from, project);
@@ -818,6 +822,10 @@ impl Hub {
             Verb::TaskSpawn { project, task, launch } => {
                 self.task_spawn(caller, key, project, task, launch).await
             }
+            Verb::TaskAttempts { project, task, launches } => {
+                self.task_attempts(caller, key, project, task, launches).await
+            }
+            Verb::TaskPick { project, attempt } => self.task_pick(caller, key, &project, attempt),
             Verb::TaskStart { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "a proposed task is the person's to start; task_spawn proposed it, and you hear \
@@ -835,15 +843,22 @@ impl Hub {
             verb @ Verb::SpawnAgent { .. } => self.spawn_agent(caller, from, key, verb).await,
             verb @ Verb::OpenTerminal { .. } => self.open_terminal(caller, from, key, verb).await,
             // Only the person answers a permission, so only the person's read holds prompts.
-            Verb::ReadConversation { term, thread, since, max, .. } => {
-                let hold = caller == Caller::Person;
-                self.forward(key, Verb::ReadConversation { term, thread, since, max, hold }).await
-            }
-            Verb::AnswerPermission { .. } if caller == Caller::Agent => Outcome::Error {
+            Verb::ReadThread { of, view, after, .. } => match self.thread_on(of) {
+                Ok(of) => {
+                    let hold = caller == Caller::Person;
+                    self.forward(key, Verb::ReadThread { of, view, after, hold }).await
+                }
+                Err(refused) => refused,
+            },
+            Verb::AnswerRequest { .. } if caller == Caller::Agent => Outcome::Error {
                 code: ErrorCode::Forbidden,
-                message: "a permission is the person's to answer, never an agent's; it waits \
-                          in the agent's terminal and on the person's devices"
+                message: "a request is the person's to answer, never an agent's; it waits in \
+                          the agent's thread and on the person's devices"
                     .to_owned(),
+            },
+            Verb::AnswerRequest { of, ask, choice, message } => match self.thread_on(of) {
+                Ok(of) => self.forward(key, Verb::AnswerRequest { of, ask, choice, message }).await,
+                Err(refused) => refused,
             },
             Verb::CloneRepo { .. } | Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => error(
                 ErrorCode::Forbidden,
@@ -1558,6 +1573,8 @@ fn remember(
         | Verb::TaskAssign { project, .. }
         | Verb::TaskSpawn { project, .. }
         | Verb::TaskStart { project, .. }
+        | Verb::TaskAttempts { project, .. }
+        | Verb::TaskPick { project, .. }
         | Verb::TaskTell { project, .. }
         | Verb::ProjectNeeds { project, .. }
         | Verb::TaskReport { project, .. }
@@ -1694,6 +1711,8 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskAssign { .. }
         | Verb::TaskSpawn { .. }
         | Verb::TaskStart { .. }
+        | Verb::TaskAttempts { .. }
+        | Verb::TaskPick { .. }
         | Verb::TaskTell { .. }
         | Verb::ProjectNeeds { .. }
         | Verb::PlacementSuggest { .. }
@@ -1740,9 +1759,12 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::WaitFor { term, .. }
         | Verb::AgentStatus { term }
         | Verb::ResizeTerminal { term, .. }
-        | Verb::Close { term }
-        | Verb::ReadConversation { term, .. }
-        | Verb::AnswerPermission { term, .. } => Some(term.worker),
+        | Verb::Close { term } => Some(term.worker),
+        Verb::ReadThread { of, .. } | Verb::AnswerRequest { of, .. } => match of {
+            ThreadOf::On { worker, .. } => Some(*worker),
+            // The server finds the worker first ([`Hub::thread_on`]).
+            ThreadOf::Task { .. } | ThreadOf::Term(_) | ThreadOf::Thread(_) => None,
+        },
     }
 }
 
@@ -1785,6 +1807,8 @@ fn run_seed() -> u64 {
         .map_or(1, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX).max(1))
 }
 
+#[cfg(test)]
+mod attempt_tests;
 #[cfg(test)]
 mod project_tests;
 
@@ -2011,26 +2035,28 @@ pub(crate) mod tests {
     /// they name, the key with the ones that change something.
     #[tokio::test]
     async fn the_agent_screen_and_upload_verbs_go_to_their_worker() {
-        use slopty_proto::conversation::{ThreadId, Verdict};
-        use slopty_proto::orchestration::UploadPart;
+        use slopty_proto::orchestration::{ThreadView, UploadPart};
         use slopty_proto::screen::CaptureTarget;
 
         let hub = Hub::new("server".to_owned(), Vec::new());
         let worker = WorkerId::new();
         let (tx, mut rx) = mpsc::channel(8);
         let lease = hub.register(registration(worker, Vec::new()), ip(), tx).unwrap();
-        let term = TermRef { worker, session: SessionId::new() };
         let upload = slopty_core::XferId::new();
         let key = IdempotencyKey::new("once").unwrap();
         let verbs = [
-            Verb::ReadConversation {
-                term,
-                thread: ThreadId::Main,
-                since: None,
-                max: 50,
+            Verb::ReadThread {
+                of: ThreadOf::On { worker, thread: slopty_proto::thread::ThreadId::new() },
+                view: ThreadView::Activity,
+                after: None,
                 hold: true,
             },
-            Verb::AnswerPermission { term, ask: 3, verdict: Verdict::Allow },
+            Verb::AnswerRequest {
+                of: ThreadOf::On { worker, thread: slopty_proto::thread::ThreadId::new() },
+                ask: slopty_proto::thread::AskId("3".to_owned()),
+                choice: "allow".to_owned(),
+                message: None,
+            },
             Verb::CaptureStill {
                 worker,
                 target: CaptureTarget::Display(slopty_core::DisplayId(1)),

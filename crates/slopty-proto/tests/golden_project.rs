@@ -15,12 +15,12 @@ mod golden_project {
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
-        AgentReport, Assignment, Bounds, Budget, Commits, Fact, Facts, Limits, LimitsChange, Live,
-        Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, Need, NodeDetail,
-        Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus, ProjectUpdate,
-        ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Spend, Spent, StepKind, StepState,
-        Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep,
-        TimelineEntry, VerifierRun, WorkerFacts,
+        AgentReport, Assignment, Attempts, Bounds, Budget, Commits, Fact, Facts, Limits,
+        LimitsChange, Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives,
+        Need, NodeDetail, Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus,
+        ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Spend, Spent,
+        StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
+        TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -177,6 +177,7 @@ mod golden_project {
                 commits: None,
             }),
             proposal: None,
+            attempts: Some(Attempts { tried: vec![TaskId(8), TaskId(9)], picked: Some(TaskId(9)) }),
         }
     }
 
@@ -253,6 +254,89 @@ mod golden_project {
         let op = FsOp::Trash { path: "~/old".to_owned() };
         snap("fs_change_trash", &request(Verb::FsChange { worker, op }));
         snap("fs_done", &reply(Outcome::FsDone { path: "/Users/c/notes".to_owned() }));
+    }
+
+    /// A thread read and answered through the thread model, whatever its agent: asked by task
+    /// and sent to its worker once found, the whole turns it gives with an open request, and
+    /// the person's answer to that request.
+    #[test]
+    fn thread_reads() {
+        use slopty_proto::orchestration::{
+            ReadEntry, RequestRead, ThreadOf, ThreadRead, ThreadView, TurnRead,
+        };
+        use slopty_proto::thread::{AskId, Choice, Effect, Phase, ToolState, TurnId, TurnState};
+
+        let thread =
+            ThreadId::from_uuid(Uuid::from_u128(0x0199_a1b1_c3d4_7000_8000_0000_0000_7e7e));
+        let child = ThreadId::from_uuid(Uuid::from_u128(0x0199_a1b1_c3d4_7000_8000_0000_0000_c41d));
+        let by_task = Verb::ReadThread {
+            of: ThreadOf::Task { project: project_id(), task: TaskId(3) },
+            view: ThreadView::Messages,
+            after: None,
+            hold: false,
+        };
+        snap("read_thread_task", &request(by_task));
+        let found = Verb::ReadThread {
+            of: ThreadOf::On { worker: term().worker, thread },
+            view: ThreadView::Activity,
+            after: Some(TurnId(4)),
+            hold: true,
+        };
+        snap("read_thread_on", &request(found));
+        let read = ThreadRead {
+            worker: term().worker,
+            thread,
+            agent: AgentId::named(AgentId::PI),
+            title: "Server store".to_owned(),
+            parent: None,
+            phase: Phase::NeedsYou,
+            wait: Some("Wants to run cargo test".to_owned()),
+            turns: vec![TurnRead {
+                id: TurnId(5),
+                state: TurnState::Active,
+                started_ms: at(),
+                ended_ms: None,
+                entries: vec![
+                    ReadEntry::User("Build the store.".to_owned()),
+                    ReadEntry::Tool {
+                        kind: "subagent".to_owned(),
+                        title: "Explore the hub".to_owned(),
+                        state: ToolState::Completed,
+                        output: Some("Found it.".to_owned()),
+                        child: Some(child),
+                    },
+                    ReadEntry::Text(format!("Half done{}", ThreadRead::CUT)),
+                    ReadEntry::Notice {
+                        kind: "api-error".to_owned(),
+                        text: "overloaded".to_owned(),
+                    },
+                ],
+            }],
+            requests: vec![RequestRead {
+                ask: AskId("7".to_owned()),
+                kind: "approval".to_owned(),
+                title: "Run cargo test?".to_owned(),
+                choices: vec![Choice {
+                    id: "allow".to_owned(),
+                    label: "Allow".to_owned(),
+                    effect: Effect::Allow,
+                    scope: Some("this session".to_owned()),
+                    stops: false,
+                }],
+                questions: Vec::new(),
+            }],
+            next: TurnId(4),
+            truncated: true,
+            skipped: false,
+        };
+        snap("thread_read", &reply(Outcome::Thread(Box::new(read))));
+        let answer = Verb::AnswerRequest {
+            of: ThreadOf::Thread(thread),
+            ask: AskId("7".to_owned()),
+            choice: "deny".to_owned(),
+            message: Some("Not on main.".to_owned()),
+        };
+        snap("answer_request", &request(answer));
     }
 
     fn launch(run: Runner) -> TaskLaunch {
@@ -413,6 +497,25 @@ mod golden_project {
                 launch: launch(pi),
             }),
         );
+        let codex = Runner::Codex { prompt: Some("Read your brief.".to_owned()), args: Vec::new() };
+        let tries = vec![
+            TaskLaunch { pin: Some(term().worker), ..launch(codex) },
+            launch(Runner::Agent {
+                agent: AgentId::named(AgentId::PI),
+                prompt: None,
+                model: Some("sonnet".to_owned()),
+                args: Vec::new(),
+            }),
+        ];
+        snap(
+            "task_attempts",
+            &request(Verb::TaskAttempts {
+                project: project_id(),
+                task: TaskId(3),
+                launches: tries,
+            }),
+        );
+        snap("task_pick", &request(Verb::TaskPick { project: project_id(), attempt: TaskId(9) }));
         let start = Start {
             agent: AgentId::acp("gemini"),
             cwd: "/w/slopty".to_owned(),

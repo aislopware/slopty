@@ -128,6 +128,16 @@ impl Board {
             .max_by_key(|r| (r.updated_ms, r.id))
     }
 
+    /// The thread whose agent runs or is seated at `term`, hanging from no other.
+    pub(super) fn thread_at(&self, term: TermRef) -> Option<ThreadId> {
+        self.thread_in(term).map(|r| r.id)
+    }
+
+    /// The worker whose table holds `thread`.
+    pub(super) fn worker_of(&self, thread: ThreadId) -> Option<WorkerId> {
+        self.tables.iter().find(|(_, table)| table.contains_key(&thread)).map(|(w, _)| *w)
+    }
+
     /// The seat `session` of a task's thread on any worker, as its row's [`SEAT_FACT`] says.
     pub(super) fn seat(&self, session: SessionId) -> Option<TermRef> {
         self.tables.iter().find_map(|(worker, table)| {

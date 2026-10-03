@@ -11,9 +11,10 @@ use slopty_core::{WallMs, WorkerId};
 use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, Need, NodeDetail,
-    Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer, StepKind,
-    StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    Attempts, Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, Need,
+    NodeDetail, Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer,
+    StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry,
+    VerifierRun,
 };
 use slopty_proto::server::Os;
 
@@ -301,8 +302,21 @@ pub struct TaskView<'a> {
     at_work_since_ms: Option<WallMs>,
     /// Its start is proposed and waits for the person, who starts it from the board.
     proposed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempts: Option<AttemptsView>,
     created_ms: WallMs,
     updated_ms: WallMs,
+}
+
+/// The attempts at a task, for JSON: each a task of its own, and the one picked to land.
+#[derive(Debug, Serialize)]
+pub struct AttemptsView {
+    tried: Vec<u32>,
+    picked: Option<u32>,
+}
+
+fn attempts(a: &Attempts) -> AttemptsView {
+    AttemptsView { tried: a.tried.iter().map(|t| t.0).collect(), picked: a.picked.map(|t| t.0) }
 }
 
 /// A task's line in the tree, for JSON: `task_get` has the rest.
@@ -334,6 +348,8 @@ pub struct CardView<'a> {
     at_work_since_ms: Option<WallMs>,
     /// Its start is proposed and waits for the person.
     proposed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attempts: Option<AttemptsView>,
     natives: NativeCounts,
     created_ms: WallMs,
     updated_ms: WallMs,
@@ -364,6 +380,7 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
         proposed: t.proposed.is_some(),
+        attempts: t.attempts.as_ref().map(attempts),
         natives: t.natives,
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
@@ -414,6 +431,7 @@ pub fn task(t: &Task) -> TaskView<'_> {
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
         proposed: t.proposal.is_some(),
+        attempts: t.attempts.as_ref().map(attempts),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
     }

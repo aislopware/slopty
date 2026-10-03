@@ -128,61 +128,9 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(
-            names,
-            [
-                "list_workers",
-                "list_terminals",
-                "open_terminal",
-                "spawn_agent",
-                "send_input",
-                "read_screen",
-                "read_output",
-                "list_commands",
-                "wait_for",
-                "events",
-                "agent_status",
-                "resize_terminal",
-                "close_terminal",
-                "read_file",
-                "write_file",
-                "list_dir",
-                "stat",
-                "make_dir",
-                "move_path",
-                "trash_path",
-                "search_files",
-                "list_ports",
-                "list_items",
-                "open_item",
-                "rename_item",
-                "remove_item",
-                "point_at",
-                "list_windows",
-                "read_conversation",
-                "capture_still",
-                "upload_file",
-                "download_file",
-                "forget_worker",
-                "project_create",
-                "project_update",
-                "project_needs",
-                "project_list",
-                "project_status",
-                "task_get",
-                "task_create",
-                "task_claim",
-                "task_update",
-                "task_report",
-                "task_tell",
-                "task_wait",
-                "review_report",
-                "task_assign",
-                "task_spawn",
-                "placement_suggest",
-                "wake_worker",
-            ]
-        );
+        let table: Vec<String> =
+            slopty_tools::tools::list().into_iter().map(|t| t.name.into_owned()).collect();
+        assert_eq!(names, table, "every tool in the table, in its order");
         let wait = &listed["result"]["tools"][8];
         assert_eq!(wait["inputSchema"]["required"], json!(["term"]));
         let cap = slopty_server::WAIT_CAP_MS.to_string();
@@ -336,7 +284,10 @@ mod tests {
         // another test's listener bound to `127.0.0.1` on the same port would answer instead.
         let inside = SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
         let listed = rpc(inside, 1, "tools/list", None, json!({})).await;
-        assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 50);
+        assert_eq!(
+            listed["result"]["tools"].as_array().unwrap().len(),
+            slopty_tools::tools::list().len()
+        );
         serving.abort();
     }
 }

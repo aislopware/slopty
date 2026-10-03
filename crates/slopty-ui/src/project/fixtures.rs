@@ -65,6 +65,7 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -
         natives: NativeCounts::default(),
         created_ms: AT,
         updated_ms: AT,
+        attempts: None,
     }
 }
 

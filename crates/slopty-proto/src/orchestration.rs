@@ -17,9 +17,9 @@
 //! A verb that [changes](Verb::changes) something may carry an [`IdempotencyKey`], so a caller
 //! whose answer was lost sends it again without doing it twice.
 //!
-//! An agent's conversation is read as the conversation face reads it ([`Verb::ReadConversation`]),
-//! and its permission prompts are answered through the same held hook
-//! ([`Verb::AnswerPermission`]). A file too large for one frame goes up in parts
+//! Any agent's thread is read through the agent-neutral thread model ([`Verb::ReadThread`]), a
+//! bounded page of whole turns at a time, and its open requests are answered as a client's
+//! would be ([`Verb::AnswerRequest`]). A file too large for one frame goes up in parts
 //! ([`Verb::Upload`]) and comes down in [`Verb::ReadFile`] ranges.
 //!
 //! Projects ([`crate::project`]) are the server's own: it answers the project and task verbs
@@ -33,7 +33,6 @@ use serde::{Deserialize, Serialize};
 use slopty_core::{ItemId, SessionId, WallMs, WorkerId, XferId};
 
 use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
-use crate::conversation::{Entry, Meters, Origin, PermissionPrompt, Task, ThreadId, Verdict};
 use crate::folder::FsOp;
 use crate::items::{Item, ItemKind};
 use crate::project::{
@@ -44,6 +43,7 @@ use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::search::{FileHits, SearchQuery, SearchSummary};
 use crate::server::{Liveness, WorkerInfo};
 use crate::terminal::SessionSummary;
+use crate::thread::{AgentId, AskId, Choice, Phase, ToolState, TurnId, TurnState};
 use crate::transfer::Hash;
 
 /// How long after its answer a key is still honoured: longer than any caller keeps retrying
@@ -421,35 +421,37 @@ pub enum Verb {
         /// Where.
         worker: WorkerId,
     },
-    /// A page of the conversation of the agent in a terminal, as the conversation face shows
-    /// it; answered with [`Outcome::Conversation`].
+    /// What a thread did after turn `after`, read through the thread model whatever its agent;
+    /// answered with [`Outcome::Thread`].
     ///
-    /// Orchestration follows the session from then on, as a client that shows its face does:
-    /// the agent's permission prompts are held for [`Verb::AnswerPermission`] rather than shown
-    /// in its TUI at once. Following twice is following once.
-    ReadConversation {
-        /// Which.
-        term: TermRef,
-        /// The session's own conversation, or one subagent's.
-        thread: ThreadId,
-        /// The first entry wanted, by its place in the thread; the last `max` when absent.
-        since: Option<u32>,
-        /// At most this many entries, capped by the worker.
-        max: u32,
-        /// Hold the agent's permission prompts for [`Verb::AnswerPermission`] from then on, as a
-        /// person following its conversation does. The server sets it, for the person alone:
-        /// an agent's read leaves every prompt in the agent's terminal.
+    /// A read is bounded ([`ThreadRead::truncated`]) and ends on a whole turn, so reading again
+    /// from [`ThreadRead::next`] goes on where it stopped; a turn still under way is read again
+    /// until it ends. The thread's open requests come with it, answered with
+    /// [`Verb::AnswerRequest`].
+    ReadThread {
+        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
+        of: ThreadOf,
+        /// How much of each turn.
+        view: ThreadView,
+        /// The last turn already read; from the first held when absent.
+        after: Option<TurnId>,
+        /// Hold the agent's prompts that only its terminal shows for an answer here from then
+        /// on, as a person following the thread does. The server sets it, for the person alone:
+        /// an agent's read leaves every prompt where it is.
         hold: bool,
     },
-    /// Answer a permission prompt held for orchestration ([`ConversationPage::held`]), through
-    /// the agent's `PermissionRequest` hook as the conversation face answers it.
-    AnswerPermission {
-        /// Which.
-        term: TermRef,
-        /// [`PermissionPrompt::ask`].
-        ask: u64,
-        /// The answer.
-        verdict: Verdict,
+    /// Answer a thread's open request ([`ThreadRead::requests`]) as a client's would be: by
+    /// one of the choices it offers. The person's alone; an agent is
+    /// [`ErrorCode::Forbidden`].
+    AnswerRequest {
+        /// Which thread; the server finds where it is and sends [`ThreadOf::On`].
+        of: ThreadOf,
+        /// The request.
+        ask: AskId,
+        /// The choice taken ([`Choice::id`]), or the answers to its questions.
+        choice: String,
+        /// Words to go with it, where the agent takes them.
+        message: Option<String>,
     },
     /// One still picture of a window or a display; answered with [`Outcome::Still`], or
     /// [`ErrorCode::Unsupported`] by a worker that may not capture its screen.
@@ -923,6 +925,28 @@ pub enum Verb {
         /// What to do.
         op: FsOp,
     },
+    /// Have several agents try `task` at once, an attempt each ([`crate::project::Attempts`]):
+    /// each launch makes a sub-task of [`crate::project::ATTEMPT_KIND`] with the task's brief
+    /// and starts it as [`Verb::TaskSpawn`] would, on its own worker where several fit and it
+    /// names none. Answered with [`Outcome::Task`]: the task, its attempts named.
+    TaskAttempts {
+        /// The project.
+        project: ProjectId,
+        /// The task to try; one with no agent of its own.
+        task: TaskId,
+        /// What each attempt runs, and where when it says ([`TaskLaunch::pin`]).
+        launches: Vec<TaskLaunch>,
+    },
+    /// Pick the attempt that lands ([`crate::project::Attempts::picked`]): it goes through the
+    /// merge queue once verified, and every other attempt stops, its agent closed and its
+    /// worktree freed, its branch kept. The person's, or the project's orchestrator's; answered
+    /// with [`Outcome::Task`], the task tried.
+    TaskPick {
+        /// The project.
+        project: ProjectId,
+        /// The attempt.
+        attempt: TaskId,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -991,7 +1015,7 @@ impl Verb {
             | Self::RenameItem { .. }
             | Self::RemoveItem { .. }
             | Self::PointAt { .. }
-            | Self::AnswerPermission { .. }
+            | Self::AnswerRequest { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
             | Self::ProjectNeeds { .. }
@@ -1015,7 +1039,9 @@ impl Verb {
             | Self::FastForward { .. }
             | Self::RemoveWorktree { .. }
             | Self::StartThread { .. }
-            | Self::FsChange { .. } => true,
+            | Self::FsChange { .. }
+            | Self::TaskAttempts { .. }
+            | Self::TaskPick { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),
@@ -1036,7 +1062,7 @@ impl Verb {
             | Self::Events { .. }
             | Self::ListItems { .. }
             | Self::ListWindows { .. }
-            | Self::ReadConversation { .. }
+            | Self::ReadThread { .. }
             | Self::CaptureStill { .. }
             | Self::ProjectList
             | Self::ProjectStatus { .. }
@@ -1340,7 +1366,7 @@ pub enum Outcome {
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`],
     /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
-    /// [`Verb::RemoveItem`], [`Verb::PointAt`], [`Verb::AnswerPermission`], [`Verb::Upload`]).
+    /// [`Verb::RemoveItem`], [`Verb::PointAt`], [`Verb::AnswerRequest`], [`Verb::Upload`]).
     Done,
     /// It failed.
     Error {
@@ -1378,8 +1404,8 @@ pub enum Outcome {
         /// Displays.
         displays: Vec<DisplayInfo>,
     },
-    /// For [`Verb::ReadConversation`].
-    Conversation(Box<ConversationPage>),
+    /// For [`Verb::ReadThread`].
+    Thread(Box<ThreadRead>),
     /// For [`Verb::CaptureStill`]: a PNG, at the target's native pixel size or halved until it
     /// fits one reply.
     Still {
@@ -1496,38 +1522,131 @@ pub enum Outcome {
     },
 }
 
-/// A page of an agent's conversation: the entries of one thread from `start`, what the face
-/// shows beside them, and the permission prompts waiting for an answer.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub struct ConversationPage {
-    /// Every thread there is, the session's own first.
-    pub threads: Vec<ThreadInfo>,
-    /// The thread the entries are of.
-    pub thread: ThreadId,
-    /// Its entries from `start`, oldest first.
-    pub entries: Vec<Entry>,
-    /// The place of the first entry in the thread.
-    pub start: u32,
-    /// The place to ask from next: one past the last entry returned.
-    pub next: u32,
-    /// How many entries the thread has.
-    pub total: u32,
-    /// Its task list.
-    pub tasks: Vec<Task>,
-    /// The status line's latest meters.
-    pub meters: Option<Meters>,
-    /// The permission prompts held now, oldest first, each answered with
-    /// [`Verb::AnswerPermission`].
-    pub held: Vec<PermissionPrompt>,
+/// Which thread a [`Verb::ReadThread`] or a [`Verb::AnswerRequest`] is about.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ThreadOf {
+    /// The thread working on a task now: its assignment's.
+    Task {
+        /// The project.
+        project: ProjectId,
+        /// The task.
+        task: TaskId,
+    },
+    /// The thread of the agent in a terminal, or of a task's thread seated there.
+    Term(TermRef),
+    /// A thread by its id, a subagent's too, on whichever worker holds it.
+    Thread(crate::thread::ThreadId),
+    /// A thread on a worker: what the server sends that worker once it found the thread.
+    On {
+        /// The worker that holds it.
+        worker: WorkerId,
+        /// The thread.
+        thread: crate::thread::ThreadId,
+    },
 }
 
-/// A thread of a conversation, as a [`ConversationPage`] lists it.
+/// How much of each turn a [`Verb::ReadThread`] gives.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum ThreadView {
+    /// What was said: the person's messages and the agent's answers.
+    #[default]
+    Messages,
+    /// Those, and what the agent did between: each tool call with its outcome and the end of
+    /// its output, and what the agent itself noted.
+    Activity,
+}
+
+/// Turns of a thread, as [`Verb::ReadThread`] reads them.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ThreadInfo {
-    /// Which.
-    pub id: ThreadId,
-    /// For a subagent, the call that started it.
-    pub origin: Option<Origin>,
-    /// How many entries it has.
-    pub entries: u32,
+pub struct ThreadRead {
+    /// The worker that holds it.
+    pub worker: WorkerId,
+    /// The thread.
+    pub thread: crate::thread::ThreadId,
+    /// Its agent.
+    pub agent: AgentId,
+    /// What it is about.
+    pub title: String,
+    /// For a subagent's thread: its parent's.
+    pub parent: Option<crate::thread::ThreadId>,
+    /// Where it is.
+    pub phase: Phase,
+    /// What it waits on, in words, when it waits.
+    pub wait: Option<String>,
+    /// The turns after the one asked from, oldest first; the last may be under way.
+    pub turns: Vec<TurnRead>,
+    /// The requests open now, oldest first.
+    pub requests: Vec<RequestRead>,
+    /// The turn to read after next: the last whole turn given, or the one asked from when
+    /// none ended.
+    pub next: TurnId,
+    /// Something was left out to keep the read small: a text cut short (it ends in
+    /// [`ThreadRead::CUT`]), or turns that did not fit, which the next read from `next` gives.
+    pub truncated: bool,
+    /// Turns after the one asked from are no longer held: the read starts at the first held.
+    pub skipped: bool,
+}
+
+impl ThreadRead {
+    /// What a text cut short ends in.
+    pub const CUT: &str = " [\u{2026}]";
+}
+
+/// One turn of a [`ThreadRead`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct TurnRead {
+    /// Its number.
+    pub id: TurnId,
+    /// How it stands.
+    pub state: TurnState,
+    /// When it began.
+    pub started_ms: WallMs,
+    /// When it ended.
+    pub ended_ms: Option<WallMs>,
+    /// What happened in it, in order, as the view asked.
+    pub entries: Vec<ReadEntry>,
+}
+
+/// One thing in a turn of a [`ThreadRead`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum ReadEntry {
+    /// What the person (or an automation) sent.
+    User(String),
+    /// The agent's answer.
+    Text(String),
+    /// A tool call ([`ThreadView::Activity`]).
+    Tool {
+        /// What kind of call ([`crate::thread::kind`]), open.
+        kind: String,
+        /// What it does, in words.
+        title: String,
+        /// Where it is.
+        state: ToolState,
+        /// The end of what it printed or returned.
+        output: Option<String>,
+        /// The thread of the subagent it started, to read in turn.
+        child: Option<crate::thread::ThreadId>,
+    },
+    /// Something the agent itself said ([`ThreadView::Activity`]): an API error, a hook's word.
+    Notice {
+        /// Its kind ([`crate::thread::Notice::kind`]).
+        kind: String,
+        /// What it says.
+        text: String,
+    },
+}
+
+/// An open request of a [`ThreadRead`].
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct RequestRead {
+    /// Its id, for [`Verb::AnswerRequest`].
+    pub ask: AskId,
+    /// What it asks ([`crate::thread::Request::kind`]), open.
+    pub kind: String,
+    /// What it asks, in a line.
+    pub title: String,
+    /// The answers it offers, in its order: each `id` is a choice to answer with.
+    pub choices: Vec<Choice>,
+    /// Its questions, for a question.
+    pub questions: Vec<String>,
 }

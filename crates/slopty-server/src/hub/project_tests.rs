@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use slopty_agent::vouch::SessionKey;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason, PullRequest, Worktree};
-use slopty_proto::orchestration::{BranchBundle, UploadPart};
+use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
     Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, Placement, ProjectId, Runner, TASK_ENV,
     TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
@@ -892,10 +892,11 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     let task = new_task(&hub, Placement::default()).await;
     let term = TermRef { worker, session: plain };
     let orchestrating = Speaker::Proven(agent_here);
-    let answer = Verb::AnswerPermission {
-        term,
-        ask: 1,
-        verdict: slopty_proto::conversation::Verdict::Allow,
+    let answer = Verb::AnswerRequest {
+        of: ThreadOf::Term(term),
+        ask: slopty_proto::thread::AskId("1".to_owned()),
+        choice: "allow".to_owned(),
+        message: None,
     };
     let said = hub.dispatch_as(Speaker::Agent, None, answer.clone()).await;
     assert!(refused(&said, ErrorCode::Forbidden).contains("the person's"));

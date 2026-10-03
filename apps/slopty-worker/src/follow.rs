@@ -303,8 +303,9 @@ pub fn answer(
     true
 }
 
-/// The daemon's followed conversations as orchestration's verbs reach them: orchestration
-/// follows, reads and answers as [`ORCHESTRATION`], by the nil client.
+/// The daemon's followed Claude Code sessions as orchestration's verbs reach them:
+/// orchestration follows as [`ORCHESTRATION`], and answers through the session's thread
+/// (`crate::threads::Reads`).
 pub struct Orchestrated(pub Daemon);
 
 impl std::fmt::Debug for Orchestrated {
@@ -314,25 +315,15 @@ impl std::fmt::Debug for Orchestrated {
 }
 
 impl Conversations for Orchestrated {
-    fn follow(&self, session: SessionId) -> Vec<PermissionPrompt> {
-        let mut follows = self.0.follows.lock();
-        let ids = follows.holds.follow(session, ORCHESTRATION);
-        let held = ids
-            .into_iter()
-            .filter_map(|ask| follows.holds.get(ask).map(|held| held.reply.prompt.clone()))
-            .collect();
-        drop(follows);
-        held
+    fn follow(&self, session: SessionId) {
+        // The prompts held already reach the session's thread as its requests.
+        let _held = self.0.follows.lock().holds.follow(session, ORCHESTRATION);
     }
 
     fn sources(&self, session: SessionId) -> Sources {
         let main = self.0.agents.lock().transcript_path(session);
         let seen = self.0.follows.lock().board.current(session);
         Sources { main, subagents: seen.subagents.into_iter().collect(), meters: seen.meters }
-    }
-
-    fn answer(&self, session: SessionId, ask: u64, verdict: Verdict) -> bool {
-        answer(&self.0, ORCHESTRATION, ClientId::nil(), session, ask, verdict)
     }
 
     fn forget(&self, session: SessionId) {

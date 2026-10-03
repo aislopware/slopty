@@ -12,8 +12,8 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 
 **The orchestrator is a Claude Code session with Slopty's tools, not a driver.** ✅ 2026-09-30
 - The orchestrator is an ordinary interactive `claude` session in a PTY tile. What Slopty adds is
-  a tool surface: the existing MCP verbs (`spawn_agent`, `agent_status`, `read_conversation`,
-  `answer_permission`, `events`, the file and terminal verbs), plus the project verbs below. The
+  a tool surface: the existing MCP verbs (`spawn_agent`, `agent_status`, `read_thread`,
+  `events`, the file and terminal verbs), plus the project verbs below. The
   agent chooses to call them, and the TUI stays the source of truth, as for every agent.
 - Rejected:
   - **Claude Code's own Projects as the backbone.** It is a public beta on Pro and Max, and its
@@ -284,9 +284,9 @@ The research behind these rulings, with sources, is in `.research/projects-resea
 - Claude Code's folder trust is written only for a folder strictly inside the one Slopty makes
   its own in (`slopty_agent::trust::trust`, `within`). An ancestor, or a worktree whose `.git`
   file leads outside, is refused, since trusting its key would trust the person's repository.
-- Only the person answers a permission (`answer_permission` from an agent is `Forbidden`),
+- Only the person answers a request (`AnswerRequest` from an agent is `Forbidden`),
   merges a task, records its verifier, or names a verifier for a project or a task: a verifier
-  is the person's word on what counts as done. Only the person's read of a conversation holds its
+  is the person's word on what counts as done. Only the person's read of a thread holds its
   prompts, so an agent reading another's never hides a prompt from the TUI.
 - Every way to start `claude` is judged by its arguments against an allowlist
   (`slopty_proto::project::SAFE_FLAGS`): `spawn_agent`, `task_spawn`, and a terminal whose
@@ -1703,7 +1703,7 @@ R2).
   give a call, with progress every 10 s; it waits at most 30 min, a read at a time of up to
   the server's 240 s.
 - The agent's last words are not in the answer yet: they need the thread's final message on
-  the wire (`ThreadRow::last_said`). Until then `read_conversation` on the task's `term` reads
+  the wire (`ThreadRow::last_said`). Until then `read_thread` on the task reads
   them, and a hooked orchestrator gets them in the outcome notice.
 - Tests: `task_wait_waits_for_news_and_cancels_nothing` (`slopty-tools`, over a scripted
   timeline on a paused clock) and the rest's timeline mark in
@@ -1983,3 +1983,91 @@ stopped or cancelled from its card.** ✅ 2026-10-04 (readiness #16, N17)
     notification that opens on the orchestrator, and it is withdrawn with the rest.
   - Tests: `only_what_holds_a_task_up_or_waits_on_the_person_is_news` (`project/tests.rs`),
     `a_project_s_failure_is_said_as_it_lands` (`tests/projects.rs`).
+
+**Any agent's thread is read and answered alike.** ✅ 2026-10-04 (R10; the worker's thread
+door is wired in the agents lane)
+- Before: `read_conversation` read Claude Code's transcripts through the conversation face, by
+  terminal, and `answer_permission` answered its held prompts by number. It could not read a
+  pi or ACP thread, a Codex thread without a TUI, or a task started as a thread (R7).
+- Prior art: T3 Code's `t3_thread_read`, with a messages view and an activity view, bounded
+  text with a truncation flag, and a position cursor.
+- `ReadThread { of, view, after, hold }` reads through the thread model, whatever the agent.
+  `of` names a task (its assignment's thread, or the one seated in its terminal), a terminal,
+  or a thread's id, a subagent's too. The server finds the worker that holds it and sends
+  `ThreadOf::On`.
+- The answer is whole turns after `after`, a `TurnId`. The `messages` view gives the person's
+  messages and the agent's answers. The `activity` view adds each tool call (its kind, title,
+  state, the last 1000 characters of its output, and the child thread it started) and the
+  agent's notices. Reasoning is never given.
+- A read is bounded so a model can take it in at once. A message is cut to its first 4000
+  characters and an output to its last 1000, each marked. The read stops at the first whole
+  turn past 48 000 characters, though the first turn always goes. `truncated` says something
+  was left out. `next` is the last whole turn given, so a turn under way is read again until
+  it ends, and reading on from `next` misses nothing. `skipped` says turns after `after` are no
+  longer held.
+- The open requests come with the read, each with the choices it offers. The person answers
+  one with `AnswerRequest { of, ask, choice, message }` (`slopty agent answer`), done as a
+  client's intent would be. There is no MCP tool for it, and the server refuses it from an
+  agent. Only the person's read holds a Claude Code TUI's prompts, as before (`hold`, set by
+  the server). The worker's daemon gives orchestration its threads through
+  `orchestrate::ThreadReads`, and answers as `conversation::ORCHESTRATION` by the nil client.
+- The old path is gone: `ReadConversation`, `AnswerPermission`, `ConversationPage`,
+  `ThreadInfo`, `orchestrate::conversation::read_page` and `Conversations::answer`.
+  `ReadThread` and `AnswerRequest` took their places in `Verb`, and `Outcome::Thread` took
+  `Outcome::Conversation`'s, so no other golden moved.
+- The MCP endpoint's tool list and count are checked against the tool table itself, so a tool
+  added or removed cannot leave them stale.
+- Tests: `orchestrate::thread_read` (`slopty-worker`: the two views, the cursor over a turn
+  under way, the bounds and what they say, a skipped start and the open requests);
+  `a_thread_is_read_by_task_thread_or_term_and_answering_is_no_tool` and
+  `a_read_names_its_turns_and_what_waits` (`slopty-tools`);
+  `any_agent_runs_a_task_as_a_thread` (its thread read by task, seat and id, holding for the
+  person alone), `an_agent_never_takes_the_person_s_word_through_any_surface` and
+  `the_agent_screen_and_upload_verbs_go_to_their_worker` (`slopty-server`); the goldens
+  `read_thread_task`, `read_thread_on`, `thread_read` and `answer_request`; and the server e2e,
+  where a played Claude Code session's thread is read over the CLI and its prompt is answered
+  there.
+
+**A task is tried by several agents at once, and the attempt picked lands.** ✅ 2026-10-04
+(R11)
+- Before: a task had one agent. Comparing agents, models or machines on the same work meant
+  making near-identical tasks by hand, whose paths clashed, and merging whichever finished
+  first.
+- Prior art: T3 Code runs one prompt several ways and keeps one. Here the attempts spread over
+  the fleet, so each can run on its own machine.
+- `TaskAttempts { project, task, launches }` makes one sub-task per launch, of kind `attempt`,
+  up to `ATTEMPTS_MAX` (6) per task. Each gets the task's brief, placement, verifier and
+  dependencies, and each starts as `TaskSpawn` would. The task itself keeps `Attempts { tried,
+  picked }` and goes running, and it starts no agent of its own. A task with an agent of its
+  own is not tried, nor is an attempt, nor a merged task.
+- Every attempt writes the same paths, so none owns any (a path claim would clash with its
+  siblings and its task). The task tried holds the paths, an attempt's claim is refused, and
+  its agent's role says why.
+- An attempt pinned to a worker goes there. An unpinned one goes to the best-ranked worker that
+  fits and that no other attempt took, so the attempts spread before they share a machine.
+  They all start at once. An attempt that did not start says why on its card. The call is
+  refused only when none started. An agent in a project that asks to start its tasks
+  proposes each attempt instead.
+- Each attempt is verified and reviewed as any task is, but none joins the merge queue until
+  it is picked. A pass that would queue it leaves it done and outside the queue, and the
+  person cannot merge it either.
+- `TaskPick { project, attempt }` comes from the person, or from an agent above the task
+  tried; an attempt's own agent may not pick. The other attempts are given up and their
+  status says which attempt lands. Their agents are closed and their worktrees freed with
+  `landed` the target alone, so a branch whose work did not land is kept. The attempt picked
+  joins the queue at once when its work is done and checked already. Picking it again changes
+  nothing, and once one is picked no other can be, and no more attempts are made.
+- When the attempt picked merges, the task it tried is merged with the same merge.
+- Tools `task_attempts` and `task_pick`; CLI `slopty task attempts <task> --try
+  codex,model=o3,on=studio --try pi` and `slopty task pick <attempt>`. The JSON task and card
+  views carry `attempts`.
+- Left for later: a reviewer that compares the attempts side by side, and a cost estimate
+  before trying a task several ways. The board shows `attempts` on the card once the UI lane
+  draws it.
+- Tests: `an_attempt_waits_outside_the_queue_until_picked_and_merging_it_merges_its_task` and
+  `attempts_try_a_task_no_agent_works_on` (`project::attempts`),
+  `a_task_is_tried_on_each_machine_and_the_attempt_picked_is_kept` (hub: one attempt on each
+  worker, the pick closing the other and freeing its worktree),
+  `a_task_is_tried_by_several_agents_and_one_attempt_is_picked` (`slopty-tools`),
+  `an_attempt_names_its_agent_then_its_model_and_worker` (`slopty-cli`), and the goldens
+  `task_attempts` and `task_pick`, with `attempts` on every task golden.

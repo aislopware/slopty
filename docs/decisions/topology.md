@@ -705,20 +705,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **An orchestrating agent reads and answers another, sees a screen, and moves any file**
   (2026-09-28). An agent could see another was blocked but could not answer it except by typing
   its menu's digits, read only its screen, take no picture of a window, and move no file past
-  one 8 MiB read. Four verbs close that, on every surface (tools `read_conversation`,
-  `answer_permission`, `capture_still`, `upload_file`, `download_file`; CLI `slopty agent
-  conversation|answer`, `slopty capture`, `slopty push|pull`).
-  - **The conversation** (`ReadConversation`) is the face's projection, decoded by the same
-    `Transcripts` on the worker's blocking pool: one thread's entries from a place (or its last
-    `max`, at most 500 and a frame's worth), with every thread, the tasks, the meters and the
-    prompts held now (`ConversationPage`).
-  - **The answer** (`AnswerPermission`) goes through the held `PermissionRequest` hook the face
-    uses (`Holds`), never through the TUI. A prompt is held only while someone follows, so
-    orchestration follows as a link of its own (`conversation::ORCHESTRATION`) from the first
-    read of a session's conversation, or from the `SpawnAgent` that started it, until the
-    session ends (`Holds::forget`, also on a client's close). Reading is what a person does
-    when they open the face, and it holds prompts the same way. An answer to a prompt no
-    longer held fails. It is keyed, so a repeat answers the first outcome.
+  one 8 MiB read. Four verbs close that, on every surface (tools `read_thread`,
+  `capture_still`, `upload_file`, `download_file`; CLI `slopty agent read|answer`, `slopty
+  capture`, `slopty push|pull`).
+  - **Reading and answering another agent** went through Claude Code's conversation face
+    (`ReadConversation`, `AnswerPermission`) until 2026-10-04. They are now the agent-neutral
+    `ReadThread` and `AnswerRequest` over the thread model, for any agent
+    (`docs/decisions/projects.md`, "Any agent's thread is read and answered alike"). Following
+    is unchanged: orchestration follows a Claude Code session as a link of its own
+    (`conversation::ORCHESTRATION`) from the person's first read until the session ends
+    (`Holds::forget`, also on a client's close), so its prompts are held while someone may
+    answer them.
   - **The still** (`CaptureStill`) is `SCScreenshotManager` at native size, PNG-encoded on the
     worker and halved until it fits a reply. A worker without Screen Recording, or without a
     desktop, answers the new `ErrorCode::Unsupported` from the preflight, which prompts nobody.
@@ -737,8 +734,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `download_file` with `Unsupported` (`Dispatch::local_files`).
   - Tests: the `agent_verbs` goldens; `Holds`'
     `orchestration_follows_until_the_session_ends`; the worker's page, upload and still
-    tests (`orchestrate::{conversation, upload, still}`); `bulk`'s three against an
-    in-memory worker; the tools' `a_conversation_is_read_and_its_prompt_answered` and
+    tests (`orchestrate::{thread_read, upload, still}`); `bulk`'s three against an
+    in-memory worker; the tools' `a_thread_is_read_by_task_thread_or_term_and_answering_is_no_tool` and
     `a_still_is_an_image_and_files_move_only_where_they_are`; the hub's
     `the_agent_screen_and_upload_verbs_go_to_their_worker`; and the server e2e. There a
     9 MiB file is pushed and pulled, a conversation played through `slopty hook` is read, and

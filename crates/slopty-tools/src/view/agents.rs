@@ -1,110 +1,198 @@
-//! The answers of the verbs that reach another agent and the screen, and move files: a page of a
-//! conversation, a still picture, a file moved.
+//! The answers of the verbs that reach another agent and the screen, and move files: turns of
+//! a thread, a still picture, a file moved.
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use serde::Serialize;
-use slopty_proto::conversation::{
-    Body, Entry, Meters, PermissionPrompt, ResultStatus, Suggestion, Task, ThreadId, ToolDetail,
-};
-use slopty_proto::orchestration::{ConversationPage, TermRef};
+use slopty_proto::orchestration::{ReadEntry, RequestRead, ThreadRead, TurnRead};
+use slopty_proto::thread::{Phase, ToolState, TurnState};
 
-use super::term_string;
 use crate::bulk::Moved;
 
-/// How a thread is named in JSON and in arguments: `main`, or a subagent's id.
-#[must_use]
-pub fn thread_key(thread: &ThreadId) -> Cow<'_, str> {
-    match thread {
-        ThreadId::Main => Cow::Borrowed("main"),
-        ThreadId::Agent(id) => Cow::Borrowed(id),
-    }
-}
-
-/// The thread an argument names: `main` (or nothing) for the session's own, else a subagent's
-/// id.
-#[must_use]
-pub fn thread_named(name: Option<&str>) -> ThreadId {
-    match name {
-        None | Some("main") => ThreadId::Main,
-        Some(id) => ThreadId::Agent(id.to_owned()),
-    }
-}
-
-/// A page of a conversation, for JSON. The entries, tasks and meters are the conversation
-/// face's own types as they are.
+/// Turns of a thread, for JSON.
 #[derive(Debug, Serialize)]
-pub struct ConversationView<'a> {
-    term: String,
-    thread: Cow<'a, str>,
-    threads: Vec<ThreadView<'a>>,
-    start: u32,
+pub struct ThreadReadView<'a> {
+    worker: String,
+    thread: String,
+    agent: &'a str,
+    title: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<String>,
+    phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wait: Option<&'a str>,
+    turns: Vec<TurnView<'a>>,
+    requests: Vec<RequestView<'a>>,
+    /// Read again from here (`after`) for what came next.
     next: u32,
-    total: u32,
-    entries: &'a [Entry],
-    tasks: &'a [Task],
-    meters: Option<&'a Meters>,
-    held: Vec<HeldView<'a>>,
+    truncated: bool,
+    skipped: bool,
 }
 
-/// A thread of a conversation, for JSON.
+/// A turn of a thread, for JSON.
 #[derive(Debug, Serialize)]
-pub struct ThreadView<'a> {
-    thread: Cow<'a, str>,
-    entries: u32,
-    agent_type: Option<&'a str>,
-    description: Option<&'a str>,
+pub struct TurnView<'a> {
+    turn: u32,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    started_ms: slopty_core::WallMs,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_ms: Option<slopty_core::WallMs>,
+    entries: Vec<ReadEntryView<'a>>,
 }
 
-/// A permission prompt waiting for an answer, for JSON.
+/// One thing in a turn, for JSON.
 #[derive(Debug, Serialize)]
-pub struct HeldView<'a> {
-    ask: u64,
-    tool: &'a str,
-    detail: &'a ToolDetail,
-    /// What `allow_always` grants.
-    always: &'a [Suggestion],
-    mode: Option<&'a str>,
-    asked_ms: slopty_core::WallMs,
-    until_ms: slopty_core::WallMs,
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ReadEntryView<'a> {
+    /// The person's words.
+    User {
+        /// Them.
+        text: &'a str,
+    },
+    /// The agent's answer.
+    Agent {
+        /// It.
+        text: &'a str,
+    },
+    /// A tool call.
+    Tool {
+        /// Its kind.
+        kind: &'a str,
+        /// What it does.
+        title: &'a str,
+        /// Where it is.
+        state: &'static str,
+        /// The end of its output.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<&'a str>,
+        /// A subagent's thread it started, to read with `thread`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        child: Option<String>,
+    },
+    /// The agent's own word.
+    Notice {
+        /// Its kind.
+        kind: &'a str,
+        /// What it says.
+        text: &'a str,
+    },
 }
 
-fn held(prompt: &PermissionPrompt) -> HeldView<'_> {
-    HeldView {
-        ask: prompt.ask,
-        tool: &prompt.tool,
-        detail: &prompt.detail,
-        always: &prompt.suggestions,
-        mode: prompt.mode.as_deref(),
-        asked_ms: prompt.asked_ms,
-        until_ms: prompt.until_ms,
+/// An open request, for JSON.
+#[derive(Debug, Serialize)]
+pub struct RequestView<'a> {
+    ask: &'a str,
+    kind: &'a str,
+    title: &'a str,
+    choices: Vec<ChoiceView<'a>>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    questions: &'a [String],
+}
+
+/// A choice a request offers, for JSON.
+#[derive(Debug, Serialize)]
+pub struct ChoiceView<'a> {
+    id: &'a str,
+    label: &'a str,
+}
+
+/// A thread's phase, as a word.
+#[must_use]
+pub const fn phase_key(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Idle => "idle",
+        Phase::Working => "working",
+        Phase::Waiting => "waiting",
+        Phase::NeedsYou => "needs_you",
+        Phase::Done => "done",
+        Phase::Failed => "failed",
+        Phase::Stopped => "stopped",
     }
 }
 
-/// A page of a conversation, for JSON.
-#[must_use]
-pub fn conversation(term: TermRef, page: &ConversationPage) -> ConversationView<'_> {
-    ConversationView {
-        term: term_string(term),
-        thread: thread_key(&page.thread),
-        threads: page
-            .threads
+const fn turn_key(state: &TurnState) -> &'static str {
+    match state {
+        TurnState::Active => "active",
+        TurnState::Complete => "complete",
+        TurnState::Interrupted => "interrupted",
+        TurnState::Failed { .. } => "failed",
+    }
+}
+
+const fn tool_key(state: &ToolState) -> &'static str {
+    match state {
+        ToolState::Streaming => "streaming",
+        ToolState::Pending { .. } => "pending",
+        ToolState::Running => "running",
+        ToolState::Completed => "completed",
+        ToolState::Failed => "failed",
+        ToolState::Rejected => "rejected",
+        ToolState::Cancelled => "cancelled",
+    }
+}
+
+fn entry(entry: &ReadEntry) -> ReadEntryView<'_> {
+    match entry {
+        ReadEntry::User(text) => ReadEntryView::User { text },
+        ReadEntry::Text(text) => ReadEntryView::Agent { text },
+        ReadEntry::Tool { kind, title, state, output, child } => ReadEntryView::Tool {
+            kind,
+            title,
+            state: tool_key(state),
+            output: output.as_deref(),
+            child: child.map(|c| c.to_string()),
+        },
+        ReadEntry::Notice { kind, text } => ReadEntryView::Notice { kind, text },
+    }
+}
+
+fn turn(turn: &TurnRead) -> TurnView<'_> {
+    TurnView {
+        turn: turn.id.0,
+        state: turn_key(&turn.state),
+        error: match &turn.state {
+            TurnState::Failed { error, .. } => Some(error),
+            TurnState::Active | TurnState::Complete | TurnState::Interrupted => None,
+        },
+        started_ms: turn.started_ms,
+        ended_ms: turn.ended_ms,
+        entries: turn.entries.iter().map(entry).collect(),
+    }
+}
+
+fn request(request: &RequestRead) -> RequestView<'_> {
+    RequestView {
+        ask: &request.ask.0,
+        kind: &request.kind,
+        title: &request.title,
+        choices: request
+            .choices
             .iter()
-            .map(|t| ThreadView {
-                thread: thread_key(&t.id),
-                entries: t.entries,
-                agent_type: t.origin.as_ref().and_then(|o| o.agent_type.as_deref()),
-                description: t.origin.as_ref().and_then(|o| o.description.as_deref()),
-            })
+            .map(|c| ChoiceView { id: &c.id, label: &c.label })
             .collect(),
-        start: page.start,
-        next: page.next,
-        total: page.total,
-        entries: &page.entries,
-        tasks: &page.tasks,
-        meters: page.meters.as_ref(),
-        held: page.held.iter().map(held).collect(),
+        questions: &request.questions,
+    }
+}
+
+/// Turns of a thread, for JSON.
+#[must_use]
+pub fn thread_read(read: &ThreadRead) -> ThreadReadView<'_> {
+    ThreadReadView {
+        worker: read.worker.to_string(),
+        thread: read.thread.to_string(),
+        agent: &read.agent.0,
+        title: &read.title,
+        parent: read.parent.map(|p| p.to_string()),
+        phase: phase_key(read.phase),
+        wait: read.wait.as_deref(),
+        turns: read.turns.iter().map(turn).collect(),
+        requests: read.requests.iter().map(request).collect(),
+        next: read.next.0,
+        truncated: read.truncated,
+        skipped: read.skipped,
     }
 }
 
@@ -118,59 +206,51 @@ fn gist(text: &str) -> String {
     gist
 }
 
-fn entry_text(entry: &Entry) -> String {
-    match &entry.body {
-        Body::Prompt(prompt) => format!("you       {}", gist(&prompt.text.text)),
-        Body::Text(text) => format!("agent     {}", gist(&text.text)),
-        Body::Thinking(text) => format!("thinking  {}", gist(&text.text)),
-        Body::Tool(call) => {
-            let status = match call.result.as_ref().map(|r| r.status) {
-                None => "running",
-                Some(ResultStatus::Ok) => "ok",
-                Some(ResultStatus::Error) => "error",
-                Some(ResultStatus::Rejected) => "rejected",
-            };
-            format!("tool      {} ({status})", call.name)
-        }
-        Body::Compact(_) => "compacted".to_owned(),
-        Body::Interrupted { .. } => "interrupted".to_owned(),
-        Body::Note(note) => format!("note      {}", gist(&note.text.text)),
-        Body::Rewound { dropped } => format!("rewound   {dropped} entries dropped"),
-    }
-}
-
-/// A page of a conversation, for a person: one line an entry, then the prompts waiting.
+/// Turns of a thread, for a person: a line for each thing in them, then the requests waiting,
+/// each with the command that answers it.
 #[must_use]
-pub fn conversation_text(term: TermRef, page: &ConversationPage) -> String {
+pub fn thread_read_text(read: &ThreadRead) -> String {
     let mut out = String::new();
-    let thread = thread_key(&page.thread);
-    let _infallible =
-        writeln!(out, "{thread}: entries {}..{} of {}", page.start, page.next, page.total);
-    for (index, entry) in (page.start..).zip(&page.entries) {
-        let _infallible = writeln!(out, "{index:>5}  {}", entry_text(entry));
+    let wait = read.wait.as_deref().map(|w| format!(": {w}")).unwrap_or_default();
+    let _infallible = writeln!(
+        out,
+        "{} {} ({}), {}{wait}",
+        read.agent.0,
+        read.thread,
+        read.title,
+        phase_key(read.phase).replace('_', " ")
+    );
+    if read.skipped {
+        let _infallible = writeln!(out, "(earlier turns are no longer held)");
     }
-    let others: Vec<String> = page
-        .threads
-        .iter()
-        .filter(|t| t.id != page.thread)
-        .map(|t| format!("{} ({})", thread_key(&t.id), t.entries))
-        .collect();
-    if !others.is_empty() {
-        let _infallible = writeln!(out, "threads: {}", others.join(", "));
+    for t in &read.turns {
+        let _infallible = writeln!(out, "turn {} ({})", t.id.0, turn_key(&t.state));
+        for e in &t.entries {
+            let line = match e {
+                ReadEntry::User(text) => format!("you      {}", gist(text)),
+                ReadEntry::Text(text) => format!("agent    {}", gist(text)),
+                ReadEntry::Tool { title, state, child, .. } => {
+                    let child = child.map(|c| format!(" -> thread {c}")).unwrap_or_default();
+                    format!("tool     {} ({}){child}", gist(title), tool_key(state))
+                }
+                ReadEntry::Notice { kind, text } => format!("{kind:<8} {}", gist(text)),
+            };
+            let _infallible = writeln!(out, "  {line}");
+        }
     }
-    for task in &page.tasks {
-        let _infallible = writeln!(out, "task  [{}] {}", task.status, task.subject);
-    }
-    for prompt in &page.held {
+    for r in &read.requests {
+        let choices: Vec<&str> = r.choices.iter().map(|c| c.id.as_str()).collect();
         let _infallible = writeln!(
             out,
-            "waiting  #{} {}: slopty agent answer {} {} --allow | --deny",
-            prompt.ask,
-            prompt.tool,
-            term_string(term),
-            prompt.ask,
+            "waiting  {}: slopty thread answer {} {} <{}>",
+            r.title,
+            read.thread,
+            r.ask.0,
+            choices.join(" | ")
         );
     }
+    let more = if read.truncated { ", more to read" } else { "" };
+    let _infallible = writeln!(out, "next: --after {}{more}", read.next.0);
     out
 }
 
@@ -213,45 +293,67 @@ pub fn moved(moved: &Moved) -> MovedView<'_> {
 
 #[cfg(test)]
 mod tests {
-    use slopty_core::{SessionId, WallMs, WorkerId};
-    use slopty_proto::conversation::{Clipped, Prompt};
-    use slopty_proto::orchestration::ThreadInfo;
+    use slopty_core::{WallMs, WorkerId};
+    use slopty_proto::thread::{AgentId, AskId, Choice, Effect, ThreadId, TurnId};
 
     use super::*;
 
-    /// A page reads as the face's entries with their place, the other threads, and each
-    /// prompt waiting with the answer that takes it.
+    /// A read says each turn's words and calls in a line apiece, and each request waiting with
+    /// the command that answers it; its JSON keeps every field, the next cursor too.
     #[test]
-    fn a_page_names_its_entries_and_what_waits() {
-        let term = TermRef { worker: WorkerId::nil(), session: SessionId::nil() };
-        let text =
-            Clipped { text: "fix the build\nplease".to_owned(), lines: 2, chars: 20, full: None };
-        let page = ConversationPage {
-            threads: vec![
-                ThreadInfo { id: ThreadId::Main, origin: None, entries: 8 },
-                ThreadInfo { id: ThreadId::Agent("a1".to_owned()), origin: None, entries: 2 },
-            ],
-            thread: ThreadId::Main,
-            entries: vec![Entry {
-                id: "u1".to_owned(),
-                at_ms: WallMs::from_millis(1),
-                body: Body::Prompt(Prompt { text, images: Vec::new(), command: None }),
+    fn a_read_names_its_turns_and_what_waits() {
+        let thread = ThreadId::derived(&["t"]);
+        let read = ThreadRead {
+            worker: WorkerId::nil(),
+            thread,
+            agent: AgentId::named(AgentId::PI),
+            title: "Fix the build".to_owned(),
+            parent: None,
+            phase: Phase::NeedsYou,
+            wait: Some("Wants to run cargo test".to_owned()),
+            turns: vec![TurnRead {
+                id: TurnId(4),
+                state: TurnState::Active,
+                started_ms: WallMs::from_millis(1),
+                ended_ms: None,
+                entries: vec![
+                    ReadEntry::User("fix the build\nplease".to_owned()),
+                    ReadEntry::Tool {
+                        kind: "exec".to_owned(),
+                        title: "Run cargo test".to_owned(),
+                        state: ToolState::Pending { ask: AskId("7".to_owned()) },
+                        output: None,
+                        child: None,
+                    },
+                ],
             }],
-            start: 7,
-            next: 8,
-            total: 8,
-            tasks: Vec::new(),
-            meters: None,
-            held: Vec::new(),
+            requests: vec![RequestRead {
+                ask: AskId("7".to_owned()),
+                kind: "approval".to_owned(),
+                title: "Run cargo test?".to_owned(),
+                choices: vec![Choice {
+                    id: "allow".to_owned(),
+                    label: "Allow".to_owned(),
+                    effect: Effect::Allow,
+                    scope: None,
+                    stops: false,
+                }],
+                questions: Vec::new(),
+            }],
+            next: TurnId(3),
+            truncated: true,
+            skipped: false,
         };
-        let shown = conversation_text(term, &page);
-        assert!(shown.contains("    7  you       fix the build\n"), "{shown}");
-        assert!(shown.contains("threads: a1 (2)"), "{shown}");
-        let json = serde_json::to_value(conversation(term, &page)).unwrap();
-        assert_eq!(json["thread"], "main");
-        assert_eq!(json["threads"][1]["thread"], "a1");
-        assert_eq!(json["entries"][0]["id"], "u1");
-        assert_eq!(thread_named(Some("a1")), ThreadId::Agent("a1".to_owned()));
-        assert_eq!(thread_named(None), ThreadId::Main);
+        let shown = thread_read_text(&read);
+        assert!(shown.contains("  you      fix the build\n"), "{shown}");
+        assert!(shown.contains("  tool     Run cargo test (pending)"), "{shown}");
+        assert!(shown.contains(&format!("slopty thread answer {thread} 7 <allow>")), "{shown}");
+        assert!(shown.contains("next: --after 3, more to read"), "{shown}");
+        let json = serde_json::to_value(thread_read(&read)).unwrap();
+        assert_eq!(json["phase"], "needs_you");
+        assert_eq!(json["turns"][0]["entries"][0]["type"], "user");
+        assert_eq!(json["turns"][0]["entries"][1]["state"], "pending");
+        assert_eq!(json["requests"][0]["choices"][0]["id"], "allow");
+        assert_eq!((json["next"].as_u64(), json["truncated"].as_bool()), (Some(3), Some(true)));
     }
 }

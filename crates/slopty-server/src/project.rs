@@ -34,6 +34,8 @@ pub use tally::Tally;
 
 use crate::placement;
 
+mod attempts;
+
 /// Latest timeline entries a connecting client gets, and a status read with no cursor.
 pub const RECENT_ENTRIES: usize = 64;
 /// Subagents and task-list items kept per node, the oldest dropped first.
@@ -1412,6 +1414,7 @@ impl Projects {
             updated_ms: now,
             step: None,
             proposal: None,
+            attempts: None,
         };
         record.tasks.push(task.clone());
         let entry =
@@ -1442,6 +1445,13 @@ impl Projects {
         }
         if held.read_only {
             return Err(invalid(format!("task {task} only reads; it owns no paths")));
+        }
+        if let Some(parent) = record.tried(held) {
+            return Err(invalid(format!(
+                "task {task} is an attempt at task {}, which holds the paths: every attempt \
+                 writes the same ones, so none owns any",
+                parent.id
+            )));
         }
         if !held.state.holds_paths() {
             return Err(invalid(format!(
@@ -1745,6 +1755,19 @@ impl Projects {
         }
         if t.state == TaskState::Merged {
             return Err(invalid(format!("task {task} is merged; make a new task")));
+        }
+        if let Some(attempts) = &t.attempts {
+            let tried: Vec<String> = attempts.tried.iter().map(ToString::to_string).collect();
+            return Err(invalid(format!(
+                "task {task} is tried by attempts {}; start one of them, or make more with \
+                 task_attempts",
+                tried.join(", ")
+            )));
+        }
+        if record.lost(t) {
+            return Err(invalid(format!(
+                "task {task} is an attempt given up for the one picked; it starts no more"
+            )));
         }
         if let Some(over) = self.over_budget(id) {
             return Err(refuse(
@@ -2250,11 +2273,13 @@ impl Projects {
 
     /// What frees a settled task's worktree once its agent is closed: the worktree its agent
     /// reported, and where its work landed (the merge queue's head, the target, the target on
-    /// `origin`). Only a merged task's: one given up may be tried again, and its agent would
-    /// remake a worktree gone, its branch reset to the base with it.
+    /// `origin`). Only a merged task's, or an attempt's given up for another: any other given
+    /// up may be tried again, and its agent would remake a worktree gone, its branch reset to
+    /// the base with it.
     pub(crate) fn to_free(&self, id: &ProjectId, task: TaskId) -> Option<(String, Vec<String>)> {
         let record = self.records.get(id)?;
-        let t = record.task(task).ok().filter(|t| t.state == TaskState::Merged)?;
+        let t =
+            record.task(task).ok().filter(|t| t.state == TaskState::Merged || record.lost(t))?;
         let (head, target) = match &t.merge {
             Some(Merge::Merged { target, head, .. }) => (Some(head.clone()), target.clone()),
             _ => (None, record.project.target.clone()),

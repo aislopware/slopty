@@ -1236,6 +1236,30 @@ pub struct Task {
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
+    /// Its attempts, when several agents try it at once
+    /// ([`crate::orchestration::Verb::TaskAttempts`]).
+    pub attempts: Option<Attempts>,
+}
+
+/// The kind of a task that is one attempt at its parent: several try the same brief, each in
+/// a worktree of its own, and the one picked lands ([`Attempts`]).
+pub const ATTEMPT_KIND: &str = "attempt";
+
+/// Most attempts at one task.
+pub const ATTEMPTS_MAX: usize = 6;
+
+/// A task tried by several agents at once, each attempt a sub-task of its own.
+///
+/// Each attempt ([`ATTEMPT_KIND`]) runs on its own worker or model. Every attempt is verified
+/// (and read by the reviewer) as a task is, but only the one picked joins the merge queue; the
+/// others stop, their agents closed and their worktrees freed, their branches kept.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct Attempts {
+    /// The attempts, in the order they were made; at most [`ATTEMPTS_MAX`].
+    pub tried: Vec<TaskId>,
+    /// The one picked to land, once the person or the orchestrator picked it
+    /// ([`crate::orchestration::Verb::TaskPick`]).
+    pub picked: Option<TaskId>,
 }
 
 /// How long an agent worked: the stretches it was at work, the waits between left out.
@@ -1543,6 +1567,7 @@ impl Task {
             natives: natives.counts(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
+            attempts: self.attempts.clone(),
         }
     }
 }
@@ -1601,6 +1626,8 @@ pub struct TaskCard {
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
+    /// Its attempts, when several agents try it at once.
+    pub attempts: Option<Attempts>,
 }
 
 impl TaskCard {
@@ -1616,6 +1643,7 @@ impl TaskCard {
         + 2 * Suggestion::WHY_MAX
         + KIND_MAX
         + Checks::MAX_BYTES
+        + ATTEMPTS_MAX * 5
         + 800;
 }
 
@@ -1651,6 +1679,7 @@ impl TaskCard {
                     .saturating_add(64)
             }),
             self.depends_on.len().saturating_mul(5),
+            self.attempts.as_ref().map_or(0, |a| a.tried.len().saturating_mul(5).saturating_add(8)),
             self.step.as_ref().map_or(0, TaskStep::approx_bytes),
             self.proposed
                 .as_ref()

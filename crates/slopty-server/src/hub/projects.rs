@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentKind};
-use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, Verb};
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
-    Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
-    Placed, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Proposal, Proposed, Report,
-    ReportKind, Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry,
-    WorkerFacts,
+    ATTEMPT_KIND, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
+    PROJECT_ENV, Placed, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Proposal,
+    Proposed, Report, ReportKind, Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId,
+    TaskLaunch, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -32,6 +32,8 @@ use super::{
     keyed, known_term, remember, start_again, start_answered, term_of,
 };
 use crate::deliver::{Batch, plain};
+
+mod attempts;
 use crate::placement::{self, Candidate, Installed, Ranking};
 use crate::project::{
     Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,
@@ -218,6 +220,8 @@ pub(super) fn agent_scope(
             | Verb::TaskSpawn { .. }
             | Verb::TaskAssign { .. }
             | Verb::TaskTell { .. }
+            | Verb::TaskAttempts { .. }
+            | Verb::TaskPick { .. }
     );
     if !changes {
         return Ok(verb);
@@ -300,9 +304,18 @@ pub(super) fn agent_scope(
         }
         Verb::TaskClaim { project, task, .. }
         | Verb::TaskUpdate { project, task, .. }
-        | Verb::TaskSpawn { project, task, .. } => {
+        | Verb::TaskSpawn { project, task, .. }
+        | Verb::TaskAttempts { project, task, .. } => {
             in_own(project)?;
             under(project, *task)?;
+        }
+        // An agent picks among attempts at a task under it, never among its own siblings.
+        Verb::TaskPick { project, attempt } => {
+            in_own(project)?;
+            let tried = state.projects.task(project, *attempt).ok().and_then(|t| t.parent);
+            if let Some(tried) = tried {
+                under(project, tried)?;
+            }
         }
         Verb::TaskAssign { project, task, term } => {
             in_own(project)?;
@@ -714,6 +727,12 @@ pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Op
 fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
     let owns = if task.read_only {
         "none: it only reads".to_owned()
+    } else if let Some(tried) = task.parent.filter(|_| task.kind == ATTEMPT_KIND) {
+        format!(
+            "none: your task is one of several attempts at task {tried}, which holds its paths; \
+             each attempt writes them in a worktree of its own, claims nothing, and the one \
+             picked lands"
+        )
     } else if task.owns.is_empty() {
         "none yet; claim what you will write with task_claim first".to_owned()
     } else {
@@ -1292,6 +1311,18 @@ impl Hub {
         let on = term_of(&state, session).and_then(|term| state.projects.working_on(term));
         drop(state);
         Outcome::WorkingOn(on)
+    }
+
+    /// The thread `of` names, on the worker that holds it ([`ThreadOf::On`]): a task's is its
+    /// assignment's thread, or the one seated in its terminal; a terminal's is the one whose
+    /// agent runs or is seated there; a thread's is found in the workers' tables.
+    pub(super) fn thread_on(&self, of: ThreadOf) -> Result<ThreadOf, Outcome> {
+        if let ThreadOf::On { .. } = of {
+            return Ok(of);
+        }
+        let found = thread_found(&self.inner.state.lock(), &of)?;
+        let (worker, thread) = found.map_err(|why| error(ErrorCode::Invalid, &why))?;
+        Ok(ThreadOf::On { worker, thread })
     }
 
     /// What `term`'s summary says of its repository goes to the projects it orchestrates.
@@ -2497,6 +2528,43 @@ const fn unknown_checks(why: String) -> slopty_proto::project::Checks {
         why: Some(why),
         at_ms: WallMs::ZERO,
     }
+}
+
+/// Where the thread `of` names is, as `state` knows it: its worker and id, or why it is not
+/// found. A task that is not there is the store's refusal.
+fn thread_found(
+    state: &State,
+    of: &ThreadOf,
+) -> Result<Result<(WorkerId, ThreadId), String>, Outcome> {
+    Ok(match of {
+        ThreadOf::On { worker, thread } => Ok((*worker, *thread)),
+        ThreadOf::Thread(thread) => state
+            .board
+            .worker_of(*thread)
+            .map(|worker| (worker, *thread))
+            .ok_or_else(|| format!("no worker's thread table holds thread {thread}")),
+        ThreadOf::Term(term) => {
+            state.board.thread_at(*term).map(|thread| (term.worker, thread)).ok_or_else(|| {
+                format!("no agent's thread runs in terminal {}/{}", term.worker, term.session)
+            })
+        }
+        ThreadOf::Task { project, task } => {
+            let card = state.projects.task(project, *task)?;
+            match card.assignment.as_ref().filter(|a| a.open()) {
+                None => Err(format!("task {task} has no agent at work on it now")),
+                Some(a) => a
+                    .thread
+                    .or_else(|| state.board.thread_at(a.term))
+                    .map(|thread| (a.term.worker, thread))
+                    .ok_or_else(|| {
+                        format!(
+                            "task {task}'s agent has no thread its worker reports yet; read its \
+                             terminal's screen"
+                        )
+                    }),
+            }
+        }
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Any agent runs a task as a thread of its worker's thread host: placed where it is
 //! installed, started at a seat the server chose, known by that seat when its tools speak, its
-//! state following its thread's row, and ended when the row goes.
+//! state following its thread's row, and ended when the row goes. Its thread is read where it
+//! is, by its task, its seat or its id.
 
 use slopty_proto::project::{Placement, Runner, SEAT_FACT, TASK_ENV, TaskLaunch, TaskState};
 use slopty_proto::server::Os;
@@ -82,6 +83,7 @@ async fn any_agent_runs_a_task_as_a_thread() {
     let now = status(&hub).await;
     assert_eq!(now.live.project, 1, "it counts as a live agent");
     assert_eq!(card(&hub, task).await.state, TaskState::Running);
+    read_where_it_is(&hub, (&linux_lease, &mut linux_rx), task, (term, thread)).await;
 
     let mut needs = asking(seated.clone(), "Run cargo test?");
     needs.status.phase = Phase::NeedsYou;
@@ -99,4 +101,46 @@ async fn any_agent_runs_a_task_as_a_thread() {
     let ended = card(&hub, task).await.assignment.expect("still named");
     assert!(ended.ended_ms.is_some(), "its row gone, its assignment ended");
     assert_eq!(status(&hub).await.live.project, 0);
+}
+
+/// The thread of `task` (its assignment's, seated at `term`) is read where it is: by the task,
+/// its seat or its id, each sent to its worker as the thread there, holding prompts for the
+/// person's read alone. A thread no table holds is no read, and answering a request is the
+/// person's.
+async fn read_where_it_is(
+    hub: &Hub,
+    (lease, rx): (&Lease, &mut mpsc::Receiver<FromServer>),
+    task: TaskId,
+    (term, thread): (TermRef, ThreadId),
+) {
+    use slopty_proto::orchestration::{ThreadOf, ThreadView};
+    let on = ThreadOf::On { worker: term.worker, thread };
+    let read = |of| Verb::ReadThread { of, view: ThreadView::Activity, after: None, hold: false };
+    let by = [
+        (Speaker::Person, ThreadOf::Task { project: project(), task }, true),
+        (Speaker::Proven(term.session), ThreadOf::Term(term), false),
+        (Speaker::Agent, ThreadOf::Thread(thread), false),
+    ];
+    for (who, of, hold) in by {
+        let asked = tokio::spawn({
+            let (hub, verb) = (hub.clone(), read(of));
+            async move { hub.dispatch_as(who, None, verb).await }
+        });
+        let (id, sent) = request(rx).await;
+        let expected =
+            Verb::ReadThread { of: on.clone(), view: ThreadView::Activity, after: None, hold };
+        assert_eq!(sent, expected, "found where it is, holding for the person alone");
+        answer(lease, id, Outcome::Done);
+        assert_eq!(asked.await.unwrap(), Outcome::Done);
+    }
+    let nowhere = hub.dispatch(read(ThreadOf::Thread(ThreadId::new()))).await;
+    assert!(refused(&nowhere, ErrorCode::Invalid).contains("no worker's thread table holds"));
+    let answering = Verb::AnswerRequest {
+        of: ThreadOf::Thread(thread),
+        ask: slopty_proto::thread::AskId("1".to_owned()),
+        choice: "allow".to_owned(),
+        message: None,
+    };
+    let by_agent = hub.dispatch_as(Speaker::Proven(term.session), None, answering).await;
+    assert!(refused(&by_agent, ErrorCode::Forbidden).contains("the person's to answer"));
 }

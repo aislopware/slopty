@@ -130,6 +130,15 @@ impl Projects {
         now: WallMs,
     ) -> Result<(Task, Vec<Change>), Refused> {
         let record = self.record(id)?;
+        let held = record.task(task)?;
+        if advance.state.is_some() && record.lost(held) {
+            return Err(invalid(format!("task {task} is an attempt given up for the one picked")));
+        }
+        // An attempt not picked is checked as any task is, but waits outside the queue.
+        let merge = match advance.merge {
+            Queue::Set(Merge::Queued { .. }) if record.unpicked(held) => Queue::Leave,
+            merge => merge,
+        };
         let t = record.task_mut(task)?;
         if let Some(to) = advance.state.filter(|to| *to != t.state)
             && !t.state.may_become(to)
@@ -160,7 +169,7 @@ impl Projects {
         if let Some(run) = advance.reviewed {
             t.reviewed = Some(bounded(run));
         }
-        match advance.merge {
+        match merge {
             Queue::Keep => {}
             Queue::Leave => t.merge = None,
             Queue::Set(merge) => t.merge = Some(merge),
@@ -168,7 +177,11 @@ impl Projects {
         t.updated_ms = now;
         let task_now = t.clone();
         let entry = advance.moment.map(|what| record.log(Some(task), what, now));
-        Ok((task_now.clone(), vec![record.task_update(&task_now, entry)]))
+        let mut changes = vec![record.task_update(&task_now, entry)];
+        if task_now.state == TaskState::Merged {
+            changes.extend(record.merged_with(&task_now, now));
+        }
+        Ok((task_now, changes))
     }
 
     /// The person asks for `task`'s merge: its verifier runs first when one applies, and a
@@ -214,6 +227,12 @@ impl Projects {
         }
         if t.read_only {
             return Err(invalid(format!("task {task} only reads, so it has nothing to merge")));
+        }
+        if let Some(parent) = record.tried(t).filter(|_| record.unpicked(t)) {
+            return Err(invalid(format!(
+                "task {task} is an attempt at task {} not picked; task_pick it to land it",
+                parent.id
+            )));
         }
         if !t.state.holds_paths()
             && let Some((theirs, path, ours)) = record.conflict(Some(task), &t.owns)

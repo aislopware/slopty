@@ -376,11 +376,11 @@ mod tests {
         ensure!(refused["result"]["isError"] == json!(true), "an online worker stays: {refused}");
         clock.lap("mcp events, resize");
 
-        // 8b. Another agent, played through the real hook relay: its conversation read, its
-        //     permission prompt held for orchestration and answered over MCP; and a still
+        // 8b. Another agent, played through the real hook relay: its thread read, its
+        //     permission prompt held for orchestration and answered over the CLI; and a still
         //     picture refused, or asked of a window no worker has, so nothing is ever captured.
         agent_reached(stack, &worker).await?;
-        clock.lap("conversation, answer, still");
+        clock.lap("thread read, answer, still");
 
         // 5. A closed terminal leaves the list. One whose program exited stays, exited with its
         //    status, until it is closed.
@@ -497,11 +497,11 @@ mod tests {
         Ok(child)
     }
 
-    /// A played agent in a quiet shell: its conversation read over the CLI, which makes
-    /// orchestration follow it; a permission prompt the relay asks is held, shown on the next
-    /// read, refused when an agent answers it over MCP, answered by the person over the CLI under
-    /// a key (and again, answering the first), and the relay prints the denial. Then a still
-    /// picture of a window no worker has, so nothing is captured.
+    /// A played agent in a quiet shell: its thread read over the CLI, which makes orchestration
+    /// follow it; a permission prompt the relay asks is held, shown as the thread's request on
+    /// the next read, refused when an agent answers it over MCP, answered by the person over
+    /// the CLI under a key (and again, answering the first), and the relay prints the denial.
+    /// Then a still picture of a window no worker has, so nothing is captured.
     async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
         let term = open_bash(stack, "e2e agent").await?;
         let session = term.rsplit('/').next().context("a session in the term")?.to_owned();
@@ -534,52 +534,55 @@ mod tests {
         let status = tokio::time::timeout(STEP, prompted.wait()).await??;
         ensure!(status.success(), "the relay exits 0: {status}");
 
-        let page = until("the prompts in the conversation", STEP, async || {
-            let page = stack.slopty(&["agent", "conversation", &term]).await?;
-            Ok((page["total"] == 2).then_some(page))
+        // Read as the person, over the CLI: from now on its prompts wait for an answer here.
+        let read = until("the prompts in the agent's thread", STEP, async || {
+            // Until the worker's table shows the thread, the server finds none in the terminal.
+            let Ok(read) = stack.slopty(&["agent", "read", "--term", &term]).await else {
+                return Ok(None);
+            };
+            Ok(read.to_string().contains("tidy the build folder").then_some(read))
         })
         .await?;
-        let first = page["entries"][0].to_string();
-        ensure!(first.contains("tidy the build folder"), "{page}");
-        ensure!(page["held"] == json!([]) && page["thread"] == "main", "{page}");
-        let tail = stack.slopty(&["agent", "conversation", &term, "--max", "1"]).await?;
-        ensure!(tail["start"] == 1 && tail["next"] == 2, "the last entry alone: {tail}");
+        ensure!(read["agent"] == "claude-code" && read["requests"] == json!([]), "{read}");
+        let thread = str_of(&read, "thread")?.to_owned();
 
         let mut asking = hook("PermissionRequest");
         asking["tool_name"] = json!("Bash");
         asking["tool_input"] = json!({ "command": "rm -rf build" });
         asking["permission_mode"] = json!("default");
         let asked = relay(stack, &session, &asking)?;
-        let held = until("the prompt held for orchestration", STEP, async || {
-            let page = stack.slopty(&["agent", "conversation", &term]).await?;
-            Ok(page["held"].as_array().and_then(|h| h.first()).cloned())
+        let request = until("the prompt held as the thread's request", STEP, async || {
+            let read = stack.slopty(&["agent", "read", "--thread", &thread]).await?;
+            Ok(read["requests"].as_array().and_then(|r| r.first()).cloned())
         })
         .await?;
-        ensure!(held["tool"] == "Bash", "{held}");
-        let ask = held["ask"].as_u64().context("ask")?;
+        let ask = str_of(&request, "ask")?.to_owned();
+        let choices = request["choices"].to_string();
+        ensure!(choices.contains("\"deny\""), "{request}");
         // Only the person answers: MCP offers an agent no tool to answer with, and the prompt
         // waits.
         let params = json!({
-            "name": "answer_permission",
-            "arguments": { "term": term, "ask": ask, "verdict": "allow" },
+            "name": "answer_request",
+            "arguments": { "thread": thread, "ask": ask, "choice": "allow" },
         });
         let by_agent = stack.mcp(40, "tools/call", params).await;
         let refused = match &by_agent {
-            Err(e) => e.to_string().contains("no tool is called answer_permission"),
+            Err(e) => e.to_string().contains("no tool is called answer_request"),
             Ok(said) => said["error"].is_object() || said["result"]["isError"] == json!(true),
         };
-        ensure!(refused, "an agent cannot answer a permission: {by_agent:?}");
-        let still = stack.slopty(&["agent", "conversation", &term]).await?;
-        ensure!(still["held"][0]["ask"] == json!(ask), "the prompt still waits: {still}");
-        let ask_arg = ask.to_string();
+        ensure!(refused, "an agent cannot answer a request: {by_agent:?}");
+        let still = stack.slopty(&["agent", "read", "--term", &term]).await?;
+        ensure!(still["requests"][0]["ask"] == json!(ask), "the prompt still waits: {still}");
         let answer = [
             "--idempotency-key",
             "e2e-answer",
             "agent",
             "answer",
+            "--term",
             term.as_str(),
-            ask_arg.as_str(),
-            "--deny",
+            ask.as_str(),
+            "deny",
+            "--message",
             "not the build folder",
         ];
         let done = stack.slopty(&answer).await?;
@@ -593,7 +596,7 @@ mod tests {
         ensure!(decision["message"] == "not the build folder", "{printed}");
         let again = stack.slopty(&answer).await?;
         ensure!(again == json!({ "ok": true }), "the same key answers the first: {again}");
-        let late = stack.slopty(&["agent", "answer", &term, &ask_arg, "--allow"]).await;
+        let late = stack.slopty(&["agent", "answer", "--term", &term, &ask, "allow"]).await;
         ensure!(late.is_err(), "a second answer finds nothing: {late:?}");
 
         // A window no worker has: whether or not this one may record its screen, it answers

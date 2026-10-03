@@ -369,6 +369,8 @@ fn join_server(
     );
     if let Some(threads) = &daemon.threads {
         orchestrator.set_task_threads(Arc::new(threads.clone()));
+        orchestrator
+            .set_thread_reads(Arc::new(threads::Reads::new(threads.clone(), daemon.clone())));
     }
     let (facts_tx, facts) = tokio::sync::watch::channel(slopty_proto::project::Facts::new());
     let settings = slopty_settings::path_in(data_dir);
