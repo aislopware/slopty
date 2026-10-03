@@ -749,7 +749,7 @@ impl WorkspaceView {
         // of a terminal that ended) is theirs to see, not only the log's.
         if let TermEvent::Error(error) = &event {
             tracing::warn!(%session, %error, "worker");
-            self.show_notice(error.to_string(), cx);
+            self.show_failure(error.to_string(), cx);
         }
         if let Some(view) = self.terminals.get(&session) {
             view.update(cx, |v, cx| v.apply(event, cx));
@@ -1100,7 +1100,7 @@ impl WorkspaceView {
                     #[cfg(not(target_os = "macos"))]
                     crate::screen::ScreenViewEvent::DragOut(_) => {}
                     crate::screen::ScreenViewEvent::DragOutFailed(why) => {
-                        this.show_notice(format!("The drag did not come out: {why}"), cx);
+                        this.show_failure(format!("The drag did not come out: {why}"), cx);
                     }
                 })
                 .detach();
@@ -1218,7 +1218,7 @@ impl WorkspaceView {
         let item = w.doc.get(id).cloned();
         let title = item
             .map_or_else(String::new, |i| i.name.clone().unwrap_or_else(|| self.derived_title(&i)));
-        self.show_notice(format!("{title} did not open. {text}"), cx);
+        self.show_failure(format!("{title} did not open. {text}"), cx);
         self.items_dirty = true;
     }
 
@@ -1580,7 +1580,7 @@ fn quote_when_shown(
         None => {
             tracing::warn!(session = %agent, "no composer showed; the block was not attached");
             let _gone = workspace.update(cx, |w, cx| {
-                w.show_notice("The agent's composer did not open".to_owned(), cx);
+                w.show_failure("The agent's composer did not open".to_owned(), cx);
             });
         }
     }

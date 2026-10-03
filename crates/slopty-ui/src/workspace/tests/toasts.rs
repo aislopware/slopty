@@ -1,5 +1,5 @@
-//! The notices in the status bar: over no tile, and one being read is never taken away
-//! under the pointer.
+//! The notices in the status bar: over no tile, one being read is never taken away under the
+//! pointer, none lapses while the app is not in front, and a failure stays until dismissed.
 
 use super::*;
 use crate::workspace::toast::{SAY_AFTER_HOVER, SAY_FOR};
@@ -53,4 +53,56 @@ fn a_notice_sits_in_the_status_bar_over_no_tile(cx: &mut TestAppContext) {
     let notice = cx.debug_bounds("said").expect("the notice");
     assert!(bar.contains(&notice.center()), "{notice:?} in {bar:?}");
     assert!(notice.top() >= tile.bottom(), "under the tile, not over it: {notice:?} {tile:?}");
+}
+
+/// A notice whose time comes while the app is not in front waits for it: it outlives its time
+/// and goes a short while after the app comes back, so nothing lapses unseen.
+#[gpui::test]
+fn a_notice_waits_while_the_app_is_not_in_front(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    view.update_in(cx, |v, _w, cx| {
+        v.set_app_active(false, cx);
+        v.show_notice("Copied the address".to_owned(), cx);
+    });
+    cx.executor().advance_clock(SAY_FOR.saturating_add(SAY_FOR));
+    cx.run_until_parked();
+    let up = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_texts());
+    assert_eq!(up(cx), ["Copied the address"], "held while nobody looks");
+
+    view.update_in(cx, |v, _w, cx| v.set_app_active(true, cx));
+    cx.run_until_parked();
+    assert_eq!(up(cx), ["Copied the address"], "not at once");
+    cx.executor().advance_clock(SAY_AFTER_HOVER.saturating_add(crate::kit::Pace::Fade.duration()));
+    cx.run_until_parked();
+    assert!(up(cx).is_empty(), "then it goes");
+}
+
+/// A failure stays until it is dismissed, in the error's mark, and offers its words to copy;
+/// newer words push out an older word before they push out a failure.
+#[gpui::test]
+fn a_failure_stays_until_dismissed_and_copies(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    view.update_in(cx, |v, _w, cx| v.show_failure("Settings: line 3 is not TOML".to_owned(), cx));
+    cx.executor().advance_clock(SAY_FOR.saturating_mul(3));
+    cx.run_until_parked();
+    let up = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_texts());
+    assert_eq!(up(cx), ["Settings: line 3 is not TOML"], "it stays");
+    view.update_in(cx, |v, _w, cx| {
+        v.show_notice("one".to_owned(), cx);
+        v.show_notice("two".to_owned(), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(up(cx), ["Settings: line 3 is not TOML", "two"], "the older word went");
+
+    let copy = cx.debug_bounds("toast-copy").expect("Copy").center();
+    cx.simulate_click(copy, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()).as_deref(),
+        Some("Settings: line 3 is not TOML")
+    );
+    let dismiss = cx.debug_bounds("toast-dismiss").expect("Dismiss").center();
+    cx.simulate_click(dismiss, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(up(cx), ["two"], "dismissed");
 }

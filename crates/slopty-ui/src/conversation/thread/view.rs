@@ -40,9 +40,14 @@ use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
 use crate::conversation::composer::Attach;
 use crate::conversation::diff::Block;
-use crate::conversation::{CTX, CycleDensity, Interrupt};
+use crate::conversation::{CTX, CycleDensity, EditLastQueued, Interrupt, QueueMessage};
 use crate::icons::{Glyph, IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
+
+/// The pointer group a message and its actions answer as one.
+fn message_group(id: &ItemId) -> SharedString {
+    SharedString::from(format!("message-{}", id.0))
+}
 
 /// The widest the reading column's text runs, in points at zoom 1 (`design.md` §3).
 pub const COLUMN: f32 = 736.0;
@@ -50,6 +55,10 @@ pub const COLUMN: f32 = 736.0;
 /// The most of the window's height what else waits in the tray (the plan, the edits, the
 /// queue) takes before it scrolls.
 const TRAY: f32 = 0.3;
+
+/// The composer's key context, where ⌘↵ queues and ⌥↑ edits what waits; a question's own
+/// field in the tray keeps its ⌘↵.
+pub(crate) const COMPOSER_CTX: &str = "ThreadComposer";
 
 /// The same while a request stands whole above it: what the person must answer and the
 /// conversation it is about come first, so the rest keeps to a line or two and scrolls.
@@ -169,6 +178,9 @@ pub struct ThreadView {
     plan_open: bool,
     /// The panel of the work the agent runs in the background is open.
     tasks_open: bool,
+    /// The meter's panel is open in the tray: the context, each window and its reset, what the
+    /// session cost, and Compact where the agent takes it.
+    meter_open: bool,
     /// Diffs coloured once, by call.
     diffs: RefCell<Coloured>,
     /// Ticks once a second while the agent works (the elapsed time).
@@ -194,6 +206,9 @@ pub struct ThreadView {
     /// How many frames drew the marks wrong, found so once the list laid out.
     #[cfg(test)]
     marks_moved: Cell<usize>,
+    /// The message whose words were just copied, by its item, and the timer that clears it.
+    copied: Option<ItemId>,
+    copied_clear: Option<Task<()>>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -284,6 +299,7 @@ impl ThreadView {
             asked_at: 0,
             plan_open: false,
             tasks_open: false,
+            meter_open: false,
             diffs: RefCell::default(),
             clock: None,
             composing: Composing::default(),
@@ -296,6 +312,8 @@ impl ThreadView {
             marks: Cell::default(),
             #[cfg(test)]
             marks_moved: Cell::default(),
+            copied: None,
+            copied_clear: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -558,6 +576,35 @@ impl ThreadView {
     /// How ↵ sends: into the turn under way, where the agent takes a message mid-turn; else
     /// queued for the turn's end ([`Cap::QUEUE`]), which at rest goes at once. An agent that
     /// says neither is sent a steer and its worker says what it can do.
+    /// ⌥↑: the last waiting message that can still change takes the composer, as its line's
+    /// Edit does; nothing when none can.
+    fn edit_last_queued(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.state(cx) else { return };
+        let bar = crate::conversation::thread::activity::Activity::of(
+            self.hub.read(cx).threads(),
+            self.thread,
+            state,
+        );
+        let last = bar
+            .queue
+            .iter()
+            .rev()
+            .filter(|_| bar.can_withdraw && !self.composing.editing())
+            .find(|q| q.on_worker && !q.withdrawing && !q.going)
+            .map(|q| {
+                let words = match &q.edit {
+                    Some(crate::conversation::thread::activity::Edit::Refused { text, .. }) => {
+                        text.clone()
+                    }
+                    _ => q.text.clone(),
+                };
+                (q.intent, words)
+            });
+        if let Some((pending, words)) = last {
+            self.start_edit(pending, &words, window, cx);
+        }
+    }
+
     fn send_now(&self, cx: &App) -> Delivery {
         match self.state(cx).map(|st| &st.meta) {
             Some(meta) if !meta.can(Cap::STEER) && meta.can(Cap::QUEUE) => Delivery::Queue,
@@ -917,9 +964,10 @@ impl ThreadView {
     }
 
     fn user_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
-        let Some(Item { body: ItemBody::User(message), .. }) = self.item(ix, id, cx) else {
+        let Some(Item { body: ItemBody::User(message), at_ms, .. }) = self.item(ix, id, cx) else {
             return div().into_any_element();
         };
+        let at_ms = *at_ms;
         let words = match &message.command {
             Some(command) if message.text.text.trim().is_empty() => format!("/{command}"),
             _ => message.text.text.clone(),
@@ -943,8 +991,96 @@ impl ThreadView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.show_whole(item.clone(), cx)))
                 .into_any_element()
         });
+        let actions = self.message_actions(id, at_ms, words.clone(), true, cx);
+        let under = div().flex().flex_col().items_end().w_full().children(more).child(actions);
         let shown = cut.unwrap_or(words);
-        self.bubble(format!("item-{}", id.0), shown, pictures, more, false)
+        div()
+            .group(message_group(id))
+            .w_full()
+            .child(self.bubble(
+                format!("item-{}", id.0),
+                shown,
+                pictures,
+                Some(under.into_any_element()),
+                false,
+            ))
+            .into_any_element()
+    }
+
+    /// The quiet actions under a message, shown while the pointer is on it (always under a
+    /// finger): when it was written, said for today ([`figures::stamp`]), and a copy of its
+    /// words that says "Copied" in place for a moment. `end` lines them up at the right, under
+    /// the person's bubble.
+    fn message_actions(
+        &self,
+        id: &ItemId,
+        at_ms: WallMs,
+        words: String,
+        end: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let touch = theme.density == slopty_theme::Density::TOUCH;
+        let copied = self.copied.as_ref() == Some(id);
+        let selector = format!("copy-{}", id.0);
+        let label: SharedString = if copied { "Copied".into() } else { "Copy message".into() };
+        let item = id.clone();
+        let copy = crate::a11y::tab_stop(
+            div()
+                .id(ElementId::Name(selector.clone().into()))
+                .debug_selector(move || selector)
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_none()
+                .size(self.z(theme.typography.icon_large()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(self.z(theme.radii.xs))
+                .cursor_pointer()
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)))
+                .active(move |el| el.bg(hsla(s.pressed)))
+                .child(self.icon(
+                    if copied { IconName::Check } else { IconName::Copy },
+                    if copied { s.success } else { s.text_muted },
+                )),
+            s.accent,
+        )
+        .on_click(cx.listener(move |this, _ev, _w, cx| {
+            this.copy(item.clone(), words.clone(), cx);
+        }));
+        let stamp = crate::conversation::figures::stamp(at_ms, WallMs::now());
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .when(end, gpui::Styled::justify_end)
+            .gap(self.z(theme.spacing.xs))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .when(!touch && !copied, |el| {
+                el.invisible().group_hover(message_group(id), gpui::Styled::visible)
+            })
+            .children(stamp.map(|t| kit::tabular(div()).flex_none().child(SharedString::from(t))))
+            .child(copy)
+            .into_any_element()
+    }
+
+    /// Put `words` on the clipboard and say so on `item`'s copy for a moment.
+    fn copy(&mut self, item: ItemId, words: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(words));
+        self.copied = Some(item);
+        self.copied_clear = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(crate::conversation::view::COPIED_FOR).await;
+            let _gone = this.update(cx, |this, cx| {
+                this.copied = None;
+                this.copied_clear = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     /// What the person sent, on the raised surface at the column's right, its pictures over it.
@@ -960,7 +1096,8 @@ impl ThreadView {
         let s = theme.surfaces;
         let label = SharedString::from(format!("You: {}", kit::first_line(&words)));
         div()
-            .id(ElementId::Name(id.into()))
+            .id(ElementId::Name(id.clone().into()))
+            .debug_selector(move || id)
             .role(Role::Article)
             .aria_label(label)
             .w_full()
@@ -988,8 +1125,8 @@ impl ThreadView {
     }
 
     fn text_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
-        let Some(clipped) = self.item(ix, id, cx).and_then(|i| match &i.body {
-            ItemBody::Text(text) => Some(text.clone()),
+        let Some((clipped, at_ms)) = self.item(ix, id, cx).and_then(|i| match &i.body {
+            ItemBody::Text(text) => Some((text.clone(), i.at_ms)),
             _ => None,
         }) else {
             return div().into_any_element();
@@ -1008,8 +1145,10 @@ impl ThreadView {
             .text_size(self.z(theme.typography.title()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
+            .group(message_group(id))
             .child(self.markdown(format!("text-{}", id.0), &text))
             .when(clipped_more, |el| el.child(self.show_all(id, &clipped, cx)))
+            .child(self.message_actions(id, at_ms, text.clone(), false, cx))
             .into_any_element()
     }
 
@@ -1125,8 +1264,12 @@ impl ThreadView {
         let (line, when, label) = (fold.line(), fold.when(), fold.label());
         let (model, spent) = notes::turn_footer(figures, &state.meters);
         let hint_theme = theme.clone();
+        let fork = (state.meta.can(Cap::FORK) && figures.state != TurnState::Active)
+            .then(|| self.fork_button(turn, cx));
+        let group = SharedString::from(format!("fold-{}", turn.0));
         div()
             .id(ElementId::Name(format!("fold-{}", turn.0).into()))
+            .group(group)
             .debug_selector(move || format!("fold-{}", turn.0))
             .role(Role::Button)
             .aria_label(SharedString::from(label))
@@ -1174,8 +1317,52 @@ impl ThreadView {
                         })
                     })
             }))
+            .children(fork)
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_turn(turn, cx)))
             .into_any_element()
+    }
+
+    /// "Fork from here" on a settled turn's fold, while the pointer is on it (always under a
+    /// finger): a new thread through this turn, by the agent's own door ([`Intent::Fork`]),
+    /// which goes on here as it was. Offered only where the agent can ([`Cap::FORK`]).
+    fn fork_button(&self, turn: TurnId, cx: &Context<Self>) -> AnyElement {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let touch = theme.density == slopty_theme::Density::TOUCH;
+        let id = format!("fork-{}", turn.0);
+        let group = SharedString::from(format!("fold-{}", turn.0));
+        crate::a11y::tab_stop(
+            div()
+                .id(ElementId::Name(id.clone().into()))
+                .debug_selector(move || id)
+                .role(Role::Button)
+                .aria_label("Fork from here")
+                .flex_none()
+                .size(self.z(theme.typography.icon_large()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(self.z(theme.radii.xs))
+                .cursor_pointer()
+                .map(kit::eased)
+                .hover(move |el| el.bg(hsla(s.hover)))
+                .active(move |el| el.bg(hsla(s.pressed)))
+                .when(!touch, |el| el.invisible().group_hover(group, gpui::Styled::visible))
+                .child(self.icon(IconName::GitBranch, s.text_muted))
+                .map(kit::hint_timing)
+                .tooltip({
+                    let theme = Rc::new(theme.clone());
+                    move |_window, cx| {
+                        cx.new(|_| kit::Hint::new("Fork from here", "", Rc::clone(&theme))).into()
+                    }
+                }),
+            s.accent,
+        )
+        .on_click(cx.listener(move |this, _ev, _w, cx| {
+            cx.stop_propagation();
+            let _id = this.intent(Intent::Fork { after: Some(turn) }, cx);
+        }))
+        .into_any_element()
     }
 
     /// Quiet calls done one after another, as one line: "Read 3 files · Searched once".
@@ -1499,6 +1686,12 @@ impl Render for ThreadView {
             .track_focus(&self.focus)
             .role(Role::Group)
             .aria_label("Thread")
+            .on_action(cx.listener(|this, _: &QueueMessage, window, cx| {
+                this.submit(Delivery::Queue, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &EditLastQueued, window, cx| {
+                this.edit_last_queued(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &Interrupt, window, cx| {
                 if !this.leave_subagent(window, cx) {
                     this.interrupt(cx);

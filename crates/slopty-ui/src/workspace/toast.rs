@@ -5,7 +5,9 @@
 //! is about when it is about something, with at most its actions; they stay [`SAY_FOR`] and no
 //! more than [`SHOWN`] are up at once, side by side, the newest nearest the readouts. One whose
 //! time comes while the pointer is over them stays until the pointer leaves, then
-//! [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away. A notice rises a
+//! [`SAY_AFTER_HOVER`] more, so a notice being read is never taken away; one whose time comes
+//! while the app is not in front waits the same way for it to come back, so nothing lapses
+//! unseen. A failure stays until it is dismissed, offering its words to copy. A notice rises a
 //! hair into place as it fades in, and fades where it stands when its time is up; under Reduce
 //! Motion it comes and goes at once.
 
@@ -77,6 +79,9 @@ pub(super) enum ToastKind {
     },
     /// A word to this client alone.
     Said(String),
+    /// Something that failed: it stays until dismissed, in the error's tone, and offers its
+    /// words to copy.
+    Failed(String),
     /// A page a program in a shell asked to open, held back: "Open" opens it.
     Offered(Box<super::handoffs::Offer>),
     /// What an inbox verb did by key: "Undo" puts it back.
@@ -111,11 +116,21 @@ impl WorkspaceView {
         let seq = toast.seq;
         // One on its way out gives its place at once to the one coming in.
         toast.shown.retain(|shown| !shown.leaving);
+        let sticky = matches!(what, ToastKind::Failed(_));
         toast.shown.push(Shown { seq, what, leaving: false, held: false });
-        let over = toast.shown.len().saturating_sub(SHOWN);
-        toast.shown.drain(..over);
+        // Past the most shown, the oldest goes, a failure only when nothing else is left to go.
+        while toast.shown.len() > SHOWN {
+            let at = toast
+                .shown
+                .iter()
+                .position(|shown| !matches!(shown.what, ToastKind::Failed(_)))
+                .unwrap_or(0);
+            toast.shown.remove(at);
+        }
         cx.notify();
-        Self::arm_toast(seq, during, cx);
+        if !sticky {
+            Self::arm_toast(seq, during, cx);
+        }
     }
 
     /// Take notice `seq` down `during` from now, unless the pointer is over the stack then.
@@ -151,11 +166,12 @@ impl WorkspaceView {
         .detach();
     }
 
-    /// Whether notice `seq` stays because the pointer is over the stack; it is marked to go
-    /// once the pointer leaves.
+    /// Whether notice `seq` stays because the pointer is over the stack or the app is not in
+    /// front; it is marked to go once the pointer leaves and the app is back.
     fn hold_toast(&mut self, seq: u64) -> bool {
+        let away = !self.app_active;
         let Some(toast) = self.toast.as_mut() else { return false };
-        if !toast.hovered {
+        if !toast.hovered && !away {
             return false;
         }
         if let Some(shown) = toast.shown.iter_mut().find(|s| s.seq == seq) {
@@ -169,7 +185,17 @@ impl WorkspaceView {
     pub(super) fn toast_hovered(&mut self, hovered: bool, cx: &Context<Self>) {
         let Some(toast) = self.toast.as_mut() else { return };
         toast.hovered = hovered;
-        if hovered {
+        if !hovered {
+            self.release_held_toasts(cx);
+        }
+    }
+
+    /// The pointer left the notices or the app came back to the front: each notice held
+    /// meanwhile gets [`SAY_AFTER_HOVER`] more, unless the other still holds it.
+    pub(super) fn release_held_toasts(&mut self, cx: &Context<Self>) {
+        let active = self.app_active;
+        let Some(toast) = self.toast.as_mut() else { return };
+        if toast.hovered || !active {
             return;
         }
         let held: Vec<u64> = toast
@@ -202,9 +228,15 @@ impl WorkspaceView {
         toast.shown.len() != before
     }
 
-    /// A word for the human (a picture refused, a worker added, settings that did not parse).
+    /// A word for the human (a picture refused, a worker added).
     pub fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
         self.show_toast(ToastKind::Said(text), cx);
+    }
+
+    /// Something that failed (settings that did not parse, a save that did not land): it stays
+    /// until dismissed and offers its words to copy.
+    pub fn show_failure(&mut self, text: String, cx: &mut Context<Self>) {
+        self.show_toast(ToastKind::Failed(text), cx);
     }
 
     /// What a notice says.
@@ -215,7 +247,7 @@ impl WorkspaceView {
                 format!("{name} points at {}", self.tile_title(item))
             }
             ToastKind::Closed { title, .. } => format!("Closed {title}"),
-            ToastKind::Said(text) => text.clone(),
+            ToastKind::Said(text) | ToastKind::Failed(text) => text.clone(),
             ToastKind::Offered(offer) => offer.line(),
             ToastKind::Attention { line, .. } => line.clone(),
             ToastKind::Triaged(undo) => undo.line().to_owned(),
@@ -300,6 +332,24 @@ impl WorkspaceView {
             }
             // A word needs no mark: an info glyph on every notice says nothing the line does not.
             ToastKind::Said(_) => ("said", None, Vec::new()),
+            ToastKind::Failed(text) => {
+                let (words, seq) = (text.clone(), shown.seq);
+                let copy = action("toast-copy", "Copy").on_click(cx.listener(
+                    move |_this, _ev, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(words.clone()));
+                    },
+                ));
+                let dismiss = action("toast-dismiss", "Dismiss")
+                    .text_color(hsla(s.text_secondary))
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        if this.drop_toasts(|shown| shown.seq == seq) {
+                            cx.notify();
+                        }
+                    }));
+                mark =
+                    Some(crate::icons::status_mark(theme, Some(crate::icons::Status::Failed), 1.0));
+                ("failed", None, vec![copy, dismiss])
+            }
             ToastKind::Offered(offer) => {
                 let (worker, id, url) = offer.target();
                 let open =

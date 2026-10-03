@@ -52,7 +52,7 @@ const COMPACT: &str = "compact";
 
 /// Whether `state`'s agent compacts through Slopty ([`Cap::COMPACT`]) rather than by a command
 /// it lists itself.
-fn compacts(state: &slopty_proto::thread::ThreadState) -> bool {
+pub(super) fn compacts(state: &slopty_proto::thread::ThreadState) -> bool {
     state.meta.can(Cap::COMPACT) && !state.commands.iter().any(|c| c.name == COMPACT)
 }
 

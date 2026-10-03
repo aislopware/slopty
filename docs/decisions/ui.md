@@ -881,7 +881,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   sentence-case phrase a screen reader announces (`Read the file again`, `Take over`).
   `kit::chrome_text_is_sentence_case` holds the naming half.
 
-- ❌ **Ranking the command palette by match quality** (2026-09-14, written and then measured
+- ❌ **Ranking the command palette by match quality** (2026-09-14; superseded 2026-10-04 by
+  "The palette ranks within each section, shows what matched, and Esc takes a query back"
+  below, once its own revisit condition held; written and then measured
   against the real command list rather than a toy one). `palette::filter` keeps every item whose
   label holds all of the query's words and returns them in the order they were built. The obvious
   improvement is a score — the front of a label beats the front of a word inside it beats the
@@ -1501,7 +1503,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     its status.
   - **Spinner.** The working mark turns in 12 steps a second, driven by one app-wide clock. A
     timer wakes only the views that painted a mark, so nothing repaints once none shows, and
-    the mark stands still under Reduce Motion. Headless at a simulated 120 Hz with one agent
+    the mark stands still under Reduce Motion (amended 2026-10-03: it stays upright and
+    breathes in opacity instead; see "A working mark breathes under Reduce Motion" at the end).
+    Headless at a simulated 120 Hz with one agent
     working, the workspace rendered 12 frames a second against 120 for a per-frame animation,
     and 0 at rest (MEASUREMENTS, "a working mark that steps").
   - **Palette and first run.** The palette gains a foot legend in key caps, and `kit::key_cap`
@@ -5354,7 +5358,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   progress, and Waiting (an agent paused on its own background work, a long command) lasts
   minutes, past WCAG's five seconds of motion with no pause. `Status::Running` is a still
   dashed ring (`CircleDashed` in `text_muted`), drawn as an icon; Working is the only mark that
-  moves, and it stands still under Reduce Motion. The calm lane of the spin clock went with it:
+  moves, and under Reduce Motion it stands upright and breathes in opacity (amended
+  2026-10-03). The calm lane of the spin clock went with it:
   how long a command has run is the readouts' clock's to count (`WorkspaceView::keep_time`).
   Test: `icons::tests::waiting_holds_still` (a Waiting mark wakes its view for nothing over
   three seconds).
@@ -5550,7 +5555,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Motion doc. The palette, the picker, project search, About and the settings dialog fade in
     where they stand; menus and popovers opened by the pointer keep their 4 pt drop. Every
     overlay leaves on the new `Motion::exit` (100 ms, shorter than any entrance): its owner
-    keeps drawing it one exit longer through `kit::fade_out`, which holds the pointer only
+    keeps drawing it one exit longer through `kit::fade_out` (since 2026-10-04
+    `kit::Presence`, below), which holds the pointer only
     within the leaving panel (a modal's dim holds it as the modal did) while the keyboard is
     back where it was. Under Reduce Motion, and where the workspace holds its chrome still,
     nothing is kept. Tests: `the_paces_are_the_motion_tokens`,
@@ -5604,7 +5610,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   stale "T3 Code's 768" note on the reading column now says 736.
   1. **An APCA floor for dark text** (designeer #1). `Rgb::apca` beside `Rgb::contrast`; the
      lift takes the stricter of WCAG and APCA (secondary |Lc| ≥ 55, muted ≥ 45 on every
-     ground), and `alpha::FOCUS` 0.45 → 0.47 to clear Lc 30. The values come from a test that
+     ground), and the focus line derived to clear Lc 30 as well as 3:1. The values come from a test that
      computes them (`chrome_text_clears_apca`), never from the eye.
   2. **Shadows that fall, and the sunk finish** (gpui-references T2 and T1). `Shadow` gains a
      spread (the soft floating layer `0 12 32 −10`, a third heavier); `Elevation::sunk` shades
@@ -5654,8 +5660,189 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   whether GPUI sets the system face as Core Text does. A test lays out "Connect to a server"
   at 13, 20 and 26 pt through GPUI and through a Core Text line from `NSAttributedString`
   and compares the advances and the face. Both name `.SFNS-Regular` at every size, and the
-  advances agree (13 pt 119.13 both; 26 pt 217.56 both; 20 pt 171.43 against GPUI's 171.61,
-  the 0.11 % being GPUI asking for the next float above 20 on its first run, which Core Text
-  at that size matches exactly). Set in proportion to 13 pt, the 26 pt line would be 238.26
+  advances agree (13 pt 119.13 both; 26 pt 217.56 both; 20 pt 171.43 both). GPUI set 171.61
+  at 20 pt until lane F's gpui-fast#25 (cc85e69, pinned 2026-10-04): it shaped alternate runs
+  at the next float above the size, which crossed SF's optical step at 20 pt. The test now
+  holds GPUI to Core Text's width within 0.01 pt. Set in proportion to 13 pt, the 26 pt line would be 238.26
   wide, so the face carries Apple's tracking per size already; nothing needs `letter_spacing`
   in the renderer. Test: `fonts::optical_size::gpui_sets_the_system_face_at_its_optical_size_and_tracking`.
+
+- ✅ **Chrome text clears an APCA floor as well as WCAG's** (2026-10-03,
+  `.research/designeer-2026-10-03.md` §3 #1; stage 4 item 1). WCAG's ratio calls a dark text
+  tier the equal of its light twin where APCA reads it 20 to 30 Lc weaker: by WCAG alone dark
+  muted text sat at Lc 43 on its worst ground (the selected wash over a float) and the dark red
+  at 43, against APCA's 45 for text read beside large or heavy type.
+  - `Rgb::apca` is APCA-W3 0.0.98G; a test holds it to the published values (`#888` on white
+    Lc 63.06, white on black −107.88).
+  - The lift takes the stricter of WCAG's ratio and an APCA floor on every ground text lands
+    on: secondary |Lc| 55 (APCA's 60 for content text that is not body, less 5 for chrome at 12
+    to 13 pt medium), muted and the status words (accent, warn, error, the agent's orange) 45.
+    The default dark tones moved to where the lift has nothing to do: `text_secondary`
+    0.715 → 0.745 (`#b5b5b5`), `text_muted` 0.625 → 0.651 (`#a1a1a1`), the red `f1767e` →
+    `f27d84`. Measured on the default dark: text Lc 88.7, secondary 56.2, muted 45.3, accent
+    50.5, warn 65.4. Light does not move, since WCAG already binds there (its muted is Lc
+    62.8).
+  - **The focus line is derived, not a fixed share.** `Surfaces::focus` is the text at
+    `alpha::FOCUS` (0.45), laid on only as much thicker as the content needs for both WCAG's
+    3:1 and APCA's Lc 30 for a mark that means something. At 0.45 it read Lc 24.8 on black,
+    29.4 on the default dark, and 2.85:1 on white, each short of one floor; whole under
+    Increase Contrast.
+  - Tests: theme `apca_gives_the_published_values`, `chrome_text_clears_apca`,
+    `the_focus_line_clears_apca_for_what_is_seen`,
+    `the_default_tones_are_lifted_by_a_rounding_step_at_most`; ui `focus_line::*`.
+
+- ✅ **A working mark breathes under Reduce Motion** (2026-10-03,
+  `.research/gpui-references-2026-10-03.md` T5; stage 4 item 3). This amends the rule that
+  everything lands at once under Reduce Motion, for the one mark that says an agent is at
+  work. Standing still, it read the same as a mark that had stopped, and on an app whose point
+  is what needs the person at a glance that lost the one live cue; the platform itself keeps
+  its activity indicators alive under Reduce Motion. So the mark stays upright and its opacity
+  breathes from 0.6 to whole and back over `Motion::breath` (2.4 s), in steps of a fifth of a
+  second (twelve to a breath, so each breath ends on a step) on the same app-wide clock: no
+  travel, no turn, no scale, and under half the frames the turn draws (headless, 5 a second
+  against 12). Everything else still lands at once. Tests:
+  `icons::tests::the_working_mark_steps_twelve_times_a_turn_and_stands_under_reduce_motion`
+  (the breath's range, period and steps), `a_working_mark_wakes_its_view_only_while_it_shows`
+  (4 to 6 wakes a second under Reduce Motion), and
+  `workspace::tests::frame::a_working_mark_draws_twelve_frames_a_second_and_none_at_rest`.
+
+- ✅ **Floats cast a shadow that falls, and what is sunk holds shade** (2026-10-03,
+  `.research/gpui-references-2026-10-03.md` T1 and T2; stage 4 item 2).
+  - `Shadow` gains a spread, which `kit::drop_shadow` passes through. The soft layer of a
+    float is now `0 12 32 −10`: drawn in by ten points, so its shape starts two points below
+    the top edge and shows no halo at the sides (at most six points past them), only a shade
+    that falls under. Drawing it in thins it, so it is a third heavier: dark 0.125 → 0.16 and
+    light 0.10 → 0.13. The contact layers keep no spread, and light's resting card draws its
+    contact in by half a point so the hairline stays its edge.
+  - `Elevation::sunk` is the other half of the rest rule. A card catches light at its top
+    edge, and what is sunk (a field, a segmented track, the settings well) holds shade there
+    instead. `kit::sunk` lays an inset shade a point inside the top edge, past any border: dark
+    at 0.18, light at 0.05. In dark it adds a lip of light (`alpha::RIM`) inside the bottom,
+    where light falls on a hollow's far wall. Light has none, since a white lip on a white
+    ground reads as nothing. `kit::track` is the segmented track, the hover wash sunk, and the
+    inbox's views wear it. The fields wear `kit::sunk` too: the navigator's filter, the settings
+    well, the first run's address field, and the SSH sheet's fields.
+  - Tests: theme `elevation_and_density` (the soft layer falls, starts below the top edge and
+    keeps its halo within six points), kit
+    `the_elevation_is_two_layers_of_the_shade_and_a_lit_edge_in_dark` (the soft layer drawn
+    in) and `a_field_sinks_where_a_card_rises`.
+
+- ✅ **A message offers its copy and its day, and a settled turn offers a fork** (2026-10-03,
+  `.research/t3code-ui-2026-10-03.md` #1; stage 4 item 4).
+  - Under each message (the person's bubble, right-aligned, and the agent's answer) a quiet
+    row shows while the pointer is on the message, and always under a finger. It holds the
+    time the message was written and a copy of its words that says "Copied" with a check for
+    `COPIED_FOR`, as the old face's answers do. The time is said for today
+    (`figures::stamp`): the clock alone today, "Yesterday", a weekday within the week, and a
+    day and month past it.
+  - A settled turn's fold offers "Fork from here" (the branch glyph, with a hint) where the
+    thread's caps hold `Cap::FORK`. It is never offered on a turn under way. The press sends
+    `Intent::Fork { after: Some(turn) }` through the agent's own door, and the fold keeps its
+    state, since the press is the fork's and not the fold's. The new thread arrives as any
+    other does.
+  - Tests: `figures::tests::a_message_s_day_reads_by_how_far_back_it_is`, and
+    `conversation::thread::tests::steps::a_settled_turn_forks_from_its_fold_where_the_agent_can`
+    and `a_message_s_copy_puts_its_words_on_the_clipboard`.
+
+- ✅ **The palette ranks within each section, shows what matched, and Esc takes a query back**
+  (2026-10-04, `.research/t3code-ui-2026-10-03.md` #3 and `.research/designeer-2026-10-03.md`
+  §3 #3; stage 4 item 5). This supersedes the 2026-09-14 ruling against ranking, whose own
+  revisit condition now holds: the fixed list grew from a few dozen short noun phrases to 127
+  commands that carry incidental matches.
+  - **Measured first.** `palette::tests::palette_scoring_on_the_real_commands` (ignored; `cargo
+    test -p slopty-ui --lib -- --ignored palette_scoring --nocapture`) runs every word of every
+    label, and its first three letters, through the real list. 140 queries match two lines or
+    more; ranking changes the first line of 55. Most of them now lead with the line that was
+    meant: `page` gives Page back, not Open last offered page; `copy` gives Copy last output,
+    not Save a copy…; `workspace` gives Workspace above, not Tile or workspace above; `select`
+    gives Select all text; `over` gives Overview; and `start` gives Start a project here, not
+    Move column to the start. A few go the other way: `down` leads with Download… over Move
+    workspace down, and `fil` with Filter the navigator over Open file…. Neither is wrong, and
+    the next letter settles both.
+  - **Ranking.** The score is the whole label (4), its start (3), every word at a word's start
+    (2), inside the label (1), or only in the line's context (0). A command run lately breaks a
+    tie, and after that the order the lines came in. Lines rank only within their section, so a
+    tile is never pushed under a command and a found file never rises over a tile. An empty
+    field keeps the brief list as it was. Matching is unchanged: whole words, any order, no
+    subsequences.
+  - **What matched shows.** The label draws its matched words in `text` over the rest in
+    `text_secondary` (`StyledText` highlights; nothing for a label whose lowercase changes its
+    byte length).
+  - **`>` asks for commands only**, as in VS Code and T3 Code. It never spells a path or asks
+    the worker for files.
+  - **Esc empties a field that holds text and closes only an empty one**, in the palette and
+    the window picker (interior.dev's rule), so a wrong query is taken back without
+    reopening.
+  - **↑↓ walk the navigator filter's tiles.** While the filter holds text, ↑ and ↓ mark the
+    next tile it left, round at the ends, as the focused tile's row is marked. ↩ goes to that
+    tile, or the first when nothing was walked. The keyboard stays in the field.
+  - Tests: `palette::tests::a_query_ranks_each_section_and_shows_what_it_matched`,
+    `workspace::tests::the_command_palette_runs_an_action_by_name`,
+    `workspace::tests::nav_rows::the_filter_keeps_the_rows_that_match`.
+
+- ✅ **The send button says what ↵ will do, ⌘↵ and ⌥↑ are keymap actions, and the meter opens a
+  panel** (2026-10-04, `.research/t3code-ui-2026-10-03.md` #6; stage 4 item 6).
+  - **The one solid names its press.** Stop while a turn runs and nothing is typed, as before.
+    Otherwise it is Update while a waiting message is being changed (a check), Send with no
+    turn under way (the up arrow), Steer into a turn where the agent takes a steer (the arrow
+    that turns in), or Queue after it where the agent only queues (the end of a list). The
+    glyph and the accessible name change together, and the hint says the name alone. The keys
+    stay in the palette.
+  - **"Queue message" (⌘↵) and "Edit the last queued message" (⌥↑) are keymap actions.** They
+    are bound in the thread composer's own key context (`ThreadComposer > Input`), so the old
+    face and a question's own field in the tray keep their ⌘↵. Both are listed in the palette. ⌥↑
+    takes the last waiting message that can still change into the composer, as its pencil
+    does, and does nothing when none can.
+  - **A press on the meter opens its panel in the tray**, where the background panel opens.
+    It shows the context, each of the plan's windows with when it resets (said for today,
+    `figures::stamp`), and what the session cost ("$1.24 this session", rounded up to a
+    cent). Where the agent compacts through Slopty (`Cap::COMPACT` and no `/compact` of its
+    own) it offers "Compact context", which sends `Intent::Compact`. Compacting stays the
+    person's press. The hint keeps the same lines for a glance.
+  - Sending a waiting message now and reordering the queue wait on lane A's `Promote` and
+    `Reorder` intents. Until their buttons land, the thread names their refusals ("Couldn't
+    send the message now", "Couldn't move the message").
+  - Tests in `conversation::thread::tests::composing`: `the_send_button_says_what_return_will_do`,
+    `command_return_queues_and_option_up_edits_the_last_waiting`,
+    `the_meter_opens_its_panel_and_compacts_on_a_press`.
+
+- ✅ **A failure stays until dismissed, no notice lapses unseen, and a thread's notice shows
+  three lines** (2026-10-04, `.research/t3code-ui-2026-10-03.md` #7 and
+  `.research/designeer-2026-10-03.md` §3 #2; stage 4 item 7).
+  - **Failures are their own kind.** `show_failure` puts up a notice with the failed mark that
+    has no timer. It offers Copy (its words to the clipboard) and Dismiss. Past the two shown,
+    the oldest word goes before any failure does. Settings that did not parse, a save, an
+    upload, a drop or a drag that did not land, a port not forwarded, a terminal's refusal, a
+    machine not forgotten and a project verb's error are failures now. Words that only inform
+    stay plain notices.
+  - **A notice's time waits while the app is not in front**, as it waits under the pointer:
+    one whose time comes then is held, and once the app is back it gets `SAY_AFTER_HOVER`
+    (2 s) more. On this Mac the person is often in another app over Parsec while agents work,
+    and "Undo close", a pointing or an offered page lapsed unseen.
+  - **A thread's notice shows up to three lines**, then "Show all", where it showed only its
+    first line (an agent's error often says what to do on its second).
+  - **A usage limit says when it resets** where the agent says (`AgentStatus::Failed` with
+    `until_ms`): "Hit its usage limit · resets 14:05".
+  - Tests: `workspace::tests::toasts::a_notice_waits_while_the_app_is_not_in_front`,
+    `a_failure_stays_until_dismissed_and_copies`,
+    `conversation::thread::view::notes::tests::a_notice_shows_three_lines_and_says_when_there_is_more`,
+    `workspace::agents::tests::a_failed_turn_says_why_and_when_a_limit_resets`.
+
+- ✅ **A surface that comes and goes is one reversible value, and a hint answers the keyboard**
+  (2026-10-04, lane F's gpui-fast #23 and #24, pinned at cc85e69; the ranked list's "waiting on
+  lane F" items).
+  - **`kit::Presence`.** A menu, the inbox, a status-bar popover, About, the window picker and
+    the settings dialog are drawn through one `ValueTransition` each (gpui-fast's port of
+    gpui-ce's, Apache), kept under the surface's id while it is drawn. Open, it eases toward
+    whole over `Pace::Fade` (with the menus' and the inbox's 4 pt drop); closed, toward clear
+    over `Pace::Exit`. Opened again on its way out it turns back from where it stands, in the
+    time the way back takes, where the one-shot fades it replaces started over from clear.
+    While it leaves, a blocker over it holds the clicks within its bounds, as before. The
+    owners still keep the closed surface for `kit::exit_time` and drop it then. `kit::fade_out`
+    is gone. The palette keeps its own exit, since the phone's sheet leaves on the drawer's
+    curve. Test: `kit::tests::a_surface_opened_on_its_way_out_turns_back`.
+  - **Hints show for the keyboard.** gpui-fast shows an element's tooltip while it is
+    focus-visible, so every kit control on the keyboard ring (`a11y::tab_stop`, which gives it
+    a focus handle) names itself when Tab reaches it, on the warm group's wait
+    (`kit::hint_timing` composes unchanged), and Esc hides the hint before any binding, the
+    focus staying. Test: `kit::tests::a_hint_shows_for_the_keyboard_and_esc_hides_it_first`.

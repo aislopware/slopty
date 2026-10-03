@@ -652,7 +652,8 @@ impl WorkspaceView {
     }
 
     /// A menu's panel around its rows, fading in as it drops a base unit from its button, and
-    /// fading out where it is once `leaving`.
+    /// back up and out once `leaving`, turning back if it is opened again on its way out
+    /// ([`kit::Presence`]).
     fn menu_panel(
         &self,
         rows: Vec<gpui::AnyElement>,
@@ -675,13 +676,12 @@ impl WorkspaceView {
             .font_family(theme.typography.ui_family.clone())
             .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
             .children(rows);
-        if leaving {
-            return kit::fade_out(panel.debug_selector(|| "menu-leaving".to_owned()), "menu-out");
-        }
-        if self.menu_keyed || !self.chrome_moves(cx) {
-            return panel.into_any_element();
-        }
-        let id = SharedString::from(format!("menu-in-{which:?}"));
-        kit::slide_fade(panel, id, -spacing.xs, kit::Pace::Fade, cx)
+        let panel =
+            if leaving { panel.debug_selector(|| "menu-leaving".to_owned()) } else { panel };
+        let id = SharedString::from(format!("menu-presence-{which:?}"));
+        kit::presence(panel, id, !leaving)
+            .arrives_whole(self.menu_keyed || !self.chrome_moves(cx))
+            .travel(-spacing.xs)
+            .into_any_element()
     }
 }

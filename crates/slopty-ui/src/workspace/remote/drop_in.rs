@@ -241,7 +241,7 @@ impl WorkspaceView {
             })
             .collect();
         if !dropped.failed.is_empty() {
-            self.show_notice(format!("Not sent: {}", dropped.failed.join("; ")), cx);
+            self.show_failure(format!("Not sent: {}", dropped.failed.join("; ")), cx);
         }
         let Some(screen) = self.screen(tile.item).cloned() else {
             Self::discard_landing(dropped.landing.clone(), cx);
@@ -274,7 +274,7 @@ impl WorkspaceView {
             }
             Outcome::Failed(why) => {
                 self.stop_drag_uploads(drag, cx);
-                self.show_notice(format!("The drop did not land: {why}"), cx);
+                self.show_failure(format!("The drop did not land: {why}"), cx);
             }
         }
     }

@@ -306,6 +306,10 @@ ListItem │ Conversation density │ ⌃O
 Button │ Keys for Conversation density │ ⌃O
 ListItem │ Stop the agent │ ⎋
 Button │ Keys for Stop the agent │ ⎋
+ListItem │ Queue message │ ⌘↩
+Button │ Keys for Queue message │ ⌘↩
+ListItem │ Edit the last queued message │ ⌥↑
+Button │ Keys for Edit the last queued message │ ⌥↑
 ListItem │ Previous prompt │ ⌘↑
 Button │ Keys for Previous prompt │ ⌘↑
 ListItem │ Next prompt │ ⌘↓

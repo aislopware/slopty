@@ -1062,7 +1062,7 @@ impl WorkspaceView {
         cx.spawn(async move |this, cx| {
             let outcome = caller.call(verb).await;
             this.update(cx, |this, cx| match outcome {
-                Outcome::Error { message, .. } => this.show_notice(message, cx),
+                Outcome::Error { message, .. } => this.show_failure(message, cx),
                 _ => then(this, cx),
             })
         })

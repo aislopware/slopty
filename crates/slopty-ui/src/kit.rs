@@ -178,28 +178,94 @@ pub fn eased<E: gpui::StatefulInteractiveElement>(el: E) -> E {
     el.transition(gpui::StateTransition::new(m.unhover).enter(m.hover).with_easing(ease_out()))
 }
 
+/// A surface that comes and goes (a menu, a popover, a dialog), drawn as present as it is.
+///
+/// One value per surface, eased toward whole over [`Pace::Fade`] while it is open and toward
+/// clear over [`Pace::Exit`] once it is closed.
+///
+/// The value is gpui-fast's `ValueTransition`, kept under `id` while the surface is drawn, so a
+/// surface opened again while it leaves turns back from where it stands, in the time the way
+/// back takes. Its owner keeps drawing it for [`exit_time`] after closing it, under the same
+/// `id` and parents it was open under. While it leaves it takes no pointer: a blocker over it
+/// holds the clicks within its own bounds. Under Reduce Motion it comes and goes at once.
+pub struct Presence<E> {
+    id: gpui::ElementId,
+    open: bool,
+    enters: bool,
+    travel: f32,
+    el: E,
+}
+
+impl<E> std::fmt::Debug for Presence<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Presence")
+            .field("id", &self.id)
+            .field("open", &self.open)
+            .field("enters", &self.enters)
+            .field("travel", &self.travel)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `el` as present as its owner says: open, or leaving ([`Presence`]).
+pub fn presence<E>(el: E, id: impl Into<gpui::ElementId>, open: bool) -> Presence<E> {
+    Presence { id: id.into(), open, enters: true, travel: 0.0, el }
+}
+
+impl<E> Presence<E> {
+    /// Arriving whole in its first frame, as what a key summons does; it still leaves, and
+    /// turns back, eased.
+    #[must_use]
+    pub const fn arrives_whole(mut self, whole: bool) -> Self {
+        self.enters = !whole;
+        self
+    }
+
+    /// Travelling `from` points below its place (above, when negative) on its way in, and back
+    /// on its way out, beside its opacity. It is moved as a `relative` element by its `top`, so
+    /// nothing round it shifts.
+    #[must_use]
+    pub const fn travel(mut self, from: f32) -> Self {
+        self.travel = from;
+        self
+    }
+}
+
+impl<E: IntoElement + Styled + gpui::ParentElement + 'static> IntoElement for Presence<E> {
+    type Element = gpui::ViewElement<Self>;
+
+    #[track_caller]
+    fn into_element(self) -> Self::Element {
+        gpui::ViewElement::new(self)
+    }
+}
+
+impl<E: IntoElement + Styled + gpui::ParentElement + 'static> gpui::RenderOnce for Presence<E> {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let pace = if self.open { Pace::Fade } else { Pace::Exit };
+        let curve = pace.curve();
+        let start = if self.enters { 0.0_f32 } else { 1.0 };
+        let value = window
+            .use_keyed_transition(self.id, cx, pace.duration(), move |_, _| start)
+            .with_easing(move |t| curve.at(t));
+        value.set_goal(if self.open { 1.0 } else { 0.0 }, cx);
+        let shown = value.evaluate(window, cx);
+        let travel = self.travel;
+        self.el
+            .opacity(shown)
+            .when(travel != 0.0, |el| el.relative().top(px(travel * (1.0 - shown))))
+            .when(!self.open, |el| el.child(div().absolute().inset_0().occlude()))
+    }
+}
+
 /// How long a dismissed overlay stays drawn while it leaves.
 ///
 /// [`Pace::Exit`], or `None` under Reduce Motion, where it goes on the frame it is dismissed.
 /// Its owner keeps drawing it
-/// through [`fade_out`] for this long and then drops it; the keyboard has already gone back.
+/// through [`Presence`] for this long and then drops it; the keyboard has already gone back.
 #[must_use]
 pub fn exit_time(cx: &App) -> Option<std::time::Duration> {
     motion(cx).then(|| Pace::Exit.duration())
-}
-
-/// `el` leaving: fading out where it is over [`Pace::Exit`], with no travel.
-///
-/// It fades the first time it is drawn under `id`. It takes no pointer while it goes: a blocker
-/// over it holds the clicks within its own bounds, so a row in a fading menu never runs and nothing
-/// under it is hit by a press aimed at the menu. Its owner draws it only for [`exit_time`].
-pub fn fade_out<E>(el: E, id: impl Into<gpui::ElementId>) -> gpui::AnyElement
-where
-    E: IntoElement + Styled + gpui::ParentElement + 'static,
-{
-    el.child(div().absolute().inset_0().occlude())
-        .with_animation(id, Pace::Exit.animation(), |el, t| el.opacity(1.0 - t))
-        .into_any_element()
 }
 
 /// How far a gpui-kit field at the medium size sets its text in from its edge, in points,
@@ -429,7 +495,7 @@ fn drop_shadow(theme: &Theme, layer: slopty_theme::Shadow) -> BoxShadow {
         color: hsla_alpha(theme.elevation.shade, layer.alpha),
         offset: point(px(0.0), px(layer.y)),
         blur_radius: px(layer.blur),
-        spread_radius: px(0.0),
+        spread_radius: px(layer.spread),
         inset: false,
     }
 }
@@ -496,6 +562,39 @@ pub fn card_part(theme: &Theme, first: bool, last: bool) -> Div {
                 .border_color(hsla(theme.surfaces.border))
         })
         .shadow(rest_layers(theme, border, first, last))
+}
+
+/// `el` sunk into its plane ([`slopty_theme::Sunk`]).
+///
+/// Shade is held inside its top edge and, in dark, a lip of light inside its bottom, a point
+/// deep past a border `border` wide (0 for none). What is raised catches light at its top
+/// edge; what is sunk holds shade there. Fields, the segmented tracks and meters wear it.
+pub fn sunk<E: Styled>(el: E, theme: &Theme, border: f32) -> E {
+    let sunk = theme.elevation.sunk;
+    let depth = border + RIM_DEPTH;
+    let inside = |color: Hsla, y: f32| BoxShadow {
+        color,
+        offset: point(px(0.0), px(y)),
+        blur_radius: px(0.0),
+        spread_radius: px(0.0),
+        inset: true,
+    };
+    let shade = inside(hsla_alpha(theme.elevation.shade, sunk.shade), depth);
+    let lip = sunk.lip.map(|a| inside(hsla_alpha(Rgb::hex(0x00ff_ffff), a), -depth));
+    el.shadow(std::iter::once(shade).chain(lip).collect())
+}
+
+/// A segmented control's track: the hover wash, sunk, its options held [`TRACK_PAD`] in, at
+/// `radii.sm`. The thumb ([`paint_thumb`]) rides in it.
+#[must_use]
+pub fn track(theme: &Theme) -> Div {
+    sunk(div(), theme, 0.0)
+        .relative()
+        .flex()
+        .items_center()
+        .p(px(TRACK_PAD))
+        .rounded(px(theme.radii.sm))
+        .bg(hsla(theme.surfaces.hover))
 }
 
 /// How far a segmented control's track holds its options in from its edge.
@@ -1271,6 +1370,7 @@ impl Render for Hint {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let hint = elevate(div(), theme)
+            .debug_selector(|| "hint".to_owned())
             .flex()
             .items_center()
             .gap(px(theme.spacing.sm))
@@ -2211,6 +2311,8 @@ mod tests {
             let (drop, edge): (Vec<_>, Vec<_>) = layers.iter().partition(|l| !l.inset);
             assert!(drop.iter().all(|l| l.offset.y > px(0.0)));
             assert!(drop.first().map(|l| l.blur_radius) < drop.last().map(|l| l.blur_radius));
+            let soft = drop.last().expect("a soft layer");
+            assert!(soft.spread_radius < px(0.0), "{variant:?}: the soft shade falls under");
             let white = hsla_alpha(Rgb::hex(0xff_ffff), alpha::EDGE);
             assert!(edge.iter().all(|l| l.color == white && l.offset.y > px(0.0)), "{edge:?}");
             assert_eq!(edge.len(), usize::from(dark), "{variant:?}: the lit edge is dark's");
@@ -2253,6 +2355,25 @@ mod tests {
         }
         let theme = Theme { contrast: slopty_theme::Contrast::Increased, ..Theme::default() };
         assert!(card(&theme).style().border_widths.top.is_some(), "ringed at more contrast");
+    }
+
+    /// What is sunk holds shade inside its top edge, a point past any border, and in dark a
+    /// lip of light inside its bottom; the segmented track is sunk.
+    #[test]
+    fn a_field_sinks_where_a_card_rises() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let dark = variant == Variant::Dark;
+            let layers = sunk(div(), &theme, 1.0).style().box_shadow.clone().unwrap_or_default();
+            assert!(layers.iter().all(|l| l.inset), "{variant:?}: all inside");
+            let (shade, lip): (Vec<_>, Vec<_>) = layers.iter().partition(|l| l.offset.y > px(0.0));
+            let [shade] = shade.as_slice() else { panic!("{variant:?}: one shade, {layers:?}") };
+            assert_eq!(shade.offset.y, px(1.0 + RIM_DEPTH), "{variant:?}: past the border");
+            assert!((shade.color.a - theme.elevation.sunk.shade).abs() < 1e-3, "{variant:?}");
+            assert_eq!(lip.len(), usize::from(dark), "{variant:?}: the lip is dark's");
+            let tracked = track(&theme).style().box_shadow.clone().unwrap_or_default();
+            assert_eq!(tracked.len(), 1 + usize::from(dark), "{variant:?}: the track is sunk");
+        }
     }
 
     /// The primary solid has its finish: a point inside its lit edge (the top on light's dark
@@ -2344,8 +2465,7 @@ mod tests {
     #[test]
     fn a_chrome_border_is_kit_hair() {
         // Call sites whose owners move them onto `kit::hair` in their next change.
-        const AWAITING: [&str; 3] =
-            ["slopty-ui/src/project/", "slopty-app/src/lib.rs", "slopty-app/src/ssh.rs"];
+        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
         let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
             .flat_map(chrome_lines)
@@ -2358,6 +2478,119 @@ mod tests {
             })
             .collect();
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A control on the keyboard ring shows its hint once Tab brings the focus to it, on the
+    /// warm group's wait as a pointer's does, and Esc hides the hint first, the focus staying.
+    #[gpui::test]
+    fn a_hint_shows_for_the_keyboard_and_esc_hides_it_first(cx: &mut TestAppContext) {
+        struct Control;
+        impl Render for Control {
+            fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let theme = Theme::default();
+                let s = theme.surfaces;
+                let hinted = Rc::new(theme);
+                div().size_full().p(px(40.0)).child(crate::a11y::tab_stop(
+                    div()
+                        .id("control")
+                        .debug_selector(|| "control".to_owned())
+                        .size(px(24.0))
+                        .map(hint_timing)
+                        .tooltip(move |_w, cx| {
+                            gpui::AppContext::new(cx, |_| {
+                                Hint::new("Fork from here", "", Rc::clone(&hinted))
+                            })
+                            .into()
+                        }),
+                    s.accent,
+                ))
+            }
+        }
+        cx.update(gpui_kit::init);
+        let (_view, cx) = cx.add_window_view(|_, _| Control);
+        cx.simulate_resize(gpui::size(px(200.0), px(200.0)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            if window.focused(cx).is_none() {
+                window.focus_next(cx);
+            }
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(HINT_DELAY.saturating_mul(2));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("hint").is_some(), "Tab to it names it");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("hint").is_none(), "Esc hides the hint");
+        assert!(cx.update(|window, cx| window.focused(cx).is_some()), "and the focus stays");
+    }
+
+    /// A surface closed half way out and opened again turns back from where it stands rather
+    /// than starting over from clear, and one closed leaves over the exit's time.
+    #[gpui::test]
+    fn a_surface_opened_on_its_way_out_turns_back(cx: &mut TestAppContext) {
+        struct Surface {
+            open: bool,
+        }
+        impl Render for Surface {
+            fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let fill = gpui::rgb(0x0000_0000);
+                div().size_full().child(presence(
+                    div().id("surface").size(px(40.0)).bg(fill),
+                    "surface",
+                    self.open,
+                ))
+            }
+        }
+        /// The surface's opacity as the last frame painted it.
+        fn shown(cx: &mut gpui::VisualTestContext) -> f32 {
+            let lines = cx.update(|window, _| crate::retained::painted(window));
+            lines
+                .iter()
+                .find_map(|line| {
+                    let at = line.find("Quad")?;
+                    let rest = line.get(at..)?;
+                    let a = rest.find(" a: ")?;
+                    let digits: String = rest
+                        .get(a.saturating_add(4)..)?
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit() || *c == '.')
+                        .collect();
+                    digits.parse().ok()
+                })
+                .unwrap_or(0.0)
+        }
+        let (view, cx) = cx.add_window_view(|_, _| Surface { open: true });
+        cx.simulate_resize(gpui::size(px(100.0), px(100.0)));
+        cx.executor().advance_clock(Pace::Fade.duration().saturating_mul(2));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        assert!((shown(cx) - 1.0).abs() < 1e-3, "whole once in: {}", shown(cx));
+
+        view.update(cx, |v, cx| {
+            v.open = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Pace::Exit.duration().div_f32(2.0));
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        let halfway = shown(cx);
+        assert!(halfway > 0.0 && halfway < 1.0, "on its way out: {halfway}");
+
+        view.update(cx, |v, cx| {
+            v.open = true;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(Window::simulate_next_frame);
+        cx.run_until_parked();
+        assert!(
+            shown(cx) >= halfway - 1e-3,
+            "turned back from {halfway}, not from clear: {}",
+            shown(cx)
+        );
     }
 
     /// Every hint keeps the warm group's timing: GPUI builds it at once ([`hint_timing`]) and
@@ -2407,8 +2640,7 @@ mod tests {
     /// over the content with its rows' hover still showing.
     #[test]
     fn a_state_is_a_wash_over_its_plane() {
-        const AWAITING: [&str; 3] =
-            ["slopty-ui/src/project/", "slopty-app/src/lib.rs", "slopty-app/src/ssh.rs"];
+        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
         let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
             .flat_map(chrome_lines)
@@ -2424,7 +2656,7 @@ mod tests {
     /// the same sizes under second names, as a scale drifts.
     #[test]
     fn one_name_per_type_size() {
-        const AWAITING: [&str; 2] = ["slopty-ui/src/project/", "slopty-app/src/lib.rs"];
+        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
         let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
             .flat_map(chrome_lines)

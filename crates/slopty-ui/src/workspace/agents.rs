@@ -104,8 +104,13 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
         AgentStatus::Done => {
             detail.map_or_else(|| "Turn finished".to_owned(), |d| format!("Done: {d}"))
         }
-        AgentStatus::Failed { error, .. } if error == AgentStatus::RATE_LIMIT => {
-            "Hit its usage limit".to_owned()
+        AgentStatus::Failed { error, until_ms } if error == AgentStatus::RATE_LIMIT => {
+            let resets = until_ms
+                .and_then(|at| crate::conversation::figures::stamp(at, slopty_core::WallMs::now()));
+            resets.map_or_else(
+                || "Hit its usage limit".to_owned(),
+                |at| format!("Hit its usage limit \u{b7} resets {at}"),
+            )
         }
         AgentStatus::Failed { .. } => {
             detail.map_or_else(|| "Turn failed".to_owned(), |d| format!("Failed: {d}"))
@@ -935,6 +940,28 @@ mod tests {
             assert_eq!(Status::of_agent(&agent), Some(Status::Running));
             assert!(!needs_human(&agent) && agent_ask_text(&agent).is_none());
         }
+    }
+
+    /// A turn that hit a usage limit says so, and when the limit resets where that is known;
+    /// another failure says what failed. The word stays short either way.
+    #[test]
+    fn a_failed_turn_says_why_and_when_a_limit_resets() {
+        let failed = |error: &str, until_ms| {
+            asking(AgentStatus::Failed { error: error.to_owned(), until_ms }, None)
+        };
+        let limited = failed(AgentStatus::RATE_LIMIT, None);
+        assert_eq!(agent_status_text(&limited), "Hit its usage limit");
+        assert_eq!(agent_status_word(&limited), "Limit reached");
+        let at = WallMs::now();
+        let clock = crate::conversation::figures::stamp(at, at).unwrap_or_default();
+        let resets = failed(AgentStatus::RATE_LIMIT, Some(at));
+        assert_eq!(
+            agent_status_text(&resets),
+            format!("Hit its usage limit \u{b7} resets {clock}")
+        );
+        let other = failed("overloaded", None);
+        assert_eq!(agent_status_text(&other), "Turn failed");
+        assert_eq!(agent_status_word(&other), "Failed");
     }
 
     /// The word for a state never carries the detail, so a chip, a pill and a row read one

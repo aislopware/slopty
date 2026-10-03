@@ -292,25 +292,21 @@ impl WorkspaceView {
                     .child(kit::separator(theme))
                     .child(build),
             );
-        if leaving {
-            // The dim goes with it; for its moment it still holds the pointer, as it did.
-            let panel = panel.debug_selector(|| "about-leaving".to_owned());
-            return Some(kit::fade_out(kit::backdrop(theme, window).child(panel), "about-out"));
-        }
-        let panel = kit::fade_in(panel, "about-in", cx);
-        Some(
-            kit::backdrop(theme, window)
-                .id("about-backdrop")
-                .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _ev, window, cx| {
-                        this.close_about(window, cx);
-                        cx.stop_propagation();
-                    }),
-                )
-                .child(panel)
-                .into_any_element(),
-        )
+        // The dim comes and goes with it ([`kit::Presence`]); leaving, for its moment it still
+        // holds the pointer, as it did.
+        let root = kit::backdrop(theme, window).id("about-backdrop").occlude();
+        let root = if leaving {
+            root.child(panel.debug_selector(|| "about-leaving".to_owned()))
+        } else {
+            root.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| {
+                    this.close_about(window, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(panel)
+        };
+        Some(kit::presence(root, "about-presence", !leaving).into_any_element())
     }
 }

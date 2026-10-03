@@ -48,9 +48,15 @@ pub(super) fn meter_words(meters: &slopty_proto::thread::Meters) -> Vec<String> 
         Some(window) => format!("Context {} of {}", share(u), super::tokens(window)),
         None => format!("Context {}", share(u)),
     });
-    let limits = meters.limits.iter().map(|l| {
+    let now = slopty_core::WallMs::now();
+    let limits = meters.limits.iter().map(move |l| {
         let used = f64::from(l.used_bp) / 100.0;
-        format!("{} {used:.0}%", sentence(&l.name))
+        let resets = l
+            .resets_ms
+            .and_then(|at| crate::conversation::figures::stamp(at, now))
+            .map(|at| format!(" \u{b7} resets {at}"))
+            .unwrap_or_default();
+        format!("{} {used:.0}%{resets}", sentence(&l.name))
     });
     context.into_iter().chain(limits).collect()
 }
@@ -469,7 +475,7 @@ impl ThreadView {
     }
 
     /// How full the context is, a ring and its share, with the plan's rate windows in its
-    /// hint: quiet until asked.
+    /// hint: quiet until asked. A press opens the meter's panel in the tray.
     fn meter(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let theme = &self.theme;
         let s = theme.surfaces;
@@ -481,39 +487,60 @@ impl ThreadView {
         let hint = meter_words(meters).join("\n");
         let hint_theme = theme.clone();
         Some(
-            self.chip("thread-meter", hint.replace('\n', ", "))
-                .role(Role::Label)
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .children(used.map(|u| {
-                    crate::conversation::view::context_ring(
-                        theme,
-                        u,
-                        theme.typography.small() * self.zoom,
-                    )
-                }))
-                .children(used.map(|u| SharedString::from(share(u))))
-                .map(kit::hint_timing)
-                .tooltip(move |_window, cx| {
-                    let theme = std::rc::Rc::new(hint_theme.clone());
-                    cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
-                })
-                .into_any_element(),
+            crate::a11y::tab_stop(
+                self.chip("thread-meter", hint.replace('\n', ", "))
+                    .role(Role::Button)
+                    .aria_expanded(self.meter_open)
+                    .cursor_pointer()
+                    .when(self.meter_open, |el| el.bg(hsla(s.hover)))
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                    .on_click(cx.listener(|this, _ev, _w, cx| {
+                        this.meter_open = !this.meter_open;
+                        cx.notify();
+                    }))
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .children(used.map(|u| {
+                        crate::conversation::view::context_ring(
+                            theme,
+                            u,
+                            theme.typography.small() * self.zoom,
+                        )
+                    }))
+                    .children(used.map(|u| SharedString::from(share(u))))
+                    .map(kit::hint_timing)
+                    .tooltip(move |_window, cx| {
+                        let theme = std::rc::Rc::new(hint_theme.clone());
+                        cx.new(|_| kit::Hint::new(hint.clone(), "", theme)).into()
+                    }),
+                s.accent,
+            )
+            .into_any_element(),
         )
     }
 
-    /// The one solid: send what is typed, or stop the turn while one runs and nothing is.
+    /// The one solid: stop the turn while one runs and nothing is typed; otherwise what ↵ will
+    /// do with the draft, in its glyph and its name: Update a waiting message being changed,
+    /// Steer into the turn under way, Queue after it (an agent that takes no steer), or Send.
     fn send_button(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
         let stopping = self.hub.read(cx).threads().stopping(self.thread);
         let empty = self.composer.read(cx).value().trim().is_empty();
-        let stop = self.working(cx) && empty && !stopping && !self.composing.editing();
+        let working = self.working(cx);
+        let stop = working && empty && !stopping && !self.composing.editing();
         let (id, icon, label) = if stop {
             ("thread-stop", IconName::Square, "Stop")
-        } else {
+        } else if self.composing.editing() {
+            ("thread-send", IconName::Check, "Update")
+        } else if !working {
             ("thread-send", IconName::ArrowUp, "Send")
+        } else if self.send_now(cx) == Delivery::Queue {
+            ("thread-send", IconName::Clock, "Queue")
+        } else {
+            ("thread-send", IconName::ArrowRight, "Steer")
         };
+        let hint_theme = std::rc::Rc::new(theme.clone());
         let el = div()
             .id(id)
             .debug_selector(move || id.to_owned())
@@ -529,7 +556,11 @@ impl ThreadView {
             .child(
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.solid_ink))
                     .size(self.z(theme.typography.icon())),
-            );
+            )
+            .map(kit::hint_timing)
+            .tooltip(move |_window, cx| {
+                cx.new(|_| kit::Hint::new(label, "", std::rc::Rc::clone(&hint_theme))).into()
+            });
         let el =
             kit::solid_pressable(el, theme).on_click(cx.listener(move |this, _ev, window, cx| {
                 if stop {
@@ -579,6 +610,7 @@ impl ThreadView {
         div()
             .id("thread-composer")
             .debug_selector(|| "thread-composer".to_owned())
+            .key_context(super::COMPOSER_CTX)
             .w_full()
             .flex()
             .flex_col()

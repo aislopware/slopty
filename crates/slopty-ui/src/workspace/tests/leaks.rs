@@ -210,7 +210,7 @@ fn the_overlays_and_the_overview_leave_nothing(cx: &mut TestAppContext) {
         assert!(view.read_with(cx, |v, _| v.palette.is_some()), "the palette is up");
         cx.simulate_input("term");
         cx.run_until_parked();
-        cx.simulate_keystrokes("escape");
+        cx.simulate_keystrokes("escape escape");
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.palette.is_none()), "Esc dismissed it");
         cx.simulate_keystrokes("cmd-alt-o");

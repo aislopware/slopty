@@ -487,12 +487,12 @@ impl Render for SettingsEditor {
         let layer = crate::palette::Layer::Dialog.priority();
         if self.leaving {
             let dialog = dialog.debug_selector(|| "settings-leaving".to_owned());
-            let root = crate::kit::backdrop(&theme, window).child(dialog);
-            return gpui::deferred(crate::kit::fade_out(root, "settings-out")).with_priority(layer);
+            let root = crate::kit::backdrop(&theme, window).id("settings-backdrop").child(dialog);
+            let root = crate::kit::presence(root, "settings", false);
+            return gpui::deferred(root).with_priority(layer);
         }
         // The keyboard and the palette summon it, so it fades in where it stands, as the
-        // palette does, with no travel.
-        let dialog = crate::kit::fade_in(dialog, "settings-in", cx);
+        // palette does, with no travel, and leaves the same way ([`crate::kit::Presence`]).
         let root = crate::kit::backdrop(&theme, window)
             .id("settings-backdrop")
             .key_context(CTX)
@@ -524,6 +524,8 @@ impl Render for SettingsEditor {
                 }),
             )
             .child(dialog);
+        let root =
+            crate::kit::presence(root, "settings", true).arrives_whole(!crate::kit::motion(cx));
         gpui::deferred(root).with_priority(layer)
     }
 }

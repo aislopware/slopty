@@ -73,7 +73,7 @@ const PENDING_FOR: Duration = Duration::from_secs(15);
 pub const SPLIT_FROM: f32 = 960.0;
 
 /// How long a copy button says it copied.
-const COPIED_FOR: Duration = Duration::from_millis(1_500);
+pub(crate) const COPIED_FOR: Duration = Duration::from_millis(1_500);
 
 /// What the list shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

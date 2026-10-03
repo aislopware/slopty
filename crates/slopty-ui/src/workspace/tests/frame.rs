@@ -536,7 +536,7 @@ fn frames_in_a_second(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) 
 
 /// A working agent in view turns its mark twelve steps a second, and the workspace draws
 /// twelve frames a second for it, not one per display refresh. With nothing at work it draws
-/// none, and under Reduce Motion the mark stands still and draws none either.
+/// none, and under Reduce Motion the mark stands upright and breathes, five frames a second.
 #[gpui::test]
 fn a_working_mark_draws_twelve_frames_a_second_and_none_at_rest(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -561,7 +561,8 @@ fn a_working_mark_draws_twelve_frames_a_second_and_none_at_rest(cx: &mut TestApp
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     view.update_in(cx, |v, _w, cx| v.agent_event(working, cx));
     cx.run_until_parked();
-    assert_eq!(frames_in_a_second(&view, cx), 0, "Reduce Motion: a still mark");
+    let breathing = frames_in_a_second(&view, cx);
+    assert!((4..=6).contains(&breathing), "Reduce Motion: {breathing} breaths in a second");
 }
 
 /// The app holding the workspace in less than its window, as an iPad's Split View does in the

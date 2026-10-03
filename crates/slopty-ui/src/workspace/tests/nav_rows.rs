@@ -56,7 +56,7 @@ fn a_key_types_into_the_navigators_filter(cx: &mut TestAppContext) {
 
 /// The filter keeps the tiles whose title, second line or project has what was typed, and every
 /// tile of a worker whose name has it. A fold hides nothing while it filters; with nothing left
-/// it says so; ↩ goes to the first tile listed, and Esc empties it.
+/// it says so; ↩ goes to the first tile listed, or the one ↑↓ walked to, and Esc empties it.
 #[gpui::test]
 fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -95,6 +95,22 @@ fn the_filter_keeps_the_rows_that_match(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(site), "↩ goes to the first tile listed");
+
+    click(cx, "nav-filter-clear");
+    filter(cx, "studio");
+    let listed = view.read_with(cx, |v, _| v.navigator_tiles());
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    cx.simulate_keystrokes("down down");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.navigator_filter().to_owned()), "studio", "kept");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), listed.get(1).copied(), "↓↓ walked to the second");
+    click(cx, "nav-filter-clear");
+    filter(cx, "studio");
+    cx.simulate_keystrokes("up enter");
+    cx.run_until_parked();
+    assert_eq!(focused(&view, cx), listed.last().copied(), "↑ starts from the end");
 }
 
 /// A shell no client views still shows its program's progress from its summary: the figure at

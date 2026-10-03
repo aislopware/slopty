@@ -2914,11 +2914,11 @@ pub(super) const fn title_ink(theme: &Theme, focused: bool) -> slopty_theme::Rgb
 /// The line along the top of the focused tile's header (or its column's shown tab) while
 /// several tiles are in view: a title's tone alone is too faint a sign across a strip of
 /// columns, so a line in the text's tone says which one has the keyboard. It is a marker, not a
-/// rule: `stroke::MARK` (1.5 pt) at `alpha::FOCUS`, inset by `radii.sm` at both ends with round
+/// rule: `stroke::MARK` (1.5 pt) in `Surfaces::focus` (the text set back to `alpha::FOCUS`, or
+/// less where the content needs it to be seen), inset by `radii.sm` at both ends with round
 /// caps, and whole under Increase Contrast. No ring, no frame, no dimming of the others; a lone
 /// tile and the overview draw none.
 fn focus_line(theme: &Theme, k: f32) -> Div {
-    let strength = theme.set_back(slopty_theme::alpha::FOCUS);
     let inset = px(theme.radii.sm * k);
     div()
         .debug_selector(|| "focus-line".to_owned())
@@ -2928,5 +2928,5 @@ fn focus_line(theme: &Theme, k: f32) -> Div {
         .right(inset)
         .h(px(slopty_theme::stroke::MARK * k))
         .rounded(px(theme.radii.full))
-        .bg(crate::colors::hsla_alpha(theme.surfaces.text, strength))
+        .bg(hsla(theme.surfaces.focus))
 }

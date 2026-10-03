@@ -22,6 +22,7 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Article │ Let me run it.
+Button │ Copy message
 Button │ Preparing Bash
 MultilineTextInput │ Message (focused)
 Button │ Attach files

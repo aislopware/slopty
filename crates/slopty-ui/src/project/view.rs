@@ -295,6 +295,8 @@ pub struct ProjectView {
     focus: FocusHandle,
     scroll: ScrollHandle,
     plate: Plate,
+    /// The lenses' segmented thumb, sliding to the lens shown.
+    lens_plate: Plate,
     /// Moves the timeline's ages on once a minute while the timeline shows, and asks for the
     /// workers' news while the machines lens does; for the lens it was started for.
     tick: Option<(Lens, Task<()>)>,
@@ -347,6 +349,7 @@ impl ProjectView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             plate: Plate::default(),
+            lens_plate: Plate::default(),
             tick: None,
             delete_asked: None,
             composer: None,
@@ -748,17 +751,18 @@ impl ProjectView {
             .rounded(self.z(theme.radii.sm))
             .overflow_hidden()
             .whitespace_nowrap()
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
             .text_color(hsla(tone))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+            .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
             .child(
                 icon(theme, glyph, IconSize::Inline, hsla(tone))
-                    .size(self.z(theme.typography.meta())),
+                    .size(self.z(theme.typography.small())),
             )
             .child(
                 div().min_w_0().overflow_hidden().text_ellipsis().child(SharedString::from(short)),
             )
+            .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = Rc::clone(&hint_theme);
                 cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
@@ -947,7 +951,8 @@ pub(super) fn switch(
     let knob = 2.0_f32.mul_add(-sp.xxs, sp.lg);
     let width = sp.xl + sp.xs;
     let travel = 2.0_f32.mul_add(-sp.xxs, width - knob);
-    let (track, ink) = if on { (s.solid, s.solid_ink) } else { (s.overlay, s.text_secondary) };
+    let (track, ink) =
+        if on { (hsla(s.solid), s.solid_ink) } else { (hsla(s.selected), s.text_secondary) };
     let el = div()
         .id(id)
         .debug_selector(move || id.to_owned())
@@ -965,7 +970,7 @@ pub(super) fn switch(
         .items_center()
         .px(z(sp.xxs))
         .rounded_full()
-        .bg(hsla(track))
+        .bg(track)
         .cursor_pointer()
         .child(
             div()
@@ -1047,7 +1052,7 @@ impl ProjectView {
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .flex_none()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
                 .child(SharedString::from(text))
         };
@@ -1135,7 +1140,7 @@ impl ProjectView {
             .overflow_hidden()
             .whitespace_nowrap()
             .text_ellipsis()
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_muted))
             .child(SharedString::from(place));
         div()
@@ -1158,8 +1163,9 @@ impl ProjectView {
         let mut row = div().flex_none().flex().items_center().gap(self.z(theme.spacing.xs));
         for (ix, readout) in readouts.enumerate() {
             if ix > 0 {
-                row = row
-                    .child(crate::kit::separator(theme).text_size(self.z(theme.typography.meta())));
+                row = row.child(
+                    crate::kit::separator(theme).text_size(self.z(theme.typography.small())),
+                );
             }
             row = row.child(readout);
         }
@@ -1182,11 +1188,11 @@ impl ProjectView {
                 .role(Role::Label)
                 .aria_label(SharedString::from(label))
                 .flex_none()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(tone))
                 .child(SharedString::from(text))
                 .when_some(hint, |el, hint| {
-                    el.tooltip(move |_window, cx| {
+                    el.map(crate::kit::hint_timing).tooltip(move |_window, cx| {
                         let theme = Rc::clone(&hint_theme);
                         cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
                     })
@@ -1270,7 +1276,7 @@ impl ProjectView {
                 .debug_selector(move || selector)
                 .role(Role::Button)
                 .aria_label(SharedString::from(format!("{} #{task}", action.label())))
-                // A secondary button at the meta size: on a card's raised fill a ghost's words
+                // A secondary button at the small size: on a card's fill a ghost's words
                 // read as plain text ("Merge" looked like a label), so it carries the
                 // hairline that makes it a button there, at the least height a click needs.
                 .flex_none()
@@ -1279,13 +1285,13 @@ impl ProjectView {
                 .h(self.z(theme.density.hit))
                 .px(self.z(sp.sm))
                 .rounded(self.z(theme.radii.sm))
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                 .cursor_pointer()
                 .child(action.label());
             let el = if control {
                 el.text_color(hsla(s.text_secondary))
-                    .hover(move |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+                    .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
             } else {
                 crate::kit::secondary(el, theme)
             };
@@ -1318,6 +1324,7 @@ impl ProjectView {
             .rounded(self.z(BAR_H))
             .overflow_hidden()
             .bg(hsla(theme.surfaces.border_subtle))
+            .map(crate::kit::hint_timing)
             .tooltip(move |_window, cx| {
                 let theme = Rc::clone(&hint_theme);
                 let legend = legend.clone();
@@ -1375,7 +1382,7 @@ impl ProjectView {
                 .flex_none()
                 .mb(self.z(theme.spacing.xs))
                 .pb(self.z(theme.spacing.xxs))
-                .bg(hsla(s.raised))
+                .bg(hsla(s.hover))
                 .child(self.heading("project-needs-heading", NEEDS_YOU, Some(s.warn)))
                 .children(spent)
                 .children(rows),
@@ -1440,7 +1447,7 @@ impl ProjectView {
                 .flex_none()
                 .mb(self.z(sp.xs))
                 .pb(self.z(sp.xs))
-                .bg(hsla(s.raised))
+                .bg(hsla(s.hover))
                 .child(head)
                 .children(lines)
                 .children(partial),
@@ -1519,13 +1526,13 @@ impl ProjectView {
             .flex_none()
             .px(self.z(sp.sm))
             .rounded(self.z(theme.radii.sm))
-            .border_1()
+            .border(crate::kit::hair(theme))
             .border_color(hsla(s.border))
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
             .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
             .text_color(hsla(s.text))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.overlay)))
+            .hover(move |el| el.bg(hsla(s.selected)))
             .child(START_ALL);
         let start_all = tab_stop(start_all, s.accent)
             .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::StartAll)));
@@ -1574,7 +1581,7 @@ impl ProjectView {
                 .flex_none()
                 .mb(self.z(sp.xs))
                 .pb(self.z(sp.xxs))
-                .bg(hsla(s.raised))
+                .bg(hsla(s.hover))
                 .child(head)
                 .children(rows),
         )
@@ -1596,7 +1603,7 @@ impl ProjectView {
             .child(text)
     }
 
-    /// The three lenses, as tabs on a plate of their own, and what the board holds.
+    /// The lenses as a segmented control, its thumb sliding to the lens shown.
     fn lenses(&self, cx: &Context<Self>) -> Stateful<Div> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -1610,18 +1617,16 @@ impl ProjectView {
                 .role(Role::Tab)
                 .aria_label(lens.title())
                 .aria_selected(on)
+                .h_full()
                 .flex()
                 .items_center()
                 .gap(self.z(sp.xs))
                 .px(self.z(sp.sm))
-                .py(self.z(sp.xxs))
-                .rounded(self.z(theme.radii.sm))
                 .cursor_pointer()
                 .text_size(self.z(theme.typography.small()))
-                .when(on, |el| el.bg(hsla(s.overlay)).text_color(hsla(s.text)))
+                .when(on, |el| self.lens_plate.mark(el.text_color(hsla(s.text)), id))
                 .when(!on, |el| {
-                    el.text_color(hsla(s.text_muted))
-                        .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)))
+                    el.text_color(hsla(s.text_muted)).hover(move |el| el.text_color(hsla(s.text)))
                 })
                 .child(
                     icon(
@@ -1636,23 +1641,28 @@ impl ProjectView {
             tab_stop(el, s.accent)
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.show(lens, cx)))
         };
-        div()
+        let track = crate::kit::track(theme)
             .id("project-lenses")
             .debug_selector(|| "project-lenses".to_owned())
             .role(Role::TabList)
             .aria_label("Lens")
             .flex_none()
-            .flex()
-            .items_center()
-            .gap(self.z(sp.xxs))
-            .px(self.z(sp.inset() - sp.sm))
-            .pb(self.z(sp.xs))
-            .border_b_1()
-            .border_color(hsla(s.border_subtle))
+            .h(self.z(theme.density.control))
+            .child(self.lens_plate.under_thumb(theme, true, None))
             .child(tab(Lens::Tree))
             .child(tab(Lens::Board))
             .child(tab(Lens::Timeline))
-            .child(tab(Lens::Machines))
+            .child(tab(Lens::Machines));
+        div()
+            .id("project-lens-bar")
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(self.z(sp.inset()))
+            .pb(self.z(sp.xs))
+            .border_b(crate::kit::hair(theme))
+            .border_color(hsla(s.border_subtle))
+            .child(track)
     }
 
     /// One node on two lines: its mark, its number and title with its state at the right, then
@@ -1735,7 +1745,7 @@ impl ProjectView {
             .children(word.map(|(word, tone)| {
                 div()
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(tone))
                     .child(word)
             }))
@@ -1755,7 +1765,7 @@ impl ProjectView {
                 .items_center()
                 .gap(self.z(sp.xs))
                 .min_w_0()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .children(text)
                 .children(place)
@@ -1779,7 +1789,7 @@ impl ProjectView {
             .rounded(self.z(theme.radii.sm))
             .cursor_pointer()
             .when(settled, |el| el.opacity(alpha::STRONG))
-            .hover(move |el| el.bg(hsla(if mark.is_some() { s.overlay } else { s.raised })))
+            .hover(move |el| el.bg(hsla(if mark.is_some() { s.selected } else { s.hover })))
             .children((depth > 0).then(|| self.guides(depth)))
             .child(
                 div()
@@ -1841,7 +1851,7 @@ impl ProjectView {
                 .flex()
                 .items_center()
                 .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .children(context)
                 .children(time),
         )
@@ -2058,7 +2068,7 @@ impl ProjectView {
                 .rounded(self.z(theme.radii.sm))
                 .cursor_pointer()
                 .text_color(hsla(s.text_muted))
-                .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.overlay)))
+                .hover(move |el| el.text_color(hsla(s.text)).bg(hsla(s.selected)))
                 .child(
                     icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.text_muted))
                         .size(self.z(theme.typography.icon())),
@@ -2133,7 +2143,7 @@ impl ProjectView {
             .gap(self.z(sp.xs))
             .pt(self.z(sp.xxs))
             .min_w_0()
-            .text_size(self.z(theme.typography.meta()))
+            .text_size(self.z(theme.typography.small()))
             .child(head)
             .children(tail)
             .children(findings)
@@ -2243,7 +2253,7 @@ impl ProjectView {
         let s = &theme.surfaces;
         let sp = theme.spacing;
         let Some(natives) = board.natives.get(&row.task) else { return Vec::new() };
-        let raised = hsla(s.raised);
+        let hover = hsla(s.hover);
         natives
             .agents
             .iter()
@@ -2271,8 +2281,8 @@ impl ProjectView {
                     .h(self.z(theme.density.row))
                     .rounded(self.z(theme.radii.sm))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(raised))
-                    .text_size(self.z(theme.typography.meta()))
+                    .hover(move |el| el.bg(hover))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_secondary))
                     .child(self.guides(depth))
                     .child(self.mark(Some(Status::Working)))
@@ -2429,7 +2439,7 @@ impl ProjectView {
             Some(self.card(board, card, lane, cx))
         });
         let selector = format!("project-lane-{}", lane.selector());
-        div()
+        crate::kit::well(div(), theme)
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector)
             .role(Role::List)
@@ -2438,6 +2448,8 @@ impl ProjectView {
             .flex()
             .flex_col()
             .gap(self.z(sp.xs))
+            .p(self.z(sp.xs))
+            .rounded(self.z(theme.radii.lg))
             .child(head)
             .children(cards)
             .into_any_element()
@@ -2486,7 +2498,7 @@ impl ProjectView {
                 .items_center()
                 .gap(self.z(sp.xs))
                 .min_w_0()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(chip)
                 .children(reason.map(|why| {
@@ -2501,7 +2513,7 @@ impl ProjectView {
                         .child(SharedString::from(why))
                 }))
         });
-        let el = div()
+        let el = crate::kit::card(theme)
             .id(SharedString::from(key))
             .debug_selector(move || selector)
             .role(Role::ListItem)
@@ -2511,9 +2523,9 @@ impl ProjectView {
             .gap(self.z(sp.xxs))
             .p(self.z(sp.sm))
             .rounded(self.z(theme.radii.md))
-            .bg(hsla(if picked { s.overlay } else { s.raised }))
             .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.overlay)))
+            .when(picked, |el| crate::kit::selected(el, theme, true))
+            .when(!picked, |el| el.hover(move |el| el.bg(hsla(s.selected))))
             .when(own == Lane::Merged, |el| el.opacity(alpha::STRONG))
             .child(
                 div()
@@ -2545,7 +2557,7 @@ impl ProjectView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(dotted(theme, meta))
             }))
@@ -2555,7 +2567,7 @@ impl ProjectView {
             .children(self.run_on_block(card.id, "project-card", cx))
             .children(why.map(|why| {
                 div()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(lane_tone(theme, lane)))
                     .child(SharedString::from(why))
             }))
@@ -2706,7 +2718,7 @@ impl ProjectView {
         let sp = theme.spacing;
         let label = |text: &'static str| {
             div()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(text)
         };
@@ -2743,7 +2755,7 @@ impl ProjectView {
         };
         let cancel = button("project-checks-cancel", "Cancel")
             .text_color(hsla(s.text_secondary))
-            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         let cancel = tab_stop(cancel, s.accent)
             .on_click(cx.listener(|this, _ev, window, cx| this.close_checks(window, cx)));
         let save = crate::kit::solid_pressable(button("project-checks-save", "Save"), theme);
@@ -2829,9 +2841,9 @@ impl ProjectView {
                 .text_ellipsis()
                 .px(self.z(sp.xs))
                 .rounded(self.z(theme.radii.sm))
-                .border_1()
+                .border(crate::kit::hair(theme))
                 .border_color(hsla(s.border_subtle))
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(if stage.holds { s.text } else { s.text_muted }))
                 .child(SharedString::from(stage.words.clone()))
         });
@@ -2896,7 +2908,7 @@ impl ProjectView {
                     .h(self.z(theme.density.row + sp.xs))
                     .rounded(self.z(theme.radii.sm))
                     .when(entry.task.is_some(), |el| {
-                        el.cursor_pointer().hover(move |el| el.bg(hsla(s.raised)))
+                        el.cursor_pointer().hover(move |el| el.bg(hsla(s.hover)))
                     })
                     .child(
                         div()
@@ -2941,7 +2953,7 @@ impl ProjectView {
                         crate::kit::tabular(div())
                             .debug_selector(move || selector)
                             .flex_none()
-                            .text_size(self.z(theme.typography.meta()))
+                            .text_size(self.z(theme.typography.small()))
                             .text_color(hsla(s.text_muted))
                             .child(SharedString::from(age))
                     }));
@@ -2992,7 +3004,7 @@ impl ProjectView {
             let readout = |text: String| {
                 crate::kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_secondary))
                     .child(SharedString::from(text))
             };
@@ -3034,7 +3046,7 @@ impl ProjectView {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .text_size(self.z(theme.typography.meta()))
+                        .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
                         .child(SharedString::from(
                             [away.map(str::to_owned), kind]
@@ -3104,7 +3116,7 @@ impl ProjectView {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(dotted(theme, format!("{covers} \u{b7} {asks}"))),
             )
@@ -3148,7 +3160,7 @@ impl ProjectView {
                     .py(self.z(sp.xxs))
                     .rounded(self.z(theme.radii.sm))
                     .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.overlay)))
+                    .hover(move |el| el.bg(hsla(s.selected)))
                     .child(div().flex_none().size(self.z(theme.typography.icon())).children(
                         on.then(|| {
                             icon(theme, IconName::Check, IconSize::Inline, hsla(s.text))
@@ -3236,7 +3248,7 @@ impl ProjectView {
                 .py(self.z(sp.xs))
                 .rounded(self.z(theme.radii.sm))
                 .bg(hsla(s.panel))
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .child(head)
                 .children(options)
                 .children(ranking),
@@ -3258,7 +3270,7 @@ impl ProjectView {
             .child(div().text_color(hsla(theme.surfaces.text_secondary)).child(line))
             .child(
                 div()
-                    .text_size(self.z(theme.typography.meta()))
+                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(theme.surfaces.text_muted))
                     .child(hint),
             )

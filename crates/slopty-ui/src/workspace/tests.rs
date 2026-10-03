@@ -1194,8 +1194,9 @@ fn a_closed_tile_waits_in_the_palette_to_be_reopened(cx: &mut TestAppContext) {
 
 // ----- the palette, names, notes -----------------------------------------------------------
 
-/// ⌘⇧P lists the actions; typing narrows them; ↩ runs the one left once the palette is gone.
-/// A session is a line too, and going to it focuses its tile.
+/// ⌘⇧P lists the actions; typing narrows them; Esc empties the field, and a second Esc closes
+/// it; ↩ runs the one left once the palette is gone. A session is a line too, and going to it
+/// focuses its tile.
 #[gpui::test]
 fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1213,7 +1214,12 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("Overview ⌥⌘O"))), "{tree:#?}");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!view.read_with(cx, |v, _| v.palette_open()), "Esc closes it");
+    assert!(view.read_with(cx, |v, _| v.palette_open()), "Esc empties the field first");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("ListBoxOption", Some("New terminal ⌘T"))), "{tree:#?}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.palette_open()), "then Esc closes it");
 
     cx.simulate_keystrokes("cmd-shift-p");
     cx.run_until_parked();

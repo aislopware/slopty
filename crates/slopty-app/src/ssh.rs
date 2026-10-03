@@ -1072,7 +1072,8 @@ impl Workspace {
                             .items_center()
                             .pl(px(spacing.xs))
                             .rounded(px(theme.radii.sm))
-                            .bg(hsla(s.raised))
+                            .bg(hsla(s.hover))
+                            .map(|el| kit::sunk(el, theme, 0.0))
                             .text_size(px(theme.typography.ui_size))
                             .child(Input::new(input).appearance(false).aria_label(label)),
                     )
@@ -1150,7 +1151,8 @@ impl Workspace {
             .items_center()
             .pl(px(spacing.xs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.raised))
+            .bg(hsla(s.hover))
+            .map(|el| kit::sunk(el, theme, 0.0))
             .text_size(px(theme.typography.ui_size))
             .child(
                 Input::new(&sheet.password).appearance(false).mask_toggle().aria_label("Password"),
@@ -1164,7 +1166,7 @@ impl Workspace {
             .flex()
             .items_center()
             .justify_center()
-            .border_1()
+            .border(px(slopty_theme::stroke::EDGE))
             .border_color(if on { hsla(s.solid) } else { hsla(s.control) })
             .when(on, |b| {
                 kit::solid(b, theme).child(slopty_ui::icons::icon(

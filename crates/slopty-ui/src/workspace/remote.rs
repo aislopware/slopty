@@ -211,6 +211,9 @@ impl WorkspaceView {
     pub fn set_app_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.app_active != active {
             self.app_active = active;
+            if active {
+                self.release_held_toasts(cx);
+            }
             cx.notify();
         }
     }
@@ -457,7 +460,7 @@ impl WorkspaceView {
                     }
                     Ok(_) => Self::upload_ended(Upload { scratch: Some(scratch), ..upload }, cx),
                     Err(e) => {
-                        this.show_notice(format!("Cannot bring the files over: {e}"), cx);
+                        this.show_failure(format!("Cannot bring the files over: {e}"), cx);
                         Self::upload_ended(Upload { scratch: Some(scratch), ..upload }, cx);
                     }
                 }
@@ -584,7 +587,7 @@ impl WorkspaceView {
                             let _started = this.upload(tile, &[file], upload, cx);
                         }
                         Err(e) => {
-                            this.show_notice(format!("Cannot attach the picture: {e}"), cx);
+                            this.show_failure(format!("Cannot attach the picture: {e}"), cx);
                             Self::upload_ended(upload, cx);
                         }
                     });
@@ -683,7 +686,7 @@ impl WorkspaceView {
         upload.total = match slopty_client::xfer::entries(paths) {
             Ok(entries) => entries.iter().fold(0_u64, |sum, e| sum.saturating_add(e.size)),
             Err(e) => {
-                self.show_notice(format!("Cannot send that: {e}"), cx);
+                self.show_failure(format!("Cannot send that: {e}"), cx);
                 Self::upload_ended(upload, cx);
                 return false;
             }
@@ -857,7 +860,7 @@ impl WorkspaceView {
                 .workers
                 .get(&upload.tile.worker)
                 .map_or_else(|| "the machine".to_owned(), |w| w.name.clone());
-            self.show_notice(
+            self.show_failure(
                 format!("{} did not reach {machine}: {error}", sent(&upload.names)),
                 cx,
             );
@@ -889,7 +892,7 @@ impl WorkspaceView {
                 }
                 None => {
                     let port = moved.port.number;
-                    self.show_notice(format!("Port {port} could not be forwarded"), cx);
+                    self.show_failure(format!("Port {port} could not be forwarded"), cx);
                 }
                 Some(_) => {}
             }

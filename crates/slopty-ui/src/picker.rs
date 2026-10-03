@@ -1,10 +1,11 @@
 //! `WindowPicker`: jump to a session in the workspace, or choose a worker window or display to
 //! put in it.
 //!
-//! Shown by the workspace after a `Listing` arrives; a click picks, Escape dismisses. Sessions come
-//! first, and among them the ones whose agent is waiting on the human, so a wall of terminals
-//! is searched by what needs doing rather than by position. A field at the top filters the
-//! rows by every word typed, ↑/↓ choose one and ↩ picks it, as the palette does.
+//! Shown by the workspace after a `Listing` arrives; a click picks, Escape empties the field
+//! and then dismisses. Sessions come first, and among them the ones whose agent is waiting on
+//! the human, so a wall of terminals is searched by what needs doing rather than by position. A
+//! field at the top filters the rows by every word typed, ↑/↓ choose one and ↩ picks it, as the
+//! palette does.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -348,6 +349,21 @@ impl WindowPicker {
 
     /// Whether an input method holds uncommitted text in the field (a Telex word, kana before
     /// conversion): the keys it reads then (the arrows, Tab, Esc) are its own.
+    /// Esc empties a field that holds text, as the palette's does, and dismisses once it is
+    /// empty.
+    fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = self.input.clone().filter(|_| !self.query.is_empty());
+        let Some(input) = input else {
+            cx.emit(PickerEvent::Dismiss);
+            return;
+        };
+        input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        self.query.clear();
+        self.selected = 0;
+        self.reveal = true;
+        cx.notify();
+    }
+
     fn composing(&self, cx: &gpui::App) -> bool {
         self.input.as_ref().is_some_and(|input| input.read(cx).is_composing())
     }
@@ -585,10 +601,10 @@ impl Render for WindowPicker {
         });
         let layer = crate::palette::Layer::Dialog.priority();
         if self.leaving {
-            let root = crate::kit::anchor(&theme, window)
-                .children(scrim)
-                .child(panel.debug_selector(|| "picker-leaving".to_owned()));
-            return gpui::deferred(crate::kit::fade_out(root, "picker-out")).with_priority(layer);
+            let panel = panel.debug_selector(|| "picker-leaving".to_owned());
+            let root = crate::kit::anchor(&theme, window).id("picker-backdrop");
+            let root = crate::kit::presence(root.children(scrim).child(panel), "picker", false);
+            return gpui::deferred(root).with_priority(layer);
         }
         let root = crate::kit::anchor(&theme, window)
             .id("picker-backdrop")
@@ -605,9 +621,9 @@ impl Render for WindowPicker {
                     this.step(1, cx);
                 }
             }))
-            .capture_action(cx.listener(|this, _: &Escape, _window, cx| {
+            .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 if !this.composing(cx) {
-                    cx.emit(PickerEvent::Dismiss);
+                    this.escape(window, cx);
                 }
             }))
             .on_mouse_down(
@@ -618,8 +634,11 @@ impl Render for WindowPicker {
                 }),
             )
             .children(scrim)
-            // The keyboard summons it, so it arrives fading in where it stands, with no travel.
-            .child(crate::kit::fade_in(panel, "picker-in", cx));
+            .child(panel);
+        // The keyboard summons it, so it arrives fading in where it stands, with no travel, and
+        // leaves the same way ([`crate::kit::Presence`]).
+        let root =
+            crate::kit::presence(root, "picker", true).arrives_whole(!crate::kit::motion(cx));
         gpui::deferred(root).with_priority(layer)
     }
 }

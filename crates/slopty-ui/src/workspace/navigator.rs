@@ -72,7 +72,7 @@ use gpui::{
     ParentElement as _, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, canvas, div, list, px,
 };
-use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+use gpui_kit::component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_client::groups::{self, GroupKey, fact};
 use slopty_client::layout::{Navigator, TileRef, WorkerKey};
 use slopty_core::WallMs;
@@ -336,6 +336,9 @@ pub(super) struct Filter {
     events: Option<Subscription>,
     /// The field takes the keyboard once it is drawn: asked by key.
     focus_asked: bool,
+    /// The tile ↑↓ walked to among what the filter left, which ↩ goes to; none until an arrow
+    /// is pressed, when ↩ goes to the first.
+    chosen: Option<TileRef>,
 }
 
 impl std::fmt::Debug for NavState {
@@ -1880,8 +1883,8 @@ impl WorkspaceView {
         self.session_nav_agent(at, Status::Working).words
     }
 
-    /// The filter's field, made once there is a window to make it in. ↩ in it goes to the
-    /// first tile listed.
+    /// The filter's field, made once there is a window to make it in. ↩ in it goes to the tile
+    /// ↑↓ walked to, or else the first one listed.
     pub(super) fn ensure_navigator_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.nav.filter.input.is_some() {
             return;
@@ -1890,20 +1893,49 @@ impl WorkspaceView {
         self.nav.filter.events = Some(cx.subscribe(&input, |this, input, event, cx| match event {
             InputEvent::Change => {
                 this.nav.filter.query = input.read(cx).value().to_string();
+                this.nav.filter.chosen = None;
                 cx.notify();
             }
             InputEvent::PressEnter { .. } => {
-                let first = this.nav_rows(cx).into_iter().find_map(|row| match row {
-                    NavRow::Tile(t) => Some(t.tile),
-                    _ => None,
-                });
-                if let Some(first) = first {
-                    this.go_to_tile(first, cx);
+                let listed = this.filtered_tiles(cx);
+                let chosen = this.nav.filter.chosen.filter(|c| listed.contains(c));
+                if let Some(tile) = chosen.or_else(|| listed.first().copied()) {
+                    this.go_to_tile(tile, cx);
                 }
             }
             InputEvent::Focus | InputEvent::Blur => {}
         }));
         self.nav.filter.input = Some(input);
+    }
+
+    /// The tiles the filter's rows list, top to bottom.
+    fn filtered_tiles(&self, cx: &gpui::App) -> Vec<TileRef> {
+        self.nav_rows(cx)
+            .into_iter()
+            .filter_map(|row| match row {
+                NavRow::Tile(t) => Some(t.tile),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// ↑ or ↓ in the filter while it holds text: the next tile it left up or down, round at
+    /// the ends, marked as the focused tile's row is, for ↩ to go to. The keyboard stays in the
+    /// field, so typing goes on narrowing.
+    fn walk_filter(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let listed = self.filtered_tiles(cx);
+        if listed.is_empty() {
+            return;
+        }
+        let from = self.nav.filter.chosen.and_then(|c| listed.iter().position(|t| *t == c));
+        let count = listed.len().cast_signed();
+        let next = match from {
+            Some(at) => at.cast_signed().saturating_add(delta).rem_euclid(count),
+            None if delta > 0 => 0,
+            None => count.saturating_sub(1),
+        };
+        self.nav.filter.chosen = listed.get(next.cast_unsigned()).copied();
+        cx.notify();
     }
 
     /// Empty the filter, and give the keyboard back to the workspace. With the filter empty
@@ -1916,6 +1948,7 @@ impl WorkspaceView {
             input.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         }
         self.nav.filter.query.clear();
+        self.nav.filter.chosen = None;
         self.pending_focus_self = true;
         cx.notify();
     }
@@ -1946,14 +1979,27 @@ impl WorkspaceView {
         let spacing = theme.spacing;
         let safe = window.insets().effective();
         let leading = if cfg!(target_os = "macos") { LEADING_INSET } else { spacing.sm };
+        let filtering = !self.nav.filter.query.is_empty();
         let input = self.nav.filter.input.as_ref().map(|input| {
-            div().debug_selector(|| "nav-filter".to_owned()).flex_1().min_w_0().child(
-                Input::new(input)
-                    .appearance(false)
-                    .px_0()
-                    .text_size(px(theme.typography.ui_size))
-                    .aria_label("Filter"),
-            )
+            div()
+                .debug_selector(|| "nav-filter".to_owned())
+                .flex_1()
+                .min_w_0()
+                .when(filtering, |el| {
+                    el.capture_action(
+                        cx.listener(|this, _: &MoveUp, _w, cx| this.walk_filter(-1, cx)),
+                    )
+                    .capture_action(
+                        cx.listener(|this, _: &MoveDown, _w, cx| this.walk_filter(1, cx)),
+                    )
+                })
+                .child(
+                    Input::new(input)
+                        .appearance(false)
+                        .px_0()
+                        .text_size(px(theme.typography.ui_size))
+                        .aria_label("Filter"),
+                )
         });
         let clear = (!self.nav.filter.query.is_empty() || self.nav.scope.is_some()).then(|| {
             let el = div()
@@ -1987,7 +2033,7 @@ impl WorkspaceView {
                 .max_w(px(self.navigator_width() / 2.0))
                 .child(SharedString::from(name))
         });
-        let field = div()
+        let field = kit::sunk(div(), theme, 0.0)
             .id("nav-filter-field")
             .flex_1()
             .min_w_0()
@@ -2321,7 +2367,8 @@ impl WorkspaceView {
     ) -> gpui::AnyElement {
         let rows = self.nav_rows(cx);
         self.nav.list.set_rows(rows);
-        self.nav.list.selected.set(self.focused());
+        let chosen = self.nav.filter.chosen.filter(|_| !self.nav.filter.query.is_empty());
+        self.nav.list.selected.set(chosen.or_else(|| self.focused()));
         self.nav.list.reveal_selected(window);
         self.schedule_navigator_tick(cx);
         let theme = &self.theme;

@@ -53,14 +53,14 @@ fn the_focused_header_carries_a_text_line_while_two_tiles_show(cx: &mut TestAppC
 
     let theme = Theme::default();
     let line = cx.debug_bounds("focus-line").expect("drawn");
-    let ink = crate::colors::hsla_alpha(theme.surfaces.text, slopty_theme::alpha::FOCUS);
+    let ink = crate::colors::hsla(theme.surfaces.focus);
     assert!(fills_at(cx, line).contains(&ink), "in the text's tone, set back a step");
     let header = cx.debug_bounds(selector("title", second.item)).expect("drawn");
     let inset = px(theme.radii.sm);
     assert!(line.left() >= header.left() + inset, "inset at its start: {line:?} {header:?}");
     assert!((line.size.height - px(slopty_theme::stroke::MARK)).abs() < px(0.01), "1.5 pt");
     let content = theme.content();
-    let seen = theme.surfaces.text.mix(content, 1.0 - slopty_theme::alpha::FOCUS);
+    let seen = theme.surfaces.focus.over(content);
     assert!(seen.contrast(content) >= 3.0, "seen over the content: {}", seen.contrast(content));
     let content = crate::colors::hsla(theme.content());
     let panel = crate::colors::hsla(theme.surfaces.panel);

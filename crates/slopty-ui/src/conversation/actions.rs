@@ -9,5 +9,9 @@ gpui::actions!(
         CycleDensity,
         /// Stop the agent's turn, as Esc in its terminal does.
         Interrupt,
+        /// Send the thread's draft once the turn under way ends.
+        QueueMessage,
+        /// Take the last waiting message into the thread's composer to change it.
+        EditLastQueued,
     ]
 );

@@ -229,6 +229,9 @@ const TEXTLESS: [Option<&str>; 4] = [FILE_PAGES, FOLDER, BOARD, INBOX];
 /// A conversation face, and its composer, where the keyboard sits in a face.
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
+/// A thread view's composer (`thread::view::COMPOSER_CTX`), which waits a message for the
+/// turn under way.
+const THREAD_INPUT: Option<&str> = Some("ThreadComposer > Input");
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
 /// A project's board: its rows hold no text, so bare keys walk them.
 const BOARD: Option<&str> = Some(crate::project::CTX);
@@ -262,7 +265,7 @@ const APP: &[Option<&str>] = &[None];
 pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Inbox, Page, Project, Search, Terminal, Workspace};
 
-    use crate::conversation::{CycleDensity, Interrupt};
+    use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
     use crate::terminal as t;
 
     fn c(
@@ -426,6 +429,8 @@ pub fn defaults() -> Vec<Command> {
         c(Page, "find_previous", t::FindPrev, &["cmd-shift-g"], &[PAGE_SEARCH]),
         c(Conversation, "cycle_density", CycleDensity, &["ctrl-o"], &[FACE, FACE_INPUT]),
         c(Conversation, "interrupt", Interrupt, &["escape"], &[FACE]),
+        c(Conversation, "queue_message", QueueMessage, &["cmd-enter"], &[THREAD_INPUT]),
+        c(Conversation, "edit_last_queued", EditLastQueued, &["alt-up"], &[THREAD_INPUT]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
         c(Conversation, "find", t::Find, &["cmd-f"], &[FACE, FACE_INPUT]),

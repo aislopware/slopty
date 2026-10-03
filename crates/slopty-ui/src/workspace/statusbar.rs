@@ -134,11 +134,11 @@ pub(super) enum Popover {
 
 impl Popover {
     /// The layer round it that a click closes it from, and its fades' names.
-    const fn ids(self) -> (&'static str, &'static str, &'static str) {
+    const fn ids(self) -> (&'static str, &'static str) {
         match self {
-            Self::Hosts => ("hosts-away", "hosts-fade", "hosts-out"),
-            Self::Plans => ("plans-away", "plans-fade", "plans-out"),
-            Self::Transfers => ("transfers-away", "transfers-fade", "transfers-out"),
+            Self::Hosts => ("hosts-away", "hosts-presence"),
+            Self::Plans => ("plans-away", "plans-presence"),
+            Self::Transfers => ("transfers-away", "transfers-presence"),
         }
     }
 }
@@ -1183,7 +1183,8 @@ impl WorkspaceView {
 
     /// `panel` over the window as the bar's popover `which`: a click anywhere else closes it,
     /// and it fades in. Once closed it fades out where it stands for [`kit::Pace::Exit`], the
-    /// window taking the pointer back at once but where the panel still shows.
+    /// window taking the pointer back at once but where the panel still shows, and turns back
+    /// if it is opened again on its way out ([`kit::Presence`]).
     fn popover(
         &self,
         which: Popover,
@@ -1191,20 +1192,21 @@ impl WorkspaceView {
         window: &Window,
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
-        let (away, fade, out) = which.ids();
+        let (away, shown) = which.ids();
         let viewport = window.viewport_size();
         let layer = div().id(away).relative().w(viewport.width).h(viewport.height);
-        let layer = if self.bar.open(which) {
-            layer
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _ev, _w, cx| this.close_popover(which, cx)),
-                )
-                .child(kit::fade_in(panel, fade, cx))
+        let open = self.bar.open(which);
+        let (layer, panel) = if open {
+            let layer = layer.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _ev, _w, cx| this.close_popover(which, cx)),
+            );
+            (layer, panel)
         } else {
             let gone = format!("{}-leaving", away.trim_end_matches("-away"));
-            layer.child(kit::fade_out(panel.debug_selector(move || gone), out))
+            (layer, panel.debug_selector(move || gone))
         };
+        let layer = layer.child(kit::presence(panel, shown, open));
         gpui::deferred(gpui::anchored().position(gpui::point(px(0.0), px(0.0))).child(layer))
             .with_priority(crate::palette::Layer::Popover.priority())
             .into_any_element()

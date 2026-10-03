@@ -422,16 +422,16 @@ impl WorkspaceView {
     }
 
     /// The popover's panel, dropping the base unit from the bell as it fades in; opened by a
-    /// key, whole in its first frame. Once `leaving`, fading out where it is.
+    /// key, whole in its first frame. Once `leaving`, back up and out, turning back if it is
+    /// opened again on its way out ([`kit::Presence`]).
     pub(super) fn render_inbox(&self, leaving: bool, cx: &Context<Self>) -> gpui::AnyElement {
         let panel = self.inbox_panel(cx);
-        if leaving {
-            return kit::fade_out(panel.debug_selector(|| "inbox-leaving".to_owned()), "inbox-out");
-        }
-        if self.menu_keyed {
-            return panel.into_any_element();
-        }
-        kit::slide_fade(panel, "inbox-fade", -self.theme.spacing.xs, kit::Pace::Fade, cx)
+        let panel =
+            if leaving { panel.debug_selector(|| "inbox-leaving".to_owned()) } else { panel };
+        kit::presence(panel, "inbox-presence", !leaving)
+            .arrives_whole(self.menu_keyed)
+            .travel(-self.theme.spacing.xs)
+            .into_any_element()
     }
 
     fn inbox_panel(&self, cx: &Context<Self>) -> gpui::Stateful<Div> {
@@ -565,18 +565,12 @@ impl WorkspaceView {
             .border_b(kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .child(
-                div()
+                kit::track(theme)
                     .id("inbox-views")
                     .role(Role::TabList)
                     .aria_label("Views")
-                    .relative()
                     .flex_none()
                     .h(px(theme.density.control))
-                    .flex()
-                    .items_center()
-                    .p(px(kit::TRACK_PAD))
-                    .rounded(px(theme.radii.sm))
-                    .bg(hsla(s.hover))
                     .child(self.inbox.plate.under_thumb(theme, true, Some(self.clock_instant())))
                     .child(
                         tab("inbox-unread", "Unread", !all, Some(unread)).on_click(

@@ -166,14 +166,14 @@ impl ProjectView {
         let sp = theme.spacing;
         let label = |text: &'static str| {
             div()
-                .text_size(self.z(theme.typography.meta()))
+                .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_muted))
                 .child(text)
         };
         let cancel = self
             .panel_button("project-budget-cancel", "Cancel")
             .text_color(hsla(s.text_secondary))
-            .hover(move |el| el.bg(hsla(s.raised)).text_color(hsla(s.text)));
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
         let cancel = tab_stop(cancel, s.accent)
             .on_click(cx.listener(|this, _ev, window, cx| this.close_budget(window, cx)));
         let save =
@@ -242,7 +242,7 @@ impl ProjectView {
         let raise = self
             .panel_button("project-budget-raise", RAISE)
             .text_color(hsla(s.accent))
-            .hover(move |el| el.bg(hsla(s.raised)));
+            .hover(move |el| el.bg(hsla(s.hover)));
         let raise = tab_stop(raise, s.accent)
             .on_click(cx.listener(|this, _ev, window, cx| this.open_budget(window, cx)));
         Some(

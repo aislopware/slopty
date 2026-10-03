@@ -616,8 +616,31 @@ pub const SPIN_STEPS: u32 = 12;
 /// every display refresh.
 pub const SPIN_STEP: Duration = Duration::from_nanos(83_333_333);
 
+/// How long the working mark holds each step of its breath under Reduce Motion.
+///
+/// A fifth of a second, twelve to a breath, so a breathing mark draws under half the frames a
+/// turning one does and every breath ends on a step.
+pub const BREATH_STEP: Duration = Duration::from_millis(200);
+
+/// The least opacity of a breath: the mark never fades past it, so it is always found.
+const BREATH_LOW: f32 = 0.6;
+
+/// The opacity the working mark shows `since` the spin clock started under Reduce Motion.
+///
+/// It breathes from `BREATH_LOW` to whole and back over [`slopty_theme::Motion::breath`], in
+/// steps of [`BREATH_STEP`], upright. Opacity only: nothing travels, turns or scales.
+#[must_use]
+pub fn breath(since: Duration) -> f32 {
+    let (step, period) = (BREATH_STEP.as_nanos(), slopty_theme::Motion::DEFAULT.breath.as_nanos());
+    let stepped = since.as_nanos().checked_div(step).unwrap_or(0).saturating_mul(step);
+    #[expect(clippy::cast_precision_loss, reason = "a phase within one breath")]
+    let phase = stepped.checked_rem(period).unwrap_or(0) as f32 / period as f32;
+    let wave = (1.0 - (phase * std::f32::consts::TAU).cos()) / 2.0;
+    (1.0 - BREATH_LOW).mul_add(wave, BREATH_LOW)
+}
+
 /// The step of its turn the working mark shows `since` the spin clock started: always the
-/// first under Reduce Motion, where it stands still.
+/// first under Reduce Motion, where it stays upright and breathes instead ([`breath`]).
 #[must_use]
 pub fn spin_step(since: Duration, reduce_motion: bool) -> u32 {
     if reduce_motion {
@@ -630,8 +653,13 @@ pub fn spin_step(since: Duration, reduce_motion: bool) -> u32 {
 /// How long after `since` the next step begins.
 #[must_use]
 pub fn until_next_step(since: Duration) -> Duration {
-    let into = since.as_nanos().checked_rem(SPIN_STEP.as_nanos()).unwrap_or(0);
-    SPIN_STEP.saturating_sub(Duration::from_nanos(u64::try_from(into).unwrap_or(0)))
+    until_next(since, SPIN_STEP)
+}
+
+/// How long after `since` the next step `step` long begins.
+fn until_next(since: Duration, step: Duration) -> Duration {
+    let into = since.as_nanos().checked_rem(step.as_nanos()).unwrap_or(0);
+    step.saturating_sub(Duration::from_nanos(u64::try_from(into).unwrap_or(0)))
 }
 
 /// The clock every working mark turns by, one per app, so marks on screen together show the
@@ -649,6 +677,10 @@ pub fn until_next_step(since: Duration) -> Duration {
 struct SpinClock {
     /// The executor's clock when the first mark was drawn; the test executor's is simulated.
     epoch: Instant,
+    /// How long after `epoch` the marks were last woken. Every mark draws the step and breath
+    /// of that moment, not of the moment it is drawn, so a frame drawn again from scratch draws
+    /// what the frame shown drew until the views showing marks are woken together.
+    shown: Duration,
     /// The views that painted a turning mark since the last step.
     wake: Vec<EntityId>,
     /// The timer that is out, if one is, and its number: a timer whose number is not the
@@ -678,6 +710,7 @@ impl SpinClock {
         if !cx.has_global::<Self>() {
             let clock = Self {
                 epoch: cx.background_executor().now(),
+                shown: Duration::ZERO,
                 wake: Vec::new(),
                 armed: None,
                 timers: 0,
@@ -730,9 +763,19 @@ impl SpinClock {
         }
     }
 
+    /// The step and the breath every mark drawn now shows: those of the clock's last wake.
+    fn drawn(cx: &mut App) -> (u32, f32) {
+        let reduce = cx.reduce_motion();
+        let shown = Self::get(cx).shown;
+        (spin_step(shown, reduce), breath(shown))
+    }
+
     /// Wake every view that painted a mark since the last step.
     fn wake(cx: &mut App) {
-        for view in std::mem::take(&mut Self::get(cx).wake) {
+        let now = cx.background_executor().now();
+        let clock = Self::get(cx);
+        clock.shown = now.saturating_duration_since(clock.epoch);
+        for view in std::mem::take(&mut clock.wake) {
             cx.notify(view);
         }
     }
@@ -764,7 +807,7 @@ pub fn release_steps(cx: &mut App) {
 
 /// GPUI's Reduce Motion flag changed: every view showing a mark draws again.
 ///
-/// A mark that was turning stands still at once and one that stood starts its steps. The
+/// A mark that was turning stands upright and breathes at once, and one that breathed turns. The
 /// marks read the flag itself as they are drawn, so nothing here keeps a copy of it.
 pub fn motion_setting_changed(cx: &mut App) {
     SpinClock::wake(cx);
@@ -805,17 +848,15 @@ impl Element for Spinner {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let reduce = cx.reduce_motion();
-        let now = cx.background_executor().now();
-        let clock = SpinClock::get(cx);
-        let since = now.saturating_duration_since(clock.epoch);
-        let step = spin_step(since, reduce);
+        let (step, breath) = SpinClock::drawn(cx);
         #[expect(clippy::cast_precision_loss, reason = "a step under twelve")]
         let turn = step as f32 / SPIN_STEPS as f32;
+        let color = if reduce { self.color.opacity(breath) } else { self.color };
         let mut inner = svg()
             .path(Status::Working.icon().path())
             .flex_shrink_0()
             .size(self.side)
-            .text_color(self.color)
+            .text_color(color)
             .with_transformation(Transformation::rotate(radians(turn * std::f32::consts::TAU)))
             .into_any_element();
         let layout = inner.request_layout(window, cx);
@@ -854,16 +895,14 @@ impl Element for Spinner {
         let now = cx.background_executor().now();
         let view = window.current_view();
         let clock = SpinClock::get(cx);
-        if reduce {
-            return;
-        }
         if !clock.wake.contains(&view) {
             clock.wake.push(view);
         }
         if clock.armed.is_some() {
             return;
         }
-        let wait = until_next_step(now.saturating_duration_since(clock.epoch));
+        let step = if reduce { BREATH_STEP } else { SPIN_STEP };
+        let wait = until_next(now.saturating_duration_since(clock.epoch), step);
         SpinClock::arm(cx, Timer::Step, wait);
     }
 }
@@ -950,7 +989,8 @@ mod tests {
 
     /// Twelve steps make one turn a second, each held a twelfth of a second, and the timer
     /// always waits for the next step's start. Under Reduce Motion the mark stands on its
-    /// first step whatever the time.
+    /// first step whatever the time, and breathes: whole and faint by turns over the breath,
+    /// never under its floor.
     #[test]
     fn the_working_mark_steps_twelve_times_a_turn_and_stands_under_reduce_motion() {
         let ms = Duration::from_millis;
@@ -969,6 +1009,16 @@ mod tests {
         assert_eq!(spin_step(next, false), 2, "the timer lands on the next step");
         let turn = SPIN_STEP.checked_mul(SPIN_STEPS).unwrap_or_default();
         assert!(ms(1_000).saturating_sub(turn) < Duration::from_micros(1), "{turn:?}");
+        assert!((breath(ms(0)) - BREATH_LOW).abs() < 1e-4, "it starts at its faintest");
+        assert!((breath(ms(1_200)) - 1.0).abs() < 1e-3, "whole half a breath in");
+        assert!((breath(ms(2_400)) - BREATH_LOW).abs() < 1e-4, "one breath a period");
+        assert_eq!(breath(ms(150)), breath(ms(0)), "held for a step");
+        let breath_ns = slopty_theme::Motion::DEFAULT.breath.as_nanos();
+        assert_eq!(breath_ns.checked_rem(BREATH_STEP.as_nanos()), Some(0), "steps fill a breath");
+        for at in (0..2_400).step_by(50) {
+            let b = breath(ms(at));
+            assert!((BREATH_LOW..=1.0).contains(&b), "{at} ms: {b}");
+        }
     }
 
     /// A mark is an image named by its status at any zoom; an empty slot is nothing to a
@@ -1029,8 +1079,31 @@ mod tests {
         view.read_with(cx, |v, _| v.renders).saturating_sub(before)
     }
 
+    /// A breathing mark draws the breath of the clock's last wake, not of the moment it is
+    /// drawn: with a step held back for a key's echo, a mark drawn anew (a frame from scratch)
+    /// shows the breath the frame shown does, and the wake that ends the hold moves both.
+    #[gpui::test]
+    fn a_breath_held_back_is_drawn_from_scratch_as_it_shows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (view, cx) =
+            cx.add_window_view(|_, _| Turning { shown: true, status: Status::Working, renders: 0 });
+        cx.run_until_parked();
+        let drawn = cx.update(|_w, cx| SpinClock::drawn(cx));
+        let held = cx.executor().now().checked_add(BREATH_STEP.saturating_mul(3));
+        cx.update(|_w, cx| hold_steps(cx, held.unwrap_or_else(|| cx.background_executor().now())));
+        let before = view.read_with(cx, |v, _| v.renders);
+        cx.executor().advance_clock(BREATH_STEP.saturating_add(BREATH_STEP.div_f32(2.0)));
+        cx.run_until_parked();
+        assert_eq!(view.read_with(cx, |v, _| v.renders), before, "the step waits on the echo");
+        assert_eq!(cx.update(|_w, cx| SpinClock::drawn(cx)), drawn, "drawn anew as it shows");
+        cx.update(|_w, cx| release_steps(cx));
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.renders) > before, "the echo's frame moves it");
+        assert_ne!(cx.update(|_w, cx| SpinClock::drawn(cx)), drawn, "a breath further on");
+    }
+
     /// The mark wakes the view it was painted in once a step while it shows, and not once it
-    /// is gone; under Reduce Motion it never wakes it.
+    /// is gone; under Reduce Motion once a breath's step, under half as often.
     #[gpui::test]
     fn a_working_mark_wakes_its_view_only_while_it_shows(cx: &mut gpui::TestAppContext) {
         let (view, cx) =
@@ -1051,7 +1124,8 @@ mod tests {
             cx.notify();
         });
         cx.run_until_parked();
-        assert_eq!(renders_in_a_second(&view, cx), 0, "Reduce Motion: it stands still");
+        let breathing = renders_in_a_second(&view, cx);
+        assert!((4..=6).contains(&breathing), "Reduce Motion: it breathes, {breathing} a second");
     }
 
     /// Waiting is a still dashed ring: drawn once, it wakes its view for nothing, so two frames

@@ -1662,9 +1662,10 @@ impl SettingsForm {
     }
 }
 
-/// A control's well: a row tall, the raised fill, no hairline, as a field is drawn.
+/// A control's well: a row tall, the hover wash, sunk ([`crate::kit::sunk`]), no hairline, as
+/// a field is drawn.
 fn well(theme: &Theme) -> Div {
-    div()
+    crate::kit::sunk(div(), theme, 0.0)
         .flex_none()
         .h(px(theme.density.row))
         .flex()

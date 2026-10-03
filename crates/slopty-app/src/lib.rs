@@ -496,6 +496,8 @@ pub struct Workspace {
     settings_editor: Option<Entity<SettingsEditor>>,
     /// What the editor asks for, heard while it is open.
     settings_editor_events: Option<gpui::Subscription>,
+    /// The settings dialog just closed, drawn for the moment it takes to fade away.
+    settings_leaving: Option<Entity<SettingsEditor>>,
     /// Focus the editor's field on the next frame (it needs a frame to exist).
     pending_focus_editor: bool,
     /// The self-test's stand-in for iPad Split View and Stage Manager: the app laid out in
@@ -657,6 +659,7 @@ impl Workspace {
             settings_seen,
             settings_editor: None,
             settings_editor_events: None,
+            settings_leaving: None,
             pending_focus_editor: false,
             split_view: None,
             key_bar_scroll: ScrollHandle::new(),
@@ -833,11 +836,24 @@ impl Workspace {
         }
     }
 
-    /// Drop the editor and hand the keyboard back to the focused tile.
+    /// Drop the editor and hand the keyboard back to the focused tile at once; the dialog
+    /// fades out where it stands for its way out, then goes.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_editor_events = None;
-        if self.settings_editor.take().is_none() {
-            return;
+        let Some(editor) = self.settings_editor.take() else { return };
+        let during = editor.update(cx, SettingsEditor::leave);
+        if !during.is_zero() {
+            self.settings_leaving = Some(editor.clone());
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(during).await;
+                let _gone = this.update(cx, |this, cx| {
+                    if this.settings_leaving.as_ref() == Some(&editor) {
+                        this.settings_leaving = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
         self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
         cx.notify();
@@ -891,7 +907,7 @@ impl Workspace {
     fn apply_loaded(&mut self, mut loaded: Loaded, cx: &mut Context<Self>) {
         if let Some(error) = &loaded.error {
             tracing::error!(%error, "settings ignored");
-            self.show_notice(format!("Settings: {error}"), cx);
+            self.show_failure(format!("Settings: {error}"), cx);
             self.rebuild_theme(cx);
             return;
         }
@@ -1016,6 +1032,11 @@ impl Workspace {
         self.view.update(cx, |v, cx| v.show_notice(text, cx));
     }
 
+    /// Something that failed, which stays until dismissed.
+    fn show_failure(&self, text: String, cx: &mut Context<Self>) {
+        self.view.update(cx, |v, cx| v.show_failure(text, cx));
+    }
+
     fn slot(&self, id: WorkerId) -> Option<&WorkerSlot> {
         self.workers.iter().find(|w| w.id == id)
     }
@@ -1081,7 +1102,7 @@ impl Workspace {
     /// left the panel returns.
     fn forget_worker(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(e) = net::forget_worker(id) {
-            self.show_notice(format!("Could not forget the machine: {e:#}"), cx);
+            self.show_failure(format!("Could not forget the machine: {e:#}"), cx);
             return;
         }
         if self.directory.get(id).is_some() {
@@ -2048,7 +2069,7 @@ impl Workspace {
             .and_then(|text| settings::save(&self.settings_path, &text, &mut self.settings_seen));
         match kept {
             Ok(loaded) => self.settings = loaded.settings,
-            Err(e) => self.show_notice(format!("Settings: {e}"), cx),
+            Err(e) => self.show_failure(format!("Settings: {e}"), cx),
         }
     }
 
@@ -2066,7 +2087,7 @@ impl Workspace {
             return;
         }
         if let Err(e) = self.save_server(None) {
-            self.show_notice(format!("Settings: {e}"), cx);
+            self.show_failure(format!("Settings: {e}"), cx);
             return;
         }
         self.set_server(None, None, cx);
@@ -2193,7 +2214,8 @@ impl Workspace {
             // The field's own pad and this put its text on the tailnet rows' glyphs.
             .pl(px(spacing.xs))
             .rounded(px(radii.sm))
-            .bg(hsla(s.raised))
+            .bg(hsla(s.hover))
+            .map(|el| kit::sunk(el, theme, 0.0))
             .text_size(px(ty.ui_size))
             .child(
                 Input::new(&adding.address)
@@ -2252,13 +2274,8 @@ impl Workspace {
         let group =
             |id: &'static str, label_id: &'static str, label: &'static str, rows: Vec<_>| {
                 (!rows.is_empty()).then(|| {
-                    let frame = div()
-                        .flex()
-                        .flex_col()
-                        .p(px(spacing.xxs))
-                        .rounded(px(radii.md))
-                        .bg(hsla(s.raised))
-                        .children(rows);
+                    let frame =
+                        kit::card(theme).flex().flex_col().p(px(spacing.xxs)).children(rows);
                     div()
                         .id(id)
                         .flex()
@@ -2344,9 +2361,10 @@ impl Workspace {
             })
             .child(aside);
         if !welcome {
-            // The scrim dims in as the dialog rises the base unit's half into place, both on
-            // the overlay's pace, and under Reduce Motion both are there at once.
-            let panel = kit::slide_fade(panel, "add-worker-rise", spacing.xs, kit::Pace::Fade, cx);
+            // The scrim dims in as the dialog fades in where it stands (the palette and the
+            // keyboard summon it, so it does not travel), both on the overlay's pace, and under
+            // Reduce Motion both are there at once.
+            let panel = kit::fade_in(panel, "add-worker-in", cx);
             let backdrop = kit::backdrop(theme, window)
                 .id("add-worker-backdrop")
                 .occlude()
@@ -2460,14 +2478,8 @@ impl Workspace {
                 this.press_found(host, &pressed, window, cx);
             }))
         });
-        // The rows' radius plus the pad round them, so the corners nest.
-        let frame = div()
-            .flex()
-            .flex_col()
-            .p(px(spacing.xxs))
-            .rounded(px(theme.radii.md))
-            .bg(hsla(s.raised))
-            .children(rows);
+        // A card: the rows' radius plus the pad round them, so the corners nest.
+        let frame = kit::card(theme).flex().flex_col().p(px(spacing.xxs)).children(rows);
         let label = panel_label(theme, "add-worker-tailnet-label", "On your tailnet");
         section.child(label).child(frame).into_any_element()
     }
@@ -2483,7 +2495,7 @@ impl Workspace {
         let lines = this_mac::checklist(&flow.worker, &logs)
             .into_iter()
             .map(|line| self.this_mac_line(line, cx));
-        let frame = div()
+        let frame = kit::card(theme)
             .id("this-mac-checklist")
             .debug_selector(|| "this-mac-checklist".to_owned())
             .role(Role::List)
@@ -2491,8 +2503,6 @@ impl Workspace {
             .flex()
             .flex_col()
             .p(px(spacing.xxs))
-            .rounded(px(theme.radii.md))
-            .bg(hsla(s.raised))
             .children(lines);
         let status = match (&flow.error, flow.adding) {
             (Some(why), _) => Some((why.clone(), s.error)),
@@ -2608,7 +2618,7 @@ impl Workspace {
         div()
             .w_full()
             .bg(hsla(self.theme.content()))
-            .border_t_1()
+            .border_t(kit::hair(&self.theme))
             .border_color(hsla(self.theme.surfaces.border))
             .child(gpui::edge_fade(row, ends))
             .into_any_element()
@@ -2704,10 +2714,10 @@ impl Workspace {
                 if lit {
                     kit::solid(el, &self.theme)
                 } else {
-                    el.text_color(hsla(s.text)).bg(hsla(s.raised))
+                    el.text_color(hsla(s.text)).bg(hsla(s.hover))
                 }
             })
-            .when(!lit, |el| el.active(|el| el.bg(hsla(s.overlay))))
+            .when(!lit, |el| el.active(|el| el.bg(hsla(s.pressed))))
     }
 
     /// One key of the bar; `lit` draws it armed.
@@ -3031,7 +3041,8 @@ impl Render for Workspace {
             let editor = editor.entity_id();
             window.defer(cx, move |_window, cx| App::notify(cx, editor));
         }
-        let settings_editor = self.settings_editor.clone();
+        let settings_editor =
+            self.settings_editor.clone().or_else(|| self.settings_leaving.clone());
         let welcome = self.welcome();
         // The key bar takes the status bar's row above the keyboard. Told only a change: an
         // update while the window draws would build everything that read the workspace again.
@@ -3217,7 +3228,8 @@ fn apply_link_event(
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
-        // read (`LinkEvent::Handoff`).
+        // read (`LinkEvent::Handoff`). A folder tile asks for no page past its first and no
+        // folder op until its rows do (`slopty_client::folders`).
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
@@ -3292,8 +3304,10 @@ fn found_row(theme: &Theme, ix: usize, host: Host, offer: &Offer) -> gpui::State
         .aria_description(SharedString::from(format!("{what}, {said}")))
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
-        // On the list's `raised` step: the pointer washes a row one step up.
-        .hover(move |el| el.bg(hsla(s.overlay)))
+        // On the list's card: the pointer washes a row one step up.
+        .map(kit::eased)
+        .hover(move |el| el.bg(hsla(s.hover)))
+        .active(move |el| el.bg(hsla(s.pressed)))
         .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
         .child(
             div()
@@ -3357,8 +3371,10 @@ fn entry_row(
         .aria_label(title)
         .rounded(px(theme.radii.sm))
         .cursor_pointer()
-        // On the list's `raised` step: the pointer washes a row one step up.
-        .hover(move |el| el.bg(hsla(s.overlay)))
+        // On the list's card: the pointer washes a row one step up.
+        .map(kit::eased)
+        .hover(move |el| el.bg(hsla(s.hover)))
+        .active(move |el| el.bg(hsla(s.pressed)))
         .child(icon(theme, glyph, IconSize::Inline, hsla(s.text_muted)).size(glyph_size))
         .child(
             div()
@@ -4268,10 +4284,10 @@ mod tests {
         }
     }
 
-    /// The dialog rises into place as its scrim dims in; under Reduce Motion it is in place on
-    /// its first frame.
+    /// The dialog fades in where it stands as its scrim dims in, with no travel, and so under
+    /// Reduce Motion: in place on its first frame either way.
     #[gpui::test]
-    fn the_dialog_rises_into_place_unless_motion_is_reduced(cx: &mut TestAppContext) {
+    fn the_dialog_fades_in_where_it_stands(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
@@ -4296,11 +4312,8 @@ mod tests {
             "in place at once: {still}"
         );
         cx.update(|_window, cx| cx.set_reduce_motion(false));
-        // The test runs on this Mac, whose own Reduce Motion the kit reads as well.
-        if cx.update(|_window, cx| kit::motion(cx)) {
-            let rising = first_top(cx);
-            assert!(rising > still + 0.5, "below its place on its first frame: {rising}");
-        }
+        let fading = first_top(cx);
+        assert!((fading - still).abs() < 0.5, "no travel on its first frame: {fading}");
     }
 
     /// A change the workspace view hears of builds that view, not the app's root over it.
@@ -5122,6 +5135,8 @@ mod tests {
         };
         let press = |cx: &mut VisualTestContext, keys: &str| {
             cx.update(|window, cx| ws.update(cx, |ws, cx| ws.close_settings(window, cx)));
+            // The dialog's dim holds the pointer while it fades out.
+            cx.executor().advance_clock(kit::Pace::Exit.duration());
             cx.run_until_parked();
             let field = cx.debug_bounds("add-worker-field").expect("the panel's field");
             cx.simulate_click(field.center(), gpui::Modifiers::none());

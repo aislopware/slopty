@@ -208,6 +208,9 @@ impl ThreadView {
                 sections.push(self.task_line(task, bar.can_stop, cx));
             }
         }
+        if self.meter_open {
+            sections.push(self.meter_panel(state, cx));
+        }
         if sections.is_empty() && request.is_none() {
             return None;
         }
@@ -868,6 +871,49 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// The meter's panel: a line for the context and each of the plan's windows with when it
+    /// resets, what the session cost, and "Compact context" where the agent compacts through
+    /// Slopty's door ([`Cap::COMPACT`]). Compacting is the person's press, never Slopty's.
+    fn meter_panel(
+        &self,
+        state: &slopty_proto::thread::ThreadState,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let s = self.theme.surfaces;
+        let meters = &state.meters;
+        let mut lines = super::composer::meter_words(meters);
+        lines.extend(meters.cost_micro_usd.map(spent));
+        let compact = super::composing::compacts(state).then(|| {
+            self.button("thread-compact", "Compact context", ButtonKind::Ghost).on_click(
+                cx.listener(|this, _ev, _w, cx| {
+                    let _id = this.intent(Intent::Compact, cx);
+                    this.meter_open = false;
+                    cx.notify();
+                }),
+            )
+        });
+        let label = SharedString::from(lines.join(", "));
+        self.section()
+            .id("thread-meter-panel")
+            .debug_selector(|| "thread-meter-panel".to_owned())
+            .role(Role::Group)
+            .aria_label(label)
+            .items_start()
+            .py(self.z(self.theme.spacing.xs))
+            .text_color(hsla(s.text_secondary))
+            .child(self.slot().child(self.icon(IconName::Info, s.text_muted)))
+            .child(
+                kit::tabular(div())
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .children(lines.into_iter().map(|l| div().child(SharedString::from(l)))),
+            )
+            .children(compact)
+            .into_any_element()
+    }
+
     /// One piece of background work in the panel: its kind, what it is, the end of what it
     /// printed, how it stands and for how long, and the way to stop it while it runs.
     fn task_line(&self, task: &BackgroundTask, can_stop: bool, cx: &Context<Self>) -> AnyElement {
@@ -999,6 +1045,13 @@ fn answer_mark(
         Effect::Deny => Some((IconName::X, quiet.then_some(s.error))),
         Effect::Answer => None,
     }
+}
+
+/// What a session cost, from millionths of a US dollar: "$1.23 this session", a cent at least
+/// once anything was spent.
+fn spent(micro_usd: u64) -> String {
+    let cents = micro_usd.div_ceil(10_000);
+    format!("${}.{:02} this session", cents / 100, cents % 100)
 }
 
 #[cfg(test)]

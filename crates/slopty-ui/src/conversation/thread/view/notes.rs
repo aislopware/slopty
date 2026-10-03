@@ -71,6 +71,16 @@ pub(super) fn turn_footer(turn: &Turn, meters: &Meters) -> (Option<String>, Opti
     (model, (!parts.is_empty()).then(|| parts.join(" \u{b7} ")))
 }
 
+/// The most lines a notice shows before "Show all".
+const NOTICE_LINES: usize = 3;
+
+/// A notice's first [`NOTICE_LINES`] lines, and whether more follow.
+fn notice_lines(text: &str) -> (String, bool) {
+    let mut lines = text.trim().lines();
+    let shown: Vec<&str> = lines.by_ref().take(NOTICE_LINES).collect();
+    (shown.join("\n"), lines.next().is_some())
+}
+
 /// Millionths of a dollar as a person reads a cost: "$0.0123", "$1.24".
 pub(super) fn dollars(micro: u64) -> String {
     #[expect(clippy::cast_precision_loss, reason = "a cost on screen")]
@@ -84,17 +94,18 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let open = self.items_open.contains(id);
+        let mut cut = false;
         let (icon, words, under, more) = match &item.body {
             ItemBody::Compaction(c) => {
                 let summary = c.summary.as_ref().map(|t| t.text.clone()).filter(|t| !t.is_empty());
                 (IconName::Scissors, compacted(c), None, summary)
             }
-            ItemBody::Notice(n) => (
-                IconName::Info,
-                kit::first_line(&n.text.text).to_owned(),
-                n.retry.as_ref().map(retrying),
-                None,
-            ),
+            ItemBody::Notice(n) => {
+                let (shown, rest) = notice_lines(&n.text.text);
+                cut = rest && !self.whole.contains(id);
+                let words = if cut { shown } else { n.text.text.trim().to_owned() };
+                (IconName::Info, words, n.retry.as_ref().map(retrying), None)
+            }
             ItemBody::Review { .. } => {
                 (IconName::ListChecks, "Reviewed the changes".to_owned(), None, None)
             }
@@ -146,6 +157,26 @@ impl ThreadView {
                     .text_size(self.z(theme.typography.small()))
                     .child(SharedString::from(u))
             }))
+            .when(cut, |el| {
+                let item = id.clone();
+                el.child(
+                    div()
+                        .id(ElementId::Name(format!("note-all-{}", id.0).into()))
+                        .debug_selector({
+                            let id = id.0.clone();
+                            move || format!("note-all-{id}")
+                        })
+                        .role(Role::Button)
+                        .aria_label("Show all")
+                        .pl(indent)
+                        .cursor_pointer()
+                        .hover(move |el| el.text_color(hsla(s.text)))
+                        .child("Show all")
+                        .on_click(
+                            cx.listener(move |this, _ev, _w, cx| this.show_whole(item.clone(), cx)),
+                        ),
+                )
+            })
             .children(more.filter(|_| open).map(|summary| {
                 let id = id.0.clone();
                 div()
@@ -164,7 +195,15 @@ impl ThreadView {
 mod tests {
     use slopty_proto::thread::{Compaction, Meters, Retry, Turn, TurnId, TurnState, Usage};
 
-    use super::{compacted, dollars, retrying, turn_footer};
+    use super::{compacted, dollars, notice_lines, retrying, turn_footer};
+
+    /// A notice shows three lines and says when there is more; a short one shows whole.
+    #[test]
+    fn a_notice_shows_three_lines_and_says_when_there_is_more() {
+        assert_eq!(notice_lines("one\ntwo"), ("one\ntwo".to_owned(), false));
+        assert_eq!(notice_lines("a\nb\nc"), ("a\nb\nc".to_owned(), false));
+        assert_eq!(notice_lines("a\nb\nc\nd\ne\n"), ("a\nb\nc".to_owned(), true));
+    }
 
     /// A turn's footer names a model other than the thread's, and what the turn spent.
     #[test]

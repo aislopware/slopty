@@ -79,6 +79,39 @@ impl Rgb {
         let (a, b) = (self.luminance() + 0.05, other.luminance() + 0.05);
         if a > b { a / b } else { b / a }
     }
+
+    /// APCA lightness contrast (Lc) of `self` as text on `bg`, by APCA-W3 0.0.98G: about 106
+    /// for black on white, −108 for white on black (light text on dark is negative), 0 below
+    /// the least difference it counts.
+    ///
+    /// WCAG's ratio overstates dark pairs: it calls a dark tier the equal of its light twin
+    /// where APCA reads it 20 to 30 Lc weaker, so the chrome's text clears both.
+    #[must_use]
+    pub fn apca(self, bg: Self) -> f32 {
+        const BLACK_THRESHOLD: f32 = 0.022;
+        const BLACK_CLAMP: f32 = 1.414;
+        const SCALE: f32 = 1.14;
+        const OFFSET: f32 = 0.027;
+        const CLIP: f32 = 0.1;
+        let y = |c: Self| {
+            let lin = |v: u8| (f32::from(v) / 255.0).powf(2.4);
+            let y = 0.072_175_f32
+                .mul_add(lin(c.b), 0.715_152_2_f32.mul_add(lin(c.g), 0.212_672_9 * lin(c.r)));
+            if y > BLACK_THRESHOLD { y } else { y + (BLACK_THRESHOLD - y).powf(BLACK_CLAMP) }
+        };
+        let (text, ground) = (y(self), y(bg));
+        if (ground - text).abs() < 0.000_5 {
+            return 0.0;
+        }
+        let lc = if ground > text {
+            let sapc = (ground.powf(0.56) - text.powf(0.57)) * SCALE;
+            if sapc < CLIP { 0.0 } else { sapc - OFFSET }
+        } else {
+            let sapc = (ground.powf(0.65) - text.powf(0.62)) * SCALE;
+            if sapc > -CLIP { 0.0 } else { sapc + OFFSET }
+        };
+        lc * 100.0
+    }
 }
 
 /// A colour in OKLCH: perceived lightness (0 to 1), chroma, and hue in degrees.
@@ -694,7 +727,8 @@ pub mod alpha {
     /// draw theirs at about 15 to 30 %.
     pub const RING: f32 = 0.3;
     /// The focus line: the text's tone set back far enough that it is not the brightest
-    /// stroke on screen, yet still 3:1 over the content (WCAG's least for what is seen).
+    /// stroke on screen; `Surfaces::focus` lays it on thicker where the content needs it to
+    /// clear 3:1 and APCA's Lc 30.
     pub const FOCUS: f32 = 0.45;
     /// The edge of a card whose thing failed, in the error tone: there to be found on a second
     /// look, never louder than the words in it (`HeroUI` Pro's tool card, error at 30 %).
@@ -725,6 +759,17 @@ const AAA: f32 = 7.0;
 /// WCAG's least contrast for what is seen but not read (1.4.11): a control's outline always
 /// reaches it, a dividing hairline under Increase Contrast, the quieter one a [`LEVEL`] under.
 const NON_TEXT: f32 = 3.0;
+
+/// APCA's floor for secondary text on every ground it lands on: its 60 for content text that
+/// is not body, less 5 for chrome set at 12 to 13 pt in the medium weight.
+const SECONDARY_LC: f32 = 55.0;
+
+/// APCA's floor for muted text: a level under [`SECONDARY_LC`], still past its 45 for large or
+/// heavy text, which hints and ages read beside.
+const MUTED_LC: f32 = 45.0;
+
+/// APCA's least for a mark that means something and is seen rather than read: the focus line.
+const SEEN_LC: f32 = 30.0;
 
 /// How far apart two text levels stay: each reads at least a quarter again the contrast of the
 /// level under it, on the surface where both read worst. Past it, muted and secondary text
@@ -763,7 +808,7 @@ pub struct Surfaces {
     /// What is held down: a step past `selected`, so a press reads apart from a hover.
     pub pressed: Tint,
     /// Leaving: `hover` over the content, solid, for the call sites not yet on the washes
-    /// (`slopty-ui/src/project`, `slopty-app/src/lib.rs`, `slopty-app/src/ssh.rs`).
+    /// (`slopty-ui/src/project`).
     pub raised: Rgb,
     /// Leaving: `selected` over the content, solid, as `raised` is.
     pub overlay: Rgb,
@@ -781,6 +826,11 @@ pub struct Surfaces {
     /// every surface it can sit on, WCAG's least for a control's edge (1.4.11), where a
     /// dividing hairline is only seen.
     pub control: Tint,
+    /// The focus line: the text's ink set back to [`alpha::FOCUS`], or only as much less as it
+    /// takes over the content to clear both WCAG's 3:1 and APCA's Lc 30 for a mark that is
+    /// seen and means something (on black, and on white, 0.45 fell short of one or the other).
+    /// Whole under Increase Contrast.
+    pub focus: Tint,
     /// Primary text.
     pub text: Rgb,
     /// Labels, tool summaries, counts.
@@ -932,19 +982,20 @@ const DARK_TONES: Tones = Tones {
     border: ink(0.10),
     pole: Rgb::hex(0xffffff),
     text: Rgb::hex(0xebebeb),
-    // `content/71.5` and `content/62.5`: the least shares at which muted text reads AA on the
-    // selected wash over a float (the lightest ground text lands on) and secondary a level
-    // over it, so the lift has nothing to do. `MonoCode`'s `/70` and `/55` sat on solid fills
-    // under +3 floats.
-    text_secondary: 0.715,
-    text_muted: 0.625,
+    // `content/74.5` and `content/65.1`: the least shares at which secondary text reads APCA
+    // |Lc| 55 and muted 45 on the selected wash over a float (the lightest ground text lands
+    // on), so the lift has nothing to do. WCAG AA alone put them at `/71.5` and `/62.5`, which
+    // APCA reads at Lc 53 and 43 there. `MonoCode`'s `/70` and `/55` sat on solid fills under
+    // +3 floats.
+    text_secondary: 0.745,
+    text_muted: 0.651,
     accent: BRAND_OKLCH,
     accent_fill: BRAND_OKLCH,
     accent_ink: ON_GREEN,
     warn: Rgb::hex(0xe5c07b),
-    // One Dark's red a notch lighter (`f06c75`), the least that reads AA on the selected wash
-    // over a float.
-    error: Rgb::hex(0xf1767e),
+    // One Dark's red (`f06c75`) lighter, the least that reads APCA |Lc| 45, a status word's
+    // floor, on the selected wash over a float; AA alone wanted only `f1767e` (Lc 43).
+    error: Rgb::hex(0xf27d84),
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
@@ -993,20 +1044,43 @@ fn worst(fg: Rgb, surfaces: &[Rgb]) -> f32 {
     surfaces.iter().map(|&bg| fg.contrast(bg)).fold(f32::INFINITY, f32::min)
 }
 
+/// The least APCA lightness contrast, as a magnitude, `fg` has on any of `surfaces`.
+fn worst_lc(fg: Rgb, surfaces: &[Rgb]) -> f32 {
+    surfaces.iter().map(|&bg| fg.apca(bg).abs()).fold(f32::INFINITY, f32::min)
+}
+
 /// `fg`, moved toward `pole` only as far as it takes to read `least` on every one of
 /// `surfaces`, so its hue survives: the pole itself when even that is not enough.
 fn lift(fg: Rgb, surfaces: &[Rgb], pole: Rgb, least: f32) -> Rgb {
-    if worst(fg, surfaces) >= least {
+    lift_to(fg, surfaces, pole, Floor { ratio: least, lc: 0.0 })
+}
+
+/// What a text tone must clear on every ground: a WCAG ratio and an APCA |Lc|.
+#[derive(Clone, Copy, Debug)]
+struct Floor {
+    ratio: f32,
+    lc: f32,
+}
+
+impl Floor {
+    fn met(self, fg: Rgb, surfaces: &[Rgb]) -> bool {
+        worst(fg, surfaces) >= self.ratio && worst_lc(fg, surfaces) >= self.lc
+    }
+}
+
+/// [`lift`] to the stricter of a WCAG ratio and an APCA floor.
+fn lift_to(fg: Rgb, surfaces: &[Rgb], pole: Rgb, floor: Floor) -> Rgb {
+    if floor.met(fg, surfaces) {
         return fg;
     }
-    if worst(pole, surfaces) <= least {
+    if !floor.met(pole, surfaces) {
         return pole;
     }
-    // Contrast grows with the mix toward the pole: bisect for the least mix that reads.
+    // Both grow with the mix toward the pole: bisect for the least mix that reads.
     let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
     for _ in 0..14 {
         let mid = f32::midpoint(lo, hi);
-        if worst(fg.mix(pole, mid), surfaces) >= least {
+        if floor.met(fg.mix(pole, mid), surfaces) {
             hi = mid;
         } else {
             lo = mid;
@@ -1018,10 +1092,15 @@ fn lift(fg: Rgb, surfaces: &[Rgb], pole: Rgb, least: f32) -> Rgb {
 /// `line` laid on only as much thicker as it takes to read `least` over every one of
 /// `surfaces`: the ink whole when even that is not enough.
 fn thicken(line: Tint, surfaces: &[Rgb], least: f32) -> Tint {
-    let reads = |share: f32| {
-        let line = Tint::of(line.ink, share);
+    thicken_until(line, |line| {
         surfaces.iter().map(|&bg| line.over(bg).contrast(bg)).fold(f32::INFINITY, f32::min) >= least
-    };
+    })
+}
+
+/// `line` laid on only as much thicker as it takes for `reads` to hold: the ink whole when even
+/// that is not enough. `reads` grows with the share.
+fn thicken_until(line: Tint, reads: impl Fn(Tint) -> bool) -> Tint {
+    let reads = |share: f32| reads(Tint::of(line.ink, share));
     let from = line.opacity();
     if reads(from) {
         return line;
@@ -1094,15 +1173,18 @@ impl Surfaces {
             Contrast::Increased => AAA,
         };
         let tier = |share: f32| content.mix(t.text, share);
-        let text_muted = lift(tier(t.text_muted), &under, t.pole, floor);
-        let text_secondary = lift(
+        let text_muted =
+            lift_to(tier(t.text_muted), &under, t.pole, Floor { ratio: floor, lc: MUTED_LC });
+        let text_secondary = lift_to(
             tier(t.text_secondary),
             &under,
             t.pole,
-            floor.max(worst(text_muted, &under) * LEVEL),
+            Floor { ratio: floor.max(worst(text_muted, &under) * LEVEL), lc: SECONDARY_LC },
         );
         let text = lift(t.text, &under, t.pole, floor.max(worst(text_secondary, &under) * LEVEL));
-        let green = lift(t.accent.rgb(), &under, t.pole, floor);
+        // A status word (failed, waiting, done) is read as muted text is, and clears its floor.
+        let word = Floor { ratio: floor, lc: MUTED_LC };
+        let green = lift_to(t.accent.rgb(), &under, t.pole, word);
         let green_fill = t.accent_fill.rgb();
         Self {
             canvas,
@@ -1116,6 +1198,13 @@ impl Surfaces {
             band,
             border: hairline(t.border, NON_TEXT),
             border_subtle: hairline(t.border_subtle, NON_TEXT / LEVEL),
+            focus: match contrast {
+                Contrast::Standard => thicken_until(Tint::of(text, alpha::FOCUS), |line| {
+                    let seen = line.over(content);
+                    seen.contrast(content) >= NON_TEXT && seen.apca(content).abs() >= SEEN_LC
+                }),
+                Contrast::Increased => Tint::of(text, 1.0),
+            },
             control: thicken(
                 Tint::of(t.text, t.border.share),
                 &crossed,
@@ -1129,13 +1218,13 @@ impl Surfaces {
             text_muted,
             accent: green,
             success: green,
-            warn: lift(t.warn, &under, t.pole, floor),
-            error: lift(t.error, &under, t.pole, floor),
+            warn: lift_to(t.warn, &under, t.pole, word),
+            error: lift_to(t.error, &under, t.pole, word),
             accent_fill: green_fill,
             success_fill: green_fill,
             warn_fill: t.warn_fill,
             error_fill: t.error_fill,
-            agent: lift(t.agent.rgb(), &under, t.pole, floor),
+            agent: lift_to(t.agent.rgb(), &under, t.pole, word),
             fill_fg: t.fill_fg,
             accent_ink: t.accent_ink.rgb(),
             solid: text,
@@ -1149,15 +1238,33 @@ impl Surfaces {
     }
 }
 
-/// One layer of a shadow, in points: black at `alpha`, `y` down, blurred over `blur`.
+/// One layer of a shadow, in points: black at `alpha`, `y` down, blurred over `blur`, its
+/// shape grown by `spread` (drawn in by a negative one).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Shadow {
     /// How far down it falls.
     pub y: f32,
     /// How far it blurs.
     pub blur: f32,
+    /// How far its shape grows past the surface's, before the blur; negative draws it in, so
+    /// a soft layer falls below a float rather than haloing round it.
+    pub spread: f32,
     /// Its opacity.
     pub alpha: f32,
+}
+
+/// The finish of what is sunk: a field, a segmented control's track, a meter.
+///
+/// Shade is held inside its top edge, and in dark a lip of light inside its bottom, where
+/// light reaches the far side of a hollow. The rim's counterpart: what is raised catches light
+/// at its top edge, what is sunk holds shade there (Frame's fields and tracks, tty7's key
+/// caps).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Sunk {
+    /// The black shade's opacity inside the top edge.
+    pub shade: f32,
+    /// The white lip's opacity inside the bottom edge, or none.
+    pub lip: Option<f32>,
 }
 
 /// The rim of what is raised: a point inside one edge that catches the light, the one rule
@@ -1220,6 +1327,8 @@ pub struct Elevation {
     pub rim: Rim,
     /// The primary solid's finish.
     pub finish: Finish,
+    /// What is sunk.
+    pub sunk: Sunk,
 }
 
 impl Elevation {
@@ -1230,8 +1339,10 @@ impl Elevation {
         shade: Rgb::hex(0),
         scrim: alpha::SCRIM,
         shadow: [
-            Shadow { y: 1.0, blur: 2.0, alpha: 0.1 },
-            Shadow { y: 12.0, blur: 32.0, alpha: 0.125 },
+            Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.1 },
+            // Drawn in by 10, so it falls below the sheet (6 to the sides, none above) where
+            // `0 12 32` reached 16 sideways and 4 above; a third heavier to keep its weight.
+            Shadow { y: 12.0, blur: 32.0, spread: -10.0, alpha: 0.16 },
         ],
         rest: None,
         // coss draws its dark rim at 6 %; what floats keeps that, what rests a step quieter.
@@ -1242,6 +1353,7 @@ impl Elevation {
             float: Some(alpha::EDGE),
         },
         finish: Finish { top: false, ink: Rgb::hex(0), alpha: 0.10, contact: None, pressed: 0.08 },
+        sunk: Sunk { shade: 0.18, lip: Some(alpha::RIM) },
     };
     /// Light: a faint shadow and a light scrim, since white panels read on their own. At a
     /// quarter the scrim flattened the screen to a mid grey behind a drawer.
@@ -1249,20 +1361,22 @@ impl Elevation {
         shade: Rgb::hex(0),
         scrim: alpha::DIM,
         shadow: [
-            Shadow { y: 1.0, blur: 2.0, alpha: 0.06 },
-            Shadow { y: 12.0, blur: 32.0, alpha: 0.10 },
+            Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.06 },
+            // As dark's: below the sheet, not a grey halo round every menu.
+            Shadow { y: 12.0, blur: 32.0, spread: -10.0, alpha: 0.13 },
         ],
         // coss's every shadow sits at 5 %: a card on its well is held by its hairline and a
         // contact this faint, not a pool.
-        rest: Some(Shadow { y: 1.0, blur: 2.0, alpha: 0.05 }),
+        rest: Some(Shadow { y: 1.0, blur: 2.0, spread: -0.5, alpha: 0.05 }),
         rim: Rim { top: false, ink: Rgb::hex(0), rest: alpha::RIM, float: None },
         finish: Finish {
             top: true,
             ink: Rgb::hex(0x00ff_ffff),
             alpha: 0.14,
-            contact: Some(Shadow { y: 1.0, blur: 2.0, alpha: 0.08 }),
+            contact: Some(Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.08 }),
             pressed: 0.08,
         },
+        sunk: Sunk { shade: 0.05, lip: None },
     };
 
     /// The elevation for chrome over `content`.
@@ -1326,7 +1440,8 @@ impl Curve {
 ///
 /// Every duration stays at or under 160 ms but a sheet's: an overlay that takes longer to arrive
 /// than a key takes to type reads as waiting. What moves is opacity and a small translate, never
-/// the scale of text. Under Reduce Motion all of it lands at once (`slopty_ui::kit::motion`).
+/// the scale of text. Under Reduce Motion all of it lands at once (`slopty_ui::kit::motion`),
+/// but for what says work is live: the working mark breathes in opacity over [`Self::breath`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Motion {
     /// A hover or press arriving, and a cursor changing: instant, so the pointer never waits.
@@ -1344,6 +1459,10 @@ pub struct Motion {
     /// A phone's palette sheet, the iPad's drawer, the composer turning into an approval, a
     /// tab closing: `MonoCode`'s 200 ms.
     pub sheet: std::time::Duration,
+    /// One breath of a live mark under Reduce Motion: its opacity rises and falls over this,
+    /// with no travel or turn, since a mark that freezes reads as hung (Zeron's activity pulse;
+    /// the platform keeps its activity indicators alive under Reduce Motion).
+    pub breath: std::time::Duration,
     /// Half a caret blink: shown this long, then hidden as long (Ghostty's cadence). The pace of
     /// a blink, not a transition: nothing eases.
     pub blink: std::time::Duration,
@@ -1362,6 +1481,7 @@ impl Motion {
         exit: std::time::Duration::from_millis(100),
         settle: std::time::Duration::from_millis(160),
         sheet: std::time::Duration::from_millis(200),
+        breath: std::time::Duration::from_millis(2_400),
         blink: std::time::Duration::from_millis(600),
         ease_out: Curve { p1: (0.22, 1.0), p2: (0.36, 1.0) },
         drawer: Curve { p1: (0.32, 0.72), p2: (0.0, 1.0) },
@@ -2054,6 +2174,62 @@ mod tests {
         }
     }
 
+    /// The APCA arithmetic gives the published values: `#888` on white Lc 63.06, white on
+    /// black −107.88, black on white 106.04.
+    #[test]
+    fn apca_gives_the_published_values() {
+        let (white, black) = (Rgb::hex(0xff_ffff), Rgb::hex(0));
+        assert!((Rgb::hex(0x88_8888).apca(white) - 63.06).abs() < 0.05);
+        assert!((white.apca(black) + 107.88).abs() < 0.05);
+        assert!((black.apca(white) - 106.04).abs() < 0.05);
+        assert!(white.apca(white).abs() < f32::EPSILON, "no difference, no contrast");
+    }
+
+    /// Secondary text clears APCA's |Lc| 55 and muted text and the status words 45 on every
+    /// ground they land on, for every background in the supported range, or go as far as black
+    /// or white go: WCAG alone let dark muted text and the dark red sit at Lc 43 on the
+    /// selected wash over a float.
+    #[test]
+    fn chrome_text_clears_apca() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let pole = if content.is_light() { LIGHT_TONES.pole } else { DARK_TONES.pole };
+            for contrast in [Contrast::Standard, Contrast::Increased] {
+                let s = Surfaces::derive(content, contrast);
+                let surfaces: Vec<Rgb> =
+                    under_text(&s, content).into_iter().map(|(_, c)| c).collect();
+                for (ink, fg, least) in [
+                    ("text_secondary", s.text_secondary, SECONDARY_LC),
+                    ("text_muted", s.text_muted, MUTED_LC),
+                    ("accent", s.accent, MUTED_LC),
+                    ("warn", s.warn, MUTED_LC),
+                    ("error", s.error, MUTED_LC),
+                    ("agent", s.agent, MUTED_LC),
+                ] {
+                    let lc = worst_lc(fg, &surfaces);
+                    assert!(lc >= least || fg == pole, "{name} {contrast:?}: {ink} Lc {lc:.1}");
+                }
+            }
+        }
+    }
+
+    /// The focus line is seen, not read, and clears APCA's Lc 30 for a mark that means something
+    /// over the content as well as WCAG's 3:1, at [`alpha::FOCUS`] where that is enough and a
+    /// little more where it is not (black, and the light grounds); whole at more contrast.
+    #[test]
+    fn the_focus_line_clears_apca_for_what_is_seen() {
+        for (name, bg) in BACKGROUNDS {
+            let content = Rgb::hex(bg);
+            let s = Surfaces::derive(content, Contrast::Standard);
+            let seen = s.focus.over(content);
+            let (lc, ratio) = (seen.apca(content).abs(), seen.contrast(content));
+            assert!(lc >= SEEN_LC && ratio >= NON_TEXT, "{name}: Lc {lc:.1}, {ratio:.2}:1");
+            assert!(s.focus.opacity() >= alpha::FOCUS - 0.005, "{name}: never quieter than set");
+            let more = Surfaces::derive(content, Contrast::Increased);
+            assert!((more.focus.opacity() - 1.0).abs() < 0.005, "{name}: whole at more contrast");
+        }
+    }
+
     /// A remote picture's stage is one near-black whatever the content, and black at more
     /// contrast.
     #[test]
@@ -2307,8 +2483,12 @@ mod tests {
             let [contact, soft] = theme.elevation.shadow;
             assert!(contact.blur < soft.blur && contact.y < soft.y, "a tight layer, then a soft");
             assert!(soft.alpha >= 0.1, "{:?}: the shadow shows", theme.variant());
-            // Zed's quiet floor: a dark shadow about a quarter of the 0.5 it was.
-            assert!(soft.alpha <= 0.15, "{:?}: the shadow pools", theme.variant());
+            // Zed's quiet floor: a dark shadow about a third of the 0.5 it was, drawn in so it
+            // falls below the sheet and shows nothing above it.
+            assert!(soft.alpha <= 0.17, "{:?}: the shadow pools", theme.variant());
+            let v = theme.variant();
+            assert!(soft.y + soft.spread > 0.0, "{v:?}: its shape starts below the top edge");
+            assert!(soft.spread + soft.blur / 2.0 <= 6.0, "{v:?}: no halo to the sides");
         }
         let (dark_rim, light_rim) = (dark.elevation.rim, light.elevation.rim);
         assert_eq!(dark_rim.float, Some(alpha::EDGE), "a dark sheet's lit edge");

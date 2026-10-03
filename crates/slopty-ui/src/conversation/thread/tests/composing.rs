@@ -1,11 +1,12 @@
-//! The composer beyond its text: its `/` and `@` menus, attachments, and changing a message
-//! that waits in the queue.
+//! The composer beyond its text: its `/` and `@` menus, attachments, changing a message that
+//! waits in the queue, what the send button says, and the meter's panel.
 
 use gpui::{Modifiers, MouseButton, TestAppContext};
-use slopty_core::SessionId;
+use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    AgentId, Cap, Command, Delivery, IntentId, Pending, PendingState, ThreadState,
+    AgentId, Cap, Changed, Command, Delivery, IntentId, Limit, Pending, PendingState, Phase,
+    ThreadState, Turn, TurnId, TurnState, Usage,
 };
 
 use super::{asked, hub, intents, snapshot, view};
@@ -340,5 +341,125 @@ fn compact_is_a_command_when_the_agent_compacts(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert!(intents(&sent).is_empty(), "\u{21b5} on the menu writes the command");
     cx.simulate_keystrokes("enter");
+    assert_eq!(intents(&sent), [Intent::Compact]);
+}
+
+/// `state` with a turn under way.
+fn working(mut state: ThreadState) -> ThreadState {
+    state.status.phase = Phase::Working;
+    state.turns = vec![Turn {
+        id: TurnId(1),
+        input: None,
+        state: TurnState::Active,
+        started_ms: WallMs::ZERO,
+        ended_ms: None,
+        usage: Usage::default(),
+        models: Vec::new(),
+        changed: Changed::default(),
+        before: None,
+        after: None,
+    }];
+    state
+}
+
+fn waiting(text: &str) -> Pending {
+    Pending {
+        intent: IntentId::new(),
+        text: text.to_owned(),
+        attachments: vec![],
+        delivery: Delivery::Queue,
+        state: PendingState::Waiting,
+    }
+}
+
+/// The send button names what ↵ will do: Send with no turn under way, Steer into one where
+/// the agent takes a steer, Queue after it where it only queues, and Update while a waiting
+/// message is being changed.
+#[gpui::test]
+fn the_send_button_says_what_return_will_do(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = state();
+    let thread = state.meta.id;
+    let first = waiting("after this");
+    state.pending = vec![first.clone()];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    let said = |cx: &mut gpui::VisualTestContext| {
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        ["Send", "Steer", "Queue", "Update"]
+            .into_iter()
+            .find(|l| tree.iter().any(|n| n.is("Button", Some(l))))
+    };
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    cx.simulate_input("next");
+    assert_eq!(said(cx), Some("Send"));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(working(state.clone()), 1), cx));
+    assert_eq!(said(cx), Some("Steer"));
+    let mut queues = working(state);
+    queues.meta.caps = vec![Cap::named(Cap::QUEUE)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(queues, 2), cx));
+    assert_eq!(said(cx), Some("Queue"));
+    let pencil = format!("edit-{}", first.intent).leak();
+    let at = cx.debug_bounds(pencil).expect("a waiting message").center();
+    cx.simulate_click(at, Modifiers::none());
+    assert_eq!(said(cx), Some("Update"));
+}
+
+/// ⌘↵ is the keymap's "Queue message": the draft waits for the turn under way. ⌥↑ takes the
+/// last waiting message into the composer to change, as its pencil does.
+#[gpui::test]
+fn command_return_queues_and_option_up_edits_the_last_waiting(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = working(state());
+    let thread = state.meta.id;
+    state.pending = vec![waiting("first"), waiting("second")];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+
+    cx.simulate_input("later");
+    cx.simulate_keystrokes("cmd-enter");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Send { text: "later".to_owned(), delivery: Delivery::Queue, attachments: vec![] }]
+    );
+    cx.simulate_keystrokes("alt-up");
+    assert_eq!(view.read_with(cx, ThreadView::draft), "second", "the last one waiting");
+    assert!(cx.debug_bounds("thread-editing").is_some(), "the composer says so");
+}
+
+/// A press on the meter opens its panel in the tray: the context, each window with its reset,
+/// what the session cost, and "Compact context" where the agent compacts through Slopty.
+#[gpui::test]
+fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = state();
+    state.meta.caps.push(Cap::named(Cap::COMPACT));
+    state.meters.context_tokens = Some(50_000);
+    state.meters.context_window = Some(200_000);
+    state.meters.cost_micro_usd = Some(1_234_567);
+    state.meters.limits =
+        vec![Limit { name: "five-hour".to_owned(), used_bp: 4_200, resets_ms: None }];
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-meter-panel").is_none(), "quiet until asked");
+
+    let meter = cx.debug_bounds("thread-meter").expect("the meter").center();
+    cx.simulate_click(meter, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-meter-panel").is_some(), "the panel is open");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let words: Vec<_> = tree.iter().filter_map(|n| n.label.clone()).collect();
+    assert!(words.iter().any(|w| w.contains("$1.24 this session")), "{words:?}");
+    assert!(words.iter().any(|w| w.contains("Five hour 42%")), "{words:?}");
+    let compact = cx.debug_bounds("thread-compact").expect("Compact context").center();
+    cx.simulate_click(compact, Modifiers::none());
     assert_eq!(intents(&sent), [Intent::Compact]);
 }

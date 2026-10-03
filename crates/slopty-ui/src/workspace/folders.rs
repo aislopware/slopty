@@ -384,7 +384,7 @@ impl WorkspaceView {
             }
         });
         if !slopty_platform::file_drop::picker::import(sink) {
-            self.show_notice("The Files picker could not be shown".to_owned(), cx);
+            self.show_failure("The Files picker could not be shown".to_owned(), cx);
         }
     }
 
@@ -392,7 +392,7 @@ impl WorkspaceView {
     /// on it, and the landing goes when the upload ends. A file that did not come is named.
     pub fn files_picked(&mut self, tile: TileRef, dropped: Dropped, cx: &mut Context<Self>) {
         if !dropped.failed.is_empty() {
-            self.show_notice(format!("Not sent: {}", dropped.failed.join("; ")), cx);
+            self.show_failure(format!("Not sent: {}", dropped.failed.join("; ")), cx);
         }
         if dropped.paths.is_empty() {
             return;
@@ -430,10 +430,10 @@ impl WorkspaceView {
                         done,
                     ) {
                         discard_fetched(path);
-                        this.show_notice("The Files picker could not be shown".to_owned(), cx);
+                        this.show_failure("The Files picker could not be shown".to_owned(), cx);
                     }
                 }
-                Err(why) => this.show_notice(format!("{name} was not saved: {why}"), cx),
+                Err(why) => this.show_failure(format!("{name} was not saved: {why}"), cx),
             });
         })
         .detach();

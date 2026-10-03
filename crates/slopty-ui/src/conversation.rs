@@ -38,7 +38,7 @@ pub mod thread;
 pub mod tools;
 pub mod view;
 
-pub use actions::{CycleDensity, Interrupt};
+pub use actions::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
 pub use composer::Attach;
 pub use view::{ConversationView, FaceEvent, HeaderChips};
 
