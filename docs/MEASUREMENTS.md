@@ -14073,3 +14073,22 @@ costs to start".
 cargo test -p slopty-worker --lib fsevents::tests::a_stream_says -- --nocapture
 cargo test -p slopty-worker --test fswatch a_folder_deleted -- --nocapture
 ```
+
+## 2026-10-04 — the terminal seat and the server link after a lid close
+
+This Mac, debug builds, other lanes building. A driver whose Mac closed its lid holds a
+session's seat until its link times out; a server link dead after a sleep held the app until the
+same timeout. Decisions: `docs/decisions/terminal.md` (the seat) and
+`docs/decisions/workers.md`, "A wake dials a held machine, and a resume probes the server link".
+
+| what | before | after (3 runs) |
+| --- | --- | --- |
+| second viewer's first key → its `Driver { you: true }`, the driver silent | 45 s (`IDLE_TIMEOUT`) | 3.002 / 3.003 / 3.002 s |
+| resume with the server path muted → the link given up | 45 s | 1.002 / 1.002 / 1.003 s |
+
+The input path gains one `Option` check per request for the marker the driver is asked to answer.
+
+```sh
+cargo test -p slopty-worker --test session_actor -- silent_driver --nocapture
+cargo test -p slopty-client --test server_link -- resume --nocapture
+```

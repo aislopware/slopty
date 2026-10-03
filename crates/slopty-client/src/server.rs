@@ -22,7 +22,7 @@ use slopty_proto::RequestId;
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::server::{FromServer, Refusal, Role, ToServer};
 use slopty_proto::thread::attention::Presence;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::update::UpdateNotice;
 
@@ -30,6 +30,13 @@ use crate::update::UpdateNotice;
 const EVENT_DEPTH: usize = 256;
 /// Verbs waiting for the link at most; a caller past them waits its turn.
 const CALL_DEPTH: usize = 64;
+/// How long a probe after [`ServerTask::resume`] waits for the server before giving up the link.
+///
+/// The server is the control plane, off every terminal's and stream's path, so one fixed wait
+/// is enough: a live link answers in a round trip.
+pub const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often a probe looks for the answer.
+const PROBE_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// What the link says.
 #[derive(Debug)]
@@ -62,9 +69,17 @@ pub struct ServerTask {
     task: tokio::task::JoinHandle<()>,
     calls: mpsc::Sender<Call>,
     presence: Arc<watch::Sender<Option<Presence>>>,
+    resume: Arc<Notify>,
 }
 
 impl ServerTask {
+    /// Something may have killed the link (the device slept, the path moved): a live link is
+    /// probed now, and given up if the server says nothing within [`PROBE_DEADLINE`], rather
+    /// than at the transport's idle timeout; a link between dials is dialled now.
+    pub fn resume(&self) {
+        self.resume.notify_one();
+    }
+
     /// A handle that sends verbs up this link, for as long as it runs.
     #[must_use]
     pub fn caller(&self) -> ServerCaller {
@@ -189,9 +204,10 @@ pub fn spawn(
     let (calls, queued) = mpsc::channel(CALL_DEPTH);
     let presence = Arc::new(watch::Sender::new(None));
     let said = presence.subscribe();
-    let up = Up { calls: queued, presence: said };
+    let resume = Arc::new(Notify::new());
+    let up = Up { calls: queued, presence: said, resume: Arc::clone(&resume) };
     let task = runtime.spawn(run(endpoint, addr, role, first, tx, up));
-    (ServerTask { task, calls, presence }, rx)
+    (ServerTask { task, calls, presence, resume }, rx)
 }
 
 async fn run(
@@ -247,23 +263,26 @@ async fn run(
         loop {
             tokio::select! {
                 () = &mut wait => break,
+                () = up.resume.notified() => break,
                 Some(call) = up.calls.recv() => call.answer(unreachable(&why)),
             }
         }
     }
 }
 
-/// What goes up the link from this client: verbs, and where the person is.
+/// What goes up the link from this client: verbs, and where the person is; and the word to
+/// probe it ([`ServerTask::resume`]).
 #[derive(Debug)]
 struct Up {
     calls: mpsc::Receiver<Call>,
     presence: watch::Receiver<Option<Presence>>,
+    resume: Arc<Notify>,
 }
 
 /// Hand on everything the link carries and send up every verb until it ends; the reason, or
 /// `None` once nobody listens.
 async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> Option<String> {
-    let Up { calls, presence } = up;
+    let Up { calls, presence, resume } = up;
     tracing::debug!(server = %link.remote, name = %link.name, "server linked");
     let ServerLink { conn, name, link, tx: mut up, mut rx, .. } = link;
     let close = || conn.close(slopty_net::worker::close_code::NORMAL.into(), b"bye");
@@ -276,8 +295,28 @@ async fn pump(link: ServerLink, tx: &mpsc::Sender<ServerEvent>, up: &mut Up) -> 
     let mut said_open = true;
     let mut pending: HashMap<RequestId, Call> = HashMap::new();
     let mut next: RequestId = 0;
+    // A probe on its way: what had arrived when its PING went, and when it gives up.
+    let mut probe: Option<(u64, tokio::time::Instant)> = None;
     let why = loop {
         tokio::select! {
+            () = resume.notified() => {
+                if probe.is_none() {
+                    let before = slopty_net::endpoint::received_datagrams(&conn);
+                    probe = tokio::time::Instant::now()
+                        .checked_add(PROBE_DEADLINE)
+                        .map(|until| (before, until));
+                    slopty_net::endpoint::ping(&conn);
+                }
+            }
+            () = tokio::time::sleep(PROBE_POLL), if probe.is_some() => {
+                let Some((before, until)) = probe else { continue };
+                if slopty_net::endpoint::received_datagrams(&conn) > before {
+                    probe = None;
+                } else if tokio::time::Instant::now() >= until {
+                    close();
+                    break "the server did not answer after a resume".to_owned();
+                }
+            }
             msg = rx.recv() => match msg {
                 Ok(FromServer::Reply { id, outcome }) => {
                     if let Some(call) = pending.remove(&id) {

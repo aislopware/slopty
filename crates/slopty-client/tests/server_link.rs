@@ -198,4 +198,78 @@ mod tests {
         assert_eq!(said(&mut again.rx).await, at(false), "a new link is told at once");
         assert_eq!(caller.presence_said(), Some(at(false)));
     }
+
+    /// A UDP relay in front of the server at `port` that can go deaf both ways, as a path that
+    /// died while the device slept does: nothing is closed, nothing more arrives. Returns its
+    /// port and the switch.
+    async fn relay(port: u16) -> (u16, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        use std::sync::atomic::Ordering;
+        let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 0));
+        let front = tokio::net::UdpSocket::bind(loopback).await.unwrap();
+        let behind = tokio::net::UdpSocket::bind(loopback).await.unwrap();
+        behind.connect(("127.0.0.1", port)).await.unwrap();
+        let at = front.local_addr().unwrap().port();
+        let deaf = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let muted = std::sync::Arc::clone(&deaf);
+        tokio::spawn(async move {
+            let mut client = None;
+            let (mut up, mut down) = ([0_u8; 2048], [0_u8; 2048]);
+            loop {
+                tokio::select! {
+                    Ok((n, from)) = front.recv_from(&mut up) => {
+                        client = Some(from);
+                        if !muted.load(Ordering::Relaxed) {
+                            let _sent = behind.send(&up[..n]).await;
+                        }
+                    }
+                    Ok(n) = behind.recv(&mut down) => {
+                        if let Some(client) = client
+                            && !muted.load(Ordering::Relaxed)
+                        {
+                            let _sent = front.send_to(&down[..n], client).await;
+                        }
+                    }
+                }
+            }
+        });
+        (at, deaf)
+    }
+
+    /// A resume probes the server link: one the server still answers is kept, one whose path
+    /// died is given up within the probe's deadline (not the transport's 45 s idle timeout),
+    /// and the link comes back once the path does.
+    #[tokio::test]
+    async fn a_resume_keeps_a_live_link_and_gives_up_a_dead_one_at_once() {
+        use std::sync::atomic::Ordering;
+        let listener =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::default()).unwrap();
+        let (port, deaf) = relay(listener.local_addr().unwrap().port()).await;
+        let endpoint = slopty_net::client::bind_client().unwrap();
+        let addr = HostAddr::new("127.0.0.1", port);
+        let (task, mut events) =
+            spawn(&tokio::runtime::Handle::current(), endpoint, addr, role(), None);
+        let _link = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("not linked") };
+        let ServerEvent::Message(_) = next(&mut events).await else { panic!("no directory") };
+
+        task.resume();
+        let quiet = slopty_client::server::PROBE_DEADLINE.saturating_mul(2);
+        let heard = tokio::time::timeout(quiet, events.recv()).await;
+        assert!(heard.is_err(), "a live link is kept: {heard:?}");
+
+        deaf.store(true, Ordering::Relaxed);
+        let asked = tokio::time::Instant::now();
+        task.resume();
+        let ServerEvent::Unlinked { why } = next(&mut events).await else { panic!("kept") };
+        let gave_up = asked.elapsed();
+        assert_eq!(why, "the server did not answer after a resume");
+        assert!(
+            gave_up < slopty_client::server::PROBE_DEADLINE + Duration::from_millis(500),
+            "{gave_up:?}"
+        );
+
+        deaf.store(false, Ordering::Relaxed);
+        let _again = welcome(&listener, Vec::new()).await;
+        let ServerEvent::Linked { .. } = next(&mut events).await else { panic!("no redial") };
+    }
 }

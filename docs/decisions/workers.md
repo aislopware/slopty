@@ -1086,3 +1086,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   types, settings tables and keys, and these decision files. The Keyboard page names the app's
   commands in the palette's words, not by their names in the file (test: `slopty-app`
   `the_keyboard_page_names_the_app_s_commands_in_the_palette_s_words`).
+
+- ✅ **A wake dials a held machine, and a resume probes the server link** (2026-10-04, A21 in
+  `.research/readiness-2026-10-04.md`). A machine the server calls away waits `HOLD_RETRY`
+  between dials, but any wake (a resume, Connect, the server's word) now dials it once before
+  the hold starts again, so a laptop opened beside its machine does not wait out the hold. A
+  resume also sends the server link a PING and gives it 1 s for anything back; past that the link
+  is given up and dialled at once, and a link waiting between dials is dialled now. The server is
+  off every data path, so one fixed wait is enough. A dead path is dropped 1.0 s after a resume,
+  against 45 s before (`docs/MEASUREMENTS.md` 2026-10-04). Tests: `slopty-app`
+  `a_wake_dials_a_held_worker_once_rather_than_holding_again`; `slopty-client`
+  `a_resume_keeps_a_live_link_and_gives_up_a_dead_one_at_once`.

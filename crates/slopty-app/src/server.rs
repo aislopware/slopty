@@ -182,6 +182,14 @@ impl Workspace {
         self.server.as_ref()?.task.as_ref().map(ServerTask::caller)
     }
 
+    /// Something may have killed the server link: it is probed now, or dialled now if it is
+    /// between dials ([`ServerTask::resume`]).
+    pub(crate) fn resume_server(&self) {
+        if let Some(task) = self.server.as_ref().and_then(|s| s.task.as_ref()) {
+            task.resume();
+        }
+    }
+
     /// Use the server at `address`, or none. The same address again changes nothing; another
     /// one drops the old link and the workers only it listed. `first` is a link that already
     /// proved the address.
