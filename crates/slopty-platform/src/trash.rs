@@ -285,7 +285,9 @@ pub(crate) mod freedesktop {
     /// `YYYY-MM-DDThh:mm:ss` in this machine's time zone.
     pub(crate) fn local_time(at: SystemTime) -> String {
         let secs = at.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-        let t = libc::time_t::try_from(secs).unwrap_or(libc::time_t::MAX);
+        // `time_t` is left to `localtime_r` to name: the libc crate deprecates the alias on
+        // musl while its width moves there.
+        let Ok(t) = secs.try_into() else { return "1970-01-01T00:00:00".to_owned() };
         // SAFETY: an all-zero `tm` is a valid value of the plain C struct.
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         // SAFETY: POSIX `localtime_r` reads the `time_t` and writes only the `tm` it is given,
