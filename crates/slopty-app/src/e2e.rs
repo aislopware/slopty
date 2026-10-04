@@ -217,7 +217,8 @@ fn carry(
     use slopty_proto::drag::{DragOp, DragOps};
     let view = workspace.read(cx).view.clone();
     match command {
-        Command::DragOver { paths, x, y } => {
+        Command::DragOver { paths, texts, x, y } => {
+            use slopty_platform::pasteboard::{FILE_URL_UTI, TEXT_UTI};
             let board = slopty_platform::pasteboard::Memory::default();
             let urls: Option<Vec<String>> = paths
                 .iter()
@@ -226,7 +227,12 @@ fn carry(
             let Some(urls) = urls else {
                 return Reply::Error { message: format!("not absolute paths: {paths:?}") };
             };
-            board.copy_files(&urls.iter().map(String::as_str).collect::<Vec<_>>());
+            let items: Vec<[(&str, &[u8]); 1]> = urls
+                .iter()
+                .map(|u| [(FILE_URL_UTI, u.as_bytes())])
+                .chain(texts.iter().map(|t| [(TEXT_UTI, t.as_bytes())]))
+                .collect();
+            board.copy_items(&items.iter().map(<[_; 1]>::as_slice).collect::<Vec<_>>());
             let over = view.update(cx, |v, cx| {
                 let carried = slopty_ui::workspace::remote::Carried {
                     board: &board,

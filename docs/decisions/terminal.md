@@ -3277,8 +3277,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_dropped_stream_goes_as_fast_as_the_program_reads` (24 MiB, held to its window while
     the stand-in reads nothing, then every byte) and
     `a_push_past_what_a_worker_holds_is_fetched_on_the_drop`; e2e
-    `files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_copies`, over a link
-    shaped as a tailnet's. Numbers in MEASUREMENTS.md, 2026-10-05.
+    `files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_copies` and
+    `texts_dropped_on_a_program_asking_for_drops_reach_it_pushed_or_fetched` (a text pushed,
+    one fetched, and 12 MiB fetched and paced), over a link shaped as a tailnet's. Numbers in MEASUREMENTS.md, 2026-10-05.
 
 - ✅ **Grapheme clustering is on by default** (2026-10-02). Mode 2027 starts on and comes
   back on after a full reset, as in Ghostty, Kitty and WezTerm. An emoji sequence (a ZWJ

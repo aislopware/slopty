@@ -197,15 +197,16 @@ pub enum Command {
         /// Window y in points.
         y: f32,
     },
-    /// Carry a drag of files from this machine to a window point, as the platform's drag
-    /// destination hands the workspace each step of a system drag (`DropSink::over`): the
-    /// files sit on a pasteboard of the command's own, and no system drag runs. Over a remote
-    /// tile the drag goes on to the worker. The first step carries the files; while the drag
-    /// stays on the same tile the paths are not read again. Answers [`Reply::Over`]. macOS
-    /// only.
+    /// Carry a drag of files and texts from this machine to a window point, as the platform's
+    /// drag destination hands the workspace each step of a system drag (`DropSink::over`): they
+    /// sit on a pasteboard of the command's own, and no system drag runs. Over a remote tile
+    /// the drag goes on to the worker. The first step carries them; while the drag stays on the
+    /// same tile they are not read again. Answers [`Reply::Over`]. macOS only.
     DragOver {
-        /// Absolute paths on this machine.
+        /// Absolute paths on this machine, an item each.
         paths: Vec<String>,
+        /// Texts, an item of plain text each, after the files.
+        texts: Vec<String>,
         /// Window x in points.
         x: f32,
         /// Window y in points.

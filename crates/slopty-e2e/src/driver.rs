@@ -103,8 +103,8 @@ impl Driver {
         self.ok(&Command::DropFiles { paths, x, y }).await
     }
 
-    /// Carry a drag of `paths` to a window point: what it is over (`local`, or the worker's
-    /// `none`, `copy`, `link`, `move`) and the drag the window carries to the worker.
+    /// Carry a drag of `paths` and `texts` to a window point: what it is over (`local`, or the
+    /// worker's `none`, `copy`, `link`, `move`) and the drag the window carries to the worker.
     ///
     /// # Errors
     ///
@@ -112,11 +112,13 @@ impl Driver {
     pub async fn drag_over(
         &mut self,
         paths: &[&Path],
+        texts: &[&str],
         x: f32,
         y: f32,
     ) -> Result<(String, Option<String>)> {
         let paths = paths.iter().map(|p| p.display().to_string()).collect();
-        let command = Command::DragOver { paths, x, y };
+        let texts = texts.iter().map(|&t| t.to_owned()).collect();
+        let command = Command::DragOver { paths, texts, x, y };
         match self.call(&command).await? {
             Reply::Over { op, drag } => Ok((op, drag)),
             Reply::Error { message } => bail!("{command:?}: {message}"),

@@ -14496,10 +14496,11 @@ under this shape (QUIC under 3 % loss after a long transfer), not the drop's. Th
 stream" below finds its cause in BBR3 and fixes it. Before this change the upload began only at
 the drop, so every drop paid the at-once figure.
 
-Not measured end to end: a small text fetched lazily. The e2e's drag carries files only. A
-type the program accepted is pushed during the hover and waits on the worker, so it costs
-nothing at the drop. One it did not accept costs one round trip after its request (8 to 12 ms
-on this shape), the fetch and its answer. The worker test
+Not measured end to end here: a small text fetched lazily, since the e2e's drag carried files
+only (measured since, in "texts dropped on a program" below). A type the program accepted is
+pushed during the hover and waits on the worker, so it costs nothing at the drop. One it did
+not accept costs one round trip after its request (8 to 12 ms on this shape), the fetch and its
+answer. The worker test
 `a_dropped_text_is_fetched_when_the_program_asks` shows the one fetch and the pushed text
 answered with none.
 
@@ -14640,4 +14641,35 @@ the arms, and the arm with the call is no slower.
 cargo build --release -p slopty-ptyd -p slopty-cli
 SLOPTY_BINS_FRESH=1 cargo test -p slopty-workerd --release --test e2e \
   echo_beside_a_followed_thread -- --ignored --nocapture
+```
+
+## 2026-10-05 — texts dropped on a program (M1 for texts)
+
+The e2e drag now carries texts as well as files (`Command::DragOver { texts }`), so the lazy
+drop's text path is measured end to end. This was the part the files-only M1 above left out.
+`texts_dropped_on_a_program_asking_for_drops_reach_it_pushed_or_fetched` drags a text over a
+bash stand-in that asks for drops, through the tailnet shape (`harness::TAILNET`, now 1 %
+loss). On the drop the stand-in asks for `text/plain`, and awk writes the answer's base64 to a
+file, which the test decodes and compares. Three drops a run:
+
+- the stand-in accepted the text by name, so it went up during the hover;
+- it accepted naming no type, so the 20-byte text is fetched when it asks;
+- the same for a 12 MiB text, past the 8 MiB a worker holds, so it streams into the answer at
+  the stand-in's pace.
+
+The test looks for the stand-in's done file every millisecond, and the clock starts before the
+driver's drop command. Five runs:
+
+| drop → the program has the text | median | range |
+|---|---|---|
+| 20 bytes, pushed during the hover | 13.6 ms | 10.6–17.8 ms |
+| 20 bytes, fetched on the program's request | 19.3 ms | 17.8–28.5 ms |
+| 12 MiB, fetched and streamed, paced | 2 246 ms | 2 001–2 589 ms |
+
+The fetch costs about one round trip of the shape (8–12 ms) over the push, as the plan said.
+The 12 MiB goes at about 5.6 MB/s, which the stand-in sets: bash and awk reading base64 off a
+pty. The 24 MiB upload in the same runs takes about 0.6 s.
+
+```sh
+cargo xtask e2e app --filter 'test(texts_dropped_on_a_program_asking_for_drops_reach_it_pushed_or_fetched)'
 ```

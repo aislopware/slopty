@@ -31,6 +31,9 @@ const FIRST_FRAMES: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(20);
 /// The big file's size: many chunks, so it is still going up for a while after the drag enters.
 const BIG: usize = 24 << 20;
+/// The big text's size: past the 8 MiB a worker holds ahead of the drop, so it streams into
+/// the program's answer, paced by its reading.
+const BIG_TEXT: usize = 12 << 20;
 
 /// A stack whose worker draws its screen and records every drop it is handed in `record`,
 /// answering `op` (`copy` or `none`) from every target, with the drawn display in a tile.
@@ -82,10 +85,22 @@ fn sources(dir: &Path) -> Vec<PathBuf> {
 /// Carry the drag of `paths` to `at` until the worker's answer is `op`; the drag and how long
 /// the answer took from the first step.
 async fn hover(drv: &mut Driver, paths: &[&Path], at: (f32, f32), op: &str) -> (String, Duration) {
+    carry(drv, paths, &[], at, op).await
+}
+
+/// Carry the drag of `paths` and `texts` to `at` until the worker's answer is `op`; the drag
+/// and how long the answer took from the first step.
+async fn carry(
+    drv: &mut Driver,
+    paths: &[&Path],
+    texts: &[&str],
+    at: (f32, f32),
+    op: &str,
+) -> (String, Duration) {
     let start = Instant::now();
     let mut last = None;
     while start.elapsed() < STEP {
-        let (now, drag) = drv.drag_over(paths, at.0, at.1).await.unwrap();
+        let (now, drag) = drv.drag_over(paths, texts, at.0, at.1).await.unwrap();
         if now == op
             && let Some(drag) = drag
         {
@@ -260,12 +275,17 @@ exec sleep 600"#;
 
 /// Wait until `path` is there; how long it took.
 async fn there(path: &Path) -> Duration {
+    there_every(path, POLL).await
+}
+
+/// Wait until `path` is there, looking every `poll`; how long it took.
+async fn there_every(path: &Path, poll: Duration) -> Duration {
     let start = Instant::now();
     while start.elapsed() < STEP {
         if path.exists() {
             return start.elapsed();
         }
-        tokio::time::sleep(POLL).await;
+        tokio::time::sleep(poll).await;
     }
     panic!("{} never came", path.display());
 }
@@ -331,5 +351,91 @@ async fn files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_cop
         read.as_secs_f64() * 1e3,
     );
     assert_eq!(digests(&walk(&out.join("got2"))), digests(&files), "the program's copies");
+    stack.shutdown().await;
+}
+
+/// A program that asks for drops of text, as the files' stand-in does for files. The first drag
+/// it accepts as `text/plain`, so the text goes up during the hover. The others it accepts
+/// naming no type, so nothing goes up until it asks on the drop. Each answer's base64 goes to
+/// `text<n>` a message a line, which awk reads in blocks where bash would read a byte at a
+/// time.
+const TAKES_TEXT: &str = r#"stty -echo -icanon
+printf '\033]72;t=a;text/plain\033\\'; echo ready
+for n in 1 2 3; do
+  while IFS= read -r -d '\' x; do case $x in *t=m*) break;; esac; done
+  case $n in
+    1) printf '\033]72;t=m:o=1;text/plain\033\\';;
+    *) printf '\033]72;t=m:o=1\033\\';;
+  esac
+  while IFS= read -r -d '\' x; do case $x in *t=M*) break;; esac; done
+  printf '\033]72;t=r:x=2\033\\'
+  awk 'BEGIN { RS = "\\" } /t=r:x=2:m=/ { sub(/^.*;/, ""); sub(/\033$/, ""); print; next } { exit }' > "$0/text$n"
+  printf '\033]72;t=r:o=1\033\\'
+  : > "$0/done$n"
+done
+exec sleep 600"#;
+
+/// The text a stand-in's answer carried: its base64 messages, a line each, decoded.
+fn decoded(path: &Path) -> String {
+    let lines = std::fs::read_to_string(path).unwrap();
+    let mut text = Vec::new();
+    for line in lines.lines().filter(|l| !l.is_empty()) {
+        text.extend(data_encoding::BASE64.decode(line.as_bytes()).unwrap());
+    }
+    String::from_utf8(text).unwrap()
+}
+
+/// Texts dragged from this Mac over a program that asks for drops, over a link shaped as a
+/// tailnet's. One the program accepted by name goes up during the hover and is the program's a
+/// local step after the drop. One it accepted naming nothing is fetched when it asks: a round
+/// trip after the drop, inline when small, and streamed into the answer as the program reads it
+/// when larger than a worker would hold.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn texts_dropped_on_a_program_asking_for_drops_reach_it_pushed_or_fetched() {
+    let scratch = tempfile::tempdir().unwrap();
+    let out = scratch.path().join("program");
+    std::fs::create_dir_all(&out).unwrap();
+    let (mut stack, _link) =
+        Stack::launch_shaped("e2e-worker", &[], slopty_e2e::harness::TAILNET).await.unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    let command =
+        ["/bin/bash", "-c", TAKES_TEXT, &out.display().to_string()].map(str::to_owned).to_vec();
+    drv.ok(&Command::Open { command, count: 1 }).await.unwrap();
+    let dump = drv
+        .wait_for("the program asking for drops", STEP, |d| {
+            d.terminals.iter().any(|t| t.rows.iter().any(|r| r.contains("ready")))
+        })
+        .await
+        .unwrap();
+    let session = dump.terminals.iter().find(|t| t.rows.iter().any(|r| r.contains("ready")));
+    let session = session.map(|t| t.session.clone());
+    let item = dump.items.iter().find(|i| i.session == session).expect("its tile");
+    let [x, y, w, h] = item.bounds;
+    let at = (x + w / 2.0, y + h / 2.0);
+    let small = "héllo from the Mac\n";
+    let big: String =
+        (0..BIG_TEXT).map(|i| char::from(b"abcdefghijklmnopqrstuvwxyz\n"[i % 27])).collect();
+
+    for (n, text, how) in
+        [(1, small, "pushed"), (2, small, "fetched"), (3, big.as_str(), "fetched")]
+    {
+        let (_drag, _answered) = carry(drv, &[], &[text], at, "copy").await;
+        // A pushed text has gone up once the acceptance is heard and the push sent.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let dropped = Instant::now();
+        assert!(drv.drag_drop(at.0, at.1).await.unwrap(), "the drop is taken");
+        // Looked for every millisecond: a small text's figures are a few round trips.
+        let _read = there_every(&out.join(format!("done{n}")), Duration::from_millis(1)).await;
+        let read = dropped.elapsed();
+        println!(
+            "MEASURE text dropped on a program, {how}, {} bytes: drop → program has it {:.1} ms",
+            text.len(),
+            read.as_secs_f64() * 1e3,
+        );
+        assert!(decoded(&out.join(format!("text{n}"))) == text, "drop {n}: the program's text");
+    }
     stack.shutdown().await;
 }
