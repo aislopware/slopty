@@ -11,8 +11,8 @@
 //! Goldens: the thread with a request over the composer, light and dark; its questions; a settled
 //! turn and a subagent's own thread; a file attached by a drop; the thread on a phone-width window;
 //! a step the model is still writing; the work beyond words (a pasted picture, the plan, a
-//! build in the background), folded and with every step open; and the screen an agent drives,
-//! offered beside its thread.
+//! build in the background), folded and with every step open; the screen an agent drives,
+//! offered beside its thread; and a file's line naming the turn that wrote it.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -1085,10 +1085,15 @@ async fn private_ref(repo: &Path, end: &str) -> String {
 
 /// One record of the session's transcript, as Claude Code writes it.
 fn record(uuid: &str, parent: Option<&str>, at: &str, body: Value) -> String {
+    record_at(uuid, parent, &format!("2026-10-04T09:{at}.000Z"), body)
+}
+
+/// One record of the session's transcript, written at `timestamp` (RFC 3339).
+fn record_at(uuid: &str, parent: Option<&str>, timestamp: &str, body: Value) -> String {
     let mut record = body;
     record["uuid"] = json!(uuid);
     record["parentUuid"] = parent.map_or(Value::Null, |p| json!(p));
-    record["timestamp"] = json!(format!("2026-10-04T09:{at}.000Z"));
+    record["timestamp"] = json!(timestamp);
     record["sessionId"] = json!("s1");
     record["isSidechain"] = json!(false);
     format!("{record}\n")
@@ -1113,26 +1118,15 @@ fn append(path: &Path, text: &str) {
     file.write_all(text.as_bytes()).unwrap();
 }
 
-/// Claude Code's own review from the review tile: the agent changes a file in a turn, the
-/// review tile shows it, and "Review with Claude Code" sends its `/code-review` over the
-/// change as the person's turn, typed into the agent's terminal (a stand-in that only keeps
-/// what it is given). Its answer, played into the transcript as Claude Code writes one, puts
-/// a finding on its line in the diff and keeps one about a file not on show as a note above
-/// it. Light and dark.
-#[tokio::test]
-#[ignore = "live: cargo xtask e2e app"]
-#[expect(clippy::too_many_lines, reason = "one review, from the turn to its findings")]
-async fn the_agents_own_review_puts_its_findings_on_the_diff() {
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
-    let dir = stack.dir.path().to_path_buf();
-    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let repo = stack.path("repo");
-    review_repo(&repo);
+/// An agent's tile on a stand-in terminal that keeps what it is given, titled `title`; its
+/// session.
+async fn agent_tile(stack: &mut Stack, title: &str) -> String {
     first_shell(&mut stack.driver).await;
     let drv = &mut stack.driver;
     let before: Vec<String> =
         drv.dump().await.unwrap().terminals.into_iter().map(|t| t.session).collect();
-    drv.open(&["sh", "-c", "printf '\\033]0;Retry the refresh\\007'; exec cat"], 1).await.unwrap();
+    let shell = format!("printf '\\033]0;{title}\\007'; exec cat");
+    drv.open(&["sh", "-c", &shell], 1).await.unwrap();
     let dump = drv
         .wait_for("the agent's terminal", STEP, |d| {
             d.terminals.iter().any(|t| !before.contains(&t.session))
@@ -1142,95 +1136,166 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
     let session =
         dump.terminals.iter().find(|t| !before.contains(&t.session)).unwrap().session.clone();
     drv.reveal(&session).await.unwrap();
+    session
+}
 
-    let main = stack.path("projects").join("s1.jsonl");
-    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
-    let transcript = main.to_string_lossy().into_owned();
-    let hook = |event: &str, more: Value| {
+/// Claude Code's session `s1` in `repo`, as its hooks and transcript tell the worker: the
+/// transcript at `main`, and a hook played through the real relay for the agent's tile
+/// `session`.
+struct Played {
+    session: String,
+    repo: PathBuf,
+    main: PathBuf,
+    /// When the transcript starts, in Unix seconds; the fixed morning the goldens show when
+    /// none.
+    since: Option<u64>,
+}
+
+/// `secs` since the Unix epoch as RFC 3339 in UTC, as Claude Code stamps its records.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the civil calendar's own arithmetic, on a time after 1970 that cannot overflow"
+)]
+fn rfc3339(secs: u64) -> String {
+    // Howard Hinnant's days-to-civil, over whole days since 1970-01-01.
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    let (h, m, s) = (rest / 3_600, rest % 3_600 / 60, rest % 60);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}.000Z")
+}
+
+impl Played {
+    /// The session, started.
+    async fn start(stack: &Stack, session: &str, repo: &Path) -> Self {
+        let main = stack.path("projects").join("s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, "").unwrap();
+        let played = Self { session: session.to_owned(), repo: repo.to_owned(), main, since: None };
+        played.hook(stack, "SessionStart", json!({ "source": "startup" })).await;
+        played
+    }
+
+    /// A record written `at` (`mm:ss`) into the session.
+    fn record(&self, uuid: &str, parent: Option<&str>, at: &str, body: Value) -> String {
+        let Some(since) = self.since else { return record(uuid, parent, at, body) };
+        let (m, s) = at.split_once(':').unwrap();
+        let offset = m.parse::<u64>().unwrap().saturating_mul(60);
+        let offset = offset.saturating_add(s.parse::<u64>().unwrap());
+        record_at(uuid, parent, &rfc3339(since.saturating_add(offset)), body)
+    }
+
+    /// Hook `event` with `more` in its payload, through the relay.
+    async fn hook(&self, stack: &Stack, event: &str, more: Value) {
         let mut payload = json!({
-            "hook_event_name": event, "session_id": "s1", "transcript_path": transcript,
-            "cwd": repo,
+            "hook_event_name": event, "session_id": "s1",
+            "transcript_path": self.main.to_string_lossy(), "cwd": self.repo,
         });
         if let (Some(payload), Some(more)) = (payload.as_object_mut(), more.as_object()) {
             payload.extend(more.clone());
         }
-        payload
-    };
-    let relay = async |stack: &Stack, payload: Value| {
-        let done = stack.relay_hook(&session, &[], &payload).unwrap().wait().await.unwrap();
+        let done = stack.relay_hook(&self.session, &[], &payload).unwrap().wait().await.unwrap();
         assert!(done.success(), "the relay ran");
-    };
-    std::fs::write(&main, "").unwrap();
-    relay(&stack, hook("SessionStart", json!({ "source": "startup" }))).await;
+    }
 
-    // The agent's turn: snapshotted as it begins, the file changed, and snapshotted as it ends.
-    let prompt = "Make the refresh retry with one idempotency key";
-    relay(&stack, hook("UserPromptSubmit", json!({ "prompt": prompt }))).await;
-    append(
-        &main,
-        &record(
-            "u1",
-            None,
-            "00:00",
-            json!({ "type": "user", "message": { "role": "user", "content": prompt } }),
-        ),
-    );
-    private_ref(&repo, "/1-before").await;
-    std::fs::write(repo.join("src/refresh.rs"), REFRESH_AFTER).unwrap();
-    let file = repo.join("src/refresh.rs").to_string_lossy().into_owned();
-    let (old, new) = (
-        REFRESH_BEFORE.lines().nth(1).unwrap(),
-        REFRESH_AFTER.lines().skip(1).take(3).collect::<Vec<_>>().join("\n"),
-    );
-    append(
-        &main,
-        &record(
-            "e1",
-            Some("u1"),
-            "00:10",
-            json!({ "type": "assistant", "message": {
-                "role": "assistant", "model": "claude-opus-5-5", "stop_reason": "tool_use",
-                "content": [{ "type": "tool_use", "id": "toolu_e1", "name": "Edit",
-                    "input": { "file_path": file, "old_string": old, "new_string": new } }],
-                "usage": { "input_tokens": 12, "cache_read_input_tokens": 41_000, "output_tokens": 220 },
-            }}),
-        ),
-    );
-    let patch: Vec<String> =
-        std::iter::once(format!(" {}", REFRESH_BEFORE.lines().next().unwrap()))
-            .chain(std::iter::once(format!("-{old}")))
-            .chain(new.lines().map(|l| format!("+{l}")))
-            .chain(REFRESH_BEFORE.lines().skip(2).map(|l| format!(" {l}")))
-            .collect();
-    append(
-        &main,
-        &record(
-            "r1",
-            Some("e1"),
-            "00:11",
-            json!({ "type": "user",
-                "message": { "role": "user", "content": [{ "type": "tool_result",
-                    "tool_use_id": "toolu_e1", "content": "The file has been updated." }] },
-                "toolUseResult": { "filePath": file, "oldString": old, "newString": new,
-                    "originalFile": REFRESH_BEFORE, "replaceAll": false, "userModified": false,
-                    "structuredPatch": [{ "oldStart": 1, "oldLines": 4, "newStart": 1,
-                        "newLines": 6, "lines": patch }] } }),
-        ),
-    );
-    append(
-        &main,
-        &record(
-            "a1",
-            Some("r1"),
-            "00:30",
-            said_by_claude(
-                "The refresh now retries three times with one key, and saves the token.",
+    /// The agent's turn that makes the refresh retry: snapshotted as it begins, the file
+    /// changed, the transcript written as Claude Code writes it, and snapshotted as it ends.
+    async fn refresh_turn(&self, stack: &Stack) {
+        let (repo, main) = (self.repo.as_path(), &self.main);
+        let prompt = "Make the refresh retry with one idempotency key";
+        self.hook(stack, "UserPromptSubmit", json!({ "prompt": prompt })).await;
+        append(
+            main,
+            &self.record(
+                "u1",
+                None,
+                "00:00",
+                json!({ "type": "user", "message": { "role": "user", "content": prompt } }),
             ),
-        ),
-    );
-    append(&main, &record("d1", Some("a1"), "00:31", turn_ended()));
-    relay(&stack, hook("Stop", json!({ "stop_hook_active": false }))).await;
-    private_ref(&repo, "/1-after").await;
+        );
+        private_ref(repo, "/1-before").await;
+        std::fs::write(repo.join("src/refresh.rs"), REFRESH_AFTER).unwrap();
+        let file = repo.join("src/refresh.rs").to_string_lossy().into_owned();
+        let (old, new) = (
+            REFRESH_BEFORE.lines().nth(1).unwrap(),
+            REFRESH_AFTER.lines().skip(1).take(3).collect::<Vec<_>>().join("\n"),
+        );
+        append(
+            main,
+            &self.record(
+                "e1",
+                Some("u1"),
+                "00:10",
+                json!({ "type": "assistant", "message": {
+                    "role": "assistant", "model": "claude-opus-5-5", "stop_reason": "tool_use",
+                    "content": [{ "type": "tool_use", "id": "toolu_e1", "name": "Edit",
+                        "input": { "file_path": file, "old_string": old, "new_string": new } }],
+                    "usage": { "input_tokens": 12, "cache_read_input_tokens": 41_000, "output_tokens": 220 },
+                }}),
+            ),
+        );
+        let patch: Vec<String> =
+            std::iter::once(format!(" {}", REFRESH_BEFORE.lines().next().unwrap()))
+                .chain(std::iter::once(format!("-{old}")))
+                .chain(new.lines().map(|l| format!("+{l}")))
+                .chain(REFRESH_BEFORE.lines().skip(2).map(|l| format!(" {l}")))
+                .collect();
+        append(
+            main,
+            &self.record(
+                "r1",
+                Some("e1"),
+                "00:11",
+                json!({ "type": "user",
+                    "message": { "role": "user", "content": [{ "type": "tool_result",
+                        "tool_use_id": "toolu_e1", "content": "The file has been updated." }] },
+                    "toolUseResult": { "filePath": file, "oldString": old, "newString": new,
+                        "originalFile": REFRESH_BEFORE, "replaceAll": false, "userModified": false,
+                        "structuredPatch": [{ "oldStart": 1, "oldLines": 4, "newStart": 1,
+                            "newLines": 6, "lines": patch }] } }),
+            ),
+        );
+        append(
+            main,
+            &self.record(
+                "a1",
+                Some("r1"),
+                "00:30",
+                said_by_claude(
+                    "The refresh now retries three times with one key, and saves the token.",
+                ),
+            ),
+        );
+        append(main, &self.record("d1", Some("a1"), "00:31", turn_ended()));
+        self.hook(stack, "Stop", json!({ "stop_hook_active": false })).await;
+        private_ref(repo, "/1-after").await;
+    }
+}
+
+/// Claude Code's own review from the review tile: the agent changes a file in a turn, the
+/// review tile shows it, and "Review with Claude Code" sends its `/code-review` over the
+/// change as the person's turn, typed into the agent's terminal (a stand-in that only keeps
+/// what it is given). Its answer, played into the transcript as Claude Code writes one, puts
+/// a finding on its line in the diff and keeps one about a file not on show as a note above
+/// it. Light and dark.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn the_agents_own_review_puts_its_findings_on_the_diff() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let repo = stack.path("repo");
+    review_repo(&repo);
+    let session = agent_tile(&mut stack, "Retry the refresh").await;
+    let played = Played::start(&stack, &session, &repo).await;
+    played.refresh_turn(&stack).await;
 
     let drv = &mut stack.driver;
     drv.wait_for("the thread", STEP, |d| thread_shows(d) && button_starts(d, "Review"))
@@ -1259,12 +1324,12 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
         })
         .await
         .unwrap();
-    relay(&stack, hook("UserPromptSubmit", json!({ "prompt": typed }))).await;
+    played.hook(&stack, "UserPromptSubmit", json!({ "prompt": typed })).await;
     let command = format!(
         "<command-name>/code-review</command-name>\n<command-message>code-review</command-message>\n<command-args>{range}</command-args>"
     );
     append(
-        &main,
+        &played.main,
         &record(
             "u2",
             Some("d1"),
@@ -1275,9 +1340,9 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
     let findings = "I reviewed the change and found two things to fix.\n\n\
         1. **The store is not in scope** (`src/refresh.rs:4`)\n   `store` is never passed in, so this does not build. Take it as a parameter.\n\n\
         2. **The README still says refresh never retries** (`README.md:12`)\n   Say that it retries three times with one key.";
-    append(&main, &record("a2", Some("u2"), "01:40", said_by_claude(findings)));
-    append(&main, &record("d2", Some("a2"), "01:41", turn_ended()));
-    relay(&stack, hook("Stop", json!({ "stop_hook_active": false }))).await;
+    append(&played.main, &record("a2", Some("u2"), "01:40", said_by_claude(findings)));
+    append(&played.main, &record("d2", Some("a2"), "01:41", turn_ended()));
+    played.hook(&stack, "Stop", json!({ "stop_hook_active": false })).await;
 
     let drv = &mut stack.driver;
     let dump = drv
@@ -1296,6 +1361,54 @@ async fn the_agents_own_review_puts_its_findings_on_the_diff() {
     let drv = &mut stack.driver;
     drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
     golden(drv, &dir, "review-agent-dark").await;
+    stack.shutdown().await;
+}
+
+/// A line to the turn that wrote it: the agent's turn changes a file, and the file, opened on
+/// a line that turn wrote, names the thread and the turn in the corner of its text, light and
+/// dark. Its own record dates the turn two and a half hours back, so the tag says how long ago
+/// the same on every run. A press on it opens the agent's thread there.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_line_names_the_turn_that_wrote_it_and_opens_it() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let repo = stack.path("repo");
+    review_repo(&repo);
+    let session = agent_tile(&mut stack, "Retry the refresh").await;
+    let mut played = Played::start(&stack, &session, &repo).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    played.since = Some(now.as_secs() - 9_000);
+    played.refresh_turn(&stack).await;
+
+    let drv = &mut stack.driver;
+    drv.wait_for("the thread", STEP, thread_shows).await.unwrap();
+    let path = repo.join("src/refresh.rs").to_string_lossy().into_owned();
+    // The third line is the turn's: its retry.
+    drv.ok(&Command::OpenFile { path, line: Some(3) }).await.unwrap();
+    let dump = drv
+        .wait_for("the line's author", STEP, |d| {
+            labels(d, "Link").iter().any(|l| l.starts_with("Written in"))
+        })
+        .await
+        .unwrap();
+    let said = labels(&dump, "Link").into_iter().find(|l| l.starts_with("Written in")).unwrap();
+    // Named as its tile is.
+    assert_eq!(said, "Written in Retry the refresh \u{b7} turn 1 \u{b7} 2h");
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    golden(drv, &dir, "file-author").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(drv, &dir, "file-author-dark").await;
+    stack.set_appearance("light").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
+
+    click(drv, "Link", &said).await;
+    let thread = format!("thread:{session}");
+    drv.wait_for("the agent's thread", STEP, |d| d.focused == thread).await.unwrap();
     stack.shutdown().await;
 }
 
