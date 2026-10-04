@@ -336,6 +336,16 @@ pub enum Intent {
     Discard,
     /// Keep an aside as an ordinary thread of its own: it shows from then on.
     KeepAside,
+    /// Ask the thread's agent for its own review of a change ([`Cap::REVIEW`]): what differs
+    /// between two snapshots of its working tree, as a review showed them ([`Review::from`],
+    /// [`Review::to`]). The agent reviews through its own door, as the person's turn, and its
+    /// findings come back as its answer in the thread.
+    Review {
+        /// The old side.
+        from: TreeRef,
+        /// The new side.
+        to: TreeRef,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -374,6 +384,7 @@ impl Intent {
             Self::StopTask { .. } => Cap::STOP_TASK,
             Self::Fork { .. } | Self::Aside | Self::Discard | Self::KeepAside => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
+            Self::Review { .. } => Cap::REVIEW,
             Self::Continue { .. } => Cap::CONTINUE,
             Self::Rewind { .. } => Cap::REWIND,
         }

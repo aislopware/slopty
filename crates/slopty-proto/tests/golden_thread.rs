@@ -779,6 +779,11 @@ mod golden_thread {
         };
         snap("review_keep", &Intent::Keep(pick.clone()));
         snap("review_revert", &Intent::Revert(Pick { hunks: vec![], ..pick }));
+        let asked = Intent::Review {
+            from: TreeRef("4b825dc".to_owned()),
+            to: TreeRef("9d1e7aa".to_owned()),
+        };
+        snap("review_by_agent", &asked);
     }
 
     /// The thread messages as they ride the control stream and open a stream of their own.

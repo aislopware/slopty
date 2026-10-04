@@ -257,6 +257,9 @@ impl Cap {
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
     /// editing of what is held.
     pub const QUEUE: &'static str = "queue";
+    /// [`wire::Intent::Review`]: the agent reviews a change through its own door (Claude Code's
+    /// `/code-review`, Codex's `review/start`).
+    pub const REVIEW: &'static str = "review";
     /// [`wire::Intent::Rewind`]: the agent branches its session before an earlier turn through
     /// its own door.
     pub const REWIND: &'static str = "rewind";
