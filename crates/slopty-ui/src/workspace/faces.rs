@@ -330,6 +330,11 @@ impl WorkspaceView {
         self.faces.threads.cache = Some(dir);
     }
 
+    /// `key`'s threads, once they have been made.
+    pub(super) fn held_hub(&self, key: WorkerKey) -> Option<&Entity<ThreadHub>> {
+        self.faces.threads.hubs.get(&key)
+    }
+
     /// `key`'s threads, made the first time they are asked for.
     pub(super) fn thread_hub(
         &mut self,
@@ -730,6 +735,9 @@ impl WorkspaceView {
             ThreadViewEvent::Detach { id } => {
                 self.detach_from_face(&Target(view.downgrade()), id, cx);
             }
+            ThreadViewEvent::Watch { thread, screen } => {
+                self.watch_agent_screen(key, thread, &screen, cx);
+            }
             ThreadViewEvent::PickFiles => {
                 if let Some(tile) = terminal.and_then(|s| self.tile_of_session(s)) {
                     self.ask_files(&super::folders::FilesAsk::Import(tile), cx);
@@ -789,6 +797,11 @@ impl WorkspaceView {
             }
             ThreadViewEvent::Detach { id } => {
                 self.detach_from_face(&Target(view.downgrade()), id, cx);
+            }
+            ThreadViewEvent::Watch { thread, screen } => {
+                if let Some(key) = self.worker_of_session(session) {
+                    self.watch_agent_screen(key, thread, &screen, cx);
+                }
             }
             ThreadViewEvent::PickFiles => {
                 if let Some(tile) = self.tile_of_session(session) {

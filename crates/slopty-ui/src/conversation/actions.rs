@@ -23,5 +23,7 @@ gpui::actions!(
         AskAside,
         /// Ask the thread's agent for its own review of the changes the review tile shows.
         ReviewWithAgent,
+        /// Open the screen the thread's agent drives beside it.
+        WatchAgentScreen,
     ]
 );

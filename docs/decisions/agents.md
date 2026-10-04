@@ -510,6 +510,50 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - The e2e `the_agents_own_review_puts_its_findings_on_the_diff`, with goldens
       `review-agent` and `review-agent-dark`.
 
+- ✅ **The screen an agent drives opens beside its thread, watched until the person takes
+  control** (2026-10-04, frontier must-have M2). The research behind it is in
+  `.research/feature-prune-frontier-2026-10-04.md` §6.
+  - **The link is the agent's own calls.** Every adapter already maps its agent's tool calls
+    into the thread model, an MCP tool as its server and tool with its input, a command as its
+    text. The host tells each call that runs in a thread's last turn (`Host::tools`), and
+    `thread::screens` reads what it says of a screen. One worker module serves every agent,
+    so no adapter grows a screen of its own. Nothing reads a screen to learn this, and nothing
+    acts on one.
+    - Computer use names its window outright. Claude Code's built-in `computer-use` server
+      passes `window_id` to its `app_*` tools and says "Captured window_id" when it defaults
+      one; `cua-driver` passes `window_id` and `pid`. A call that names an application is that
+      application's largest window, and a call on the whole screen is the display.
+    - A simulator's tools (a server for simulators or devices, `simctl` or a simulator
+      destination in a command) mean the booted simulator named by id or by name, or the
+      only one booted, as `xcrun simctl list devices booted -j` says. That is its window in
+      Simulator, titled with the device's name. Another platform's device is no simulator.
+    - A browser's tools (Claude in Chrome, Playwright, Chrome DevTools, `agent-browser`) mean
+      the browser window titled with the page the tool reported. With no title, it is the one
+      window of a browser only automation runs (Chrome for Testing, Chromium), never the
+      person's own browser by guess.
+  - **One fact on the thread.** `Action::ScreensSet` names up to three screens, the latest
+    first, each with its capture target, an open kind (browser, simulator, desktop, app) and
+    its label. A screen goes when its window closes or fifteen minutes after the agent last
+    drove it. It is an action of its own because adapters re-send their whole meta, which
+    would wipe a worker-set field.
+  - **Watched, then taken over on the person's word.** The composer's toolbar offers the
+    latest screen by its window's title (its mark alone in a narrow tile, the name in a hint),
+    and the palette has "Watch the agent's screen". It opens as a window or display tile
+    beside the thread, the item carrying the thread, so every client knows whose screen it
+    is. While the agent drives, a pill at the foot says so. No move, click, key or scroll
+    leaves the device, and a press does not raise the window. "Take control" stops the
+    agent's turn under way through its own door (`Intent::Interrupt`) and gives the person
+    the stream. "Hand back" watches again and sends nothing.
+  - Tests:
+    - `computer_use_names_a_window_an_application_or_the_display`,
+      `a_browser_is_the_window_showing_the_page_the_tool_reported`,
+      `a_simulator_is_the_booted_one_the_call_names` and the rest of
+      `slopty-worker/src/thread/screens/tests.rs`.
+    - `the_agents_calls_name_the_windows_it_drives` (`slopty-worker/tests/screens.rs`).
+    - `an_agents_screen_is_watched_until_the_person_takes_control` (`slopty-ui/src/screen.rs`)
+      and `the_screen_the_agent_drives_is_offered_beside_it` (`thread/tests/doors.rs`).
+    - `the_screen_an_agent_drives_opens_beside_its_thread` (app e2e, over the drawn screen;
+      goldens `agent-screen`, `agent-screen-dark`).
 - ✅ **The thread composer's menus never blank, and a waiting message is changed in place**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/composing.rs`;
   `thread/tests/composing.rs`). `/` lists the commands the thread says its agent takes, ranked

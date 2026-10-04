@@ -214,3 +214,44 @@ fn an_exited_pi_thread_goes_on_with_the_next_message(cx: &mut TestAppContext) {
     assert_eq!(intents(&sent).len(), 1, "the message goes, and starts pi again");
     assert_eq!(starts(&sent), Vec::<(slopty_proto::thread::IntentId, Vec<String>)>::new());
 }
+
+/// The screen the agent drove last is offered in the composer's toolbar, by its window's
+/// title, and in the palette; either opens it beside the thread. With none, neither shows.
+#[gpui::test]
+fn the_screen_the_agent_drives_is_offered_beside_it(cx: &mut TestAppContext) {
+    use slopty_proto::screen::CaptureTarget;
+    use slopty_proto::thread::AgentScreen;
+
+    use crate::conversation::WatchAgentScreen;
+
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-screen").is_none(), "no screen, no chip");
+    let available = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| window.is_action_available(&WatchAgentScreen, cx))
+    };
+    assert!(!available(cx));
+
+    let screen = AgentScreen {
+        target: CaptureTarget::Window(slopty_core::WindowId(41)),
+        kind: AgentScreen::SIMULATOR.to_owned(),
+        label: "Simulator \u{2014} iPhone 17 Pro".to_owned(),
+        used_ms: slopty_core::WallMs::ZERO,
+    };
+    state.screens = vec![screen.clone()];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let asked = asked(cx, &view);
+    click(cx, "thread-screen");
+    assert!(
+        matches!(asked.borrow().as_slice(), [ThreadViewEvent::Watch { screen: s, .. }] if *s == screen),
+        "{:?}",
+        asked.borrow()
+    );
+    assert!(available(cx), "and in the palette");
+}

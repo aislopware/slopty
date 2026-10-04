@@ -309,6 +309,7 @@ impl ThreadView {
             .child(place)
             .children(self.pull_chip(cx))
             .children(changes)
+            .children(self.screen_chip(cx))
     }
 
     /// The branch's pull request, once this client has heard of it: its number in the tone of

@@ -44,7 +44,7 @@ use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{
     AskAside, CTX, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
-    RefreshPullRequest,
+    RefreshPullRequest, WatchAgentScreen,
 };
 use crate::icons::{Glyph, IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
@@ -119,6 +119,7 @@ mod later;
 mod notes;
 mod pictures;
 mod plan;
+pub mod screens;
 mod tools;
 mod trail;
 mod tray;
@@ -154,6 +155,13 @@ pub enum ThreadViewEvent {
     },
     /// Show the system's picker; the files picked are attached as a drop on the tile is.
     PickFiles,
+    /// Open the screen the agent drives beside the thread, to watch it and take control.
+    Watch {
+        /// The thread.
+        thread: ThreadId,
+        /// The screen.
+        screen: slopty_proto::thread::AgentScreen,
+    },
 
     /// Ask the worker for the paths under `root` an `@` query matches; the answer comes to
     /// [`ThreadView::files_found`].
@@ -1951,6 +1959,11 @@ impl Render for ThreadView {
             .on_action(cx.listener(|this, _: &AskAside, window, cx| this.ask_aside(window, cx)))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
+            .when(self.agent_screen(cx).is_some(), |el| {
+                el.on_action(
+                    cx.listener(|this, _: &WatchAgentScreen, _w, cx| this.watch_screen(cx)),
+                )
+            })
             .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| {
                 this.open_find(window, cx);
             }))

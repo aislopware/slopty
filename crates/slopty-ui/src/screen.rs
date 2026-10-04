@@ -58,6 +58,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use crate::colors::hsla;
 use crate::{keys, kit};
 
+mod driver;
 mod drop;
 mod glass;
 mod health;
@@ -65,6 +66,7 @@ mod keyboard;
 mod touch;
 mod zoom;
 
+pub use driver::{Driver, HAND_BACK, IN_CONTROL, TAKE_CONTROL};
 pub use health::{Figure, Health, RTT_WARN_FROM, fps_label};
 pub use zoom::Zoom;
 
@@ -440,6 +442,11 @@ pub struct ScreenView {
     /// "Unlock here" was pressed on a locked Mac's notice: the scrim is lifted and the keys go
     /// to the lock screen, until the Mac says otherwise.
     unlocking: bool,
+    /// The agent that drives the screen, where the workspace opened it from a thread
+    /// (`driver`).
+    driver: Option<Driver>,
+    /// The person took control from the agent that drives the screen.
+    control: bool,
     /// Where the scroll gesture over the picture has got to.
     scrolling: Scrolling,
     /// Fires [`MOMENTUM_GAP`] after the last momentum event to close the fling. Replaced (so
@@ -1103,6 +1110,8 @@ impl ScreenView {
             rate: None,
             source: SourceState::Live,
             unlocking: false,
+            driver: None,
+            control: false,
             scrolling: Scrolling::Idle,
             momentum_end: None,
             zoom: Zoom::FIT,
@@ -1808,6 +1817,9 @@ impl ScreenView {
     }
 
     fn send_input(&mut self, input: ScreenInput) {
+        if self.watching() {
+            return;
+        }
         if self.paste_hold.0 > 0 {
             self.paste_hold.1.push(input);
             return;
@@ -2272,7 +2284,7 @@ impl ScreenView {
 
     /// The view takes the keys, and the worker raises its window, as a press on it does.
     fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.focus.is_focused(window) {
+        if !self.focus.is_focused(window) && !self.watching() {
             self.send(ScreenRequest::Focus(self.stream));
         }
         self.focus.focus(window, cx);
@@ -2302,7 +2314,8 @@ impl ScreenView {
     /// The pointer moved over the picture: sent to the worker, and drawn there in the same
     /// frame, not when the worker's sample of it comes back.
     fn mouse_move(&mut self, ev: &MouseMoveEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        if !self.inside(ev.position) {
+        // Watching, the pointer drawn is the agent's.
+        if self.watching() || !self.inside(ev.position) {
             return;
         }
         let now = cx.background_executor().now();
@@ -2318,6 +2331,10 @@ impl ScreenView {
 
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.take_focus(window, cx);
+        if self.watching() {
+            cx.stop_propagation();
+            return;
+        }
         // On glass a double tap is the zoom's: the first tap has clicked already.
         if self.touch && self.trackpad.is_none() && ev.click_count == 2 {
             let target = zoom::double_tap_target(self.one_to_one());
@@ -3428,6 +3445,7 @@ impl Render for ScreenView {
             )
             .children(console)
             .children(readout)
+            .children(self.driver_pill(cx))
             .children(hud)
     }
 }
@@ -4879,6 +4897,66 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// A screen an agent drives is watched: no move, press, key or scroll leaves this device,
+    /// nor does a press raise the window, and its pill says who drives. Taking control stops the
+    /// agent's turn once and the person's input goes from then; handing back watches again.
+    #[gpui::test]
+    fn an_agents_screen_is_watched_until_the_person_takes_control(cx: &mut gpui::TestAppContext) {
+        let (view, mut rx, cx) = windowed_on(cx, CaptureTarget::Window(slopty_core::WindowId(9)));
+        drop(sent(&mut rx));
+        let stops = Rc::new(std::cell::Cell::new(0_u32));
+        let counted = Rc::clone(&stops);
+        let driver = Driver {
+            agent: slopty_proto::thread::AgentId(
+                slopty_proto::thread::AgentId::CLAUDE_CODE.to_owned(),
+            ),
+            name: "Claude Code".to_owned(),
+            working: true,
+            take: Rc::new(move |_cx: &mut App| counted.set(counted.get().saturating_add(1))),
+        };
+        view.update(cx, |v, cx| v.set_driver(Some(driver.clone()), cx));
+        cx.run_until_parked();
+        let bounds = view.read_with(cx, |v, _| v.bounds);
+        let middle = bounds.center();
+        let poke = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_mouse_move(middle, None, Modifiers::default());
+            cx.simulate_mouse_down(middle, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(middle, MouseButton::Left, Modifiers::default());
+            cx.simulate_keystrokes("a");
+            cx.run_until_parked();
+        };
+        poke(cx);
+        let watched = sent(&mut rx);
+        assert!(
+            !watched
+                .iter()
+                .any(|r| matches!(r, ScreenRequest::Input { .. } | ScreenRequest::Focus(_))),
+            "{watched:?}"
+        );
+        assert!(cx.debug_bounds("screen-driver").is_some(), "the pill says who drives");
+
+        let act = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
+        cx.simulate_click(act, Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(stops.get(), 1, "the agent's turn was stopped once");
+        assert!(view.read_with(cx, |v, _| !v.watching()));
+        drop(sent(&mut rx));
+        poke(cx);
+        let taken = inputs(&mut rx);
+        assert!(
+            taken.iter().any(|i| matches!(i, ScreenInput::Button { down: true, .. })),
+            "{taken:?}"
+        );
+
+        view.update(cx, |v, cx| v.set_driver(Some(driver), cx));
+        assert!(view.read_with(cx, |v, _| !v.watching()), "the same driver keeps who has control");
+        let back = cx.debug_bounds("screen-driver-act").expect("the pill's button").center();
+        cx.simulate_click(back, Modifiers::default());
+        cx.run_until_parked();
+        assert!(view.read_with(cx, |v, _| v.watching()), "handed back");
+        assert_eq!(stops.get(), 1, "handing back stops nothing");
     }
 
     /// The pointer reaches the worker in the stream's pixels: a point on the painted picture

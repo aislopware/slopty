@@ -157,6 +157,7 @@ drawn![
     "shield",
     "shield-ban",
     "shield-off",
+    "smartphone",
     "sparkles",
     "square",
     "square-terminal",
