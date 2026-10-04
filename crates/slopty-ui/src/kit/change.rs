@@ -2,7 +2,7 @@
 //!
 //! [`on_change`] counts how often a value changed since its element first drew, so an
 //! animation keyed on the count plays once per change and never on the first paint. A figure
-//! that changes ([`rolling`]) rolls each digit to its new place, as a counter does, so the eye
+//! that changes ([`Rolling`]) rolls each digit to its new place, as a counter does, so the eye
 //! sees that it moved and by how much; a figure drawn for the first time, or under Reduce
 //! Motion, simply stands.
 //!

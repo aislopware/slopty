@@ -896,7 +896,6 @@ pub(crate) const PROPOSED: &str = "Proposed";
 pub(crate) const START_ALL: &str = "Start all";
 /// A proposal's word in its row, for a task its orchestrator would start.
 pub(crate) const PROPOSED_WORD: &str = "Proposed";
-/// A task several attempts try, none picked yet ([`slopty_proto::project::Attempts`]).
 /// The plan band with no finished task to estimate from.
 pub(crate) const NO_ESTIMATE: &str = "No finished task to estimate from yet";
 /// "Start all" with nothing proposed.
