@@ -27,6 +27,7 @@ use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
 use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
+use slopty_worker::thread::carry::carry;
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
 use slopty_worker::thread::compose::Terminals;
@@ -442,6 +443,17 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // Going on in a new thread starts one: on a task of its own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Continue { agent } } => {
+                tracing::info!(client = %at.client, %id, %thread, agent = %agent.0, "continue");
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let host = threads.host.clone();
+                    let begun = |id, start| begin(&threads, id, Box::new(start));
+                    let outcome = carry(&host, thread, id, agent, begun).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             // A sleep may close a terminal, and a wake open one: on tasks of their own.
             ThreadRequest::Intent { id, thread, intent: Intent::Sleep } => {
                 tracing::info!(client = %at.client, %id, %thread, "sleep");
@@ -463,47 +475,14 @@ impl Following {
                 let outcome = act(at, &threads, thread, id, &intent);
                 at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
             }
-            // pi looks for its program and starts: on a task of its own.
-            ThreadRequest::Start { id, start } if start.agent.is(AgentId::PI) => {
-                tracing::info!(client = %at.client, %id, cwd = start.cwd, "start pi");
-                let (pi, out) = (threads.pi, at.out.clone());
-                at.tasks.spawn(async move {
-                    let outcome = pi.start(id, start).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
-            // Claude Code opens in a terminal, and Codex's daemon is asked: on tasks of their own.
-            ThreadRequest::Start { id, start } if start.agent.is(AgentId::CLAUDE_CODE) => {
-                tracing::info!(client = %at.client, %id, cwd = start.cwd, "start Claude Code");
-                let (claude, out) = (threads.claude_start, at.out.clone());
-                at.tasks.spawn(async move {
-                    let outcome = claude.start(id, *start).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
-            ThreadRequest::Start { id, start } if start.agent.is(AgentId::CODEX) => {
-                tracing::info!(client = %at.client, %id, cwd = start.cwd, "start Codex");
-                let (codex, out) = (threads.codex, at.out.clone());
-                at.tasks.spawn(async move {
-                    let outcome = codex.start(id, *start).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
-            // An ACP agent is looked for and starts: on a task of its own.
-            ThreadRequest::Start { id, start }
-                if slopty_agent::acp::name_of(&start.agent).is_some() =>
-            {
-                tracing::info!(client = %at.client, %id, agent = %start.agent.0, cwd = start.cwd, "start");
-                let (acp, out) = (threads.acp, at.out.clone());
-                at.tasks.spawn(async move {
-                    let outcome = acp.start(id, start).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
+            // An agent is looked for and starts, in a terminal or not: on a task of its own.
             ThreadRequest::Start { id, start } => {
-                tracing::info!(client = %at.client, %id, agent = %start.agent.0, "start refused");
-                let reason = format!("{} is no agent this machine can start", start.agent.0);
-                at.post(WorkerMsg::IntentDone(IntentDone { id, outcome: refused(reason) }));
+                tracing::info!(client = %at.client, %id, agent = %start.agent.0, cwd = start.cwd, "start");
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let outcome = begin(&threads, id, start).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
             }
             // An agent is asked, or its session directory listed: on a task of its own.
             ThreadRequest::Sessions { agent, cwd, query, limit } => {
@@ -525,6 +504,23 @@ impl Following {
                 tracing::debug!(client = %at.client, %thread, "a thread request while not following");
             }
         }
+    }
+}
+
+/// Start a thread for intent `id` as `start` says, once, on its agent's adapter: pi and an
+/// ACP agent are looked for and run here, Claude Code opens in a terminal, Codex's daemon is
+/// asked.
+async fn begin(threads: &Threads, id: IntentId, start: Box<Start>) -> Outcome {
+    if start.agent.is(AgentId::PI) {
+        threads.pi.start(id, start).await
+    } else if start.agent.is(AgentId::CLAUDE_CODE) {
+        threads.claude_start.start(id, *start).await
+    } else if start.agent.is(AgentId::CODEX) {
+        threads.codex.start(id, *start).await
+    } else if slopty_agent::acp::name_of(&start.agent).is_some() {
+        threads.acp.start(id, start).await
+    } else {
+        refused(format!("{} is no agent this machine can start", start.agent.0))
     }
 }
 

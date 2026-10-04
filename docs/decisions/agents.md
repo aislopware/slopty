@@ -1390,3 +1390,38 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`);
     `a_message_scheduled_after_another_thread_goes_to_pi_once_it_rests`; goldens
     `intent_send_at` and `intent_send_after`.
+
+- ✅ **A thread goes on in a new one, on another agent or on its own afresh** (2026-10-04, R8 of
+  the T3 Code orchestrator study, after T3's budgeted context handoff and Amp's Handoff).
+  `Intent::Continue { agent }` needs `Cap::CONTINUE`, which every adapter has, since the worker
+  makes the account from the thread it holds and not from the agent. Fork stays the agent's own
+  branch of its session; Continue is the portable way, for any pair of agents.
+  - **A visible first message, never a hidden prompt.** The new thread starts with nothing
+    sent. Its first message waits on the worker as a draft (`Delivery::Draft`), which the
+    person reads, changes (Edit), sends (Promote) or drops (Withdraw). A draft is kept like a
+    scheduled message, in the thread's log through a restart, but it never goes on its own and
+    does not keep the agent from sleep. A client may keep a draft of its own the same way.
+    Slopty's rule that the agent's session is the record holds: switching agents is a new
+    thread with its own session, never words slipped into an old one.
+  - **The account** (`slopty_agent::handoff::render`) is made by rule, not by a model, so the
+    same thread always gives the same words. It opens by saying whose conversation it was and
+    where, and that what follows is context rather than a request. One line says how much it
+    holds. Then come the plan, the files changed and the commands run with how they ended, each
+    newest first within an eighth of the budget, and together within half of what is left. The
+    person's messages with their final answers fill the rest, newest first: the newest is cut
+    short if it alone is too long, and older ones go whole or not at all. The budget is 32 KiB.
+    A property test holds it to the budget for any thread.
+  - **Where it came from.** The new thread's `forked_from` names the old one through its last
+    turn, so the lineage reads as a fork's does. The old thread goes on as it was.
+  - **Once.** The start is once per intent, as a client's start is. A repeat starts nothing and
+    finishes what the first may not have, the draft and where it came from, both kept once.
+  - **Not yet.** The thread view's door ("Continue in…" with the agents this worker has) is the
+    client's half. So is a project task's "Restart fresh" or "Give to another agent", which
+    starts the task's runner again with the account, its branch and its brief. A seated
+    thread's seat does not go with it.
+  - Tests: `a_thread_is_told_whole_when_it_fits`,
+    `the_newest_message_stays_when_the_budget_is_tight` and the property test
+    `an_account_keeps_within_its_budget` (`slopty_agent::handoff`);
+    `a_claude_code_thread_goes_on_in_pi_from_a_draft_the_person_sends`
+    (`slopty-worker/tests/pi.rs`); `only_an_agent_at_rest_with_nothing_under_way_sleeps` for
+    the draft; goldens `intent_continue` and `intent_send_draft`.

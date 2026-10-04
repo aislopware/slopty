@@ -380,6 +380,14 @@ mod golden_thread {
                 attachments: Vec::new(),
             }),
         );
+        snap(
+            "intent_send_draft",
+            &send(Intent::Send {
+                text: "Go on from where it stopped".to_owned(),
+                delivery: Delivery::Draft,
+                attachments: Vec::new(),
+            }),
+        );
         snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
         snap(
             "intent_edit",
@@ -424,6 +432,7 @@ mod golden_thread {
         snap("intent_fork_whole", &send(Intent::Fork { after: None }));
         snap("intent_sleep", &send(Intent::Sleep));
         snap("intent_wake", &send(Intent::Wake));
+        snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));
     }
 
     #[test]

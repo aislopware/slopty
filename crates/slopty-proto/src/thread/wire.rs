@@ -236,6 +236,18 @@ pub enum Intent {
     /// Wake an agent put to sleep: its session is taken up again through the agent's own
     /// resume. The next message wakes it too.
     Wake,
+    /// Go on from this thread in a new one on agent `agent` (this one's own, to start afresh)
+    /// ([`Cap::CONTINUE`]). The new thread starts with nothing sent: its first message, a
+    /// portable account of this one (the person's messages and the answers, newest first, the
+    /// commands run, the files changed, the plan), waits on the worker as a draft
+    /// ([`Delivery::Draft`]) for the person to read, change and send. Answered with
+    /// [`Outcome::Started`] and the new thread, whose
+    /// [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) names this one; this one goes
+    /// on as it was.
+    Continue {
+        /// The agent the new thread runs.
+        agent: AgentId,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -258,9 +270,10 @@ impl Intent {
     pub const fn needs(&self) -> &'static str {
         match self {
             Self::Send { delivery: Delivery::Steer, .. } | Self::Promote { .. } => Cap::STEER,
-            Self::Send { delivery: Delivery::At { .. } | Delivery::After { .. }, .. } => {
-                Cap::SCHEDULE
-            }
+            Self::Send {
+                delivery: Delivery::At { .. } | Delivery::After { .. } | Delivery::Draft,
+                ..
+            } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
             | Self::Edit { .. }
@@ -275,6 +288,7 @@ impl Intent {
             Self::Fork { .. } => Cap::FORK,
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Sleep | Self::Wake => Cap::SLEEP,
+            Self::Continue { .. } => Cap::CONTINUE,
         }
     }
 }

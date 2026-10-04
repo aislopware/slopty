@@ -17,6 +17,7 @@
 
 pub mod acp;
 pub mod attach;
+pub mod carry;
 pub mod claude;
 pub mod codex;
 pub mod compose;

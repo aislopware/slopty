@@ -241,6 +241,9 @@ impl Cap {
     pub const APPROVALS: &'static str = "approvals";
     /// [`wire::Intent::Compact`].
     pub const COMPACT: &'static str = "compact";
+    /// [`wire::Intent::Continue`]: a new thread, on any agent here, that goes on from this one
+    /// with a portable account of it as its first message, held for the person to send.
+    pub const CONTINUE: &'static str = "continue";
     /// [`wire::Intent::Fork`]: a new thread branched off this one.
     pub const FORK: &'static str = "fork";
     /// The agent's own TUI takes the session over by a handoff.
@@ -254,8 +257,8 @@ impl Cap {
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
     /// editing of what is held.
     pub const QUEUE: &'static str = "queue";
-    /// [`wire::Intent::Send`] with [`Delivery::At`] or [`Delivery::After`]: the worker holds the
-    /// message until its moment.
+    /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds
+    /// the message until its moment, or the person's word for a draft.
     pub const SCHEDULE: &'static str = "schedule";
     /// [`wire::Intent::SetMode`].
     pub const SET_MODE: &'static str = "set-mode";
@@ -1006,11 +1009,23 @@ pub enum Delivery {
         /// How long it rests first.
         settle_ms: u32,
     },
+    /// On the person's word alone: a draft held on the worker, through a restart, never sent
+    /// on its own. Sending it ([`wire::Intent::Promote`]) queues it; it can be changed or
+    /// withdrawn until then ([`Cap::SCHEDULE`]). A continued thread's first message waits so
+    /// ([`wire::Intent::Continue`]).
+    Draft,
 }
 
 impl Delivery {
-    /// Whether the worker holds the message until its moment ([`Self::At`], [`Self::After`]),
+    /// Whether the worker keeps the message ([`Self::At`], [`Self::After`], [`Self::Draft`]),
     /// rather than the agent's queue.
+    #[must_use]
+    pub const fn is_kept(self) -> bool {
+        matches!(self, Self::At { .. } | Self::After { .. } | Self::Draft)
+    }
+
+    /// Whether the message goes on its own at a moment the worker watches for ([`Self::At`],
+    /// [`Self::After`]).
     #[must_use]
     pub const fn is_scheduled(self) -> bool {
         matches!(self, Self::At { .. } | Self::After { .. })

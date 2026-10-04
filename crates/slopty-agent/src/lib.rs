@@ -50,6 +50,7 @@ pub mod conversation;
 pub mod detect;
 pub mod discover;
 pub mod driven;
+pub mod handoff;
 pub mod history;
 pub mod hooks;
 pub mod live;

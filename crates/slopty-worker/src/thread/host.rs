@@ -204,7 +204,7 @@ impl Own {
         let scheduled = state
             .pending
             .iter()
-            .filter(|p| p.delivery.is_scheduled())
+            .filter(|p| p.delivery.is_kept())
             .map(|p| match p.state {
                 PendingState::Sending => Pending {
                     state: PendingState::Held { reason: super::schedule::CUT_OFF.to_owned() },
@@ -218,7 +218,7 @@ impl Own {
 
     /// `pending`, an adapter's list, with the messages the worker holds put back after it.
     fn pending(&self, pending: &mut Vec<Pending>) {
-        pending.retain(|p| !p.delivery.is_scheduled());
+        pending.retain(|p| !p.delivery.is_kept());
         pending.extend(self.scheduled.iter().cloned());
     }
 

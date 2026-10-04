@@ -49,9 +49,10 @@ use crate::attach::Attached;
 use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
 
 /// What a driven pi can do through Slopty.
-pub const CAPS: [&str; 10] = [
+pub const CAPS: [&str; 11] = [
     Cap::APPROVALS,
     Cap::COMPACT,
+    Cap::CONTINUE,
     Cap::FORK,
     Cap::HANDOFF,
     Cap::INTERRUPT,

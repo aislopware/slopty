@@ -9,6 +9,10 @@
 //!
 //! One that was being sent when the worker stopped is never sent again: it comes back held,
 //! saying it may have gone ([`CUT_OFF`]), for the person to withdraw or send again.
+//!
+//! A draft ([`Delivery::Draft`]) is kept the same way with no moment of its own: it goes once
+//! the person sends it ([`Intent::Promote`]). A continued thread's first message waits so
+//! ([`draft`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -81,7 +85,7 @@ pub fn when(pending: &Pending, watched: Option<&ThreadState>, now: WallMs) -> Wh
             }
             None => When::Later,
         },
-        Delivery::Steer | Delivery::Queue => When::Later,
+        Delivery::Steer | Delivery::Queue | Delivery::Draft => When::Later,
     }
 }
 
@@ -93,16 +97,39 @@ pub fn sent_as(intent: IntentId) -> IntentId {
     IntentId::from_uuid(*derived.as_uuid())
 }
 
+/// Keep `text` on `thread` as a draft for the person to read, change and send, once per
+/// intent `id` ([`drafted_as`]); `None` when there is no such thread.
+pub fn draft(host: &Host, thread: ThreadId, id: IntentId, text: String) -> Option<Outcome> {
+    let draft = drafted_as(id);
+    host.schedule(thread, draft, |_, kept| {
+        kept.push(Pending {
+            intent: draft,
+            text,
+            attachments: Vec::new(),
+            delivery: Delivery::Draft,
+            state: PendingState::Waiting,
+        });
+        Outcome::Accepted
+    })
+}
+
+/// The intent a draft kept for intent `intent` waits as ([`draft`]).
+#[must_use]
+pub fn drafted_as(intent: IntentId) -> IntentId {
+    let derived = ThreadId::derived(&["draft", &intent.to_string()]);
+    IntentId::from_uuid(*derived.as_uuid())
+}
+
 /// What comes of `intent` on `thread` when it is about a scheduled message.
 ///
 /// The worker holds those and no adapter knows them: one scheduled (a send with
-/// [`Delivery::is_scheduled`]), or a change to one waiting (withdrawn, its words changed, sent
+/// [`Delivery::is_kept`]), or a change to one waiting (withdrawn, its words changed, sent
 /// now; never moved, since it goes at its own moment). `None` for any other intent, which
 /// goes on to the thread's agent.
 pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Option<Outcome> {
     let refused = |reason: &str| Outcome::Refused { reason: reason.to_owned() };
     match intent {
-        Intent::Send { text, attachments, delivery } if delivery.is_scheduled() => {
+        Intent::Send { text, attachments, delivery } if delivery.is_kept() => {
             let decided = host.schedule(thread, id, |state, scheduled| {
                 if !state.meta.can(Cap::SCHEDULE) {
                     return Outcome::Unsupported { cap: Cap::named(Cap::SCHEDULE) };

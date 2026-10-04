@@ -14,12 +14,16 @@ mod pi {
     use std::time::Duration;
 
     use serde_json::Value;
-    use slopty_core::{ClientId, SessionId};
+    use slopty_agent::handoff;
+    use slopty_core::{ClientId, SessionId, WallMs};
+    use slopty_proto::thread::detail::Clipped;
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
-        Action, AgentId, Answerer, Cap, Delivery, Drive, IntentId, ItemBody, Liveness, Phase,
-        RequestState, Status, ThreadId, ThreadState, ToolState, TurnId, TurnState,
+        Action, AgentId, Answerer, Cap, Changed, Delivery, Drive, Fork, IntentId, Item, ItemBody,
+        ItemId, Liveness, Phase, RequestState, Status, ThreadId, ThreadMeta, ThreadState,
+        ToolState, Turn, TurnId, TurnState, Usage, UserMessage,
     };
+    use slopty_worker::thread::carry::carry;
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::pi::tui::{Pending, Terminals};
     use slopty_worker::thread::pi::{self, Pi};
@@ -508,7 +512,7 @@ mod pi {
             phase: Phase::Working,
             wait: None,
             liveness: Liveness::Live,
-            since_ms: slopty_core::WallMs::now(),
+            since_ms: WallMs::now(),
         };
         rig.host.apply(other, vec![Action::Status(working.clone())]);
 
@@ -532,7 +536,7 @@ mod pi {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(rig.host.state(thread).unwrap().0.turns.len(), 1, "not while it works");
 
-        let rested = Status { phase: Phase::Done, since_ms: slopty_core::WallMs::now(), ..working };
+        let rested = Status { phase: Phase::Done, since_ms: WallMs::now(), ..working };
         rig.host.apply(other, vec![Action::Status(rested)]);
         let state = rig.until(thread, "the scheduled message's ask", asking(1)).await;
         assert!(state.pending.is_empty(), "it went");
@@ -540,6 +544,125 @@ mod pi {
         let sent = users.last().unwrap();
         assert_eq!(sent.0, "Make a file called made-by-pi.");
         assert_eq!(sent.1, Some(schedule::sent_as(later)), "as the person's message");
+    }
+
+    /// A Claude Code thread goes on in pi: pi starts with nothing sent, once per intent, and the
+    /// new thread says where it came from. Its first message, the old thread's portable account,
+    /// waits on the worker as a draft; the person changes it and sends it, and it goes to pi as
+    /// their message. A thread with nothing in it, or whose agent cannot, is not gone on from.
+    #[tokio::test]
+    async fn a_claude_code_thread_goes_on_in_pi_from_a_draft_the_person_sends() {
+        let rig = Rig::new();
+        let (pi, _served) = rig.serve();
+        let meta = ThreadMeta {
+            id: ThreadId::new(),
+            agent: AgentId::named(AgentId::CLAUDE_CODE),
+            agent_version: String::new(),
+            native: "claude-session".to_owned(),
+            cwd: rig.work.to_string_lossy().into_owned(),
+            title: "Fix the parser".to_owned(),
+            terminal: None,
+            parent: None,
+            origin: ThreadMeta::PERSON.to_owned(),
+            forked_from: None,
+            drive: Drive::named(Drive::OBSERVED),
+            caps: vec![Cap::named(Cap::CONTINUE)],
+            models: Vec::new(),
+            modes: Vec::new(),
+            facts: std::collections::BTreeMap::new(),
+            created_ms: WallMs::ZERO,
+        };
+        let from = meta.id;
+        rig.host.create(meta.clone()).unwrap();
+        let pi_agent = AgentId::named(AgentId::PI);
+        let not_started = |_, _| std::future::ready(Outcome::Refused { reason: "started".into() });
+        let empty = carry(&rig.host, from, IntentId::new(), pi_agent.clone(), not_started).await;
+        assert!(matches!(empty, Outcome::Refused { .. }), "nothing to go on from: {empty:?}");
+
+        let said = |n: &str, body| {
+            let item =
+                Item { id: ItemId(n.to_owned()), turn: TurnId(1), at_ms: WallMs::ZERO, body };
+            Action::ItemStarted(item)
+        };
+        let asked = UserMessage {
+            text: Clipped::whole("Fix the parser."),
+            images: Vec::new(),
+            command: None,
+            intent: None,
+        };
+        rig.host.apply(
+            from,
+            vec![
+                Action::TurnStarted(Turn {
+                    id: TurnId(1),
+                    input: None,
+                    state: TurnState::Active,
+                    started_ms: WallMs::ZERO,
+                    ended_ms: None,
+                    usage: Usage::default(),
+                    models: Vec::new(),
+                    changed: Changed::default(),
+                    before: None,
+                    after: None,
+                }),
+                said("u1", ItemBody::User(asked)),
+                said("a1", ItemBody::Text(Clipped::whole("Fixed it."))),
+                Action::TurnEnded {
+                    turn: TurnId(1),
+                    state: TurnState::Complete,
+                    usage: Usage::default(),
+                    ended_ms: WallMs::ZERO,
+                },
+            ],
+        );
+        let mut unable = meta;
+        unable.id = ThreadId::new();
+        unable.caps.clear();
+        rig.host.create(unable.clone()).unwrap();
+        let refused = carry(&rig.host, unable.id, IntentId::new(), pi_agent.clone(), not_started);
+        assert_eq!(refused.await, Outcome::Unsupported { cap: Cap::named(Cap::CONTINUE) });
+
+        let id = IntentId::new();
+        let begin = |id, mut start: Start| {
+            start.args.push("--offline".to_owned());
+            pi.start(id, Box::new(start))
+        };
+        let Outcome::Started { thread } = carry(&rig.host, from, id, pi_agent.clone(), begin).await
+        else {
+            panic!("not gone on");
+        };
+        let again = carry(&rig.host, from, id, pi_agent, not_started).await;
+        assert_eq!(again, Outcome::Started { thread }, "once");
+        let state = rig.until(thread, "the draft waits", |s| s.pending.len() == 1).await;
+        assert_eq!(state.meta.agent, AgentId::named(AgentId::PI));
+        assert_eq!(state.meta.forked_from, Some(Fork { thread: from, turn: Some(TurnId(1)) }));
+        assert!(state.turns.is_empty(), "nothing sent");
+        let draft = state.pending[0].clone();
+        assert_eq!((draft.intent, draft.delivery), (schedule::drafted_as(id), Delivery::Draft));
+        let (old, _) = rig.host.state(from).unwrap();
+        assert_eq!(draft.text, handoff::render(&old, handoff::BUDGET));
+        assert!(draft.text.contains("Fix the parser.") && draft.text.contains("Fixed it."));
+
+        let (sending, host, by) = (pi.clone(), rig.host.clone(), rig.by());
+        let fire: schedule::Fire = Arc::new(move |thread, id, intent| {
+            let decide = |s: &ThreadState| (sending.decide(s, id, &intent, by.clone()), vec![]);
+            host.intent(thread, id, decide)
+                .unwrap_or_else(|| Outcome::Refused { reason: "gone".into() })
+        });
+        let _scheduler = schedule::spawn(rig.host.clone(), fire);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(rig.host.state(thread).unwrap().0.pending.len(), 1, "never on its own");
+        let edit = Intent::Edit { pending: draft.intent, text: "Say hello.".to_owned() };
+        assert_eq!(schedule::act(&rig.host, thread, IntentId::new(), &edit), Some(Outcome::Done));
+        let send = Intent::Promote { pending: draft.intent };
+        assert_eq!(schedule::act(&rig.host, thread, IntentId::new(), &send), Some(Outcome::Done));
+        let state = rig.until(thread, "the draft's turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.pending.is_empty(), "it went");
+        let sent = users(&state).pop().unwrap();
+        assert_eq!(sent, ("Say hello.".to_owned(), Some(schedule::sent_as(draft.intent))));
+        let record =
+            rig.record_once(|r| r["heard"].as_array().is_some_and(|h| !h.is_empty())).await;
+        assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
     /// The worker going while the gate asks closes pi's stdin and ends pi with no answer sent,
@@ -783,9 +906,9 @@ mod pi {
         let (new, old) = (fork.to_string(), id.to_string());
         assert_eq!(argv[4..], ["--session-id", &new, "--offline", "--fork", &old]);
         let state = rig.until(forked, "the copy read", |s| s.turns.len() == 4).await;
-        let from = slopty_proto::thread::Fork { thread, turn: Some(last) };
+        let from = Fork { thread, turn: Some(last) };
         assert_eq!(state.meta.forked_from, Some(from));
-        assert_eq!(state.meta.origin, slopty_proto::thread::ThreadMeta::FORK);
+        assert_eq!(state.meta.origin, ThreadMeta::FORK);
         assert_eq!(state.meta.native, new);
         assert_eq!(slopty_agent::pi::driven::args_of(&state.meta), ["--offline"], "no --fork kept");
     }

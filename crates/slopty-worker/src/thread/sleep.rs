@@ -6,14 +6,19 @@
 //! through the agent's own resume. Only an agent at rest with nothing of its own under way is
 //! put to sleep ([`refusal`]): ending it then loses nothing the session does not keep.
 
-use slopty_proto::thread::{BackgroundTask, Liveness, Phase, ThreadState, TurnState};
+use slopty_proto::thread::{BackgroundTask, Delivery, Liveness, Phase, ThreadState, TurnState};
 
-/// Why `state`'s agent is not put to sleep now, in words; `None` when it may be. A message
-/// scheduled for the thread ([`super::schedule`]) holds it awake too: asleep, it would miss it.
+/// Why `state`'s agent is not put to sleep now, in words; `None` when it may be.
+///
+/// A message scheduled for the thread ([`super::schedule`]) holds it awake too: asleep, it would
+/// miss it. A draft does not: it goes only on the person's word, which wakes the agent.
 #[must_use]
 pub fn refusal(state: &ThreadState) -> Option<&'static str> {
-    let (scheduled, waiting): (Vec<_>, Vec<_>) =
-        state.pending.iter().partition(|p| p.delivery.is_scheduled());
+    let (scheduled, waiting): (Vec<_>, Vec<_>) = state
+        .pending
+        .iter()
+        .filter(|p| p.delivery != Delivery::Draft)
+        .partition(|p| p.delivery.is_scheduled());
     let at_rest = state.last_turn().is_none_or(|turn| turn.state != TurnState::Active)
         && !matches!(state.status.phase, Phase::Working | Phase::Waiting);
     match state.status.liveness {
@@ -178,6 +183,9 @@ mod tests {
             state: PendingState::Waiting,
         });
         assert_eq!(refusal(&armed), Some("A scheduled message waits for it"));
+        let mut drafted = resting();
+        drafted.pending.push(Pending { delivery: Delivery::Draft, ..armed.pending[0].clone() });
+        assert_eq!(refusal(&drafted), None, "a draft goes only on the person's word");
 
         let mut gone = resting();
         gone.status.liveness = Liveness::Exited { resumable: true };
