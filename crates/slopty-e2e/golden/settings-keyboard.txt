@@ -375,8 +375,6 @@ ListItem │ Merge the task │ M
 Button │ Keys for Merge the task │ M
 ListItem │ Retry the task │ R
 Button │ Keys for Retry the task │ R
-ListItem │ Approve the task's work │ A
-Button │ Keys for Approve the task's work │ A
 ListItem │ Tell the task's agent to fix CI
 Button │ Keys for Tell the task's agent to fix CI
 ListItem │ Tell the task's agent to address the comments
@@ -397,20 +395,12 @@ ListItem │ Show the machines │ 4
 Button │ Keys for Show the machines │ 4
 ListItem │ Run the task on… │ O
 Button │ Keys for Run the task on… │ O
-ListItem │ Start the task │ S
-Button │ Keys for Start the task │ S
-ListItem │ Start every proposed task
-Button │ Keys for Start every proposed task
-ListItem │ Ask before each task starts
-Button │ Keys for Ask before each task starts
 ListItem │ Push after each merge
 Button │ Keys for Push after each merge
 ListItem │ Delete the project
 Button │ Keys for Delete the project
-ListItem │ Verifier and review…
-Button │ Keys for Verifier and review…
-ListItem │ Budget…
-Button │ Keys for Budget…
+ListItem │ Verifier…
+Button │ Keys for Verifier…
 Heading │ Search in files
 ListItem │ Toggle match case │ ⌥⌘C
 Button │ Keys for Toggle match case │ ⌥⌘C

@@ -703,8 +703,8 @@ mod tests {
     /// line, until it is typed again, and the fixed value applies once the typing pauses.
     #[gpui::test]
     fn an_invalid_value_is_not_written_and_its_row_says_why(cx: &mut TestAppContext) {
-        let (view, events, cx) = editor(cx, "[colors]\ncursor = \"\"\n", Mode::Form);
-        let ix = row("colors", "cursor");
+        let (view, events, cx) = editor(cx, "[colors.light]\ncursor = \"\"\n", Mode::Form);
+        let ix = row("colors.light", "cursor");
         // Narrowed to it first: the Appearance section runs past the test window's foot.
         cx.simulate_input("cursor");
         cx.run_until_parked();
@@ -714,7 +714,10 @@ mod tests {
         cx.run_until_parked();
         assert!(events.borrow().is_empty(), "nothing to apply: {:?}", events.borrow());
         let form = view.read_with(cx, |v, _| v.form.clone());
-        assert_eq!(form.read_with(cx, |f, _| f.text().to_owned()), "[colors]\ncursor = \"\"\n");
+        assert_eq!(
+            form.read_with(cx, |f, _| f.text().to_owned()),
+            "[colors.light]\ncursor = \"\"\n"
+        );
         let error = form.read_with(cx, |f, _| f.error(ix).map(str::to_owned)).expect("a reason");
         assert!(error.contains("#rrggbb"), "{error}");
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
@@ -727,7 +730,7 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(
             events.borrow().as_slice(),
-            [SettingsEditorEvent::Apply("[colors]\ncursor = \"#123456\"\n".to_owned())]
+            [SettingsEditorEvent::Apply("[colors.light]\ncursor = \"#123456\"\n".to_owned())]
         );
     }
 

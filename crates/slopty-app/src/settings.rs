@@ -7,7 +7,7 @@ use std::path::Path;
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, ColorSettings, Companions, CursorBlink, CursorStyle, Loaded, OptionAsAlt,
+    Appearance, Color, Companions, CursorBlink, CursorStyle, Loaded, OptionAsAlt, Palette,
     SecureEntry, Settings, SettingsError, bounds,
 };
 use slopty_theme::{Contrast, Density, Rgb, TerminalPalette, Theme, Variant};
@@ -127,7 +127,7 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
         sized(settings.font.mono_line_height, &bounds::LINE_HEIGHT, defaults.mono_line_height);
     theme.typography.ligatures = settings.font.ligatures;
     theme.terminal.minimum_contrast = hundredths(settings.terminal.minimum_contrast);
-    colour_the_terminal(&mut theme.terminal, &settings.colors);
+    colour_the_terminal(&mut theme.terminal, settings.colors.for_dark(variant == Variant::Dark));
     theme.contrast = contrast;
     theme.derive_chrome();
     theme.density = density(crate::TOUCH);
@@ -192,9 +192,10 @@ fn hundredths(ratio: f32) -> u16 {
     hundredths
 }
 
-/// Lay the `[colors]` overrides over the theme's palette. Text under the cursor follows a
-/// custom cursor (black or white, whichever reads) unless set itself.
-fn colour_the_terminal(palette: &mut TerminalPalette, colors: &ColorSettings) {
+/// Lay one appearance's `[colors.light]` or `[colors.dark]` over the theme's palette. Text
+/// under the cursor follows a custom cursor (black or white, whichever reads) unless set
+/// itself.
+fn colour_the_terminal(palette: &mut TerminalPalette, colors: &Palette) {
     let rgb = |c: Color| c.0.map(|[r, g, b]| Rgb { r, g, b });
     if let Some(fg) = rgb(colors.foreground) {
         palette.fg = fg;
@@ -299,9 +300,9 @@ mod tests {
     fn custom_colours_lay_over_the_theme() {
         let mut s = Settings::default();
         let dark = theme_for(&s, true, Contrast::Standard).terminal;
-        s.colors.foreground = Color(Some([0xc0, 0xca, 0xf5]));
-        s.colors.cursor = Color(Some([0xff, 0xff, 0xff]));
-        s.colors.ansi = vec![Color(None), Color(Some([0xf7, 0x76, 0x8e]))];
+        s.colors.dark.foreground = Color(Some([0xc0, 0xca, 0xf5]));
+        s.colors.dark.cursor = Color(Some([0xff, 0xff, 0xff]));
+        s.colors.dark.ansi = vec![Color(None), Color(Some([0xf7, 0x76, 0x8e]))];
         let t = theme_for(&s, true, Contrast::Standard).terminal;
         assert_eq!((t.fg, t.bg), (Rgb::hex(0x00c0_caf5), dark.bg), "set and unset");
         assert_eq!(
@@ -313,29 +314,38 @@ mod tests {
             (t.ansi[0], t.ansi[1], t.ansi[2]),
             (dark.ansi[0], Rgb::hex(0x00f7_768e), dark.ansi[2])
         );
-        s.colors.cursor_text = Color(Some([1, 2, 3]));
+        s.colors.dark.cursor_text = Color(Some([1, 2, 3]));
         assert_eq!(
             theme_for(&s, true, Contrast::Standard).terminal.cursor_text,
             Rgb { r: 1, g: 2, b: 3 },
             "set: as said"
         );
         let light = theme_for(&s, false, Contrast::Standard).terminal;
-        assert_eq!(light.fg, Rgb::hex(0x00c0_caf5), "both appearances");
+        let own = TerminalPalette::LIGHT;
+        assert_eq!(
+            (light.fg, light.cursor, light.ansi),
+            (own.fg, own.cursor, own.ansi),
+            "the dark palette leaves light alone"
+        );
+        s.colors.light.foreground = Color(Some([1, 2, 3]));
+        let light = theme_for(&s, false, Contrast::Standard).terminal;
+        assert_eq!(light.fg, Rgb { r: 1, g: 2, b: 3 }, "light's own");
+        assert_eq!(theme_for(&s, true, Contrast::Standard).terminal.fg, Rgb::hex(0x00c0_caf5));
     }
 
-    /// A background set in `[colors]` carries the chrome with it: the surfaces are derived
+    /// A background set in `[colors.dark]` carries the chrome with it: the surfaces are derived
     /// from it, and a light one makes a light theme under a dark appearance.
     #[test]
     fn a_custom_background_carries_the_chrome() {
         let mut s = Settings::default();
-        s.colors.background = Color(Some([0x28, 0x2a, 0x36]));
+        s.colors.dark.background = Color(Some([0x28, 0x2a, 0x36]));
         let t = theme_for(&s, true, Contrast::Standard);
         assert_eq!(
             t.surfaces,
             slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36), Contrast::Standard)
         );
         assert_ne!(t.surfaces, theme_for(&Settings::default(), true, Contrast::Standard).surfaces);
-        s.colors.background = Color(Some([0xfd, 0xf6, 0xe3]));
+        s.colors.dark.background = Color(Some([0xfd, 0xf6, 0xe3]));
         assert_eq!(
             theme_for(&s, true, Contrast::Standard).variant(),
             Variant::Light,
@@ -343,12 +353,12 @@ mod tests {
         );
     }
 
-    /// The system's Increase Contrast reaches the chrome, a `[colors]` background's included:
-    /// the contrast is set before the chrome is derived from the background.
+    /// The system's Increase Contrast reaches the chrome, a `[colors.dark]` background's
+    /// included: the contrast is set before the chrome is derived from the background.
     #[test]
     fn increase_contrast_derives_the_chrome_for_it() {
         let mut s = Settings::default();
-        s.colors.background = Color(Some([0x28, 0x2a, 0x36]));
+        s.colors.dark.background = Color(Some([0x28, 0x2a, 0x36]));
         let t = theme_for(&s, true, Contrast::Increased);
         assert_eq!(t.contrast, Contrast::Increased);
         let derived = slopty_theme::Surfaces::derive(Rgb::hex(0x0028_2a36), Contrast::Increased);

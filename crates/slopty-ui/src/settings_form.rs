@@ -41,7 +41,7 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState, MoveDown, MoveUp};
 use slopty_settings::edit::{self, Value};
 use slopty_settings::schema::{Choice, Kind};
-use slopty_theme::{Rgb, Theme, Typography};
+use slopty_theme::{Rgb, TerminalPalette, Theme, Typography};
 
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
@@ -1614,7 +1614,7 @@ impl SettingsForm {
                     Value::Str(hex) => parse_hex(&hex),
                     _ => None,
                 };
-                own.or_else(|| theme_colour(theme, row.key())).map(|colour| {
+                own.or_else(|| theme_colour(row.table(), row.key())).map(|colour| {
                     div()
                         .flex_none()
                         .size(px(theme.typography.icon()))
@@ -1792,9 +1792,10 @@ fn parse_hex(text: &str) -> Option<Rgb> {
     u32::from_str_radix(hex, 16).ok().map(Rgb::hex)
 }
 
-/// The theme's own colour that `[colors]` key stands in for, so an unset row shows it.
-fn theme_colour(theme: &Theme, key: &str) -> Option<Rgb> {
-    let t = &theme.terminal;
+/// The theme's own colour that a `[colors.light]` or `[colors.dark]` key stands in for, so an
+/// unset row shows it: the palette of that appearance, whichever one is on screen.
+fn theme_colour(table: &str, key: &str) -> Option<Rgb> {
+    let t = if table == "colors.dark" { TerminalPalette::DARK } else { TerminalPalette::LIGHT };
     Some(match key {
         "foreground" => t.fg,
         "background" => t.bg,

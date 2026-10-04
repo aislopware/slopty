@@ -265,13 +265,34 @@ impl JsonSchema for Color {
     }
 }
 
-/// `[colors]`: the terminal palette, each entry the theme's own unless set. They apply
-/// to both appearances.
+/// `[colors]`: the terminal palette for each appearance, `[colors.light]` and
+/// `[colors.dark]`. A colour picked for one is rarely right on the other's ground, so neither
+/// reaches the other.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Terminal colours")]
 pub struct ColorSettings {
-    /// Empty keeps the theme's own, in both appearances.
+    /// The palette in the light appearance.
+    #[schemars(title = "Light terminal colours")]
+    pub light: Palette,
+    /// The palette in the dark appearance.
+    #[schemars(title = "Dark terminal colours")]
+    pub dark: Palette,
+}
+
+impl ColorSettings {
+    /// The palette for the dark appearance, or the light one.
+    #[must_use]
+    pub const fn for_dark(&self, dark: bool) -> &Palette {
+        if dark { &self.dark } else { &self.light }
+    }
+}
+
+/// One appearance's terminal palette, each entry the theme's own unless set.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct Palette {
+    /// Empty keeps the theme's own.
     ///
     /// Default text.
     #[schemars(title = "Text")]
@@ -794,8 +815,7 @@ pub struct ServerSettings {
 }
 
 /// `[server.projects]`: what the person allows projects across the fleet
-/// (`docs/decisions/projects.md`). A project sets its own limits under these, and no agent
-/// raises them.
+/// (`docs/decisions/projects.md`). No agent raises them.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Projects")]
@@ -805,21 +825,6 @@ pub struct ProjectBounds {
     /// The most live agents the server lets run across every worker at once.
     #[schemars(title = "Live agents", example = 24)]
     pub live_agents: u16,
-    /// The most a project may let run on one machine.
-    ///
-    /// The highest per-worker limit of live agents any one project may set.
-    #[schemars(title = "Live agents per machine", example = 8)]
-    pub live_per_worker: u16,
-    /// The most a project may let run in all.
-    ///
-    /// The highest limit of live agents any one project may set across the fleet.
-    #[schemars(title = "Live agents per project", example = 24)]
-    pub live_per_project: u16,
-    /// Timeline entries a project may keep.
-    ///
-    /// The most timeline entries any project may keep; older ones are dropped first.
-    #[schemars(title = "Timeline kept", example = 65_536)]
-    pub timeline_kept: u32,
     /// Projects whose agents may be started with looser permissions.
     ///
     /// The names of the projects whose spawned agents may be given flags that loosen Claude
@@ -827,54 +832,11 @@ pub struct ProjectBounds {
     /// allows none.
     #[schemars(title = "Looser permissions for", example = ["nightly-refactor"])]
     pub permission_flags: Vec<String>,
-    /// Projects the server keeps.
-    ///
-    /// The most projects the server keeps at once; creating one more is refused.
-    #[schemars(title = "Projects", example = 64)]
-    pub projects: u16,
-    /// Tasks one project holds.
-    ///
-    /// The most tasks one project holds, finished ones included.
-    #[schemars(title = "Tasks per project", example = 512)]
-    pub tasks_per_project: u32,
-    /// The longest project or task title, in bytes.
-    ///
-    /// The longest title a project or a task may have, in bytes.
-    #[schemars(title = "Longest title", example = 256)]
-    pub title_max: u32,
-    /// The longest task brief, in bytes.
-    ///
-    /// The longest brief a task may carry, in bytes.
-    #[schemars(title = "Longest brief", example = 65_536)]
-    pub brief_max: u32,
-    /// Paths one task may own.
-    ///
-    /// The most paths one task may claim to write.
-    #[schemars(title = "Paths per task", example = 64)]
-    pub owns_max: u16,
-    /// How deep a placement rule may nest comprehensions.
-    ///
-    /// The deepest nesting of `all`, `exists`, `exists_one`, `map` and `filter` in one
-    /// placement rule; each level multiplies what a rule may cost.
-    #[schemars(title = "Comprehension depth", example = 1)]
-    pub comprehension_depth: u8,
 }
 
 impl Default for ProjectBounds {
     fn default() -> Self {
-        Self {
-            live_agents: 24,
-            live_per_worker: 8,
-            live_per_project: 24,
-            timeline_kept: 65_536,
-            permission_flags: Vec::new(),
-            projects: 64,
-            tasks_per_project: 512,
-            title_max: 256,
-            brief_max: 64 * 1024,
-            owns_max: 64,
-            comprehension_depth: 1,
-        }
+        Self { live_agents: 24, permission_flags: Vec::new() }
     }
 }
 
@@ -933,7 +895,7 @@ pub struct Settings {
     pub remote: RemoteSettings,
     /// The clipboard shared with the workers.
     pub clipboard: ClipboardSettings,
-    /// Terminal colours.
+    /// Terminal colours, per appearance.
     pub colors: ColorSettings,
     /// The app's key bindings the file changes.
     pub keys: KeySettings,
@@ -1104,9 +1066,9 @@ sync = {clipboard_sync}
 # [clipboard.workers]
 # shared-mac = false
 
-[colors]
-# Terminal colours as \"#rrggbb\"; \"\" keeps the theme's own. They apply in
-# both appearances.
+[colors.light]
+# Terminal colours as \"#rrggbb\" in the light appearance; \"\" keeps the
+# theme's own. [colors.dark] below holds the dark one's.
 foreground = \"\"
 background = \"\"
 cursor = \"\"
@@ -1115,6 +1077,14 @@ cursor_text = \"\"
 selection = \"\"
 # ANSI 0-15 in order: black, red, green, yellow, blue, magenta, cyan, white,
 # then their bright forms. Fewer than 16 keep the rest.
+ansi = []
+
+[colors.dark]
+foreground = \"\"
+background = \"\"
+cursor = \"\"
+cursor_text = \"\"
+selection = \"\"
 ansi = []
 
 [keys]
@@ -1532,17 +1502,25 @@ mod tests {
     #[test]
     fn colour_keys() {
         let loaded = Settings::parse(
-            "[colors]\nforeground = \"#c0caf5\"\nbackground = \"1a1b26\"\ncursor = \"\"\nansi = [\"#15161e\", \"#f7768e\"]\n",
+            "[colors.dark]\nforeground = \"#c0caf5\"\nbackground = \"1a1b26\"\ncursor = \"\"\nansi = [\"#15161e\", \"#f7768e\"]\n",
         );
-        assert!(loaded.error.is_none(), "{:?}", loaded.error);
-        let c = &loaded.settings.colors;
+        assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
+        let c = &loaded.settings.colors.dark;
         assert_eq!(c.foreground, Color(Some([0xc0, 0xca, 0xf5])));
         assert_eq!(c.background, Color(Some([0x1a, 0x1b, 0x26])), "the # is optional");
         assert_eq!(c.cursor, Color(None), "empty: the theme's own");
         assert_eq!(c.ansi, [Color(Some([0x15, 0x16, 0x1e])), Color(Some([0xf7, 0x76, 0x8e]))]);
+        let colors = &loaded.settings.colors;
+        assert_eq!(colors.light, Palette::default(), "the dark palette leaves light alone");
+        assert_eq!(colors.for_dark(true), &colors.dark);
+        assert_eq!(colors.for_dark(false), &colors.light);
         assert_eq!(Settings::default().colors, ColorSettings::default(), "nothing set");
+        // One table for both appearances is gone, not read as either.
+        let flat = Settings::parse("[colors]\nforeground = \"#c0caf5\"\n");
+        assert_eq!(flat.warnings, ["unknown key `colors.foreground`"]);
+        assert_eq!(flat.settings.colors, ColorSettings::default());
         for bad in ["#12345", "#gg0000", "red"] {
-            let loaded = Settings::parse(&format!("[colors]\ncursor = \"{bad}\"\n"));
+            let loaded = Settings::parse(&format!("[colors.light]\ncursor = \"{bad}\"\n"));
             assert!(
                 loaded.error.as_ref().is_some_and(|e| e.to_string().contains("#rrggbb")),
                 "{bad}: {:?}",
@@ -1550,9 +1528,9 @@ mod tests {
             );
         }
         assert_eq!(
-            toml::to_string(&ColorSettings {
+            toml::to_string(&Palette {
                 cursor: Color(Some([1, 0xab, 0xff])),
-                ..ColorSettings::default()
+                ..Palette::default()
             })
             .unwrap_or_default()
             .lines()
@@ -1840,32 +1818,18 @@ mod tests {
     #[test]
     fn server_project_bounds() {
         let d = Settings::default().server.projects;
-        assert_eq!(
-            (d.live_agents, d.live_per_worker, d.live_per_project, d.timeline_kept),
-            (24, 8, 24, 65_536)
-        );
+        assert_eq!(d.live_agents, 24);
         assert!(d.permission_flags.is_empty(), "no project loosens permissions by default");
         let loaded = Settings::parse(
-            "[server.projects]\nlive_agents = 40\npermission_flags = [\"nightly\"]\n\
-             projects = 8\ntasks_per_project = 100\ntitle_max = 80\nbrief_max = 4096\n\
-             owns_max = 16\ncomprehension_depth = 2\n",
+            "[server.projects]\nlive_agents = 40\npermission_flags = [\"nightly\"]\n",
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         assert_eq!(
             loaded.settings.server.projects,
-            ProjectBounds {
-                live_agents: 40,
-                permission_flags: vec!["nightly".to_owned()],
-                projects: 8,
-                tasks_per_project: 100,
-                title_max: 80,
-                brief_max: 4096,
-                owns_max: 16,
-                comprehension_depth: 2,
-                ..ProjectBounds::default()
-            }
+            ProjectBounds { live_agents: 40, permission_flags: vec!["nightly".to_owned()] }
         );
-        assert!(Settings::parse("[server.projects]\ncomprehension_depth = 300\n").error.is_some());
+        let gone = Settings::parse("[server.projects]\ntimeline_kept = 4096\n");
+        assert_eq!(gone.warnings, ["unknown key `server.projects.timeline_kept`"]);
         let typo = Settings::parse("[server.projects]\nlive_agent = 40\n");
         assert_eq!(typo.warnings, ["unknown key `server.projects.live_agent`"]);
         assert!(Settings::parse("[server.projects]\nlive_agents = -1\n").error.is_some());

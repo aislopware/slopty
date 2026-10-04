@@ -78,14 +78,26 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     ),
     (
         Section::Appearance,
-        "Terminal colours",
+        "Light terminal colours",
         &[
-            "colors.foreground",
-            "colors.background",
-            "colors.cursor",
-            "colors.cursor_text",
-            "colors.selection",
-            "colors.ansi",
+            "colors.light.foreground",
+            "colors.light.background",
+            "colors.light.cursor",
+            "colors.light.cursor_text",
+            "colors.light.selection",
+            "colors.light.ansi",
+        ],
+    ),
+    (
+        Section::Appearance,
+        "Dark terminal colours",
+        &[
+            "colors.dark.foreground",
+            "colors.dark.background",
+            "colors.dark.cursor",
+            "colors.dark.cursor_text",
+            "colors.dark.selection",
+            "colors.dark.ansi",
         ],
     ),
     (

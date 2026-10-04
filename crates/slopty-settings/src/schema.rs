@@ -119,18 +119,43 @@ pub fn fields() -> &'static [Field] {
     &FIELDS
 }
 
+/// Every table of `schema` (a whole file's, subschemas inline), a nested one
+/// (`[colors.light]`) after the keys of the table it sits in, each by its dotted name.
+fn tables(schema: &Json) -> Vec<(String, &Json)> {
+    fn walk<'a>(schema: &'a Json, prefix: &str, out: &mut Vec<(String, &'a Json)>) {
+        for (key, inner) in properties(schema) {
+            if properties(inner).next().is_none() {
+                continue;
+            }
+            let name = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+            out.push((name.clone(), inner));
+            walk(inner, &name, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(schema, "", &mut out);
+    out
+}
+
+/// The value at `table.key` in `file`, `table` dotted.
+fn value_at<'a>(file: &'a toml::Table, table: &str, key: &str) -> Option<&'a toml::Value> {
+    let mut at = file;
+    for part in table.split('.') {
+        at = at.get(part)?.as_table()?;
+    }
+    at.get(key)
+}
+
 /// The keys of `schema` (a whole file's, subschemas inline) with a kind a form can set, each
 /// with its value in `defaults`.
 fn fields_of(schema: &Json, defaults: &toml::Table) -> Vec<Field> {
     let mut out = Vec::new();
-    for (table, table_schema) in properties(schema) {
-        let table_title = title(table_schema, table);
+    for (table, table_schema) in tables(schema) {
+        let table_title = title(table_schema, &table);
         for (key, field) in properties(table_schema) {
             let Some(kind) = kind(field) else { continue };
-            let default = defaults
-                .get(table)
-                .and_then(|t| t.get(key))
-                .map_or(Value::Other(String::new()), from_toml);
+            let default =
+                value_at(defaults, &table, key).map_or(Value::Other(String::new()), from_toml);
             out.push(Field {
                 table: table.clone(),
                 table_title: table_title.clone(),
@@ -161,14 +186,11 @@ pub fn restart_keys(before: &Settings, now: &Settings, daemon: &str) -> Vec<Stri
     let (Ok(before), Ok(now)) = (toml::Table::try_from(before), toml::Table::try_from(now)) else {
         return Vec::new();
     };
-    let value = |file: &toml::Table, table: &str, key: &str| {
-        file.get(table).and_then(|t| t.get(key)).cloned()
-    };
     let mut keys = Vec::new();
-    for (table, table_schema) in properties(&SCHEMA) {
+    for (table, table_schema) in tables(&SCHEMA) {
         for (key, field) in properties(table_schema) {
             if restarts(field).as_deref() == Some(daemon)
-                && value(&before, table, key) != value(&now, table, key)
+                && value_at(&before, &table, key) != value_at(&now, &table, key)
             {
                 keys.push(format!("{table}.{key}"));
             }
@@ -296,17 +318,22 @@ mod tests {
     }
 
     /// Every key of the default file is a field, with the default the file writes, and every
-    /// field names a key of it. A table inside a table is no row.
+    /// field names a key of it, a nested table's (`colors.light`) included.
     #[test]
     fn every_key_is_a_field_with_its_default() {
+        fn keys_of(table: &toml::Table, prefix: &str, out: &mut Vec<String>) {
+            for (key, value) in table {
+                let name = format!("{prefix}.{key}");
+                match value.as_table() {
+                    Some(inner) => keys_of(inner, &name, out),
+                    None => out.push(name),
+                }
+            }
+        }
         let defaults = toml::Table::try_from(Settings::default()).unwrap();
         let mut keys = Vec::new();
         for (table, inner) in &defaults {
-            for (key, value) in inner.as_table().unwrap() {
-                if !value.is_table() {
-                    keys.push(format!("{table}.{key}"));
-                }
-            }
+            keys_of(inner.as_table().unwrap(), table, &mut keys);
         }
         let mut named: Vec<String> =
             fields().iter().map(|f| format!("{}.{}", f.table, f.key)).collect();
@@ -359,8 +386,12 @@ mod tests {
         assert_eq!(levels, [("off", "Off"), ("quiet", "Quiet"), ("lively", "Lively")]);
         assert_eq!(field("theme", "companions").default, Value::Str("lively".to_owned()));
         assert_eq!(field("font", "ligatures").kind, Kind::Switch);
-        assert_eq!(field("colors", "cursor").kind, Kind::Colour);
-        assert_eq!(field("colors", "ansi").kind, Kind::List);
+        for table in ["colors.light", "colors.dark"] {
+            assert_eq!(field(table, "cursor").kind, Kind::Colour, "{table}: a nested table's key");
+            assert_eq!(field(table, "ansi").kind, Kind::List);
+        }
+        assert_eq!(field("colors.light", "cursor").table_title, "Light terminal colours");
+        assert_eq!(field("colors.dark", "cursor").table_title, "Dark terminal colours");
         assert_eq!(field("font", "mono_family").kind, Kind::Font);
         assert_eq!(field("font", "mono_family").default, Value::Str("JetBrains Mono".to_owned()));
         let server = field("client", "server");
@@ -390,9 +421,9 @@ mod tests {
     /// A value is checked against its key's type alone, and a refusal is the parser's reason.
     #[test]
     fn a_value_is_checked_by_its_key() {
-        field("colors", "cursor").check("\"#01abff\"").unwrap();
-        field("colors", "cursor").check("\"\"").unwrap();
-        let bad = field("colors", "cursor").check("\"#12\"").unwrap_err();
+        field("colors.dark", "cursor").check("\"#01abff\"").unwrap();
+        field("colors.light", "cursor").check("\"\"").unwrap();
+        let bad = field("colors.light", "cursor").check("\"#12\"").unwrap_err();
         assert!(bad.contains("#rrggbb") && !bad.contains('\n'), "{bad}");
         field("client", "server").check("\"studio:45560\"").unwrap();
         assert!(field("client", "server").check("\"studio:x\"").is_err());

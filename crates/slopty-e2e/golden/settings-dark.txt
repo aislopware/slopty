@@ -42,7 +42,7 @@ Tab │ Keyboard
 Tab │ About
 TabPanel │ Appearance
 Heading │ Interface
-RadioGroup │ Theme │ Light
+RadioGroup │ Theme │ Dark
 RadioButton │ System
 RadioButton │ Light
 RadioButton │ Dark

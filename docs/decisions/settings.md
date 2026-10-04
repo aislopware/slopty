@@ -78,10 +78,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `TerminalPalette` in both appearances (`colour_the_terminal`); a custom cursor takes
   black or white text under it (`Rgb::is_light`) unless `cursor_text` says otherwise. Ruled
   out: a scheme name (no bundled scheme table to pick from yet; a file of 16 hex strings
-  is what every scheme repository exports) and per-appearance sections (the theme's
-  appearance switch is for the chrome; a palette is chosen once). Since the driver's
-  colours answer OSC queries and follow theme changes, a program asking for its
-  background hears the custom one. Tests: `colour_keys`, `custom_colours_lay_over_the_theme`.
+  is what every scheme repository exports). Per-appearance sections were ruled out here
+  too, and are now the rule: see the next entry. Since the driver's colours answer OSC
+  queries and follow theme changes, a program asking for its background hears the custom
+  one. Tests: `colour_keys`, `custom_colours_lay_over_the_theme`.
+- ✅ **A palette per appearance: `[colors.light]` and `[colors.dark]`** (2026-10-04, light
+  pass phase 4). One `[colors]` table laid over both appearances meant that a palette picked
+  on black was painted on paper too, where its pale yellows and cyans fail contrast. Each
+  appearance now has its own table with the same keys, and `theme_for` lays only the one
+  for the variant it builds (`ColorSettings::for_dark`).
+  - The flat `[colors]` table is gone, with no fallback. A file that still has it gets the
+    unknown-key warning and the theme's own palette.
+  - The settings schema walk now reads a nested table as a table of its own, named by its
+    dotted path. Its keys are form rows like any other, and a key the layout does not name
+    lands on its root table's page. The form shows a light group and a dark group, and an
+    unset row's swatch is that appearance's own colour. `[server.projects]` keys become rows
+    by the same walk.
+  - Tests: `colour_keys` (a flat table warns), `every_key_is_a_field_with_its_default`
+    (recursive), `custom_colours_lay_over_the_theme` (dark leaves light alone).
 
 - ✅ **An in-app editor for `settings.toml`** (2026-09-15). The phone had no way to change
   a setting: ⌘, handed the file to the system editor, and iOS has none for a file in the
