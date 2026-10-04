@@ -7473,7 +7473,6 @@ dependencies = [
  "bytes",
  "parking_lot",
  "pretty_assertions",
- "regex",
  "rustix",
  "serde",
  "serde_json",

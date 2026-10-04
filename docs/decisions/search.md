@@ -153,3 +153,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     server's 60 s) with what it found, capped. Tests: `dropping_a_search_stops_its_walk` (the
     dropped walk ended 0.2 ms after its drop, a whole one takes 150–215 ms),
     `a_collected_search_stops_when_told_or_late`.
+
+- ✅ **Replace across files is cut; a file is changed in its own tile** (2026-10-05). The
+  frontier prune (`.research/feature-prune-frontier-2026-10-04.md`) rated it rare and risky
+  for this app: the agents make the sweeping edits, and the person reviews them. A person who
+  wants one more change opens the match, which lands in the file tile, and replaces there
+  (⌘⇧H), where the edit is seen in place and undone in one step. Deleted with it, rather than
+  kept unused:
+  - the replace field, its struck-through preview, the rows' replace buttons and the foot's
+    report (`slopty-ui::search`);
+  - `Preview`, `Replaced` and the replace bookkeeping (`slopty_client::search`), and the
+    client's `regex` dependency, which only the preview needed;
+  - `SearchRequest::Replace`, `SearchEvent::Replaced`, the stamps that guarded a replace
+    (`FileStamp`, `FileHits::stamp`) and their wire types (`slopty_proto::search`);
+  - the worker's `search::replace` and its tests.
+
+  The surface's foot keeps ↑↓ and ↩, and the search itself is unchanged.

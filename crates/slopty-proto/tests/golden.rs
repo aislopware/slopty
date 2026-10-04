@@ -536,14 +536,12 @@ mod golden {
 
     /// Project-wide text search: a start with every toggle, a glob each way and context lines,
     /// a stop, a page of hits (a line cut round its match, two matches on one line, the context
-    /// round them and the file's stamp), how it ended, and why it could not start. Then a
-    /// replace of one match and a whole file, and its answer: a file rewritten, one changed on
-    /// disk since, one that could not be written.
+    /// round them), how it ended, and why it could not start.
     #[test]
     fn text_search() {
         use slopty_proto::search::{
-            ContextLine, FileHits, FileReplace, FileReplaced, FileStamp, LineHit, MatchAt, Replace,
-            SearchEvent, SearchQuery, SearchRequest, SearchSummary, SkipReason, Skipped, Span,
+            ContextLine, FileHits, LineHit, SearchEvent, SearchQuery, SearchRequest, SearchSummary,
+            Span,
         };
         let query = SearchQuery {
             pattern: r"fn (\w+)".to_owned(),
@@ -558,18 +556,16 @@ mod golden {
             &ClientMsg::Search(SearchRequest::Start {
                 id: 7,
                 root: "~/w/slopty".to_owned(),
-                query: query.clone(),
+                query,
             }),
         );
         snap("client_search_stop", &ClientMsg::Search(SearchRequest::Stop { id: 7 }));
-        let stamp = FileStamp { size: 4_812, modified_ns: 1_790_000_000_123_456_789 };
         snap(
             "worker_search_hits",
             &WorkerMsg::Search(SearchEvent::Hits {
                 id: 7,
                 files: vec![FileHits {
                     path: "src/main.rs".to_owned(),
-                    stamp,
                     lines: vec![
                         LineHit {
                             line: 12,
@@ -616,45 +612,6 @@ mod golden {
             &WorkerMsg::Search(SearchEvent::Failed {
                 id: 8,
                 error: "regex parse error: unclosed group".to_owned(),
-            }),
-        );
-        snap(
-            "client_search_replace",
-            &ClientMsg::Search(SearchRequest::Replace(Replace {
-                id: 9,
-                root: "~/w/slopty".to_owned(),
-                query,
-                with: "fn ${1}_v2".to_owned(),
-                files: vec![
-                    FileReplace {
-                        path: "src/main.rs".to_owned(),
-                        stamp,
-                        matches: vec![MatchAt { line: 12, index: 1 }],
-                    },
-                    FileReplace {
-                        path: "src/lib.rs".to_owned(),
-                        stamp: FileStamp { size: 90, modified_ns: 1_790_000_000_000_000_001 },
-                        matches: vec![MatchAt { line: 1, index: 0 }, MatchAt { line: 7, index: 0 }],
-                    },
-                ],
-            })),
-        );
-        snap(
-            "worker_search_replaced",
-            &WorkerMsg::Search(SearchEvent::Replaced {
-                id: 9,
-                files: vec![FileReplaced {
-                    path: "src/main.rs".to_owned(),
-                    matches: 1,
-                    stamp: FileStamp { size: 4_815, modified_ns: 1_790_000_000_999_000_000 },
-                }],
-                skipped: vec![
-                    Skipped { path: "src/lib.rs".to_owned(), why: SkipReason::Changed },
-                    Skipped {
-                        path: "src/ro.rs".to_owned(),
-                        why: SkipReason::Failed("Permission denied".to_owned()),
-                    },
-                ],
             }),
         );
     }
@@ -2116,7 +2073,7 @@ mod orchestration {
     #[test]
     fn search_in_files() {
         use slopty_proto::search::{
-            ContextLine, FileHits, FileStamp, LineHit, SearchQuery, SearchSummary, Span,
+            ContextLine, FileHits, LineHit, SearchQuery, SearchSummary, Span,
         };
         let worker = term().worker;
         let query = SearchQuery {
@@ -2133,7 +2090,6 @@ mod orchestration {
         );
         let file = FileHits {
             path: "src/lib.rs".to_owned(),
-            stamp: FileStamp { size: 310, modified_ns: 1_790_000_000_000_000_000 },
             lines: vec![LineHit {
                 line: 4,
                 text: "// TODO: this".to_owned(),

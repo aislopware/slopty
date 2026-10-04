@@ -8,10 +8,6 @@
 //! how it ended ([`SearchEvent::Done`] or [`SearchEvent::Failed`]). A stopped search says
 //! nothing more. Every event names its search, so a page still in flight for a search the
 //! client has moved on from is told from the current one.
-//!
-//! A replace ([`SearchRequest::Replace`]) names the matches a search showed, file by file, with
-//! the [`FileStamp`] each file had when it was searched. The worker rewrites each file whole,
-//! refuses one that changed since, and answers once ([`SearchEvent::Replaced`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -71,45 +67,6 @@ pub enum SearchRequest {
         /// Which one.
         id: RequestId,
     },
-    /// Replace matches a search found, each file rewritten whole; answered with
-    /// [`SearchEvent::Replaced`]. It runs beside a search rather than stopping it.
-    Replace(Replace),
-}
-
-/// Matches to replace, as a search reported them.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Replace {
-    /// The client's number for it, which the answer carries.
-    pub id: RequestId,
-    /// The search's root: an absolute directory on the worker, or `~/…` in its home.
-    pub root: String,
-    /// The search's query, which finds the matches again in each file.
-    pub query: SearchQuery,
-    /// What each match becomes. With [`SearchQuery::regex`], `$1` and `${name}` stand for the
-    /// match's groups and `$$` for a dollar sign; otherwise it is the text as it is.
-    pub with: String,
-    /// The files, each with the matches in it to replace.
-    pub files: Vec<FileReplace>,
-}
-
-/// One file's matches to replace.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct FileReplace {
-    /// Relative to the root, as [`FileHits::path`] said it.
-    pub path: String,
-    /// The file as it was searched: a file whose stamp differs is left alone.
-    pub stamp: FileStamp,
-    /// Which matches, each once.
-    pub matches: Vec<MatchAt>,
-}
-
-/// A match by where a search reported it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Serialize, Deserialize)]
-pub struct MatchAt {
-    /// Its line, from 1.
-    pub line: u32,
-    /// Which match on the line, from 0: the same as its place in [`LineHit::spans`].
-    pub index: u32,
 }
 
 /// Worker → client, about one search.
@@ -131,21 +88,12 @@ pub enum SearchEvent {
         summary: SearchSummary,
     },
     /// The search could not start: a pattern or a glob that does not parse, a root that is
-    /// not a directory. For a replace: its query does not parse.
+    /// not a directory.
     Failed {
-        /// The search, or the replace.
+        /// The search.
         id: RequestId,
         /// For a person to read.
         error: String,
-    },
-    /// A replace went through its files.
-    Replaced {
-        /// The replace.
-        id: RequestId,
-        /// The files rewritten, in the order they were asked for.
-        files: Vec<FileReplaced>,
-        /// The files left alone, and why.
-        skipped: Vec<Skipped>,
     },
 }
 
@@ -154,51 +102,9 @@ impl SearchEvent {
     #[must_use]
     pub const fn id(&self) -> RequestId {
         match self {
-            Self::Hits { id, .. }
-            | Self::Done { id, .. }
-            | Self::Failed { id, .. }
-            | Self::Replaced { id, .. } => *id,
+            Self::Hits { id, .. } | Self::Done { id, .. } | Self::Failed { id, .. } => *id,
         }
     }
-}
-
-/// A file rewritten by a replace.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct FileReplaced {
-    /// Relative to the root.
-    pub path: String,
-    /// How many matches it replaced.
-    pub matches: u32,
-    /// The file as it is now, for a later replace of its other matches.
-    pub stamp: FileStamp,
-}
-
-/// A file a replace left alone.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Skipped {
-    /// Relative to the root.
-    pub path: String,
-    /// Why.
-    pub why: SkipReason,
-}
-
-/// Why a replace left a file alone.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum SkipReason {
-    /// It changed since it was searched, or is gone: its matches may be elsewhere now.
-    Changed,
-    /// It could not be read or written: the OS's word, for a person.
-    Failed(String),
-}
-
-/// What a file was when it was searched: its size and its modification time, which any write
-/// moves.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
-pub struct FileStamp {
-    /// Bytes.
-    pub size: u64,
-    /// Nanoseconds since the Unix epoch, as the file system keeps it.
-    pub modified_ns: u64,
 }
 
 /// One file's matching lines.
@@ -206,8 +112,6 @@ pub struct FileStamp {
 pub struct FileHits {
     /// Relative to the search's root, `/` between its parts.
     pub path: String,
-    /// The file as it was searched, for a replace to check against.
-    pub stamp: FileStamp,
     /// Its matching lines, top down.
     pub lines: Vec<LineHit>,
     /// The lines round them ([`SearchQuery::context`]), top down: each line once, never one

@@ -1,8 +1,6 @@
 //! Project-wide text search: the files under a directory that `.gitignore` lets through, their
 //! lines matching a query, streamed to the client in pages as they are found.
 //!
-//! Its `replace` module then rewrites the matches a search showed.
-//!
 //! ripgrep's own libraries do the work: `ignore` walks the tree on several threads with the
 //! ignore files honoured, `grep-regex` builds the matcher (a literal, a regex, either case,
 //! whole words) and `grep-searcher` reads each file line by line, stopping at the first NUL
@@ -12,22 +10,19 @@
 //! orchestration verb; [`Searches`] runs one per connection off the runtime, a new one stopping
 //! the last.
 
-mod replace;
-
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use ignore::{WalkBuilder, WalkState};
-pub use replace::replace;
 use slopty_proto::search::{
-    ContextLine, FileHits, FileStamp, LINE_BYTES, LineHit, MAX_CONTEXT, MAX_LINES, PAGE_BYTES,
-    SearchEvent, SearchQuery, SearchRequest, SearchSummary, Span,
+    ContextLine, FileHits, LINE_BYTES, LineHit, MAX_CONTEXT, MAX_LINES, PAGE_BYTES, SearchEvent,
+    SearchQuery, SearchRequest, SearchSummary, Span,
 };
 use slopty_proto::{RequestId, WorkerMsg};
 
@@ -36,7 +31,6 @@ use slopty_proto::{RequestId, WorkerMsg};
 const FLUSH: Duration = Duration::from_millis(16);
 
 /// Matches a line reports at most; a line of `a` searched for `a` needs no more to be seen.
-/// A replace counts a line's matches the same way, so it replaces no more than were shown.
 const MAX_SPANS: usize = 64;
 
 /// How much of a long line is kept before its first match when it is cut.
@@ -230,15 +224,6 @@ fn searcher(context: u32) -> Searcher {
         .build()
 }
 
-/// What `meta` says of a file as a replace compares it: its size and modification time.
-pub(crate) fn stamp_of(meta: &std::fs::Metadata) -> FileStamp {
-    let modified = meta.modified().ok().and_then(|at| at.duration_since(UNIX_EPOCH).ok());
-    FileStamp {
-        size: meta.len(),
-        modified_ns: modified.map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)),
-    }
-}
-
 /// What the walk's threads share: the lines the search may report, the files searched, the
 /// lines taken against the cap, and whether the cap cut the search short.
 #[derive(Debug, Default)]
@@ -313,10 +298,6 @@ fn visit(
         return WalkState::Continue;
     }
     found.searched.fetch_add(1, Ordering::Relaxed);
-    // Taken before the file is read: a write while it is read then moves the stamp past the
-    // one sent, and a replace refuses the file rather than trusting lines read half way.
-    let Ok(meta) = entry.metadata() else { return WalkState::Continue };
-    let stamp = stamp_of(&meta);
     let mut sink = Gathered {
         matcher,
         cancel,
@@ -340,7 +321,7 @@ fn visit(
     sink.context.retain(|c| c.line <= reach);
     let path = entry.path().strip_prefix(root).unwrap_or_else(|_| entry.path());
     let path = path.to_string_lossy().into_owned();
-    let file = FileHits { path, stamp, lines: sink.lines, context: sink.context };
+    let file = FileHits { path, lines: sink.lines, context: sink.context };
     if tx.send(file).is_err() || found.full() {
         return WalkState::Quit;
     }
@@ -406,8 +387,8 @@ fn content(raw: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-/// Where `matcher` matches in `line`, as a hit shows them and a replace counts them: the
-/// matches that are not empty, in order, [`MAX_SPANS`] at most.
+/// Where `matcher` matches in `line`, as a hit shows them: the matches that are not empty, in
+/// order, [`MAX_SPANS`] at most.
 fn spans_in(line: &[u8], matcher: &RegexMatcher) -> Vec<(usize, usize)> {
     let mut found: Vec<(usize, usize)> = Vec::new();
     let _searched = matcher.find_iter(line, |m| {
@@ -427,9 +408,8 @@ fn indent(line: &[u8]) -> usize {
 /// A matching line as the client shows it: its end and its indentation off, cut to
 /// [`LINE_BYTES`] round its first match, the matches marked in what is left.
 ///
-/// The cut never starts past the first match, since a replace names a match by its place among
-/// the line's spans: one left out before the cut would make every later one another match.
-/// Only matches past the end may go, and those come last.
+/// The cut never starts past the first match, so the line shown holds the match it is listed
+/// for. Only matches past the end may go, and those come last.
 fn line_hit(number: u64, raw: &[u8], matcher: &RegexMatcher) -> LineHit {
     let line = content(raw);
     let found = spans_in(line, matcher);
@@ -578,9 +558,9 @@ pub struct Searches {
 }
 
 impl Searches {
-    /// Start or stop a search, or run a replace, for the connection whose messages go out on
-    /// `out`. A search runs on the blocking pool; its pages go out as they fill, then `Done` or
-    /// `Failed`, unless it was stopped first. A replace runs beside it and answers once.
+    /// Start or stop a search for the connection whose messages go out on `out`. A search runs
+    /// on the blocking pool; its pages go out as they fill, then `Done` or `Failed`, unless it
+    /// was stopped first.
     pub fn handle(&mut self, request: SearchRequest, out: &tokio::sync::mpsc::Sender<WorkerMsg>) {
         match request {
             SearchRequest::Start { id, root, query } => {
@@ -596,18 +576,6 @@ impl Searches {
                 if self.current.as_ref().is_some_and(|(current, _)| *current == id) {
                     self.stop();
                 }
-            }
-            SearchRequest::Replace(request) => {
-                let out = out.clone();
-                let _running = tokio::task::spawn_blocking(move || {
-                    let id = request.id;
-                    let root = crate::file::expand_home(Path::new(&request.root));
-                    let event = match replace(&root, &request) {
-                        Ok((files, skipped)) => SearchEvent::Replaced { id, files, skipped },
-                        Err(error) => SearchEvent::Failed { id, error },
-                    };
-                    let _sent = out.blocking_send(WorkerMsg::Search(event));
-                });
             }
         }
     }

@@ -1050,20 +1050,15 @@ CoreGraphics draws at the tile's width on a background thread, the pages near th
 (`file::decode`). The pages take Preview's scroll keys in the key context
 `FileEditor FilePages`.
 
-**Search in files** (⌥⌘F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
+**Search in files** (⌘⇧F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
 files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`
 (`slopty_worker::search`, ripgrep's `ignore` and `grep-searcher`, capped at 2 000 lines), each
-file with its stamp (size and modification time) and, when the context toggle is on, the lines
-round each match merged once (`FileHits::context`). `slopty_client::search::SearchResults`
-keeps them in path order and lays out the rows: a file, then its matches and context in line
-order. The replace field previews each match struck through with its replacement
-(`search::Preview`, a regex's groups expanded client-side). ↩ there, a row's button or ⌘↩ sends
-`SearchRequest::Replace` naming each match by line and index with the file's stamp. The worker
-(`search::replace`) refuses a file whose stamp moved, finds the matches again with the same
-matcher, rewrites the file through `slopty_platform::fs::replace` (atomic, permissions kept) and
-answers `SearchEvent::Replaced` with the new stamps and the files it skipped. An open file tile
-sees the new stamp on its watcher's next look. Scripts and agents reach the same search through
-`Verb::Search` (`slopty search`), one capped reply in path order.
+file's matching lines and, when the context toggle is on, the lines round each match merged
+once (`FileHits::context`). `slopty_client::search::SearchResults` keeps them in path order and
+lays out the rows: a file, then its matches and context in line order. It finds and does not
+replace: a match opens its file tile at the line, where ⌘⇧H replaces in that file. Scripts and
+agents reach the same search through `Verb::Search` (`slopty search`), one capped reply in path
+order.
 
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
 usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`). The window
