@@ -1,5 +1,6 @@
 ---
 source: crates/slopty-proto/tests/golden.rs
+assertion_line: 2003
 expression: hex(&bytes)
 ---
-0a 00 00 00 01 09 00 11 01 29 e0 d4 03 01
+0a 00 00 00 01 09 00 10 01 29 e0 d4 03 01

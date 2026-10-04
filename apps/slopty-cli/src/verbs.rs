@@ -19,13 +19,13 @@ use slopty_proto::orchestration::{
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::search::SearchQuery;
 use slopty_proto::server::{Role, Vouch};
+use slopty_tools::bulk::Here;
 use slopty_tools::ops::{
     self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS,
     Spec,
 };
 use slopty_tools::resolve::Resolver;
 use slopty_tools::{Dispatch as _, ToolError, bulk, view};
-use tokio::io::AsyncReadExt as _;
 
 use crate::link::{self, Link};
 
@@ -162,20 +162,6 @@ pub enum VerbCmd {
         #[arg(help = TERM_HELP)]
         term: String,
     },
-    /// Print a file on a worker, whole (read in parts) or a range of it.
-    Cat {
-        /// Worker id or name (the only worker online when omitted).
-        #[arg(long)]
-        worker: Option<String>,
-        /// Absolute path, or `~/…`.
-        path: String,
-        /// First byte.
-        #[arg(long, default_value_t = 0)]
-        offset: u64,
-        /// At most this many bytes (8 MiB with `--json`, which prints one read).
-        #[arg(long)]
-        length: Option<u64>,
-    },
     /// List a directory on a worker.
     Ls {
         /// Worker id or name (the only worker online when omitted).
@@ -255,14 +241,6 @@ pub enum VerbCmd {
         #[arg(long, default_value_t = DEFAULT_MAX_MATCHES)]
         max: u32,
     },
-    /// Replace a file on a worker with standard input.
-    Put {
-        /// Worker id or name (the only worker online when omitted).
-        #[arg(long)]
-        worker: Option<String>,
-        /// Absolute path, or `~/…`.
-        path: String,
-    },
     /// TCP ports listening in a worker's terminals.
     Ports {
         /// Worker id or name (the only worker online when omitted).
@@ -291,25 +269,35 @@ pub enum VerbCmd {
         #[arg(long)]
         out: std::path::PathBuf,
     },
-    /// Send a file of any size to a worker, in parts; it replaces what is there once whole.
+    /// Send a file of any size, or standard input, to a worker in parts; it replaces what is
+    /// there once whole.
     Push {
         /// Worker id or name (the only worker online when omitted).
         #[arg(long)]
         worker: Option<String>,
-        /// The file here.
-        local: std::path::PathBuf,
+        /// The file here, or `-` for standard input.
+        #[arg(value_parser = here)]
+        local: Here,
         /// Where it goes on the worker: absolute, or `~/…`.
         path: String,
     },
-    /// Bring a file of any size from a worker, in parts.
+    /// Bring a file of any size from a worker in parts, to a file here or to standard output.
     Pull {
         /// Worker id or name (the only worker online when omitted).
         #[arg(long)]
         worker: Option<String>,
         /// The file on the worker: absolute, or `~/…`.
         path: String,
-        /// Where it goes here; a directory takes it under its own name.
-        local: std::path::PathBuf,
+        /// Where it goes here, a directory taking it under its own name; `-` for standard
+        /// output, where `--json` prints one read of at most 8 MiB.
+        #[arg(value_parser = here)]
+        local: Here,
+        /// First byte (to standard output only).
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
+        /// At most this many bytes (to standard output only).
+        #[arg(long)]
+        length: Option<u64>,
     },
 }
 
@@ -750,15 +738,6 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             ops::close(&mut res, &term, key).await?;
             print_done(json)?;
         }
-        VerbCmd::Cat { worker, path, offset, length } => {
-            let worker = res.worker(worker.as_deref()).await?;
-            if json {
-                let chunk = ops::read_file(link, worker, path.clone(), offset, length).await?;
-                print_json(&view::file(&path, &chunk))?;
-            } else {
-                cat(link, worker, &path, offset, length).await?;
-            }
-        }
         VerbCmd::Ls { worker, path, max } => {
             let (entries, total) =
                 ops::list_dir(&mut res, worker.as_deref(), path.clone(), max).await?;
@@ -815,12 +794,6 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             } else {
                 print!("{}", view::search_text(&files, &summary));
             }
-        }
-        VerbCmd::Put { worker, path } => {
-            let mut bytes = Vec::new();
-            tokio::io::stdin().read_to_end(&mut bytes).await.context("read stdin")?;
-            ops::write_file(&mut res, worker.as_deref(), path, bytes, key).await?;
-            print_done(json)?;
         }
         VerbCmd::Ports { worker } => {
             let (worker, ports) = ops::ports(&mut res, worker.as_deref()).await?;
@@ -891,17 +864,31 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             }
         }
         VerbCmd::Push { worker, local, path } => {
-            let moved = bulk::upload(&mut res, worker.as_deref(), &local, path, key).await?;
+            let moved = bulk::push(&mut res, worker.as_deref(), &local, path, key).await?;
             print_moved(&moved, json)?;
         }
-        VerbCmd::Pull { worker, path, local } => {
-            let moved = bulk::download(&mut res, worker.as_deref(), path, &local).await?;
-            print_moved(&moved, json)?;
+        VerbCmd::Pull { worker, path, local: Here::Stdio, offset, length } if json => {
+            let worker = res.worker(worker.as_deref()).await?;
+            let chunk = ops::read_file(link, worker, path.clone(), offset, length).await?;
+            print_json(&view::file(&path, &chunk))?;
+        }
+        VerbCmd::Pull { worker, path, local, offset, length } => {
+            let range = (offset, length);
+            let moved = bulk::pull(&mut res, worker.as_deref(), path, &local, range).await?;
+            if local != Here::Stdio {
+                print_moved(&moved, json)?;
+            }
         }
         VerbCmd::Project { cmd } => crate::projects::project(*cmd, link, json, key).await?,
         VerbCmd::Task { cmd } => crate::projects::task(*cmd, link, json, key).await?,
     }
     Ok(())
+}
+
+/// A place here: `-` for standard input or output, else a path.
+#[expect(clippy::unnecessary_wraps, reason = "clap's value parser returns a result")]
+fn here(arg: &str) -> Result<Here, std::convert::Infallible> {
+    Ok(Here::parse(arg))
 }
 
 fn print_moved(moved: &bulk::Moved, json: bool) -> Result<()> {
@@ -958,33 +945,6 @@ async fn events(
         std::io::stdout().flush()?;
         cursor = Some(page.next);
     }
-}
-
-/// Write a file's bytes from `offset` to stdout, read by read until `length` or the end.
-async fn cat(
-    link: &Link,
-    worker: slopty_core::WorkerId,
-    path: &str,
-    offset: u64,
-    length: Option<u64>,
-) -> Result<()> {
-    let end = length.map(|n| offset.saturating_add(n));
-    let mut at = offset;
-    let mut out = std::io::stdout().lock();
-    loop {
-        // Always a length, which the worker caps: a read of the rest would be refused for a
-        // rest over the cap.
-        let want = end.map_or(u64::MAX, |end| end.saturating_sub(at));
-        let chunk = ops::read_file(link, worker, path.to_owned(), at, Some(want)).await?;
-        out.write_all(&chunk.bytes)?;
-        at = at.saturating_add(chunk.bytes.len() as u64);
-        let done = chunk.bytes.is_empty() || at >= chunk.size || end.is_some_and(|end| at >= end);
-        if done {
-            break;
-        }
-    }
-    out.flush()?;
-    Ok(())
 }
 
 pub fn print_term(term: slopty_proto::orchestration::TermRef, json: bool) -> Result<()> {
@@ -1171,12 +1131,6 @@ mod tests {
         let VerbCmd::Wake { worker } = parse(&["wake", "studio"]).unwrap() else { panic!() };
         assert_eq!(worker, "studio");
         parse(&["wake"]).unwrap_err();
-        let VerbCmd::Cat { offset, length, .. } =
-            parse(&["cat", "/f", "--offset", "10", "--length", "4"]).unwrap()
-        else {
-            panic!()
-        };
-        assert_eq!((offset, length), (10, Some(4)));
         let VerbCmd::Ls { max, .. } = parse(&["ls", "~"]).unwrap() else { panic!() };
         assert_eq!(max, DEFAULT_MAX_ENTRIES);
         let VerbCmd::Mv { from, to, .. } = parse(&["mv", "~/a", "~/b"]).unwrap() else { panic!() };
@@ -1240,11 +1194,29 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!((local.to_str(), path.as_str()), (Some("a.tar"), "~/a.tar"));
-        let VerbCmd::Pull { path, local, .. } = parse(&["pull", "~/a.tar", "."]).unwrap() else {
+        assert_eq!((local, path.as_str()), (Here::Path("a.tar".into()), "~/a.tar"));
+        let VerbCmd::Push { local, .. } = parse(&["push", "-", "~/a.txt"]).unwrap() else {
             panic!()
         };
-        assert_eq!((path.as_str(), local.to_str()), ("~/a.tar", Some(".")));
+        assert_eq!(local, Here::Stdio, "standard input");
+        let VerbCmd::Pull { path, local, offset, length, .. } =
+            parse(&["pull", "~/a.tar", "."]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (path.as_str(), local, offset, length),
+            ("~/a.tar", Here::Path(".".into()), 0, None)
+        );
+        let VerbCmd::Pull { local, offset, length, .. } =
+            parse(&["pull", "/f", "-", "--offset", "10", "--length", "4"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((local, offset, length), (Here::Stdio, 10, Some(4)));
+        parse(&["pull", "/f"]).unwrap_err();
+        parse(&["cat", "/f"]).unwrap_err();
+        parse(&["put", "/f"]).unwrap_err();
     }
 
     #[test]

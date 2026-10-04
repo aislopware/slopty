@@ -1,8 +1,9 @@
 ---
 source: crates/slopty-proto/tests/golden_project.rs
+assertion_line: 41
 expression: hex(&bytes)
 ---
-4d 00 00 00 01 15 00 20 06 73 6c 6f 70 74 79 01
+4d 00 00 00 01 15 00 1f 06 73 6c 6f 70 74 79 01
 02 02 03 63 77 64 07 7e 2f 6e 6f 74 65 73 07 6d
 61 63 68 69 6e 65 06 73 74 75 64 69 6f 02 03 63
 77 64 08 2f 77 2f 6e 6f 74 65 73 07 6d 61 63 68

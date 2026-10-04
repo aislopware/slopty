@@ -526,11 +526,6 @@ impl Orchestrator {
                 let thread = threads.start(TaskThread { start, seat, env, role }).await?;
                 Ok(Outcome::ThreadStarted { thread, worktree: made.map(Box::new) })
             }
-            Verb::WriteFile { worker, path, bytes } => {
-                self.mine(worker)?;
-                let path = crate::file::expand_home(Path::new(&path));
-                blocking(move || write_file(&path, &bytes)).await.map(|()| Outcome::Done)
-            }
             Verb::ListPorts { worker } => {
                 self.mine(worker)?;
                 let roots = inner.worker.pids().await?;
@@ -1656,11 +1651,6 @@ fn stat(path: &Path) -> Result<Option<FileStat>, Failure> {
     }))
 }
 
-/// Replace a file whole (`slopty_platform::fs::replace`).
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    slopty_platform::fs::replace(path, bytes).map_err(|e| io_failure(path, &e))
-}
-
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
@@ -1687,21 +1677,11 @@ mod tests {
     }
 
     #[test]
-    fn files_are_read_capped_and_written_atomically() {
+    fn files_are_read_whole_up_to_the_cap() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("notes.txt");
-        write_file(&path, b"one").unwrap();
+        std::fs::write(&path, b"one").unwrap();
         assert_eq!(whole(&path).unwrap(), b"one");
-        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-        write_file(&path, b"two").unwrap();
-        assert_eq!(whole(&path).unwrap(), b"two");
-        let mode = std::os::unix::fs::PermissionsExt::mode(
-            &std::fs::metadata(&path).unwrap().permissions(),
-        );
-        assert_eq!(mode & 0o777, 0o755, "the mode carries over");
-        let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
-        assert_eq!(left.len(), 1, "no temporary file is left behind");
 
         let big = dir.path().join("big.bin");
         let file = std::fs::File::create(&big).unwrap();
@@ -1709,8 +1689,6 @@ mod tests {
         let err = whole(&big).unwrap_err();
         assert!(err.message.contains("offset and length"), "{err:?}");
         assert_eq!(whole(dir.path()).unwrap_err().code, ErrorCode::Failed);
-        let missing = write_file(&dir.path().join("no/such/dir/x"), b"").unwrap_err();
-        assert_eq!(missing.code, ErrorCode::Failed);
     }
 
     /// A range reads from its offset, a length past the end stops at the end, and every read

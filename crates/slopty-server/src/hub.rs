@@ -1682,7 +1682,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
-        | Verb::WriteFile { worker, .. }
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
         | Verb::FsChange { worker, .. }

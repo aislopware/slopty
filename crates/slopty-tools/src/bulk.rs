@@ -1,22 +1,24 @@
 //! Files of any size, moved between this machine and a worker in parts.
 //!
-//! **Up.** The file is read here part by part and sent as [`UploadPart::Bytes`] steps,
-//! [`WINDOW`] of them in flight at once; the finish carries the size and the BLAKE3 digest of
-//! what was read, and the worker puts the parts in place only when they add up. Under an
+//! **Up.** A file here, or standard input, is read part by part until it ends and sent as
+//! [`UploadPart::Bytes`] steps, [`WINDOW`] of them in flight at once; the finish carries the
+//! size and the BLAKE3 digest of what was read, and the worker puts the parts in place only
+//! when they add up. Under an
 //! idempotency key the upload is named for the key, so a call sent again writes into the same
 //! parts and its finish answers what the first one did; the abort sent after it sweeps the
 //! parts such a repeat wrote again.
 //!
 //! **Down.** [`Verb::ReadFile`] ranges, [`WINDOW`] at a time, written where they go in a
-//! partial file beside the target and renamed over it at the end. The file's size and time are
-//! looked at before and after, and a file that changed meanwhile is refused rather than handed
-//! over half old and half new.
+//! partial file beside the target and renamed over it at the end, or in order to standard
+//! output. The file's size and time are looked at before and after, and a file that changed
+//! meanwhile is refused rather than handed over half old and half new.
 //!
 //! A part is [`PART_BYTES`], well under a reply's cap: the parts share the server's links with
 //! every other verb and event, and one part holds those up for a moment at most.
 
 use std::fs::File;
 use std::future::Future;
+use std::io::{Read, Write};
 use std::os::unix::fs::FileExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -24,7 +26,9 @@ use std::sync::Arc;
 use std::task::Poll;
 
 use slopty_core::{WorkerId, XferId};
-use slopty_proto::orchestration::{ErrorCode, FileKind, IdempotencyKey, Outcome, UploadPart, Verb};
+use slopty_proto::orchestration::{
+    ErrorCode, FileKind, FileStat, IdempotencyKey, Outcome, UploadPart, Verb,
+};
 
 use crate::resolve::Resolver;
 use crate::{Dispatch, ToolError};
@@ -81,10 +85,12 @@ async fn together<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
     outputs.into_iter().flatten().collect()
 }
 
-/// The parts of a file of `size` bytes: each one's offset and length.
-fn parts(size: u64) -> impl Iterator<Item = (u64, u64)> {
+/// The parts of the bytes from `start` to `end`: each one's offset and length.
+fn parts(start: u64, end: u64) -> impl Iterator<Item = (u64, u64)> {
     let step = usize::try_from(PART_BYTES).unwrap_or(usize::MAX);
-    (0..size).step_by(step).map(move |offset| (offset, PART_BYTES.min(size.saturating_sub(offset))))
+    (start..end)
+        .step_by(step)
+        .map(move |offset| (offset, PART_BYTES.min(end.saturating_sub(offset))))
 }
 
 /// The upload a key names: the same key, the same parts on the worker.
@@ -96,49 +102,110 @@ fn upload_named(key: Option<&IdempotencyKey>) -> XferId {
     named.unwrap_or_default()
 }
 
-/// Send the file `local` here to `remote` on a worker, replacing what is there.
+/// The source a [`push`] reads, or the place a [`pull`] writes: a file here, or standard input
+/// or output (`-`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Here {
+    /// A file here; a download into a directory takes the file under its own name.
+    Path(PathBuf),
+    /// Standard input up, standard output down.
+    Stdio,
+}
+
+impl Here {
+    /// `-` for standard input or output, else the path.
+    #[must_use]
+    pub fn parse(arg: &str) -> Self {
+        if arg == "-" { Self::Stdio } else { Self::Path(PathBuf::from(arg)) }
+    }
+
+    fn shown(&self) -> PathBuf {
+        match self {
+            Self::Path(path) => path.clone(),
+            Self::Stdio => PathBuf::from("-"),
+        }
+    }
+}
+
+/// Send `from`, a file here or standard input until it ends, to `remote` on a worker.
+///
+/// It replaces what is there. A file replaced there keeps its mode; a new one takes the
+/// file's here, or the worker's default for standard input.
 ///
 /// # Errors
 ///
 /// A file here that cannot be read or is not a regular file, and whatever the worker refuses;
 /// the parts sent are dropped then.
-pub async fn upload<D: Dispatch>(
+pub async fn push<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     worker: Option<&str>,
-    local: &Path,
+    from: &Here,
+    remote: String,
+    key: Option<IdempotencyKey>,
+) -> Result<Moved, ToolError> {
+    match from {
+        Here::Path(path) => {
+            let opened = path.clone();
+            let (file, mode) = blocking(move || {
+                let file = File::open(&opened).map_err(|e| local_failure(&opened, &e))?;
+                let meta = file.metadata().map_err(|e| local_failure(&opened, &e))?;
+                if !meta.is_file() {
+                    let message = format!("{} (here) is not a regular file", opened.display());
+                    return Err(ToolError::new(ErrorCode::Failed, message));
+                }
+                let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777;
+                Ok((file, mode))
+            })
+            .await?;
+            upload(res, worker, (file, path.clone(), Some(mode)), remote, key).await
+        }
+        Here::Stdio => {
+            let stdin = (std::io::stdin(), PathBuf::from("-"), None);
+            upload(res, worker, stdin, remote, key).await
+        }
+    }
+}
+
+/// Send what `reader` reads, until it ends, to `remote` on a worker in parts: [`WINDOW`]
+/// parts read here, then sent together, until a short one. `shown` names it in a failure and
+/// in what is moved.
+async fn upload<D: Dispatch, R: Read + Send + 'static>(
+    res: &mut Resolver<'_, D>,
+    worker: Option<&str>,
+    (reader, shown, mode): (R, PathBuf, Option<u32>),
     remote: String,
     key: Option<IdempotencyKey>,
 ) -> Result<Moved, ToolError> {
     let worker = res.worker(worker).await?;
     let dispatch = res.dispatch();
-    let path = local.to_path_buf();
-    let (file, size, mode) = blocking(move || {
-        let file = File::open(&path).map_err(|e| local_failure(&path, &e))?;
-        let meta = file.metadata().map_err(|e| local_failure(&path, &e))?;
-        if !meta.is_file() {
-            let message = format!("{} (here) is not a regular file", path.display());
-            return Err(ToolError::new(ErrorCode::Failed, message));
-        }
-        let mode = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777;
-        Ok((Arc::new(file), meta.len(), mode))
-    })
-    .await?;
     let upload = upload_named(key.as_ref());
     let step = |part| Verb::Upload { worker, path: remote.clone(), upload, part };
     let mut hasher = blake3::Hasher::new();
-    let all: Vec<(u64, u64)> = parts(size).collect();
-    for batch in all.chunks(WINDOW) {
-        let (file, local, batch) = (Arc::clone(&file), local.to_path_buf(), batch.to_vec());
-        let read = blocking(move || read_parts(&file, &local, &batch)).await;
+    let mut size = 0_u64;
+    let mut reader = Some(reader);
+    loop {
+        let Some(taken) = reader.take() else { break };
+        let named = shown.clone();
+        let read = blocking(move || {
+            let mut taken = taken;
+            let batch = read_batch(&mut taken, &named)?;
+            Ok((taken, batch))
+        })
+        .await;
         let sent = match read {
-            Ok(read) => {
-                for (_offset, bytes) in &read {
-                    hasher.update(bytes);
+            Ok((back, batch)) => {
+                let ended = batch.last().is_none_or(|part| (part.len() as u64) < PART_BYTES);
+                if !ended {
+                    reader = Some(back);
                 }
-                let steps = read.into_iter().map(|(offset, bytes)| {
-                    dispatch.call(step(UploadPart::Bytes { offset, bytes }))
-                });
-                together(steps.collect()).await.into_iter().try_for_each(|outcome| match outcome {
+                let mut steps = Vec::with_capacity(batch.len());
+                for bytes in batch {
+                    hasher.update(&bytes);
+                    let offset = size;
+                    size = size.saturating_add(bytes.len() as u64);
+                    steps.push(dispatch.call(step(UploadPart::Bytes { offset, bytes })));
+                }
+                together(steps).await.into_iter().try_for_each(|outcome| match outcome {
                     Outcome::Done => Ok(()),
                     other => Err(ToolError::unexpected(other)),
                 })
@@ -152,7 +219,7 @@ pub async fn upload<D: Dispatch>(
     }
     let digest = *hasher.finalize().as_bytes();
     let keyed = key.is_some();
-    let finish = UploadPart::Finish { size, digest, mode: Some(mode) };
+    let finish = UploadPart::Finish { size, digest, mode };
     match dispatch.send(key, step(finish)).await {
         Outcome::Done => {}
         other => return Err(ToolError::unexpected(other)),
@@ -162,33 +229,81 @@ pub async fn upload<D: Dispatch>(
         // worker's table and left them.
         let _swept = dispatch.call(step(UploadPart::Abort)).await;
     }
-    Ok(Moved { worker, remote, local: local.to_path_buf(), size })
+    Ok(Moved { worker, remote, local: shown, size })
 }
 
-/// The bytes of each `(offset, length)` of `file`.
-fn read_parts(
-    file: &File,
-    path: &Path,
-    parts: &[(u64, u64)],
-) -> Result<Vec<(u64, Vec<u8>)>, ToolError> {
-    parts
-        .iter()
-        .map(|&(offset, length)| {
-            let mut bytes = vec![0; usize::try_from(length).unwrap_or(0)];
-            file.read_exact_at(&mut bytes, offset).map_err(|e| local_failure(path, &e))?;
-            Ok((offset, bytes))
-        })
-        .collect()
+/// Up to [`WINDOW`] parts from `reader`, each whole but the last one read before it ended,
+/// which may be short or empty.
+fn read_batch(reader: &mut impl Read, shown: &Path) -> Result<Vec<Vec<u8>>, ToolError> {
+    let part = usize::try_from(PART_BYTES).unwrap_or(usize::MAX);
+    let mut batch = Vec::with_capacity(WINDOW);
+    while batch.len() < WINDOW {
+        let mut bytes = Vec::with_capacity(part);
+        let read = reader
+            .by_ref()
+            .take(PART_BYTES)
+            .read_to_end(&mut bytes)
+            .map_err(|e| local_failure(shown, &e))?;
+        let whole = read == part;
+        if read > 0 {
+            batch.push(bytes);
+        }
+        if !whole {
+            break;
+        }
+    }
+    Ok(batch)
 }
 
-/// Bring `remote` from a worker to `local` here, replacing what is there; `local` may be a
-/// directory, which takes the file under its own name.
+/// Bring `remote` from a worker to `to`, a file here or standard output.
+///
+/// A file here is replaced, and a directory takes it under its own name. `range` (an offset
+/// and at most a length) takes only part of it, to standard output only.
+///
+/// The bytes are of one version of the file: one that changes while it is read is refused.
+/// Into a file here nothing of it is left then; standard output has had what came before.
 ///
 /// # Errors
 ///
-/// Nothing at `remote` or not a regular file there, a file that changed while it was read,
-/// and whatever the disk here refuses.
-pub async fn download<D: Dispatch>(
+/// Nothing at `remote` or not a regular file there, a range into a file, a file that changed
+/// while it was read, and whatever the disk here refuses.
+pub async fn pull<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    worker: Option<&str>,
+    remote: String,
+    to: &Here,
+    range: (u64, Option<u64>),
+) -> Result<Moved, ToolError> {
+    match to {
+        Here::Path(local) if range == (0, None) => download(res, worker, remote, local).await,
+        Here::Path(_) => Err(ToolError::invalid("a range goes to standard output (`-`) only")),
+        Here::Stdio => stream(res, worker, remote, range, std::io::stdout())
+            .await
+            .map(|moved| Moved { local: to.shown(), ..moved }),
+    }
+}
+
+/// `remote`'s kind and size, refused when it is no regular file.
+async fn regular<D: Dispatch>(
+    dispatch: &D,
+    worker: WorkerId,
+    remote: &str,
+) -> Result<FileStat, ToolError> {
+    match dispatch.call(Verb::Stat { worker, path: remote.to_owned() }).await {
+        Outcome::Stat(Some(stat)) if stat.kind == FileKind::File => Ok(stat),
+        Outcome::Stat(Some(_other)) => {
+            let message = format!("{remote} is not a regular file on the worker");
+            Err(ToolError::new(ErrorCode::Failed, message))
+        }
+        Outcome::Stat(None) => {
+            Err(ToolError::new(ErrorCode::Failed, format!("nothing is at {remote}")))
+        }
+        other => Err(ToolError::unexpected(other)),
+    }
+}
+/// Bring `remote` to the file `local` here through a partial file beside it, renamed over it
+/// once whole.
+async fn download<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     worker: Option<&str>,
     remote: String,
@@ -196,69 +311,23 @@ pub async fn download<D: Dispatch>(
 ) -> Result<Moved, ToolError> {
     let worker = res.worker(worker).await?;
     let dispatch = res.dispatch();
-    let stat = || dispatch.call(Verb::Stat { worker, path: remote.clone() });
-    let before = match stat().await {
-        Outcome::Stat(Some(stat)) if stat.kind == FileKind::File => stat,
-        Outcome::Stat(Some(_other)) => {
-            let message = format!("{remote} is not a regular file on the worker");
-            return Err(ToolError::new(ErrorCode::Failed, message));
-        }
-        Outcome::Stat(None) => {
-            return Err(ToolError::new(ErrorCode::Failed, format!("nothing is at {remote}")));
-        }
-        other => return Err(ToolError::unexpected(other)),
-    };
+    let before = regular(dispatch, worker, &remote).await?;
     let size = before.size;
     let name = Path::new(&remote).file_name().map(ToOwned::to_owned);
     let (target, partial, file) = {
         let local = local.to_path_buf();
         blocking(move || open_partial(&local, name.as_deref(), size)).await?
     };
-    let changed = || {
-        ToolError::new(ErrorCode::Failed, format!("{remote} changed while it was read; try again"))
-    };
-    let all: Vec<(u64, u64)> = parts(size).collect();
-    let fetched = async {
-        for batch in all.chunks(WINDOW) {
-            let reads = batch.iter().map(|&(offset, length)| {
-                let verb =
-                    Verb::ReadFile { worker, path: remote.clone(), offset, length: Some(length) };
-                dispatch.call(verb)
-            });
-            let mut chunks = Vec::with_capacity(batch.len());
-            for (outcome, &(offset, length)) in
-                together(reads.collect()).await.into_iter().zip(batch)
-            {
-                match outcome {
-                    Outcome::File { bytes, size: now, .. } => {
-                        let whole = u64::try_from(bytes.len()).is_ok_and(|n| n == length);
-                        if now != size || !whole {
-                            return Err(changed());
-                        }
-                        chunks.push((offset, bytes));
-                    }
-                    other => return Err(ToolError::unexpected(other)),
-                }
-            }
-            let (file, partial) = (Arc::clone(&file), partial.clone());
-            blocking(move || {
-                chunks.iter().try_for_each(|(offset, bytes)| {
-                    file.write_all_at(bytes, *offset).map_err(|e| local_failure(&partial, &e))
-                })
+    let put = async |chunks: Vec<(u64, Vec<u8>)>| {
+        let (file, partial) = (Arc::clone(&file), partial.clone());
+        blocking(move || {
+            chunks.iter().try_for_each(|(offset, bytes)| {
+                file.write_all_at(bytes, *offset).map_err(|e| local_failure(&partial, &e))
             })
-            .await?;
-        }
-        match stat().await {
-            Outcome::Stat(Some(after))
-                if after.size == before.size && after.modified_ms == before.modified_ms =>
-            {
-                Ok(())
-            }
-            Outcome::Stat(_) => Err(changed()),
-            other => Err(ToolError::unexpected(other)),
-        }
+        })
+        .await
     };
-    let fetched = fetched.await;
+    let fetched = fetch(dispatch, worker, &remote, &before, (0, size), put).await;
     let (placed_at, removed_at) = (target.clone(), partial.clone());
     blocking(move || {
         let placed = fetched.and_then(|()| {
@@ -272,6 +341,81 @@ pub async fn download<D: Dispatch>(
     })
     .await?;
     Ok(Moved { worker, remote, local: target, size })
+}
+
+/// Write `remote`, or the part of it `(offset, length)` names, to `out` in order.
+async fn stream<D: Dispatch, W: Write + Send + 'static>(
+    res: &mut Resolver<'_, D>,
+    worker: Option<&str>,
+    remote: String,
+    (offset, length): (u64, Option<u64>),
+    out: W,
+) -> Result<Moved, ToolError> {
+    let worker = res.worker(worker).await?;
+    let dispatch = res.dispatch();
+    let before = regular(dispatch, worker, &remote).await?;
+    let end = length.map_or(before.size, |n| offset.saturating_add(n).min(before.size));
+    let start = offset.min(end);
+    let mut out = Some(out);
+    let put = async |chunks: Vec<(u64, Vec<u8>)>| {
+        let Some(mut writer) = out.take() else {
+            return Err(ToolError::new(ErrorCode::Failed, "standard output was lost"));
+        };
+        let writer = blocking(move || {
+            let written = chunks
+                .iter()
+                .try_for_each(|(_offset, bytes)| writer.write_all(bytes))
+                .and_then(|()| writer.flush());
+            written.map_err(|e| local_failure(Path::new("-"), &e))?;
+            Ok(writer)
+        })
+        .await?;
+        out = Some(writer);
+        Ok(())
+    };
+    fetch(dispatch, worker, &remote, &before, (start, end), put).await?;
+    let size = end.saturating_sub(start);
+    Ok(Moved { worker, remote, local: PathBuf::from("-"), size })
+}
+
+/// Read `remote` from `start` to `end` in parts, [`WINDOW`] at a time, each batch handed to
+/// `put` in order; then refuse it if it is no longer the file `before` saw.
+async fn fetch<D: Dispatch>(
+    dispatch: &D,
+    worker: WorkerId,
+    remote: &str,
+    before: &FileStat,
+    (start, end): (u64, u64),
+    mut put: impl AsyncFnMut(Vec<(u64, Vec<u8>)>) -> Result<(), ToolError>,
+) -> Result<(), ToolError> {
+    let changed = || {
+        ToolError::new(ErrorCode::Failed, format!("{remote} changed while it was read; try again"))
+    };
+    let all: Vec<(u64, u64)> = parts(start, end).collect();
+    for batch in all.chunks(WINDOW) {
+        let reads = batch.iter().map(|&(offset, length)| {
+            let path = remote.to_owned();
+            dispatch.call(Verb::ReadFile { worker, path, offset, length: Some(length) })
+        });
+        let mut chunks = Vec::with_capacity(batch.len());
+        for (outcome, &(offset, length)) in together(reads.collect()).await.into_iter().zip(batch) {
+            match outcome {
+                Outcome::File { bytes, size, .. } => {
+                    let whole = u64::try_from(bytes.len()).is_ok_and(|n| n == length);
+                    if size != before.size || !whole {
+                        return Err(changed());
+                    }
+                    chunks.push((offset, bytes));
+                }
+                other => return Err(ToolError::unexpected(other)),
+            }
+        }
+        put(chunks).await?;
+    }
+    match regular(dispatch, worker, remote).await {
+        Ok(after) if after.size == before.size && after.modified_ms == before.modified_ms => Ok(()),
+        Ok(_) | Err(_) => Err(changed()),
+    }
 }
 
 /// Where a download to `local` lands (inside it, under `name`, when it is a directory), and a
@@ -446,7 +590,8 @@ mod tests {
         let here = dir.path().join("app.tar");
         std::fs::write(&here, contents()).unwrap();
         let mut res = Resolver::new(&worker);
-        let moved = upload(&mut res, None, &here, "~/app.tar".to_owned(), None).await.unwrap();
+        let from = Here::Path(here.clone());
+        let moved = push(&mut res, None, &from, "~/app.tar".to_owned(), None).await.unwrap();
         assert_eq!(
             (moved.worker, moved.size),
             (studio(), u64::try_from(contents().len()).unwrap())
@@ -459,7 +604,8 @@ mod tests {
 
         let back = dir.path().join("back");
         std::fs::create_dir_all(&back).unwrap();
-        let moved = download(&mut res, None, "~/app.tar".to_owned(), &back).await.unwrap();
+        let to = Here::Path(back.clone());
+        let moved = pull(&mut res, None, "~/app.tar".to_owned(), &to, (0, None)).await.unwrap();
         assert_eq!(moved.local, back.join("app.tar"));
         assert_eq!(std::fs::read(back.join("app.tar")).unwrap(), contents());
         let left: Vec<_> = std::fs::read_dir(&back).unwrap().collect();
@@ -476,7 +622,8 @@ mod tests {
         std::fs::write(&here, b"hello").unwrap();
         let key = IdempotencyKey::new("push-1").unwrap();
         let mut res = Resolver::new(&worker);
-        upload(&mut res, None, &here, "/w/small".to_owned(), Some(key.clone())).await.unwrap();
+        let from = Here::Path(here);
+        push(&mut res, None, &from, "/w/small".to_owned(), Some(key.clone())).await.unwrap();
         assert_eq!(*worker.steps.lock(), ["part 0", "finish", "abort"]);
         assert_eq!(
             upload_named(Some(&key)),
@@ -485,7 +632,7 @@ mod tests {
         );
         assert_ne!(upload_named(None), upload_named(None));
         let nope = dir.path().join("nope");
-        let missing = upload(&mut res, None, &nope, "/w/x".to_owned(), None).await;
+        let missing = push(&mut res, None, &Here::Path(nope), "/w/x".to_owned(), None).await;
         assert_eq!(missing.unwrap_err().code, ErrorCode::Failed);
     }
 
@@ -497,10 +644,82 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let here = dir.path().join("log");
         let mut res = Resolver::new(&worker);
-        let refused = download(&mut res, None, "/w/log".to_owned(), &here).await.unwrap_err();
+        let to = Here::Path(here);
+        let refused = pull(&mut res, None, "/w/log".to_owned(), &to, (0, None)).await.unwrap_err();
         assert!(refused.message.contains("changed while it was read"), "{refused}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "no partial left here");
-        let missing = download(&mut res, None, "/w/none".to_owned(), &here).await.unwrap_err();
+        let missing = pull(&mut res, None, "/w/none".to_owned(), &to, (0, None)).await.unwrap_err();
         assert!(missing.message.contains("nothing is at"), "{missing}");
+    }
+
+    /// What standard output is handed, kept to look at.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A stream with no size up front goes up in parts until it ends: a short last part, a
+    /// whole number of parts, and nothing at all each add up at the finish.
+    #[tokio::test]
+    async fn a_stream_goes_up_until_it_ends() {
+        let worker = Worker::default();
+        let mut res = Resolver::new(&worker);
+        let whole = usize::try_from(PART_BYTES.saturating_mul(4)).unwrap();
+        let even: Vec<u8> = contents().into_iter().cycle().take(whole).collect();
+        for (bytes, steps) in [(contents(), 5), (even, 5), (Vec::new(), 1)] {
+            worker.steps.lock().clear();
+            let read = (std::io::Cursor::new(bytes.clone()), PathBuf::from("-"), None);
+            let moved = upload(&mut res, None, read, "/w/in".to_owned(), None).await.unwrap();
+            assert_eq!(moved.size, u64::try_from(bytes.len()).unwrap());
+            assert_eq!(moved.local, Path::new("-"));
+            assert_eq!(worker.file("/w/in"), Some(bytes));
+            let sent = worker.steps.lock().clone();
+            assert_eq!(sent.len(), steps, "{sent:?}");
+            assert_eq!(sent.last().map(String::as_str), Some("finish"));
+        }
+    }
+
+    /// Standard output takes the file, or a range of it, in order across parts; a range into a
+    /// file here is refused, and a file that changes while it streams fails.
+    #[tokio::test]
+    async fn a_range_streams_out_in_order() {
+        let worker = Worker::default();
+        worker.files.lock().insert("/w/log".to_owned(), contents());
+        let mut res = Resolver::new(&worker);
+        let out = Shared::default();
+        let all = stream(&mut res, None, "/w/log".to_owned(), (0, None), out.clone()).await;
+        assert_eq!(all.unwrap().size, u64::try_from(contents().len()).unwrap());
+        assert_eq!(*out.0.lock(), contents());
+
+        let (offset, length) = (PART_BYTES / 2, PART_BYTES.saturating_mul(2));
+        let out = Shared::default();
+        let range = (offset, Some(length));
+        let part = stream(&mut res, None, "/w/log".to_owned(), range, out.clone()).await.unwrap();
+        assert_eq!(part.size, length);
+        let (from, to) =
+            (usize::try_from(offset).unwrap(), usize::try_from(offset + length).unwrap());
+        assert_eq!(*out.0.lock(), contents()[from..to]);
+        let past = stream(&mut res, None, "/w/log".to_owned(), (u64::MAX, None), Shared::default());
+        assert_eq!(past.await.unwrap().size, 0, "past the end, nothing");
+
+        let into = Here::Path(PathBuf::from("/tmp/x"));
+        let refused = pull(&mut res, None, "/w/log".to_owned(), &into, range).await.unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Invalid, "{refused}");
+
+        let touched = Worker { touch_after: Some(2), ..Worker::default() };
+        touched.files.lock().insert("/w/log".to_owned(), contents());
+        let mut res = Resolver::new(&touched);
+        let changed = stream(&mut res, None, "/w/log".to_owned(), (0, None), Shared::default());
+        let changed = changed.await.unwrap_err();
+        assert!(changed.message.contains("changed while it was read"), "{changed}");
     }
 }

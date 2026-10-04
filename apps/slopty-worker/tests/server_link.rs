@@ -18,7 +18,7 @@ mod tests {
     use slopty_proto::handshake::Hello;
     use slopty_proto::items::{ItemKind, ItemOp, ItemSync};
     use slopty_proto::orchestration::{
-        ErrorCode, Input, ItemRef, Outcome, Size, TermRef, Verb, WaitUntil, Waited,
+        ErrorCode, Input, ItemRef, Outcome, Size, TermRef, UploadPart, Verb, WaitUntil, Waited,
     };
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer};
     use slopty_proto::terminal::{CloseReason, SessionState};
@@ -1298,8 +1298,13 @@ mod tests {
         assert_eq!(peer.ask(Verb::SendInput { term, input: interrupt }).await, Outcome::Done);
 
         let path = dir.path().join("note.txt").to_string_lossy().into_owned();
-        let write = Verb::WriteFile { worker, path: path.clone(), bytes: b"hello".to_vec() };
-        assert_eq!(peer.ask(write).await, Outcome::Done);
+        let upload = slopty_core::XferId::new();
+        let step = |part| Verb::Upload { worker, path: path.clone(), upload, part };
+        let bytes = UploadPart::Bytes { offset: 0, bytes: b"hello".to_vec() };
+        assert_eq!(peer.ask(step(bytes)).await, Outcome::Done);
+        let digest = *blake3::hash(b"hello").as_bytes();
+        let finish = UploadPart::Finish { size: 5, digest, mode: None };
+        assert_eq!(peer.ask(step(finish)).await, Outcome::Done);
         assert_eq!(
             peer.ask(Verb::ReadFile { worker, path, offset: 1, length: Some(3) }).await,
             Outcome::File { bytes: b"ell".to_vec(), offset: 1, size: 5 }

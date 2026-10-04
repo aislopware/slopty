@@ -400,19 +400,19 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_lost_answer_is_asked_again_under_the_same_key() {
         use slopty_core::{SessionId, WorkerId};
-        use slopty_proto::orchestration::TermRef;
+        use slopty_proto::orchestration::{Input, TermRef};
 
         let error = |code| Outcome::Error { code, message: "x".to_owned() };
         let mut answers =
             vec![Outcome::Done, error(ErrorCode::WorkerUnreachable), error(ErrorCode::Interrupted)];
         let mut keys = Vec::new();
         let mut sent = Vec::new();
-        let write =
-            Verb::WriteFile { worker: WorkerId::new(), path: "/f".to_owned(), bytes: vec![7; 64] };
+        let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
+        let write = Verb::SendInput { term, input: Input::Text("x".repeat(64)) };
         let outcome = retried(None, write, |key, verb| {
             keys.push(key);
-            if let Verb::WriteFile { bytes, .. } = &verb {
-                sent.push(bytes.as_ptr());
+            if let Verb::SendInput { input: Input::Text(text), .. } = &verb {
+                sent.push(text.as_ptr());
             }
             std::future::ready((answers.pop().unwrap(), Some(verb)))
         })

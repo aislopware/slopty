@@ -1970,10 +1970,27 @@ pub async fn slopty_json(
     args: &[&str],
     stdin: &[u8],
 ) -> Result<Value> {
+    let out = slopty_out(server, data_dir, &[&["--json"], args].concat(), stdin).await?;
+    serde_json::from_slice(&out)
+        .with_context(|| format!("slopty {args:?} printed {:?}", String::from_utf8_lossy(&out)))
+}
+
+/// `slopty …` against the server at `server`, as [`slopty_json`] runs it but without `--json`:
+/// what it printed, as bytes.
+///
+/// # Errors
+///
+/// When the CLI exits non-zero (its stderr is in the error).
+pub async fn slopty_out(
+    server: &str,
+    data_dir: &Path,
+    args: &[&str],
+    stdin: &[u8],
+) -> Result<Vec<u8>> {
     let mut child = scrubbed(bin("slopty")?, &data_dir.join("home"))
         .arg("--data-dir")
         .arg(data_dir)
-        .args(["--server", server, "--json"])
+        .args(["--server", server])
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1989,9 +2006,7 @@ pub async fn slopty_json(
         .with_context(|| format!("slopty {args:?} did not finish within {STARTUP:?}"))??;
     let stderr = String::from_utf8_lossy(&out.stderr);
     ensure!(out.status.success(), "slopty {args:?}: {}: {}", out.status, stderr.trim());
-    serde_json::from_slice(&out.stdout).with_context(|| {
-        format!("slopty {args:?} printed {:?}", String::from_utf8_lossy(&out.stdout))
-    })
+    Ok(out.stdout)
 }
 
 /// One JSON-RPC request to the MCP endpoint at `addr`, over plain HTTP/1.1; the response.
@@ -2114,13 +2129,23 @@ impl ServerStack {
         self.slopty_with_stdin(args, b"").await
     }
 
-    /// [`Self::slopty`] with `stdin` on the CLI's standard input (`put`).
+    /// [`Self::slopty`] with `stdin` on the CLI's standard input (`push -`).
     ///
     /// # Errors
     ///
     /// As [`slopty_json`].
     pub async fn slopty_with_stdin(&self, args: &[&str], stdin: &[u8]) -> Result<Value> {
         slopty_json(self.server.address(), &self.path("cli"), args, stdin).await
+    }
+
+    /// `slopty <args> --server <this server>` without `--json`, `stdin` on its standard input:
+    /// the bytes it printed (`pull -`).
+    ///
+    /// # Errors
+    ///
+    /// As [`slopty_out`].
+    pub async fn slopty_bytes(&self, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>> {
+        slopty_out(self.server.address(), &self.path("cli"), args, stdin).await
     }
 
     /// One MCP request to this server ([`mcp_request`]).

@@ -60,7 +60,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `slopty wait <term> --output <pattern> | --quiet | --exit | --command-done |
     --agent-input`
   - `slopty agent spawn`, `slopty agent status`, `slopty close`
-  - `slopty cat` / `slopty put`, `slopty ports`
+  - `slopty pull` / `slopty push` (`-` for standard output or input), `slopty ports`
 
   **Reads come from the worker's libghostty grid, never raw PTY bytes.** There are three
   views: the rendered screen, scrollback by absolute line index (the same numbering the row
@@ -270,14 +270,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     end, and returns 10 000 lines at most. The command blocks keep their marks in stream
     order, so a command with no output or two prompts on adjacent rows stay apart, and the
     marks survive a full-screen program.
-  - `ReadFile` returns 8 MiB at most, half a frame, and reads a range (protocol 56, below). `WriteFile` writes a
-    temporary file beside the target, fsyncs it and renames it over, keeping the old mode.
+  - `ReadFile` returns 8 MiB at most, half a frame, and reads a range (protocol 56, below). A
+    file goes up as `Upload` parts ("One verb each way moves a file", below).
   - A message too large for one frame is never written; an error goes in its place and the
     link carries on (2026-09-25). The frame holds more than the file's bytes, so a file just
     under 16 MiB passed the check above and its answer broke the worker's writer while the
     lease stayed up, and every later verb timed out. Now the worker's writer answers such a
-    reply with `Failed`, the server's writer to a worker answers such a request (a
-    `WriteFile` of a frame's worth) with `Invalid`, and its writer to a client does the same
+    reply with `Failed`, the server's writer to a worker answers such a request (a frame's
+    worth of file in one verb) with `Invalid`, and its writer to a client does the same
     for a reply. Any other write failure ends the link: on the worker it ends the session and
     it redials, and on the server it ends the lease. The MCP endpoint took a frame's worth of
     file in one request body until 2026-10-04, and its test proved the worker writer's guard
@@ -301,7 +301,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (above, "One verb set drives workers"); a tool failure, a name that does not resolve
     included, is an `isError` result reading `message (Code)`, and an unknown tool is invalid
     params.
-  - **Files.** `slopty cat --json` answers `content` with `encoding` `utf8` when the bytes are
+  - **Files.** `slopty pull <path> - --json` answers `content` with `encoding` `utf8` when the bytes are
     UTF-8 and `base64` otherwise, plus the file's `size`.
   - **What stays on each side.** The 240 s wait cap lives in the hub; the tools only pass the
     timeout through. A tool's long wait reports progress through an optional sink: `slopty
@@ -406,8 +406,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       read is. So is a text past `FILE_BYTES` (16 MiB since 2026-09-28, when a tile began to
       hold whole files; a save larger than 64 KiB goes up a bulk stream, workspace.md "A file
       tile edits any file up to 16 MiB").
-    - The write is `slopty_platform::fs::replace`, the same path orchestration's `WriteFile`
-      takes: a temporary file beside the target, its data ordered ahead of the rename, rename
+    - The write is `slopty_platform::fs::replace`: a temporary file beside the target, its data ordered ahead of the rename, rename
       over, the old mode kept. A symbolic
       link is followed and the file it names is replaced, so the link survives; renaming over
       the link would have swapped it for a copy.
@@ -453,7 +452,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     caller knows the whole size and pages through a large file; one read returns at most 8 MiB
     (`MAX_FILE_BYTES`, half a frame, asserted at compile time), which leaves room for the
     envelope. A read of the rest over that cap is refused with a hint to read in parts, and
-    `slopty cat` reads in parts. `ListDir` answers entries by name with kind, size and
+    `slopty pull` reads in parts. `ListDir` answers entries by name with kind, size and
     modification time, 10 000 at most, with the total. `Stat` follows links and answers `None`
     for a missing path. `SpawnAgent` takes arguments and environment for `claude`.
   - **An oversized request from the CLI.** The CLI sent a request past a
@@ -682,7 +681,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `IdempotencyKey`, the caller's name for the effect: a UUID, or up to 128 printable ASCII
     characters. It rides the envelope rather than each verb, since it names the call, not what
     the call does. `Verb::changes` says which verbs honour it: the opens, `SendInput`, `Close`,
-    `WriteFile`, `ResizeTerminal`, the item changes, `ForgetWorker`, and `WaitFor`, whose met
+    `ResizeTerminal`, the item changes, `ForgetWorker`, and `WaitFor`, whose met
     wait moves the session's mark so a repeat would wait for the next match. A read ignores
     the key and is answered afresh.
   - **The worker keeps the table** (`slopty_worker::orchestrate::idempotency::Ledger`). The
@@ -871,3 +870,23 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `worker_install_with_no_server_installs_one_beside_it`,
     `a_worker_name_resolves_through_the_server`; e2e: `the_first_run_offers_one_way_in`,
     `this_mac_walks_its_checklist`.
+
+- ✅ **One verb each way moves a file** (2026-10-05, from the feature audit). The CLI had two
+  verbs each way: `put` replaced a file with standard input in one `WriteFile`, `push` sent a
+  file here in parts, `cat` printed a file or a range, and `pull` brought a file here in parts.
+  Now `slopty push <local|-> <path>` and `slopty pull <path> <local|->` are the only two, and
+  `-` stands for standard input or output. Both go through `slopty_tools::bulk` in 1 MiB parts
+  with four in flight, so standard input has no size cap and needs no size up front: it is read
+  until it ends, and the finish carries the size and BLAKE3 digest. A file replaced on the
+  worker keeps its mode, and a new one takes the local file's, or the worker's default for
+  standard input. `pull … -` writes the parts in order to standard output and takes
+  `--offset` and `--length`, which a file here refuses. It checks the file's size and time
+  before and after, as a pull to a file does, and fails if they changed. Standard output has
+  had the bytes before that, so the failure is the exit status. `pull … - --json` prints one
+  read of at most 8 MiB as `content`, `encoding`, `size` and `more`, byte for byte what
+  `cat --json` printed. `cat`, `put` and `Verb::WriteFile` are gone, with the worker's handler
+  and the server's routing for it, since nothing else sent it. Tests: `slopty-tools`
+  `a_stream_goes_up_until_it_ends`, `a_range_streams_out_in_order`; `slopty-cli`
+  `the_agent_screen_and_file_verbs_parse`; `slopty-e2e` `server`
+  `the_cli_and_mcp_drive_a_real_worker_through_the_server` (text and binary through `-`, a
+  range, and 9 MiB piped both ways).

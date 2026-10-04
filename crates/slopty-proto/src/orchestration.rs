@@ -328,16 +328,6 @@ pub enum Verb {
         /// which fails for a rest over the cap.
         length: Option<u64>,
     },
-    /// Write a file on a worker, replacing it.
-    WriteFile {
-        /// Where.
-        worker: WorkerId,
-        /// Absolute path, or `~/…`.
-        path: String,
-        /// New contents.
-        #[serde(with = "serde_bytes")]
-        bytes: Vec<u8>,
-    },
     /// TCP ports listening in a worker's terminals' process trees.
     ListPorts {
         /// Where.
@@ -455,9 +445,8 @@ pub enum Verb {
         /// What, by an id from [`Verb::ListWindows`].
         target: CaptureTarget,
     },
-    /// One step of a file sent up in parts, for a file too large for [`Verb::WriteFile`]. The
-    /// parts land beside the file under the upload's name, and only a finished upload that adds
-    /// up replaces it.
+    /// One step of a file sent up in parts, of any size. The parts land beside the file under the
+    /// upload's name, and only a finished upload that adds up replaces it.
     Upload {
         /// Where.
         worker: WorkerId,
@@ -951,7 +940,6 @@ impl Verb {
             | Self::SendInput { .. }
             | Self::WaitFor { .. }
             | Self::Close { .. }
-            | Self::WriteFile { .. }
             | Self::ResizeTerminal { .. }
             | Self::ForgetWorker { .. }
             | Self::OpenItem { .. }
@@ -1301,7 +1289,7 @@ pub enum Outcome {
     },
     /// For [`Verb::ListPorts`].
     Ports(Vec<Port>),
-    /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`],
+    /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`],
     /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
     /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`]).
     Done,

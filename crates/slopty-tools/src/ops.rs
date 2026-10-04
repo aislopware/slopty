@@ -430,18 +430,6 @@ pub async fn wake<D: Dispatch>(
     }
 }
 
-/// Replace a file.
-pub async fn write_file<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    worker: Option<&str>,
-    path: String,
-    bytes: Vec<u8>,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let worker = res.worker(worker).await?;
-    done(res.dispatch(), key, Verb::WriteFile { worker, path, bytes }).await
-}
-
 /// Listening ports, and the worker they are on.
 pub async fn ports<D: Dispatch>(
     res: &mut Resolver<'_, D>,

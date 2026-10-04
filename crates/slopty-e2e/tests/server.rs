@@ -261,30 +261,32 @@ mod tests {
         ensure!(closed == json!({ "ok": true }), "{closed}");
         clock.lap("open once under a key");
 
-        // 3. Files both ways, text and binary.
+        // 3. Files both ways, text and binary, through standard input and output.
         let worker = stack.worker.name().to_owned();
         let text_path = stack.path("note.txt").to_string_lossy().into_owned();
-        let put = stack
-            .slopty_with_stdin(&["put", "--worker", &worker, &text_path], b"hello, worker\n")
-            .await?;
-        ensure!(put == json!({ "ok": true }), "{put}");
-        ensure!(std::fs::read(&text_path)? == b"hello, worker\n", "put wrote the file");
-        let cat = stack.slopty(&["cat", "--worker", &worker, &text_path]).await?;
-        ensure!(cat["encoding"] == "utf8" && cat["content"] == "hello, worker\n", "{cat}");
+        let push = ["push", "--worker", &worker, "-", &text_path];
+        let pushed = stack.slopty_with_stdin(&push, b"hello, worker\n").await?;
+        ensure!(pushed["size"] == 14 && pushed["local"] == "-", "{pushed}");
+        ensure!(std::fs::read(&text_path)? == b"hello, worker\n", "push - wrote the file");
+        let read = stack.slopty(&["pull", "--worker", &worker, &text_path, "-"]).await?;
+        ensure!(read["encoding"] == "utf8" && read["content"] == "hello, worker\n", "{read}");
         let binary: Vec<u8> = (0..=255_u8).rev().chain(0..=255).collect();
         let bin_path = stack.path("blob.bin").to_string_lossy().into_owned();
-        stack.slopty_with_stdin(&["put", "--worker", &worker, &bin_path], &binary).await?;
-        ensure!(std::fs::read(&bin_path)? == binary, "put wrote the bytes as they are");
-        let cat = stack.slopty(&["cat", "--worker", &worker, &bin_path]).await?;
-        ensure!(cat["encoding"] == "base64" && cat["size"] == binary.len(), "{cat}");
-        let decoded = data_encoding::BASE64.decode(str_of(&cat, "content")?.as_bytes())?;
-        ensure!(decoded == binary, "cat read the bytes back");
-        let part = ["cat", "--worker", &worker, &text_path, "--offset", "7", "--length", "6"];
-        let part = stack.slopty(&part).await?;
+        stack.slopty_with_stdin(&["push", "--worker", &worker, "-", &bin_path], &binary).await?;
+        ensure!(std::fs::read(&bin_path)? == binary, "push - wrote the bytes as they are");
+        let read = stack.slopty(&["pull", "--worker", &worker, &bin_path, "-"]).await?;
+        ensure!(read["encoding"] == "base64" && read["size"] == binary.len(), "{read}");
+        let decoded = data_encoding::BASE64.decode(str_of(&read, "content")?.as_bytes())?;
+        ensure!(decoded == binary, "pull - --json read the bytes back");
+        let raw = stack.slopty_bytes(&["pull", "--worker", &worker, &bin_path, "-"], b"").await?;
+        ensure!(raw == binary, "pull - printed the bytes as they are");
+        let part = ["pull", "--worker", &worker, &text_path, "-", "--offset", "7", "--length", "6"];
+        let read = stack.slopty(&part).await?;
         ensure!(
-            part["content"] == "worker" && part["size"] == 14 && part["more"] == true,
-            "{part}"
+            read["content"] == "worker" && read["size"] == 14 && read["more"] == true,
+            "{read}"
         );
+        ensure!(stack.slopty_bytes(&part, b"").await? == b"worker", "a range printed");
         let dir = stack.dir.path().to_string_lossy().into_owned();
         let listing = stack.slopty(&["ls", "--worker", &worker, &dir]).await?;
         let entries = listing["entries"].as_array().context("entries")?;
@@ -445,7 +447,8 @@ mod tests {
         Ok(())
     }
 
-    /// Push a file past the 8 MiB one read carries, pull it back, compare.
+    /// Push a file past the 8 MiB one read carries, pull it back, compare; then the same
+    /// through standard input and output.
     async fn bulk(stack: &ServerStack, worker: &str) -> Result<()> {
         // 9 MiB and 3 bytes: past the 8 MiB one read carries, and not a whole number of parts.
         let size: usize = 9_437_187;
@@ -472,6 +475,14 @@ mod tests {
         let pulled = stack.slopty(&["pull", "--worker", worker, &there, &back_arg]).await?;
         ensure!(pulled["size"] == size, "{pulled}");
         ensure!(std::fs::read(&back)? == contents, "pulled back whole");
+        // The same through standard input and output, past one batch of parts both ways.
+        let piped = stack.path("big-piped.bin").to_string_lossy().into_owned();
+        let push = ["push", "--worker", worker, "-", &piped];
+        let pushed = stack.slopty_with_stdin(&push, &contents).await?;
+        ensure!(pushed["size"] == size, "pushed from standard input: {pushed}");
+        ensure!(std::fs::read(&piped)? == contents, "the worker holds what was piped");
+        let printed = stack.slopty_bytes(&["pull", "--worker", worker, &piped, "-"], b"").await?;
+        ensure!(printed == contents, "pulled to standard output whole");
         let leftovers: Vec<String> = std::fs::read_dir(stack.dir.path())?
             .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
             .filter(|name| name.ends_with(".slopty-upload") || name.ends_with(".slopty-download"))
