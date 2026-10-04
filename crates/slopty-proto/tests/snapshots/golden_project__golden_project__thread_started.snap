@@ -2,7 +2,7 @@
 source: crates/slopty-proto/tests/golden_project.rs
 expression: hex(&bytes)
 ---
-7b 00 00 00 03 15 26 10 01 99 a0 00 00 00 70 00
+7b 00 00 00 03 15 27 10 01 99 a0 00 00 00 70 00
 80 00 00 00 00 00 00 06 01 0f 73 6c 6f 70 74 79
 2d 73 6c 6f 70 74 79 2d 36 2b 2f 77 2f 73 6c 6f
 70 74 79 2f 2e 63 6c 61 75 64 65 2f 77 6f 72 6b

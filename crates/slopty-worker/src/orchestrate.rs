@@ -47,7 +47,7 @@ use slopty_proto::WorkerMsg;
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::folder::{FsOutcome, FsRefusal};
 use slopty_proto::git::GitOutcome;
-use slopty_proto::items::{Item, ItemKind, ItemOp, ItemSync};
+use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{
     BUNDLES, BranchBundle, Command, DirEntry, ErrorCode, FileStat, IdempotencyKey, Input, ItemRef,
     Line, Outcome, Screen, Size, TermRef, ThreadOf, Verb, WaitUntil,
@@ -69,8 +69,6 @@ use crate::{ItemStore, Worker, WorkerError, listing};
 /// outcome reports them) and for the item deltas it causes (nobody's echo).
 const ORCHESTRATOR: ClientId = ClientId::nil();
 
-/// Who a [`Verb::PointAt`] says pointed, as a client's toast names it.
-const POINTER_NAME: &str = "Orchestration";
 /// How many clone progress steps wait for the server's link before the oldest are dropped.
 const CLONE_PROGRESS: usize = 64;
 
@@ -130,6 +128,11 @@ pub trait Agents: Send + Sync {
     /// The agent that ran in `session` has ended and none has started there since. A table
     /// that keeps no such history says no.
     fn ended(&self, _session: SessionId) -> bool {
+        false
+    }
+    /// The person stopped the last turn of the agent in `session` (Esc) and has not prompted
+    /// it since. A table that keeps no such word says no.
+    fn interrupted(&self, _session: SessionId) -> bool {
         false
     }
 }
@@ -377,13 +380,6 @@ impl Orchestrator {
             | Verb::TaskReview { .. }
             | Verb::ProjectDelete { .. }
             | Verb::TaskStart { .. }
-            | Verb::TaskAttempts { .. }
-            | Verb::TaskPick { .. }
-            | Verb::ScheduleSet { .. }
-            | Verb::ScheduleDelete { .. }
-            | Verb::ScheduleRun { .. }
-            | Verb::Snooze { .. }
-            | Verb::Unsnooze { .. }
             | Verb::ScriptSet { .. }
             | Verb::ScriptDelete { .. }
             | Verb::ScriptRun { .. }
@@ -392,9 +388,7 @@ impl Orchestrator {
             | Verb::ProjectList
             | Verb::ProjectStatus { .. }
             | Verb::TaskCreate { .. }
-            | Verb::TaskClaim { .. }
             | Verb::TaskUpdate { .. }
-            | Verb::TaskAssign { .. }
             | Verb::TaskSpawn { .. }
             | Verb::PlacementSuggest { .. }
             | Verb::WorkerFacts { .. }
@@ -518,6 +512,7 @@ impl Orchestrator {
             | Verb::Verify { .. }
             | Verb::ReviewCheckout { .. }
             | Verb::Rebase { .. }
+            | Verb::TestDiff { .. }
             | Verb::FastForward { .. }
             | Verb::RemoveWorktree { .. }
             | Verb::PullChecks { .. }) => Box::pin(self.repository(verb)).await,
@@ -626,16 +621,6 @@ impl Orchestrator {
                     ));
                 }
                 self.change(ItemOp::Remove(item.item))?;
-                Ok(Outcome::Done)
-            }
-            Verb::PointAt { item } => {
-                self.item(item)?;
-                let pointed = ItemSync::Pointed {
-                    client: ORCHESTRATOR,
-                    name: POINTER_NAME.to_owned(),
-                    item: item.item,
-                };
-                let _sent = inner.events.send(WorkerMsg::Items(pointed));
                 Ok(Outcome::Done)
             }
             Verb::ListWindows { worker } => {
@@ -963,7 +948,7 @@ impl Orchestrator {
                 let path = made.path.to_string_lossy().into_owned();
                 Ok(Outcome::CheckedOut { path, head: made.head, base: made.base })
             }
-            Verb::Rebase { worker, repo, worktree, head, onto } => {
+            Verb::Rebase { worker, repo, worktree, head, onto, trailers, verified } => {
                 self.mine(worker)?;
                 let git = crate::changes::git().ok_or_else(|| {
                     Failure::new(ErrorCode::Unsupported, "this worker has no git")
@@ -972,10 +957,30 @@ impl Orchestrator {
                 let places = crate::file::expand_home(Path::new(VERIFY_PLACES));
                 let place = crate::repo::verify::place(&places, &worktree)
                     .map_err(|f| verify_failure(&f))?;
-                let made = crate::repo::verify::rebase(git, &repo, &place, &head, &onto)
+                let commits = (head.as_str(), onto.as_str());
+                let made = crate::repo::verify::rebase(
+                    git,
+                    &repo,
+                    &place,
+                    commits,
+                    &trailers,
+                    verified.as_deref(),
+                )
+                .await
+                .map_err(|f| verify_failure(&f))?;
+                let crate::repo::verify::Rebased { head, onto, verified } = made;
+                Ok(Outcome::Rebased { head, onto, verified })
+            }
+            Verb::TestDiff { worker, repo, head, target, test_paths } => {
+                self.mine(worker)?;
+                let git = crate::changes::git().ok_or_else(|| {
+                    Failure::new(ErrorCode::Unsupported, "this worker has no git")
+                })?;
+                let repo = crate::file::expand_home(Path::new(&repo));
+                let tests = crate::repo::verify::test_diff(git, &repo, &head, &target, &test_paths)
                     .await
                     .map_err(|f| verify_failure(&f))?;
-                Ok(Outcome::Rebased { head: made.head, onto: made.onto })
+                Ok(Outcome::TestDiff(tests))
             }
             Verb::FastForward { worker, repo, target, from, to, push } => {
                 self.mine(worker)?;
@@ -1248,6 +1253,28 @@ fn not_ready() -> Failure {
         "the agent has not reported through its hooks yet, so a dialog of its own may be up; \
          wait for it (wait_for agent_needs_input) and try again",
     )
+}
+
+/// Whether what is kept for the agent in `handle`'s terminal may be posted to wake it now.
+///
+/// What is kept is reports, and the person's or the orchestrator's words through the server. It
+/// may go as [`may_type`] says, and not while the person's own stop of its last turn stands. A
+/// post starts a turn in an idle agent, so one the person just stopped would be started again
+/// in nobody's name; what is kept waits for its next hook, which is the person's next prompt,
+/// and rides with their turn.
+///
+/// # Errors
+///
+/// [`may_type`]'s refusals, and [`ErrorCode::AwaitsPerson`] after the person's stop.
+pub fn may_deliver(handle: &SessionHandle, agents: &dyn Agents) -> Result<(), Failure> {
+    may_type(handle, agents, true)?;
+    if agents.interrupted(handle.id()) {
+        return Err(Failure::new(
+            ErrorCode::AwaitsPerson,
+            "the person stopped this agent; what is kept for it goes with their next prompt",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether an agent is at its prompt, by its hooks' word: at rest after its `SessionStart` or

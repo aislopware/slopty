@@ -258,6 +258,11 @@ impl Hub {
             let (project, task) = &key;
             loop {
                 let home = hub.bring_home(project, *task, branch.clone()).await;
+                // What the work did to the tests is read once the last trip is in.
+                let again = hub.inner.state.lock().steps.homing.get(&key) == Some(&true);
+                if home && !again {
+                    hub.read_tests((project, *task)).await;
+                }
                 let mut state = hub.inner.state.lock();
                 if state.steps.homing.remove(&key) != Some(true) {
                     let merge = state.steps.merge_after.remove(&key);

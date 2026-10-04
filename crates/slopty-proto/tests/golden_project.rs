@@ -15,13 +15,12 @@ mod golden_project {
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
-        AgentReport, Assignment, Attempts, Bounds, Budget, Commits, Fact, Facts, Limits,
+        AgentReport, Assignment, Bounds, Budget, Commits, Fact, Facts, GiveBacks, Limits,
         LimitsChange, Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives,
         Need, NodeDetail, Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus,
-        ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Schedule,
-        ScheduleRun, ScheduleSpec, Script, Spend, Spent, StepKind, StepState, Suggestion, Task,
-        TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
-        WorkerFacts,
+        ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Script, Spend,
+        Spent, StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec,
+        TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -67,12 +66,8 @@ mod golden_project {
 
     fn project() -> Project {
         Project {
-            spend: Spend {
-                cost_micro_usd: 4_200_000,
-                windows: BTreeMap::from([("five-hour".to_owned(), 3_100)]),
-            },
+            spend: Spend { windows: BTreeMap::from([("five-hour".to_owned(), 3_100)]) },
             needs: Vec::new(),
-            schedules: vec![schedule()],
             scripts: vec![Script {
                 name: "dev".to_owned(),
                 command: "bun run dev".to_owned(),
@@ -112,7 +107,6 @@ mod golden_project {
 
     fn spec() -> TaskSpec {
         TaskSpec {
-            parent: Some(TaskId(1)),
             depends_on: vec![TaskId(2)],
             kind: "build".to_owned(),
             title: "Server store".to_owned(),
@@ -134,7 +128,6 @@ mod golden_project {
                 since_ms: Some(WallMs::from_millis(1_790_000_004_500)),
             },
             id: TaskId(3),
-            parent: s.parent,
             depends_on: s.depends_on,
             kind: s.kind,
             title: s.title,
@@ -184,7 +177,15 @@ mod golden_project {
                 commits: None,
             }),
             proposal: None,
-            attempts: Some(Attempts { tried: vec![TaskId(8), TaskId(9)], picked: Some(TaskId(9)) }),
+            give_backs: GiveBacks { count: 2, reviews: 1, held: false },
+            tests: Some(TestDiff {
+                head: commit('a'),
+                deleted: vec!["crates/slopty-server/tests/store.rs".to_owned()],
+                changed: vec!["crates/slopty-server/src/hub/queue/tests.rs".to_owned()],
+                deleted_count: 1,
+                changed_count: 1,
+                added_count: 2,
+            }),
         }
     }
 
@@ -346,38 +347,6 @@ mod golden_project {
         snap("answer_request", &request(answer));
     }
 
-    fn schedule_spec() -> ScheduleSpec {
-        let task = TaskSpec {
-            title: "Bump dependencies".to_owned(),
-            brief: "cargo update, then the gate.".to_owned(),
-            kind: "chore".to_owned(),
-            ..TaskSpec::default()
-        };
-        let run = Runner::Claude { prompt: Some("Read your brief.".to_owned()), args: Vec::new() };
-        ScheduleSpec {
-            task,
-            launch: launch(run),
-            when: "0 9 * * 1-5".to_owned(),
-            zone: "Europe/Berlin".to_owned(),
-            paused: false,
-        }
-    }
-
-    fn schedule() -> Schedule {
-        let last = ScheduleRun {
-            at_ms: at(),
-            task: Some(TaskId(4)),
-            why: Some("task 4 did not start: no worker fits".to_owned()),
-        };
-        Schedule {
-            id: 1,
-            spec: schedule_spec(),
-            next_ms: Some(WallMs::from_millis(1_790_060_000_000)),
-            last: Some(last),
-            created_ms: at(),
-        }
-    }
-
     fn launch(run: Runner) -> TaskLaunch {
         TaskLaunch {
             pin: None,
@@ -394,12 +363,9 @@ mod golden_project {
         let limits = LimitsChange {
             live_per_worker: Some(2),
             live_per_project: Some(6),
-            depth: Some(4),
+            review: Some(4),
             timeline_kept: Some(1024),
-            budget: Some(Budget(BTreeMap::from([
-                (Budget::USD.to_owned(), 50_000_000),
-                ("five-hour".to_owned(), 8_000),
-            ]))),
+            budget: Some(Budget(BTreeMap::from([("five-hour".to_owned(), 8_000)]))),
         };
         snap(
             "project_create",
@@ -427,7 +393,7 @@ mod golden_project {
                 review: Some(String::new()),
                 push: Some(true),
                 ask_to_start: None,
-                limits: LimitsChange { depth: Some(3), ..LimitsChange::default() },
+                limits: LimitsChange { review: Some(2), ..LimitsChange::default() },
                 metadata: None,
                 members: Some(vec![notes_on("studio", "~/notes"), notes_on("devbox", "/w/notes")]),
             }),
@@ -452,18 +418,11 @@ mod golden_project {
                 }),
             }),
         );
-        snap(
-            "task_claim",
-            &request(Verb::TaskClaim {
-                project: project_id(),
-                task: TaskId(3),
-                paths: vec!["docs/decisions/projects.md".to_owned()],
-            }),
-        );
         let change = TaskChange {
             state: Some(TaskState::Done),
             status: Some("gate passed; ready".to_owned()),
             branch: Some("slopty/slopty/3".to_owned()),
+            claim: vec!["docs/decisions/projects.md".to_owned()],
             verified: Some(run(true, "gate passed")),
             base: Some(commit('b')),
             note: Some("ready".to_owned()),
@@ -480,10 +439,6 @@ mod golden_project {
                 task: TaskId(3),
                 change: Box::new(change),
             }),
-        );
-        snap(
-            "task_assign",
-            &request(Verb::TaskAssign { project: project_id(), task: TaskId(3), term: term() }),
         );
         let claude = Runner::Claude {
             prompt: Some("Read your brief: slopty task status.".to_owned()),
@@ -536,36 +491,6 @@ mod golden_project {
                 launch: launch(pi),
             }),
         );
-        let codex = Runner::Codex { prompt: Some("Read your brief.".to_owned()), args: Vec::new() };
-        let tries = vec![
-            TaskLaunch { pin: Some(term().worker), ..launch(codex) },
-            launch(Runner::Agent {
-                agent: AgentId::named(AgentId::PI),
-                prompt: None,
-                model: Some("sonnet".to_owned()),
-                args: Vec::new(),
-            }),
-        ];
-        snap(
-            "task_attempts",
-            &request(Verb::TaskAttempts {
-                project: project_id(),
-                task: TaskId(3),
-                launches: tries,
-            }),
-        );
-        snap("task_pick", &request(Verb::TaskPick { project: project_id(), attempt: TaskId(9) }));
-        let set = Verb::ScheduleSet {
-            project: project_id(),
-            schedule: Some(1),
-            spec: Box::new(schedule_spec()),
-        };
-        snap("schedule_set", &request(set));
-        snap(
-            "schedule_delete",
-            &request(Verb::ScheduleDelete { project: project_id(), schedule: 1 }),
-        );
-        snap("schedule_run", &request(Verb::ScheduleRun { project: project_id(), schedule: 1 }));
         let script =
             Script { name: "test".to_owned(), command: "cargo test".to_owned(), dir: None };
         snap("script_set", &request(Verb::ScriptSet { project: project_id(), script }));
@@ -694,9 +619,36 @@ mod golden_project {
                 worktree: "slopty".to_owned(),
                 head: commit('a'),
                 onto: "main".to_owned(),
+                trailers: vec![
+                    ("Slopty-Task".to_owned(), "slopty#3".to_owned()),
+                    ("Slopty-Thread".to_owned(), "0199a000-0000-7000-8000-000000000006".to_owned()),
+                ],
+                verified: Some(commit('a')),
             }),
         );
-        snap("rebased", &reply(Outcome::Rebased { head: commit('d'), onto: commit('c') }));
+        snap(
+            "rebased",
+            &reply(Outcome::Rebased { head: commit('d'), onto: commit('c'), verified: true }),
+        );
+        snap(
+            "test_diff",
+            &request(Verb::TestDiff {
+                worker,
+                repo: repo.clone(),
+                head: "slopty/slopty/3".to_owned(),
+                target: "main".to_owned(),
+                test_paths: vec!["crates/slopty-e2e/golden".to_owned()],
+            }),
+        );
+        let tests = TestDiff {
+            head: commit('a'),
+            deleted: vec!["tests/store.rs".to_owned()],
+            changed: Vec::new(),
+            deleted_count: 1,
+            changed_count: 0,
+            added_count: 0,
+        };
+        snap("tested", &reply(Outcome::TestDiff(tests)));
         snap(
             "fast_forward",
             &request(Verb::FastForward {
@@ -1096,7 +1048,7 @@ mod golden_project {
             Moment::Created,
             Moment::Orchestrator { term: term() },
             Moment::Limits { limits: Limits::default() },
-            Moment::Budget { meter: Budget::USD.to_owned(), share_bp: 10_000 },
+            Moment::Budget { meter: "five-hour".to_owned(), share_bp: 10_000 },
             Moment::TaskCreated { title: "Server store".to_owned() },
             Moment::Claimed { paths: vec!["crates/slopty-server".to_owned()] },
             Moment::Assigned { term: term(), spawned: false },

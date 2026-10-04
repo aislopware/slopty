@@ -20,8 +20,6 @@ hyper.workspace = true
 icu_normalizer.workspace = true
 icu_casemap.workspace = true
 hyper-util.workspace = true
-# When a project's schedules run, in the person's time zone (`project::when`).
-jiff.workspace = true
 parking_lot.workspace = true
 rmcp = { workspace = true, features = [ "transport-streamable-http-server" ] }
 # The projects file's records (`project`).

@@ -1,8 +1,9 @@
 //! Projects on the server (`docs/decisions/projects.md`).
 //!
 //! The records the store keeps and the rules a change keeps: a task that writes owns paths no
-//! other live task holds, its dependencies never lead back to it, its tree stays within the
-//! project's depth, a merged task stays merged, and one terminal works on a task at a time.
+//! other live task holds, its dependencies never lead back to it, a merged task stays merged,
+//! and one terminal works on a task at a time. Tasks are the orchestrator's, one level: no task
+//! is split from another.
 //! How many agents run is counted from the terminals that are live, never from what a task's
 //! state says alone, so nothing that runs escapes the limits: only the agent of a task merged
 //! or given up counts no more while it rests, and counts again as soon as it works.
@@ -19,12 +20,12 @@ use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
     ARTIFACTS_MAX, AgentReport, Assignment, Budget, CHECK_NAME_MAX, CHECKS_NAMED, CHECKS_WHY_MAX,
-    Checks, ChecksState, DEPENDS_MAX, KIND_MAX, Limits, LimitsChange, Live, METADATA_MAX, Matcher,
-    Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives, Need, NodeDetail,
-    NodeNatives, Placed, Project, ProjectStatus, ProjectUpdate, Proposal, REF_MAX, Report, RunOn,
-    STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch, TIMELINE_BYTES_KEPT, TIMELINE_PAGE,
-    TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TimelineEntry,
-    VerifierRun,
+    Checks, ChecksState, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits, LimitsChange, Live,
+    METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives,
+    Need, NodeDetail, NodeNatives, Placed, Project, ProjectStatus, ProjectUpdate, Proposal,
+    REF_MAX, Report, ReportKind, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch,
+    TESTS_NAMED, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
+    TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
@@ -34,10 +35,7 @@ pub use tally::Tally;
 
 use crate::placement;
 
-mod attempts;
-mod schedule;
 mod scripts;
-pub(crate) mod when;
 
 /// Latest timeline entries a connecting client gets, and a status read with no cursor.
 pub const RECENT_ENTRIES: usize = 64;
@@ -81,9 +79,8 @@ pub enum Caller {
 pub(crate) enum Teller {
     /// The person.
     Person,
-    /// An agent above the node told: the project's orchestrator when the task is absent, or
-    /// the agent of a task the node was split from.
-    Above(Option<TaskId>),
+    /// The project's orchestrator, telling one of its tasks.
+    Orchestrator,
 }
 
 /// The store's file: every project whole, and the terminals the server watches, as of the
@@ -158,8 +155,9 @@ pub struct Kept {
 pub(crate) struct Change {
     /// The change.
     pub kept: Kept,
-    /// Whether the store keeps it. An agent's working and waiting flip at every turn and are
-    /// known again from its worker when it registers, so they are pushed and never written.
+    /// Whether the store keeps it. What flips within an agent's turn is known again from its
+    /// worker when it registers, so it is pushed and never written; where a task's turn began
+    /// and ended is written, for a restart to take its turn up.
     pub durable: bool,
 }
 
@@ -629,27 +627,86 @@ impl Record {
         false
     }
 
-    /// Whether `task` is `root` or split from it, however deep.
-    fn under(&self, root: TaskId, task: TaskId) -> bool {
-        let mut at = Some(task);
-        while let Some(t) = at {
-            if t == root {
-                return true;
-            }
-            at = self.task(t).ok().and_then(|t| t.parent);
-        }
-        false
+    /// The tasks that wait on the person ([`Task::waits_on_person`]), each with why, in a few
+    /// words.
+    fn waiting_on_person(&self) -> Vec<(TaskId, &'static str)> {
+        self.tasks
+            .iter()
+            .filter(|t| t.waits_on_person())
+            .map(|t| {
+                let why = if t.ready_to_merge() {
+                    "ready to merge"
+                } else if t.give_backs.held {
+                    "given back as often as it may"
+                } else {
+                    "asks the person"
+                };
+                (t.id, why)
+            })
+            .collect()
     }
 
-    /// How deep a new task under `parent` is: 1 for a task with no parent.
-    fn depth_under(&self, parent: Option<TaskId>) -> usize {
-        let mut depth = 1_usize;
-        let mut at = parent;
-        while let Some(p) = at {
-            depth = depth.saturating_add(1);
-            at = self.task(p).ok().and_then(|t| t.parent);
+    /// Whether an agent may start more of the project's work: not while as many tasks wait on
+    /// the person as its review limit, since work they cannot look at only piles up.
+    fn room_to_review(&self) -> Result<(), Refused> {
+        let waiting = self.waiting_on_person();
+        let most = self.project.limits.review;
+        if waiting.len() < usize::from(most) {
+            return Ok(());
         }
-        depth
+        let named: Vec<String> =
+            waiting.iter().take(4).map(|(task, why)| format!("task {task} {why}")).collect();
+        let more = waiting.len().saturating_sub(named.len());
+        let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+        Err(refuse(
+            ErrorCode::Limit,
+            format!(
+                "project {} has {} tasks waiting on the person ({}{more}), its review limit of \
+                 {most}; no agent starts more work until the person merges, answers or takes \
+                 one back, and only they raise the limit",
+                self.project.id,
+                waiting.len(),
+                named.join(", ")
+            ),
+        ))
+    }
+
+    /// The paths of `wanted` a task takes beside what it owns, when it may take them: the
+    /// new ones, refused past `owns_max`, for a task that only reads or holds nothing, or for
+    /// a path another live task owns.
+    fn claim_for(
+        &self,
+        task: TaskId,
+        wanted: &[String],
+        owns_max: u16,
+    ) -> Result<Vec<String>, Refused> {
+        let wanted = claimable(wanted, owns_max)?;
+        let held = self.task(task)?;
+        let new: Vec<String> =
+            wanted.into_iter().filter(|w| !held.owns.iter().any(|o| same_path(o, w))).collect();
+        if new.is_empty() {
+            return Ok(new);
+        }
+        if held.owns.len().saturating_add(new.len()) > usize::from(owns_max) {
+            return Err(over_bound(
+                "owns_max",
+                held.owns.len().saturating_add(new.len()),
+                owns_max.into(),
+            ));
+        }
+        if held.read_only {
+            return Err(invalid(format!("task {task} only reads; it owns no paths")));
+        }
+        if !held.state.holds_paths() {
+            return Err(invalid(format!(
+                "task {task} is {:?} and holds nothing; plan it again or make a new task",
+                held.state
+            )));
+        }
+        if let Some((theirs, path, ours)) = self.conflict(Some(task), &new) {
+            return Err(overlapping(theirs, path, &ours));
+        }
+        Ok(new)
     }
 }
 
@@ -761,7 +818,8 @@ const fn follows(status: &AgentStatus) -> Option<TaskState> {
     }
 }
 
-/// `limits` changed by `change`, within `bounds`.
+/// `limits` changed by `change`, within `bounds`. The review limit has no bound of the
+/// person's: it is theirs alone to set ([`LimitsChange::review`]), which the hub sees to.
 fn limited(limits: Limits, change: LimitsChange, bounds: Bounds) -> Result<Limits, Refused> {
     let within = |name: &str, value: Option<u32>, least: u32, most: u32| match value {
         Some(v) if v < least => Err(invalid(format!("{name} is at least {least}"))),
@@ -786,7 +844,11 @@ fn limited(limits: Limits, change: LimitsChange, bounds: Bounds) -> Result<Limit
         1,
         bounds.live_per_project.into(),
     )?;
-    within("depth", change.depth.map(u32::from), 1, bounds.depth.into())?;
+    if change.review == Some(0) {
+        return Err(invalid(
+            "review is at least 1: a project with nothing to review starts nothing",
+        ));
+    }
     within("timeline_kept", change.timeline_kept, TIMELINE_LEAST, bounds.timeline_kept)?;
     let clamp = |v: u16, most: u16| v.min(most);
     Ok(Limits {
@@ -796,7 +858,7 @@ fn limited(limits: Limits, change: LimitsChange, bounds: Bounds) -> Result<Limit
         live_per_project: change
             .live_per_project
             .unwrap_or_else(|| clamp(limits.live_per_project, bounds.live_per_project)),
-        depth: change.depth.unwrap_or_else(|| clamp(limits.depth, bounds.depth)),
+        review: change.review.unwrap_or(limits.review),
         timeline_kept: change
             .timeline_kept
             .unwrap_or_else(|| limits.timeline_kept.min(bounds.timeline_kept)),
@@ -804,8 +866,8 @@ fn limited(limits: Limits, change: LimitsChange, bounds: Bounds) -> Result<Limit
             Some(budget) if budget.0.is_empty() => None,
             Some(budget) if !budget.fits() => {
                 return Err(invalid(format!(
-                    "a budget names at most {} meters, each a name with no space and a cap \
-                     above nothing; a plan window's at most 10000 (the whole window)",
+                    "a budget names at most {} plan windows, each a name with no space and a \
+                     cap of 1 to 10000 hundredths of a percent (the whole window)",
                     Budget::METERS_MAX
                 )));
             }
@@ -945,6 +1007,7 @@ impl Projects {
     /// The projects a store kept.
     pub(crate) fn restore(file: ProjectsFile) -> Self {
         let mut restarted = HashMap::new();
+        let mut turns = turns::Turns::default();
         let records = file
             .projects
             .into_iter()
@@ -958,15 +1021,27 @@ impl Projects {
                     step.state = StepState::Running { phase: RESUMING.to_owned(), percent: None };
                 }
                 // Nor a stretch of work: how long the server was away is not known to be
-                // work, and the agent's status after its worker registers starts the next.
+                // work, and the agent's status after its worker registers starts the next. A
+                // task's turn under way is still one, so a turn that ended while the server was
+                // away is heard once its worker says so.
                 r.project.orchestrator_spent.since_ms = None;
                 for t in &mut r.tasks {
-                    t.spent.since_ms = None;
+                    if let Some(since) = t.spent.since_ms.take()
+                        && t.state == TaskState::Running
+                        && let Some(term) = open_term(t)
+                    {
+                        let answered = r.timeline.iter().any(|e| {
+                            e.task == Some(t.id)
+                                && e.at_ms >= since
+                                && matches!(&e.what, Moment::Reported { report } if report.kind != ReportKind::Checkpoint)
+                        });
+                        turns.resume(term, answered);
+                    }
                 }
                 (r.project.id.clone(), r)
             })
             .collect();
-        Self { records, restarted, ..Self::default() }
+        Self { records, turns, restarted, ..Self::default() }
     }
 
     /// The steps under way on `worker` when the server stopped, as they stood then, each once:
@@ -1148,11 +1223,6 @@ impl Projects {
         self.records.get(id).ok_or_else(|| unknown_project(id))?.task(task)
     }
 
-    /// Whether `task` of project `id` is `root` or split from it, however deep.
-    pub(crate) fn under(&self, id: &ProjectId, root: TaskId, task: TaskId) -> bool {
-        self.records.get(id).is_some_and(|r| r.under(root, task))
-    }
-
     /// Make a project.
     pub(crate) fn create(
         &mut self,
@@ -1173,7 +1243,6 @@ impl Projects {
         within("a target branch", Some(&new.target), REF_MAX)?;
         let project = Project {
             needs: Vec::new(),
-            schedules: Vec::new(),
             scripts: Vec::new(),
             orchestrator_spent: Spent::default(),
             spend: slopty_proto::project::Spend::default(),
@@ -1361,20 +1430,6 @@ impl Projects {
         if kind.len() > KIND_MAX {
             return Err(invalid(format!("a kind is at most {KIND_MAX} bytes")));
         }
-        if let Some(parent) = spec.parent {
-            record.task(parent)?;
-        }
-        let depth = record.depth_under(spec.parent);
-        let most = record.project.limits.depth;
-        if depth > usize::from(most) {
-            return Err(refuse(
-                ErrorCode::Limit,
-                format!(
-                    "the task would be {depth} deep, past the project's depth of {most}; raise it \
-                     with project_update, within the person's bounds"
-                ),
-            ));
-        }
         let mut depends_on = Vec::with_capacity(spec.depends_on.len());
         for on in spec.depends_on {
             record.task(on)?;
@@ -1395,7 +1450,6 @@ impl Projects {
             spent: Spent::default(),
             checks: None,
             id: TaskId(number),
-            parent: spec.parent,
             depends_on,
             kind,
             title,
@@ -1419,7 +1473,8 @@ impl Projects {
             updated_ms: now,
             step: None,
             proposal: None,
-            attempts: None,
+            give_backs: GiveBacks::default(),
+            tests: None,
         };
         record.tasks.push(task.clone());
         let entry =
@@ -1428,64 +1483,10 @@ impl Projects {
         Ok((task, vec![update]))
     }
 
-    /// Take `paths` for a task to own, beside what it owns.
-    pub(crate) fn claim(
-        &mut self,
-        id: &ProjectId,
-        task: TaskId,
-        paths: &[String],
-        now: WallMs,
-    ) -> Changed<Task> {
-        let owns_max = self.policy.bounds_for(Some(id)).owns_max;
-        let record = self.record(id)?;
-        let wanted = claimable(paths, owns_max)?;
-        let held = record.task(task)?;
-        let adding = wanted.iter().filter(|w| !held.owns.iter().any(|o| same_path(o, w))).count();
-        if held.owns.len().saturating_add(adding) > usize::from(owns_max) {
-            return Err(over_bound(
-                "owns_max",
-                held.owns.len().saturating_add(adding),
-                owns_max.into(),
-            ));
-        }
-        if held.read_only {
-            return Err(invalid(format!("task {task} only reads; it owns no paths")));
-        }
-        if let Some(parent) = record.tried(held) {
-            return Err(invalid(format!(
-                "task {task} is an attempt at task {}, which holds the paths: every attempt \
-                 writes the same ones, so none owns any",
-                parent.id
-            )));
-        }
-        if !held.state.holds_paths() {
-            return Err(invalid(format!(
-                "task {task} is {:?} and holds nothing; plan it again or make a new task",
-                held.state
-            )));
-        }
-        if let Some((theirs, path, ours)) = record.conflict(Some(task), &wanted) {
-            return Err(overlapping(theirs, path, &ours));
-        }
-        let t = record.task_mut(task)?;
-        let mut taken = Vec::new();
-        for path in wanted {
-            if !t.owns.iter().any(|o| same_path(o, &path)) {
-                t.owns.push(path.clone());
-                taken.push(path);
-            }
-        }
-        if taken.is_empty() {
-            return Ok((t.clone(), Vec::new()));
-        }
-        t.updated_ms = now;
-        let task_now = t.clone();
-        let entry = record.log(Some(task), Moment::Claimed { paths: taken }, now);
-        Ok((task_now.clone(), vec![record.task_update(&task_now, Some(entry))]))
-    }
-
     /// Change a task: move it, set its status, dependencies, placement, verifier or metadata,
-    /// record its branch or its verifier's word, note something.
+    /// take paths for it to own, record its branch or its verifier's word, note something. The
+    /// person's change is their word on it: a failure held past its give-backs is theirs now,
+    /// and its count starts again.
     pub(crate) fn update_task(
         &mut self,
         id: &ProjectId,
@@ -1510,9 +1511,10 @@ impl Projects {
             }
         }
         checked_change(&change)?;
-        let comprehensions = self.policy.bounds_for(Some(id)).comprehension_depth;
+        let bounds = self.policy.bounds_for(Some(id));
         let record = self.record(id)?;
         let before = record.task(task)?.clone();
+        let claimed = record.claim_for(task, &change.claim, bounds.owns_max)?;
         if let Some(to) = change.state.filter(|to| *to != before.state) {
             if !before.state.may_become(to) {
                 return Err(invalid(format!(
@@ -1540,7 +1542,7 @@ impl Projects {
             }
         }
         if let Some(placement) = &change.placement {
-            placement::check(placement, comprehensions)?;
+            placement::check(placement, bounds.comprehension_depth)?;
         }
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let status = change.status.as_deref().map(status_text).transpose()?;
@@ -1606,8 +1608,16 @@ impl Projects {
             moments.push(Moment::Verified(run.clone()));
             t.verified = Some(run);
         }
+        if !claimed.is_empty() {
+            t.owns.extend(claimed.iter().cloned());
+            moments.push(Moment::Claimed { paths: claimed });
+        }
         if let Some(text) = words(change.note) {
             moments.push(Moment::Note { text });
+        }
+        if caller == Caller::Person && t.give_backs != GiveBacks::default() {
+            t.give_backs = GiveBacks::default();
+            quiet = true;
         }
         if moments.is_empty() && !quiet {
             return Ok((t.clone(), Vec::new()));
@@ -1627,15 +1637,15 @@ impl Projects {
         Ok((task_now, updates))
     }
 
-    /// A task's agent reports on its work: kept on the timeline, and answered with the task and
-    /// the node it is for (its parent task, or the orchestrator's when absent).
+    /// A task's agent reports on its work, for the orchestrator: kept on the timeline, and
+    /// answered with the task.
     pub(crate) fn report_task(
         &mut self,
         id: &ProjectId,
         task: TaskId,
         report: &Report,
         now: WallMs,
-    ) -> Changed<(Task, Option<TaskId>)> {
+    ) -> Changed<Task> {
         within("a report's note", Some(&report.note), NOTE_MAX)?;
         within("a report's branch", report.branch.as_deref(), REF_MAX)?;
         if report.artifacts.len() > ARTIFACTS_MAX {
@@ -1656,7 +1666,7 @@ impl Projects {
         }
         moments.push(Moment::Reported { report: report.clone() });
         t.updated_ms = now;
-        let (task_now, parent) = (t.clone(), t.parent);
+        let task_now = t.clone();
         let updates = moments
             .into_iter()
             .map(|what| {
@@ -1665,7 +1675,7 @@ impl Projects {
             })
             .collect();
         self.answered(id, task, report.kind);
-        Ok(((task_now, parent), updates))
+        Ok((task_now, updates))
     }
 
     /// Reports went to `term`, the agent of `node` (a task, or the orchestrator): a moment on
@@ -1711,6 +1721,13 @@ impl Projects {
             .values()
             .find(|r| r.project.orchestrator == Some(term))
             .map(|r| (r.project.id.clone(), None))
+    }
+
+    /// Whether an agent may start more of project `id`'s work now: not while as many of its
+    /// tasks wait on the person as its review limit, since more work than they can look at
+    /// piles up unread. The person's own starts, and starts proposed to them, are not held.
+    pub(crate) fn room_to_review(&self, id: &ProjectId) -> Result<(), Refused> {
+        self.records.get(id).ok_or_else(|| unknown_project(id))?.room_to_review()
     }
 
     /// Whether a task may be started now: it exists, is not merged, and nothing runs or is
@@ -1761,19 +1778,6 @@ impl Projects {
         if t.state == TaskState::Merged {
             return Err(invalid(format!("task {task} is merged; make a new task")));
         }
-        if let Some(attempts) = &t.attempts {
-            let tried: Vec<String> = attempts.tried.iter().map(ToString::to_string).collect();
-            return Err(invalid(format!(
-                "task {task} is tried by attempts {}; start one of them, or make more with \
-                 task_attempts",
-                tried.join(", ")
-            )));
-        }
-        if record.lost(t) {
-            return Err(invalid(format!(
-                "task {task} is an attempt given up for the one picked; it starts no more"
-            )));
-        }
         if let Some(over) = self.over_budget(id) {
             return Err(refuse(
                 ErrorCode::Limit,
@@ -1791,38 +1795,6 @@ impl Projects {
                 format!(
                     "project {id} runs {live} agents, its live_per_project of {most}; wait for one \
                      to end, or raise it with project_update within the person's bounds"
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    /// Whether project `id` has room for the terminal `term` put on one of its tasks: one the
-    /// project counts already takes no more, any other takes a place under its
-    /// `live_per_project` and its `live_per_worker` on that worker, as a start would. So no
-    /// terminal opened outside the counts is assigned past them.
-    pub(crate) fn room_for(
-        &self,
-        id: &ProjectId,
-        term: TermRef,
-        running: &Running<'_>,
-    ) -> Result<(), Refused> {
-        let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
-        let occupied = record.occupied(running);
-        if occupied.contains(&term) {
-            return Ok(());
-        }
-        let limits = &record.project.limits;
-        let live = count(occupied.len());
-        let here = count(occupied.iter().filter(|t| t.worker == term.worker).count());
-        if live >= limits.live_per_project || here >= limits.live_per_worker {
-            return Err(refuse(
-                ErrorCode::Limit,
-                format!(
-                    "project {id} runs {live} agents, {here} of them on that worker, at its \
-                     live_per_project of {} or live_per_worker of {}; a terminal put on a task \
-                     counts as a start does",
-                    limits.live_per_project, limits.live_per_worker
                 ),
             ));
         }
@@ -1951,14 +1923,6 @@ impl Projects {
         Ok((task_now, vec![update]))
     }
 
-    /// The items still open on `task`'s agent's own task list, by their titles: they keep its
-    /// work from merging.
-    pub(crate) fn open_todos(&self, id: &ProjectId, task: TaskId) -> Vec<String> {
-        let Some(record) = self.records.get(id) else { return Vec::new() };
-        let natives = record.natives_of(Some(task));
-        natives.tasks.iter().filter(|t| !t.done).map(|t| t.subject.clone()).collect()
-    }
-
     /// Every task whose pull request's checks are worth reading: one with a pull request
     /// still open to merge, and a worktree on the worker its agent ran on to read them in.
     pub(crate) fn pull_requests(&self) -> Vec<PrWatch> {
@@ -2019,13 +1983,41 @@ impl Projects {
         Ok(vec![record.task_update(&task_now, entry)])
     }
 
+    /// What `task`'s work did to the project's tests, read once its branch came home: on its
+    /// card, within the bounds a card keeps.
+    pub(crate) fn set_tests(
+        &mut self,
+        id: &ProjectId,
+        task: TaskId,
+        mut tests: TestDiff,
+        now: WallMs,
+    ) -> Vec<Change> {
+        tests.head = clipped(&tests.head, REF_MAX);
+        for paths in [&mut tests.deleted, &mut tests.changed] {
+            paths.truncate(TESTS_NAMED);
+            for path in paths.iter_mut() {
+                *path = clipped(path, REF_MAX);
+            }
+        }
+        let Ok(record) = self.record(id) else { return Vec::new() };
+        let Ok(t) = record.task_mut(task) else { return Vec::new() };
+        if t.tests.as_ref() == Some(&tests) {
+            return Vec::new();
+        }
+        t.tests = Some(tests);
+        t.updated_ms = now;
+        let t = t.clone();
+        vec![record.task_update(&t, None)]
+    }
+
     /// `by` tells `task`'s agent `text`, or the orchestrator when it is absent: kept on the
     /// timeline, and handed back trimmed for the hub to deliver. A task with no agent running
     /// has nobody to hear it.
     ///
-    /// An agent tells only a task under it, never the node above it (it reports up with
-    /// `task_report`), and never one that waits on the person: what it says must not pass for
-    /// an answer to the person's permission or question. The timeline keeps who told.
+    /// The orchestrator tells only its tasks, never itself, and never one that waits on the
+    /// person: what it says must not pass for an answer to the person's permission or
+    /// question. The person's word is theirs on a failure held past its give-backs: its count
+    /// starts again. The timeline keeps who told.
     pub(crate) fn tell(
         &mut self,
         id: &ProjectId,
@@ -2052,12 +2044,8 @@ impl Projects {
                 ));
             }
         }
-        if let Teller::Above(from) = by
-            && (task.is_none() || task == from)
-        {
-            return Err(invalid(
-                "an agent tells only a task under it; to the node above, report with task_report",
-            ));
+        if by == Teller::Orchestrator && task.is_none() {
+            return Err(invalid("the orchestrator tells one of its tasks; name it"));
         }
         if self.node_term(id, task, terminals).is_none() {
             return Err(invalid(match task {
@@ -2070,16 +2058,24 @@ impl Projects {
         let record = self.record(id)?;
         let what = match by {
             Teller::Person => Moment::Told { text: text.to_owned() },
-            Teller::Above(None) => {
+            Teller::Orchestrator => {
                 Moment::Note { text: format!("The orchestrator told it: {text}") }
-            }
-            Teller::Above(Some(from)) => {
-                Moment::Note { text: format!("Task {from}'s agent told it: {text}") }
             }
         };
         let entry = record.log(task, what, now);
-        let kept = Kept { entry: Some(entry), ..record.kept() };
-        Ok((text.to_owned(), vec![Change { kept, durable: true }]))
+        let reset = task.filter(|_| by == Teller::Person).and_then(|task| {
+            let t = record.task_mut(task).ok()?;
+            (t.give_backs != GiveBacks::default()).then(|| {
+                t.give_backs = GiveBacks::default();
+                t.updated_ms = now;
+                t.clone()
+            })
+        });
+        let change = match reset {
+            Some(t) => record.task_update(&t, Some(entry)),
+            None => Change { kept: Kept { entry: Some(entry), ..record.kept() }, durable: true },
+        };
+        Ok((text.to_owned(), vec![change]))
     }
 
     /// The project and task whose open assignment is `term`.
@@ -2092,8 +2088,9 @@ impl Projects {
     /// An agent's status changed: the task it works on follows it while it runs, and the time
     /// it spends at work is counted on its task, or on its project for an orchestrator. Only a
     /// block is worth the timeline, since working and waiting flip at every turn. A stretch of
-    /// work that ended is written, so the time survives a restart; the flips between are only
-    /// pushed.
+    /// work that began or ended is written, so the time survives a restart and a server that
+    /// comes back knows which turns were under way ([`Self::restore`]); the flips between are
+    /// only pushed.
     pub(crate) fn agent_status(
         &mut self,
         term: TermRef,
@@ -2126,7 +2123,7 @@ impl Projects {
             let (task, id) = (t.clone(), t.id);
             let entry = (moved == Some(TaskState::Blocked))
                 .then(|| record.log(Some(id), Moment::State { from, to: TaskState::Blocked }, now));
-            let durable = entry.is_some() || stretch == Some(Stretch::Ended);
+            let durable = entry.is_some() || stretch.is_some();
             updates.push(Change { durable, ..record.task_update(&task, entry) });
         }
         self.turn(term, status);
@@ -2239,52 +2236,59 @@ impl Projects {
         vec![record.task_update(&t, Some(entry))]
     }
 
-    /// The live terminals the server started for tasks that are [`finished`], with their
-    /// project and task: each closes once its agent has rested long enough.
+    /// The live terminals the server started for tasks that are [`finished`], or merged or
+    /// given up with an agent that only keeps commands it `left_running` (a dev server), with
+    /// their project and task: each closes once its agent has rested long enough.
     pub(crate) fn finished_agents(
         &self,
         terminals: &HashSet<TermRef>,
+        left_running: impl Fn(TermRef) -> bool,
     ) -> Vec<(ProjectId, TaskId, TermRef)> {
+        let over = |t: &Task| matches!(t.state, TaskState::Merged | TaskState::Failed);
         self.records
             .values()
             .flat_map(|r| {
-                r.tasks.iter().filter(|t| finished(t)).filter_map(|t| {
+                r.tasks.iter().filter(|t| over(t)).filter_map(|t| {
                     let a = t.assignment.as_ref().filter(|a| a.open() && a.placed.is_some())?;
-                    terminals.contains(&a.term).then(|| (r.project.id.clone(), t.id, a.term))
+                    let rests = finished(t) || left_running(a.term);
+                    (rests && terminals.contains(&a.term))
+                        .then(|| (r.project.id.clone(), t.id, a.term))
                 })
             })
             .collect()
     }
 
-    /// The server closes the agent of `task`, which is finished and rested `rested_mins`: the
-    /// timeline says why, before the terminal's end says it is gone.
+    /// The server closes the agent of `task`, which is finished and rested `rested_mins`, with
+    /// what it `left` running, which stops with it: the timeline says why, before the
+    /// terminal's end says it is gone.
     pub(crate) fn settled(
         &mut self,
         id: &ProjectId,
         task: TaskId,
-        rested_mins: u64,
+        (rested_mins, left): (u64, Option<String>),
         now: WallMs,
     ) -> Vec<Change> {
         let Ok(record) = self.record(id) else { return Vec::new() };
         let Ok(t) = record.task(task).cloned() else { return Vec::new() };
         let over = if t.state == TaskState::Merged { "merged" } else { "given up" };
-        let text = format!(
+        let mut text = format!(
             "The server closed its agent, at rest {rested_mins} min after the task was {over}; \
              its session can be taken up again."
         );
+        if let Some(left) = left.map(|l| clipped(l.trim(), SUMMARY_MAX)).filter(|l| !l.is_empty()) {
+            text = format!("{text} It stopped what the agent left running: {left}.");
+        }
         let entry = record.log(Some(task), Moment::Note { text }, now);
         vec![record.task_update(&t, Some(entry))]
     }
 
     /// What frees a settled task's worktree once its agent is closed: the worktree its agent
     /// reported, and where its work landed (the merge queue's head, the target, the target on
-    /// `origin`). Only a merged task's, or an attempt's given up for another: any other given
-    /// up may be tried again, and its agent would remake a worktree gone, its branch reset to
-    /// the base with it.
+    /// `origin`). Only a merged task's: one given up may be tried again, and its agent would
+    /// remake a worktree gone, its branch reset to the base with it.
     pub(crate) fn to_free(&self, id: &ProjectId, task: TaskId) -> Option<(String, Vec<String>)> {
         let record = self.records.get(id)?;
-        let t =
-            record.task(task).ok().filter(|t| t.state == TaskState::Merged || record.lost(t))?;
+        let t = record.task(task).ok().filter(|t| t.state == TaskState::Merged)?;
         let (head, target) = match &t.merge {
             Some(Merge::Merged { target, head, .. }) => (Some(head.clone()), target.clone()),
             _ => (None, record.project.target.clone()),
@@ -2418,14 +2422,13 @@ impl Projects {
         updates
     }
 
-    /// What thread `thread` of the agent in `term` says it has spent so far: counted on the
+    /// How full thread `thread` of the agent in `term` read its plan windows: counted on the
     /// project it works for, as its orchestrator or on a task, with a timeline moment for each
     /// line of the budget it passed.
     pub(crate) fn spent(
         &mut self,
         term: TermRef,
         thread: ThreadId,
-        cost_micro_usd: Option<u64>,
         windows: &[Limit],
         now: WallMs,
     ) -> Vec<Change> {
@@ -2433,7 +2436,7 @@ impl Projects {
         for record in self.records.values_mut() {
             let works = record.project.orchestrator == Some(term)
                 || record.tasks.iter().any(|t| open_term(t) == Some(term));
-            if works && record.tally.take(thread, cost_micro_usd, windows, now) {
+            if works && record.tally.take(thread, windows, now) {
                 updates.extend(record.respend(now));
             }
         }
@@ -2455,25 +2458,18 @@ impl Projects {
         (updates, next)
     }
 
-    /// What says project `id`'s agents have spent a cap of its budget, while they have: it
-    /// starts no task and its agents' reports wait until the person raises the cap.
+    /// What says project `id`'s agents have filled a plan window to its cap in the budget,
+    /// while they have: it starts no task and its agents' reports wait until the person raises
+    /// the cap.
     #[must_use]
     pub(crate) fn over_budget(&self, id: &ProjectId) -> Option<String> {
         let project = &self.records.get(id)?.project;
         let budget = project.limits.budget.as_ref()?;
         let meter = budget.reached(&project.spend)?;
         let cap = *budget.0.get(&meter)?;
-        let used = if meter == Budget::USD {
-            project.spend.cost_micro_usd
-        } else {
-            project.spend.windows.get(&meter).copied().map_or(0, u64::from)
-        };
-        let (used, cap) = (Budget::figure(&meter, used), Budget::figure(&meter, cap));
-        Some(if meter == Budget::USD {
-            format!("project {id} spent an estimated {used} of its {cap} budget")
-        } else {
-            format!("project {id} is at {used} of the {meter} window, its budget {cap}")
-        })
+        let used = project.spend.windows.get(&meter).copied().map_or(0, u64::from);
+        let (used, cap) = (Budget::figure(used), Budget::figure(cap));
+        Some(format!("project {id} is at {used} of the {meter} window, its budget {cap}"))
     }
 
     fn hold_unclaimed(&mut self, term: TermRef, report: &AgentReport, now: WallMs) {

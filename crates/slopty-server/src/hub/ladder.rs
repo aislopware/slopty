@@ -8,9 +8,10 @@
 //! differs from the last goes to every link.
 //!
 //! A thread that hangs from no other and climbs to needing the person, fails, or comes to rest
-//! from working, is a notice. It goes to no client when the thread's tile is on screen where
-//! the person is, to the desks they are at when they are at one, to the handhelds they hold
-//! when not, and to every client when they are at none.
+//! from working, is a notice; a project task's agent coming to rest is not, since its work
+//! comes to the person when it is ready to merge and its orchestrator hears of the rest. It goes to
+//! no client when the thread's tile is on screen where the person is, to the desks they are at when
+//! they are at one, to the handhelds they hold when not, and to every client when they are at none.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -58,15 +59,17 @@ pub(super) struct Board {
     natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
 }
 
-/// What one thread says it spent so far, under the terminal its agent runs in.
+/// The kind of wait an adapter says when its agent waits only on commands it left running (a
+/// dev server, say): no subagent, monitor or scheduled prompt of its own.
+pub(super) const COMMANDS_WAIT: &str = "command";
+
+/// How full one thread read its plan's windows, under the terminal its agent runs in.
 #[derive(Debug)]
 pub(super) struct Figures {
     /// The terminal.
     pub term: TermRef,
     /// The thread.
     pub thread: ThreadId,
-    /// Its estimated cost, in millionths of a US dollar, when its agent says one.
-    pub cost_micro_usd: Option<u64>,
     /// The plan's rate windows as it last read them.
     pub windows: Vec<slopty_proto::thread::Limit>,
 }
@@ -82,16 +85,11 @@ struct Sitting {
 }
 
 impl Board {
-    /// The ladder last published.
-    pub(super) const fn published(&self) -> &Ladder {
-        &self.published
-    }
-
     /// Take in a worker's table frame. A snapshot replaces what it published before.
     ///
-    /// Answers what each thread the frame names says it spent, under the terminal its agent
-    /// runs in: a subagent's under its root's, since the project knows the root's terminal.
-    /// A thread whose family runs in no terminal says nothing.
+    /// Answers how full each thread the frame names read its plan's windows, under the
+    /// terminal its agent runs in: a subagent's under its root's, since the project knows the
+    /// root's terminal. A thread whose family runs in no terminal says nothing.
     pub(super) fn take(&mut self, worker: WorkerId, frame: TableFrame) -> Vec<Figures> {
         let table = self.tables.entry(worker).or_default();
         let named: Vec<ThreadId> = match frame {
@@ -119,7 +117,6 @@ impl Board {
                 Some(Figures {
                     term: TermRef { worker, session },
                     thread: id,
-                    cost_micro_usd: row.meters.cost_micro_usd,
                     windows: row.meters.limits.clone(),
                 })
             })
@@ -170,7 +167,7 @@ impl Board {
             .flat_map(|(worker, table)| {
                 table
                     .values()
-                    .filter(|r| r.terminal.is_none() && awake(r))
+                    .filter(|r| r.terminal.is_none() && there(r))
                     .filter_map(|r| Some(TermRef { worker: *worker, session: seat_fact(r)? }))
             })
             .collect()
@@ -242,7 +239,7 @@ impl Board {
         for (id, session, row) in &now {
             let at_work =
                 matches!(row.status.phase, Phase::Working | Phase::Waiting | Phase::NeedsYou);
-            let stopped = !awake(row) || !at_work;
+            let stopped = !there(row) || !at_work;
             let said = self.natives_said.insert((worker, *id), (*session, stopped));
             let agent = id.to_string();
             if said.is_none() {
@@ -300,6 +297,13 @@ impl Board {
                     && table.get(&root_of(table, r)).and_then(seat_of) == Some(term.session)
             })
         })
+    }
+
+    /// What the agent seated at `term` waits on, when that is only commands it left running
+    /// ([`COMMANDS_WAIT`]): the wait's words.
+    pub(super) fn left_running(&self, term: TermRef) -> Option<String> {
+        let wait = self.thread_in(term)?.status.wait.as_ref()?;
+        (wait.kind == COMMANDS_WAIT).then(|| wait.text.clone())
     }
 
     /// Whether `term`'s tile is on screen, or has the keyboard, on any client.
@@ -431,10 +435,9 @@ impl Hub {
         if ladder == state.board.published {
             return;
         }
-        let notices = moved(&mut state.board, &ladder);
+        let notices = moved(&mut state.board, &ladder, &state.projects);
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
-        self.snoozes_heard(state, &notices);
         for notice in notices {
             for link in route(&state.board.seats, &notice) {
                 let Some(seat) = state.board.seats.get(&link) else { continue };
@@ -465,16 +468,9 @@ fn seat_fact(row: &ThreadRow) -> Option<SessionId> {
     row.facts.get(SEAT_FACT)?.parse().ok()
 }
 
-/// Whether `row`'s thread is still to be had: its process has not ended, or it sleeps on the
-/// person's word with its session kept, to wake on the next message.
+/// Whether `row`'s thread is still to be had: its process has not ended.
 const fn there(row: &ThreadRow) -> bool {
     !matches!(row.status.liveness, Liveness::Exited { .. })
-}
-
-/// Whether `row`'s agent runs now: there, and not put to sleep, so it takes a place among
-/// the live agents.
-const fn awake(row: &ThreadRow) -> bool {
-    there(row) && !matches!(row.status.liveness, Liveness::Asleep { .. })
 }
 
 /// `row`'s phase as an agent's status reads, for a task's thread with no hooks: a request
@@ -569,23 +565,9 @@ fn roots(tables: &HashMap<WorkerId, BTreeMap<ThreadId, ThreadRow>>) -> Vec<Root<
     roots
 }
 
-/// The project nodes `term` works under: its task and every task above it, or the project's
-/// orchestrator; and the project.
-fn nodes_of(projects: &Projects, term: TermRef) -> Vec<NodeAt> {
-    let Some((project, task)) = projects.working_on(term) else { return Vec::new() };
-    let mut nodes = vec![NodeAt { project: project.clone(), task }];
-    let mut at = task;
-    while let Some(task) = at {
-        let parent = projects.task(&project, task).ok().and_then(|t| t.parent);
-        if let Some(parent) = parent {
-            if nodes.iter().any(|n| n.task == Some(parent)) {
-                break;
-            }
-            nodes.push(NodeAt { project: project.clone(), task: Some(parent) });
-        }
-        at = parent;
-    }
-    nodes
+/// The project node `term` works under: its task, or the project's orchestrator.
+fn node_of(projects: &Projects, term: TermRef) -> Option<NodeAt> {
+    projects.working_on(term).map(|(project, task)| NodeAt { project, task })
 }
 
 /// The ladder of `tables`, with the project nodes `projects` puts their terminals under.
@@ -608,11 +590,8 @@ fn ladder(
         }
         let Some(session) = seat_of(root.row) else { continue };
         let term = TermRef { worker: ranked.at.worker, session };
-        let under = nodes_of(projects, term);
-        if let Some(first) = under.first() {
-            by_project.entry(first.project.clone()).or_default().add(ranked);
-        }
-        for node in under {
+        if let Some(node) = node_of(projects, term) {
+            by_project.entry(node.project.clone()).or_default().add(ranked);
             nodes.entry(node).or_default().add(ranked);
         }
     }
@@ -630,8 +609,9 @@ fn ladder(
 }
 
 /// The notices `ladder` makes against the one `board` published, keeping how long each
-/// thread has been busy.
-fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Notice> {
+/// thread has been busy. A project task's agent that finished says nothing: what it made
+/// reaches the person as work ready to merge, and its orchestrator hears of the rest.
+fn moved(board: &mut Board, ladder: &Ladder, projects: &Projects) -> Vec<Notice> {
     let before: HashMap<ThreadAt, Rung> =
         board.published.threads.iter().map(|r| (r.at, r.rung)).collect();
     let busy = |rung: Rung| matches!(rung, Rung::Working | Rung::Waiting);
@@ -641,20 +621,12 @@ fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Notice> {
         if busy(now.rung) {
             board.busy.entry(now.at).or_insert(now.since_ms);
         }
-        // A wait on the person is part of the work; coming to rest or failing ends it, as
-        // being put to sleep does.
-        let rest = matches!(now.rung, Rung::ToReview | Rung::Idle | Rung::Failed | Rung::Sleeping);
+        // A wait on the person is part of the work; coming to rest or failing ends it.
+        let rest = matches!(now.rung, Rung::ToReview | Rung::Idle | Rung::Failed);
         let kind = match (was, now.rung) {
             (Some(was), Rung::NeedsYou) if was != Rung::NeedsYou => Some(NoticeKind::NeedsYou),
             (Some(was), Rung::Failed) if was != Rung::Failed => Some(NoticeKind::Failed),
             (Some(was), Rung::ToReview | Rung::Idle) if busy(was) => Some(NoticeKind::Finished),
-            // The person puts an agent to sleep at rest, so its turn finished before, and was
-            // told then: a second notice would tell nothing new.
-            #[expect(
-                clippy::match_same_arms,
-                reason = "sleep is ruled on its own, so a rung added later is not silently quiet"
-            )]
-            (_, Rung::Sleeping) => None,
             _ => None,
         };
         let worked_ms = if rest {
@@ -666,6 +638,13 @@ fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Notice> {
         let Some(kind) = kind else { continue };
         let Some(table) = board.tables.get(&now.at.worker) else { continue };
         let Some(row) = table.get(&now.at.thread) else { continue };
+        let task_agent = || {
+            let term = seat_of(row).map(|session| TermRef { worker: now.at.worker, session });
+            term.and_then(|t| projects.working_on(t)).is_some_and(|(_, task)| task.is_some())
+        };
+        if kind == NoticeKind::Finished && task_agent() {
+            continue;
+        }
         let family: Vec<&ThreadRow> =
             table.values().filter(|r| r.id != row.id && root_of(table, r) == row.id).collect();
         let (_, from) = source(row, &family);

@@ -11,9 +11,9 @@ use slopty_core::{WallMs, WorkerId};
 use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Attempts, Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, Need,
+    Bounds, Fact, Facts, Finding, GiveBacks, Limits, Live, Moment, NativeCounts, Natives, Need,
     NodeDetail, Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer,
-    Schedule, Script, StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep,
+    Script, StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TestDiff,
     TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
@@ -111,58 +111,10 @@ pub struct ProjectView<'a> {
     /// What each kind of its work needs of its machines.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     needs: Vec<NeedView<'a>>,
-    /// The tasks it runs on a schedule the person set.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    schedules: Vec<ScheduleView<'a>>,
     /// The person's named commands for it.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     scripts: &'a [Script],
     created_ms: WallMs,
-}
-
-/// A schedule, for JSON: what it makes, when, and how its last run went.
-#[derive(Debug, Serialize)]
-pub struct ScheduleView<'a> {
-    schedule: u32,
-    title: &'a str,
-    when: &'a str,
-    zone: &'a str,
-    paused: bool,
-    next_ms: Option<WallMs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_ms: Option<WallMs>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_task: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    last_why: Option<&'a str>,
-}
-
-fn schedule(s: &Schedule) -> ScheduleView<'_> {
-    let last = s.last.as_ref();
-    ScheduleView {
-        schedule: s.id,
-        title: &s.spec.task.title,
-        when: &s.spec.when,
-        zone: &s.spec.zone,
-        paused: s.spec.paused,
-        next_ms: s.next_ms,
-        last_ms: last.map(|l| l.at_ms),
-        last_task: last.and_then(|l| l.task).map(|t| t.0),
-        last_why: last.and_then(|l| l.why.as_deref()),
-    }
-}
-
-/// A schedule on one line: its number, when, what, and how its last run went.
-#[must_use]
-pub fn schedule_text(s: &Schedule) -> String {
-    let when = format!("{} {}", s.spec.when, s.spec.zone);
-    let paused = if s.spec.paused { "  paused" } else { "" };
-    let last = s.last.as_ref().map_or_else(String::new, |l| match (&l.why, l.task) {
-        (Some(why), _) => format!("  last: {why}"),
-        (None, Some(task)) => format!("  last: #{task}"),
-        (None, None) => String::new(),
-    });
-    format!("schedule {} [{when}] {}{paused}{last}", s.id, s.spec.task.title)
 }
 
 /// A script on one line: its name, where under the folder it runs, and its command.
@@ -210,7 +162,6 @@ pub fn project(p: &Project) -> ProjectView<'_> {
                     .collect(),
             })
             .collect(),
-        schedules: p.schedules.iter().map(schedule).collect(),
         scripts: &p.scripts,
         created_ms: p.created_ms,
     }
@@ -330,7 +281,6 @@ fn reviewed(r: &ReviewRun) -> ReviewedView<'_> {
 #[derive(Debug, Serialize)]
 pub struct TaskView<'a> {
     task: u32,
-    parent: Option<u32>,
     depends_on: Vec<u32>,
     kind: &'a str,
     title: &'a str,
@@ -362,28 +312,62 @@ pub struct TaskView<'a> {
     at_work_since_ms: Option<WallMs>,
     /// Its start is proposed and waits for the person, who starts it from the board.
     proposed: bool,
+    /// Its work was checked and waits for the person's merge.
+    ready_to_merge: bool,
+    /// The server's automatic give-backs since the person last spoke on it.
+    give_backs: GiveBacksView,
+    /// What its work did to the project's tests.
     #[serde(skip_serializing_if = "Option::is_none")]
-    attempts: Option<AttemptsView>,
+    tests: Option<TestsView<'a>>,
     created_ms: WallMs,
     updated_ms: WallMs,
 }
 
-/// The attempts at a task, for JSON: each a task of its own, and the one picked to land.
-#[derive(Debug, Serialize)]
-pub struct AttemptsView {
-    tried: Vec<u32>,
-    picked: Option<u32>,
+/// A task's give-backs, for JSON: how many, of how many before the person hears instead, and
+/// whether a failure waits for the person now.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct GiveBacksView {
+    count: u8,
+    of: u8,
+    reviews: u8,
+    held: bool,
 }
 
-fn attempts(a: &Attempts) -> AttemptsView {
-    AttemptsView { tried: a.tried.iter().map(|t| t.0).collect(), picked: a.picked.map(|t| t.0) }
+const fn give_backs(g: GiveBacks) -> GiveBacksView {
+    GiveBacksView {
+        count: g.count,
+        of: slopty_proto::project::GIVE_BACKS_MAX,
+        reviews: g.reviews,
+        held: g.held,
+    }
+}
+
+/// What a task's work did to the tests, for JSON: the line people read, and the paths.
+#[derive(Debug, Serialize)]
+pub struct TestsView<'a> {
+    line: String,
+    deleted: &'a [String],
+    changed: &'a [String],
+    deleted_count: u16,
+    changed_count: u16,
+    added_count: u16,
+}
+
+fn tests(t: &TestDiff) -> TestsView<'_> {
+    TestsView {
+        line: t.line(),
+        deleted: &t.deleted,
+        changed: &t.changed,
+        deleted_count: t.deleted_count,
+        changed_count: t.changed_count,
+        added_count: t.added_count,
+    }
 }
 
 /// A task's line in the tree, for JSON: `task_get` has the rest.
 #[derive(Debug, Serialize)]
 pub struct CardView<'a> {
     task: u32,
-    parent: Option<u32>,
     depends_on: Vec<u32>,
     kind: &'a str,
     title: &'a str,
@@ -408,8 +392,13 @@ pub struct CardView<'a> {
     at_work_since_ms: Option<WallMs>,
     /// Its start is proposed and waits for the person.
     proposed: bool,
+    /// Its work was checked and waits for the person's merge.
+    ready_to_merge: bool,
+    /// The server's automatic give-backs since the person last spoke on it.
+    give_backs: GiveBacksView,
+    /// What its work did to the project's tests.
     #[serde(skip_serializing_if = "Option::is_none")]
-    attempts: Option<AttemptsView>,
+    tests: Option<TestsView<'a>>,
     natives: NativeCounts,
     created_ms: WallMs,
     updated_ms: WallMs,
@@ -420,7 +409,6 @@ pub struct CardView<'a> {
 pub fn card(t: &TaskCard) -> CardView<'_> {
     CardView {
         task: t.id.0,
-        parent: t.parent.map(|p| p.0),
         depends_on: t.depends_on.iter().map(|d| d.0).collect(),
         kind: &t.kind,
         title: &t.title,
@@ -440,7 +428,9 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
         proposed: t.proposed.is_some(),
-        attempts: t.attempts.as_ref().map(attempts),
+        ready_to_merge: t.ready_to_merge(),
+        give_backs: give_backs(t.give_backs),
+        tests: t.tests.as_ref().map(tests),
         natives: t.natives,
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
@@ -465,7 +455,6 @@ fn pr(pr: &PullRequest) -> PrView<'_> {
 pub fn task(t: &Task) -> TaskView<'_> {
     TaskView {
         task: t.id.0,
-        parent: t.parent.map(|p| p.0),
         depends_on: t.depends_on.iter().map(|d| d.0).collect(),
         kind: &t.kind,
         title: &t.title,
@@ -491,7 +480,9 @@ pub fn task(t: &Task) -> TaskView<'_> {
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
         proposed: t.proposal.is_some(),
-        attempts: t.attempts.as_ref().map(attempts),
+        ready_to_merge: t.state == TaskState::Done && t.merge.is_none(),
+        give_backs: give_backs(t.give_backs),
+        tests: t.tests.as_ref().map(tests),
         created_ms: t.created_ms,
         updated_ms: t.updated_ms,
     }
@@ -704,15 +695,15 @@ fn limits_text(l: &Limits) -> String {
     let budget = l.budget.as_ref().map_or_else(String::new, |b| {
         let caps: Vec<String> =
             b.0.iter()
-                .map(|(meter, cap)| {
-                    format!("{meter} {}", slopty_proto::project::Budget::figure(meter, *cap))
+                .map(|(window, cap)| {
+                    format!("{window} {}", slopty_proto::project::Budget::figure(*cap))
                 })
                 .collect();
         format!(", budget {}", caps.join(", "))
     });
     format!(
-        "{} agents per worker, {} in all, {} deep, {} entries kept{budget}",
-        l.live_per_worker, l.live_per_project, l.depth, l.timeline_kept
+        "{} agents per worker, {} in all, {} waiting on you at most, {} entries kept{budget}",
+        l.live_per_worker, l.live_per_project, l.review, l.timeline_kept
     )
 }
 
@@ -947,14 +938,7 @@ pub fn status_text<S: std::hash::BuildHasher>(
         limits_text(&p.limits)
     );
     if let Some(budget) = &p.limits.budget {
-        let _infallible =
-            writeln!(out, "  budget  {} (estimated)", crate::budget::text(budget, &p.spend));
-    } else if p.spend.cost_micro_usd > 0 {
-        let spent = slopty_proto::project::Budget::figure(
-            slopty_proto::project::Budget::USD,
-            p.spend.cost_micro_usd,
-        );
-        let _infallible = writeln!(out, "  spent  {spent} (estimated), no budget");
+        let _infallible = writeln!(out, "  budget  {}", crate::budget::text(budget, &p.spend));
     }
     let (b, live) = (&s.bounds, &s.live);
     let _infallible = writeln!(
@@ -972,20 +956,16 @@ pub fn status_text<S: std::hash::BuildHasher>(
     for need in &p.needs {
         let _infallible = writeln!(out, "  {}", need_text(need));
     }
-    for s in &p.schedules {
-        let _infallible = writeln!(out, "  {}", schedule_text(s));
-    }
     for s in &p.scripts {
         let _infallible = writeln!(out, "  {}", script_text(s));
     }
-    let mut children: HashMap<Option<u32>, Vec<&TaskCard>> = HashMap::new();
-    for t in &s.tasks {
-        children.entry(t.parent.map(|p| p.0)).or_default().push(t);
+    let waiting = s.tasks.iter().filter(|t| t.waits_on_person()).count();
+    if waiting > 0 {
+        let _infallible =
+            writeln!(out, "  waiting on you  {waiting} of {} at most", p.limits.review);
     }
-    let mut stack: Vec<(&TaskCard, usize)> =
-        children.get(&None).into_iter().flatten().rev().map(|t| (*t, 1)).collect();
-    while let Some((t, depth)) = stack.pop() {
-        let indent = "  ".repeat(depth);
+    for t in &s.tasks {
+        let indent = "  ";
         let agent = t.assignment.as_ref().map_or_else(String::new, |a| {
             let gone = if a.ended_ms.is_some() { " (closed)" } else { "" };
             format!("  {}{gone}", term(a.term))
@@ -1012,6 +992,28 @@ pub fn status_text<S: std::hash::BuildHasher>(
         if t.read_only {
             let _infallible = writeln!(out, "{indent}   reads only");
         }
+        if t.ready_to_merge() {
+            let _infallible =
+                writeln!(out, "{indent}   ready to merge: `slopty task merge {}`", t.id);
+        }
+        let g = t.give_backs;
+        if g.held {
+            let _infallible = writeln!(
+                out,
+                "{indent}   needs you: given back {} times, the last failure is held for you",
+                g.count
+            );
+        } else if g.count > 0 {
+            let _infallible = writeln!(
+                out,
+                "{indent}   given back {} of {} times",
+                g.count,
+                slopty_proto::project::GIVE_BACKS_MAX
+            );
+        }
+        if let Some(tests) = &t.tests {
+            let _infallible = writeln!(out, "{indent}   {}", tests.line());
+        }
         if let Some(v) = &t.verified {
             let word = if v.passed { "passed" } else { "failed" };
             let head = v.head.get(..8).unwrap_or(&v.head);
@@ -1027,9 +1029,7 @@ pub fn status_text<S: std::hash::BuildHasher>(
                 let _infallible = writeln!(out, "{indent}     blocks: {at}{}", f.body);
             }
         }
-        counts_text(&mut out, t.natives, depth.saturating_add(2));
-        let kids = children.get(&Some(t.id.0)).into_iter().flatten().rev();
-        stack.extend(kids.map(|k| (*k, depth.saturating_add(1))));
+        counts_text(&mut out, t.natives, 3);
     }
     if !s.timeline.is_empty() {
         out.push_str("timeline\n");

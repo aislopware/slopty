@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use slopty_proto::orchestration::{Line, Screen};
 use slopty_proto::project::{
-    Checks, ChecksState, LimitsChange, Merge, Moment, NativeTask, Placement, Report, ReportKind,
-    StepKind, StepState, TaskId, TaskState,
+    Checks, ChecksState, GiveBacks, LimitsChange, Merge, Moment, Placement, Report, ReportKind,
+    StepKind, StepState, TaskId, TaskState, TestDiff,
 };
 use slopty_proto::server::Os;
 
@@ -28,19 +28,35 @@ pub(in crate::hub) fn commit(c: char) -> String {
     std::iter::repeat_n(c, 40).collect()
 }
 
-/// The orchestrator's worker as the lane sees it: its requests, and what it delivered to its
-/// agents' hooks on the way.
+/// The orchestrator's worker as the lane sees it: its requests, what it delivered to its
+/// agents' hooks on the way, and what it says each task's work did to the tests.
 pub(in crate::hub) struct Studio {
     pub lease: Lease,
     pub rx: mpsc::Receiver<FromServer>,
     pub delivered: Vec<(SessionId, String)>,
+    pub tests: TestDiff,
+    /// Each read of the tests the server asked for: the repository, head and target.
+    pub tested: Vec<(String, String, String)>,
 }
 
 impl Studio {
-    /// The next request, keeping any delivery that comes first.
+    pub(in crate::hub) fn new(lease: Lease, rx: mpsc::Receiver<FromServer>) -> Self {
+        Self { lease, rx, delivered: Vec::new(), tests: TestDiff::default(), tested: Vec::new() }
+    }
+
+    /// The next request, keeping any delivery that comes first and answering every read of
+    /// the tests with [`Self::tests`].
     pub(in crate::hub) async fn request(&mut self) -> (RequestId, Verb) {
         loop {
             match tokio::time::timeout(Duration::from_secs(10), self.rx.recv()).await {
+                Ok(Some(FromServer::Request {
+                    id,
+                    verb: Verb::TestDiff { repo, head, target, .. },
+                    ..
+                })) => {
+                    self.tested.push((repo, head, target));
+                    answer(&self.lease, id, Outcome::TestDiff(self.tests.clone()));
+                }
                 Ok(Some(FromServer::Request { id, verb, .. })) => return (id, verb),
                 Ok(Some(FromServer::Deliver { session, context, .. })) => {
                     self.delivered.push((session, context));
@@ -134,10 +150,10 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
     assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
     let task = new_task(hub, Placement::default()).await;
     let agent = TermRef { worker, session: agent };
-    let assigned = hub.dispatch(Verb::TaskAssign { project: project(), task, term: agent }).await;
+    let assigned = hub.assign_for_test(&project(), task, agent);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
     tokio::spawn(Hub::deliver_reports(hub.downgrade()));
-    (Studio { lease, rx, delivered: Vec::new() }, orchestrator, task, agent)
+    (Studio::new(lease, rx), orchestrator, task, agent)
 }
 
 /// The agent says it is done, with its branch.
@@ -154,6 +170,20 @@ pub(in crate::hub) async fn done(hub: &Hub, task: TaskId, agent: TermRef) {
     assert!(matches!(reported, Outcome::Task(_)), "{reported:?}");
 }
 
+/// The person merges `task`.
+pub(in crate::hub) async fn merge(hub: &Hub, task: TaskId) {
+    let merged = hub.dispatch(Verb::TaskMerge { project: project(), task }).await;
+    assert!(matches!(merged, Outcome::Task(_)), "{merged:?}");
+}
+
+/// `task` is done and waits for the person's Merge, nothing asked of the worker meanwhile.
+pub(in crate::hub) async fn ready_to_merge(hub: &Hub, studio: &mut Studio, task: TaskId) {
+    until_state(hub, task, TaskState::Done).await;
+    assert_eq!(task_now(hub, task).await.merge, None, "ready to merge, for the person");
+    let waits = tokio::time::timeout(Duration::from_millis(300), studio.request()).await;
+    assert!(waits.is_err(), "nothing merges without the person: {waits:?}");
+}
+
 pub(in crate::hub) async fn until_state(hub: &Hub, task: TaskId, want: TaskState) {
     let reached = tokio::time::timeout(Duration::from_secs(10), async {
         while task_now(hub, task).await.state != want {
@@ -165,9 +195,10 @@ pub(in crate::hub) async fn until_state(hub: &Hub, task: TaskId, want: TaskState
 
 /// A task reported done, its branch in a worktree of the orchestrator's clone, is verified in
 /// the project's own checkout of that clone: a terminal the card names while it runs, whose
-/// last line it shows, closed once it passed. The pass puts it in the queue; the queue finds
-/// the target where the work left it, so the rebase leaves the commit verified and nothing
-/// runs again; the target is fast-forwarded and pushed, and the timeline says each step.
+/// last line it shows, closed once it passed. The pass leaves it ready to merge, and only the
+/// person's Merge puts it in the queue; the queue finds the target where the work left it, so
+/// the rebase leaves the commit verified and nothing runs again, each commit carrying the task
+/// it came from; the target is fast-forwarded and pushed, and the timeline says each step.
 #[tokio::test]
 async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_forward() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -211,11 +242,17 @@ async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_
     let (id, verb) = studio.past_screens(&["test result: ok. 12 passed", ""]).await;
     assert!(matches!(verb, Verb::Close { term: t } if t == term), "a pass closes it: {verb:?}");
     answer(&studio.lease, id, Outcome::Done);
+    ready_to_merge(&hub, &mut studio, task).await;
+    merge(&hub, task).await;
 
     let (id, verb) = studio.request().await;
-    let Verb::Rebase { head, onto, .. } = &verb else { panic!("{verb:?}") };
+    let Verb::Rebase { head, onto, trailers, verified, .. } = &verb else { panic!("{verb:?}") };
     assert_eq!((head.as_str(), onto.as_str()), (commit('a').as_str(), "main"), "what was verified");
-    answer(&studio.lease, id, Outcome::Rebased { head: commit('a'), onto: commit('b') });
+    let provenance = [("Slopty-Task".to_owned(), format!("slopty#{task}"))];
+    assert_eq!(trailers.as_slice(), provenance, "no thread is known for a terminal's agent");
+    assert_eq!(verified.as_deref(), Some(commit('a').as_str()));
+    let rebased = Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true };
+    answer(&studio.lease, id, rebased);
     let (id, verb) = studio.request().await;
     let Verb::FastForward { repo, target, from, to, push, .. } = &verb else { panic!("{verb:?}") };
     assert_eq!(
@@ -259,6 +296,9 @@ async fn a_task_done_is_verified_in_the_orchestrator_s_clone_and_merged_by_fast_
         moments,
         ["Verify began", "verified true", "Merge began", "Merge main at aaaaaaa, pushed to origin"]
     );
+    let tested = studio.tested.clone();
+    let read = [("/w/demo".to_owned(), BRANCH.to_owned(), "main".to_owned())];
+    assert_eq!(tested, read, "its tests read once its branch was home");
     let merged = studio.told(orchestrator.session, "merged into main").await;
     assert!(merged.contains(&format!("task {task} merged into main at aaaaaaa")), "{merged}");
 }
@@ -282,7 +322,7 @@ pub(in crate::hub) fn restarted(
     ];
     sessions.extend(running.iter().map(|s| summary(*s)));
     let (_, lease, rx) = worker_again(&hub, orchestrator.worker, "studio", Os::MacOs, sessions);
-    (hub, Studio { lease, rx, delivered: Vec::new() })
+    (hub, Studio::new(lease, rx))
 }
 
 /// A verifier still running when the server stopped is followed again once its worker is
@@ -327,8 +367,7 @@ async fn a_verifier_left_running_by_a_restart_is_followed_to_its_verdict() {
     let (id, verb) = studio.past_screens(&["test result: ok. 12 passed", ""]).await;
     assert!(matches!(verb, Verb::Close { term: t } if t == term), "a pass closes it: {verb:?}");
     answer(&studio.lease, id, Outcome::Done);
-    let (_, verb) = studio.request().await;
-    assert!(matches!(verb, Verb::Rebase { .. }), "then the queue: {verb:?}");
+    until_state(&hub, task, TaskState::Done).await;
     let card = task_now(&hub, task).await;
     let run = card.verified.unwrap();
     assert_eq!((run.passed, run.head, run.base), (true, commit('a'), commit('b')));
@@ -405,11 +444,14 @@ async fn the_queue_verifies_a_rebased_head_again_and_holds_for_the_person_s_chan
     let (id, verb) = studio.past_screens(&["ok"]).await;
     assert!(matches!(verb, Verb::Close { .. }), "{verb:?}");
     answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
     for (rebased, onto, moved) in [('c', 'd', true), ('e', 'f', false)] {
         let (id, verb) = studio.request().await;
         let Verb::Rebase { head, .. } = &verb else { panic!("{verb:?}") };
         assert_eq!(head, &commit(judged.0), "the last commit verified goes on");
-        answer(&studio.lease, id, Outcome::Rebased { head: commit(rebased), onto: commit(onto) });
+        let made = Outcome::Rebased { head: commit(rebased), onto: commit(onto), verified: false };
+        answer(&studio.lease, id, made);
         let asked = studio.request().await;
         let Verb::Verify { head, .. } = &asked.1 else { panic!("{:?}", asked.1) };
         assert_eq!(head, &commit(rebased), "what the rebase made is verified");
@@ -468,6 +510,8 @@ async fn a_conflict_goes_back_to_the_agent_with_its_paths() {
     studio.ran(&asked, 0, ('a', 'b'));
     let (id, _close) = studio.past_screens(&["ok"]).await;
     answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
     let (id, verb) = studio.request().await;
     assert!(matches!(verb, Verb::Rebase { .. }), "{verb:?}");
     let message = "conflicts in a.txt, src/lib.rs".to_owned();
@@ -544,41 +588,80 @@ async fn the_person_s_words_reach_the_task_s_agent() {
     refused(&hub.dispatch(tell("Fix CI")).await, ErrorCode::Invalid);
 }
 
-/// Work whose agent still has to-dos open on its own list is not merged: the queue gives it
-/// back to its agent naming them, before it rebases anything.
+/// A rebase that changed only the commits' messages (the provenance trailers) leaves the tree
+/// that was verified, so the queue fast-forwards to it without running the verifier again.
 #[tokio::test]
-async fn open_to_dos_keep_work_from_merging() {
+async fn a_rebase_that_kept_the_verified_tree_is_not_verified_again() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
-    let todo = |id: &str, subject: &str, done| NativeTask {
-        id: id.to_owned(),
-        subject: subject.to_owned(),
-        done,
-    };
-    for item in [todo("1", "Write the tests", false), todo("2", "Build it", true)] {
-        let report = AgentReport::NativeTask { session: agent.session, task: item };
-        studio.lease.handle(ToServer::Report(report));
-    }
     done(&hub, task, agent).await;
     let asked = studio.request().await;
     studio.ran(&asked, 0, ('a', 'b'));
     let (id, _close) = studio.past_screens(&["ok"]).await;
     answer(&studio.lease, id, Outcome::Done);
-    until_state(&hub, task, TaskState::Waiting).await;
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::Rebase { .. }), "{verb:?}");
+    let rebased = Outcome::Rebased { head: commit('c'), onto: commit('b'), verified: true };
+    answer(&studio.lease, id, rebased);
+    let (id, verb) = studio.request().await;
+    let Verb::FastForward { from, to, .. } = &verb else { panic!("not verified again: {verb:?}") };
+    assert_eq!((from, to), (&commit('b'), &commit('c')));
+    let moved = Outcome::FastForwarded { head: commit('c'), pushed: true, push_failed: None };
+    answer(&studio.lease, id, moved);
+    until_state(&hub, task, TaskState::Merged).await;
+}
+
+/// A failure goes back to the agent with what the work did to the tests, three times at most:
+/// the fourth waits on the person instead, its agent not told, and the person's word on the task
+/// starts the count again.
+#[tokio::test]
+async fn a_task_given_back_three_times_waits_on_the_person() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = fleet(&hub).await;
+    studio.tests = TestDiff {
+        head: commit('a'),
+        deleted: vec!["tests/flaky.rs".to_owned()],
+        deleted_count: 1,
+        added_count: 2,
+        ..TestDiff::default()
+    };
+    for round in 1..=4_u8 {
+        done(&hub, task, agent).await;
+        let mut asked = studio.request().await;
+        if matches!(asked.1, Verb::Close { .. }) {
+            answer(&studio.lease, asked.0, Outcome::Done);
+            asked = studio.request().await;
+        }
+        let term = studio.ran(&asked, 1, ('a', 'b'));
+        let (id, verb) = studio.request().await;
+        assert!(matches!(verb, Verb::ReadScreen { term: t } if t == term), "{verb:?}");
+        answer(&studio.lease, id, screen(&["error: it broke"]));
+        let want = if round <= 3 {
+            GiveBacks { count: round, reviews: 0, held: false }
+        } else {
+            GiveBacks { count: 3, reviews: 0, held: true }
+        };
+        let reached = tokio::time::timeout(Duration::from_secs(10), async {
+            while task_now(&hub, task).await.give_backs != want {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        assert!(reached.await.is_ok(), "round {round}: {:?}", task_now(&hub, task).await);
+        if round == 1 {
+            let told = studio.told(agent.session, "The verifier `cargo gate` failed").await;
+            assert!(told.contains("Tests: 1 deleted (tests/flaky.rs), 2 added"), "{told}");
+        }
+    }
     let card = task_now(&hub, task).await;
-    let step = card.step.unwrap();
-    assert_eq!(
-        (step.kind, step.state),
-        (
-            StepKind::Merge,
-            StepState::Failed { why: "1 to-do still open on its task list".to_owned() }
-        )
-    );
-    let told = studio.told(agent.session, "your task list still has 1 to-do open").await;
-    assert!(told.contains("(Write the tests)"), "{told}");
-    assert!(!told.contains("Build it"), "{told}");
-    let rebased = tokio::time::timeout(Duration::from_millis(300), studio.request()).await;
-    assert!(rebased.is_err(), "nothing is rebased: {rebased:?}");
+    assert_eq!(card.tests.as_ref().map(|t| t.deleted_count), Some(1), "on its card");
+    assert!(card.waits_on_person(), "{card:?}");
+
+    let tell =
+        Verb::TaskTell { project: project(), task: Some(task), text: "Try once more.".to_owned() };
+    assert_eq!(hub.dispatch(tell).await, Outcome::Done);
+    assert_eq!(task_now(&hub, task).await.give_backs, GiveBacks::default(), "the person's word");
 }
 
 /// A task's pull request's own checks are read on the worker its agent ran on, in its
@@ -730,8 +813,14 @@ async fn a_merge_whose_push_failed_is_pushed_again_on_the_person_s_word() {
     let (id, verb) = studio.past_screens(&["ok"]).await;
     assert!(matches!(verb, Verb::Close { .. }), "{verb:?}");
     answer(&studio.lease, id, Outcome::Done);
+    until_state(&hub, task, TaskState::Done).await;
+    merge(&hub, task).await;
     let (id, _rebase) = studio.request().await;
-    answer(&studio.lease, id, Outcome::Rebased { head: commit('a'), onto: commit('b') });
+    answer(
+        &studio.lease,
+        id,
+        Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true },
+    );
     let (id, _forward) = studio.request().await;
     let rejected = Some("rejected: fetch first".to_owned());
     let moved = Outcome::FastForwarded { head: commit('a'), pushed: false, push_failed: rejected };

@@ -1,5 +1,5 @@
-//! What a task's agent came to, said to the node above it when the agent did not report
-//! (`docs/decisions/projects.md`, "A task's outcome reaches the node above it without a
+//! What a task's agent came to, said to the orchestrator when the agent did not report
+//! (`docs/decisions/projects.md`, "A task's outcome reaches the orchestrator without a
 //! report"): the server's words, with the agent's last words from its thread's row.
 //!
 //! The rest of a turn settles before it goes ([`crate::deliver::DONE_SETTLE`]), so its words
@@ -18,7 +18,7 @@ use crate::project::{Change, Heard, Upshot, clipped};
 pub(super) const LAST_WORDS_MAX: usize = 2048;
 
 impl Hub {
-    /// Hand what the nodes above tasks are to hear to the deliveries. A rest goes on the
+    /// Hand what the orchestrators are to hear to the deliveries. A rest goes on the
     /// timeline too, as the task's move from running to waiting, so whoever follows the
     /// project (`task_wait`, a board) sees the turn end; the changes that makes come back.
     pub(super) fn hear(&self, state: &mut State) -> Vec<Change> {
@@ -28,11 +28,11 @@ impl Hub {
         }
         let at = tokio::time::Instant::now();
         let mut changes = Vec::new();
-        for Heard { project, task, parent, term, upshot } in heard {
+        for Heard { project, task, term, upshot } in heard {
             if upshot == Upshot::Rested {
                 changes.extend(state.projects.rested(&project, task, WallMs::now()));
             }
-            let node = (project, parent);
+            let node = (project, None);
             let Some(kind) = upshot.kind() else {
                 state.deliveries.moved_on(&node, task);
                 continue;
@@ -59,7 +59,7 @@ impl Hub {
     }
 }
 
-/// What the node above `task` reads of what its agent in `term` came to.
+/// What the orchestrator reads of what `task`'s agent in `term` came to.
 fn words(state: &State, task: TaskId, term: TermRef, upshot: &Upshot) -> String {
     let last = state.board.last_words(term);
     match upshot {

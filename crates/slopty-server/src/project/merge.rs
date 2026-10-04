@@ -1,8 +1,10 @@
 //! The merge queue's record (`docs/decisions/projects.md`, "A task is done when its verifier
-//! passes; the server merges one at a time").
+//! passes; the server merges one at a time", and "The person merges").
 //!
 //! The queue is the tasks themselves: a task waits in it while its [`Merge`] is queued, in the
-//! order it joined, so a server that restarts takes the queue up where it stood. What a
+//! order it joined, so a server that restarts takes the queue up where it stood. Only the
+//! person's Merge queues a task: work whose checks passed waits, done and unqueued, ready to
+//! merge. What a
 //! project's lane does next ([`Projects::next_job`]) and each move it makes to a task, as one
 //! change with at most one timeline entry ([`Projects::advance`]), are here; the lane itself,
 //! which asks the workers, is the hub's.
@@ -13,8 +15,8 @@ use slopty_proto::project::{
 };
 
 use super::{
-    Change, Changed, Merge, Moment, ProjectId, Projects, Record, Refused, SUMMARY_MAX, Task,
-    TaskId, TaskState, TaskStep, VerifierRun, clipped, invalid, overlapping, unknown_project,
+    Change, Changed, GiveBacks, Merge, Moment, ProjectId, Projects, Record, Refused, SUMMARY_MAX,
+    Task, TaskId, TaskState, TaskStep, VerifierRun, clipped, invalid, overlapping, unknown_project,
 };
 
 /// What a project's lane does next.
@@ -43,6 +45,8 @@ pub(crate) struct Advance {
     pub fresh: bool,
     /// Its place in the queue, or its merge.
     pub merge: Queue,
+    /// How often its work went back to its agent, as it stands now.
+    pub give_backs: Option<GiveBacks>,
     /// The timeline's entry for the move, when it is worth one.
     pub moment: Option<Moment>,
 }
@@ -130,15 +134,6 @@ impl Projects {
         now: WallMs,
     ) -> Result<(Task, Vec<Change>), Refused> {
         let record = self.record(id)?;
-        let held = record.task(task)?;
-        if advance.state.is_some() && record.lost(held) {
-            return Err(invalid(format!("task {task} is an attempt given up for the one picked")));
-        }
-        // An attempt not picked is checked as any task is, but waits outside the queue.
-        let merge = match advance.merge {
-            Queue::Set(Merge::Queued { .. }) if record.unpicked(held) => Queue::Leave,
-            merge => merge,
-        };
         let t = record.task_mut(task)?;
         if let Some(to) = advance.state.filter(|to| *to != t.state)
             && !t.state.may_become(to)
@@ -169,7 +164,10 @@ impl Projects {
         if let Some(run) = advance.reviewed {
             t.reviewed = Some(bounded(run));
         }
-        match merge {
+        if let Some(give_backs) = advance.give_backs {
+            t.give_backs = give_backs;
+        }
+        match advance.merge {
             Queue::Keep => {}
             Queue::Leave => t.merge = None,
             Queue::Set(merge) => t.merge = Some(merge),
@@ -177,35 +175,39 @@ impl Projects {
         t.updated_ms = now;
         let task_now = t.clone();
         let entry = advance.moment.map(|what| record.log(Some(task), what, now));
-        let mut changes = vec![record.task_update(&task_now, entry)];
-        if task_now.state == TaskState::Merged {
-            changes.extend(record.merged_with(&task_now, now));
-        }
-        Ok((task_now, changes))
+        Ok((task_now.clone(), vec![record.task_update(&task_now, entry)]))
     }
 
-    /// The person asks for `task`'s merge: its verifier runs first when one applies, and a
-    /// task with none joins the queue at once. A task given up takes its paths again, as any
-    /// move back into a live state does.
+    /// The person merges `task`: work ready to merge (done, its checks passed) joins the queue
+    /// at once. Work not checked yet is checked first, its verifier and its reviewer as the
+    /// project asks, and joins the queue once they pass, as the person's Merge said; a task
+    /// with no checks joins at once. A task given up takes its paths again, as any move back
+    /// into a live state does. The person's word on it starts its give-backs again.
     pub(crate) fn ask_merge(&mut self, id: &ProjectId, task: TaskId, now: WallMs) -> Changed<Task> {
         self.may_merge(id, task)?;
         let record = self.record(id)?;
         let t = record.task(task)?;
-        let checks = t.verifier.is_some()
-            || record.project.verifier.is_some()
-            || record.project.review.is_some();
+        let verifies = t.verifier.is_some() || record.project.verifier.is_some();
+        let reviews = record.project.review.is_some();
+        let checked = t.state == TaskState::Done
+            && (!verifies || t.verified.as_ref().is_some_and(|r| r.passed))
+            && (!reviews || t.reviewed.as_ref().is_some_and(|r| r.verdict.approved));
         let from = t.state;
-        let advance = if checks {
+        let queued = Queue::Set(Merge::Queued { since_ms: now });
+        let give_backs = Some(GiveBacks::default());
+        let advance = if checked || !(verifies || reviews) {
             Advance {
-                state: Some(TaskState::Verifying),
-                merge: Queue::Leave,
-                fresh: true,
+                state: Some(TaskState::Done),
+                merge: queued,
+                give_backs,
                 ..Advance::default()
             }
         } else {
             Advance {
-                state: Some(TaskState::Done),
-                merge: Queue::Set(Merge::Queued { since_ms: now }),
+                state: Some(TaskState::Verifying),
+                merge: queued,
+                fresh: true,
+                give_backs,
                 ..Advance::default()
             }
         };
@@ -214,8 +216,8 @@ impl Projects {
         self.advance(id, task, Advance { moment, ..advance }, now)
     }
 
-    /// Why the person may not ask for `task`'s merge now, if they may not: it is merged
-    /// already, it only reads, or its paths are another live task's since it let them go.
+    /// Why the person may not merge `task` now, if they may not: it is merged already, it only
+    /// reads, or its paths are another live task's since it let them go.
     ///
     /// # Errors
     /// That reason.
@@ -227,12 +229,6 @@ impl Projects {
         }
         if t.read_only {
             return Err(invalid(format!("task {task} only reads, so it has nothing to merge")));
-        }
-        if let Some(parent) = record.tried(t).filter(|_| record.unpicked(t)) {
-            return Err(invalid(format!(
-                "task {task} is an attempt at task {} not picked; task_pick it to land it",
-                parent.id
-            )));
         }
         if !t.state.holds_paths()
             && let Some((theirs, path, ours)) = record.conflict(Some(task), &t.owns)

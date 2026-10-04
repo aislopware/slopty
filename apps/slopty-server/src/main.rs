@@ -118,7 +118,6 @@ fn policy(settings: &slopty_settings::ProjectBounds) -> Policy {
         live_agents: settings.live_agents,
         live_per_worker: settings.live_per_worker,
         live_per_project: settings.live_per_project,
-        depth: settings.depth,
         timeline_kept: settings.timeline_kept,
         permission_flags: false,
         projects: settings.projects,
@@ -278,13 +277,13 @@ mod tests {
             "the file's defaults are the server's"
         );
         assert!(default.permission_flags.is_empty(), "no project may loosen by default");
-        let text = "[server.projects]\nlive_agents = 3\ndepth = 2\n\
+        let text = "[server.projects]\nlive_agents = 3\n\
                     permission_flags = [\"nightly\", \"Not A Name\"]\n\
                     tasks_per_project = 50\nowns_max = 4\ncomprehension_depth = 2\n";
         std::fs::write(root.path().join("settings.toml"), text).unwrap();
         let set = policy(&settings(&data_dir).projects);
         let b = set.bounds;
-        assert_eq!((b.live_agents, b.depth, b.tasks_per_project, b.owns_max), (3, 2, 50, 4));
+        assert_eq!((b.live_agents, b.tasks_per_project, b.owns_max), (3, 50, 4));
         assert_eq!(b.comprehension_depth, 2);
         assert_eq!(
             set.permission_flags.into_iter().collect::<Vec<_>>(),

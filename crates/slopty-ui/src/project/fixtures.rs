@@ -34,20 +34,18 @@ pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
         limits: Limits::default(),
         metadata: None,
         needs: Vec::new(),
-        schedules: Vec::new(),
         scripts: Vec::new(),
         created_ms: AT,
         members: Vec::new(),
     }
 }
 
-/// Task `n`, titled, in `state`, split from `parent`.
-pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -> TaskCard {
+/// Task `n`, titled, in `state`.
+pub(crate) fn card(n: u32, title: &str, state: TaskState) -> TaskCard {
     TaskCard {
         checks: None,
         spent: slopty_proto::project::Spent::default(),
         id: TaskId(n),
-        parent: parent.map(TaskId),
         depends_on: Vec::new(),
         kind: "build".to_owned(),
         title: title.to_owned(),
@@ -67,7 +65,8 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState, parent: Option<u32>) -
         natives: NativeCounts::default(),
         created_ms: AT,
         updated_ms: AT,
-        attempts: None,
+        give_backs: slopty_proto::project::GiveBacks::default(),
+        tests: None,
     }
 }
 

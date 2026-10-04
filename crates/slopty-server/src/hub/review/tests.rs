@@ -6,12 +6,14 @@
 use std::time::Duration;
 
 use slopty_proto::project::{
-    Finding, LimitsChange, Moment, REVIEW_DIFF, ReviewVerdict, Reviewer, StepKind, StepState,
-    TaskId, TaskState,
+    Finding, GiveBacks, LimitsChange, Moment, REVIEW_DIFF, ReviewVerdict, Reviewer, StepKind,
+    StepState, TaskId, TaskState,
 };
 
 use super::super::project_tests::{answer, project, status, task_now};
-use super::super::queue::tests::{Studio, commit, done, fleet, restarted, until_state};
+use super::super::queue::tests::{
+    Studio, commit, done, fleet, merge, ready_to_merge, restarted, until_state,
+};
 use super::super::tests::summary;
 use super::super::*;
 
@@ -105,8 +107,8 @@ async fn review_as(hub: &Hub, speaker: Speaker, task: TaskId, verdict: ReviewVer
 /// named on the task's step while it reads. The lane does not wait on it. Only that reviewer
 /// or the person may answer. Its block gives the task back to its agent with what blocks, the
 /// most important first, its session kept to read. The work done again is verified and read
-/// afresh, the old reviewer let go, and the person's approval over the new reviewer sends it
-/// through the queue.
+/// afresh, the old reviewer let go, and the person's approval over the new reviewer leaves it
+/// ready to merge, for their Merge to send it through the queue.
 #[tokio::test]
 async fn a_reviewer_reads_the_verified_work_and_its_verdict_decides_the_merge() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -120,6 +122,7 @@ async fn a_reviewer_reads_the_verified_work_and_its_verdict_decides_the_merge() 
     assert!(role.contains("You review task 1") && role.contains(BRIEF), "{role}");
     assert!(role.contains("review_report") && role.contains(REVIEW_DIFF), "{role}");
     assert!(prompt.contains(REVIEW_DIFF) && prompt.contains("bbbbbbb..aaaaaaa"), "{prompt}");
+    assert!(role.contains("Tests: none deleted, changed or added"), "{role}");
     let card = task_now(&hub, task).await;
     let step = card.step.clone().expect("a step");
     assert_eq!(
@@ -181,23 +184,15 @@ async fn a_reviewer_reads_the_verified_work_and_its_verdict_decides_the_merge() 
 
     let over = review_as(&hub, Speaker::Person, task, approve()).await;
     assert!(matches!(over, Outcome::Task(_)), "{over:?}");
-    // The reviewer the person spoke over is closed as the queue takes the work, in either order.
-    let (mut closed, mut rebased) = (false, false);
-    while !closed || !rebased {
-        let (id, verb) = studio.request().await;
-        match verb {
-            Verb::Close { term } if term == second => {
-                closed = true;
-                answer(&studio.lease, id, Outcome::Done);
-            }
-            Verb::Rebase { .. } => {
-                rebased = true;
-                let rebased = Outcome::Rebased { head: commit('a'), onto: commit('b') };
-                answer(&studio.lease, id, rebased);
-            }
-            other => panic!("{other:?}"),
-        }
-    }
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::Close { term } if term == second), "spoken over: {verb:?}");
+    answer(&studio.lease, id, Outcome::Done);
+    ready_to_merge(&hub, &mut studio, task).await;
+    merge(&hub, task).await;
+    let (id, verb) = studio.request().await;
+    assert!(matches!(verb, Verb::Rebase { .. }), "{verb:?}");
+    let rebased = Outcome::Rebased { head: commit('a'), onto: commit('b'), verified: true };
+    answer(&studio.lease, id, rebased);
     let (id, verb) = studio.request().await;
     assert!(matches!(verb, Verb::FastForward { .. }), "{verb:?}");
     let moved = Outcome::FastForwarded { head: commit('a'), pushed: false, push_failed: None };
@@ -293,18 +288,46 @@ async fn a_reviewer_left_reading_by_a_restart_is_heard_once_its_worker_is_back()
             (run.by, run.head, run.base),
             (Reviewer::Agent(reviewer), commit('a'), commit('b'))
         );
-        // The reviewer is let go as the queue takes the work, in either order.
-        let (mut closed, mut rebased) = (false, false);
-        while !closed || !rebased {
-            let (id, verb) = studio.request().await;
-            match verb {
-                Verb::Close { term } if term == reviewer => {
-                    closed = true;
-                    answer(&studio.lease, id, Outcome::Done);
-                }
-                Verb::Rebase { .. } => rebased = true,
-                other => panic!("{other:?}"),
-            }
+        let (id, verb) = studio.request().await;
+        assert!(matches!(verb, Verb::Close { term } if term == reviewer), "let go: {verb:?}");
+        answer(&studio.lease, id, Outcome::Done);
+        ready_to_merge(&hub, &mut studio, task).await;
+    }
+}
+
+/// A reviewer's ask for changes goes back to the agent once: a second ask waits on the person,
+/// its agent not told, until they say what next.
+#[tokio::test]
+async fn a_reviewer_gives_work_back_for_one_round_only() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (mut studio, _orchestrator, task, agent) = reviewed_fleet(&hub).await;
+    done(&hub, task, agent).await;
+    verified(&mut studio).await;
+    let (first, ..) = reviewer_started(&mut studio).await;
+    let said = review_as(&hub, Speaker::Proven(first.session), task, blocked()).await;
+    assert!(matches!(said, Outcome::Task(_)), "{said:?}");
+    let card = task_now(&hub, task).await;
+    assert_eq!(card.give_backs, GiveBacks { count: 1, reviews: 1, held: false });
+    studio.told(agent.session, "What blocks the merge").await;
+
+    done(&hub, task, agent).await;
+    let mut verify = None;
+    while verify.is_none() {
+        let (id, verb) = studio.request().await;
+        match verb {
+            Verb::Close { .. } => answer(&studio.lease, id, Outcome::Done),
+            verb @ Verb::Verify { .. } => verify = Some((id, verb)),
+            other => panic!("{other:?}"),
         }
     }
+    studio.ran(&verify.expect("the verifier"), 0, ('a', 'b'));
+    let (id, verb) = studio.past_screens(&["test result: ok", ""]).await;
+    assert!(matches!(verb, Verb::Close { .. }), "{verb:?}");
+    answer(&studio.lease, id, Outcome::Done);
+    let (second, ..) = reviewer_started(&mut studio).await;
+    let said = review_as(&hub, Speaker::Proven(second.session), task, blocked()).await;
+    assert!(matches!(said, Outcome::Task(_)), "{said:?}");
+    let card = task_now(&hub, task).await;
+    assert_eq!(card.give_backs, GiveBacks { count: 1, reviews: 1, held: true }, "held");
+    assert!(card.waits_on_person() && card.reviewed.is_some(), "{card:?}");
 }

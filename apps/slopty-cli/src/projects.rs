@@ -12,7 +12,7 @@ use slopty_proto::project::{
     TaskChange, TaskState, VerifierRun,
 };
 use slopty_tools::ops::{
-    self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, ScheduleWhen,
+    self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, Which,
 };
 use slopty_tools::resolve::Resolver;
 use slopty_tools::view::projects as view;
@@ -29,15 +29,16 @@ pub struct LimitArgs {
     /// Most of its live agents in all.
     #[arg(long)]
     live_per_project: Option<u16>,
-    /// How deep its tree of tasks may go.
+    /// How many of its tasks may wait on you, ready to merge or asking you something, before
+    /// its agents start no more work; at least 1. Yours to set: an agent's is refused.
     #[arg(long)]
-    depth: Option<u16>,
+    review_limit: Option<u16>,
     /// How many timeline entries it keeps.
     #[arg(long)]
     timeline_kept: Option<u32>,
-    /// What its agents may spend, a meter at a time: `usd=50` caps the estimated cost in
-    /// dollars, `five-hour=80%` a plan window. At a cap it starts no task until it is raised.
-    /// `none` takes the budget away. Yours to set: an agent's is refused.
+    /// What its agents may spend of their plans, a window at a time: `five-hour=80%` caps the
+    /// plan's five-hour window. At a cap it starts no task until it is raised. `none` takes
+    /// the budget away. Yours to set: an agent's is refused.
     #[arg(long, value_name = "METER=CAP")]
     budget: Vec<String>,
 }
@@ -52,7 +53,7 @@ impl LimitArgs {
         Ok(LimitsChange {
             live_per_worker: self.live_per_worker,
             live_per_project: self.live_per_project,
-            depth: self.depth,
+            review: self.review_limit,
             timeline_kept: self.timeline_kept,
             budget,
         })
@@ -159,11 +160,6 @@ pub enum ProjectCmd {
     },
     /// Every project.
     List,
-    /// A project's schedules: tasks it makes and starts at set times, as the person sets them.
-    Schedule {
-        #[command(subcommand)]
-        cmd: Box<ScheduleCmd>,
-    },
     /// A project's scripts: the commands you name for it (dev, test, build), each run in a
     /// terminal of your own.
     Script {
@@ -180,36 +176,6 @@ pub enum ProjectCmd {
         /// Wait this many milliseconds for a change past `--since`.
         #[arg(long, default_value_t = 0)]
         timeout: u32,
-    },
-}
-
-/// `slopty project schedule …`.
-#[derive(Subcommand, Debug)]
-pub enum ScheduleCmd {
-    /// Set a schedule: a task made and started each time its rule comes round, in your time
-    /// zone. With `--schedule` it sets that one anew.
-    Set(Box<SetSchedule>),
-    /// Take a schedule away; the tasks it made stay.
-    Rm {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The schedule's number.
-        schedule: u32,
-    },
-    /// Run a schedule now, paused or not, and print the task it made.
-    Run {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The schedule's number.
-        schedule: u32,
-    },
-    /// List a project's schedules.
-    Ls {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
     },
 }
 
@@ -294,168 +260,6 @@ async fn script(
     Ok(())
 }
 
-/// `slopty project schedule set`.
-#[derive(Args, Debug)]
-pub struct SetSchedule {
-    /// The project (this session's own when omitted).
-    #[arg(long)]
-    project: Option<String>,
-    /// The schedule to set anew, by its number.
-    #[arg(long)]
-    schedule: Option<u32>,
-    /// When: five cron fields (minute, hour, day of the month, month, day of the week),
-    /// such as `0 9 * * 1-5`, or `@daily`, `@weekly` and the like.
-    #[arg(long)]
-    when: String,
-    /// The IANA time zone it is read in; this machine's own when omitted.
-    #[arg(long)]
-    zone: Option<String>,
-    /// It runs only when you say (`schedule run`).
-    #[arg(long)]
-    paused: bool,
-    /// Each run's task, in a line.
-    #[arg(long)]
-    title: String,
-    /// What its agent is told to do.
-    #[arg(long, default_value = "")]
-    brief: String,
-    /// What sort of work it is.
-    #[arg(long, default_value = "")]
-    kind: String,
-    /// A repository-relative path it alone may write; repeatable.
-    #[arg(long = "owns", value_name = "PATH")]
-    owns: Vec<String>,
-    /// It only reads: it owns nothing.
-    #[arg(long, conflicts_with = "owns")]
-    read_only: bool,
-    #[command(flatten)]
-    placement: PlacementArgs,
-    /// Its own verifier, over the project's.
-    #[arg(long)]
-    verifier: Option<String>,
-    /// The agent: `claude` (the default), `codex`, `pi`, or an ACP agent by name.
-    #[arg(long)]
-    agent: Option<String>,
-    /// The model, by the agent's own id.
-    #[arg(long)]
-    model: Option<String>,
-    /// The agent's first prompt.
-    #[arg(long)]
-    prompt: Option<String>,
-    /// This worker over the task's placement (name or id).
-    #[arg(long)]
-    worker: Option<String>,
-    /// Working directory on the worker; beside a clone of the project's repository when
-    /// omitted.
-    #[arg(long)]
-    cwd: Option<String>,
-    /// Run the words after `--` as the program, not as the agent's arguments.
-    #[arg(long, conflicts_with_all = ["agent", "model", "prompt"])]
-    command: bool,
-    /// Arguments for the agent, or with `--command` the program and its arguments.
-    #[arg(last = true)]
-    args: Vec<String>,
-}
-
-/// This machine's IANA time zone: `TZ` when it names one, else where `/etc/localtime` points
-/// in the zone database; empty when neither says, for the server's own.
-fn local_zone() -> String {
-    let named = std::env::var("TZ").ok().map(|tz| tz.trim_start_matches(':').to_owned());
-    if let Some(tz) = named.filter(|tz| tz.contains('/') && !tz.starts_with('/')) {
-        return tz;
-    }
-    std::fs::read_link("/etc/localtime")
-        .ok()
-        .and_then(|target| zone_of(&target.to_string_lossy()))
-        .unwrap_or_default()
-}
-
-/// The zone a path into the zone database names: `…/zoneinfo/Europe/Berlin` is `Europe/Berlin`.
-fn zone_of(path: &str) -> Option<String> {
-    path.split_once("zoneinfo/").map(|(_, zone)| zone.to_owned()).filter(|z| !z.is_empty())
-}
-
-/// Run a `slopty project schedule …`.
-async fn schedule(
-    cmd: ScheduleCmd,
-    res: &mut Resolver<'_, Link>,
-    link: &Link,
-    (json, key): (bool, Option<IdempotencyKey>),
-) -> Result<()> {
-    let status = match cmd {
-        ScheduleCmd::Set(set) => {
-            let SetSchedule {
-                project,
-                schedule,
-                when,
-                zone,
-                paused,
-                title,
-                brief,
-                kind,
-                owns,
-                read_only,
-                placement,
-                verifier,
-                agent,
-                model,
-                prompt,
-                worker,
-                cwd,
-                command,
-                args,
-            } = *set;
-            let new = NewTask {
-                parent: None,
-                depends_on: Vec::new(),
-                kind,
-                title,
-                brief,
-                owns,
-                read_only,
-                placement: placement.spec(),
-                verifier,
-                metadata: None,
-            };
-            let launch = LaunchSpec {
-                pin: worker,
-                cwd: cwd.unwrap_or_default(),
-                run: if command {
-                    Runner::Command { argv: args }
-                } else {
-                    ops::agent_runner(agent.as_deref(), prompt, model, args)
-                },
-                env: Vec::new(),
-                size: None,
-                ignore_dependencies: false,
-            };
-            let zone = zone.unwrap_or_else(local_zone);
-            let when = ScheduleWhen { when, zone, paused };
-            ops::schedule_set(res, project.as_deref(), schedule, (new, launch, when), key).await?
-        }
-        ScheduleCmd::Rm { project, schedule } => {
-            ops::schedule_delete(link, project.as_deref(), schedule, key).await?
-        }
-        ScheduleCmd::Run { project, schedule } => {
-            let task = ops::schedule_run(link, project.as_deref(), schedule, key).await?;
-            return print_task(&task, json);
-        }
-        ScheduleCmd::Ls { project } => {
-            ops::project_status(link, project.as_deref(), None, 0).await?
-        }
-    };
-    if json {
-        return print_json(&view::status(&status));
-    }
-    if status.project.schedules.is_empty() {
-        println!("{} has no schedule", status.project.id);
-    }
-    for s in &status.project.schedules {
-        println!("{}", view::schedule_text(s));
-    }
-    Ok(())
-}
-
 /// Which project and task: this session's own when omitted.
 #[derive(Args, Debug)]
 pub struct TaskRef {
@@ -525,185 +329,15 @@ fn preference(s: &str) -> Result<Preference, String> {
 /// `slopty task …`.
 #[derive(Subcommand, Debug)]
 pub enum TaskCmd {
-    /// Make a task in a project.
-    Create {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The task it is split from (this session's own task when omitted).
-        #[arg(long)]
-        parent: Option<String>,
-        /// A task it needs first; repeatable.
-        #[arg(long = "depends-on", value_name = "TASK")]
-        depends_on: Vec<String>,
-        /// What sort of work it is, in your words.
-        #[arg(long, default_value = "")]
-        kind: String,
-        /// What it is, in a line.
-        #[arg(long)]
-        title: String,
-        /// What its agent is told to do.
-        #[arg(long, default_value = "")]
-        brief: String,
-        /// A repository-relative path it alone may write; repeatable.
-        #[arg(long = "owns", value_name = "PATH")]
-        owns: Vec<String>,
-        /// It only reads: it owns nothing.
-        #[arg(long, conflicts_with = "owns")]
-        read_only: bool,
-        #[command(flatten)]
-        placement: PlacementArgs,
-        /// Its own verifier, over the project's.
-        #[arg(long)]
-        verifier: Option<String>,
-        /// Anything to keep with it, as a JSON object.
-        #[arg(long)]
-        metadata: Option<String>,
-    },
-    /// Take more paths for a task to own.
-    Claim {
-        #[command(flatten)]
-        which: TaskRef,
-        /// Repository-relative paths.
-        #[arg(required = true)]
-        paths: Vec<String>,
-    },
+    /// Start a task, the one way work starts: a new one made from `--title` and the flags after
+    /// it, or one the project has with `--task` (made before and refused its start, stopped,
+    /// given back, or proposed to you). Claude Code runs it, or another `--agent`, or with
+    /// `--command` the program after `--`, where the server places it or on `--worker`.
+    Start(Box<StartTask>),
     /// Change a task: move it, say what it is doing, record its branch or verifier, or note
     /// something on the timeline.
-    Update {
-        #[command(flatten)]
-        which: TaskRef,
-        /// planned, running, waiting, blocked, verifying, done, merged or failed.
-        #[arg(long)]
-        state: Option<String>,
-        /// What it is doing, in its own words; empty clears it.
-        #[arg(long)]
-        status: Option<String>,
-        /// The branch its work is on.
-        #[arg(long)]
-        branch: Option<String>,
-        /// The verifier passed on `--head` over `--base`.
-        #[arg(long, conflicts_with = "failed", requires_all = ["head", "base"])]
-        passed: bool,
-        /// The verifier failed on `--head` over `--base`.
-        #[arg(long, requires_all = ["head", "base"])]
-        failed: bool,
-        /// What the verifier said.
-        #[arg(long)]
-        summary: Option<String>,
-        /// The commit the verifier ran on, in hex.
-        #[arg(long)]
-        head: Option<String>,
-        /// The commit the task's work starts from, in hex.
-        #[arg(long)]
-        base: Option<String>,
-        /// Words for the timeline.
-        #[arg(long)]
-        note: Option<String>,
-        /// Its dependencies, in place of the old; repeatable.
-        #[arg(long = "depends-on", value_name = "TASK")]
-        depends_on: Vec<String>,
-        /// It depends on nothing now.
-        #[arg(long, conflicts_with = "depends_on")]
-        no_dependencies: bool,
-        /// A placement in place of the old, when any of its flags is given.
-        #[command(flatten)]
-        placement: PlacementArgs,
-        /// Run it on this worker over its placement's rules, or `anywhere` to let them choose.
-        #[arg(long, value_name = "WORKER")]
-        run_on: Option<String>,
-        /// Its own verifier; empty for the project's.
-        #[arg(long)]
-        verifier: Option<String>,
-        /// New metadata, a JSON object.
-        #[arg(long)]
-        metadata: Option<String>,
-    },
-    /// Put a terminal (this one when omitted) on a task.
-    Assign {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The task's number.
-        task: String,
-        /// The terminal.
-        #[arg(long)]
-        term: Option<String>,
-    },
-    /// Start what runs for a task where the server places it, and print the task: Claude Code,
-    /// or with `--command` the program after `--`.
-    Spawn {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The task's number.
-        task: String,
-        /// This worker over the task's placement (name or id).
-        #[arg(long)]
-        worker: Option<String>,
-        /// Working directory on the worker; its home when omitted.
-        #[arg(long)]
-        cwd: Option<String>,
-        /// The agent's first prompt.
-        #[arg(long, conflicts_with = "command")]
-        prompt: Option<String>,
-        /// Run the words after `--` as the program, not as the agent's arguments.
-        #[arg(long)]
-        command: bool,
-        /// The agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
-        /// name. Each gets Slopty's tools and its role.
-        #[arg(long, conflicts_with = "command")]
-        agent: Option<String>,
-        /// The model, by the agent's own id.
-        #[arg(long, conflicts_with = "command")]
-        model: Option<String>,
-        /// An environment variable, `KEY=VALUE`; repeatable.
-        #[arg(long = "env", value_name = "KEY=VALUE", value_parser = key_value)]
-        env: Vec<(String, String)>,
-        #[command(flatten)]
-        size: SizeArgs,
-        /// Start it though a task it depends on is not done yet.
-        #[arg(long)]
-        ignore_dependencies: bool,
-        /// Arguments for the agent, or with `--command` the program and its arguments.
-        #[arg(last = true)]
-        args: Vec<String>,
-    },
-    /// Have several agents try a task at once, an attempt each, and print the task: each
-    /// attempt goes to the worker it names, or to one that fits and no other attempt took.
-    Attempts {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The task's number.
-        task: String,
-        /// One attempt: the agent, then `model=` and `on=` (a worker) when wanted, such as
-        /// `codex,model=o3,on=studio` or `pi`; repeatable, up to 6.
-        #[arg(long = "try", value_name = "AGENT[,model=M][,on=WORKER]", required = true,
-              value_parser = attempt)]
-        tries: Vec<Attempt>,
-        /// Working directory on each worker; beside a clone of the project's repository when
-        /// omitted.
-        #[arg(long)]
-        cwd: Option<String>,
-        /// Each agent's first prompt.
-        #[arg(long)]
-        prompt: Option<String>,
-        /// Start them though a task it depends on is not done yet.
-        #[arg(long)]
-        ignore_dependencies: bool,
-    },
-    /// Pick the attempt that lands, and print the task it tries: every other attempt stops,
-    /// its agent closed and its worktree freed, its branch kept.
-    Pick {
-        /// The project (this session's own when omitted).
-        #[arg(long)]
-        project: Option<String>,
-        /// The attempt's number.
-        attempt: String,
-    },
-    /// Report on a task's work to whoever split it off (its parent task's agent, or the
-    /// orchestrator), through that agent's hooks.
+    Update(Box<UpdateTask>),
+    /// Report on a task's work to the project's orchestrator, through its hooks.
     Report {
         #[command(flatten)]
         which: TaskRef,
@@ -729,18 +363,9 @@ pub enum TaskCmd {
         #[command(flatten)]
         which: TaskRef,
     },
-    /// Start a task its orchestrator proposed, as the person: where the server places it, or on
-    /// the worker named.
-    Start {
-        #[command(flatten)]
-        which: TaskRef,
-        /// This worker, over the proposal's and the task's placement.
-        #[arg(long, value_name = "WORKER")]
-        on: Option<String>,
-    },
     /// Tell a task's agent something: the words reach it through its hooks as a report does,
     /// never typed into its terminal (fix CI, address the comments, resolve the conflicts).
-    /// Inside an agent's session they are that agent's, to a task under it, and marked so.
+    /// Inside the orchestrator's session they are the orchestrator's, and marked so.
     Tell {
         #[command(flatten)]
         which: TaskRef,
@@ -801,6 +426,168 @@ pub enum TaskCmd {
         #[command(flatten)]
         placement: PlacementArgs,
     },
+}
+
+/// `slopty task update`.
+#[derive(Args, Debug)]
+pub struct UpdateTask {
+    #[command(flatten)]
+    which: TaskRef,
+    /// planned, running, waiting, blocked, verifying, done, merged or failed.
+    #[arg(long)]
+    state: Option<String>,
+    /// What it is doing, in its own words; empty clears it.
+    #[arg(long)]
+    status: Option<String>,
+    /// The branch its work is on.
+    #[arg(long)]
+    branch: Option<String>,
+    /// A repository-relative path to own beside what it owns; repeatable. Refused, naming
+    /// the task that holds it, when it overlaps a path another live task owns.
+    #[arg(long = "claim", value_name = "PATH")]
+    claim: Vec<String>,
+    /// The verifier passed on `--head` over `--base`.
+    #[arg(long, conflicts_with = "failed", requires_all = ["head", "base"])]
+    passed: bool,
+    /// The verifier failed on `--head` over `--base`.
+    #[arg(long, requires_all = ["head", "base"])]
+    failed: bool,
+    /// What the verifier said.
+    #[arg(long)]
+    summary: Option<String>,
+    /// The commit the verifier ran on, in hex.
+    #[arg(long)]
+    head: Option<String>,
+    /// The commit the task's work starts from, in hex.
+    #[arg(long)]
+    base: Option<String>,
+    /// Words for the timeline.
+    #[arg(long)]
+    note: Option<String>,
+    /// Its dependencies, in place of the old; repeatable.
+    #[arg(long = "depends-on", value_name = "TASK")]
+    depends_on: Vec<String>,
+    /// It depends on nothing now.
+    #[arg(long, conflicts_with = "depends_on")]
+    no_dependencies: bool,
+    /// A placement in place of the old, when any of its flags is given.
+    #[command(flatten)]
+    placement: PlacementArgs,
+    /// Run it on this worker over its placement's rules, or `anywhere` to let them choose.
+    #[arg(long, value_name = "WORKER")]
+    run_on: Option<String>,
+    /// Its own verifier; empty for the project's.
+    #[arg(long)]
+    verifier: Option<String>,
+    /// New metadata, a JSON object.
+    #[arg(long)]
+    metadata: Option<String>,
+}
+
+/// `slopty task start`.
+#[derive(Args, Debug)]
+pub struct StartTask {
+    /// The project (this session's own when omitted).
+    #[arg(long)]
+    project: Option<String>,
+    /// A task the project has, by its number, in place of a new one.
+    #[arg(long, conflicts_with_all = [
+        "title", "brief", "kind", "depends_on", "owns", "read_only", "verifier", "metadata",
+        "require", "prefer", "near", "avoid", "pin",
+    ])]
+    task: Option<String>,
+    /// A new task: what it is, in a line.
+    #[arg(long, required_unless_present = "task")]
+    title: Option<String>,
+    /// A new task: what its agent is told to do; its first prompt unless `--prompt` says
+    /// otherwise.
+    #[arg(long, default_value = "")]
+    brief: String,
+    /// A new task: what sort of work it is, in your words.
+    #[arg(long, default_value = "")]
+    kind: String,
+    /// A new task: a task it needs first; repeatable.
+    #[arg(long = "depends-on", value_name = "TASK")]
+    depends_on: Vec<String>,
+    /// A new task: a repository-relative path it alone may write; repeatable.
+    #[arg(long = "owns", value_name = "PATH")]
+    owns: Vec<String>,
+    /// A new task: it only reads, so it owns nothing.
+    #[arg(long, conflicts_with = "owns")]
+    read_only: bool,
+    #[command(flatten)]
+    placement: PlacementArgs,
+    /// A new task: its own verifier, over the project's.
+    #[arg(long)]
+    verifier: Option<String>,
+    /// A new task: anything to keep with it, as a JSON object.
+    #[arg(long)]
+    metadata: Option<String>,
+    /// This worker over the task's placement (name or id); the server places it when omitted.
+    #[arg(long)]
+    worker: Option<String>,
+    /// Working directory on the worker; beside a clone of the project's repository, in a git
+    /// worktree of the task's own when it writes, when omitted.
+    #[arg(long)]
+    cwd: Option<String>,
+    /// The agent's first prompt; a new task's brief when omitted.
+    #[arg(long, conflicts_with = "command")]
+    prompt: Option<String>,
+    /// Run the words after `--` as the program, not as the agent's arguments.
+    #[arg(long)]
+    command: bool,
+    /// The agent: `claude` (the default), `codex`, `pi`, or an ACP agent by the registry's
+    /// name. Each gets Slopty's tools and its role.
+    #[arg(long, conflicts_with = "command")]
+    agent: Option<String>,
+    /// The model, by the agent's own id.
+    #[arg(long, conflicts_with = "command")]
+    model: Option<String>,
+    /// An environment variable, `KEY=VALUE`; repeatable.
+    #[arg(long = "env", value_name = "KEY=VALUE", value_parser = key_value)]
+    env: Vec<(String, String)>,
+    #[command(flatten)]
+    size: SizeArgs,
+    /// Start it though a task it depends on is not done yet.
+    #[arg(long)]
+    ignore_dependencies: bool,
+    /// Arguments for the agent, or with `--command` the program and its arguments.
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
+impl StartTask {
+    /// Which task it starts, and what runs for it.
+    fn which(self) -> (Option<String>, Which, LaunchSpec) {
+        let run = if self.command {
+            Runner::Command { argv: self.args }
+        } else {
+            ops::agent_runner(self.agent.as_deref(), self.prompt, self.model, self.args)
+        };
+        let launch = LaunchSpec {
+            pin: self.worker,
+            cwd: self.cwd.unwrap_or_default(),
+            run,
+            env: self.env,
+            size: self.size.size(),
+            ignore_dependencies: self.ignore_dependencies,
+        };
+        let which = match (self.task, self.title) {
+            (Some(task), _) => Which::Made(task),
+            (None, title) => Which::New(Box::new(NewTask {
+                depends_on: self.depends_on,
+                kind: self.kind,
+                title: title.unwrap_or_default(),
+                brief: self.brief,
+                owns: self.owns,
+                read_only: self.read_only,
+                placement: self.placement.spec(),
+                verifier: self.verifier,
+                metadata: self.metadata,
+            })),
+        };
+        (self.project, which, launch)
+    }
 }
 
 /// What a report is.
@@ -929,7 +716,6 @@ pub async fn project(
                 Ok(())
             }
         }
-        ProjectCmd::Schedule { cmd } => schedule(*cmd, &mut res, link, (json, key)).await,
         ProjectCmd::Script { cmd } => script(cmd, &mut res, link, (json, key)).await,
         ProjectCmd::Status { project, since, timeout } => {
             let status = ops::project_status(link, project.as_deref(), since, timeout).await?;
@@ -950,35 +736,6 @@ fn state(word: Option<&str>) -> Result<Option<TaskState>> {
     }
 }
 
-/// One attempt of `slopty task attempts`: which agent, with which model, on which worker.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Attempt {
-    /// The agent, as `--agent` names one.
-    pub agent: String,
-    /// The model, by the agent's own id.
-    pub model: Option<String>,
-    /// The worker, by name or id.
-    pub on: Option<String>,
-}
-
-/// An attempt as typed: the agent, then `model=` and `on=` in any order, comma-separated.
-fn attempt(text: &str) -> Result<Attempt, String> {
-    let mut parts = text.split(',').map(str::trim);
-    let agent = parts.next().filter(|a| !a.is_empty() && !a.contains('='));
-    let Some(agent) = agent else {
-        return Err(format!("{text:?} names no agent first, as in codex,model=o3,on=studio"));
-    };
-    let mut tried = Attempt { agent: agent.to_owned(), model: None, on: None };
-    for part in parts {
-        match part.split_once('=') {
-            Some(("model", model)) if !model.is_empty() => tried.model = Some(model.to_owned()),
-            Some(("on", worker)) if !worker.is_empty() => tried.on = Some(worker.to_owned()),
-            _ => return Err(format!("{part:?} is not model=… or on=…")),
-        }
-    }
-    Ok(tried)
-}
-
 /// Run a `slopty task …`.
 pub async fn task(
     cmd: TaskCmd,
@@ -988,55 +745,30 @@ pub async fn task(
 ) -> Result<()> {
     let mut res = Resolver::new(link);
     let task = match cmd {
-        TaskCmd::Create {
-            project,
-            parent,
-            depends_on,
-            kind,
-            title,
-            brief,
-            owns,
-            read_only,
-            placement,
-            verifier,
-            metadata,
-        } => {
-            let new = NewTask {
-                parent,
+        TaskCmd::Start(start) => {
+            let (project, which, launch) = start.which();
+            ops::task_start(&mut res, project.as_deref(), which, launch, key).await?
+        }
+        TaskCmd::Update(update) => {
+            let UpdateTask {
+                which,
+                state: word,
+                status,
+                branch,
+                claim,
+                passed,
+                failed,
+                summary,
+                head,
+                base,
+                note,
                 depends_on,
-                kind,
-                title,
-                brief,
-                owns,
-                read_only,
-                placement: placement.spec(),
+                no_dependencies,
+                placement,
+                run_on,
                 verifier,
                 metadata,
-            };
-            ops::task_create(&mut res, project.as_deref(), new, key).await?
-        }
-        TaskCmd::Claim { which, paths } => {
-            ops::task_claim(link, which.project.as_deref(), which.task.as_deref(), paths, key)
-                .await?
-        }
-        TaskCmd::Update {
-            which,
-            state: word,
-            status,
-            branch,
-            passed,
-            failed,
-            summary,
-            head,
-            base,
-            note,
-            depends_on,
-            no_dependencies,
-            placement,
-            run_on,
-            verifier,
-            metadata,
-        } => {
+            } = *update;
             let verified = (passed || failed).then(|| VerifierRun {
                 passed,
                 summary: summary.clone().unwrap_or_default(),
@@ -1059,6 +791,7 @@ pub async fn task(
                 state: state(word.as_deref())?,
                 status,
                 branch,
+                claim,
                 verified,
                 base,
                 note,
@@ -1076,56 +809,6 @@ pub async fn task(
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_update(&mut res, project, task, change, placement, key).await?
         }
-        TaskCmd::Assign { project, task, term } => {
-            ops::task_assign(&mut res, project.as_deref(), Some(&task), term.as_deref(), key)
-                .await?
-        }
-        TaskCmd::Spawn {
-            project,
-            task,
-            worker,
-            cwd,
-            prompt,
-            command,
-            agent,
-            model,
-            env,
-            size,
-            ignore_dependencies,
-            args,
-        } => {
-            let run = if command {
-                Runner::Command { argv: args }
-            } else {
-                ops::agent_runner(agent.as_deref(), prompt, model, args)
-            };
-            let launch = LaunchSpec {
-                pin: worker,
-                cwd: cwd.unwrap_or_default(),
-                run,
-                env,
-                size: size.size(),
-                ignore_dependencies,
-            };
-            ops::task_spawn(&mut res, project.as_deref(), Some(&task), launch, key).await?
-        }
-        TaskCmd::Attempts { project, task, tries, cwd, prompt, ignore_dependencies } => {
-            let specs = tries
-                .into_iter()
-                .map(|t| LaunchSpec {
-                    pin: t.on,
-                    cwd: cwd.clone().unwrap_or_default(),
-                    run: ops::agent_runner(Some(&t.agent), prompt.clone(), t.model, Vec::new()),
-                    env: Vec::new(),
-                    size: None,
-                    ignore_dependencies,
-                })
-                .collect();
-            ops::task_attempts(&mut res, project.as_deref(), Some(&task), specs, key).await?
-        }
-        TaskCmd::Pick { project, attempt } => {
-            ops::task_pick(link, project.as_deref(), &attempt, key).await?
-        }
         TaskCmd::Report { which, kind, note, artifacts, branch, pr } => {
             let report = Report { kind: kind.kind(), note, artifacts, branch, pr };
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
@@ -1134,10 +817,6 @@ pub async fn task(
         TaskCmd::Merge { which } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_merge(link, project, task, key).await?
-        }
-        TaskCmd::Start { which, on } => {
-            let (project, task) = (which.project.as_deref(), which.task.as_deref());
-            ops::task_start(&mut res, project, task, on.as_deref(), key).await?
         }
         TaskCmd::Tell { which, words } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
@@ -1197,11 +876,6 @@ fn print_task(task: &Task, json: bool) -> Result<()> {
         .as_ref()
         .map_or_else(String::new, |a| format!("  {}", slopty_tools::view::term_string(a.term)));
     println!("#{} {}  {}{term}", task.id, view::state_word(task.state), task.title);
-    if let Some(attempts) = &task.attempts {
-        let tried: Vec<String> = attempts.tried.iter().map(|t| format!("#{t}")).collect();
-        let picked = attempts.picked.map_or_else(String::new, |p| format!(", #{p} picked"));
-        println!("  attempts {}{picked}", tried.join(" "));
-    }
     Ok(())
 }
 
@@ -1237,36 +911,5 @@ fn finding(text: &str) -> slopty_proto::project::Finding {
         }
         _ if place.contains(char::is_whitespace) => blocker(None, None, text),
         _ => blocker(Some(place), None, body),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Attempt, attempt, zone_of};
-
-    /// The zone this machine is in is read from where its zone file points.
-    #[test]
-    fn the_local_zone_is_read_from_its_zone_file() {
-        let macos = "/var/db/timezone/zoneinfo/Asia/Ho_Chi_Minh";
-        assert_eq!(zone_of(macos).as_deref(), Some("Asia/Ho_Chi_Minh"));
-        assert_eq!(zone_of("/usr/share/zoneinfo/Europe/Berlin").as_deref(), Some("Europe/Berlin"));
-        assert_eq!(zone_of("/etc/localtime"), None);
-    }
-
-    /// An attempt names its agent first, then a model and a worker in either order; anything
-    /// else is refused saying what it takes.
-    #[test]
-    fn an_attempt_names_its_agent_then_its_model_and_worker() {
-        let full = Attempt {
-            agent: "codex".to_owned(),
-            model: Some("o3".to_owned()),
-            on: Some("studio".to_owned()),
-        };
-        assert_eq!(attempt("codex,model=o3,on=studio"), Ok(full.clone()));
-        assert_eq!(attempt("codex, on=studio, model=o3"), Ok(full));
-        let acp = Attempt { agent: "acp:gemini".to_owned(), model: None, on: None };
-        assert_eq!(attempt("acp:gemini"), Ok(acp));
-        assert!(attempt("model=o3").unwrap_err().contains("names no agent"));
-        assert!(attempt("pi,size=9").unwrap_err().contains("not model="));
     }
 }

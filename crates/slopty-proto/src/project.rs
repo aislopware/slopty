@@ -1,7 +1,7 @@
 //! Projects: one goal worked on by many agents across the fleet (`docs/decisions/projects.md`).
 //!
-//! A [`Project`] lives on the server. Its [`Task`]s form a tree by [`Task::parent`] (who split
-//! it off, to any depth the project allows) and a graph by [`Task::depends_on`]. Each owns the
+//! A [`Project`] lives on the server. Its [`Task`]s are its orchestrator's, one level under it,
+//! and form a graph by [`Task::depends_on`]. Each owns the
 //! paths it may write ([`Task::owns`]) unless it only reads, says where it may run as
 //! expressions over the workers' [`Facts`] ([`Placement`]), and, once something runs for it,
 //! names that terminal, or the thread any agent runs as ([`Assignment`]): Claude Code, Codex,
@@ -281,16 +281,18 @@ pub struct WorkerFacts {
     pub facts: Facts,
 }
 
-/// How many agents may run and what they may spend, set per project by whoever runs it,
-/// within the [`Bounds`].
+/// How many agents may run, how much may wait on the person and what the agents may spend, set
+/// per project within the [`Bounds`].
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Limits {
     /// Most live agents of this project on any one worker.
     pub live_per_worker: u16,
     /// Most live agents of this project in all.
     pub live_per_project: u16,
-    /// How deep its tree of tasks may go: 1 is tasks with no parent only.
-    pub depth: u16,
+    /// Most of its tasks that may wait on the person ([`TaskCard::waits_on_person`]) before its
+    /// orchestrator starts no more: what the person can review sets the pace. Only the person
+    /// sets it.
+    pub review: u16,
     /// How many timeline entries it keeps.
     pub timeline_kept: u32,
     /// What its agents may spend before it places no new work and asks the person.
@@ -302,19 +304,19 @@ impl Default for Limits {
         Self {
             live_per_worker: 4,
             live_per_project: 12,
-            depth: 8,
+            review: 3,
             timeline_kept: 4096,
             budget: None,
         }
     }
 }
 
-/// What a project's agents may spend, by meter: an open map of a meter's name to its cap.
+/// What a project's agents may spend of their plans, per rate window.
 ///
-/// [`Budget::USD`] caps the estimated cost, in millionths of a US dollar as the agents' meters
-/// say it. Any other name is a plan's rate window as the agents name it
-/// ([`crate::thread::Limit::name`]: `five-hour`, `seven-day`), capped in hundredths of a percent
-/// of it. At the cap the project starts no task and holds its orchestrator's tells until the
+/// An open map of a plan's rate window, as the agents name it ([`crate::thread::Limit::name`]:
+/// `five-hour`, `seven-day`), to its cap in hundredths of a percent of it.
+///
+/// At the cap the project starts no task and holds its orchestrator's tells until the
 /// person raises the cap or stops it; turns under way finish, so it may pass the cap by up to
 /// one turn per live agent.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -325,24 +327,21 @@ impl Budget {
     pub const METERS_MAX: usize = 8;
     /// The share of a cap at which the person hears it comes near, in hundredths of a percent.
     pub const NEAR_BP: u64 = 8_000;
-    /// The estimated cost's meter.
-    pub const USD: &'static str = "usd";
 
-    /// Whether it may be set: up to [`Self::METERS_MAX`] meters, each named within
-    /// [`crate::items::FACT_KEY_MAX`] characters with no space, each cap above nothing, and a
-    /// window's no more than the whole of it.
+    /// Whether it may be set: up to [`Self::METERS_MAX`] windows, each named within
+    /// [`crate::items::FACT_KEY_MAX`] characters with no space, each cap above nothing and no
+    /// more than the whole window.
     #[must_use]
     pub fn fits(&self) -> bool {
         self.0.len() <= Self::METERS_MAX
             && self.0.iter().all(|(name, cap)| {
                 (1..=crate::items::FACT_KEY_MAX).contains(&name.chars().count())
                     && !name.chars().any(|c| c.is_whitespace() || c.is_control())
-                    && *cap > 0
-                    && (name == Self::USD || *cap <= 10_000)
+                    && (1..=10_000).contains(cap)
             })
     }
 
-    /// How `spend` stands against it: each capped meter's use as a share of its cap, in
+    /// How `spend` stands against it: each capped window's use as a share of its cap, in
     /// hundredths of a percent, fullest first.
     #[must_use]
     pub fn against(&self, spend: &Spend) -> Vec<(String, u64)> {
@@ -350,11 +349,7 @@ impl Budget {
             .0
             .iter()
             .filter_map(|(name, cap)| {
-                let used = if name == Self::USD {
-                    spend.cost_micro_usd
-                } else {
-                    u64::from(*spend.windows.get(name)?)
-                };
+                let used = u64::from(*spend.windows.get(name)?);
                 Some((name.clone(), used.saturating_mul(10_000).checked_div(*cap)?))
             })
             .collect();
@@ -362,29 +357,18 @@ impl Budget {
         shares
     }
 
-    /// `text` as a cap of `meter`, as a person writes it: dollars to the cent for
-    /// [`Self::USD`] (`12.50`, `$12.50`), a percent to the hundredth for a plan window (`80`,
-    /// `80%`), at most the whole window. `None` for anything else, nothing included.
+    /// `text` as a cap, as a person writes it: a percent of the window to the hundredth (`80`,
+    /// `80%`), at most the whole of it. `None` for anything else, nothing included.
     #[must_use]
-    pub fn cap_of(meter: &str, text: &str) -> Option<u64> {
+    pub fn cap_of(text: &str) -> Option<u64> {
         let text = text.trim();
-        if meter == Self::USD {
-            hundredths(text.strip_prefix('$').unwrap_or(text)).map(|c| c.saturating_mul(10_000))
-        } else {
-            hundredths(text.strip_suffix('%').unwrap_or(text)).filter(|bp| *bp <= 10_000)
-        }
+        hundredths(text.strip_suffix('%').unwrap_or(text)).filter(|bp| *bp <= 10_000)
     }
 
-    /// `amount` of `meter` for people: dollars to the cent for [`Self::USD`] (`$3.50`), a
-    /// percent for a plan window (`80.00%`).
+    /// `amount`, in hundredths of a percent, for people: `80.00%`.
     #[must_use]
-    pub fn figure(meter: &str, amount: u64) -> String {
-        if meter == Self::USD {
-            let cents = amount / 10_000;
-            format!("${}.{:02}", cents / 100, cents % 100)
-        } else {
-            format!("{}.{:02}%", amount / 100, amount % 100)
-        }
+    pub fn figure(amount: u64) -> String {
+        format!("{}.{:02}%", amount / 100, amount % 100)
     }
 
     /// The meter at or past its cap, the fullest first, when one is.
@@ -406,14 +390,12 @@ fn hundredths(text: &str) -> Option<u64> {
     (n > 0).then_some(n)
 }
 
-/// What a project's agents spent by their own meters.
+/// What a project's agents spent of their plans.
 ///
 /// The server tallies it from every thread that ever worked for it: each agent's session, its
-/// subagents', and every agent a task was given again. Estimates, as the agents say them.
+/// subagents', and every agent a task was given again.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Spend {
-    /// The estimated cost, in millionths of a US dollar.
-    pub cost_micro_usd: u64,
     /// Each plan rate window its agents report, by name, at the fullest any of them says, in
     /// hundredths of a percent.
     pub windows: BTreeMap<String, u32>,
@@ -426,8 +408,8 @@ pub struct LimitsChange {
     pub live_per_worker: Option<u16>,
     /// A new [`Limits::live_per_project`].
     pub live_per_project: Option<u16>,
-    /// A new [`Limits::depth`].
-    pub depth: Option<u16>,
+    /// A new [`Limits::review`]; only the person sets it.
+    pub review: Option<u16>,
     /// A new [`Limits::timeline_kept`].
     pub timeline_kept: Option<u32>,
     /// A new [`Limits::budget`]; an empty one takes the budget away.
@@ -446,8 +428,6 @@ pub struct Bounds {
     pub live_per_worker: u16,
     /// Highest [`Limits::live_per_project`] a project may set.
     pub live_per_project: u16,
-    /// Deepest [`Limits::depth`] a project may set.
-    pub depth: u16,
     /// Most [`Limits::timeline_kept`] a project may set.
     pub timeline_kept: u32,
     /// Whether an agent started for this project may be given flags that loosen Claude
@@ -475,7 +455,6 @@ impl Default for Bounds {
             live_agents: 24,
             live_per_worker: 8,
             live_per_project: 24,
-            depth: 16,
             timeline_kept: 65_536,
             permission_flags: false,
             projects: 64,
@@ -496,7 +475,6 @@ impl Bounds {
         live_agents: 1024,
         live_per_worker: 256,
         live_per_project: 1024,
-        depth: 64,
         timeline_kept: 1 << 20,
         permission_flags: true,
         projects: 256,
@@ -517,7 +495,6 @@ impl Bounds {
             ("live_agents", u64::from(self.live_agents), u64::from(c.live_agents)),
             ("live_per_worker", u64::from(self.live_per_worker), u64::from(c.live_per_worker)),
             ("live_per_project", u64::from(self.live_per_project), u64::from(c.live_per_project)),
-            ("depth", u64::from(self.depth), u64::from(c.depth)),
             ("timeline_kept", u64::from(self.timeline_kept), u64::from(c.timeline_kept)),
             ("projects", u64::from(self.projects), u64::from(c.projects)),
             (
@@ -604,8 +581,6 @@ pub struct Project {
     pub metadata: Option<String>,
     /// What each kind of its work needs of the machine it runs on ([`Need`]).
     pub needs: Vec<Need>,
-    /// The tasks it runs on a schedule the person set, at most [`SCHEDULES_MAX`].
-    pub schedules: Vec<Schedule>,
     /// The person's named commands for it (dev, test, build), at most [`SCRIPTS_MAX`].
     pub scripts: Vec<Script>,
     /// When it was made, by the server's clock.
@@ -977,8 +952,7 @@ impl Assignment {
     }
 }
 
-/// What a task's agent says of its work, for whoever split it off: its parent task's agent,
-/// or the project's orchestrator.
+/// What a task's agent says of its work, for the project's orchestrator.
 ///
 /// When it is delivered follows its kind: a need or a block at once, a finish once it has
 /// settled (a later report of the task replaces it), a checkpoint with the next delivery.
@@ -1158,8 +1132,6 @@ pub struct NativeChange {
 /// What a new task is: everything about it before anything runs for it.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct TaskSpec {
-    /// The task it was split from; one of the orchestrator's own when absent.
-    pub parent: Option<TaskId>,
     /// Tasks whose work it needs first. They and their own never lead back to it.
     pub depends_on: Vec<TaskId>,
     /// What sort of work it is, in the orchestrator's own words (`build`, `review`, `bench`).
@@ -1181,13 +1153,11 @@ pub struct TaskSpec {
     pub metadata: Option<String>,
 }
 
-/// A task: a node of a project's tree and graph.
+/// A task: one part of a project's goal its orchestrator started, and a node of its graph.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Task {
     /// Its number in the project.
     pub id: TaskId,
-    /// The task it was split from; one of the orchestrator's own when absent.
-    pub parent: Option<TaskId>,
     /// Tasks whose work it needs first.
     pub depends_on: Vec<TaskId>,
     /// What sort of work it is.
@@ -1240,34 +1210,143 @@ pub struct Task {
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
-    /// Its attempts, when several agents try it at once
-    /// ([`crate::orchestration::Verb::TaskAttempts`]).
-    pub attempts: Option<Attempts>,
+    /// The server's automatic give-backs of its work since the person last spoke on it.
+    pub give_backs: GiveBacks,
+    /// What its work did to the project's tests, as of its last done report.
+    pub tests: Option<TestDiff>,
 }
 
-/// The kind of a task that is one attempt at its parent: several try the same brief, each in
-/// a worktree of its own, and the one picked lands ([`Attempts`]).
-pub const ATTEMPT_KIND: &str = "attempt";
+/// How many automatic give-backs a task takes before a failure goes to the person instead of
+/// its agent: verifier failures, rebase conflicts and review rounds together.
+pub const GIVE_BACKS_MAX: u8 = 3;
+/// How many of a task's automatic give-backs may be a reviewer's changes asked: a second round
+/// goes to the person with the findings.
+pub const REVIEW_GIVE_BACKS_MAX: u8 = 1;
 
-/// Most attempts at one task.
-pub const ATTEMPTS_MAX: usize = 6;
-
-/// A task tried by several agents at once, each attempt a sub-task of its own.
+/// The server's automatic give-backs of a task's work to its agent, since the person last
+/// spoke on it (`docs/decisions/projects.md`, "At most three automatic give-backs").
 ///
-/// Each attempt ([`ATTEMPT_KIND`]) runs on its own worker or model. Every attempt is verified
-/// (and read by the reviewer) as a task is, but only the one picked joins the merge queue; the
-/// others stop, their agents closed and their worktrees freed, their branches kept.
-#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub struct Attempts {
-    /// The attempts, in the order they were made; at most [`ATTEMPTS_MAX`].
-    pub tried: Vec<TaskId>,
-    /// The one picked to land, once the person or the orchestrator picked it
-    /// ([`crate::orchestration::Verb::TaskPick`]).
-    pub picked: Option<TaskId>,
+/// Past [`GIVE_BACKS_MAX`] of them, or past [`REVIEW_GIVE_BACKS_MAX`] of a reviewer's, the next
+/// failure is held for the person: its agent is not told, and the task waits on the person
+/// until they say what next. The person's next word on the task starts the count again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct GiveBacks {
+    /// How many went back to its agent.
+    pub count: u8,
+    /// Of those, how many were a reviewer's changes asked.
+    pub reviews: u8,
+    /// A failure past the cap waits for the person.
+    pub held: bool,
 }
 
-/// The most schedules a project keeps.
-pub const SCHEDULES_MAX: usize = 16;
+impl GiveBacks {
+    /// Whether one more give-back, a reviewer's when `review`, still goes to the agent.
+    #[must_use]
+    pub const fn room(self, review: bool) -> bool {
+        self.count < GIVE_BACKS_MAX && (!review || self.reviews < REVIEW_GIVE_BACKS_MAX)
+    }
+}
+
+/// The most test files a [`TestDiff`] names of each kind.
+pub const TESTS_NAMED: usize = 8;
+/// The key in a project's metadata naming paths that hold tests beside the usual ones
+/// ([`is_test_path`]): an array of repository-relative paths.
+pub const TEST_PATHS_KEY: &str = "test_paths";
+
+/// What a task's work did to the project's tests: the test files it deleted, changed and
+/// added, from `git diff --name-status` between where it left the target and its head.
+///
+/// A work that deletes or rewrites tests to pass is what a reviewer looks at first, so the
+/// card, every give-back and the reviewer's brief say it.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct TestDiff {
+    /// The commit it was read at, in hex.
+    pub head: String,
+    /// Test files it deleted, at most [`TESTS_NAMED`].
+    pub deleted: Vec<String>,
+    /// Test files it changed or renamed, at most [`TESTS_NAMED`].
+    pub changed: Vec<String>,
+    /// How many test files it deleted in all.
+    pub deleted_count: u16,
+    /// How many test files it changed in all.
+    pub changed_count: u16,
+    /// How many test files it added.
+    pub added_count: u16,
+}
+
+impl TestDiff {
+    /// The most it takes on the wire.
+    pub const MAX_BYTES: usize = 2 * TESTS_NAMED * (REF_MAX + 2) + 64 + 24;
+
+    /// About how many bytes it takes on the wire, never less.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        self.deleted
+            .iter()
+            .chain(&self.changed)
+            .map(|p| p.len().saturating_add(10))
+            .fold(self.head.len().saturating_add(40), usize::saturating_add)
+    }
+
+    /// Whether it touched no test.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.deleted_count == 0 && self.changed_count == 0 && self.added_count == 0
+    }
+
+    /// What it did, in a line: `Tests: 1 deleted (tests/a.rs), 2 changed (…), 3 added`, or
+    /// that it touched none.
+    #[must_use]
+    pub fn line(&self) -> String {
+        if self.is_empty() {
+            return "Tests: none deleted, changed or added".to_owned();
+        }
+        let named = |count: u16, paths: &[String], what: &str| {
+            (count > 0).then(|| {
+                let more = usize::from(count).saturating_sub(paths.len());
+                let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+                format!("{count} {what} ({}{more})", paths.join(", "))
+            })
+        };
+        let parts: Vec<String> = [
+            named(self.deleted_count, &self.deleted, "deleted"),
+            named(self.changed_count, &self.changed, "changed"),
+            (self.added_count > 0).then(|| format!("{} added", self.added_count)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        format!("Tests: {}", parts.join(", "))
+    }
+}
+
+/// Whether `path`, relative to the repository's root, holds tests.
+///
+/// It does when it is within one of `extra` (a project's [`TEST_PATHS_KEY`]), it has a
+/// directory named `test`, `tests`, `spec` or `__tests__`, or its file is `test.*`, `tests.*`
+/// or `test_*.*`, or ends in `_test.*`, `.test.*`, `_spec.*` or `.spec.*`.
+#[must_use]
+pub fn is_test_path(path: &str, extra: &[String]) -> bool {
+    let path = path.trim_matches('/');
+    let within = |outer: &str| {
+        let outer = outer.trim().trim_matches('/');
+        !outer.is_empty()
+            && (path == outer || path.strip_prefix(outer).is_some_and(|r| r.starts_with('/')))
+    };
+    if extra.iter().any(|e| within(e)) {
+        return true;
+    }
+    let mut parts: Vec<&str> = path.split('/').collect();
+    let name = parts.pop().unwrap_or_default();
+    if parts.iter().any(|d| matches!(*d, "test" | "tests" | "spec" | "__tests__")) {
+        return true;
+    }
+    let Some((stem, _ext)) = name.rsplit_once('.') else { return false };
+    matches!(stem, "test" | "tests")
+        || stem.starts_with("test_")
+        || ["_test", "_spec", ".test", ".spec"].iter().any(|end| stem.ends_with(end))
+}
+
 /// The most scripts a project keeps.
 pub const SCRIPTS_MAX: usize = 32;
 /// The longest script name, in bytes ([`Script::name`]).
@@ -1326,89 +1405,6 @@ impl Script {
         }
     }
 }
-/// The longest schedule rule kept, in bytes ([`ScheduleSpec::when`]).
-pub const WHEN_MAX: usize = 128;
-/// The longest time zone name kept, in bytes ([`ScheduleSpec::zone`]).
-pub const ZONE_MAX: usize = 64;
-
-/// What a schedule makes and starts each time it runs, and when.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ScheduleSpec {
-    /// The task each run makes, as [`crate::orchestration::Verb::TaskCreate`] would: it
-    /// hangs from no other and depends on none.
-    pub task: TaskSpec,
-    /// What starts for it, as [`crate::orchestration::Verb::TaskSpawn`] would start it.
-    pub launch: TaskLaunch,
-    /// When it runs: five cron fields (minute, hour, day of the month, month, day of the
-    /// week), or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`.
-    pub when: String,
-    /// The IANA time zone [`Self::when`] is read in, the person's own; the server's own when
-    /// empty.
-    pub zone: String,
-    /// It runs only when the person says ([`crate::orchestration::Verb::ScheduleRun`]).
-    pub paused: bool,
-}
-
-/// One run of a schedule: the task it made, or why it made none or could not start it.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct ScheduleRun {
-    /// When, by the server's clock.
-    pub at_ms: WallMs,
-    /// The task it made.
-    pub task: Option<TaskId>,
-    /// Why it made no task, or could not start the one it made.
-    pub why: Option<String>,
-}
-
-/// A task the server makes and starts on a schedule the person set.
-///
-/// A nightly dependency bump, a weekly audit. Only the person sets one, since every run spends
-/// the plan; it runs under the project's placement, limits and budget as any start does.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Schedule {
-    /// Its number within the project.
-    pub id: u32,
-    /// What it makes, and when.
-    pub spec: ScheduleSpec,
-    /// When it runs next, by the server's clock; none while paused.
-    pub next_ms: Option<WallMs>,
-    /// Its last run.
-    pub last: Option<ScheduleRun>,
-    /// When it was set.
-    pub created_ms: WallMs,
-}
-
-impl Schedule {
-    /// About how many bytes it takes on the wire, never less.
-    #[must_use]
-    pub fn approx_bytes(&self) -> usize {
-        let ScheduleSpec { task, launch, when, zone, .. } = &self.spec;
-        let texts = [&task.title, &task.brief, &task.kind, &launch.cwd, when, zone]
-            .into_iter()
-            .map(String::len)
-            .chain(task.owns.iter().map(String::len))
-            .chain(task.verifier.as_deref().map(str::len))
-            .chain(task.placement.require.iter().map(String::len))
-            .chain(task.placement.prefer.iter().map(|p| p.expr.len()))
-            .chain(launch.env.iter().map(|(k, v)| k.len().saturating_add(v.len())))
-            .chain(self.last.as_ref().and_then(|l| l.why.as_deref()).map(str::len));
-        let run = match &launch.run {
-            Runner::Claude { prompt, args } | Runner::Codex { prompt, args } => prompt
-                .as_deref()
-                .map_or(0, str::len)
-                .saturating_add(args.iter().map(String::len).sum()),
-            Runner::Command { argv } => argv.iter().map(String::len).sum(),
-            Runner::Agent { agent, prompt, model, args } => agent
-                .0
-                .len()
-                .saturating_add(prompt.as_deref().map_or(0, str::len))
-                .saturating_add(model.as_deref().map_or(0, str::len))
-                .saturating_add(args.iter().map(String::len).sum()),
-        };
-        texts.fold(run.saturating_add(160), |sum, len| sum.saturating_add(len).saturating_add(5))
-    }
-}
-
 /// How long an agent worked: the stretches it was at work, the waits between left out.
 ///
 /// The server follows the agent's status ([`Spent::works`]): a stretch begins when it starts
@@ -1666,6 +1662,18 @@ impl VerifierRun {
 }
 
 impl Task {
+    /// Whether it waits on the person, as its card says ([`TaskCard::waits_on_person`]).
+    #[must_use]
+    pub const fn waits_on_person(&self) -> bool {
+        self.ready_to_merge() || matches!(self.state, TaskState::Blocked) || self.give_backs.held
+    }
+
+    /// Whether its work was checked and waits for the person's Merge.
+    #[must_use]
+    pub const fn ready_to_merge(&self) -> bool {
+        matches!(self.state, TaskState::Done) && self.merge.is_none()
+    }
+
     /// The git ref its base commit is kept under in a mirror of `project`'s repository.
     #[must_use]
     pub fn base_ref(&self, project: &ProjectId) -> String {
@@ -1692,7 +1700,6 @@ impl Task {
     pub fn card(&self, natives: &Natives) -> TaskCard {
         TaskCard {
             id: self.id,
-            parent: self.parent,
             depends_on: self.depends_on.clone(),
             kind: self.kind.clone(),
             title: self.title.clone(),
@@ -1714,7 +1721,8 @@ impl Task {
             natives: natives.counts(),
             created_ms: self.created_ms,
             updated_ms: self.updated_ms,
-            attempts: self.attempts.clone(),
+            give_backs: self.give_backs,
+            tests: self.tests.clone(),
         }
     }
 }
@@ -1729,8 +1737,6 @@ impl Task {
 pub struct TaskCard {
     /// Its number.
     pub id: TaskId,
-    /// The task it was split from.
-    pub parent: Option<TaskId>,
     /// The tasks it needs first.
     pub depends_on: Vec<TaskId>,
     /// What sort of work it is.
@@ -1773,8 +1779,10 @@ pub struct TaskCard {
     pub created_ms: WallMs,
     /// When it last changed.
     pub updated_ms: WallMs,
-    /// Its attempts, when several agents try it at once.
-    pub attempts: Option<Attempts>,
+    /// The server's automatic give-backs since the person last spoke on it.
+    pub give_backs: GiveBacks,
+    /// What its work did to the project's tests.
+    pub tests: Option<TestDiff>,
 }
 
 impl TaskCard {
@@ -1790,8 +1798,23 @@ impl TaskCard {
         + 2 * Suggestion::WHY_MAX
         + KIND_MAX
         + Checks::MAX_BYTES
-        + ATTEMPTS_MAX * 5
+        + TestDiff::MAX_BYTES
         + 800;
+
+    /// Whether it waits on the person: its work is ready to merge ([`Self::ready_to_merge`]),
+    /// its agent asks them something, or a failure past its give-backs is held for them. What
+    /// [`Limits::review`] counts.
+    #[must_use]
+    pub const fn waits_on_person(&self) -> bool {
+        self.ready_to_merge() || matches!(self.state, TaskState::Blocked) || self.give_backs.held
+    }
+
+    /// Whether its work was checked and waits for the person's Merge: done, and neither in the
+    /// queue nor merged.
+    #[must_use]
+    pub const fn ready_to_merge(&self) -> bool {
+        matches!(self.state, TaskState::Done) && self.merge.is_none()
+    }
 }
 
 impl TaskCard {
@@ -1826,7 +1849,7 @@ impl TaskCard {
                     .saturating_add(64)
             }),
             self.depends_on.len().saturating_mul(5),
-            self.attempts.as_ref().map_or(0, |a| a.tried.len().saturating_mul(5).saturating_add(8)),
+            self.tests.as_ref().map_or(0, TestDiff::approx_bytes),
             self.step.as_ref().map_or(0, TaskStep::approx_bytes),
             self.proposed
                 .as_ref()
@@ -1972,7 +1995,7 @@ pub enum Moment {
     /// Its agents' spend came near a cap of its budget ([`Budget::NEAR_BP`]) or reached it,
     /// where it starts no task until the person raises the cap.
     Budget {
-        /// The meter ([`Budget::USD`], or a plan window's name).
+        /// The plan window's name.
         meter: String,
         /// How much of its cap is spent, in hundredths of a percent.
         share_bp: u64,
@@ -2055,7 +2078,10 @@ impl Project {
             self.metadata.as_deref().map_or(0, str::len),
             self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
             self.needs.iter().map(Need::approx_bytes).sum(),
-            self.schedules.iter().map(Schedule::approx_bytes).sum(),
+            self.scripts
+                .iter()
+                .map(|s| s.command.len().saturating_add(s.name.len()).saturating_add(32))
+                .sum(),
             self.spend.windows.keys().map(|k| k.len().saturating_add(5)).sum(),
             self.limits
                 .budget
@@ -2097,6 +2123,9 @@ pub struct TaskChange {
     pub status: Option<String>,
     /// The branch its work is on.
     pub branch: Option<String>,
+    /// More repository paths for it to own, beside those it owns; refused when one overlaps a
+    /// path another live task of the project holds.
+    pub claim: Vec<String>,
     /// What its verifier said. Only the person and the merge queue record it.
     pub verified: Option<VerifierRun>,
     /// The commit its work starts from.
@@ -2240,44 +2269,101 @@ impl AgentReport {
 mod tests {
     use super::*;
 
-    /// A budget weighs each meter it caps: the cost in millionths of a dollar, a plan window in
-    /// hundredths of a percent; a meter its agents never reported weighs nothing. The fullest
-    /// comes first, and a cap is reached at its whole.
+    /// A budget weighs each plan window it caps, in hundredths of a percent; a window its
+    /// agents never reported weighs nothing. The fullest comes first, and a cap is reached at
+    /// its whole.
     #[test]
-    fn a_budget_weighs_each_capped_meter_and_says_which_is_reached() {
+    fn a_budget_weighs_each_capped_window_and_says_which_is_reached() {
         let budget = Budget(BTreeMap::from([
-            (Budget::USD.to_owned(), 50_000_000),
             ("five-hour".to_owned(), 8_000),
             ("seven-day".to_owned(), 5_000),
         ]));
         let spend = Spend {
-            cost_micro_usd: 40_000_000,
-            windows: BTreeMap::from([("five-hour".to_owned(), 8_800)]),
+            windows: BTreeMap::from([
+                ("five-hour".to_owned(), 8_800),
+                ("seven-day".to_owned(), 4_000),
+            ]),
         };
         assert_eq!(
             budget.against(&spend),
-            [("five-hour".to_owned(), 11_000), (Budget::USD.to_owned(), 8_000)]
+            [("five-hour".to_owned(), 11_000), ("seven-day".to_owned(), 8_000)]
         );
         assert_eq!(budget.reached(&spend).as_deref(), Some("five-hour"));
-        let under = Spend { cost_micro_usd: 49_999_999, windows: BTreeMap::new() };
+        let under = Spend { windows: BTreeMap::from([("five-hour".to_owned(), 7_999)]) };
         assert_eq!(budget.reached(&under), None);
-        assert_eq!(Budget::cap_of(Budget::USD, "$12.5"), Some(12_500_000));
-        assert_eq!(Budget::cap_of("five-hour", "80%"), Some(8_000));
-        assert_eq!(Budget::cap_of("five-hour", "33.33"), Some(3_333));
-        for bad in ["0", "1.234", "-3", "ten", "", "101"] {
-            assert_eq!(Budget::cap_of("five-hour", bad), None, "{bad}");
+        assert_eq!(Budget::cap_of("80%"), Some(8_000));
+        assert_eq!(Budget::cap_of("33.33"), Some(3_333));
+        for bad in ["0", "1.234", "-3", "ten", "", "101", "$5"] {
+            assert_eq!(Budget::cap_of(bad), None, "{bad}");
         }
-        assert_eq!(Budget::figure(Budget::USD, 1_234_567), "$1.23");
-        assert_eq!(Budget::figure("five-hour", 8_000), "80.00%");
+        assert_eq!(Budget::figure(8_000), "80.00%");
         assert!(budget.fits());
         for bad in [
-            Budget(BTreeMap::from([(Budget::USD.to_owned(), 0)])),
+            Budget(BTreeMap::from([("five-hour".to_owned(), 0)])),
             Budget(BTreeMap::from([("five-hour".to_owned(), 10_001)])),
             Budget(BTreeMap::from([("two words".to_owned(), 1)])),
             Budget((0..=Budget::METERS_MAX).map(|n| (format!("m{n}"), 1)).collect()),
         ] {
             assert!(!bad.fits(), "{bad:?}");
         }
+    }
+
+    /// A test file is one under a test directory, one named as a test is named, or one in a
+    /// path the project names; anything else is not, however close its name.
+    #[test]
+    fn a_test_file_is_known_by_its_directory_its_name_or_the_projects_word() {
+        let none: &[String] = &[];
+        for test in [
+            "tests/golden.rs",
+            "crates/x/tests/a.rs",
+            "web/__tests__/App.tsx",
+            "spec/models/user_spec.rb",
+            "src/net_test.go",
+            "src/App.test.tsx",
+            "src/app.spec.ts",
+            "pkg/test_parser.py",
+            "crates/slopty-server/src/hub/queue/tests.rs",
+            "src/a/test.rs",
+        ] {
+            assert!(is_test_path(test, none), "{test}");
+        }
+        for not in ["src/testing.rs", "src/attest.rs", "contest/main.c", "README", "src/test"] {
+            assert!(!is_test_path(not, none), "{not}");
+        }
+        let golden = vec!["crates/slopty-e2e/golden".to_owned()];
+        assert!(is_test_path("crates/slopty-e2e/golden/board.png", &golden));
+        assert!(!is_test_path("crates/slopty-e2e/goldenrod.png", &golden));
+    }
+
+    /// What the work did to tests reads in a line: deletions first, named, then changes, then
+    /// additions counted; work that touched none says so.
+    #[test]
+    fn a_test_diff_says_what_was_deleted_first() {
+        let diff = TestDiff {
+            head: "a".repeat(40),
+            deleted: vec!["tests/a.rs".to_owned()],
+            changed: vec!["tests/b.rs".to_owned(), "tests/c.rs".to_owned()],
+            deleted_count: 1,
+            changed_count: 3,
+            added_count: 2,
+        };
+        assert_eq!(
+            diff.line(),
+            "Tests: 1 deleted (tests/a.rs), 3 changed (tests/b.rs, tests/c.rs and 1 more), 2 added"
+        );
+        assert_eq!(TestDiff::default().line(), "Tests: none deleted, changed or added");
+        assert!(diff.approx_bytes() <= TestDiff::MAX_BYTES);
+    }
+
+    /// Give-backs go to the agent three times, a reviewer's once; past either the next waits
+    /// on the person.
+    #[test]
+    fn give_backs_stop_at_three_and_a_reviewers_at_one() {
+        let at = |count, reviews| GiveBacks { count, reviews, held: false };
+        assert!(at(0, 0).room(false) && at(0, 0).room(true));
+        assert!(at(2, 0).room(false) && at(2, 0).room(true));
+        assert!(!at(3, 0).room(false), "the fourth goes to the person");
+        assert!(at(1, 1).room(false) && !at(1, 1).room(true), "a second review round");
     }
 
     /// A member names one to a few facts, each a key with no space and a value that is not

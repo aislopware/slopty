@@ -15,8 +15,8 @@ use slopty_proto::orchestration::{
 };
 use slopty_proto::project::{
     BadProjectId, LimitsChange, Moment, NodeDetail, Peer, Placement, Preference, Project,
-    ProjectId, ProjectStatus, Report, Runner, ScheduleSpec, Script, StepState, Suggestion, Task,
-    TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry, WorkerFacts,
+    ProjectId, ProjectStatus, Report, Runner, Script, StepState, Suggestion, Task, TaskChange,
+    TaskId, TaskLaunch, TaskSpec, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
@@ -522,16 +522,6 @@ pub async fn remove_item<D: Dispatch>(
     done(res.dispatch(), key, Verb::RemoveItem { item }).await
 }
 
-/// Point every client at an item.
-pub async fn point_at<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    item: &str,
-    key: Option<IdempotencyKey>,
-) -> Result<(), ToolError> {
-    let item = res.item(item).await?;
-    done(res.dispatch(), key, Verb::PointAt { item }).await
-}
-
 /// The windows and displays a worker can stream, and the worker.
 pub async fn windows<D: Dispatch>(
     res: &mut Resolver<'_, D>,
@@ -877,82 +867,6 @@ pub async fn project_needs<D: Dispatch>(
     project_answer(dispatch, key, Verb::ProjectNeeds { project, needs }).await
 }
 
-/// When a schedule runs: its cron rule, the IANA time zone it is read in (the server's own
-/// when empty), and whether it waits paused.
-#[derive(Debug, Default)]
-pub struct ScheduleWhen {
-    /// Five cron fields, or `@daily` and the like.
-    pub when: String,
-    /// The time zone.
-    pub zone: String,
-    /// It runs only when the person says.
-    pub paused: bool,
-}
-
-/// Set a schedule of a project, as the person: `number` anew, or a new one. Each run makes
-/// `new` (which hangs from no task and depends on none) and starts `launch` for it.
-///
-/// # Errors
-/// As [`task_spawn`] for the worker and [`task_create`] for the placement; refused for an
-/// agent, or a spec the server refuses.
-pub async fn schedule_set<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    project: Option<&str>,
-    number: Option<u32>,
-    (new, launch, when): (NewTask, LaunchSpec, ScheduleWhen),
-    key: Option<IdempotencyKey>,
-) -> Result<ProjectStatus, ToolError> {
-    let project = project_named(project, &own(res.dispatch()).await?)?;
-    let placement = placement(res, new.placement).await?;
-    let task = TaskSpec {
-        parent: None,
-        depends_on: Vec::new(),
-        kind: new.kind,
-        title: new.title,
-        brief: new.brief,
-        owns: new.owns,
-        read_only: new.read_only,
-        placement,
-        verifier: new.verifier,
-        metadata: None,
-    };
-    let pin = res.some_worker(launch.pin.as_deref()).await?;
-    let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = launch;
-    let launch = TaskLaunch { pin, cwd, run, env, size, ignore_dependencies };
-    let ScheduleWhen { when, zone, paused } = when;
-    let spec = ScheduleSpec { task, launch, when, zone, paused };
-    let verb = Verb::ScheduleSet { project, schedule: number, spec: Box::new(spec) };
-    project_answer(res.dispatch(), key, verb).await
-}
-
-/// Take a schedule of a project away, as the person; its tasks stay.
-///
-/// # Errors
-/// Refused for an agent, or a schedule the project does not have.
-pub async fn schedule_delete<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    number: u32,
-    key: Option<IdempotencyKey>,
-) -> Result<ProjectStatus, ToolError> {
-    let project = project_named(project, &own(dispatch).await?)?;
-    project_answer(dispatch, key, Verb::ScheduleDelete { project, schedule: number }).await
-}
-
-/// Run a schedule of a project now, as the person: its task made and started.
-///
-/// # Errors
-/// Refused for an agent, while its last run's task is under way, or as a start is.
-pub async fn schedule_run<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    number: u32,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let project = project_named(project, &own(dispatch).await?)?;
-    task_answer(dispatch, key, Verb::ScheduleRun { project, schedule: number }).await
-}
-
 /// Keep a script in a project, in place of one of its name, as the person.
 ///
 /// # Errors
@@ -1087,9 +1001,6 @@ pub async fn placement<D: Dispatch>(
 /// A new task's fields, names unresolved.
 #[derive(Debug, Default)]
 pub struct NewTask {
-    /// The task it was split from; the caller's own task when absent and it works on one in
-    /// the same project.
-    pub parent: Option<String>,
     /// Tasks it needs first.
     pub depends_on: Vec<String>,
     /// What sort of work it is.
@@ -1110,22 +1021,16 @@ pub struct NewTask {
     pub metadata: Option<String>,
 }
 
-/// Make a task.
-pub async fn task_create<D: Dispatch>(
+/// Make a task in `project`, not started.
+async fn task_create<D: Dispatch>(
     res: &mut Resolver<'_, D>,
-    project: Option<&str>,
+    project: &ProjectId,
     new: NewTask,
     key: Option<IdempotencyKey>,
 ) -> Result<Task, ToolError> {
-    let project = project_named(project, &own(res.dispatch()).await?)?;
-    let parent = match new.parent.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-        Some(parent) => Some(task_number(parent)?),
-        None => own_task(res.dispatch(), &project).await?,
-    };
     let depends_on = new.depends_on.iter().map(|d| task_number(d)).collect::<Result<_, _>>()?;
     let placement = placement(res, new.placement).await?;
     let spec = TaskSpec {
-        parent,
         depends_on,
         kind: new.kind,
         title: new.title,
@@ -1136,24 +1041,15 @@ pub async fn task_create<D: Dispatch>(
         verifier: new.verifier,
         metadata: new.metadata,
     };
-    task_answer(res.dispatch(), key, Verb::TaskCreate { project, spec: Box::new(spec) }).await
+    let verb = Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) };
+    task_answer(res.dispatch(), key, verb).await
 }
 
-/// Take more paths for a task to own.
-pub async fn task_claim<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    task: Option<&str>,
-    paths: Vec<String>,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(dispatch, project, task).await?;
-    task_answer(dispatch, key, Verb::TaskClaim { project, task, paths }).await
-}
-
-/// Change a task: move it, set its status, dependencies, placement, verifier or metadata,
-/// record its branch or verifier's word, note something. `placement`, when given, replaces
-/// the task's.
+/// Change a task.
+///
+/// Move it, take more paths for it to own, set its status, dependencies, placement, verifier
+/// or metadata, record its branch or verifier's word, note something. `placement`, when given,
+/// replaces the task's.
 pub async fn task_update<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     project: Option<&str>,
@@ -1170,7 +1066,8 @@ pub async fn task_update<D: Dispatch>(
         .await
 }
 
-/// Report on a task's work (the caller's own when none is named) to whoever split it off.
+/// Report on a task's work (the caller's own when none is named) to the project's
+/// orchestrator.
 pub async fn task_report<D: Dispatch>(
     dispatch: &D,
     project: Option<&str>,
@@ -1182,27 +1079,85 @@ pub async fn task_report<D: Dispatch>(
     task_answer(dispatch, key, Verb::TaskReport { project, task, report }).await
 }
 
-/// Start a task its orchestrator proposed, as the person: on `pin` when one is named.
+/// Which task [`task_start`] starts.
+#[derive(Debug)]
+pub enum Which {
+    /// One the project has: made before and not started, stopped, given back, or proposed.
+    Made(String),
+    /// A new one, made first.
+    New(Box<NewTask>),
+}
+
+/// Start a task: one the project has, or a new one made first. The one tool and command that
+/// starts work, so a start means one thing wherever it is asked.
+///
+/// A task its orchestrator proposed, started with nothing but a worker, starts as proposed:
+/// the person's word ([`Verb::TaskStart`]). Anything else runs `launch`, Claude Code with the
+/// task's brief as its first prompt when it names no agent and no prompt
+/// ([`Verb::TaskSpawn`]); with the project's `ask_to_start` on, an agent's start is proposed
+/// instead. A new task that is made but refused its start is kept, and the refusal says its
+/// number, so a later start names it rather than making it again.
 ///
 /// # Errors
-/// As [`task_report`]; an agent is refused.
+/// The project or task is not named or known, the new task is refused, or its start is: no
+/// worker fits, a limit is reached (the project's review limit among them), or an agent starts
+/// what only the person starts.
 pub async fn task_start<D: Dispatch>(
     res: &mut Resolver<'_, D>,
     project: Option<&str>,
-    task: Option<&str>,
-    on: Option<&str>,
+    which: Which,
+    mut launch: LaunchSpec,
     key: Option<IdempotencyKey>,
 ) -> Result<Task, ToolError> {
-    let (project, task) = project_task(res.dispatch(), project, task).await?;
-    let pin = match on {
-        Some(name) => Some(res.worker(Some(name)).await?),
-        None => None,
+    let (project, task, made) = match which {
+        Which::Made(task) => {
+            let (project, task) = project_task(res.dispatch(), project, Some(&task)).await?;
+            (project, task, None)
+        }
+        Which::New(new) => {
+            let project = project_named(project, &own(res.dispatch()).await?)?;
+            let brief = new.brief.clone();
+            let made_key = key.as_ref().map(|k| k.part("task_create"));
+            let made = task_create(res, &project, *new, made_key).await?;
+            if let Runner::Claude { prompt, .. }
+            | Runner::Codex { prompt, .. }
+            | Runner::Agent { prompt, .. } = &mut launch.run
+                && prompt.is_none()
+                && !brief.trim().is_empty()
+            {
+                *prompt = Some(brief);
+            }
+            (project, made.id, Some(made))
+        }
     };
-    task_answer(res.dispatch(), key, Verb::TaskStart { project, task, pin }).await
+    let pin = res.some_worker(launch.pin.as_deref()).await?;
+    if made.is_none() && launch.is_plain() {
+        let node =
+            res.dispatch().call(Verb::TaskGet { project: project.clone(), task: Some(task) });
+        if let Outcome::Node(node) = node.await
+            && node.task.is_some_and(|t| t.proposal.is_some())
+        {
+            return task_answer(res.dispatch(), key, Verb::TaskStart { project, task, pin }).await;
+        }
+    }
+    let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = launch;
+    let launch = TaskLaunch { pin, cwd, run, env, size, ignore_dependencies };
+    let started = task_answer(res.dispatch(), key, Verb::TaskSpawn { project, task, launch }).await;
+    match (started, made) {
+        (Err(refused), Some(made)) => Err(ToolError::new(
+            refused.code,
+            format!(
+                "made task {} ({}), which did not start: {}. It is kept: start it with task {} \
+                 once that changes, rather than making it again",
+                made.id, made.title, refused.message, made.id
+            ),
+        )),
+        (started, _) => started,
+    }
 }
 
-/// Put a task in its project's merge queue, as the person: its verifier runs first when one
-/// applies.
+/// Merge a task, as the person: work ready to merge joins the merge queue, and work not checked
+/// yet is verified and reviewed first when the project asks.
 ///
 /// # Errors
 /// As [`task_report`]; an agent is refused.
@@ -1218,13 +1173,12 @@ pub async fn task_merge<D: Dispatch>(
 
 /// Tell a task's agent something, through its hooks as a report goes.
 ///
-/// The words are the person's, or an agent's to a task under it (the orchestrator to any of its
-/// project's, a task's agent to those split from its own), marked as that agent's. Nothing is
+/// The words are the person's, or the orchestrator's, marked as the orchestrator's. Nothing is
 /// typed into its terminal.
 ///
 /// # Errors
-/// As [`task_report`]; a task with no agent running is refused, and so is an agent's word to
-/// a task not under it or one that waits on the person.
+/// As [`task_report`]; a task with no agent running is refused, and so is any other agent's
+/// word, and the orchestrator's to a task that waits on the person.
 pub async fn task_tell<D: Dispatch>(
     dispatch: &D,
     project: Option<&str>,
@@ -1414,7 +1368,8 @@ pub async fn task_wait<D: Dispatch>(
 }
 
 /// Say whether a task's work may merge, as the reviewer the server started for it or as the
-/// person: an approval queues it, changes asked give it back to its agent with the findings.
+/// person: an approval puts it in Ready to merge, changes asked give it back to its agent with
+/// the findings.
 ///
 /// # Errors
 /// As [`task_report`]; any other agent is refused.
@@ -1448,21 +1403,6 @@ pub async fn task_get<D: Dispatch>(
     }
 }
 
-/// Put the terminal named (the caller's own when none is) on a task.
-pub async fn task_assign<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    project: Option<&str>,
-    task: Option<&str>,
-    term: Option<&str>,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(res.dispatch(), project, task).await?;
-    let Some(term) = term_or_own(res, term, true).await? else {
-        return Err(ToolError::invalid("name the terminal"));
-    };
-    task_answer(res.dispatch(), key, Verb::TaskAssign { project, task, term }).await
-}
-
 /// How to start what runs for a task, the worker unresolved.
 #[derive(Debug)]
 pub struct LaunchSpec {
@@ -1478,6 +1418,31 @@ pub struct LaunchSpec {
     pub size: Option<Size>,
     /// Start it though a task it depends on is not done.
     pub ignore_dependencies: bool,
+}
+
+impl LaunchSpec {
+    /// Claude Code with nothing of its own: no prompt, arguments, directory or environment.
+    #[must_use]
+    pub const fn claude() -> Self {
+        Self {
+            pin: None,
+            cwd: String::new(),
+            run: Runner::Claude { prompt: None, args: Vec::new() },
+            env: Vec::new(),
+            size: None,
+            ignore_dependencies: false,
+        }
+    }
+
+    /// Whether it asks nothing beyond a worker: what starts a proposed task as proposed.
+    #[must_use]
+    pub fn is_plain(&self) -> bool {
+        matches!(&self.run, Runner::Claude { prompt: None, args } if args.is_empty())
+            && self.cwd.trim().is_empty()
+            && self.env.is_empty()
+            && self.size.is_none()
+            && !self.ignore_dependencies
+    }
 }
 
 /// What runs for a task whose agent is named `agent`.
@@ -1517,58 +1482,6 @@ pub fn agent_runner(
             Runner::Agent { agent, prompt, model, args }
         }
     }
-}
-
-/// Start what runs for a task where the server places it, or on the worker named.
-pub async fn task_spawn<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    project: Option<&str>,
-    task: Option<&str>,
-    spec: LaunchSpec,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(res.dispatch(), project, task).await?;
-    let pin = res.some_worker(spec.pin.as_deref()).await?;
-    let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = spec;
-    let launch = TaskLaunch { pin, cwd, run, env, size, ignore_dependencies };
-    task_answer(res.dispatch(), key, Verb::TaskSpawn { project, task, launch }).await
-}
-
-/// Have an agent try a task for each of `specs` at once, each an attempt of its own on the
-/// worker it names or, where several fit, one no other attempt took.
-///
-/// # Errors
-/// As [`task_spawn`]; refused when the task cannot be tried, or no attempt started.
-pub async fn task_attempts<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    project: Option<&str>,
-    task: Option<&str>,
-    specs: Vec<LaunchSpec>,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, task) = project_task(res.dispatch(), project, task).await?;
-    let mut launches = Vec::with_capacity(specs.len());
-    for spec in specs {
-        let pin = res.some_worker(spec.pin.as_deref()).await?;
-        let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = spec;
-        launches.push(TaskLaunch { pin, cwd, run, env, size, ignore_dependencies });
-    }
-    task_answer(res.dispatch(), key, Verb::TaskAttempts { project, task, launches }).await
-}
-
-/// Pick the attempt that lands: every other attempt at its task stops, its agent closed and
-/// its worktree freed. Answers the task tried.
-///
-/// # Errors
-/// As [`task_report`]; refused for a task that is no attempt, or once another is picked.
-pub async fn task_pick<D: Dispatch>(
-    dispatch: &D,
-    project: Option<&str>,
-    attempt: &str,
-    key: Option<IdempotencyKey>,
-) -> Result<Task, ToolError> {
-    let (project, attempt) = project_task(dispatch, project, Some(attempt)).await?;
-    task_answer(dispatch, key, Verb::TaskPick { project, attempt }).await
 }
 
 /// Every worker ranked for a placement: a task's own, `spec` in its stead, or `spec` alone.

@@ -263,9 +263,6 @@ pub enum TaskAction {
     Cancel,
     /// End its agent's terminal; the task waits for its next start.
     Stop,
-    /// Pick this attempt to land: it joins the merge queue once verified, and the task's
-    /// other attempts stop.
-    Pick,
 }
 
 impl TaskAction {
@@ -284,7 +281,6 @@ impl TaskAction {
             Self::PushAgain => "Push again",
             Self::Cancel => "Cancel task",
             Self::Stop => "Stop its agent",
-            Self::Pick => "Pick",
         }
     }
 
@@ -309,7 +305,6 @@ impl TaskAction {
             Self::PushAgain => "push-again",
             Self::Cancel => "cancel",
             Self::Stop => "stop",
-            Self::Pick => "pick",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -744,18 +739,13 @@ impl Board {
         }
     }
 
-    /// The tasks that were split from `parent` (the orchestrator's own for `None`), by number.
-    /// A task whose parent is not on the board hangs from the orchestrator, so nothing falls
-    /// out of the tree.
+    /// The tasks under `parent`, by number: every task under the orchestrator (`None`), and
+    /// none under a task, as the tree is one level deep.
     fn children(&self, parent: Option<TaskId>) -> Vec<TaskId> {
-        self.tasks
-            .values()
-            .filter(|card| {
-                let hangs_from = card.parent.filter(|p| self.tasks.contains_key(p));
-                hangs_from == parent
-            })
-            .map(|card| card.id)
-            .collect()
+        if parent.is_some() {
+            return Vec::new();
+        }
+        self.tasks.keys().copied().collect()
     }
 
     /// The tree, depth first: the orchestrator, then what each node split off, by number.
@@ -909,17 +899,7 @@ impl Board {
         if live && conflicted {
             out.push(TaskAction::ResolveConflicts);
         }
-        // An attempt waits on the person's pick: the one picked lands, so only it merges.
-        let attempt = self.attempt_of(card);
-        if attempt.is_some_and(|a| a.picked.is_none()) && card.state != TaskState::Failed {
-            out.push(TaskAction::Pick);
-        }
-        let lands = attempt.is_none_or(|a| a.picked == Some(task));
-        if card.state == TaskState::Done
-            && card.merge.is_none()
-            && self.open_todos(task) == 0
-            && lands
-        {
+        if card.state == TaskState::Done && card.merge.is_none() {
             out.push(TaskAction::Merge);
         }
         let retried = |kind: StepKind| match kind {
@@ -945,16 +925,6 @@ impl Board {
             out.push(TaskAction::RunOn);
         }
         out
-    }
-
-    /// The attempts `card` is one of, when it is an attempt at its parent
-    /// ([`slopty_proto::project::ATTEMPT_KIND`]).
-    fn attempt_of(&self, card: &TaskCard) -> Option<&slopty_proto::project::Attempts> {
-        if card.kind != slopty_proto::project::ATTEMPT_KIND {
-            return None;
-        }
-        let parent = self.tasks.get(&card.parent?)?;
-        parent.attempts.as_ref().filter(|a| a.tried.contains(&card.id))
     }
 
     /// What the person can do to `task` beyond what moves it on ([`Self::actions`]): stop its
@@ -1048,7 +1018,6 @@ impl Board {
             | TaskAction::Approve
             | TaskAction::RunOn
             | TaskAction::Start
-            | TaskAction::Pick
             | TaskAction::PushAgain
             | TaskAction::Cancel
             | TaskAction::Stop => None,
@@ -1056,8 +1025,7 @@ impl Board {
     }
 
     /// The to-dos still open on `task`'s agent's own list, while its work waits to be checked
-    /// or merged: they keep it from merging, as the merge queue gives back a task that has
-    /// them.
+    /// or merged: the person sees them before they merge it.
     #[must_use]
     pub fn open_todos(&self, task: TaskId) -> u16 {
         let Some(card) = self.tasks.get(&task) else { return 0 };
@@ -1305,11 +1273,7 @@ pub fn news_line(board: &Board, entry: &TimelineEntry) -> Option<String> {
         }
         Moment::Proposed { .. } => of("waits for you to start it".to_owned()),
         Moment::Budget { meter, share_bp } => {
-            let what = if meter == slopty_proto::project::Budget::USD {
-                "cost".to_owned()
-            } else {
-                format!("{meter} window")
-            };
+            let what = format!("{meter} window");
             if *share_bp >= 10_000 {
                 format!("its {what} budget is spent; no task starts until it is raised")
             } else {

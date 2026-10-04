@@ -16,10 +16,10 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentKind};
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
-    ATTEMPT_KIND, Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG,
-    PROJECT_ENV, Placed, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Proposal,
-    Proposed, Report, ReportKind, Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId,
-    TaskLaunch, TimelineEntry, WorkerFacts,
+    Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
+    Placed, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Proposal, Proposed, Report,
+    ReportKind, Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry,
+    WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -33,8 +33,6 @@ use super::{
 };
 use crate::deliver::{Batch, plain};
 
-mod attempts;
-mod schedule;
 mod scripts;
 use crate::placement::{self, Candidate, Installed, Ranking};
 use crate::project::{
@@ -202,10 +200,11 @@ fn theirs(state: &State, from: SessionId, project: &ProjectId, term: TermRef) ->
 }
 
 /// What an agent speaking from `from` may do to the projects with `verb`, and the verb as it
-/// is done. An agent works in the project it proves it works in: its orchestrator in all of
-/// it, a task's agent in its own task and what is split from it, a task it splits off going
-/// under its own. Only an orchestrator makes a project. The terminals it puts to work are the
-/// project's or its own ([`theirs`]), never the person's.
+/// is done. An agent works in the project it proves it works in. The orchestrator plans and
+/// starts the tasks, one level of them: it makes them, starts them, tells them and changes them.
+/// A task's agent works on its own task alone: it changes and reports on that one, and makes,
+/// starts and tells none. Only an orchestrator makes a project. The terminals it puts to work are
+/// the project's or its own ([`theirs`]), never the person's.
 pub(super) fn agent_scope(
     state: &State,
     from: Option<SessionId>,
@@ -217,13 +216,9 @@ pub(super) fn agent_scope(
             | Verb::ProjectSet { .. }
             | Verb::ProjectNeeds { .. }
             | Verb::TaskCreate { .. }
-            | Verb::TaskClaim { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
-            | Verb::TaskAssign { .. }
             | Verb::TaskTell { .. }
-            | Verb::TaskAttempts { .. }
-            | Verb::TaskPick { .. }
     );
     if !changes {
         return Ok(verb);
@@ -247,15 +242,6 @@ pub(super) fn agent_scope(
             ))
         }
     };
-    let under = |project: &ProjectId, task: TaskId| match task_of {
-        Some(root) if !state.projects.under(project, root, task) => Err(error(
-            ErrorCode::Forbidden,
-            &format!(
-                "this agent works on task {root}, and task {task} is neither it nor split from it"
-            ),
-        )),
-        _ => Ok(()),
-    };
     let named = |project: &ProjectId, term: TermRef| {
         if theirs(state, from, project, term) {
             Ok(())
@@ -267,18 +253,6 @@ pub(super) fn agent_scope(
                  person's to give",
             ))
         }
-    };
-    let verb = match verb {
-        Verb::TaskCreate { project, mut spec } => {
-            in_own(&project)?;
-            match (spec.parent, task_of) {
-                (None, Some(root)) => spec.parent = Some(root),
-                (Some(parent), _) => under(&project, parent)?,
-                (None, None) => {}
-            }
-            return Ok(Verb::TaskCreate { project, spec });
-        }
-        other => other,
     };
     match &verb {
         Verb::ProjectCreate { project, orchestrator, .. } => {
@@ -304,38 +278,24 @@ pub(super) fn agent_scope(
                 return refuse("only the person or the project's orchestrator says what it needs");
             }
         }
-        Verb::TaskClaim { project, task, .. }
-        | Verb::TaskUpdate { project, task, .. }
-        | Verb::TaskSpawn { project, task, .. }
-        | Verb::TaskAttempts { project, task, .. } => {
+        Verb::TaskCreate { project, .. }
+        | Verb::TaskSpawn { project, .. }
+        | Verb::TaskTell { project, .. } => {
             in_own(project)?;
-            under(project, *task)?;
-        }
-        // An agent picks among attempts at a task under it, never among its own siblings.
-        Verb::TaskPick { project, attempt } => {
-            in_own(project)?;
-            let tried = state.projects.task(project, *attempt).ok().and_then(|t| t.parent);
-            if let Some(tried) = tried {
-                under(project, tried)?;
+            if let Some(own_task) = task_of {
+                return refuse(&format!(
+                    "this agent works on task {own_task}: only the project's orchestrator makes, \
+                     starts and tells tasks. Do the work yourself, and say what else you found \
+                     with task_report"
+                ));
             }
         }
-        Verb::TaskAssign { project, task, term } => {
+        Verb::TaskUpdate { project, task, .. } => {
             in_own(project)?;
-            under(project, *task)?;
-            named(project, *term)?;
-        }
-        // An agent tells a task under it: the orchestrator any of its project's, a task's
-        // agent those split from its own. Upward it reports.
-        Verb::TaskTell { project, task, .. } => {
-            in_own(project)?;
-            match task {
-                Some(task) if Some(*task) != task_of => under(project, *task)?,
-                _ => {
-                    return refuse(
-                        "an agent tells only a task under it; to the node above, report with \
-                         task_report",
-                    );
-                }
+            if let Some(own_task) = task_of.filter(|own_task| own_task != task) {
+                return refuse(&format!(
+                    "this agent works on task {own_task}, and changes only that one"
+                ));
             }
         }
         _ => {}
@@ -447,6 +407,17 @@ const fn names_ask_to_start(verb: &Verb) -> bool {
     match verb {
         Verb::ProjectCreate { ask_to_start, .. } => *ask_to_start,
         Verb::ProjectSet { ask_to_start, .. } => ask_to_start.is_some(),
+        _ => false,
+    }
+}
+
+/// Whether `verb` sets a project's review limit: how much work may wait on the person is
+/// theirs to say.
+const fn names_review_limit(verb: &Verb) -> bool {
+    match verb {
+        Verb::ProjectCreate { limits, .. } | Verb::ProjectSet { limits, .. } => {
+            limits.review.is_some()
+        }
         _ => false,
     }
 }
@@ -729,21 +700,11 @@ pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Op
 fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
     let owns = if task.read_only {
         "none: it only reads".to_owned()
-    } else if let Some(tried) = task.parent.filter(|_| task.kind == ATTEMPT_KIND) {
-        format!(
-            "none: your task is one of several attempts at task {tried}, which holds its paths; \
-             each attempt writes them in a worktree of its own, claims nothing, and the one \
-             picked lands"
-        )
     } else if task.owns.is_empty() {
-        "none yet; claim what you will write with task_claim first".to_owned()
+        "none yet; claim what you will write with task_update's claim first".to_owned()
     } else {
         task.owns.join(", ")
     };
-    let reports_to = task.parent.map_or_else(
-        || "the project's orchestrator".to_owned(),
-        |parent| format!("task {parent}'s agent"),
-    );
     let mut lines = vec![
         format!(
             "You are the agent of task {} (\"{}\") of the Slopty project {} ({}, work lands \
@@ -760,14 +721,13 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
         format!(
             "- You alone may write the paths your task owns: {owns}. Other tasks own the rest."
         ),
-        format!(
-            "- Report to {reports_to} with task_report: checkpoint for progress, needs_input for \
-             an answer, stuck when you cannot go on, done when finished (with the branch and \
-             what you made). Say done; never merge."
-        ),
-        "- To split your work, read project_status first, then task_create subtasks under your \
-         task and task_spawn them; their reports reach you in <slopty-reports> blocks, and \
-         task_tell says more to their agents."
+        "- Report to the project's orchestrator with task_report: checkpoint for progress, \
+         needs_input for an answer, stuck when you cannot go on, done when finished (with the \
+         branch and what you made). Say done; never merge: the server checks your work and the \
+         person merges it."
+            .to_owned(),
+        "- Do the whole task yourself: you start no other agents or tasks. Work you find that is \
+         not yours goes in your report, for the orchestrator to plan."
             .to_owned(),
         "- Never type into another agent's terminal, and leave git remotes and git config as \
          they are."
@@ -804,21 +764,27 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
             plain(&project.repo),
             plain(&project.target)
         ),
-        "- Split the goal into tasks that own disjoint paths (task_create), place and start \
-         them (placement_suggest, task_spawn), and follow them with project_status. Reports \
-         come to you in <slopty-reports> blocks like this one, and so does what a task's agent \
-         came to when it ended a turn, exited or waits on the person without reporting; \
-         task_wait waits for that news where none comes unasked."
+        "- Do sequential and small work yourself. Start a task only for a part that runs in \
+         parallel with the rest and owns paths no other task does: task_start makes it and \
+         starts its agent in one call (placement_suggest shows where it would go), and \
+         project_status follows them all. Tasks are one level: their agents start nothing \
+         themselves."
+            .to_owned(),
+        "- Reports come to you in <slopty-reports> blocks like this one, and so does what a \
+         task's agent came to when it ended a turn, exited or waits on the person without \
+         reporting; task_wait waits for that news where none comes unasked."
             .to_owned(),
         "- task_tell says more to a task's agent, marked as yours: the person's words go \
          first, and nothing you say answers what the person was asked."
             .to_owned(),
-        "- Implement nothing yourself, merge nothing, and answer no permission: approvals are \
-         the person's."
+        "- Work that passes its checks waits for the person's Merge; merge nothing yourself, \
+         and answer no permission: approvals are the person's. While as many tasks wait on the \
+         person as the project's review limit, no new task starts: wait for them rather than \
+         piling up more."
             .to_owned(),
-        "- When the person asks to start each task themselves, task_spawn proposes it \
+        "- When the person asks to start each task themselves, task_start proposes it \
          (`proposed` on the task) and it starts once they say so: propose the whole plan, then \
-         wait for the starts and reports rather than spawning again."
+         wait for the starts and reports rather than starting again."
             .to_owned(),
     ];
     if project.needs.is_empty() {
@@ -839,7 +805,7 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
         ));
     }
     lines.push(
-        "- task_spawn runs Claude Code; `agent: \"codex\"` runs the person's Codex instead, \
+        "- task_start runs Claude Code; `agent: \"codex\"` runs the person's Codex instead, \
          with the same tools, on a worker that has it."
             .to_owned(),
     );
@@ -1046,7 +1012,7 @@ impl Hub {
     /// A project change the store answers at once: made once per key, logged and pushed.
     pub(super) fn project_change(
         &self,
-        (caller, from): (Caller, Option<SessionId>),
+        caller: Caller,
         key: Option<IdempotencyKey>,
         verb: &Verb,
     ) -> Outcome {
@@ -1069,6 +1035,13 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "what a project's agents may spend is the person's to say, so only the person \
                  sets its budget",
+            );
+        }
+        if caller == Caller::Agent && names_review_limit(verb) {
+            return error(
+                ErrorCode::Forbidden,
+                "how many tasks may wait on the person is theirs to say, so only the person sets \
+                 the review limit",
             );
         }
         if caller == Caller::Agent && names_ask_to_start(verb) {
@@ -1166,14 +1139,11 @@ impl Hub {
             Verb::TaskCreate { project, spec } => {
                 state.projects.create_task(&project, *spec, now).map(|(t, u)| (task(t), u))
             }
-            Verb::TaskClaim { project, task: id, paths } => {
-                state.projects.claim(&project, id, &paths, now).map(|(t, u)| (task(t), u))
-            }
             Verb::TaskTell { project, task: id, text } => {
-                // An agent's scope ([`agent_scope`]) proved the node it speaks for.
+                // An agent's scope ([`agent_scope`]) proved it the project's orchestrator.
                 let by = match caller {
                     Caller::Person => Teller::Person,
-                    Caller::Agent => Teller::Above(node_of(state, from).and_then(|(_, t)| t)),
+                    Caller::Agent => Teller::Orchestrator,
                 };
                 state.projects.tell(&project, (id, by), &text, &terminals, now).map(|(words, u)| {
                     told = Some((project, id, words, by));
@@ -1184,57 +1154,22 @@ impl Hub {
                 .projects
                 .update_task(&project, id, *change, caller, now)
                 .map(|(t, u)| (task(t), u)),
-            Verb::TaskAssign { project, task: id, term } => {
-                // A terminal its worker has opened but not yet announced is live already: an
-                // orchestrator that starts an agent and assigns it at once is not refused.
-                let opening = state.starting.iter().find(|s| s.term == term);
-                let theirs =
-                    opening.and_then(|s| s.task.as_ref()).filter(|t| **t != (project.clone(), id));
-                let known = match (opening, theirs) {
-                    (_, Some((p, t))) => Err(error(
-                        ErrorCode::Conflict,
-                        &format!("that terminal is being started for task {t} of {p}"),
-                    )),
-                    (Some(_), None) => Ok(()),
-                    (None, None) => known_term(state, Some(term)),
-                };
-                let room = state.projects.room_for(&project, term, &running);
-                known.and(room).and_then(|()| {
-                    let branch = branch_of(state, term);
-                    let who = Assignee {
-                        term,
-                        spawned: false,
-                        branch: branch.as_ref(),
-                        conversation: None,
-                        placed: None,
-                        thread: None,
-                    };
-                    let mut open = terminals.clone();
-                    open.insert(term);
-                    let assigned = state.projects.assign(&project, id, who, &open, now)?;
-                    // Until it is announced, the start counts against its project's limits.
-                    if let Some(s) = state.starting.iter_mut().find(|s| s.term == term) {
-                        s.task = Some((project, id));
-                    }
-                    Ok((task(assigned.0), assigned.1))
-                })
-            }
             Verb::TaskReport { project, task: id, report } => {
                 let reported = state.projects.report_task(&project, id, &report, now);
                 if reported.is_ok() && report.kind == ReportKind::Done {
                     self.bring_home_soon(state, (project.clone(), id), report.branch.clone());
                 }
-                reported.map(|((t, parent), u)| {
+                reported.map(|(t, u)| {
                     let at = tokio::time::Instant::now();
-                    state.deliveries.add((project, parent), Some(id), report, at);
+                    state.deliveries.add((project, None), Some(id), report, at);
                     self.inner.deliver.notify_one();
                     (task(t), u)
                 })
             }
             Verb::TaskMerge { .. } if caller == Caller::Agent => Err(error(
                 ErrorCode::Forbidden,
-                "only the person asks for a merge; a task whose verifier passes joins the merge \
-                 queue by itself, so report it done",
+                "only the person merges: work whose checks pass waits for their Merge, so \
+                 report it done",
             )),
             Verb::TaskMerge { project, task: id } => {
                 let checked = state.projects.may_merge(&project, id);
@@ -1267,7 +1202,7 @@ impl Hub {
             let at = tokio::time::Instant::now();
             match by {
                 Teller::Person => state.deliveries.person(project, task, &words, at),
-                Teller::Above(from) => state.deliveries.above((project, task), from, &words, at),
+                Teller::Orchestrator => state.deliveries.orchestrator((project, task), &words, at),
             }
             self.inner.deliver.notify_one();
         }
@@ -1296,6 +1231,39 @@ impl Hub {
         }
         drop(guard);
         outcome
+    }
+
+    /// Put the live terminal `term` on `task`, as a start of its own would once announced: for
+    /// tests that have an agent at work on a task without starting it through a worker.
+    #[cfg(test)]
+    pub(super) fn assign_for_test(
+        &self,
+        project: &ProjectId,
+        task: TaskId,
+        term: TermRef,
+    ) -> Outcome {
+        let mut guard = self.inner.state.lock();
+        let state = &mut *guard;
+        let branch = branch_of(state, term);
+        let who = Assignee {
+            term,
+            spawned: false,
+            branch: branch.as_ref(),
+            conversation: None,
+            placed: None,
+            thread: None,
+        };
+        let (mut open, _) = live(state);
+        open.insert(term);
+        let assigned = match state.projects.assign(project, task, who, &open, WallMs::now()) {
+            Ok((task, updates)) => {
+                self.projects_moved(state, updates);
+                Outcome::Task(Box::new(task))
+            }
+            Err(refused) => refused,
+        };
+        drop(guard);
+        assigned
     }
 
     /// One node of a project in full.
@@ -1719,12 +1687,17 @@ impl Hub {
         }
         let hub = self.clone();
         let started = tokio::spawn(async move {
-            let asks =
-                hub.inner.state.lock().projects.project(&project).is_ok_and(|p| p.ask_to_start);
-            let outcome = if caller == Caller::Agent && asks {
-                hub.propose(&project, task, launch).await
-            } else {
-                hub.start_task_once(key.clone(), &project, task, launch).await
+            let (asks, room) = {
+                let state = hub.inner.state.lock();
+                let asks = state.projects.project(&project).is_ok_and(|p| p.ask_to_start);
+                (asks, state.projects.room_to_review(&project))
+            };
+            // An agent's start waits while the person has as much to look at as they allow;
+            // a proposal is theirs to start, so it is not held.
+            let outcome = match room {
+                Err(refused) if caller == Caller::Agent && !asks => refused,
+                _ if caller == Caller::Agent && asks => hub.propose(&project, task, launch).await,
+                _ => hub.start_task_once(key.clone(), &project, task, launch).await,
             };
             if let Some(key) = key {
                 remember(&mut hub.inner.state.lock(), caller, key, &verb, &outcome);
@@ -2282,8 +2255,6 @@ impl Hub {
         let wall = WallMs::now();
         let (respent, reset) = state.projects.windows_due(wall);
         self.projects_moved(state, respent);
-        let scheduled = self.schedules_due(state, wall, tokio::time::Instant::now());
-        let woken = self.snoozes_due(state, wall, tokio::time::Instant::now());
         let (terminals, _) = live(state);
         Self::reword_outcomes(state);
         let projects = &state.projects;
@@ -2299,8 +2270,7 @@ impl Hub {
         // A plan window that resets may lift a budget's hold with no agent saying so.
         let reset =
             reset.and_then(|at| now.checked_add(Duration::from_millis(at.millis_since(wall))));
-        let next =
-            [state.deliveries.next_due(), reset, scheduled, woken].into_iter().flatten().min();
+        let next = [state.deliveries.next_due(), reset].into_iter().flatten().min();
         drop(guard);
         next
     }

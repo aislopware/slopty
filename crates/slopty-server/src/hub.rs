@@ -66,7 +66,6 @@ mod projects;
 mod queue;
 mod review;
 mod settle;
-mod snooze;
 mod steps;
 
 pub use ladder::Seated;
@@ -162,8 +161,6 @@ struct Inner {
     rankers: Arc<Semaphore>,
     /// Wakes the loop that delivers reports ([`Hub::deliver_reports`]).
     deliver: Arc<Notify>,
-    /// The snoozes as they change, for the store ([`Hub::snoozes_kept`]).
-    snoozes_kept: watch::Sender<Vec<slopty_proto::snooze::Snooze>>,
 }
 
 /// The newest [`HubEvent`]s, oldest first.
@@ -215,8 +212,6 @@ struct State {
     reviews: review::Reviews,
     /// Every worker's thread rows, the ladder made of them, and where the person is.
     board: ladder::Board,
-    /// The person's snoozes.
-    snoozes: snooze::Snoozes,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -391,9 +386,7 @@ impl Hub {
         let state = Mutex::new(state);
         let rankers = Arc::new(Semaphore::new(projects::RANKERS));
         let deliver = Arc::new(Notify::new());
-        let (snoozes_kept, _none) = watch::channel(Vec::new());
-        let inner =
-            Inner { name, lan, state, events, persist, log, head, rankers, deliver, snoozes_kept };
+        let inner = Inner { name, lan, state, events, persist, log, head, rankers, deliver };
         Self { inner: Arc::new(inner) }
     }
 
@@ -727,9 +720,6 @@ impl Hub {
         let (envs, project) = match verb {
             Verb::SpawnAgent { env, .. } | Verb::OpenTerminal { env, .. } => (vec![env], None),
             Verb::TaskSpawn { project, launch, .. } => (vec![&launch.env], Some(project)),
-            Verb::TaskAttempts { project, launches, .. } => {
-                (launches.iter().map(|l| &l.env).collect(), Some(project))
-            }
             _ => return Ok(()),
         };
         let mut names = envs.into_iter().flatten().map(|(name, _)| name.as_str());
@@ -829,23 +819,10 @@ impl Hub {
             Verb::TaskSpawn { project, task, launch } => {
                 self.task_spawn(caller, key, project, task, launch).await
             }
-            Verb::TaskAttempts { project, task, launches } => {
-                self.task_attempts(caller, key, project, task, launches).await
-            }
-            Verb::TaskPick { project, attempt } => self.task_pick(caller, key, &project, attempt),
-            verb @ (Verb::ScheduleSet { .. } | Verb::ScheduleDelete { .. }) => {
-                self.schedule_change(caller, key, &verb)
-            }
-            Verb::ScheduleRun { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "a schedule's run spends the plan, so only the person runs one; start the task \
-                 once with task_spawn",
-            ),
-            Verb::ScheduleRun { project, schedule } => self.schedule_run(project, schedule).await,
             Verb::TaskStart { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
-                "a proposed task is the person's to start; task_spawn proposed it, and you hear \
-                 when it starts",
+                "a proposed task is the person's to start; your task_start proposed it, and you \
+                 hear when it starts",
             ),
             Verb::TaskStart { project, task, pin } => {
                 self.task_start(key, project, task, pin).await
@@ -889,11 +866,6 @@ impl Hub {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
             Verb::ProjectDelete { project } => self.project_delete(&project),
-            Verb::Snooze { .. } | Verb::Unsnooze { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "a snooze is the person's way to put a finish off, never an agent's",
-            ),
-            Verb::Snooze { of, until, zone } => self.snooze(of, until, zone.as_deref()),
             verb @ (Verb::ScriptSet { .. } | Verb::ScriptDelete { .. }) => {
                 self.script_change(caller, key, &verb)
             }
@@ -904,7 +876,6 @@ impl Hub {
                 ErrorCode::Forbidden,
                 "the server opens a script's terminal itself; ask it with script run",
             ),
-            Verb::Unsnooze { of } => self.unsnooze(of),
             Verb::Git { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "the commit sheet is the person's; an agent commits, pushes and opens pull \
@@ -918,10 +889,11 @@ impl Hub {
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
+            | Verb::TestDiff { .. }
             | Verb::ReviewCheckout { .. } => error(
                 ErrorCode::Forbidden,
-                "the server verifies and merges tasks itself, one at a time; a task's done \
-                 report starts it, and the person's task_merge asks for it",
+                "the server checks and merges tasks itself, one at a time; a task's done report \
+                 starts its checks, and the person's task merge lands it",
             ),
             Verb::RemoveWorktree { .. } => error(
                 ErrorCode::Forbidden,
@@ -934,13 +906,11 @@ impl Hub {
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
             | Verb::TaskCreate { .. }
-            | Verb::TaskClaim { .. }
             | Verb::TaskUpdate { .. }
-            | Verb::TaskAssign { .. }
             | Verb::TaskReport { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectNeeds { .. }
-            | Verb::TaskMerge { .. }) => self.project_change((caller, from), key, &verb),
+            | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
     }
@@ -1521,13 +1491,7 @@ impl Lease {
                 let now = WallMs::now();
                 let mut moved = Vec::new();
                 for f in state.board.take(worker, frame) {
-                    moved.extend(state.projects.spent(
-                        f.term,
-                        f.thread,
-                        f.cost_micro_usd,
-                        &f.windows,
-                        now,
-                    ));
+                    moved.extend(state.projects.spent(f.term, f.thread, &f.windows, now));
                 }
                 for (term, status) in state.board.seat_moves(worker) {
                     hub.adopt(&mut state, term);
@@ -1609,14 +1573,9 @@ fn remember(
     }
     let project = match verb {
         Verb::TaskCreate { project, .. }
-        | Verb::TaskClaim { project, .. }
         | Verb::TaskUpdate { project, .. }
-        | Verb::TaskAssign { project, .. }
         | Verb::TaskSpawn { project, .. }
         | Verb::TaskStart { project, .. }
-        | Verb::TaskAttempts { project, .. }
-        | Verb::TaskPick { project, .. }
-        | Verb::ScheduleRun { project, .. }
         | Verb::TaskTell { project, .. }
         | Verb::ProjectNeeds { project, .. }
         | Verb::TaskReport { project, .. }
@@ -1748,16 +1707,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ProjectList
         | Verb::ProjectStatus { .. }
         | Verb::TaskCreate { .. }
-        | Verb::TaskClaim { .. }
         | Verb::TaskUpdate { .. }
-        | Verb::TaskAssign { .. }
         | Verb::TaskSpawn { .. }
         | Verb::TaskStart { .. }
-        | Verb::TaskAttempts { .. }
-        | Verb::TaskPick { .. }
-        | Verb::ScheduleSet { .. }
-        | Verb::ScheduleDelete { .. }
-        | Verb::ScheduleRun { .. }
         | Verb::TaskTell { .. }
         | Verb::ProjectNeeds { .. }
         | Verb::PlacementSuggest { .. }
@@ -1769,8 +1721,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskPush { .. }
         | Verb::TaskReview { .. }
         | Verb::ProjectDelete { .. }
-        | Verb::Snooze { .. }
-        | Verb::Unsnooze { .. }
         | Verb::ScriptSet { .. }
         | Verb::ScriptDelete { .. }
         | Verb::ScriptRun { .. } => None,
@@ -1798,12 +1748,11 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Verify { worker, .. }
         | Verb::ReviewCheckout { worker, .. }
         | Verb::Rebase { worker, .. }
+        | Verb::TestDiff { worker, .. }
         | Verb::FastForward { worker, .. }
         | Verb::RemoveWorktree { worker, .. }
         | Verb::StartThread { worker, .. } => Some(*worker),
-        Verb::RenameItem { item, .. } | Verb::RemoveItem { item } | Verb::PointAt { item } => {
-            Some(item.worker)
-        }
+        Verb::RenameItem { item, .. } | Verb::RemoveItem { item } => Some(item.worker),
         Verb::SendInput { term, .. }
         | Verb::ReadScreen { term }
         | Verb::ReadOutput { term, .. }
@@ -1860,11 +1809,7 @@ fn run_seed() -> u64 {
 }
 
 #[cfg(test)]
-mod attempt_tests;
-#[cfg(test)]
 mod project_tests;
-#[cfg(test)]
-mod schedule_tests;
 
 #[cfg(test)]
 mod outcome_tests;

@@ -80,11 +80,10 @@ fn standing<'a, K: PartialEq>(list: &'a [(K, Standing)], key: &K) -> &'a Standin
     &list.iter().find(|(k, _)| k == key).unwrap().1
 }
 
-async fn task(hub: &Hub, parent: Option<TaskId>) -> TaskId {
+async fn task(hub: &Hub) -> TaskId {
     let spec = TaskSpec {
         title: "Ladder".to_owned(),
         brief: "Rank it.".to_owned(),
-        parent,
         placement: Placement::default(),
         ..TaskSpec::default()
     };
@@ -95,9 +94,9 @@ async fn task(hub: &Hub, parent: Option<TaskId>) -> TaskId {
 }
 
 /// A subagent stands with the thread it hangs from, so the one the person sees needs them;
-/// the rest roll up by tile, worker, project node (a subtask into its task), project and
-/// fleet, each counting a thread once and naming the one to go to first. A thread at rest
-/// with changes not kept is to review, above working.
+/// the rest roll up by tile, worker, project node, project and fleet, each counting a thread once
+/// and naming the one to go to first. A thread at rest with changes not kept is to review, above
+/// working.
 #[tokio::test]
 async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -108,11 +107,9 @@ async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
     let term = |session| TermRef { worker, session };
     create(&hub, Some(term(orchestrating))).await;
-    let build = task(&hub, None).await;
-    let test = task(&hub, Some(build)).await;
+    let (build, test) = (task(&hub).await, task(&hub).await);
     for (task, session) in [(build, building), (test, testing)] {
-        let verb = Verb::TaskAssign { project: project(), task, term: term(session) };
-        assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
+        assert!(matches!(hub.assign_for_test(&project(), task, term(session)), Outcome::Task(_)));
     }
 
     let orchestrator = row(Phase::Idle, 10, Some(orchestrating));
@@ -139,11 +136,12 @@ async fn subagents_fold_into_their_parents_and_every_node_rolls_up() {
     assert_eq!(ladder.tile(term(orchestrating)).map(|(_, s)| s.rung), Some(Rung::Idle));
 
     let node = |task| NodeAt { project: project(), task };
+    let test_node = standing(&ladder.nodes, &node(Some(test)));
+    assert_eq!(test_node.rung, Rung::NeedsYou);
+    assert_eq!(test_node.top, Some(at(&tester)));
+    assert_eq!(test_node.counts, Counts { needs_you: 1, ..Counts::default() });
     let build_node = standing(&ladder.nodes, &node(Some(build)));
-    assert_eq!(build_node.rung, Rung::NeedsYou, "a subtask rolls up into its task");
-    assert_eq!(build_node.top, Some(at(&tester)));
-    assert_eq!(build_node.counts, Counts { needs_you: 1, working: 1, ..Counts::default() });
-    assert_eq!(standing(&ladder.nodes, &node(Some(test))).counts.total(), 1);
+    assert_eq!(build_node.counts, Counts { working: 1, ..Counts::default() }, "tasks stand apart");
     assert_eq!(standing(&ladder.nodes, &node(None)).rung, Rung::Idle);
     let whole = standing(&ladder.projects, &project());
     assert_eq!((whole.rung, whole.counts.total()), (Rung::NeedsYou, 3));
@@ -258,45 +256,6 @@ async fn notices_go_where_the_person_is_and_a_subagent_speaks_through_its_parent
     assert_eq!(hub.present().len(), 1, "a link that ends leaves");
 }
 
-/// A thread put to sleep says nothing: its turn ended at rest before, and that rest was the
-/// news. One that slept from work (its agent ended under it) is not told as finished either.
-#[tokio::test]
-async fn a_thread_put_to_sleep_is_no_news() {
-    use slopty_proto::thread::Liveness;
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (shell, worker) = (SessionId::new(), WorkerId::new());
-    let (tx, _rx) = mpsc::channel(8);
-    let lease = hub
-        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 7].into(), tx)
-        .unwrap();
-    let mut mac = Client::sit(&hub, "mac");
-    mac.at(&hub, Seat::Desk, true, Vec::new());
-    let rank = |rows: Vec<ThreadRow>| {
-        lease.handle(delta(rows));
-        hub.rank_ladder();
-    };
-    let asleep = |row: &ThreadRow, since: u64| {
-        let mut row = moved(row, Phase::Idle, since);
-        row.status.liveness = Liveness::Asleep { since_ms: WallMs::from_millis(since) };
-        row
-    };
-    let thread = row(Phase::Working, 1_000, Some(shell));
-    lease.handle(snapshot(vec![thread.clone()]));
-    hub.rank_ladder();
-
-    rank(vec![moved(&thread, Phase::Idle, 2_000)]);
-    let rested = mac.notices();
-    assert_eq!(rested.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::Finished]);
-    rank(vec![asleep(&thread, 3_000)]);
-    assert_eq!(mac.notices(), Vec::<Notice>::new(), "asleep at rest: told already");
-
-    rank(vec![moved(&thread, Phase::Working, 4_000)]);
-    rank(vec![asleep(&thread, 5_000)]);
-    assert_eq!(mac.notices(), Vec::<Notice>::new(), "asleep from work: no finish to tell");
-    let standing = hub.ladder().threads.into_iter().find(|t| t.at.thread == thread.id);
-    assert_eq!(standing.map(|t| t.rung), Some(Rung::Sleeping));
-}
-
 /// A subagent that fails while its parent works reads as working, since the parent may carry
 /// on without it; once the whole family is at rest, the failure lifts the parent, and the
 /// notice names the subagent. One that needs the person lifts its parent at once.
@@ -338,10 +297,10 @@ async fn a_failed_subagent_waits_for_its_family_to_rest() {
     assert_eq!(heard.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::NeedsYou]);
 }
 
-/// What a project's agents spent comes with the thread table every worker publishes, the
-/// whole table again at each registration: each thread's own figure under the terminal its
-/// family runs in, so a subagent's counts on its root's task, and a thread in no project's
-/// terminal counts for none. A figure published again counts once.
+/// How full a project's agents read their plan's windows comes with the thread table every
+/// worker publishes, the whole table again at each registration: each thread's own reading
+/// under the terminal its family runs in, so a subagent's counts on its root's task, and a
+/// thread in no project's terminal counts for none. A window is the fullest any of them read.
 #[tokio::test]
 async fn a_project_s_spend_comes_with_its_threads_rows() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -353,39 +312,73 @@ async fn a_project_s_spend_comes_with_its_threads_rows() {
     let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
     let term = |session| TermRef { worker, session };
     create(&hub, Some(term(orchestrating))).await;
-    let build = task(&hub, None).await;
-    let verb = Verb::TaskAssign { project: project(), task: build, term: term(building) };
-    assert!(matches!(hub.dispatch(verb).await, Outcome::Task(_)));
+    let build = task(&hub).await;
+    assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
 
-    let costing = |terminal, cost| {
+    let reading = |terminal, used_bp| {
         let mut row = row(Phase::Working, 10, terminal);
-        row.meters.cost_micro_usd = Some(cost);
+        row.meters.limits = vec![slopty_proto::thread::Limit {
+            name: "five-hour".to_owned(),
+            used_bp,
+            resets_ms: None,
+        }];
         row
     };
-    let orchestrator = costing(Some(orchestrating), 1_000_000);
-    let builder = costing(Some(building), 2_000_000);
-    let subagent = under(costing(None, 500_000), &builder);
-    let stranger = costing(Some(elsewhere), 9_000_000);
-    let mut windowed = costing(None, 0);
-    windowed.meters.limits = vec![slopty_proto::thread::Limit {
-        name: "five-hour".to_owned(),
-        used_bp: 4_200,
-        resets_ms: None,
-    }];
-    let windowed = under(windowed, &orchestrator);
-    let rows = vec![orchestrator.clone(), builder, subagent, stranger, windowed];
+    let orchestrator = reading(Some(orchestrating), 1_000);
+    let builder = reading(Some(building), 2_000);
+    let subagent = under(reading(None, 4_200), &builder);
+    let stranger = reading(Some(elsewhere), 9_000);
+    let rows = vec![orchestrator, builder, subagent, stranger];
     lease.handle(snapshot(rows.clone()));
     let spend = || hub.inner.state.lock().projects.project(&project()).unwrap().spend.clone();
-    assert_eq!(spend().cost_micro_usd, 3_500_000);
-    assert_eq!(spend().windows.get("five-hour"), Some(&4_200));
+    assert_eq!(spend().windows.get("five-hour"), Some(&4_200), "the stranger's is not");
     lease.handle(snapshot(rows));
-    assert_eq!(spend().cost_micro_usd, 3_500_000, "the same figures again");
-    lease.handle(delta(vec![costing(Some(orchestrating), 1_500_000)]));
-    assert_eq!(spend().cost_micro_usd, 5_000_000, "a new thread of the orchestrator's adds");
-    let orchestrator = ThreadRow {
-        meters: Meters { cost_micro_usd: Some(1_200_000), ..Meters::default() },
-        ..orchestrator
+    assert_eq!(spend().windows.get("five-hour"), Some(&4_200), "the same readings again");
+    let fresh = reading(Some(orchestrating), 6_000);
+    lease.handle(delta(vec![fresh.clone()]));
+    assert_eq!(
+        spend().windows.get("five-hour"),
+        Some(&6_000),
+        "a new thread of the orchestrator's"
+    );
+    let mut lower = fresh;
+    lower.meters.limits[0].used_bp = 3_000;
+    lease.handle(delta(vec![lower]));
+    assert_eq!(spend().windows.get("five-hour"), Some(&4_200), "a later reading replaces its own");
+}
+
+/// A project task's agent that comes to rest says nothing to the person: its work reaches them
+/// when it is ready to merge, and the orchestrator hears of the rest. Its need and its failure
+/// still come as notices, and the orchestrator's own rest does too.
+#[tokio::test]
+async fn a_task_s_agent_that_finishes_sends_the_person_no_notice() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (orchestrating, building) = (SessionId::new(), SessionId::new());
+    let worker = WorkerId::new();
+    let sessions = vec![summary(orchestrating), summary(building)];
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
+    let term = |session| TermRef { worker, session };
+    create(&hub, Some(term(orchestrating))).await;
+    let build = task(&hub).await;
+    assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
+    let mut desk = Client::sit(&hub, "mac");
+    desk.at(&hub, Seat::Desk, true, Vec::new());
+    let orchestrator = row(Phase::Working, 1_000, Some(orchestrating));
+    let builder = row(Phase::Working, 1_000, Some(building));
+    lease.handle(snapshot(vec![orchestrator.clone(), builder.clone()]));
+    hub.rank_ladder();
+    let rank = |rows: Vec<ThreadRow>| {
+        lease.handle(delta(rows));
+        hub.rank_ladder();
     };
-    lease.handle(delta(vec![orchestrator]));
-    assert_eq!(spend().cost_micro_usd, 5_200_000, "a later figure replaces its own");
+    rank(vec![moved(&builder, Phase::Done, 2_000)]);
+    assert!(desk.notices().is_empty(), "a task's agent at rest is no notice");
+    rank(vec![asking(moved(&builder, Phase::NeedsYou, 3_000), "May I?")]);
+    rank(vec![moved(&builder, Phase::Failed, 4_000)]);
+    let kinds: Vec<NoticeKind> = desk.notices().iter().map(|n| n.kind).collect();
+    assert_eq!(kinds, [NoticeKind::NeedsYou, NoticeKind::Failed]);
+    rank(vec![moved(&orchestrator, Phase::Done, 5_000)]);
+    let kinds: Vec<NoticeKind> = desk.notices().iter().map(|n| n.kind).collect();
+    assert_eq!(kinds, [NoticeKind::Finished], "the orchestrator's own still says so");
 }

@@ -1,8 +1,9 @@
 //! Reports on their way to the agent they are for (`docs/decisions/projects.md`, "Reports go
 //! up through hooks").
 //!
-//! A task's agent reports to the node that split its task off: its parent task's agent, or the
-//! project's orchestrator. The reports wait here per node, and go when their kind says:
+//! A task's agent reports to the project's orchestrator. What goes to an agent waits here per
+//! node (the orchestrator, or a task for the person's and the orchestrator's words to it), and
+//! goes when its kind says:
 //!
 //! - a need ([`ReportKind::NeedsInput`]) at once, but at most once per task every [`NEED_EVERY`];
 //! - a block ([`ReportKind::Stuck`]) at once, but at most once per task every [`STUCK_EVERY`];
@@ -11,7 +12,8 @@
 //! - a checkpoint with whatever goes next, or after [`CHECKPOINT_WAIT`].
 //!
 //! A task's later report of a kind replaces its earlier one still waiting, so what waits for a
-//! node is bounded by its tasks, and an agent that reports in a loop costs its parent one turn
+//! node is bounded by its tasks, and an agent that reports in a loop costs the orchestrator one
+//! turn
 //! per pacing interval, not one per report. Every report is on the timeline at once whatever
 //! waits here.
 //!
@@ -43,14 +45,14 @@ pub(crate) const CHECKPOINT_WAIT: Duration = Duration::from_hours(1);
 pub(crate) const STUCK_EVERY: Duration = Duration::from_mins(3);
 /// How often one task's need may interrupt.
 pub(crate) const NEED_EVERY: Duration = Duration::from_mins(1);
-/// How long a task's agent waits on the person before the node above it hears so: a
+/// How long a task's agent waits on the person before the orchestrator hears so: a
 /// permission the person answers at once wakes nobody.
 pub(crate) const WAIT_SETTLE: Duration = Duration::from_secs(30);
 /// The longest batch, in bytes: Claude Code takes up to 10 000 characters of a hook's
 /// context.
 pub(crate) const CONTEXT_MAX: usize = 9_000;
 
-/// A node of a project's tree: a task, or the orchestrator's when the task is absent.
+/// Where words go in a project: a task's agent, or the orchestrator when the task is absent.
 pub(crate) type Node = (ProjectId, Option<TaskId>);
 
 /// Who wrote what waits for a node.
@@ -66,10 +68,9 @@ enum By {
     /// The server, of what a task's agent came to when it did not report: its last words
     /// with it, read again until it goes ([`Deliveries::reword`]).
     Outcome,
-    /// An agent above the node, to the node's own agent: the orchestrator (no task) or the
-    /// agent of a task it was split from. Its words go at once, after the person's, and its
-    /// latest replaces the one still unread.
-    Above(Option<TaskId>),
+    /// The orchestrator, to a task's own agent. Its words go at once, after the person's, and
+    /// its latest replaces the one still unread.
+    Orchestrator,
 }
 
 /// What waits for a node: a task's report, the server's own words, or the person's.
@@ -85,7 +86,7 @@ impl Item {
     /// The pacing it goes under: its task's needs, or its task's blocks. The person's words
     /// are not paced.
     fn paced(&self) -> Option<(TaskId, bool)> {
-        if matches!(self.by, By::Person | By::Above(_)) {
+        if matches!(self.by, By::Person | By::Orchestrator) {
             return None;
         }
         let stuck = match self.report.kind {
@@ -98,7 +99,7 @@ impl Item {
 
     /// When it falls due, given when its task's last report of its kind went.
     fn due(&self, last: Option<Instant>) -> Instant {
-        if matches!(self.by, By::Person | By::Above(_)) {
+        if matches!(self.by, By::Person | By::Orchestrator) {
             return self.at;
         }
         let after = |wait: Duration| self.at.checked_add(wait).unwrap_or(self.at);
@@ -274,11 +275,10 @@ impl Deliveries {
         self.push((project, task), Item { task, report, at, by: By::Person });
     }
 
-    /// The words of the agent of `from` (the orchestrator when absent) to the agent of
-    /// `node`, which is under it: they go at once, after the person's words and never in their
-    /// place, and replace its own earlier words still unread. A project held at its budget
-    /// holds them as it holds reports.
-    pub(crate) fn above(&mut self, node: Node, from: Option<TaskId>, words: &str, at: Instant) {
+    /// The orchestrator's words to the agent of `node`'s task: they go at once, after the
+    /// person's words and never in their place, and replace its own earlier words still unread.
+    /// A project held at its budget holds them as it holds reports.
+    pub(crate) fn orchestrator(&mut self, node: Node, words: &str, at: Instant) {
         let report = Report {
             kind: ReportKind::NeedsInput,
             note: plain(words),
@@ -287,7 +287,7 @@ impl Deliveries {
             pr: None,
         };
         let task = node.1;
-        self.push(node, Item { task, report, at, by: By::Above(from) });
+        self.push(node, Item { task, report, at, by: By::Orchestrator });
     }
 
     fn push(&mut self, node: Node, item: Item) {
@@ -299,7 +299,7 @@ impl Deliveries {
             let replaced = match item.by {
                 By::Person => false,
                 By::Server | By::Outcome => i.by == item.by,
-                By::Above(_) => matches!(i.by, By::Above(_)),
+                By::Orchestrator => i.by == By::Orchestrator,
                 // The agent's own word stands for what the server would say of it.
                 By::Agent => {
                     (i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind)))
@@ -534,15 +534,11 @@ fn block(item: &Item) -> String {
     let r = &item.report;
     let said = match item.by {
         By::Person => Some("The person says:".to_owned()),
-        By::Above(None) => Some(
+        By::Orchestrator => Some(
             "Your orchestrator says (an agent, not the person; it answers nothing the person is \
              asked):"
                 .to_owned(),
         ),
-        By::Above(Some(task)) => Some(format!(
-            "The agent of task {task}, which split your task off, says (an agent, not the \
-             person; it answers nothing the person is asked):"
-        )),
         By::Agent | By::Server | By::Outcome => None,
     };
     if let Some(said) = said {

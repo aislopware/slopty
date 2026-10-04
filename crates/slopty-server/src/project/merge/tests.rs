@@ -120,18 +120,23 @@ fn the_queue_is_its_tasks_in_the_order_they_joined_and_outlives_a_restart() {
     }
 }
 
-/// The person asks for a merge: a task with a verifier is verified first, one with none joins
-/// the queue at once. A merged task, or one that only reads, has nothing to merge. A task
-/// moved out of done by anyone but the queue leaves it, and the queue never merges a task
-/// that is not done.
+/// The person merges: a task with a verifier is verified first, keeping their Merge so it
+/// joins the queue once it passes; one with none, or one ready to merge, joins at once. A merged
+/// task, or one that only reads, has nothing to merge. A task moved out of done by anyone but the
+/// queue leaves it, and the queue never merges a task that is not done.
 #[test]
 fn the_person_asks_for_a_merge_and_the_queue_takes_only_what_is_done() {
     let mut p = projects(Some("cargo gate"));
     let a = task(&mut p, "A");
     let (asked, changes) = p.ask_merge(&id(), a, at(1)).unwrap();
-    assert_eq!((asked.state, asked.merge), (TaskState::Verifying, None));
+    let kept = Some(Merge::Queued { since_ms: at(1) });
+    assert_eq!((asked.state, asked.merge), (TaskState::Verifying, kept));
     let entry = changes.iter().find_map(|c| c.kept.entry.as_ref()).unwrap();
     assert_eq!(entry.what, Moment::State { from: TaskState::Planned, to: TaskState::Verifying });
+    assert_eq!(p.queue(&id()), Vec::<TaskId>::new(), "not until it passes");
+    let passed = Advance { state: Some(TaskState::Done), ..Advance::default() };
+    p.advance(&id(), a, passed, at(2)).unwrap();
+    assert_eq!(p.queue(&id()), [a], "the person's Merge stood");
 
     let mut bare = projects(None);
     let b = task(&mut bare, "B");

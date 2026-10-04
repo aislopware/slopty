@@ -7,9 +7,10 @@
 //! target beside it ([`Verb::ReviewCheckout`]). It knows the task's brief and nothing of the
 //! conversation that wrote the work, and it cannot edit. It runs beside the lane, which goes on
 //! with other tasks, and the person can open it like any agent. It answers with Slopty's
-//! `review_report` tool ([`Verb::TaskReview`]): an approval puts the task in the merge queue,
-//! and changes asked give it back to its agent with the findings, through its hooks. The
-//! person may say either over it, at any time.
+//! `review_report` tool ([`Verb::TaskReview`]): an approval leaves the task ready to merge, for
+//! the person's Merge, and changes asked give it back to its agent with the findings, through
+//! its hooks, for one round: a second ask waits for the person ([`Hub::give_back`]). The person
+//! may say either over it, at any time.
 
 use std::collections::HashMap;
 
@@ -17,8 +18,8 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::AgentKind;
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    Commits, Merge, Moment, PROJECT_ENV, ProjectId, REVIEW_DIFF, ReviewRun, ReviewVerdict,
-    Reviewer, StepKind, StepState, TASK_ENV, Task, TaskId, TaskState, TaskStep,
+    Commits, Moment, PROJECT_ENV, ProjectId, REVIEW_DIFF, ReviewRun, ReviewVerdict, Reviewer,
+    StepKind, StepState, TASK_ENV, Task, TaskId, TaskState, TaskStep,
 };
 
 use super::projects::{fleet_room, live, started_args};
@@ -199,8 +200,9 @@ impl Hub {
         room.map_err(|refused| said(&refused))
     }
 
-    /// `task`'s reviewer, or the person, says whether its work may merge. An approval queues
-    /// it; changes asked give it back to its agent with the findings, the reviewer's session
+    /// `task`'s reviewer, or the person, says whether its work may merge. An approval leaves
+    /// it ready to merge, or in the queue when the person's Merge asked for it; changes asked
+    /// give it back to its agent with the findings, the reviewer's session
     /// kept for reading. The person's word ends a reviewer still at work.
     pub(super) fn task_review(
         &self,
@@ -251,8 +253,9 @@ impl Hub {
                     term: None,
                     commits: None,
                 }),
-                merge: Queue::Set(Merge::Queued { since_ms: WallMs::now() }),
+                merge: Queue::Keep,
                 moment: Some(Moment::Reviewed(run.clone())),
+                give_backs: (run.by == Reviewer::Person).then(Default::default),
                 reviewed: Some(run),
                 ..Advance::default()
             };
@@ -460,9 +463,10 @@ fn reviewer_role(
              need. Change nothing: you cannot edit, and git stays as it is."
         ),
         "- Look for what would be wrong to merge: a bug, a broken contract or invariant, a \
-         security hole, lost data, a test the brief asked for that is missing. Check each \
-         finding against the code before you report it, and leave out what you are not sure \
-         of, matters of style, and anything the diff did not change."
+         security hole, lost data, a test the brief asked for that is missing, a test deleted \
+         or weakened to make the work pass. Check each finding against the code before you \
+         report it, and leave out what you are not sure of, matters of style, and anything the \
+         diff did not change."
             .to_owned(),
         "- Answer once, with Slopty's review_report tool: approved or not, a summary of a few \
          lines, and the findings that matter most first, each with its path, line, severity \
@@ -473,6 +477,10 @@ fn reviewer_role(
          you about it."
             .to_owned(),
     ];
+    if let Some(tests) = &task.tests {
+        let first = if tests.is_empty() { "" } else { " Read those first." };
+        lines.push(format!("- {}.{first}", plain(&tests.line())));
+    }
     if let Some(brief) = project.review.as_deref().filter(|b| !b.trim().is_empty()) {
         lines.push(format!("- The person also asks you to look for: {}", plain(brief)));
     }

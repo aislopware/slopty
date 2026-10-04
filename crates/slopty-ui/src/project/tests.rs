@@ -32,7 +32,7 @@ fn a_snapshot_replaces_and_an_older_change_is_dropped() {
         last: false,
         projects: vec![status(
             project("board", None),
-            vec![card(1, "a", TaskState::Planned, None)],
+            vec![card(1, "a", TaskState::Planned)],
             Vec::new(),
         )],
     };
@@ -42,7 +42,7 @@ fn a_snapshot_replaces_and_an_older_change_is_dropped() {
         last: true,
         projects: vec![status(
             project("board", None),
-            vec![card(2, "b", TaskState::Planned, None)],
+            vec![card(2, "b", TaskState::Planned)],
             Vec::new(),
         )],
     };
@@ -51,14 +51,14 @@ fn a_snapshot_replaces_and_an_older_change_is_dropped() {
     assert!(mirror.get(&fixtures::id("old")).is_none(), "the first part replaces");
     assert_eq!(board(&mirror).tasks.len(), 2, "a later part adds to the project it began");
 
-    let stale = task_changed("board", card(1, "a", TaskState::Failed, None), None);
+    let stale = task_changed("board", card(1, "a", TaskState::Failed), None);
     assert_eq!(mirror.apply_update(10, stale), None, "at the snapshot's seq: already in it");
     assert_eq!(board(&mirror).tasks[&TaskId(1)].state, TaskState::Planned);
-    let fresh = task_changed("board", card(1, "a", TaskState::Running, None), None);
+    let fresh = task_changed("board", card(1, "a", TaskState::Running), None);
     assert_eq!(mirror.apply_update(11, fresh), Some(fixtures::id("board")));
     assert_eq!(board(&mirror).tasks[&TaskId(1)].state, TaskState::Running);
 
-    let unknown = task_changed("never-heard", card(1, "x", TaskState::Running, None), None);
+    let unknown = task_changed("never-heard", card(1, "x", TaskState::Running), None);
     assert_eq!(
         mirror.apply_update(12, unknown),
         None,
@@ -101,16 +101,13 @@ fn the_timeline_keeps_each_entry_once_and_its_latest() {
     assert!(kept.iter().zip(kept.iter().skip(1)).all(|(a, b)| a.seq < b.seq), "in order");
 }
 
-/// The tree is depth first from the orchestrator, children by number; a task whose parent is
-/// not on the board hangs from the orchestrator rather than falling out.
+/// The tree is one level: the orchestrator, then every task under it by number.
 #[test]
-fn the_tree_runs_depth_first_from_the_orchestrator() {
+fn every_task_stands_under_the_orchestrator() {
     let mirror = one(vec![
-        card(1, "wire", TaskState::Running, None),
-        card(2, "store", TaskState::Done, None),
-        card(3, "goldens", TaskState::Planned, Some(1)),
-        card(4, "fuzz", TaskState::Planned, Some(1)),
-        card(5, "orphan", TaskState::Planned, Some(99)),
+        card(2, "store", TaskState::Done),
+        card(1, "wire", TaskState::Running),
+        card(3, "goldens", TaskState::Planned),
     ]);
     let rows: Vec<(Option<u32>, usize, bool)> = board(&mirror)
         .tree()
@@ -119,46 +116,43 @@ fn the_tree_runs_depth_first_from_the_orchestrator() {
         .collect();
     assert_eq!(
         rows,
-        [
-            (None, 0, true),
-            (Some(1), 1, false),
-            (Some(3), 2, false),
-            (Some(4), 2, true),
-            (Some(2), 1, false),
-            (Some(5), 1, true),
-        ]
+        [(None, 0, true), (Some(1), 1, false), (Some(2), 1, false), (Some(3), 1, true)]
     );
 }
 
-/// A parent stands in the lane of its most urgent descendant: a finished parent whose child
-/// waits on the person is under "Needs you" with it. Lanes with nothing are left out.
+/// Each task stands in the lane its own state puts it in; lanes with nothing are left out.
 #[test]
-fn a_parent_stands_where_its_most_urgent_descendant_does() {
+fn a_task_stands_in_its_own_lane() {
     let mirror = one(vec![
-        card(1, "parent", TaskState::Done, None),
-        card(2, "child", TaskState::Running, Some(1)),
-        card(3, "grandchild", TaskState::Blocked, Some(2)),
-        card(4, "alone", TaskState::Merged, None),
-        card(5, "next", TaskState::Planned, None),
+        card(1, "done", TaskState::Done),
+        card(2, "running", TaskState::Running),
+        card(3, "blocked", TaskState::Blocked),
+        card(4, "alone", TaskState::Merged),
+        card(5, "next", TaskState::Planned),
     ]);
     let b = board(&mirror);
     let lanes: Vec<(Lane, Vec<u32>)> =
         b.lanes().into_iter().map(|(l, t)| (l, t.into_iter().map(|t| t.0).collect())).collect();
     assert_eq!(
         lanes,
-        [(Lane::NeedsYou, vec![1, 2, 3]), (Lane::UpNext, vec![5]), (Lane::Merged, vec![4])]
+        [
+            (Lane::NeedsYou, vec![3]),
+            (Lane::Working, vec![2]),
+            (Lane::UpNext, vec![5]),
+            (Lane::ReadyToMerge, vec![1]),
+            (Lane::Merged, vec![4]),
+        ]
     );
-    assert_eq!(b.needs_you(), [TaskId(3)], "the band names only the one that waits");
 }
 
 /// A task waits on the dependencies not yet done or merged.
 #[test]
 fn a_task_waits_on_what_is_not_done() {
-    let mut blocked = card(3, "after", TaskState::Planned, None);
+    let mut blocked = card(3, "after", TaskState::Planned);
     blocked.depends_on = vec![TaskId(1), TaskId(2), TaskId(9)];
     let mirror = one(vec![
-        card(1, "done", TaskState::Merged, None),
-        card(2, "running", TaskState::Running, None),
+        card(1, "done", TaskState::Merged),
+        card(2, "running", TaskState::Running),
         blocked,
     ]);
     assert_eq!(board(&mirror).waiting_on(TaskId(3)), [TaskId(2), TaskId(9)]);
@@ -169,7 +163,7 @@ fn a_task_waits_on_what_is_not_done() {
 #[test]
 fn a_native_moves_its_nodes_counts() {
     let (worker, session) = (WorkerId::new(), SessionId::new());
-    let mut running = on(card(1, "wire", TaskState::Running, None), worker, session);
+    let mut running = on(card(1, "wire", TaskState::Running), worker, session);
     running.natives.agents = 1;
     running.natives.running = 1;
     let mut mirror = one(vec![running]);
@@ -212,7 +206,7 @@ fn a_native_moves_its_nodes_counts() {
 fn a_session_finds_its_node() {
     let (worker, orchestrator, agent, ended) =
         (WorkerId::new(), SessionId::new(), SessionId::new(), SessionId::new());
-    let mut gone = on(card(2, "gone", TaskState::Done, None), worker, ended);
+    let mut gone = on(card(2, "gone", TaskState::Done), worker, ended);
     if let Some(a) = gone.assignment.as_mut() {
         a.ended_ms = Some(AT);
     }
@@ -221,7 +215,7 @@ fn a_session_finds_its_node() {
         1,
         vec![status(
             project("board", Some(TermRef { worker, session: orchestrator })),
-            vec![on(card(1, "live", TaskState::Running, None), worker, agent), gone],
+            vec![on(card(1, "live", TaskState::Running), worker, agent), gone],
             Vec::new(),
         )],
     ));
@@ -382,14 +376,14 @@ fn short_lanes_stack_so_every_lane_stands_in_the_first_screenful() {
 /// A board unchanged by an update keeps its address, so handing it over again costs a pointer.
 #[test]
 fn an_update_copies_only_the_board_it_touches() {
-    let mut mirror = one(vec![card(1, "Wire the board", TaskState::Running, None)]);
+    let mut mirror = one(vec![card(1, "Wire the board", TaskState::Running)]);
     let mut later = snapshot(10, vec![status(project("other", None), Vec::new(), Vec::new())]);
     later.first = false;
     let touched = mirror.apply_part(later);
     assert_eq!(touched, [fixtures::id("other")]);
     let held = mirror.get(&fixtures::id("board")).cloned();
     let untouched = mirror.get(&fixtures::id("other")).cloned();
-    let changed = task_changed("board", card(1, "Wire the board", TaskState::Blocked, None), None);
+    let changed = task_changed("board", card(1, "Wire the board", TaskState::Blocked), None);
     assert!(mirror.apply_update(11, changed).is_some());
     let (Some(held), Some(untouched)) = (held, untouched) else {
         panic!("both projects are mirrored")
@@ -417,23 +411,23 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
     use super::model::{queue_words, verdict_detail, verdict_tail};
     let worker = WorkerId::new();
     let merging = {
-        let mut c = queued(card(4, "d", TaskState::Done, None), 5, "4444444");
+        let mut c = queued(card(4, "d", TaskState::Done), 5, "4444444");
         let phase = StepState::Running { phase: "Rebasing onto main".into(), percent: None };
         c.step = Some(step(StepKind::Merge, worker, phase, None));
         c
     };
-    let mut verifying = card(6, "f", TaskState::Verifying, None);
+    let mut verifying = card(6, "f", TaskState::Verifying);
     let line = StepState::Running { phase: "Compiling".into(), percent: None };
     verifying.step = Some(step(StepKind::Verify, worker, line, None));
     verifying.updated_ms = WallMs::from_millis(AT.as_millis().saturating_add(50));
-    let mut failed = card(7, "g", TaskState::Waiting, None);
+    let mut failed = card(7, "g", TaskState::Waiting);
     failed.verified = Some(run(false, "7777777abc"));
     let mirror = one(vec![
-        queued(card(1, "a", TaskState::Done, None), 20, "1111111"),
-        queued(card(2, "b", TaskState::Done, None), 10, "2222222"),
-        card(3, "c", TaskState::Done, None),
+        queued(card(1, "a", TaskState::Done), 20, "1111111"),
+        queued(card(2, "b", TaskState::Done), 10, "2222222"),
+        card(3, "c", TaskState::Done),
         merging,
-        card(5, "e", TaskState::Verifying, None),
+        card(5, "e", TaskState::Verifying),
         verifying,
         failed,
     ]);
@@ -462,7 +456,7 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
     );
 
     let mut again = one(vec![{
-        let mut c = card(1, "a", TaskState::Verifying, None);
+        let mut c = card(1, "a", TaskState::Verifying);
         c.verified = Some(run(false, "1111111"));
         c
     }]);
@@ -472,7 +466,7 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
         task_changed(
             "board",
             {
-                let mut c = card(1, "a", TaskState::Running, None);
+                let mut c = card(1, "a", TaskState::Running);
                 c.verified = Some(run(true, "1111111"));
                 c
             },
@@ -492,17 +486,17 @@ fn a_review_speaks_while_it_holds_and_says_what_it_found() {
     use super::model::{finding_place, review_detail, review_line};
     let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
     let approved = {
-        let mut c = queued(card(1, "a", TaskState::Done, None), 5, "1111111");
+        let mut c = queued(card(1, "a", TaskState::Done), 5, "1111111");
         c.reviewed = Some(review(true, "1111111", Some(term)));
         c
     };
     let asked = {
-        let mut c = card(2, "b", TaskState::Waiting, None);
+        let mut c = card(2, "b", TaskState::Waiting);
         c.reviewed = Some(review(false, "2222222", Some(term)));
         c
     };
     let again = {
-        let mut c = card(3, "c", TaskState::Verifying, None);
+        let mut c = card(3, "c", TaskState::Verifying);
         c.reviewed = Some(review(false, "3333333", Some(term)));
         c
     };
@@ -544,25 +538,25 @@ fn a_task_offers_what_moves_it_on() {
 
     let worker = WorkerId::new();
     let failed = |kind| StepState::Failed { why: format!("{kind:?} broke") };
-    let done = card(1, "Done, nothing queued it", TaskState::Done, None);
-    let in_queue = queued(card(2, "In the queue", TaskState::Done, None), 5, "2222222");
-    let mut verify = card(3, "Its verifier failed", TaskState::Waiting, None);
+    let done = card(1, "Done, nothing queued it", TaskState::Done);
+    let in_queue = queued(card(2, "In the queue", TaskState::Done), 5, "2222222");
+    let mut verify = card(3, "Its verifier failed", TaskState::Waiting);
     verify.verified = Some(run(false, "3333333"));
     verify.step = Some(step(StepKind::Verify, worker, failed(StepKind::Verify), None));
-    let mut asked = card(4, "Changes asked", TaskState::Waiting, None);
+    let mut asked = card(4, "Changes asked", TaskState::Waiting);
     asked.verified = Some(run(true, "4444444"));
     asked.reviewed = Some(review(false, "4444444", None));
-    let mut silent = card(5, "The reviewer said nothing", TaskState::Waiting, None);
+    let mut silent = card(5, "The reviewer said nothing", TaskState::Waiting);
     silent.verified = Some(run(true, "5555555"));
     silent.step = Some(step(StepKind::Review, worker, failed(StepKind::Review), None));
-    let mut unverified = card(6, "Changes asked, not verified", TaskState::Waiting, None);
+    let mut unverified = card(6, "Changes asked, not verified", TaskState::Waiting);
     unverified.reviewed = Some(review(false, "6666666", None));
-    let mut reads = card(7, "Reads only", TaskState::Done, None);
+    let mut reads = card(7, "Reads only", TaskState::Done);
     reads.read_only = true;
-    let merged = card(8, "Merged", TaskState::Merged, None);
-    let mut clone = card(9, "Its clone failed", TaskState::Waiting, None);
+    let merged = card(8, "Merged", TaskState::Merged);
+    let mut clone = card(9, "Its clone failed", TaskState::Waiting);
     clone.step = Some(step(StepKind::Clone, worker, failed(StepKind::Clone), None));
-    let mut merge = card(10, "Its merge failed", TaskState::Done, None);
+    let mut merge = card(10, "Its merge failed", TaskState::Done);
     merge.step = Some(step(StepKind::Merge, worker, failed(StepKind::Merge), None));
     merge.merge = Some(slopty_proto::project::Merge::Queued { since_ms: AT });
     let mirror =
@@ -596,9 +590,9 @@ fn a_plan_is_estimated_from_the_tasks_that_finished() {
         c.spent = Spent { active_ms: min * 60_000, since_ms: None };
         c
     };
-    let mut review = worked(card(3, "Read it", TaskState::Done, None), 90);
+    let mut review = worked(card(3, "Read it", TaskState::Done), 90);
     review.kind = "review".to_owned();
-    let mut proposed = card(4, "Next", TaskState::Planned, None);
+    let mut proposed = card(4, "Next", TaskState::Planned);
     proposed.proposed = Some(Proposed {
         since_ms: AT,
         runs: "claude".to_owned(),
@@ -606,11 +600,11 @@ fn a_plan_is_estimated_from_the_tasks_that_finished() {
         why: String::new(),
     });
     let tasks = vec![
-        worked(card(1, "Build a", TaskState::Done, None), 10),
-        worked(card(2, "Build b", TaskState::Merged, None), 20),
+        worked(card(1, "Build a", TaskState::Done), 10),
+        worked(card(2, "Build b", TaskState::Merged), 20),
         review,
         proposed,
-        worked(card(5, "Still going", TaskState::Running, None), 500),
+        worked(card(5, "Still going", TaskState::Running), 500),
     ];
     let mut mirror = Projects::default();
     mirror.apply_part(snapshot(10, vec![status(project("board", None), tasks, Vec::new())]));
@@ -634,12 +628,12 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
     use super::fixtures::run;
     use super::recap::{Looked, Recap, RecapKind};
 
-    let mut merged = card(4, "Write the decision", TaskState::Merged, None);
+    let mut merged = card(4, "Write the decision", TaskState::Merged);
     merged.assignment = None;
     let mirror = one(vec![
         merged,
-        card(5, "Check the goldens", TaskState::Waiting, None),
-        card(6, "Draw the lanes", TaskState::Waiting, None),
+        card(5, "Check the goldens", TaskState::Waiting),
+        card(6, "Draw the lanes", TaskState::Waiting),
     ]);
     let board = board(&mirror);
     let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
@@ -690,7 +684,7 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
 /// threads say adds cost, context and the plan's rate windows, the fullest of each; a node
 /// whose thread is not heard shows its time alone.
 #[test]
-fn time_and_cost_roll_up_the_tree_with_the_orchestrator_apart() {
+fn time_and_cost_add_up_with_the_orchestrator_apart() {
     use slopty_proto::project::Spent;
     use slopty_proto::thread::{Limit, Meters};
 
@@ -708,10 +702,10 @@ fn time_and_cost_roll_up_the_tree_with_the_orchestrator_apart() {
     let mut record = project("board", Some(TermRef { worker, session: orchestrator }));
     record.orchestrator_spent = Spent { active_ms: min(8), since_ms: None };
     let tasks = vec![
-        spent(on(card(1, "Parent", TaskState::Running, None), worker, parent), 12, None),
-        spent(on(card(2, "Child", TaskState::Running, Some(1)), worker, child), 20, Some(0)),
-        spent(on(card(3, "Grandchild", TaskState::Done, Some(2)), worker, leaf), 5, None),
-        spent(card(4, "Apart", TaskState::Planned, None), 0, None),
+        spent(on(card(1, "Parent", TaskState::Running), worker, parent), 12, None),
+        spent(on(card(2, "Child", TaskState::Running), worker, child), 20, Some(0)),
+        spent(on(card(3, "Grandchild", TaskState::Done), worker, leaf), 5, None),
+        spent(card(4, "Apart", TaskState::Planned), 0, None),
     ];
     let mut mirror = Projects::default();
     mirror.apply_part(snapshot(10, vec![status(record, tasks, Vec::new())]));
@@ -720,10 +714,9 @@ fn time_and_cost_roll_up_the_tree_with_the_orchestrator_apart() {
     let none = MetersBySession::new();
     let now = at(10);
     let first = b.spend(Some(TaskId(1)), now, &none);
-    assert_eq!((first.own_ms, first.subtree_ms), (min(12), min(12 + 30 + 5)));
-    assert!(first.has_subtree() && first.own_cost.is_none() && first.subtree_cost.is_none());
-    let lone = b.spend(Some(TaskId(3)), now, &none);
-    assert!(!lone.has_subtree());
+    assert_eq!((first.own_ms, first.subtree_ms), (min(12), min(12)), "one level: its own");
+    assert!(!first.has_subtree() && first.own_cost.is_none());
+    assert_eq!(b.spend(Some(TaskId(2)), now, &none).own_ms, min(30), "its clock runs");
     let mine = b.spend(None, now, &none);
     assert_eq!((mine.own_ms, mine.subtree_ms), (min(8), min(8)), "its own share alone");
     let all = b.project_spend(now, &none);
@@ -748,13 +741,13 @@ fn time_and_cost_roll_up_the_tree_with_the_orchestrator_apart() {
     .into_iter()
     .collect();
     let first = b.spend(Some(TaskId(1)), now, &heard);
-    assert_eq!((first.own_cost, first.subtree_cost), (None, Some(1_300_000)));
+    assert_eq!(first.own_cost, None, "its thread is not heard");
     let second = b.spend(Some(TaskId(2)), now, &heard);
     assert_eq!(second.context_shown(), Some((8_500, true)), "85% warns");
     assert_eq!(b.spend(Some(TaskId(3)), now, &heard).context_shown(), None, "5% is not shown");
     assert_eq!(b.spend(None, now, &heard).context_shown(), Some((2_000, false)));
+    assert_eq!(second.own_cost, Some(1_250_000));
     let all = b.project_spend(now, &heard);
-    assert_eq!((all.orchestrator_cost, all.tasks_cost), (Some(400_000), Some(1_300_000)));
     assert_eq!(all.limits.iter().map(limit_line).collect::<Vec<_>>(), ["5-hour 44%", "weekly 18%"]);
     assert_eq!(
         [worked(0), worked(min(12)), worked(min(64)), dollars(1_700_000), dollars(4_999)],
@@ -775,7 +768,7 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     use super::model::TaskAction;
 
     let worker = WorkerId::new();
-    let live = |n, title, state| on(card(n, title, state, None), worker, SessionId::new());
+    let live = |n, title, state| on(card(n, title, state), worker, SessionId::new());
     let mut ci = live(1, "Its verifier failed", TaskState::Waiting);
     ci.verified = Some(run(false, "9c1e2f3"));
     ci.step =
@@ -801,7 +794,7 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     let mut conflict = live(4, "Does not rebase", TaskState::Waiting);
     let why = StepState::Failed { why: "conflicts in a.txt".into() };
     conflict.step = Some(step(StepKind::Rebase, worker, why.clone(), None));
-    let mut gone = card(5, "Does not rebase, nobody on it", TaskState::Planned, None);
+    let mut gone = card(5, "Does not rebase, nobody on it", TaskState::Planned);
     gone.step = Some(step(StepKind::Rebase, worker, why, None));
     let mirror = one(vec![ci, asked, pr, conflict, gone]);
     let b = board(&mirror);
@@ -829,9 +822,10 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
 
 /// Once a task's work is on its way, one row says each stage of it: its branch, what its
 /// verifier and reviewer said, its place in the queue, its pull request with its own checks,
-/// and the to-dos still open, which hold the merge back. Failing checks are CI to fix.
+/// and the to-dos still open, said beside its Merge rather than holding it back. Failing
+/// checks are CI to fix.
 #[test]
-fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
+fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
     use slopty_proto::agent::PullRequest;
     use slopty_proto::project::{Checks, ChecksState, NativeCounts};
 
@@ -839,9 +833,9 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
     use super::model::{StageKind, TaskAction};
 
     let worker = WorkerId::new();
-    let mut ahead = queued(card(1, "Ahead", TaskState::Done, None), 10, "1111111");
+    let mut ahead = queued(card(1, "Ahead", TaskState::Done), 10, "1111111");
     ahead.branch = Some("worktree-ahead".into());
-    let mut piped = queued(card(2, "Its pull request", TaskState::Done, None), 20, "2222222");
+    let mut piped = queued(card(2, "Its pull request", TaskState::Done), 20, "2222222");
     piped.reviewed = Some(review(true, "2222222", None));
     piped.pr = Some(PullRequest {
         number: 42,
@@ -860,10 +854,9 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
         at_ms: AT,
     });
     let piped = on(piped, worker, SessionId::new());
-    let mut todos =
-        on(card(3, "Still has to-dos", TaskState::Done, None), worker, SessionId::new());
+    let mut todos = on(card(3, "Still has to-dos", TaskState::Done), worker, SessionId::new());
     todos.natives = NativeCounts { agents: 0, running: 0, todos: 3, done: 1 };
-    let working = card(4, "Still at work", TaskState::Running, None);
+    let working = card(4, "Still at work", TaskState::Running);
     let mirror = one(vec![ahead, piped, todos, working]);
     let b = board(&mirror);
 
@@ -888,7 +881,7 @@ fn a_task_s_pipeline_says_each_stage_and_open_to_dos_hold_the_merge() {
     assert_eq!(b.actions(TaskId(2)), [TaskAction::FixCi], "failing checks are CI to fix");
     let fix = b.told(TaskId(2), TaskAction::FixCi).expect("words");
     assert!(fix.contains("Pull request #42's checks failed: clippy (macos)."), "{fix}");
-    assert!(!b.actions(TaskId(3)).contains(&TaskAction::Merge), "{:?}", b.actions(TaskId(3)));
+    assert_eq!(b.actions(TaskId(3)), [TaskAction::Merge], "to-dos are said, not a hold");
     assert_eq!(b.open_todos(TaskId(3)), 2);
 }
 
@@ -902,7 +895,7 @@ fn a_merge_whose_push_failed_says_so() {
     use super::model::{StageKind, TaskAction, merged_words};
 
     let merged = |n, pushed, push_failed: Option<&str>| {
-        let mut c = card(n, "Merged", TaskState::Merged, None);
+        let mut c = card(n, "Merged", TaskState::Merged);
         c.merge = Some(Merge::Merged {
             target: "main".into(),
             head: "abcdef0123".into(),
@@ -948,26 +941,25 @@ fn a_node_says_where_it_runs_and_why_and_whether_it_can_move() {
 
     let (studio, linux) = (WorkerId::new(), WorkerId::new());
     let orchestrator = TermRef { worker: studio, session: SessionId::new() };
-    let mut running =
-        on(card(1, "Ship the app", TaskState::Running, None), studio, SessionId::new());
+    let mut running = on(card(1, "Ship the app", TaskState::Running), studio, SessionId::new());
     running.worktree = Some("/w/board-1".into());
     if let Some(a) = running.assignment.as_mut() {
         a.placed = Some(Placed { pinned: false, score: 0, why: "Apple work".into() });
     }
-    let mut ended = on(card(2, "Write docs", TaskState::Done, None), linux, SessionId::new());
+    let mut ended = on(card(2, "Write docs", TaskState::Done), linux, SessionId::new());
     if let Some(a) = ended.assignment.as_mut() {
         a.ended_ms = Some(AT);
     }
-    let mut pinned = card(3, "Pinned", TaskState::Planned, None);
+    let mut pinned = card(3, "Pinned", TaskState::Planned);
     pinned.pin = Some(linux);
-    let mut proposed = card(4, "Proposed", TaskState::Planned, None);
+    let mut proposed = card(4, "Proposed", TaskState::Planned);
     proposed.proposed = Some(Proposed {
         since_ms: AT,
         runs: "codex".into(),
         on: Some(linux),
         why: "Linux first +20".into(),
     });
-    let loose = card(5, "Anywhere", TaskState::Planned, None);
+    let loose = card(5, "Anywhere", TaskState::Planned);
     let mut mirror = Projects::default();
     let tasks = vec![running, ended, pinned, proposed, loose];
     mirror.apply_part(snapshot(
@@ -1043,8 +1035,7 @@ fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
 
     use super::model::{StageKind, TaskAction};
 
-    let mut c =
-        on(card(1, "Its pull request", TaskState::Done, None), WorkerId::new(), SessionId::new());
+    let mut c = on(card(1, "Its pull request", TaskState::Done), WorkerId::new(), SessionId::new());
     c.pr = Some(PullRequest {
         number: 42,
         url: "https://github.com/o/r/pull/42".into(),
@@ -1092,7 +1083,7 @@ fn only_what_holds_a_task_up_or_waits_on_the_person_is_news() {
     use super::fixtures::run;
     use super::model::news_line;
 
-    let mirror = one(vec![card(1, "Lock the refresh row", TaskState::Running, None)]);
+    let mirror = one(vec![card(1, "Lock the refresh row", TaskState::Running)]);
     let b = board(&mirror);
     let say = |what| news_line(b, &entry(9, Some(1), what));
     let failing = Checks {
@@ -1148,12 +1139,13 @@ fn only_what_holds_a_task_up_or_waits_on_the_person_is_news() {
         say(Moment::Proposed { on: None }).as_deref(),
         Some("#1 Lock the refresh row: waits for you to start it")
     );
-    let budget =
-        |share_bp| news_line(b, &entry(9, None, Moment::Budget { meter: "usd".into(), share_bp }));
-    assert_eq!(budget(8_100).as_deref(), Some("81% of its cost budget is spent"));
+    let budget = |share_bp| {
+        news_line(b, &entry(9, None, Moment::Budget { meter: "five-hour".into(), share_bp }))
+    };
+    assert_eq!(budget(8_100).as_deref(), Some("81% of its five-hour window budget is spent"));
     assert_eq!(
         budget(10_000).as_deref(),
-        Some("its cost budget is spent; no task starts until it is raised")
+        Some("its five-hour window budget is spent; no task starts until it is raised")
     );
     assert_eq!(say(Moment::Note { text: "hello".into() }), None);
 }

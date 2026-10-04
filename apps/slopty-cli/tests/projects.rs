@@ -297,7 +297,13 @@ mod tests {
                 }),
             ),
             hook("TaskCreated", &json!({ "task_id": "1", "task_subject": "Read main.rs" })),
-            hook("Statusline", &json!({ "worktree": worktree, "meters": { "cost_usd": 1.25 } }),),
+            hook(
+                "Statusline",
+                &json!({
+                    "worktree": worktree,
+                    "meters": { "five_hour": { "used_pct": 40.0, "resets_at": null } },
+                }),
+            ),
         ]);
         let calls = json!([
             { "name": "project_status", "arguments": {} },
@@ -402,21 +408,21 @@ mod tests {
         assert!(moments.iter().any(|m| matches!(m, Moment::Branch { .. })), "{moments:?}");
         assert!(moments.iter().any(|m| matches!(m, Moment::Reported { .. })), "{moments:?}");
 
-        // What its status line said it cost reaches the project through its thread, and the
-        // person's budget below it holds the project: no task starts, and the CLI says why.
-        until("the agent's cost reaches the project", async || {
-            let spent = status(&hub, &project).await.project.spend.cost_micro_usd;
-            (spent == 1_250_000).then_some(())
+        // The plan window its status line read reaches the project through its thread, and
+        // the person's budget below it holds the project: no task starts, and the CLI says why.
+        until("the agent's plan window reaches the project", async || {
+            let spend = status(&hub, &project).await.project.spend;
+            (spend.windows.get("five-hour").copied().map(u64::from) == Some(4_000)).then_some(())
         })
         .await;
         let addr = server.quic_addr();
-        slopty(&root, addr, &["project", "update", "demo", "--budget", "usd=1"]).await;
+        slopty(&root, addr, &["project", "update", "demo", "--budget", "five-hour=30%"]).await;
         let said = slopty(&root, addr, &["project", "status", "demo"]).await;
-        assert!(said.contains("budget  usd $1.25 of $1.00 (125%) (estimated)"), "{said}");
+        assert!(said.contains("budget  five-hour 40.00% of 30.00% (133%)"), "{said}");
         let held = status(&hub, &project).await;
-        let reached = held.timeline.iter().any(
-            |e| matches!(&e.what, Moment::Budget { meter, share_bp: 12_500 } if meter == "usd"),
-        );
+        let reached = held.timeline.iter().any(|e| {
+            matches!(&e.what, Moment::Budget { meter, share_bp: 13_333 } if meter == "five-hour")
+        });
         assert!(reached, "{:?}", held.timeline);
         let next = hub
             .dispatch(Verb::TaskCreate {
@@ -659,7 +665,11 @@ mod tests {
 
         let ran =
             slopty(&root, addr, &["project", "script", "run", "--project", "demo", "where"]).await;
-        let ran_in = until("the script runs", async || std::fs::read_to_string(&out).ok()).await;
+        // The shell makes the file before printf fills it.
+        let ran_in = until("the script runs", async || {
+            std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
+        })
+        .await;
         assert_eq!(PathBuf::from(ran_in), repo.join("web"));
         let session = ran.trim().rsplit('/').next().unwrap().to_owned();
         let terminals = slopty(&root, addr, &["--json", "terminals"]).await;
@@ -688,90 +698,10 @@ case "$1 $2" in
 esac
 "#;
 
-    /// A schedule the person sets with the CLI is kept with its next run in the zone named;
-    /// run on their word it makes its task and starts its command on the worker, with its
-    /// project and task in its environment; a run while that task is under way is skipped,
-    /// saying so; and taken away, its task stays.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_schedule_set_from_the_cli_runs_its_task_on_the_worker() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let (server, _daemons, _worker) = fleet(&root, "").await;
-        let addr = server.quic_addr();
-        let repo = root.to_string_lossy().into_owned();
-        slopty(&root, addr, &["project", "create", "demo", "--title", "Demo", "--repo", &repo])
-            .await;
-
-        let out = root.join("ran");
-        let script =
-            format!("printf %s \"$SLOPTY_PROJECT/$SLOPTY_TASK\" > '{}'; exec cat", out.display());
-        let set = [
-            "--json",
-            "project",
-            "schedule",
-            "set",
-            "--project",
-            "demo",
-            "--when",
-            "0 3 * * *",
-            "--zone",
-            "Asia/Ho_Chi_Minh",
-            "--title",
-            "Nightly check",
-            "--read-only",
-            "--cwd",
-            &repo,
-            "--command",
-            "--",
-            "/bin/sh",
-            "-c",
-            &script,
-        ];
-        let set: Value = serde_json::from_str(&slopty(&root, addr, &set).await).unwrap();
-        let held = &set["project"]["schedules"][0];
-        assert_eq!(
-            (held["schedule"].as_u64(), held["zone"].as_str()),
-            (Some(1), Some("Asia/Ho_Chi_Minh")),
-            "{set}"
-        );
-        assert!(held["next_ms"].as_u64().is_some(), "{held}");
-
-        let ran =
-            slopty(&root, addr, &["project", "schedule", "run", "--project", "demo", "1"]).await;
-        assert!(ran.starts_with("#1 running  Nightly check"), "{ran}");
-        let wrote = until("the scheduled command ran", async || {
-            std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
-        })
-        .await;
-        assert_eq!(wrote, "demo/1");
-
-        let again =
-            slopty_refused(&root, addr, &["project", "schedule", "run", "--project", "demo", "1"])
-                .await;
-        assert!(again.contains("still under way"), "{again}");
-        let listed = slopty(&root, addr, &["project", "schedule", "ls", "--project", "demo"]).await;
-        assert!(
-            listed.contains("schedule 1 [0 3 * * * Asia/Ho_Chi_Minh] Nightly check"),
-            "{listed}"
-        );
-        assert!(listed.contains("still under way"), "{listed}");
-
-        let gone =
-            slopty(&root, addr, &["project", "schedule", "rm", "--project", "demo", "1"]).await;
-        assert!(gone.contains("demo has no schedule"), "{gone}");
-        let status: Value = serde_json::from_str(
-            &slopty(&root, addr, &["--json", "project", "status", "demo"]).await,
-        )
-        .unwrap();
-        assert_eq!(status["tasks"][0]["title"], "Nightly check", "its task stays: {status}");
-
-        server.shutdown().await;
-    }
-
     /// What a worker's person says of it, labels and probe commands in its settings, reaches
     /// `slopty workers` as facts, and a task's placement rules read them. A command task made
-    /// with the CLI runs where its rules place it, with its project and task in its
-    /// environment.
+    /// and started in one `slopty task start` runs where its rules place it, with its project
+    /// and task in its environment.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_worker_s_own_facts_place_a_command_task_that_runs() {
         let dir = tempfile::tempdir().unwrap();
@@ -795,12 +725,15 @@ esac
         let repo = root.to_string_lossy().into_owned();
         slopty(&root, addr, &["project", "create", "demo", "--title", "Demo", "--repo", &repo])
             .await;
+        let out = root.join("ran");
+        let script =
+            format!("printf %s \"$SLOPTY_PROJECT/$SLOPTY_TASK\" > '{}'; exec cat", out.display());
         slopty(
             &root,
             addr,
             &[
                 "task",
-                "create",
+                "start",
                 "--project",
                 "demo",
                 "--title",
@@ -814,6 +747,13 @@ esac
                 r#"probes.hello == "hi""#,
                 "--prefer",
                 "5:cpus >= 1",
+                "--command",
+                "--cwd",
+                &repo,
+                "--",
+                "/bin/sh",
+                "-c",
+                &script,
             ],
         )
         .await;
@@ -830,28 +770,6 @@ esac
         assert_eq!(ranked[0]["fits"], true, "{ranked}");
         assert_eq!(ranked[0]["score"], 5, "{ranked}");
 
-        let out = root.join("ran");
-        let script =
-            format!("printf %s \"$SLOPTY_PROJECT/$SLOPTY_TASK\" > '{}'; exec cat", out.display());
-        slopty(
-            &root,
-            addr,
-            &[
-                "task",
-                "spawn",
-                "--project",
-                "demo",
-                "1",
-                "--command",
-                "--cwd",
-                &repo,
-                "--",
-                "/bin/sh",
-                "-c",
-                &script,
-            ],
-        )
-        .await;
         let ran = until("the command ran", async || {
             std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
         })
@@ -868,12 +786,12 @@ esac
         server.shutdown().await;
     }
 
-    /// An agent says which task it is on by the server's record of its session, not by its
-    /// environment: one started with a stale `SLOPTY_TASK` and then put on another task
-    /// updates the task it is on when a tool names none, and reports on it: its terminal's token
-    /// proves where it speaks from, whoever started it.
+    /// An agent's environment does not put it on a task: one started outside every task with
+    /// a `SLOPTY_PROJECT` and `SLOPTY_TASK` of its own is refused changing that task and
+    /// reporting on it, since its terminal's token proves it works on none, and the task is as
+    /// it was.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_server_s_record_of_a_session_wins_over_its_slopty_task() {
+    async fn an_agent_s_environment_does_not_put_it_on_a_task() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let (server, _daemons, worker) = fleet(&root, "").await;
@@ -905,7 +823,6 @@ esac
         }
 
         let record = root.join("record.json");
-        let gate = root.join("assigned");
         let calls = json!([
             { "name": "task_update", "arguments": { "status": "reviewing" } },
             { "name": "task_report", "arguments": { "kind": "done", "note": "Reviewed." } },
@@ -922,33 +839,25 @@ esac
                     ("SLOPTY_TASK".to_owned(), "2".to_owned()),
                     ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
                     ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-                    ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
                 ],
                 size: None,
                 session: None,
                 permission_flags: false,
             })
             .await;
-        let Outcome::Opened(term) = spawned else { panic!("{spawned:?}") };
-        let assigned = hub
-            .dispatch(Verb::TaskAssign { project: project.clone(), task: TaskId(1), term })
-            .await;
-        assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
-        std::fs::write(&gate, b"").unwrap();
+        assert!(matches!(spawned, Outcome::Opened(_)), "{spawned:?}");
 
         let seen: Value = until("the agent's tool call answered", async || {
             let seen: Value = serde_json::from_slice(&std::fs::read(&record).ok()?).ok()?;
             (seen["mcp"].as_array()?.len() == 2).then_some(seen)
         })
         .await;
-        assert_eq!(seen["env"]["SLOPTY_TASK"], "2", "the stale environment it was given");
-        assert_eq!(seen["mcp"][0]["isError"], false, "{}", seen["mcp"][0]);
-        // Put on its task by hand, its terminal's token still proves it: it reports on it.
-        let reported = &seen["mcp"][1];
-        assert_eq!(reported["isError"], false, "{reported}");
+        assert_eq!(seen["env"]["SLOPTY_TASK"], "2", "the environment it was given");
+        assert_eq!(seen["mcp"][0]["isError"], true, "{}", seen["mcp"][0]);
+        assert_eq!(seen["mcp"][1]["isError"], true, "{}", seen["mcp"][1]);
         let now = status(&hub, &project).await;
-        assert_eq!(now.tasks[0].status.as_deref(), Some("reviewing"), "the task it is on");
-        assert_eq!(now.tasks[1].status, None, "not the one its environment named");
+        assert!(now.tasks.iter().all(|t| t.status.is_none()), "{:?}", now.tasks);
+        assert!(now.tasks.iter().all(|t| t.state == TaskState::Planned), "{:?}", now.tasks);
 
         server.shutdown().await;
     }
@@ -1441,8 +1350,9 @@ esac
 
     /// The whole way, across two machines: a task's agent on the Linux worker reports done,
     /// its branch comes home to the orchestrator's clone, the project's verifier runs on it
-    /// there in a checkout of its own and passes, and the merge queue fast-forwards the
-    /// clone's `main` to exactly the commit verified. Its checkout moves with it. Nothing is
+    /// there in a checkout of its own and passes, and the task waits ready to merge. On the
+    /// person's Merge the queue fast-forwards the clone's `main` to the tree verified, its
+    /// commits carrying the task they came from. Its checkout moves with it. Nothing is
     /// pushed, since pushing is off until the person turns it on, and the verifier's terminal
     /// is gone once it passed.
     #[tokio::test(flavor = "multi_thread")]
@@ -1468,30 +1378,49 @@ esac
         let head = git_out(tree, &["rev-parse", "HEAD"]);
         std::fs::write(gate, "").unwrap();
 
+        let failed = |card: &slopty_proto::project::TaskCard| {
+            card.step
+                .as_ref()
+                .is_some_and(|s| matches!(s.state, slopty_proto::project::StepState::Failed { .. }))
+        };
         let started = std::time::Instant::now();
-        let card = card_when(&hub, project, "the task merges", |card| {
-            card.state == TaskState::Merged
-                || card.step.as_ref().is_some_and(|s| {
-                    matches!(s.state, slopty_proto::project::StepState::Failed { .. })
-                })
+        let ready = card_when(&hub, project, "the task is ready to merge", |card| {
+            let checked = card.verified.as_ref().is_some_and(|r| r.passed);
+            (card.state == TaskState::Done && checked) || failed(card)
         })
         .await;
-        eprintln!("MEASURE done to merged across two workers: {:?}", started.elapsed());
+        eprintln!("MEASURE done to ready across two workers: {:?}", started.elapsed());
+        assert_eq!((ready.state, &ready.merge), (TaskState::Done, &None), "waits: {ready:?}");
+        let asked = hub.dispatch(Verb::TaskMerge { project: project.clone(), task: TaskId(1) });
+        assert!(matches!(asked.await, Outcome::Task(_)), "the person's Merge");
+        let card = card_when(&hub, project, "the task merges", |card| {
+            card.state == TaskState::Merged || failed(card)
+        })
+        .await;
         assert_eq!(card.state, TaskState::Merged, "{card:?}");
         let Some(Merge::Merged { target, head: merged, pushed, .. }) = card.merge else {
             panic!("{card:?}")
         };
-        assert_eq!((target.as_str(), merged.as_str(), pushed), ("main", head.as_str(), false));
+        assert_eq!((target.as_str(), pushed), ("main", false));
+        let tree_of =
+            |dir: &Path, commit: &str| git_out(dir, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        assert_eq!(tree_of(studio_clone, &merged), tree_of(tree, &head), "the tree verified");
+        let trailer = git_out(
+            studio_clone,
+            &["log", "-1", "--format=%(trailers:key=Slopty-Task,valueonly)", &merged],
+        );
+        assert_eq!(trailer.trim(), "demo#1", "where it came from");
         let run = card.verified.unwrap();
         assert!(run.passed && run.head == head && run.exit == Some(0), "{run:?}");
         assert_eq!(&run.base, forge_main, "where the work left main");
         assert_eq!(card.step.map(|s| s.kind), Some(StepKind::Merge));
 
-        assert_eq!(git_out(studio_clone, &["rev-parse", "main"]), head, "main fast-forwarded");
+        assert_eq!(git_out(studio_clone, &["rev-parse", "main"]), merged, "main fast-forwarded");
         assert_eq!(std::fs::read_to_string(studio_clone.join("work.txt")).unwrap(), "done\n");
         assert_eq!(git_out(forge, &["rev-parse", "main"]), *forge_main, "and not pushed");
         let place = root.join("home/slopty/verify/demo");
-        assert_eq!(git_out(&place, &["rev-parse", "HEAD"]), head, "verified in its own checkout");
+        let verified_tree = tree_of(&place, "HEAD");
+        assert_eq!(verified_tree, tree_of(tree, &head), "verified in its own checkout");
         assert_eq!(
             moments(&hub, project).await,
             [
@@ -1501,6 +1430,8 @@ esac
                 "Home done",
                 "Verify began",
                 "verified true",
+                "Home began",
+                "Home done",
                 "Merge began",
                 "Merge done"
             ]
@@ -1522,8 +1453,8 @@ esac
     /// committed on the orchestrator's `main`, which the forge never saw. The task goes back,
     /// and that `main` is sent to the agent's clone as `slopty/demo/target`. The agent's report
     /// names it, so the agent can rebase onto it there. Once it has, the person asks for the
-    /// merge, the newer work comes home first, it is verified, and `main` fast-forwards to
-    /// it: the person's commit and the agent's on top, nothing pushed.
+    /// merge again, the newer work comes home first, it is verified, and `main` fast-forwards
+    /// to its tree: the person's commit and the agent's on top, nothing pushed.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_conflict_on_another_machine_brings_it_the_target_to_rebase_onto() {
         use slopty_proto::project::{StepKind, StepState};
@@ -1540,6 +1471,12 @@ esac
         git_out(&fix.tree, &["commit", "-q", "-m", "the work"]);
         std::fs::write(&fix.gate, "").unwrap();
 
+        card_when(&hub, project, "the task is ready to merge", |card| {
+            card.state == TaskState::Done && card.verified.as_ref().is_some_and(|r| r.passed)
+        })
+        .await;
+        let asked = hub.dispatch(Verb::TaskMerge { project: project.clone(), task: TaskId(1) });
+        assert!(matches!(asked.await, Outcome::Task(_)), "the person's Merge");
         let card = card_when(&hub, project, "the queue gives it back", |card| {
             card.step.as_ref().is_some_and(|s| {
                 s.kind == StepKind::Rebase && matches!(s.state, StepState::Failed { .. })
@@ -1597,7 +1534,10 @@ esac
             card.state == TaskState::Merged
         })
         .await;
-        assert_eq!(git_out(&fix.studio_clone, &["rev-parse", "main"]), resolved);
+        let tree_of =
+            |dir: &Path, commit: &str| git_out(dir, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        assert_eq!(tree_of(&fix.studio_clone, "main"), tree_of(&fix.tree, &resolved));
+        assert_eq!(git_out(&fix.studio_clone, &["rev-parse", "main~1"]), person, "on top");
         assert_eq!(
             std::fs::read_to_string(fix.studio_clone.join("a.txt")).unwrap(),
             "main's own\nthe task's\n"
@@ -1613,6 +1553,8 @@ esac
                 "Home done",
                 "Verify began",
                 "verified true",
+                "Home began",
+                "Home done",
                 "Merge began",
                 "Rebase failed",
                 "Home began",
@@ -1808,8 +1750,9 @@ esac
     /// open. Its `review_report` blocks the merge, so the task goes back and its agent's next
     /// prompt brings the findings through its hooks; the reviewer's terminal stays to be read.
     /// The person reads the work and approves it with `slopty task review`, the reviewer is
-    /// let go, and the queue fast-forwards `main` to the commit both checked. Then the person
-    /// lets the project go with `slopty project delete`.
+    /// let go, the task waits ready to merge, and on `slopty task merge` the queue
+    /// fast-forwards `main` to the tree both checked. Then the person lets the project go with
+    /// `slopty project delete`.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it() {
         use slopty_proto::project::{REVIEW_DIFF, Reviewer, StepKind};
@@ -1977,12 +1920,27 @@ esac
         )
         .await;
         assert!(said.contains("#1"), "{said}");
-        let card = card_when(&hub, &project, "the person's word merges it", |card| {
+        let ready = card_when(&hub, &project, "the person's word makes it ready", |card| {
+            card.state == TaskState::Done
+        })
+        .await;
+        assert_eq!(ready.merge, None, "it waits for the person's Merge");
+        let asked = slopty(
+            &root,
+            server.quic_addr(),
+            &["task", "merge", "--project", "demo", "--task", "1"],
+        )
+        .await;
+        assert!(asked.contains("#1"), "{asked}");
+        let card = card_when(&hub, &project, "the person's Merge merges it", |card| {
             card.state == TaskState::Merged
         })
         .await;
         assert_eq!(card.reviewed.map(|r| r.by), Some(Reviewer::Person));
-        assert_eq!(git_out(&repo, &["rev-parse", "main"]), head, "main fast-forwarded");
+        let tree_of =
+            |dir: &Path, commit: &str| git_out(dir, &["rev-parse", &format!("{commit}^{{tree}}")]);
+        assert_eq!(tree_of(&repo, "main"), tree_of(&tree, &head), "main fast-forwarded");
+        assert_eq!(git_out(&repo, &["rev-parse", "main~1"]), base, "to the work alone");
         until("the reviewer the person spoke over is let go", async || {
             match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
                 Outcome::Terminals(list) => {

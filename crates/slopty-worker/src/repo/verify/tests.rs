@@ -79,11 +79,15 @@ async fn the_queue_rebases_in_the_project_s_checkout_and_names_conflicts() {
     let (repo, _first, task) = clone_with_a_task(&root);
     let place = place(&root.join("verify"), "demo").expect("a name");
 
-    let up_to_date = rebase(git, &repo, &place, &task, "main").await.expect("as it is");
+    let up_to_date = rebase(git, &repo, &place, (&task, "main"), &[], Some(&task)).await;
+    let up_to_date = up_to_date.expect("as it is");
     assert_eq!(up_to_date.head, task, "main is where the task left it");
+    assert!(up_to_date.verified, "the very commit verified");
 
     let moved = commit(&repo, "c.txt", "main moved on\n");
-    let rebased = rebase(git, &repo, &place, &task, "main").await.expect("rebased");
+    let rebased = rebase(git, &repo, &place, (&task, "main"), &[], Some(&task)).await;
+    let rebased = rebased.expect("rebased");
+    assert!(!rebased.verified, "main's change is in its tree");
     assert_eq!(rebased.onto, moved);
     assert_ne!(rebased.head, task);
     assert_eq!(git_in(&repo, &["rev-parse", &format!("{}^", rebased.head)]), moved);
@@ -94,12 +98,98 @@ async fn the_queue_rebases_in_the_project_s_checkout_and_names_conflicts() {
     let clashing = commit(&repo, "a.txt", "the other task's\n");
     git_in(&repo, &["switch", "-q", "main"]);
     commit(&repo, "a.txt", "main's own\n");
-    let conflict = rebase(git, &repo, &place, &clashing, "main").await;
+    let conflict = rebase(git, &repo, &place, (&clashing, "main"), &[], None).await;
     assert_eq!(conflict, Err(Failed::Conflict(vec!["a.txt".to_owned()])));
     let stopped = git_in(&place, &["status", "--porcelain=v2", "--branch"]);
     assert!(!stopped.contains("rebase"), "{stopped}");
-    let again = rebase(git, &repo, &place, &rebased.head, "main").await;
+    let again = rebase(git, &repo, &place, (&rebased.head, "main"), &[], None).await;
     assert!(again.is_ok(), "the checkout serves the next rebase: {again:?}");
+}
+
+/// Every commit the queue rebases carries the task and the thread it came from as trailers,
+/// once, even one already on top of the target, whose tree stays the one verified so it need
+/// not run again; a commit that has them already does not take them twice. A trailer that is
+/// not a plain token and a one-line value is refused before anything runs.
+#[tokio::test]
+async fn rebased_commits_carry_where_they_came_from() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let (repo, first, _) = clone_with_a_task(&root);
+    git_in(&repo, &["switch", "-q", "slopty/demo/1"]);
+    let task = commit(&repo, "d.txt", "a second commit\n");
+    git_in(&repo, &["switch", "-q", "main"]);
+    git_in(&repo, &["reset", "-q", "--hard", &first]);
+    let place = place(&root.join("verify"), "demo").expect("a name");
+    let trailers = [
+        ("Slopty-Task".to_owned(), "demo#1".to_owned()),
+        ("Slopty-Thread".to_owned(), "0190d6f2-7c1a-7e00-8000-000000000001".to_owned()),
+    ];
+
+    let made = rebase(git, &repo, &place, (&task, "main"), &trailers, Some(&task)).await;
+    let made = made.expect("rebased with its trailers");
+    assert_ne!(made.head, task, "its messages changed");
+    assert!(made.verified, "its tree is the one verified");
+    let log = git_in(
+        &repo,
+        &["log", "--format=%(trailers:only,unfold)%x00", &format!("{first}..{}", made.head)],
+    );
+    let each: Vec<&str> = log.split('\0').map(str::trim).filter(|t| !t.is_empty()).collect();
+    let want = "Slopty-Task: demo#1\nSlopty-Thread: 0190d6f2-7c1a-7e00-8000-000000000001";
+    assert_eq!(each, [want, want], "both commits, each once");
+
+    let again = rebase(git, &repo, &place, (&made.head, "main"), &trailers, None).await;
+    let again = again.expect("rebased again");
+    let log = git_in(&repo, &["log", "-1", "--format=%(trailers:only,unfold)", &again.head]);
+    assert_eq!(log.trim(), want, "not added twice");
+
+    let quoted = [("Slopty-Task".to_owned(), "it's".to_owned())];
+    let refused = rebase(git, &repo, &place, (&task, "main"), &quoted, None).await;
+    assert!(matches!(refused, Err(Failed::Other(why)) if why.contains("not a trailer")));
+}
+
+/// What a task's work did to the tests is read from where it left the target to its head: the
+/// tests it deleted, changed or renamed, and added, by their paths and the project's own test
+/// paths, never what the target did since.
+#[tokio::test]
+async fn a_task_s_test_diff_names_what_it_did_to_the_tests() {
+    let Some(git) = crate::changes::git() else { return };
+    let tmp = tempfile::tempdir().expect("temp");
+    let root = std::fs::canonicalize(tmp.path()).expect("real");
+    let repo = root.join("demo");
+    std::fs::create_dir_all(repo.join("tests")).expect("mkdir");
+    std::fs::create_dir_all(repo.join("qa")).expect("mkdir");
+    std::fs::create_dir_all(repo.join("src")).expect("mkdir");
+    git_in(&repo, &["init", "-q", "-b", "main"]);
+    for (file, text) in [
+        ("tests/flaky.rs", "flaky\n"),
+        ("tests/kept.rs", "kept\n"),
+        ("src/lib_test.go", "go test\n"),
+        ("qa/smoke.sh", "smoke\n"),
+        ("src/lib.rs", "code\n"),
+    ] {
+        commit(&repo, file, text);
+    }
+    git_in(&repo, &["switch", "-q", "-c", "slopty/demo/1"]);
+    git_in(&repo, &["rm", "-q", "tests/flaky.rs", "qa/smoke.sh"]);
+    std::fs::write(repo.join("src/lib_test.go"), "go test, weaker\n").expect("write");
+    std::fs::write(repo.join("src/lib.rs"), "code changed\n").expect("write");
+    std::fs::write(repo.join("tests/new.rs"), "new\n").expect("write");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "the task"]);
+    git_in(&repo, &["switch", "-q", "main"]);
+    commit(&repo, "tests/main_only.rs", "the target's own\n");
+
+    let extra = ["qa".to_owned()];
+    let tests = test_diff(git, &repo, "slopty/demo/1", "main", &extra).await.expect("read");
+    assert_eq!(tests.deleted, ["qa/smoke.sh", "tests/flaky.rs"]);
+    assert_eq!(tests.changed, ["src/lib_test.go"]);
+    assert_eq!((tests.deleted_count, tests.changed_count, tests.added_count), (2, 1, 1));
+    assert_eq!(tests.head, git_in(&repo, &["rev-parse", "slopty/demo/1"]));
+    let plain = test_diff(git, &repo, "slopty/demo/1", "main", &[]).await.expect("read");
+    assert_eq!(plain.deleted, ["tests/flaky.rs"], "qa holds tests only when the project says");
+    let none = test_diff(git, &repo, "main", "main", &[]).await.expect("read");
+    assert!(none.is_empty(), "{none:?}");
 }
 
 /// The target moves only from the commit asked, to a commit after it: by compare-and-swap

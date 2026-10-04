@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::project::{Budget, TaskId};
+use slopty_proto::project::Budget;
 use slopty_proto::thread::{Limit, Meters};
 
 use super::model::{Board, Node};
@@ -60,15 +60,8 @@ pub struct ProjectSpend {
     pub orchestrator_ms: u64,
     /// Every task's, together.
     pub tasks_ms: u64,
-    /// The orchestrator's cost, when its thread says.
-    pub orchestrator_cost: Option<u64>,
-    /// The tasks', when any of their threads says.
-    pub tasks_cost: Option<u64>,
     /// The plan's rate windows, the fullest that any of its agents reports for each.
     pub limits: Vec<Limit>,
-    /// What the server tallied from every thread that worked for the project: every
-    /// assignment a task was given and every subagent, which this client may never have heard.
-    pub tallied_cost: u64,
 }
 
 impl ProjectSpend {
@@ -76,22 +69,6 @@ impl ProjectSpend {
     #[must_use]
     pub const fn total_ms(&self) -> u64 {
         self.orchestrator_ms.saturating_add(self.tasks_ms)
-    }
-
-    /// Cost in all, when any thread says: what this client heard, or the server's tally
-    /// when that is more, as it is once an agent was replaced or worked unheard.
-    #[must_use]
-    pub fn total_cost(&self) -> Option<u64> {
-        let heard = add(self.orchestrator_cost, self.tasks_cost);
-        let tallied = (self.tallied_cost > 0).then_some(self.tallied_cost);
-        heard.max(tallied)
-    }
-}
-
-fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.saturating_add(b)),
-        (a, b) => a.or(b),
     }
 }
 
@@ -124,16 +101,7 @@ impl Board {
         let mine = self.meters(node, meters);
         let own_cost = mine.and_then(|m| m.cost_micro_usd);
         let context_bp = mine.and_then(context_bp);
-        let (mut subtree_ms, mut subtree_cost) = (own_ms, own_cost);
-        if let Some(task) = node {
-            for below in self.below(task) {
-                subtree_ms = subtree_ms
-                    .saturating_add(self.tasks.get(&below).map_or(0, |c| c.spent.at(now)));
-                let cost = self.meters(Some(below), meters).and_then(|m| m.cost_micro_usd);
-                subtree_cost = add(subtree_cost, cost);
-            }
-        }
-        NodeSpend { own_ms, subtree_ms, own_cost, subtree_cost, context_bp }
+        NodeSpend { own_ms, subtree_ms: own_ms, own_cost, subtree_cost: own_cost, context_bp }
     }
 
     /// What the project spent as of `now`.
@@ -142,14 +110,12 @@ impl Board {
         let orchestrator = self.meters(None, meters);
         let mut spend = ProjectSpend {
             orchestrator_ms: self.project.orchestrator_spent.at(now),
-            orchestrator_cost: orchestrator.and_then(|m| m.cost_micro_usd),
             ..ProjectSpend::default()
         };
         let mut limits: Vec<Limit> = orchestrator.map(|m| m.limits.clone()).unwrap_or_default();
         for card in self.tasks.values() {
             spend.tasks_ms = spend.tasks_ms.saturating_add(card.spent.at(now));
             let Some(m) = self.meters(Some(card.id), meters) else { continue };
-            spend.tasks_cost = add(spend.tasks_cost, m.cost_micro_usd);
             for limit in &m.limits {
                 match limits.iter_mut().find(|l| l.name == limit.name) {
                     Some(held) if held.used_bp < limit.used_bp => *held = limit.clone(),
@@ -167,7 +133,6 @@ impl Board {
             }
         }
         spend.limits = limits;
-        spend.tallied_cost = self.project.spend.cost_micro_usd;
         spend
     }
 
@@ -177,36 +142,13 @@ impl Board {
     pub fn over_budget(&self) -> Option<String> {
         let (budget, spend) = (self.project.limits.budget.as_ref()?, &self.project.spend);
         let meter = budget.reached(spend)?;
-        let cap = Budget::figure(&meter, *budget.0.get(&meter)?);
-        Some(if meter == Budget::USD {
-            let used = Budget::figure(&meter, spend.cost_micro_usd);
-            format!(
-                "Spent an estimated {used} of its {cap} budget: no task starts until you raise it"
-            )
-        } else {
-            let used = spend.windows.get(&meter).copied().map_or(0, u64::from);
-            format!(
-                "At {} of the {}, its budget {cap}: no task starts until you raise it",
-                Budget::figure(&meter, used),
-                meter_words(&meter)
-            )
-        })
-    }
-
-    /// Every task split from `task`, at any depth.
-    fn below(&self, task: TaskId) -> Vec<TaskId> {
-        let mut found = Vec::new();
-        let mut open = vec![task];
-        while let Some(parent) = open.pop() {
-            for card in self.tasks.values().filter(|c| c.parent == Some(parent)) {
-                // A cycle cannot come from the server; a guard costs nothing.
-                if card.id != task && !found.contains(&card.id) {
-                    found.push(card.id);
-                    open.push(card.id);
-                }
-            }
-        }
-        found
+        let cap = Budget::figure(*budget.0.get(&meter)?);
+        let used = spend.windows.get(&meter).copied().map_or(0, u64::from);
+        Some(format!(
+            "At {} of the {}, its budget {cap}: no task starts until you raise it",
+            Budget::figure(used),
+            meter_words(&meter)
+        ))
     }
 }
 
@@ -230,14 +172,10 @@ pub fn worked(ms: u64) -> String {
     }
 }
 
-/// A budget's meter in words: the estimated cost, or a plan window by its name ("five-hour").
+/// A budget's meter in words: a plan window by its name ("five-hour").
 #[must_use]
 pub fn meter_words(meter: &str) -> String {
-    if meter == Budget::USD {
-        "cost".to_owned()
-    } else {
-        format!("{} window", meter.replace(['-', '_'], " "))
-    }
+    format!("{} window", meter.replace(['-', '_'], " "))
 }
 
 /// A budget moment in words: how much of a cap is spent, or that it was reached and no new work

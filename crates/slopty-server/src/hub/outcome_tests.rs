@@ -1,13 +1,12 @@
-//! What a task's agent came to reaches the node above it through its worker, with no report
-//! from the agent; a finished task's agent stops counting and is closed once it rests, a merged
-//! one's worktree going after it; and an agent tells the tasks under it in its own words.
+//! What a task's agent came to reaches the orchestrator through its worker, with no report from
+//! the agent; a finished task's agent stops counting and is closed once it rests, a merged one's
+//! worktree going after it; and the orchestrator tells its tasks in its own words.
 
 use std::time::Duration;
 
 use slopty_proto::agent::{AgentBranch, BlockReason, Worktree};
 use slopty_proto::project::{
-    LimitsChange, Moment, Placement, Report, ReportKind, TaskChange, TaskSpec, TaskState,
-    TimelineEntry,
+    LimitsChange, Moment, Placement, Report, ReportKind, TaskChange, TaskState, TimelineEntry,
 };
 use slopty_proto::server::Os;
 use slopty_proto::thread::Phase;
@@ -16,9 +15,10 @@ use slopty_proto::thread::attention::Seat;
 use super::ladder::tests::{Client, asking, row, snapshot};
 use super::project_tests::{
     agent, announce, answer, claude, create, create_with, new_task, opened, project, refused,
-    request, spawn, status, worker_on,
+    request, spawn, status, worker_again, worker_on,
 };
 use super::settle::SETTLE_AFTER;
+use super::tests::summary;
 use super::*;
 
 /// The next batch the worker's link is sent, skipping everything else: paused, the clock runs
@@ -68,7 +68,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     ack(&role);
     let task = new_task(&hub, Placement::default()).await;
     let term = TermRef { worker, session: working };
-    let assigned = hub.dispatch(Verb::TaskAssign { project: project(), task, term }).await;
+    let assigned = hub.assign_for_test(&project(), task, term);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
 
     let mut thread = row(Phase::Idle, 1, Some(working));
@@ -135,6 +135,41 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     delivering.abort();
 }
 
+/// A task's agent that was at work when the server stopped, and came to rest while it was
+/// away, is still heard of by the orchestrator once its worker is back and says so.
+#[tokio::test(start_paused = true)]
+async fn a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (orchestrating, working) = (SessionId::new(), SessionId::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    announce(&lease, orchestrating, true);
+    announce(&lease, working, false);
+    let orchestrator = TermRef { worker, session: orchestrating };
+    create(&hub, Some(orchestrator)).await;
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let role = next_batch(&mut rx).await;
+    lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
+    let task = new_task(&hub, Placement::default()).await;
+    let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session: working });
+    assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
+    lease.handle(agent(working, AgentStatus::Working));
+
+    let (file, known) = (hub.projects_file(0), hub.directory());
+    delivering.abort();
+    drop((lease, rx, hub));
+    let hub = Hub::new("server".to_owned(), known);
+    hub.adopt_projects(file);
+    let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
+    let sessions = vec![summary(orchestrating), summary(working)];
+    let (_, lease, mut rx) = worker_again(&hub, worker, "studio", Os::MacOs, sessions);
+    announce(&lease, orchestrating, true);
+    lease.handle(agent(working, AgentStatus::Idle));
+    let rested = next_batch(&mut rx).await;
+    assert_eq!(rested.0, orchestrating);
+    assert!(rested.2.contains("task 1 ended its turn without a task_report"), "{}", rested.2);
+    delivering.abort();
+}
+
 /// The agent the server started for a task the person merged counts against no limit once it
 /// rests, and counts again while it works. Once it has rested long enough with its tile on no
 /// client's screen, the server closes its terminal and the timeline says why; on screen, or
@@ -184,6 +219,53 @@ async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     });
     let said = said.unwrap_or_default();
     assert!(said.starts_with("The server closed its agent, at rest 10 min after"), "{said}");
+}
+
+/// A merged task's agent that waits only on a command it left running (a dev server) rests as
+/// one at its prompt does: once it has long enough, its terminal closes, stopping the command,
+/// and the timeline names what was stopped. One that waits on anything else of its own is left.
+#[tokio::test]
+async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
+    create(&hub, None).await;
+    let task = new_task(&hub, Placement::default()).await;
+    let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
+    let term = opened(&lease, &request(&mut rx).await);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+    for state in [TaskState::Done, TaskState::Merged] {
+        let change = Box::new(TaskChange { state: Some(state), ..TaskChange::default() });
+        let moved = hub.dispatch(Verb::TaskUpdate { project: project(), task, change }).await;
+        assert!(matches!(moved, Outcome::Task(_)), "{moved:?}");
+    }
+    lease.handle(agent(term.session, AgentStatus::Waiting { tasks: 1, crons: 0 }));
+    let waiting = |kind: &str| {
+        let mut thread = row(Phase::Waiting, 1, Some(term.session));
+        thread.status.wait = Some(slopty_proto::thread::Wait {
+            kind: kind.to_owned(),
+            text: "npm run dev".to_owned(),
+        });
+        snapshot(vec![thread])
+    };
+    let t0 = tokio::time::Instant::now();
+    let later = |from: tokio::time::Instant| from.checked_add(SETTLE_AFTER).unwrap();
+    let mut resting = HashMap::new();
+    lease.handle(waiting("task"));
+    assert_eq!(hub.settle_due(&mut resting, t0), []);
+    assert_eq!(hub.settle_due(&mut resting, later(t0)), [], "its own work holds it");
+
+    lease.handle(waiting(ladder::COMMANDS_WAIT));
+    let t1 = later(t0);
+    assert_eq!(hub.settle_due(&mut resting, t1), []);
+    assert_eq!(hub.settle_due(&mut resting, later(t1)), [term], "a command left running does not");
+    let (_, verb) = request(&mut rx).await;
+    assert_eq!(verb, Verb::Close { term });
+    let said = status(&hub).await.timeline.into_iter().rev().find_map(|e| match e.what {
+        Moment::Note { text } if e.task == Some(task) => Some(text),
+        _ => None,
+    });
+    let said = said.unwrap_or_default();
+    assert!(said.ends_with("It stopped what the agent left running: npm run dev."), "{said}");
 }
 
 /// A merged task's agent, closed once it rests, frees the worktree it worked in after its
@@ -272,33 +354,27 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
     }
 }
 
-/// The orchestrator tells a task's agent something, and a task's agent tells a task split from
-/// its own: each reaches that agent through its hooks, marked as an agent's words, and the
-/// timeline says who told. An agent never tells a task outside its own subtree, the node
-/// above it, or a task that waits on the person, and an agent's surface that proves no
-/// terminal tells nothing.
+/// The orchestrator tells a task's agent something: it reaches that agent through its hooks,
+/// marked as an agent's words, and the timeline says the orchestrator told. A task's agent
+/// tells no task, not even its own, and nobody tells a task that waits on the person through an
+/// agent; an agent's surface that proves no terminal tells nothing.
 #[tokio::test]
-async fn an_agent_tells_the_tasks_under_it_in_its_own_words() {
+async fn only_the_orchestrator_tells_a_task_in_its_own_words() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
-    let (orchestrating, above, below, beside) =
-        (SessionId::new(), SessionId::new(), SessionId::new(), SessionId::new());
+    let (orchestrating, one, two) = (SessionId::new(), SessionId::new(), SessionId::new());
     let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     announce(&lease, orchestrating, true);
-    for session in [above, below, beside] {
+    for session in [one, two] {
         announce(&lease, session, false);
     }
     create(&hub, Some(TermRef { worker, session: orchestrating })).await;
     let role = next_batch(&mut rx).await;
     lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
-    let parent = new_task(&hub, Placement::default()).await;
-    let spec = TaskSpec { title: "Child".to_owned(), parent: Some(parent), ..TaskSpec::default() };
-    let made = hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await;
-    let Outcome::Task(child) = made else { panic!("{made:?}") };
-    let sibling = new_task(&hub, Placement::default()).await;
-    for (task, session) in [(parent, above), (child.id, below), (sibling, beside)] {
-        let term = TermRef { worker, session };
-        let assigned = hub.dispatch(Verb::TaskAssign { project: project(), task, term }).await;
+    let (first, second) =
+        (new_task(&hub, Placement::default()).await, new_task(&hub, Placement::default()).await);
+    for (task, session) in [(first, one), (second, two)] {
+        let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session });
         assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
     }
     let tell = |who, task, text: &str| {
@@ -306,34 +382,28 @@ async fn an_agent_tells_the_tasks_under_it_in_its_own_words() {
         hub.dispatch_as(who, None, verb)
     };
 
-    let said = tell(Speaker::Proven(orchestrating), Some(parent), "Also cover the iPad.").await;
+    let said = tell(Speaker::Proven(orchestrating), Some(first), "Also cover the iPad.").await;
     assert_eq!(said, Outcome::Done);
-    let (session, batch, context) = next_batch(&mut rx).await;
-    assert_eq!(session, above);
+    let (session, _, context) = next_batch(&mut rx).await;
+    assert_eq!(session, one);
     assert!(
         context.contains("Your orchestrator says (an agent, not the person; it answers nothing")
             && context.contains("  Also cover the iPad."),
         "{context}"
     );
-    lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
-    let said = tell(Speaker::Proven(above), Some(child.id), "Start with the layout.").await;
-    assert_eq!(said, Outcome::Done);
-    let (session, _, context) = next_batch(&mut rx).await;
-    assert_eq!(session, below);
-    assert!(context.contains("The agent of task 1, which split your task off, says"), "{context}");
 
     for (who, task, why) in [
-        (Speaker::Proven(above), Some(sibling), "not split from its task"),
-        (Speaker::Proven(above), None, "the node above it"),
-        (Speaker::Proven(below), Some(parent), "its parent"),
-        (Speaker::Agent, Some(child.id), "proves no terminal"),
+        (Speaker::Proven(one), Some(second), "another task"),
+        (Speaker::Proven(one), Some(first), "its own"),
+        (Speaker::Proven(one), None, "the orchestrator"),
+        (Speaker::Agent, Some(first), "proves no terminal"),
     ] {
         let said = tell(who, task, "Stop.").await;
         refused(&said, ErrorCode::Forbidden);
         assert!(matches!(said, Outcome::Error { .. }), "{why}");
     }
-    lease.handle(agent(below, AgentStatus::Blocked(BlockReason::Question)));
-    let said = tell(Speaker::Proven(orchestrating), Some(child.id), "Pick the first.").await;
+    lease.handle(agent(two, AgentStatus::Blocked(BlockReason::Question)));
+    let said = tell(Speaker::Proven(orchestrating), Some(second), "Pick the first.").await;
     assert!(refused(&said, ErrorCode::Conflict).contains("waits on the person"), "{said:?}");
 
     let notes: Vec<String> = status(&hub)
@@ -345,12 +415,6 @@ async fn an_agent_tells_the_tasks_under_it_in_its_own_words() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        notes,
-        [
-            "The orchestrator told it: Also cover the iPad.",
-            "Task 1's agent told it: Start with the layout."
-        ]
-    );
+    assert_eq!(notes, ["The orchestrator told it: Also cover the iPad."]);
     delivering.abort();
 }

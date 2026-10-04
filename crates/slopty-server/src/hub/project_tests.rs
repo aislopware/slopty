@@ -496,44 +496,6 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
     assert!(refused(&hub.dispatch(set).await, ErrorCode::Limit).contains("the person allows"));
 }
 
-/// An orchestrator that starts an agent and puts it on a task at once is not refused because
-/// its worker has not announced the terminal yet, and the start counts against the project
-/// from then. A terminal nobody opened is still unknown.
-#[tokio::test]
-async fn a_terminal_just_opened_is_assigned_before_its_worker_announces_it() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
-    let asked = spawn(
-        &hub,
-        Verb::SpawnAgent {
-            worker: linux,
-            agent: AgentKind::ClaudeCode,
-            cwd: "~".to_owned(),
-            prompt: None,
-            args: Vec::new(),
-            env: Vec::new(),
-            size: None,
-            session: None,
-            permission_flags: false,
-        },
-    );
-    let start = request(&mut rx).await;
-    let (_, session) = chosen(&start.1);
-    let term = TermRef { worker: linux, session };
-    lease.handle(ToServer::Reply { id: start.0, outcome: Outcome::Opened(term) });
-    assert!(matches!(asked.await.unwrap(), Outcome::Opened(t) if t == term));
-
-    let assigned = hub.dispatch(Verb::TaskAssign { project: project(), task, term }).await;
-    let Outcome::Task(on) = &assigned else { panic!("{assigned:?}") };
-    assert_eq!(on.assignment.as_ref().map(|a| a.term), Some(term));
-    assert_eq!(status(&hub).await.live.project, 1, "counted before it is announced");
-    let nobody = TermRef { worker: linux, session: SessionId::new() };
-    let unknown = hub.dispatch(Verb::TaskAssign { project: project(), task, term: nobody }).await;
-    refused(&unknown, ErrorCode::UnknownTerminal);
-}
-
 /// No agent starts another with more than it has: flags that loosen Claude Code's permissions
 /// are refused on every way to start one, unless the person allowed them for the project.
 #[tokio::test]
@@ -601,7 +563,7 @@ async fn a_restarted_server_frees_the_tasks_whose_terminals_ended_while_it_was_a
     create(&hub, None).await;
     let task = new_task(&hub, Placement::default()).await;
     let term = TermRef { worker: linux, session };
-    let assigned = hub.dispatch(Verb::TaskAssign { project: project(), task, term }).await;
+    let assigned = hub.assign_for_test(&project(), task, term);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
     let (file, known) = (hub.projects_file(0), hub.directory());
     drop(lease);
@@ -695,12 +657,7 @@ async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
     lease.handle(ToServer::Report(AgentReport::Branch(branch.clone())));
     create(&hub, None).await;
     let task = new_task(&hub, Placement::default()).await;
-    let unknown = TermRef { worker, session: SessionId::new() };
-    let no = hub.dispatch(Verb::TaskAssign { project: project(), task, term: unknown }).await;
-    refused(&no, ErrorCode::UnknownTerminal);
-    let Outcome::Task(assigned) =
-        hub.dispatch(Verb::TaskAssign { project: project(), task, term }).await
-    else {
+    let Outcome::Task(assigned) = hub.assign_for_test(&project(), task, term) else {
         panic!("assigned")
     };
     assert_eq!(assigned.worktree.as_deref(), Some("/w/.claude/worktrees/rows"));
@@ -1398,37 +1355,6 @@ async fn a_terminal_an_agent_opens_counts_against_the_fleet_bound() {
     first.abort();
 }
 
-/// A terminal put on a task takes a place under the project's limits as a start does, so an
-/// agent cannot run more than the project allows by assigning terminals opened elsewhere; one
-/// the project counts already takes no more. A terminal being started for one task is not
-/// taken by another.
-#[tokio::test]
-async fn an_assign_takes_a_place_under_the_project_s_limits() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (worker, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    let one = LimitsChange { live_per_project: Some(1), ..LimitsChange::default() };
-    create_with(&hub, None, one).await;
-    let (first, second) =
-        (new_task(&hub, Placement::default()).await, new_task(&hub, Placement::default()).await);
-    let asked =
-        spawn(&hub, Verb::TaskSpawn { project: project(), task: first, launch: claude(&[]) });
-    let start = request(&mut rx).await;
-    let (_, starting) = chosen(&start.1);
-    let starting = TermRef { worker, session: starting };
-    let hijack = Verb::TaskAssign { project: project(), task: second, term: starting };
-    assert!(refused(&hub.dispatch(hijack).await, ErrorCode::Conflict).contains("being started"));
-    let counted = opened(&lease, &start);
-    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
-
-    let elsewhere = SessionId::new();
-    announce(&lease, elsewhere, true);
-    let elsewhere = TermRef { worker, session: elsewhere };
-    let past = Verb::TaskAssign { project: project(), task: second, term: elsewhere };
-    assert!(refused(&hub.dispatch(past).await, ErrorCode::Limit).contains("live_per_project"));
-    let again = Verb::TaskAssign { project: project(), task: first, term: counted };
-    assert!(matches!(hub.dispatch(again).await, Outcome::Task(_)), "counted already");
-}
-
 /// A shell opened by the agent speaking from `by`, as the worker opens it.
 async fn opened_by(
     hub: &Hub,
@@ -1453,29 +1379,11 @@ async fn opened_by(
     term
 }
 
-fn assign(task: TaskId, term: TermRef) -> Verb {
-    Verb::TaskAssign { project: project(), task, term }
-}
-
-/// An agent puts to work only the terminals its project holds or it opened: never the person's
-/// own shell, as a task's terminal or as the orchestrator, and nothing at all unproven. A shell
-/// the orchestrator opened is its to give; the person gives their own.
-#[tokio::test]
-async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (person, orchestrator) = (SessionId::new(), SessionId::new());
-    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, vec![summary(person)]);
-    announce(&lease, orchestrator, true);
-    create(&hub, Some(TermRef { worker, session: orchestrator })).await;
-    let task = new_task(&hub, Placement::default()).await;
-    let persons = TermRef { worker, session: person };
-    let as_orchestrator = Speaker::Proven(orchestrator);
-
-    let taken = hub.dispatch_as(as_orchestrator, None, assign(task, persons)).await;
-    assert!(refused(&taken, ErrorCode::Forbidden).contains("person's own"), "{taken:?}");
-    let named = Verb::ProjectSet {
+/// The project's orchestrator moved to `term`.
+fn orchestrated_by(term: TermRef) -> Verb {
+    Verb::ProjectSet {
         project: project(),
-        orchestrator: Some(persons),
+        orchestrator: Some(term),
         review: None,
         verifier: None,
         push: None,
@@ -1483,17 +1391,76 @@ async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
         limits: LimitsChange::default(),
         metadata: None,
         members: None,
-    };
-    refused(&hub.dispatch_as(as_orchestrator, None, named).await, ErrorCode::Forbidden);
-    let unproven = hub.dispatch_as(Speaker::Agent, None, assign(task, persons)).await;
-    refused(&unproven, ErrorCode::Forbidden);
+    }
+}
 
+/// An agent puts to work only the terminals its project holds or it opened: never the person's
+/// own shell as the orchestrator, and nothing at all unproven. A shell the orchestrator opened
+/// is its to give.
+#[tokio::test]
+async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (person, orchestrator) = (SessionId::new(), SessionId::new());
+    let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, vec![summary(person)]);
+    announce(&lease, orchestrator, true);
+    create(&hub, Some(TermRef { worker, session: orchestrator })).await;
+    let persons = TermRef { worker, session: person };
+    let as_orchestrator = Speaker::Proven(orchestrator);
+
+    let taken = hub.dispatch_as(as_orchestrator, None, orchestrated_by(persons)).await;
+    assert!(refused(&taken, ErrorCode::Forbidden).contains("person's own"), "{taken:?}");
+    let unproven = hub.dispatch_as(Speaker::Agent, None, orchestrated_by(persons)).await;
+    refused(&unproven, ErrorCode::Forbidden);
     let shell = opened_by(&hub, orchestrator, worker, &lease, &mut rx).await;
-    let given = hub.dispatch_as(as_orchestrator, None, assign(task, shell)).await;
-    assert!(matches!(given, Outcome::Task(_)), "{given:?}");
-    let other = new_task(&hub, Placement::default()).await;
-    let by_person = hub.dispatch(assign(other, persons)).await;
-    assert!(matches!(by_person, Outcome::Task(_)), "{by_person:?}");
+    let given = hub.dispatch_as(as_orchestrator, None, orchestrated_by(shell)).await;
+    assert!(matches!(given, Outcome::Project(_)), "{given:?}");
+}
+
+/// While as many tasks wait on the person as the project's review limit, the orchestrator's
+/// start is refused in words that say why, and nothing reaches a worker; asked to propose its
+/// starts, it still may, and the person's own start goes. Only the person sets the limit.
+#[tokio::test]
+async fn an_agent_starts_no_more_work_than_the_person_can_review() {
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let orchestrator = SessionId::new();
+    let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    announce(&lease, orchestrator, true);
+    create(&hub, Some(TermRef { worker: linux, session: orchestrator })).await;
+    let as_orchestrator = Speaker::Proven(orchestrator);
+    let limit = |review, ask_to_start| Verb::ProjectSet {
+        project: project(),
+        orchestrator: None,
+        review: None,
+        verifier: None,
+        push: None,
+        ask_to_start,
+        limits: LimitsChange { review, ..LimitsChange::default() },
+        metadata: None,
+        members: None,
+    };
+    let theirs = hub.dispatch_as(as_orchestrator, None, limit(Some(5), None)).await;
+    assert!(refused(&theirs, ErrorCode::Forbidden).contains("review limit"), "{theirs:?}");
+    assert!(matches!(hub.dispatch(limit(Some(1), None)).await, Outcome::Project(_)));
+    let ready = new_task(&hub, Placement::default()).await;
+    let done = Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() });
+    let update = Verb::TaskUpdate { project: project(), task: ready, change: done };
+    assert!(matches!(hub.dispatch(update).await, Outcome::Task(_)));
+
+    let next = new_task(&hub, Placement::default()).await;
+    let launch = TaskLaunch { env: Vec::new(), ..claude(&[]) };
+    let start = || Verb::TaskSpawn { project: project(), task: next, launch: launch.clone() };
+    let held = hub.dispatch_as(as_orchestrator, None, start()).await;
+    let said = refused(&held, ErrorCode::Limit);
+    assert!(said.contains("task 1 ready to merge") && said.contains("review limit of 1"), "{said}");
+    assert!(rx.try_recv().is_err(), "nothing reached the worker");
+
+    assert!(matches!(hub.dispatch(limit(None, Some(true))).await, Outcome::Project(_)));
+    let proposed = hub.dispatch_as(as_orchestrator, None, start()).await;
+    let Outcome::Task(card) = &proposed else { panic!("{proposed:?}") };
+    assert!(card.proposal.is_some(), "the person starts what is proposed");
+    let by_person = spawn(&hub, start());
+    let _start = request(&mut rx).await;
+    by_person.abort();
 }
 
 /// The person's allowance of looser permissions is a project's, for its own agents: another
@@ -1591,45 +1558,42 @@ async fn the_terminals_an_agent_opened_are_kept_across_a_restart() {
     };
     let said = hub.dispatch_as(Speaker::Shell(shell.session), None, merge).await;
     refused(&said, ErrorCode::Forbidden);
-    let given = hub.dispatch_as(Speaker::Proven(orchestrator), None, assign(task, shell)).await;
-    assert!(matches!(given, Outcome::Task(_)), "{given:?}");
+    let given = hub.dispatch_as(Speaker::Proven(orchestrator), None, orchestrated_by(shell)).await;
+    assert!(matches!(given, Outcome::Project(_)), "{given:?}");
 }
 
-/// A task's agent works under its own task: what it splits off goes under it and counts
-/// against the project's depth, a task beside it is not its to split or change, and it makes
-/// no project.
+/// Tasks are one level: a task's agent makes, starts and tells no task, changes only its own
+/// (taking the paths it will write with its change), and makes no project.
 #[tokio::test]
-async fn a_task_s_agent_splits_work_only_under_its_own_task() {
+async fn a_task_s_agent_works_only_on_its_own_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    create_with(&hub, None, LimitsChange { depth: Some(2), ..LimitsChange::default() }).await;
+    create(&hub, None).await;
     let task = new_task(&hub, Placement::default()).await;
     let beside = new_task(&hub, Placement::default()).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let agent = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
     let as_agent = Speaker::Proven(agent.session);
-    let split = |parent| {
-        let spec = TaskSpec {
-            title: "Part".to_owned(),
-            brief: "A part.".to_owned(),
-            parent,
-            ..TaskSpec::default()
-        };
-        Verb::TaskCreate { project: project(), spec: Box::new(spec) }
-    };
-
-    let Outcome::Task(part) = hub.dispatch_as(as_agent, None, split(None)).await else {
-        panic!("a part")
-    };
-    assert_eq!(part.parent, Some(task), "under its own task");
-    let deeper = hub.dispatch_as(as_agent, None, split(Some(part.id))).await;
-    assert!(refused(&deeper, ErrorCode::Limit).contains("depth"), "{deeper:?}");
-    let aside = hub.dispatch_as(as_agent, None, split(Some(beside))).await;
-    assert!(refused(&aside, ErrorCode::Forbidden).contains("neither it nor split"), "{aside:?}");
+    let spec =
+        TaskSpec { title: "Part".to_owned(), brief: "A part.".to_owned(), ..TaskSpec::default() };
+    let tell = Verb::TaskTell { project: project(), task: Some(beside), text: "Go.".to_owned() };
+    for verb in [
+        Verb::TaskCreate { project: project(), spec: Box::new(spec) },
+        Verb::TaskSpawn { project: project(), task: beside, launch: claude(&[]) },
+        tell,
+    ] {
+        let said = hub.dispatch_as(as_agent, None, verb).await;
+        assert!(refused(&said, ErrorCode::Forbidden).contains("only the project's orchestrator"));
+    }
+    assert!(rx.try_recv().is_err(), "nothing reached the worker");
     let done = Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() });
     let change = Verb::TaskUpdate { project: project(), task: beside, change: done };
     refused(&hub.dispatch_as(as_agent, None, change).await, ErrorCode::Forbidden);
+    let claim = TaskChange { claim: vec!["docs".to_owned()], ..TaskChange::default() };
+    let own = Verb::TaskUpdate { project: project(), task, change: Box::new(claim) };
+    let Outcome::Task(claimed) = hub.dispatch_as(as_agent, None, own).await else { panic!("own") };
+    assert_eq!(claimed.owns, ["docs"]);
     let made = hub
         .dispatch_as(
             as_agent,

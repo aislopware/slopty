@@ -2,5 +2,5 @@
 source: crates/slopty-proto/tests/golden_project.rs
 expression: hex(&bytes)
 ---
-0e 00 00 00 01 15 00 23 06 73 6c 6f 70 74 79 01
+0e 00 00 00 01 15 00 22 06 73 6c 6f 70 74 79 01
 07 00

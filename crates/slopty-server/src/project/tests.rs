@@ -1,6 +1,6 @@
 use slopty_core::SessionId;
 use slopty_proto::agent::Worktree;
-use slopty_proto::project::{NativeTask, Placement, ReportKind, VerifierRun};
+use slopty_proto::project::{GiveBacks, NativeTask, Placement, ReportKind, VerifierRun};
 
 use super::*;
 
@@ -111,6 +111,12 @@ fn assign(p: &mut Projects, task: TaskId, at: TermRef) -> Changed<Task> {
     p.assign(&id(), task, who(at, true, None), &HashSet::from([at]), now())
 }
 
+/// Take `paths` for `task` to own, as its agent's `task_update` does.
+fn claim(p: &mut Projects, task: TaskId, paths: &[String]) -> Changed<Task> {
+    let change = TaskChange { claim: paths.to_vec(), ..TaskChange::default() };
+    p.update_task(&id(), task, change, Caller::Agent, now())
+}
+
 fn to(state: TaskState) -> TaskChange {
     TaskChange { state: Some(state), ..TaskChange::default() }
 }
@@ -154,30 +160,30 @@ fn a_claim_that_overlaps_a_live_task_is_refused_until_that_task_is_done_with() {
 
     let reader = TaskSpec { read_only: true, ..spec("Review the server", &[]) };
     let reader = p.create_task(&id(), reader, now()).unwrap().0.id;
-    let claim = p.claim(&id(), reader, &["crates/slopty-server".to_owned()], now());
-    assert!(message(&claim.unwrap_err()).contains("only reads"));
+    let reading = claim(&mut p, reader, &["crates/slopty-server".to_owned()]);
+    assert!(message(&reading.unwrap_err()).contains("only reads"));
     let owning_reader = TaskSpec { read_only: true, ..spec("x", &["docs"]) };
     assert_eq!(code(&p.create_task(&id(), owning_reader, now()).unwrap_err()), ErrorCode::Invalid);
 
     let tools = task(&mut p, "Tools", &["crates/slopty-tools"]);
-    let over = p.claim(&id(), tools, &["crates/slopty-server/src/lib.rs".to_owned()], now());
+    let over = claim(&mut p, tools, &["crates/slopty-server/src/lib.rs".to_owned()]);
     assert_eq!(code(&over.unwrap_err()), ErrorCode::Conflict);
     assert_eq!(get(&p, tools).owns, ["crates/slopty-tools"], "a refused claim takes nothing");
-    let (claimed, updates) = p.claim(&id(), tools, &["docs/".to_owned()], now()).unwrap();
+    let (claimed, updates) = claim(&mut p, tools, &["docs/".to_owned()]).unwrap();
     assert_eq!(claimed.owns, ["crates/slopty-tools", "docs"]);
     assert!(matches!(
         kept(&updates).as_slice(),
         [Kept { entry: Some(TimelineEntry { what: Moment::Claimed { .. }, .. }), .. }]
     ));
-    let (_, again) = p.claim(&id(), tools, &["DOCS".to_owned()], now()).unwrap();
+    let (_, again) = claim(&mut p, tools, &["DOCS".to_owned()]).unwrap();
     assert!(again.is_empty(), "a path owned already, in any case, is no change");
-    let whole = p.claim(&id(), tools, &[".".to_owned()], now());
+    let whole = claim(&mut p, tools, &[".".to_owned()]);
     assert_eq!(code(&whole.unwrap_err()), ErrorCode::Conflict, "the root overlaps everything");
 
     p.update_task(&id(), server, to(TaskState::Done), Caller::Person, now()).unwrap();
     p.update_task(&id(), server, to(TaskState::Merged), Caller::Person, now()).unwrap();
     p.create_task(&id(), spec("Hub", &["crates/slopty-server/src/hub.rs"]), now()).unwrap();
-    let late = p.claim(&id(), server, &["x".to_owned()], now());
+    let late = claim(&mut p, server, &["x".to_owned()]);
     assert_eq!(code(&late.unwrap_err()), ErrorCode::Invalid, "a merged task claims nothing");
 }
 
@@ -207,21 +213,13 @@ fn a_task_moves_along_its_lifecycle_and_takes_its_paths_back_only_when_they_are_
     p.update_task(&id(), b, to(TaskState::Planned), Caller::Person, now()).unwrap();
 }
 
+/// Tasks are numbered in order within their project, one level of them: a title says
+/// something, and a project that is not there makes none.
 #[test]
-fn a_task_is_made_under_a_known_parent_numbered_in_order_within_the_project_s_depth() {
-    let mut p = Projects::default();
-    let shallow = LimitsChange { depth: Some(2), ..LimitsChange::default() };
-    p.create(new_project(None, shallow), &Fleet::default().running(), now()).unwrap();
-    let first = task(&mut p, "Split", &[]);
-    let child = p.create_task(&id(), TaskSpec { parent: Some(first), ..spec("Leaf", &[]) }, now());
-    let (child, _) = child.unwrap();
-    assert_eq!((first, child.id, child.parent), (TaskId(1), TaskId(2), Some(TaskId(1))));
-    let deeper = TaskSpec { parent: Some(child.id), ..spec("Deeper", &[]) };
-    let refused = p.create_task(&id(), deeper, now()).unwrap_err();
-    assert_eq!(code(&refused), ErrorCode::Limit);
-    assert!(message(&refused).contains("3 deep, past the project's depth of 2"));
-    let orphan = TaskSpec { parent: Some(TaskId(9)), ..spec("x", &[]) };
-    assert_eq!(code(&p.create_task(&id(), orphan, now()).unwrap_err()), ErrorCode::UnknownTask);
+fn a_task_is_numbered_in_order_within_its_project() {
+    let mut p = project(None);
+    let (first, second) = (task(&mut p, "Split", &[]), task(&mut p, "Leaf", &[]));
+    assert_eq!((first, second), (TaskId(1), TaskId(2)));
     assert_eq!(code(&p.create_task(&id(), spec(" ", &[]), now()).unwrap_err()), ErrorCode::Invalid);
     let elsewhere = ProjectId::new("other").unwrap();
     assert_eq!(
@@ -335,8 +333,8 @@ fn a_task_follows_its_agent_until_someone_else_moves_it() {
     assert_eq!(updates.len(), 2, "moved, verified");
     let working = p.agent_status(at, &AgentStatus::Working, now());
     assert!(
-        matches!(working.as_slice(), [Change { durable: false, kept: Kept { entry: None, .. } }]),
-        "its time is counted, quietly: {working:?}"
+        matches!(working.as_slice(), [Change { durable: true, kept: Kept { entry: None, .. } }]),
+        "its time is counted, kept with no entry: {working:?}"
     );
     assert_eq!(get(&p, t).state, TaskState::Verifying);
 
@@ -349,8 +347,9 @@ fn a_task_follows_its_agent_until_someone_else_moves_it() {
 }
 
 /// Time at work is counted per task and, apart, for the orchestrator: a stretch runs from
-/// working to idle or blocked, the wait between is left out, and an ended stretch is written
-/// while a begun one is only pushed. A closed terminal ends the stretch it was in.
+/// working to idle or blocked, the wait between is left out, and an ended stretch is written,
+/// as is a task's begun one, so a restart knows which of its turns were under way; the
+/// orchestrator's begun one is only pushed. A closed terminal ends the stretch it was in.
 #[test]
 fn time_at_work_is_counted_per_task_and_apart_for_the_orchestrator() {
     let orchestrator = term();
@@ -361,7 +360,7 @@ fn time_at_work_is_counted_per_task_and_apart_for_the_orchestrator() {
     let ms = |s: u64| WallMs::from_millis(now().as_millis() + s * 1_000);
     let durable = |changes: &[Change]| changes.iter().map(|c| c.durable).collect::<Vec<_>>();
 
-    assert_eq!(durable(&p.agent_status(at, &AgentStatus::Working, ms(0))), [false]);
+    assert_eq!(durable(&p.agent_status(at, &AgentStatus::Working, ms(0))), [true]);
     let tool = AgentStatus::Tool { tool: "Bash".to_owned() };
     assert!(p.agent_status(at, &tool, ms(10)).is_empty(), "the same stretch");
     assert_eq!(durable(&p.agent_status(orchestrator, &AgentStatus::Working, ms(20))), [false]);
@@ -603,7 +602,7 @@ fn limits_stay_within_the_person_s_bounds() {
     let refused = p.create(new_project(None, greedy), &fleet.running(), now()).unwrap_err();
     assert_eq!(code(&refused), ErrorCode::Limit);
     assert!(message(&refused).contains("[server.projects] live_per_worker"));
-    let zero = LimitsChange { depth: Some(0), ..LimitsChange::default() };
+    let zero = LimitsChange { review: Some(0), ..LimitsChange::default() };
     assert_eq!(
         code(&p.create(new_project(None, zero), &fleet.running(), now()).unwrap_err()),
         ErrorCode::Invalid
@@ -686,10 +685,10 @@ fn what_a_project_holds_is_bounded_as_it_comes_in() {
     let t = task(&mut p, "T", &[]);
     let most = usize::from(Bounds::default().owns_max);
     let many: Vec<String> = (0..=most).map(|n| format!("crates/{n}")).collect();
-    let over = p.claim(&id(), t, &many, now()).unwrap_err();
+    let over = claim(&mut p, t, &many).unwrap_err();
     assert_eq!(code(&over), ErrorCode::Limit, "{}", message(&over));
     let huge: Vec<String> = vec!["x".to_owned(); 1 << 16];
-    assert_eq!(code(&p.claim(&id(), t, &huge, now()).unwrap_err()), ErrorCode::Limit);
+    assert_eq!(code(&claim(&mut p, t, &huge).unwrap_err()), ErrorCode::Limit);
 
     let report = |note: String, artifacts: usize| Report {
         kind: ReportKind::Checkpoint,
@@ -702,9 +701,7 @@ fn what_a_project_holds_is_bounded_as_it_comes_in() {
     assert_eq!(code(&p.report_task(&id(), t, &long, now()).unwrap_err()), ErrorCode::Invalid);
     let crowded = report("ok".to_owned(), ARTIFACTS_MAX + 1);
     assert_eq!(code(&p.report_task(&id(), t, &crowded, now()).unwrap_err()), ErrorCode::Invalid);
-    let ((_, parent), updates) =
-        p.report_task(&id(), t, &report("ok".to_owned(), 2), now()).unwrap();
-    assert_eq!(parent, None, "a top task reports to the orchestrator");
+    let (_, updates) = p.report_task(&id(), t, &report("ok".to_owned(), 2), now()).unwrap();
     assert!(matches!(
         kept(&updates).as_slice(),
         [Kept { entry: Some(TimelineEntry { what: Moment::Reported { .. }, .. }), .. }]
@@ -789,10 +786,10 @@ fn a_step_is_shown_as_it_goes_and_is_taken_up_after_a_restart() {
     assert_eq!(steps_logged(&p), 2, "an end is logged");
 }
 
-/// What the agents of a project say they spent is tallied on it, from its orchestrator and
-/// every task's agent, and from nobody else's. Passing 80 % of a cap and then the whole of it
-/// is each a moment, written; at the cap no task starts, with the words that say why, until
-/// the person raises it.
+/// How full the agents of a project read their plan's windows is tallied on it, from its
+/// orchestrator and every task's agent, and from nobody else's. Passing 80 % of a cap and then
+/// the whole of it is each a moment, written; at the cap no task starts, with the words that
+/// say why, until the person raises it.
 #[test]
 fn a_project_at_its_budget_starts_nothing_until_it_is_raised() {
     use slopty_proto::project::Budget;
@@ -802,46 +799,47 @@ fn a_project_at_its_budget_starts_nothing_until_it_is_raised() {
     let orchestrator = fleet.open();
     let mut p = project(Some(orchestrator));
     let budget = |cap| LimitsChange {
-        budget: Some(Budget(BTreeMap::from([(Budget::USD.to_owned(), cap)]))),
+        budget: Some(Budget(BTreeMap::from([("five-hour".to_owned(), cap)]))),
         ..LimitsChange::default()
     };
+    let window = |used_bp| [Limit { name: "five-hour".to_owned(), used_bp, resets_ms: None }];
     let raise = |p: &mut Projects, cap| {
         let change = ProjectChange { limits: budget(cap), ..ProjectChange::default() };
         p.set(&id(), change, &Fleet::default().running(), now()).unwrap().1
     };
-    raise(&mut p, 10_000_000);
+    raise(&mut p, 5_000);
     let (a, b) = (task(&mut p, "A", &["crates/a"]), task(&mut p, "B", &["crates/b"]));
     let at = fleet.open();
     assign(&mut p, a, at).unwrap();
 
-    let none: [Limit; 0] = [];
     let (theirs, mine) = (ThreadId::new(), ThreadId::new());
     let stranger = fleet.open();
-    assert_eq!(p.spent(stranger, ThreadId::new(), Some(9_000_000), &none, now()), Vec::new());
-    let quiet = p.spent(orchestrator, theirs, Some(3_000_000), &none, now());
+    assert_eq!(p.spent(stranger, ThreadId::new(), &window(4_900), now()), Vec::new());
+    let quiet = p.spent(orchestrator, theirs, &window(1_000), now());
     assert!(matches!(quiet.as_slice(), [Change { kept: Kept { entry: None, .. }, .. }]));
-    let near = p.spent(at, mine, Some(5_000_000), &none, now());
+    let near = p.spent(at, mine, &window(4_000), now());
     let moments: Vec<Moment> =
         kept(&near).into_iter().filter_map(|k| k.entry.map(|e| e.what)).collect();
-    assert_eq!(moments, [Moment::Budget { meter: Budget::USD.to_owned(), share_bp: 8_000 }]);
+    assert_eq!(moments, [Moment::Budget { meter: "five-hour".to_owned(), share_bp: 8_000 }]);
     assert!(near.iter().all(|c| c.durable) && near.iter().any(|c| c.kept.tally.is_some()));
-    assert_eq!(status(&p).project.spend.cost_micro_usd, 8_000_000, "the stranger's is not");
+    let fullest = status(&p).project.spend.windows.get("five-hour").copied();
+    assert_eq!(fullest, Some(4_000), "the stranger's is not");
     assert_eq!(p.over_budget(&id()), None);
 
-    let reached = p.spent(at, mine, Some(7_500_000), &none, now());
+    let reached = p.spent(at, mine, &window(5_250), now());
     let moments: Vec<Moment> =
         kept(&reached).into_iter().filter_map(|k| k.entry.map(|e| e.what)).collect();
-    assert_eq!(moments, [Moment::Budget { meter: Budget::USD.to_owned(), share_bp: 10_500 }]);
+    assert_eq!(moments, [Moment::Budget { meter: "five-hour".to_owned(), share_bp: 10_500 }]);
     let over = p.over_budget(&id()).expect("over");
-    assert!(over.contains("$10.50 of its $10.00 budget"), "{over}");
+    assert!(over.contains("52.50% of the five-hour window, its budget 50.00%"), "{over}");
     let refused = p.may_start(&id(), b, false, &fleet.running()).unwrap_err();
     assert_eq!(code(&refused), ErrorCode::Limit);
     assert!(message(&refused).contains("raises the budget"), "{}", message(&refused));
 
-    raise(&mut p, 20_000_000);
+    raise(&mut p, 8_000);
     assert_eq!(p.over_budget(&id()), None, "raised");
     p.may_start(&id(), b, false, &fleet.running()).unwrap();
-    let lowered = raise(&mut p, 10_000_000);
+    let lowered = raise(&mut p, 5_000);
     assert!(
         kept(&lowered).iter().any(|k| matches!(
             k.entry.as_ref().map(|e| &e.what),
@@ -851,12 +849,12 @@ fn a_project_at_its_budget_starts_nothing_until_it_is_raised() {
     );
 }
 
-/// What the node above each task heard, the takings back left out.
-fn upshots(p: &mut Projects) -> Vec<(TaskId, Option<TaskId>, Upshot)> {
+/// What the orchestrator heard of each task, the takings back left out.
+fn upshots(p: &mut Projects) -> Vec<(TaskId, Upshot)> {
     p.heard()
         .into_iter()
         .filter(|h| h.upshot != Upshot::Moved)
-        .map(|h| (h.task, h.parent, h.upshot))
+        .map(|h| (h.task, h.upshot))
         .collect()
 }
 
@@ -864,12 +862,12 @@ fn report_of(kind: ReportKind) -> Report {
     Report { kind, note: "said".to_owned(), artifacts: Vec::new(), branch: None, pr: None }
 }
 
-/// A task's agent that ends its turn without a word of its own is heard of by the node above
-/// it, once per turn; a need, a block or a finish it reported is its own word, a checkpoint is
-/// not. Waiting on the person is heard once per wait, and taken back when it works again. Its
-/// exit is heard once, and a terminal whose agent never showed says nothing of one.
+/// A task's agent that ends its turn without a word of its own is heard of by the
+/// orchestrator, once per turn; a need, a block or a finish it reported is its own word, a
+/// checkpoint is not. Waiting on the person is heard once per wait, and taken back when it works
+/// again. Its exit is heard once, and a terminal whose agent never showed says nothing of one.
 #[test]
-fn the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing() {
+fn the_orchestrator_hears_what_a_task_s_agent_came_to_when_it_said_nothing() {
     let mut p = project(Some(term()));
     let t = task(&mut p, "Work", &[]);
     let at = term();
@@ -880,7 +878,7 @@ fn the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing() {
     p.agent_status(at, &AgentStatus::Working, now());
     p.agent_status(at, &AgentStatus::Tool { tool: "Bash".to_owned() }, now());
     p.agent_status(at, &AgentStatus::Idle, now());
-    assert_eq!(upshots(&mut p), [(t, None, Upshot::Rested)]);
+    assert_eq!(upshots(&mut p), [(t, Upshot::Rested)]);
     p.agent_status(at, &AgentStatus::Done, now());
     assert_eq!(upshots(&mut p), [], "one rest per turn");
 
@@ -888,14 +886,14 @@ fn the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing() {
         p.agent_status(at, &AgentStatus::Working, now());
         p.report_task(&id(), t, &report_of(kind), now()).unwrap();
         p.agent_status(at, &AgentStatus::Blocked(BlockReason::IdlePrompt), now());
-        let want = if heard { vec![(t, None, Upshot::Rested)] } else { Vec::new() };
+        let want = if heard { vec![(t, Upshot::Rested)] } else { Vec::new() };
         assert_eq!(upshots(&mut p), want, "{kind:?}");
     }
 
     let bash = BlockReason::Permission { tool: "Bash".to_owned() };
     p.agent_status(at, &AgentStatus::Working, now());
     p.agent_status(at, &AgentStatus::Blocked(bash.clone()), now());
-    assert_eq!(upshots(&mut p), [(t, None, Upshot::Waits(bash))]);
+    assert_eq!(upshots(&mut p), [(t, Upshot::Waits(bash))]);
     p.agent_status(at, &AgentStatus::Blocked(BlockReason::Question), now());
     assert_eq!(upshots(&mut p), [], "still the one wait");
     p.agent_status(at, &AgentStatus::Working, now());
@@ -905,40 +903,51 @@ fn the_node_above_hears_what_a_task_s_agent_came_to_when_it_said_nothing() {
     assert_eq!(upshots(&mut p), [], "its own background work is no rest");
 
     p.agent_status(at, &AgentStatus::None, now());
-    assert_eq!(upshots(&mut p), [(t, None, Upshot::Exited)]);
+    assert_eq!(upshots(&mut p), [(t, Upshot::Exited)]);
     p.session_ended(at, now());
     assert_eq!(upshots(&mut p), [], "heard once");
 }
 
-/// A task whose agent rests while a task split from it still works is heard of only once that
-/// one rests too, after it; a task the merge queue or the person moved on is not heard of.
+/// A turn under way when the server stopped is taken up again from the store: one that ended
+/// while it was away is heard once the agent's worker says it rests, unless the agent said its
+/// own word in it. A task the merge queue or the person moved on is not heard of.
 #[test]
-fn a_rest_is_heard_once_the_tasks_under_it_rest() {
-    let mut p = project(Some(term()));
-    let parent = task(&mut p, "Parent", &[]);
-    let child = p
-        .create_task(&id(), TaskSpec { parent: Some(parent), ..spec("Child", &[]) }, now())
-        .unwrap()
-        .0
-        .id;
-    let (above, below) = (term(), term());
-    assign(&mut p, parent, above).unwrap();
-    assign(&mut p, child, below).unwrap();
-    p.agent_status(below, &AgentStatus::Working, now());
-    p.agent_status(above, &AgentStatus::Working, now());
-    p.agent_status(above, &AgentStatus::Idle, now());
-    assert_eq!(upshots(&mut p), [], "its child still works");
-    p.agent_status(below, &AgentStatus::Idle, now());
-    assert_eq!(
-        upshots(&mut p),
-        [(child, Some(parent), Upshot::Rested), (parent, None, Upshot::Rested)]
+fn a_turn_that_ended_while_the_server_was_away_is_still_heard() {
+    let mut p = Projects::default();
+    let made = p.create(
+        new_project(Some(term()), LimitsChange::default()),
+        &Fleet::default().running(),
+        now(),
     );
+    let mut log = made.unwrap().1;
+    let mut made = |p: &mut Projects, title: &str| {
+        let (t, changes) = p.create_task(&id(), spec(title, &[]), now()).unwrap();
+        log.extend(changes);
+        t.id
+    };
+    let (quiet, said, moved) = (made(&mut p, "Quiet"), made(&mut p, "Said"), made(&mut p, "Moved"));
+    let (a, b, c) = (term(), term(), term());
+    for (t, at) in [(quiet, a), (said, b), (moved, c)] {
+        log.extend(assign(&mut p, t, at).unwrap().1);
+        log.extend(p.agent_status(at, &AgentStatus::Working, now()));
+    }
+    let began: Vec<&Change> = log.iter().filter(|c| c.kept.task.is_some()).collect();
+    assert!(began.iter().all(|c| c.durable), "a stretch that began is written");
+    log.extend(p.report_task(&id(), said, &report_of(ReportKind::Done), now()).unwrap().1);
+    log.extend(
+        p.update_task(&id(), moved, to(TaskState::Failed), Caller::Person, now()).unwrap().1,
+    );
+    p.heard();
 
-    p.agent_status(below, &AgentStatus::Working, now());
-    p.update_task(&id(), child, to(TaskState::Failed), Caller::Person, now()).unwrap();
-    p.agent_status(below, &AgentStatus::Idle, now());
-    p.session_ended(below, now());
-    assert_eq!(upshots(&mut p), [], "given up, it is the person's to speak of");
+    let mut file = ProjectsFile::default();
+    for change in log.iter().filter(|c| c.durable) {
+        file.apply(&Keep::Project(Box::new(change.kept.clone())));
+    }
+    let mut back = Projects::restore(file);
+    for at in [a, b, c] {
+        back.agent_status(at, &AgentStatus::Idle, now());
+    }
+    assert_eq!(upshots(&mut back), [(quiet, Upshot::Rested)], "the others said or moved on");
 }
 
 /// The agent of a task merged or given up counts against no limit while it rests, though its
@@ -965,53 +974,83 @@ fn a_finished_task_s_agent_counts_only_while_it_works() {
     let live = p.status(&id(), None, &fleet.running()).unwrap().live;
     assert_eq!((live.project, live.fleet), (0, 0), "at rest, merged");
     assert_eq!(p.live_on_worker(at.worker, &fleet.running()), 0);
-    assert_eq!(p.finished_agents(&fleet.terminals), [], "the person's own terminal stays");
+    assert_eq!(
+        p.finished_agents(&fleet.terminals, |_| false),
+        [],
+        "the person's own terminal stays"
+    );
 
     p.agent_status(at, &AgentStatus::Working, now());
     assert_eq!(p.status(&id(), None, &fleet.running()).unwrap().live.project, 1, "at work again");
 }
 
-/// An agent tells only a task under it, never the node above it nor its own, and never one
-/// that waits on the person; the timeline says which agent told, apart from the person's
-/// words.
+/// The orchestrator tells only one of its tasks, never itself, and never one that waits on the
+/// person; the timeline says the orchestrator told, apart from the person's words. The
+/// person's word starts a task's give-backs again.
 #[test]
-fn an_agent_tells_only_a_task_under_it_that_does_not_wait_on_the_person() {
+fn the_orchestrator_tells_only_a_task_that_does_not_wait_on_the_person() {
     let mut p = project(Some(term()));
-    let parent = task(&mut p, "Parent", &[]);
-    let child = p
-        .create_task(&id(), TaskSpec { parent: Some(parent), ..spec("Child", &[]) }, now())
-        .unwrap()
-        .0
-        .id;
-    let (above, below) = (term(), term());
-    assign(&mut p, parent, above).unwrap();
-    assign(&mut p, child, below).unwrap();
-    let live = HashSet::from([above, below]);
+    let t = task(&mut p, "Work", &[]);
+    let at = term();
+    assign(&mut p, t, at).unwrap();
+    let live = HashSet::from([at]);
     let tell =
         |p: &mut Projects, task, by| p.tell(&id(), (task, by), "Cover the iPad.", &live, now());
 
-    let (words, changes) = tell(&mut p, Some(child), Teller::Above(Some(parent))).unwrap();
+    let (words, changes) = tell(&mut p, Some(t), Teller::Orchestrator).unwrap();
     assert_eq!(words, "Cover the iPad.");
     let what = kept(&changes).first().and_then(|k| k.entry.clone()).map(|e| e.what);
-    let said = Moment::Note { text: "Task 1's agent told it: Cover the iPad.".to_owned() };
-    assert_eq!(what, Some(said));
-    let by_orchestrator = tell(&mut p, Some(parent), Teller::Above(None)).unwrap().1;
-    let what = kept(&by_orchestrator).first().and_then(|k| k.entry.clone()).map(|e| e.what);
     let said = Moment::Note { text: "The orchestrator told it: Cover the iPad.".to_owned() };
     assert_eq!(what, Some(said));
+    let itself = tell(&mut p, None, Teller::Orchestrator).unwrap_err();
+    assert!(message(&itself).contains("one of its tasks"), "{}", message(&itself));
 
-    for (task, by) in
-        [(None, Teller::Above(Some(child))), (Some(child), Teller::Above(Some(child)))]
-    {
-        let refused = tell(&mut p, task, by).unwrap_err();
-        assert!(message(&refused).contains("task_report"), "{}", message(&refused));
-    }
     let bash = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
-    p.agent_status(below, &bash, now());
-    let refused = tell(&mut p, Some(child), Teller::Above(None)).unwrap_err();
+    p.agent_status(at, &bash, now());
+    let refused = tell(&mut p, Some(t), Teller::Orchestrator).unwrap_err();
     assert_eq!(code(&refused), ErrorCode::Conflict);
     assert!(message(&refused).contains("waits on the person"), "{}", message(&refused));
-    let person = tell(&mut p, Some(child), Teller::Person).unwrap().1;
+
+    p.records.get_mut(&id()).unwrap().task_mut(t).unwrap().give_backs =
+        GiveBacks { count: 3, reviews: 1, held: true };
+    let person = tell(&mut p, Some(t), Teller::Person).unwrap().1;
     let what = kept(&person).first().and_then(|k| k.entry.clone()).map(|e| e.what);
     assert_eq!(what, Some(Moment::Told { text: "Cover the iPad.".to_owned() }), "the person may");
+    assert_eq!(get(&p, t).give_backs, GiveBacks::default(), "their word starts it again");
+    assert_eq!(
+        kept(&person).first().and_then(|k| k.task.clone()).map(|t| t.give_backs),
+        Some(GiveBacks::default())
+    );
+}
+
+/// While as many tasks wait on the person as the project's review limit (ready to merge, asking
+/// them something, or held past their give-backs), no agent starts more work: the refusal says
+/// how many wait and which. Merging one makes room. Only the person sets the limit, and never
+/// below one.
+#[test]
+fn a_project_at_its_review_limit_starts_no_more_agent_work() {
+    let mut fleet = Fleet::default();
+    let mut p = Projects::default();
+    let two = LimitsChange { review: Some(2), ..LimitsChange::default() };
+    p.create(new_project(None, two), &fleet.running(), now()).unwrap();
+    let (a, b, c) = (task(&mut p, "A", &[]), task(&mut p, "B", &[]), task(&mut p, "C", &[]));
+    p.room_to_review(&id()).unwrap();
+    p.update_task(&id(), a, to(TaskState::Done), Caller::Person, now()).unwrap();
+    let at = fleet.open();
+    assign(&mut p, b, at).unwrap();
+    let bash = AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".to_owned() });
+    p.agent_status(at, &bash, now());
+    let refused = p.room_to_review(&id()).unwrap_err();
+    assert_eq!(code(&refused), ErrorCode::Limit);
+    let said = message(&refused);
+    assert!(
+        said.contains(
+            "2 tasks waiting on the person (task 1 ready to merge, task 2 asks the \
+                       person), its review limit of 2"
+        ),
+        "{said}"
+    );
+    p.may_start(&id(), c, false, &fleet.running()).unwrap();
+    p.ask_merge(&id(), a, now()).unwrap();
+    p.room_to_review(&id()).unwrap();
 }

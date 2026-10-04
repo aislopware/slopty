@@ -5,7 +5,9 @@
 //! carry on in it, and it counts against no limit while its agent rests
 //! ([`crate::project::Projects::fleet`]). Once that agent has rested [`SETTLE_AFTER`] at its
 //! prompt, with no request open, nothing scheduled and its tile on no client's screen, the
-//! server closes the terminal the server started for it, through the worker's own `Close`. The
+//! server closes the terminal the server started for it, through the worker's own `Close`. An
+//! agent that waits only on commands it left running (a dev server) rests too: closing its
+//! terminal stops them with it, and the timeline says what was stopped. The
 //! agent's session stays, so it can be taken up again. A terminal the person put on a task is
 //! theirs and is never closed, nor is anything still at work. Once a merged task's agent is
 //! closed, its worktree goes too, through the worker's `RemoveWorktree`, which keeps one with
@@ -54,10 +56,12 @@ impl Hub {
         let (terminals, _) = live(state);
         let quiet: Vec<_> = state
             .projects
-            .finished_agents(&terminals)
+            .finished_agents(&terminals, |term| state.board.left_running(term).is_some())
             .into_iter()
             .filter(|(_, _, term)| {
-                rests(state, *term) && !state.board.asks(*term) && !state.board.shown(*term)
+                (rests(state, *term) || state.board.left_running(*term).is_some())
+                    && !state.board.asks(*term)
+                    && !state.board.shown(*term)
             })
             .collect();
         resting.retain(|term, _| quiet.iter().any(|(_, _, t)| t == term));
@@ -71,7 +75,8 @@ impl Hub {
             // Seen at rest afresh should the close not take: tried again a whole wait later.
             resting.insert(term, now);
             let mins = rested.as_secs() / 60;
-            let changes = state.projects.settled(&project, task, mins, WallMs::now());
+            let left = state.board.left_running(term);
+            let changes = state.projects.settled(&project, task, (mins, left), WallMs::now());
             self.projects_moved(state, changes);
             tracing::info!(%project, %task, session = %term.session, "a finished task's agent closed");
             let free = state.projects.to_free(&project, task);

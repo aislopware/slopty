@@ -7,13 +7,18 @@
 //! the person's checkout nor an agent's is ever touched to verify.
 //!
 //! The merge queue rebases a task's work onto the target branch in that same checkout
-//! ([`rebase`]), so the verifier then runs on exactly the commit the target will point at, and
-//! moves the target to it only as a fast-forward from the commit it was rebased onto
-//! ([`fast_forward`]). Where the target is checked out, that checkout moves through `git merge
-//! --ff-only`, which refuses to overwrite anything of the person's there; elsewhere the ref
-//! moves by compare-and-swap. Nothing is ever force-moved or force-pushed.
+//! ([`rebase`]), each commit carrying where it came from as trailers, so the verifier then runs
+//! on exactly the commit the target will point at, and moves the target to it only as a
+//! fast-forward from the commit it was rebased onto ([`fast_forward`]). What a task's work did
+//! to the tests is read from the same clone ([`test_diff`]). Where the target is checked out, that
+//! checkout moves through `git merge --ff-only`, which refuses to overwrite anything of the
+//! person's there; elsewhere the ref moves by compare-and-swap. Nothing is ever force-moved or
+//! force-pushed.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+use slopty_proto::project::{TESTS_NAMED, TestDiff, is_test_path};
 
 use super::bundle::{self, branch_ref};
 
@@ -58,10 +63,13 @@ pub struct Checkout {
 /// A rebase's result.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Rebased {
-    /// What it made, in hex; the head itself when that already held the target.
+    /// What it made, in hex; the head itself when that already held the target and nothing
+    /// was to be added to its commits.
     pub head: String,
     /// The target's commit it is on top of, in hex.
     pub onto: String,
+    /// What it made has the very tree of the commit last verified: only the messages changed.
+    pub verified: bool,
 }
 
 /// A fast-forward's result.
@@ -119,30 +127,40 @@ pub async fn checkout(
 /// `head` rebased onto the branch `onto` in the project's checkout at `place`, as the merge
 /// queue takes it.
 ///
-/// A head that already holds `onto` is answered as it is; any other is left checked out there,
-/// rebased, for the verifier to run on.
+/// Every commit it adds to `onto` carries each of `trailers` (a token and its value) once, and
+/// the answer says whether what it made has the tree of the commit `verified`.
+///
+/// A head that already holds `onto` with no trailers to add is answered as it is; any other is
+/// left checked out there, rebased, for the verifier to run on.
 ///
 /// # Errors
-/// [`Failed::Conflict`] with the paths when it does not apply cleanly (the rebase is undone);
-/// otherwise a git that failed, such as a commit it could not sign.
+/// [`Failed::Conflict`] with the paths when it does not apply cleanly (the rebase is undone); a
+/// trailer that is not a plain token and a one-line value; otherwise a git that failed, such as
+/// a commit it could not sign.
 pub async fn rebase(
     git: &Path,
     repo: &Path,
     place: &Path,
-    head: &str,
-    onto: &str,
+    (head, onto): (&str, &str),
+    trailers: &[(String, String)],
+    verified: Option<&str>,
 ) -> Result<Rebased, Failed> {
+    let amend = amend_with(trailers)?;
     let head = commit_of(git, repo, head).await?;
     let onto = commit_of(git, repo, &branch_ref(onto)?).await?;
-    if is_ancestor(git, repo, &onto, &head).await {
-        return Ok(Rebased { head, onto });
+    let holds = is_ancestor(git, repo, &onto, &head).await;
+    if holds && (amend.is_none() || head == onto) {
+        let verified = same_tree(git, repo, &head, verified).await;
+        return Ok(Rebased { head, onto, verified });
     }
     prepare(git, repo, place, &head).await?;
     let mut args = identity(git, place).await;
-    args.extend(
-        ["rebase", "--no-autosquash", "--no-update-refs", "--quiet", "--end-of-options", &onto]
-            .map(str::to_owned),
-    );
+    args.extend(["rebase", "--no-autosquash", "--no-update-refs", "--quiet"].map(str::to_owned));
+    if let Some(amend) = amend {
+        // Every commit picked again, those already on top of `onto` too, so each takes them.
+        args.extend(["--force-rebase".to_owned(), "--exec".to_owned(), amend]);
+    }
+    args.extend(["--end-of-options".to_owned(), onto.clone()]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if let Err(stopped) = bundle::run(git, place, &args).await {
         let listed = bundle::run(git, place, &["diff", "--name-only", "--diff-filter=U"]).await;
@@ -160,7 +178,123 @@ pub async fn rebase(
             Failed::Conflict(conflicts)
         });
     }
-    Ok(Rebased { head: commit_of(git, place, "HEAD").await?, onto })
+    let head = commit_of(git, place, "HEAD").await?;
+    let verified = same_tree(git, place, &head, verified).await;
+    Ok(Rebased { head, onto, verified })
+}
+
+/// The command `git rebase --exec` runs after each commit to add `trailers` to it, none when
+/// there are none, each skipped where the commit carries it already. A token is letters, digits
+/// and `-`; a value is one line with no quote, so the shell takes each as it is.
+fn amend_with(trailers: &[(String, String)]) -> Result<Option<String>, Failed> {
+    if trailers.is_empty() {
+        return Ok(None);
+    }
+    let mut command = "git -c trailer.ifexists=addIfDifferent commit --amend --no-edit \
+                       --no-verify --allow-empty --quiet"
+        .to_owned();
+    for (token, value) in trailers {
+        let plain_token =
+            !token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+        let plain_value =
+            !value.trim().is_empty() && !value.chars().any(|c| c.is_control() || c == '\'');
+        if !plain_token || !plain_value {
+            return Err(Failed::Other(format!("{token:?}: {value:?} is not a trailer")));
+        }
+        let _written = write!(command, " --trailer '{token}: {}'", value.trim());
+    }
+    Ok(Some(command))
+}
+
+/// Whether `commit` has the very tree of `verified`.
+async fn same_tree(git: &Path, repo: &Path, commit: &str, verified: Option<&str>) -> bool {
+    let Some(verified) = verified else { return false };
+    let tree = async |what: &str| {
+        let spec = format!("{what}^{{tree}}");
+        bundle::run(git, repo, &["rev-parse", "--verify", "--quiet", "--end-of-options", &spec])
+            .await
+            .ok()
+            .map(|t| t.trim().to_owned())
+    };
+    match (tree(commit).await, tree(verified).await) {
+        (Some(ours), Some(theirs)) => ours == theirs,
+        _ => false,
+    }
+}
+
+/// What `head` did to the tests since it left the branch `target`, in the clone at `repo`.
+///
+/// That is the test files ([`is_test_path`], with the project's `test_paths`) it deleted,
+/// changed or renamed, and added, from `git diff --name-status` between their fork point and
+/// `head`.
+///
+/// # Errors
+/// A head or target that is not there, one that shares no history with the other, or a git
+/// that failed.
+pub async fn test_diff(
+    git: &Path,
+    repo: &Path,
+    head: &str,
+    target: &str,
+    test_paths: &[String],
+) -> Result<TestDiff, Failed> {
+    let head = commit_of(git, repo, head).await?;
+    let onto = commit_of(git, repo, &branch_ref(target)?).await?;
+    let base =
+        bundle::run(git, repo, &["merge-base", "--end-of-options", &onto, &head]).await.map_err(
+            |why| Failed::Other(format!("{} shares no history with {target}: {why}", short(&head))),
+        )?;
+    let listed = bundle::run(
+        git,
+        repo,
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "-M",
+            "--no-color",
+            "--end-of-options",
+            base.trim(),
+            &head,
+        ],
+    )
+    .await?;
+    Ok(tests_in(&listed, head, test_paths))
+}
+
+/// The test files `git diff --name-status -z` listed, at `head`.
+fn tests_in(listed: &str, head: String, test_paths: &[String]) -> TestDiff {
+    let mut diff = TestDiff { head, ..TestDiff::default() };
+    let test = |path: &str| is_test_path(path, test_paths);
+    let name = |list: &mut Vec<String>, count: &mut u16, path: &str| {
+        *count = count.saturating_add(1);
+        if list.len() < TESTS_NAMED {
+            list.push(path.to_owned());
+        }
+    };
+    let mut fields = listed.split('\0').filter(|f| !f.is_empty());
+    while let Some(status) = fields.next() {
+        let Some(path) = fields.next() else { break };
+        match status.chars().next() {
+            Some('D') if test(path) => name(&mut diff.deleted, &mut diff.deleted_count, path),
+            Some('A') if test(path) => diff.added_count = diff.added_count.saturating_add(1),
+            Some('M' | 'T') if test(path) => {
+                name(&mut diff.changed, &mut diff.changed_count, path);
+            }
+            // A rename or a copy names the old path, then the new.
+            Some(kind @ ('R' | 'C')) => {
+                let Some(new) = fields.next() else { break };
+                match (kind, test(path), test(new)) {
+                    ('R', true, true) => name(&mut diff.changed, &mut diff.changed_count, new),
+                    ('R', true, false) => name(&mut diff.deleted, &mut diff.deleted_count, path),
+                    (_, _, true) => diff.added_count = diff.added_count.saturating_add(1),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    diff
 }
 
 /// Move the branch `target` of the clone at `repo` from `from` to `to`, and push it to

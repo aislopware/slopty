@@ -2,9 +2,8 @@
 //! spend, and the *Needs you* row that says a cap was reached (`docs/decisions/projects.md`,
 //! "A project may have a budget per meter").
 //!
-//! The panel takes the cost cap in dollars and the plan windows' caps as `five-hour 80%`,
-//! comma-parted, so a window an agent names tomorrow needs no new field. Both empty takes the
-//! budget away.
+//! The panel takes the plan windows' caps as `five-hour 80%`, comma-parted, so a window an agent
+//! names tomorrow needs no new field. Empty takes the budget away.
 
 use std::collections::BTreeMap;
 
@@ -25,43 +24,33 @@ use crate::project::model::Board;
 
 /// What the panel and its palette line are called.
 pub(super) const BUDGET: &str = "Budget";
-/// The cost cap's label.
-const COST: &str = "Cost cap, estimated US dollars";
 /// The windows' caps' label.
 const WINDOWS: &str = "Plan window caps";
 /// What the windows' field says while it is empty.
 const WINDOWS_HINT: &str = "five-hour 80%, seven-day 50%";
-/// What the cost field says while it is empty.
-const COST_HINT: &str = "No cap";
 /// The *Needs you* row's button.
 pub(super) const RAISE: &str = "Raise budget";
 
 /// The budget being set, while its panel is open.
 pub(super) struct BudgetPanel {
-    cost: Entity<InputState>,
     windows: Entity<InputState>,
-    _enter: [Subscription; 2],
+    _enter: Subscription,
 }
 
-/// The budget `cost` and `windows` write: a cap in dollars, and `name share` pairs parted by
-/// commas. Both empty is the empty budget, which takes it away.
+/// The budget `windows` writes: `name share` pairs parted by commas. Empty is the empty budget,
+/// which takes it away.
 ///
 /// # Errors
 ///
 /// The words that say what was not read.
-pub(super) fn typed_budget(cost: &str, windows: &str) -> Result<Budget, String> {
+pub(super) fn typed_budget(windows: &str) -> Result<Budget, String> {
     let mut caps = BTreeMap::new();
-    if !cost.trim().is_empty() {
-        let cap = Budget::cap_of(Budget::USD, cost)
-            .ok_or_else(|| format!("{cost:?} is not dollars above nothing, to the cent"))?;
-        caps.insert(Budget::USD.to_owned(), cap);
-    }
     for pair in windows.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let (name, share) = pair
             .rsplit_once(|c: char| c.is_whitespace() || c == '=')
             .map(|(n, s)| (n.trim(), s.trim()))
             .ok_or_else(|| format!("{pair:?} is not a window and its share, as five-hour 80%"))?;
-        let cap = Budget::cap_of(name, share).filter(|_| name != Budget::USD).ok_or_else(|| {
+        let cap = Budget::cap_of(share).filter(|cap| *cap > 0).ok_or_else(|| {
             format!("{pair:?}: a window's cap is a share above nothing, at most 100%")
         })?;
         if caps.insert(name.to_owned(), cap).is_some() {
@@ -80,18 +69,14 @@ pub(super) fn typed_budget(cost: &str, windows: &str) -> Result<Budget, String> 
 }
 
 impl ProjectView {
-    /// Open the budget panel, filled with the budget as it stands; the keyboard goes to the
-    /// cost.
+    /// Open the budget panel, filled with the budget as it stands; the keyboard goes to it.
     pub(super) fn open_budget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let budget = self.seen.board.as_ref().and_then(|b| b.project.limits.budget.clone());
         let budget = budget.unwrap_or_default();
-        let cost = budget.0.get(Budget::USD).map(|c| Budget::figure(Budget::USD, *c));
-        let cost = cost.map(|c| c.trim_start_matches('$').to_owned()).unwrap_or_default();
         let windows: Vec<String> = budget
             .0
             .iter()
-            .filter(|(meter, _)| *meter != Budget::USD)
-            .map(|(meter, cap)| format!("{meter} {}", Budget::figure(meter, *cap)))
+            .map(|(meter, cap)| format!("{meter} {}", Budget::figure(*cap)))
             .collect();
         let field =
             |text: String, hint: &'static str, window: &mut Window, cx: &mut Context<Self>| {
@@ -99,18 +84,14 @@ impl ProjectView {
                 input.update(cx, |input, cx| input.set_value(text, window, cx));
                 input
             };
-        let cost = field(cost, COST_HINT, window, cx);
         let windows = field(windows.join(", "), WINDOWS_HINT, window, cx);
-        let enter = |input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>| {
-            cx.subscribe_in(input, window, |this, _input, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.save_budget(window, cx);
-                }
-            })
-        };
-        let enters = [enter(&cost, window, cx), enter(&windows, window, cx)];
-        cost.update(cx, |input, cx| input.focus(window, cx));
-        self.budget = Some(BudgetPanel { cost, windows, _enter: enters });
+        let enter = cx.subscribe_in(&windows, window, |this, _input, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.save_budget(window, cx);
+            }
+        });
+        windows.update(cx, |input, cx| input.focus(window, cx));
+        self.budget = Some(BudgetPanel { windows, _enter: enter });
         cx.notify();
     }
 
@@ -124,16 +105,9 @@ impl ProjectView {
 
     /// Fill the open panel, as the person would type it.
     #[cfg(test)]
-    pub(crate) fn type_budget(
-        &self,
-        cost: &str,
-        windows: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn type_budget(&self, windows: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(panel) = self.budget.as_ref() else { return };
-        let (c, w) = (panel.cost.clone(), panel.windows.clone());
-        c.update(cx, |input, cx| input.set_value(cost.to_owned(), window, cx));
+        let w = panel.windows.clone();
         w.update(cx, |input, cx| input.set_value(windows.to_owned(), window, cx));
     }
 
@@ -147,9 +121,8 @@ impl ProjectView {
     /// panel stays.
     fn save_budget(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(panel) = self.budget.as_ref() else { return };
-        let cost = panel.cost.read(cx).value().to_string();
         let windows = panel.windows.read(cx).value().to_string();
-        match typed_budget(&cost, &windows) {
+        match typed_budget(&windows) {
             Ok(budget) => {
                 cx.emit(ProjectEvent::SetBudget(budget));
                 self.close_budget(window, cx);
@@ -198,8 +171,6 @@ impl ProjectView {
                 .on_action(
                     cx.listener(|this, _: &Escape, window, cx| this.close_budget(window, cx)),
                 )
-                .child(label(COST))
-                .child(Input::new(&panel.cost).aria_label(COST))
                 .child(label(WINDOWS))
                 .child(Input::new(&panel.windows).aria_label(WINDOWS))
                 .child(
@@ -288,11 +259,11 @@ mod tests {
     fn board(
         cx: &mut TestAppContext,
         budget: Option<Budget>,
-        spent: u64,
+        five_hour: u32,
     ) -> (Entity<ProjectView>, &mut VisualTestContext, Rc<RefCell<Vec<ProjectEvent>>>) {
         let mut p = project("board", None);
         p.limits = Limits { budget, ..Limits::default() };
-        p.spend = Spend { cost_micro_usd: spent, ..Spend::default() };
+        p.spend = Spend { windows: BTreeMap::from([("five-hour".to_owned(), five_hour)]) };
         let mut mirror = Projects::default();
         mirror.apply_part(snapshot(10, vec![status(p, Vec::new(), Vec::new())]));
         let board = mirror.get(&crate::project::fixtures::id("board")).cloned().expect("it");
@@ -330,30 +301,27 @@ mod tests {
     /// is said, and the palette's Budget opens the same panel.
     #[gpui::test]
     fn a_spent_budget_needs_you_and_is_raised_from_the_board(cx: &mut TestAppContext) {
-        let cap = Budget(BTreeMap::from([(Budget::USD.to_owned(), 10_000_000)]));
-        let (view, cx, heard) = board(cx, Some(cap), 10_500_000);
+        let cap = Budget(BTreeMap::from([("five-hour".to_owned(), 5_000)]));
+        let (view, cx, heard) = board(cx, Some(cap), 5_500);
         assert!(cx.debug_bounds("project-needs-you").is_some());
-        let cost = cx.debug_bounds("project-cost");
-        assert!(cost.is_some(), "the header says the spend beside its cap");
         let said = view.read_with(cx, |v, _| v.seen.board.as_ref().and_then(|b| b.over_budget()));
         assert_eq!(
             said.as_deref(),
             Some(
-                "Spent an estimated $10.50 of its $10.00 budget: no task starts until you raise it"
+                "At 55.00% of the five hour window, its budget 50.00%: no task starts until you \
+                 raise it"
             )
         );
         click(cx, "project-budget-raise");
         assert!(view.read_with(cx, |v, _| v.budget_open()), "Raise opens the panel");
-        let filled = view
-            .read_with(cx, |v, cx| v.budget.as_ref().map(|p| p.cost.read(cx).value().to_string()));
-        assert_eq!(filled.as_deref(), Some("10.00"), "filled with the budget as it stands");
-        view.update_in(cx, |v, window, cx| v.type_budget("20", "five-hour 80%", window, cx));
+        let filled = view.read_with(cx, |v, cx| {
+            v.budget.as_ref().map(|p| p.windows.read(cx).value().to_string())
+        });
+        assert_eq!(filled.as_deref(), Some("five-hour 50.00%"), "the budget as it stands");
+        view.update_in(cx, |v, window, cx| v.type_budget("five-hour 80%", window, cx));
         click(cx, "project-budget-save");
         assert!(!view.read_with(cx, |v, _| v.budget_open()), "saved and closed");
-        let raised = Budget(BTreeMap::from([
-            ("five-hour".to_owned(), 8_000),
-            (Budget::USD.to_owned(), 20_000_000),
-        ]));
+        let raised = Budget(BTreeMap::from([("five-hour".to_owned(), 8_000)]));
         assert!(
             matches!(heard.borrow().as_slice(), [ProjectEvent::SetBudget(b)] if *b == raised),
             "{:?}",
@@ -365,12 +333,12 @@ mod tests {
     /// panel, a word it cannot read is said and the panel stays, and Esc closes it unsaved.
     #[gpui::test]
     fn a_budget_under_its_cap_is_quiet_and_set_from_the_palette(cx: &mut TestAppContext) {
-        let (view, cx, heard) = board(cx, None, 2_000_000);
+        let (view, cx, heard) = board(cx, None, 2_000);
         assert!(cx.debug_bounds("project-budget-reached").is_none());
         cx.dispatch_action(crate::project::EditBudget);
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.budget_open()));
-        view.update_in(cx, |v, window, cx| v.type_budget("ten", "", window, cx));
+        view.update_in(cx, |v, window, cx| v.type_budget("five-hour ten", window, cx));
         click(cx, "project-budget-save");
         assert!(view.read_with(cx, |v, _| v.budget_open()), "the panel stays");
         assert!(
@@ -382,24 +350,20 @@ mod tests {
         assert!(!view.read_with(cx, |v, _| v.budget_open()), "Esc closes it unsaved");
     }
 
-    /// The panel reads dollars and windows by name and share; both empty takes the budget
-    /// away; a word it cannot read is said.
+    /// The panel reads windows by name and share; empty takes the budget away; a word it
+    /// cannot read is said.
     #[test]
-    fn the_panel_reads_dollars_and_windows_by_name() {
-        let budget = typed_budget("12.50", "five-hour 80%, seven-day=50").unwrap();
+    fn the_panel_reads_windows_by_name() {
+        let budget = typed_budget("five-hour 80%, seven-day=50").unwrap();
         assert_eq!(
             budget.0,
-            BTreeMap::from([
-                ("five-hour".to_owned(), 8_000),
-                ("seven-day".to_owned(), 5_000),
-                (Budget::USD.to_owned(), 12_500_000),
-            ])
+            BTreeMap::from([("five-hour".to_owned(), 8_000), ("seven-day".to_owned(), 5_000)])
         );
-        assert_eq!(typed_budget(" ", "").unwrap(), Budget::default());
-        assert!(typed_budget("ten", "").unwrap_err().contains("ten"));
-        assert!(typed_budget("", "five-hour").unwrap_err().contains("five-hour"));
-        assert!(typed_budget("", "five-hour 120%").unwrap_err().contains("100%"));
-        assert!(typed_budget("", "usd 5").is_err(), "the cost has its own field");
-        assert!(typed_budget("", "a 5%, a 6%").unwrap_err().contains("twice"));
+        assert_eq!(typed_budget(" ").unwrap(), Budget::default());
+        assert!(typed_budget("five-hour ten").unwrap_err().contains("ten"));
+        assert!(typed_budget("five-hour").unwrap_err().contains("five-hour"));
+        assert!(typed_budget("five-hour 120%").unwrap_err().contains("100%"));
+        assert!(typed_budget("five-hour 0").unwrap_err().contains("above nothing"));
+        assert!(typed_budget("a 5%, a 6%").unwrap_err().contains("twice"));
     }
 }

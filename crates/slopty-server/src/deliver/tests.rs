@@ -72,7 +72,7 @@ fn a_block_interrupts_at_most_every_few_minutes() {
     assert!(now[0].context.contains("still no disk"), "the held one rides along");
 }
 
-/// A task that asks in a loop interrupts its parent once a minute with its latest question,
+/// A task that asks in a loop interrupts the orchestrator once a minute with its latest question,
 /// not once per report: what waits stays one item per task and kind.
 #[test]
 fn a_task_asking_in_a_loop_interrupts_once_a_minute() {
@@ -258,17 +258,16 @@ fn the_server_s_word_on_an_agent_gives_way_to_the_agent_s_own() {
     assert_eq!(again.len(), 1, "never read, so it goes again: {again:?}");
 }
 
-/// An agent above a node speaks to the node's agent at once, marked as an agent's words and
-/// after the person's, which it never replaces: its own latest replaces its earlier still
-/// unread. A project held at its budget holds it, as it holds reports, while the person's
-/// words go.
+/// The orchestrator speaks to a task's agent at once, marked as an agent's words and after the
+/// person's, which it never replaces: its own latest replaces its earlier still unread. A
+/// project held at its budget holds it, as it holds reports, while the person's words go.
 #[test]
-fn an_agent_above_speaks_after_the_person_and_never_in_their_place() {
+fn the_orchestrator_speaks_after_the_person_and_never_in_their_place() {
     let (mut d, t0, to) = (Deliveries::default(), Instant::now(), term());
     let node = (project(), Some(TaskId(4)));
-    d.above(node.clone(), None, "Also cover the iPad.", t0);
+    d.orchestrator(node.clone(), "Also cover the iPad.", t0);
     d.person(project(), Some(TaskId(4)), "Keep it small.", t0);
-    d.above(node.clone(), None, "Also cover the iPad and the Mac.", t0);
+    d.orchestrator(node.clone(), "Also cover the iPad and the Mac.", t0);
     assert_eq!(d.len(), 2, "its latest in place of its earlier, beside the person's");
     assert_eq!(d.next_due(), Some(t0), "at once");
     let batches = d.take(t0, |_| Some(to), |_| false);
@@ -282,7 +281,7 @@ fn an_agent_above_speaks_after_the_person_and_never_in_their_place() {
     assert!(!context.contains("cover the iPad.\n"), "replaced: {context}");
     assert!(d.acked(to, batches[0].number).is_some());
 
-    d.above(node, Some(TaskId(2)), "Rebase first.", t0);
+    d.orchestrator(node, "Rebase first.", t0);
     let held = d.take(t0, |_| Some(to), |_| true);
     assert!(held.is_empty(), "held at the budget");
     d.person(project(), Some(TaskId(4)), "Go on.", t0);
@@ -293,5 +292,5 @@ fn an_agent_above_speaks_after_the_person_and_never_in_their_place() {
     d.unpark();
     let batches = d.take(t0, |_| Some(to), |_| false);
     let context = &batches.first().expect("once the hold lifts").context;
-    assert!(context.contains("The agent of task 2, which split your task off, says"), "{context}");
+    assert!(context.contains("Your orchestrator says") && context.contains("Rebase first."));
 }

@@ -411,11 +411,6 @@ pub enum Verb {
         /// Which.
         item: ItemRef,
     },
-    /// Point every client at an item: each offers a jump to it.
-    PointAt {
-        /// Which.
-        item: ItemRef,
-    },
     /// The windows and displays a worker can stream; answered with [`Outcome::Screens`].
     ListWindows {
         /// Where.
@@ -571,28 +566,18 @@ pub enum Verb {
         /// Wait this long for an entry past `since`; capped as [`Verb::WaitFor`] is.
         timeout_ms: u32,
     },
-    /// Make a task; answered with [`Outcome::Task`]. Paths it owns are claimed as by
-    /// [`Verb::TaskClaim`]; a dependency that leads back to it, or a parent deeper than the
-    /// project's depth, is refused.
+    /// Make a task under the project's orchestrator; answered with [`Outcome::Task`]. Paths it
+    /// owns are claimed as by [`TaskChange::claim`]; a dependency that leads back to it is
+    /// refused.
     TaskCreate {
         /// In which project.
         project: ProjectId,
         /// What it is.
         spec: Box<TaskSpec>,
     },
-    /// Take more paths for a task to own; refused with [`ErrorCode::Conflict`] when one
-    /// overlaps a path another task of the project still holds. Answered with
-    /// [`Outcome::Task`].
-    TaskClaim {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// Repository-relative paths; a directory owns everything under it.
-        paths: Vec<String>,
-    },
-    /// Move a task, record its branch or its verifier's word, or note something on its
-    /// timeline; answered with [`Outcome::Task`].
+    /// Move a task, take more paths for it to own, record its branch or its verifier's word,
+    /// or note something on its timeline; answered with [`Outcome::Task`], or
+    /// [`ErrorCode::Conflict`] for a path claimed that another live task holds.
     TaskUpdate {
         /// In which project.
         project: ProjectId,
@@ -601,20 +586,11 @@ pub enum Verb {
         /// What changes.
         change: Box<TaskChange>,
     },
-    /// Tell the server which terminal's agent works on a task; answered with
-    /// [`Outcome::Task`].
-    TaskAssign {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// The agent's terminal.
-        term: TermRef,
-    },
     /// Start what runs for a task on the worker its pin or placement chooses, with the project
     /// and the task in its environment; answered with [`Outcome::Task`] once it runs, or
     /// [`ErrorCode::Unplaced`] saying why each worker was passed over, or
-    /// [`ErrorCode::Limit`] naming the limit reached.
+    /// [`ErrorCode::Limit`] naming the limit reached: for an agent's start, among them, as
+    /// many of the project's tasks waiting on the person as its [`crate::project::Limits::review`].
     TaskSpawn {
         /// In which project.
         project: ProjectId,
@@ -648,9 +624,8 @@ pub enum Verb {
         /// Which task; the orchestrator's node when absent.
         task: Option<TaskId>,
     },
-    /// A task's agent reports on its work to whoever split the task off (its parent task's
-    /// agent, or the project's orchestrator), delivered through that agent's hooks when the
-    /// report's kind says; answered with [`Outcome::Task`].
+    /// A task's agent reports on its work to the project's orchestrator, delivered through
+    /// its hooks when the report's kind says; answered with [`Outcome::Task`].
     TaskReport {
         /// In which project.
         project: ProjectId,
@@ -732,9 +707,11 @@ pub enum Verb {
         title: String,
     },
     /// Rebase `head` onto the branch `onto` in the project's verify checkout of the clone at
-    /// `repo`, as the merge queue does before it verifies again. A head that already holds
-    /// `onto` is answered as it is. Answered with [`Outcome::Rebased`], or
-    /// [`ErrorCode::Conflict`] naming the paths that conflict.
+    /// `repo`, as the merge queue does before it verifies again, with `trailers` added to each
+    /// commit's message as `git interpret-trailers` adds them (a trailer already there is not
+    /// added twice). A head that already holds `onto` and every trailer is answered as it is.
+    /// Answered with [`Outcome::Rebased`], or [`ErrorCode::Conflict`] naming the paths that
+    /// conflict.
     Rebase {
         /// Where.
         worker: WorkerId,
@@ -746,6 +723,27 @@ pub enum Verb {
         head: String,
         /// The branch it goes on top of.
         onto: String,
+        /// Each `(token, value)` to add to every commit rebased: the task and the thread its
+        /// work came from. A token is letters, digits and `-`; a value has no line break.
+        trailers: Vec<(String, String)>,
+        /// The commit last verified, whose tree the rebased one is compared with
+        /// ([`Outcome::Rebased::verified`]).
+        verified: Option<String>,
+    },
+    /// What `head` did to the tests since it left the branch `target`, in the clone at `repo`
+    /// ([`crate::project::TestDiff`]): every test file it deleted, changed or added, by
+    /// [`crate::project::is_test_path`] with `test_paths`. Answered with [`Outcome::TestDiff`].
+    TestDiff {
+        /// Where.
+        worker: WorkerId,
+        /// The clone.
+        repo: String,
+        /// The commit or branch the work is at.
+        head: String,
+        /// The branch it left.
+        target: String,
+        /// The project's own test paths, beside the usual ones.
+        test_paths: Vec<String>,
     },
     /// Move the branch `target` of the clone at `repo` from `from` to `to`, a commit that
     /// descends from it, and nothing else: in the checkout that has it checked out, as `git
@@ -778,12 +776,12 @@ pub enum Verb {
         pin: Option<WorkerId>,
     },
     /// Tell a task's agent, or the project's orchestrator, something: the person's own words,
-    /// or an agent's to a task under it, marked as an agent's. They reach the agent through
-    /// its hooks as reports do (its inbox wakes it when idle), never typed into its terminal.
-    /// The board's next steps (fix CI, address the review's comments, resolve conflicts) and
-    /// its line to the orchestrator are said this way. Answered with [`Outcome::Done`]; a node
-    /// with no agent running is [`ErrorCode::Invalid`]. An agent telling a node not under it
-    /// is [`ErrorCode::Forbidden`] or [`ErrorCode::Invalid`], and one telling a task that
+    /// or the orchestrator's to one of its tasks, marked as the orchestrator's. They reach the
+    /// agent through its hooks as reports do (its inbox wakes it when idle), never typed into
+    /// its terminal. The board's next steps (fix CI, address the review's comments, resolve
+    /// conflicts) and its line to the orchestrator are said this way. Answered with
+    /// [`Outcome::Done`]; a node with no agent running is [`ErrorCode::Invalid`]. Any agent but
+    /// the orchestrator is [`ErrorCode::Forbidden`], and the orchestrator telling a task that
     /// waits on the person is [`ErrorCode::Conflict`].
     TaskTell {
         /// In which project.
@@ -793,10 +791,11 @@ pub enum Verb {
         /// What the person says, at most [`crate::project::NOTE_MAX`] bytes.
         text: String,
     },
-    /// Put a task in its project's merge queue, the person's word: its verifier runs on its
-    /// branch first when the project or the task names one. How a task with no verifier is
-    /// merged, and how one is tried again after it was returned. Answered with
-    /// [`Outcome::Task`]; an agent is [`ErrorCode::Forbidden`].
+    /// Put a task in its project's merge queue, the person's word, and the only way work
+    /// merges: a task its checks passed waits in Ready to merge until then. Work not checked
+    /// yet (one given back, or done without a report) is verified and reviewed first when the
+    /// project or the task asks. Answered with [`Outcome::Task`]; an agent is
+    /// [`ErrorCode::Forbidden`].
     TaskMerge {
         /// In which project.
         project: ProjectId,
@@ -804,7 +803,7 @@ pub enum Verb {
         task: TaskId,
     },
     /// Say whether a task's work may merge, as its reviewer or the person: an approval puts it
-    /// in the merge queue, a block gives it back to its agent with the findings. Only the
+    /// in Ready to merge, a block gives it back to its agent with the findings. Only the
     /// reviewer session the server started for the task, or the person, may; the person's word
     /// stands over the reviewer's. Answered with [`Outcome::Task`].
     TaskReview {
@@ -925,55 +924,6 @@ pub enum Verb {
         /// What to do.
         op: FsOp,
     },
-    /// Have several agents try `task` at once, an attempt each ([`crate::project::Attempts`]):
-    /// each launch makes a sub-task of [`crate::project::ATTEMPT_KIND`] with the task's brief
-    /// and starts it as [`Verb::TaskSpawn`] would, on its own worker where several fit and it
-    /// names none. Answered with [`Outcome::Task`]: the task, its attempts named.
-    TaskAttempts {
-        /// The project.
-        project: ProjectId,
-        /// The task to try; one with no agent of its own.
-        task: TaskId,
-        /// What each attempt runs, and where when it says ([`TaskLaunch::pin`]).
-        launches: Vec<TaskLaunch>,
-    },
-    /// Pick the attempt that lands ([`crate::project::Attempts::picked`]): it goes through the
-    /// merge queue once verified, and every other attempt stops, its agent closed and its
-    /// worktree freed, its branch kept. The person's, or the project's orchestrator's; answered
-    /// with [`Outcome::Task`], the task tried.
-    TaskPick {
-        /// The project.
-        project: ProjectId,
-        /// The attempt.
-        attempt: TaskId,
-    },
-    /// Set a schedule of `project` ([`crate::project::Schedule`]): `schedule` anew, or a new
-    /// one when none is named. Answered with [`Outcome::Project`]. The person's alone, since
-    /// every run spends the plan.
-    ScheduleSet {
-        /// The project.
-        project: ProjectId,
-        /// The schedule to set anew, by its number; a new one when absent.
-        schedule: Option<u32>,
-        /// What it makes and starts, and when.
-        spec: Box<crate::project::ScheduleSpec>,
-    },
-    /// Take a schedule of `project` away; the tasks it made stay. Answered with
-    /// [`Outcome::Project`]; the person's alone.
-    ScheduleDelete {
-        /// The project.
-        project: ProjectId,
-        /// The schedule, by its number.
-        schedule: u32,
-    },
-    /// Run a schedule of `project` now, paused or not: its task made and started, answered
-    /// with [`Outcome::Task`]. The person's alone.
-    ScheduleRun {
-        /// The project.
-        project: ProjectId,
-        /// The schedule, by its number.
-        schedule: u32,
-    },
     /// Do something in a worker's git repository ([`crate::git`]): its status, a commit of the
     /// person's, a push, a pull request. Answered with [`Outcome::Git`]; the person's alone,
     /// since an agent commits with its own git.
@@ -984,22 +934,6 @@ pub enum Verb {
         repo: String,
         /// What to do.
         op: crate::git::GitOp,
-    },
-    /// Put a finish off until later ([`crate::snooze`]): the server keeps it, across restarts,
-    /// and tells every client. Answered with [`Outcome::Snoozed`]. Refused for a thread that
-    /// needs the person now, and from an agent.
-    Snooze {
-        /// What.
-        of: crate::snooze::SnoozeOf,
-        /// Until when.
-        until: crate::snooze::Until,
-        /// The person's IANA time zone, for the presets; the server's own when absent.
-        zone: Option<String>,
-    },
-    /// End a snooze now. Answered with [`Outcome::Done`], whether or not one held.
-    Unsnooze {
-        /// What.
-        of: crate::snooze::SnoozeOf,
     },
     /// Keep `script` in `project`, in place of one of its name. Answered with
     /// [`Outcome::Project`]. The person's alone.
@@ -1112,15 +1046,12 @@ impl Verb {
             | Self::OpenItem { .. }
             | Self::RenameItem { .. }
             | Self::RemoveItem { .. }
-            | Self::PointAt { .. }
             | Self::AnswerRequest { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
             | Self::ProjectNeeds { .. }
             | Self::TaskCreate { .. }
-            | Self::TaskClaim { .. }
             | Self::TaskUpdate { .. }
-            | Self::TaskAssign { .. }
             | Self::TaskSpawn { .. }
             | Self::TaskStart { .. }
             | Self::TaskTell { .. }
@@ -1138,13 +1069,6 @@ impl Verb {
             | Self::RemoveWorktree { .. }
             | Self::StartThread { .. }
             | Self::FsChange { .. }
-            | Self::TaskAttempts { .. }
-            | Self::TaskPick { .. }
-            | Self::ScheduleSet { .. }
-            | Self::ScheduleDelete { .. }
-            | Self::ScheduleRun { .. }
-            | Self::Snooze { .. }
-            | Self::Unsnooze { .. }
             | Self::ScriptSet { .. }
             | Self::ScriptDelete { .. }
             | Self::ScriptRun { .. }
@@ -1156,6 +1080,7 @@ impl Verb {
             // A clone there already is answered as it is.
             Self::CloneRepo { .. }
             | Self::PullChecks { .. }
+            | Self::TestDiff { .. }
             | Self::ListWorkers
             | Self::ListTerminals { .. }
             | Self::ReadScreen { .. }
@@ -1474,7 +1399,7 @@ pub enum Outcome {
     Ports(Vec<Port>),
     /// Done, nothing to report ([`Verb::SendInput`], [`Verb::Close`], [`Verb::WriteFile`],
     /// [`Verb::ResizeTerminal`], [`Verb::ForgetWorker`], [`Verb::RenameItem`],
-    /// [`Verb::RemoveItem`], [`Verb::PointAt`], [`Verb::AnswerRequest`], [`Verb::Upload`]).
+    /// [`Verb::RemoveItem`], [`Verb::AnswerRequest`], [`Verb::Upload`]).
     Done,
     /// It failed.
     Error {
@@ -1583,11 +1508,17 @@ pub enum Outcome {
     },
     /// For [`Verb::Rebase`]: what the rebase made, on top of the target at `onto`.
     Rebased {
-        /// The rebased commit, in hex; the head given when it already held `onto`.
+        /// The rebased commit, in hex; the head given when it already held `onto` and every
+        /// trailer.
         head: String,
         /// The target's commit it is on top of, in hex.
         onto: String,
+        /// Its tree is the very tree of the commit last verified: only messages changed, so
+        /// what was verified holds for it.
+        verified: bool,
     },
+    /// For [`Verb::TestDiff`].
+    TestDiff(crate::project::TestDiff),
     /// For [`Verb::FastForward`]: the branch is at `head`.
     FastForwarded {
         /// Its commit now, in hex.
@@ -1630,8 +1561,6 @@ pub enum Outcome {
     },
     /// For [`Verb::Git`]: what it did.
     Git(Box<crate::git::GitDone>),
-    /// For [`Verb::Snooze`]: the snooze as the server keeps it, its time worked out.
-    Snoozed(crate::snooze::Snooze),
 }
 
 /// Which thread a [`Verb::ReadThread`] or a [`Verb::AnswerRequest`] is about.

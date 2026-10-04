@@ -144,9 +144,8 @@ async fn a_script_runs_in_the_project_s_folder_or_a_task_s_worktree() {
     };
     let branch = AgentBranch { session: building, pr: None, worktree: Some(tree) };
     lease.handle(ToServer::Report(AgentReport::Branch(branch)));
-    let assign =
-        Verb::TaskAssign { project: project(), task, term: TermRef { worker, session: building } };
-    assert!(matches!(hub.dispatch(assign).await, Outcome::Task(_)));
+    let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session: building });
+    assert!(matches!(assigned, Outcome::Task(_)));
     let elsewhere = hub.dispatch(run(Some(WorkerId::new()), Some(task))).await;
     assert!(refused(&elsewhere, ErrorCode::Invalid).contains("another worker"));
     let asked = spawn(&hub, run(None, Some(task)));

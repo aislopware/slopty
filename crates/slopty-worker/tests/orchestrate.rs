@@ -17,7 +17,8 @@ mod orchestrate {
     use slopty_pty::shell_integration::{self, ShellIntegration};
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::{
-        AgentFeed, Agents, list_commands, may_type, read_output, read_screen, send_input, wait_for,
+        AgentFeed, Agents, list_commands, may_deliver, may_type, read_output, read_screen,
+        send_input, wait_for,
     };
     use slopty_worker::session::{self, SessionHandle, SessionStart};
     use tokio::sync::{broadcast, mpsc};
@@ -80,6 +81,27 @@ mod orchestrate {
 
         fn ended(&self, _session: SessionId) -> bool {
             self.0.lock().1
+        }
+    }
+
+    /// An agent at its prompt by its hooks' word, whose last turn the person stopped or not.
+    struct Stopped(parking_lot::Mutex<bool>);
+
+    impl Agents for Stopped {
+        fn status(&self, _session: SessionId) -> Option<SessionAgent> {
+            Some(SessionAgent {
+                kind: AgentKind::ClaudeCode,
+                status: AgentStatus::Blocked(BlockReason::IdlePrompt),
+                source: AgentSource::Hook,
+                since_ms: WallMs::ZERO,
+                mode: None,
+            })
+        }
+
+        fn forget(&self, _session: SessionId) {}
+
+        fn interrupted(&self, _session: SessionId) -> bool {
+            *self.0.lock()
         }
     }
 
@@ -530,5 +552,20 @@ mod orchestrate {
 
         said.end();
         assert_eq!(code(false), Some(ErrorCode::AgentExited), "its shell would read it");
+    }
+
+    /// What is kept for an agent the person stopped waits for their next prompt: its idle
+    /// prompt a minute later takes typing as before, but no post wakes it, until it is prompted
+    /// again.
+    #[tokio::test]
+    async fn the_person_s_stop_holds_what_is_kept_for_the_agent() {
+        let sh = shell().await;
+        let stopped = Stopped(parking_lot::Mutex::new(true));
+        assert_eq!(may_type(&sh.handle, &stopped, true).err(), None, "the person may type");
+        let held = may_deliver(&sh.handle, &stopped).expect_err("held");
+        assert_eq!(held.code, ErrorCode::AwaitsPerson);
+        assert!(held.message.contains("the person stopped this agent"), "{held:?}");
+        *stopped.0.lock() = false;
+        assert_eq!(may_deliver(&sh.handle, &stopped).err(), None, "prompted again");
     }
 }
