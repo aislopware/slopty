@@ -500,7 +500,7 @@ fn checked(start: &Start) -> Result<Begin, String> {
     Ok(Begin::New(Box::new(slopty_agent::codex::shared::start(&start.cwd, start.model.as_deref()))))
 }
 
-/// Whether Codex refused a resume because the thread is archived: "session <id> is archived",
+/// Whether Codex refused a resume because the thread is archived: "session `<id>` is archived",
 /// or its hint to run `codex unarchive`. Codex says so only in words, so they are read as T3
 /// Code reads them; any other refusal stays one.
 fn archived(message: &str) -> bool {

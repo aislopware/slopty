@@ -190,8 +190,13 @@ mod codex {
         let (resumed_at, resumed) = recorded("thread/resume");
         let thread = resumed["thread"]["id"].clone();
         stub.answer("thread/loaded/list", json!({ "data": [thread], "nextCursor": null })).await;
+        // The models it offers the picker, asked beside the loaded list; this stand-in has none.
+        stub.answer("model/list", json!({ "data": [], "nextCursor": null })).await;
         let resume = stub.answer("thread/resume", resumed).await;
         assert_eq!(resume["params"]["threadId"], thread);
+        // The goal Codex keeps for the thread, asked as it is taken up; this thread has none.
+        let goal = stub.answer("thread/goal/get", json!({})).await;
+        assert_eq!(goal["params"]["threadId"], thread);
         // What the thread has cost so far, asked as it is taken up; this account says no figure.
         let usage = stub.answer("account/usage/read", json!({ "summary": {} })).await;
         assert_eq!(usage["params"]["threadId"], thread);
