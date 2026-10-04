@@ -306,11 +306,15 @@ async fn run(
     }
     let (stderr, stdout) =
         (String::from_utf8_lossy(&out.stderr), String::from_utf8_lossy(&out.stdout));
-    let said = [stderr.trim(), stdout.trim()].into_iter().find(|s| !s.is_empty());
-    let said = said.map_or_else(
-        || format!("{name} {} failed", args.first().unwrap_or(&"")),
-        |s| tail(s, SAID_MAX),
-    );
+    // Both: `git push --porcelain` says only that it failed on stderr, and which ref was
+    // refused and why on stdout.
+    let said: Vec<&str> =
+        [stderr.trim(), stdout.trim()].into_iter().filter(|s| !s.is_empty()).collect();
+    let said = if said.is_empty() {
+        format!("{name} {} failed", args.first().unwrap_or(&""))
+    } else {
+        tail(&said.join("\n"), SAID_MAX)
+    };
     Err(failed(said))
 }
 
