@@ -32,8 +32,6 @@ pub struct WebView {
     gpui: Retained<NSView>,
     sink: Sink,
     delegate: Retained<Delegate>,
-    /// Web Inspector may open on the page (`[web] inspector`).
-    inspectable: std::cell::Cell<bool>,
     mtm: MainThreadMarker,
 }
 
@@ -47,14 +45,13 @@ impl WebView {
     /// A page of `worker` loading `url`, for the window whose GPUI view is `gpui` (its
     /// `raw_window_handle` AppKit handle), in that worker's data store (`super::route`). It is
     /// in no view until the tile's native host adopts [`Self::view`]. Events go to `sink`.
-    /// Web Inspector opens on it when `inspectable`. `None` off the main thread or for an
-    /// address `NSURL` refuses.
+    /// Web Inspector opens on it. `None` off the main thread or for an address `NSURL`
+    /// refuses.
     #[must_use]
     pub fn new(
         gpui: NonNull<c_void>,
         worker: u128,
         url: &str,
-        inspectable: bool,
         sink: Rc<dyn Fn(WebEvent)>,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
@@ -69,9 +66,7 @@ impl WebView {
         unsafe {
             config.setWebsiteDataStore(&super::store(worker, mtm));
         }
-        if inspectable {
-            developer_extras(&config);
-        }
+        developer_extras(&config);
         // SAFETY: WebKit rule: the view copies the configuration at init.
         let web =
             unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), zero, &config) };
@@ -81,13 +76,12 @@ impl WebView {
         unsafe {
             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         }
-        super::adopt_view(&web, &delegate, inspectable);
+        super::adopt_view(&web, &delegate);
         let request = NSURLRequest::requestWithURL(&address);
         // SAFETY: WebKit rule: any `NSURLRequest` may be loaded; the navigation it returns
         // may be ignored.
         let _navigation = unsafe { web.loadRequest(&request) };
-        let inspectable = std::cell::Cell::new(inspectable);
-        Some(Self { web, gpui, sink, delegate, inspectable, mtm })
+        Some(Self { web, gpui, sink, delegate, mtm })
     }
 
     /// The `WKWebView`, an `NSView *` for a native host to adopt. Valid while `self` is.
@@ -212,11 +206,10 @@ impl WebView {
         super::count_in(&self.web, text, Rc::clone(&self.sink));
     }
 
-    /// Open Web Inspector on the page, in a window of its own. Whether it opened: only a
-    /// page open to it is.
+    /// Open Web Inspector on the page, in a window of its own. Whether it opened.
     #[must_use]
     pub fn inspect(&self) -> bool {
-        self.inspectable.get() && show_inspector(&self.web)
+        show_inspector(&self.web)
     }
 
     /// Whether the page is open to Web Inspector now.
@@ -224,13 +217,6 @@ impl WebView {
     pub fn inspectable(&self) -> bool {
         // SAFETY: WebKit rule: `inspectable` is a BOOL property of `WKWebView`.
         unsafe { msg_send![&*self.web, isInspectable] }
-    }
-
-    /// Open the page to Web Inspector or close it. The menu's "Inspect Element" is the page's
-    /// configuration, made when it opened, so it follows on the page's next opening.
-    pub fn set_inspectable(&self, inspectable: bool) {
-        self.inspectable.set(inspectable);
-        super::set_inspectable(&self.web, inspectable);
     }
 
     /// Show the page at `zoom`, 1 being its own size.

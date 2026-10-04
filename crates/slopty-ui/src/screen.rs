@@ -499,6 +499,40 @@ struct Hud {
     sample: ScreenStats,
     summary: Vec<Figure>,
     text: SharedString,
+    history: History,
+}
+
+/// How many samples the overlay's trends hold: half a minute, one a [`HUD_PERIOD`].
+const HUD_HISTORY: usize = 30;
+
+/// The overlay's last half minute of the figures that move under a stalling link: how old the
+/// frame on screen is, the interarrival jitter and the round trip, in milliseconds, oldest
+/// first. A figure not known yet is a gap.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct History {
+    age: VecDeque<f32>,
+    jitter: VecDeque<f32>,
+    rtt: VecDeque<f32>,
+    /// Every sample taken, which keys the trends' slide.
+    pushed: u64,
+}
+
+impl History {
+    fn push(&mut self, age: Option<Duration>, jitter: Duration, rtt: Option<Duration>) {
+        #[expect(clippy::cast_possible_truncation, reason = "milliseconds on screen")]
+        let ms = |d: Option<Duration>| d.map_or(f32::NAN, |d| (d.as_secs_f64() * 1e3) as f32);
+        for (ring, value) in [
+            (&mut self.age, ms(age)),
+            (&mut self.jitter, ms(Some(jitter))),
+            (&mut self.rtt, ms(rtt)),
+        ] {
+            if ring.len() == HUD_HISTORY {
+                ring.pop_front();
+            }
+            ring.push_back(value);
+        }
+        self.pushed = self.pushed.saturating_add(1);
+    }
 }
 
 /// What the overlay shows that is not in [`ScreenStats`].
@@ -852,16 +886,18 @@ impl Focusable for ScreenView {
 /// runs at.
 const UNKNOWN_REFRESH_HZ: u16 = 60;
 
+/// The most frames a second a stream asks for: no screen here refreshes faster.
+const MAX_FPS: u16 = 120;
+
 /// The frames a second a stream asks for.
 ///
-/// That is the refresh of the screen its view is on, up to the settings' `ceiling`
+/// That is the refresh of the screen its view is on, up to `MAX_FPS`
 /// (`docs/decisions/video.md`, "The stream follows the screen's refresh"). A screen that does
 /// not say (`refresh_hz` 0) counts as 60 Hz.
 #[must_use]
-pub const fn stream_fps(ceiling: u16, refresh_hz: u16) -> u16 {
+pub const fn stream_fps(refresh_hz: u16) -> u16 {
     let screen = if refresh_hz == 0 { UNKNOWN_REFRESH_HZ } else { refresh_hz };
-    let fps = if screen < ceiling { screen } else { ceiling };
-    if fps == 0 { 1 } else { fps }
+    if screen < MAX_FPS { screen } else { MAX_FPS }
 }
 
 /// A refresh period as whole hertz; 0 for none.
@@ -890,12 +926,12 @@ fn screen_refresh_hz(screen: Option<u32>) -> u16 {
     screen.map_or_else(main_refresh_hz, |id| hz_of(slopty_platform::display_refresh_of(id)))
 }
 
-/// The quality a stream is asked for: the settings' ceiling on the rate, at the refresh of the
-/// screen the view is on ([`stream_fps`]), and their bitrate ceiling at `scale`.
+/// The quality a stream is asked for: the refresh of the screen the view is on
+/// ([`stream_fps`]), and the settings' bitrate ceiling at `scale`.
 #[must_use]
 pub const fn quality_of(prefs: slopty_theme::StreamPrefs, scale: f32, refresh_hz: u16) -> Quality {
     Quality {
-        fps: stream_fps(prefs.fps, refresh_hz),
+        fps: stream_fps(refresh_hz),
         bitrate_bps: prefs.max_bitrate_bps,
         scale,
         region: None,
@@ -939,10 +975,10 @@ impl ScreenView {
     }
 
     /// The view is drawn on `screen`, which refreshes at `hz` (0 when it does not say): the
-    /// stream asks for that rate, up to the settings' ceiling, when it is not the one it has.
+    /// stream asks for that rate when it is not the one it has.
     fn on_screen(&mut self, screen: Option<u32>, hz: u16) {
         self.screen = Some((screen, hz));
-        let fps = stream_fps(self.theme.behaviour.stream.fps, hz);
+        let fps = stream_fps(hz);
         if fps != self.quality.fps {
             self.quality.fps = fps;
             self.send(ScreenRequest::SetQuality { stream: self.stream, quality: self.quality });
@@ -1320,6 +1356,7 @@ impl ScreenView {
             sample: self.handle.stats(),
             summary: Vec::new(),
             text: SharedString::new_static("…"),
+            history: History::default(),
         });
         cx.notify();
     }
@@ -1539,6 +1576,12 @@ impl ScreenView {
         self.hud.as_ref().map(|hud| (hud.summary.clone(), hud.text.clone()))
     }
 
+    /// The overlay's trends, as last sampled.
+    #[cfg(test)]
+    pub(crate) fn hud_history(&self) -> Option<History> {
+        self.hud.as_ref().map(|hud| hud.history.clone())
+    }
+
     /// Sample the overlay's figures, once a [`HUD_PERIOD`] ([`Self::read_health`]), never in a
     /// render: a render that sampled whenever a period had passed drew figures a frame drawn a
     /// moment later would not, and the frame shown was stale against it.
@@ -1577,6 +1620,7 @@ impl ScreenView {
             };
             hud.summary = health::summary(&input);
             hud.text = hud_lines(&input).into();
+            hud.history.push(input.frame_age, stats.jitter, input.rtt);
             hud.sample = stats;
             hud.sampled_at = now;
         }
@@ -3554,6 +3598,7 @@ impl ScreenView {
         .aria_expanded(open)
         .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_hud_details(cx)));
+        let trends = open.then(|| self.hud_trends()).flatten();
         let lines = open.then(|| {
             div()
                 .debug_selector(|| "stream-stats-details-lines".to_owned())
@@ -3584,6 +3629,7 @@ impl ScreenView {
             .child(
                 div().flex().items_center().gap(px(theme.spacing.sm)).child(plain).child(details),
             )
+            .children(trends)
             .children(lines);
         div()
             .absolute()
@@ -3591,6 +3637,63 @@ impl ScreenView {
             .right(px(theme.spacing.sm))
             .child(panel)
             .into_any_element()
+    }
+}
+
+/// A trend's width, in points: a step for each of [`HUD_HISTORY`] samples, wide enough to
+/// read a rise.
+const TREND_WIDTH: f32 = 96.0;
+
+impl ScreenView {
+    /// Behind "Details", over the engineering lines: the last half minute of the frame's age,
+    /// the jitter and the round trip, each a sparkline with its latest figure.
+    fn hud_trends(&self) -> Option<gpui::AnyElement> {
+        let history = &self.hud.as_ref()?.history;
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let trend = |id: &'static str, name: &'static str, values: &VecDeque<f32>| {
+            let latest = values.back().copied().filter(|v| v.is_finite());
+            let figure = latest.map_or_else(|| "\u{2013}".to_owned(), |v| format!("{v:.0} ms"));
+            let label = format!("{name} {figure}");
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(theme.spacing.xxs))
+                .child(
+                    div()
+                        .flex()
+                        .justify_between()
+                        .gap(px(theme.spacing.sm))
+                        .text_size(px(theme.typography.caption()))
+                        .child(div().text_color(hsla(s.text_muted)).child(name))
+                        .child(
+                            kit::tabular(div())
+                                .text_color(hsla(s.text_secondary))
+                                .child(SharedString::from(figure)),
+                        ),
+                )
+                .child(
+                    kit::Spark::new(
+                        id,
+                        values.iter().copied().collect(),
+                        history.pushed,
+                        HUD_HISTORY,
+                        label,
+                    )
+                    .tone(hsla(s.accent))
+                    .size(px(TREND_WIDTH), px(theme.spacing.lg)),
+                )
+        };
+        Some(
+            div()
+                .debug_selector(|| "stream-stats-trends".to_owned())
+                .flex()
+                .gap(px(theme.spacing.md))
+                .child(trend("stream-trend-age", "Frame age", &history.age))
+                .child(trend("stream-trend-jitter", "Jitter", &history.jitter))
+                .child(trend("stream-trend-rtt", "Round trip", &history.rtt))
+                .into_any_element(),
+        )
     }
 }
 
@@ -3911,7 +4014,7 @@ mod tests {
         (view, rx)
     }
 
-    /// A settings change to the stream's rate, ceiling or depth reaches a live stream as a
+    /// A settings change to the stream's ceiling or depth reaches a live stream as a
     /// `SetQuality` at the scale it holds; a chrome-only change asks nothing.
     #[gpui::test]
     fn new_stream_settings_are_asked_of_a_live_stream(cx: &mut gpui::TestAppContext) {
@@ -3920,14 +4023,13 @@ mod tests {
         theme.behaviour.copy_on_select = true;
         view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         assert!(sent(&mut rx).is_empty(), "nothing about the stream changed");
-        theme.behaviour.stream.fps = 30;
         theme.behaviour.stream.max_bitrate_bps = 8_000_000;
         view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         let asked = sent(&mut rx);
         let [ScreenRequest::SetQuality { stream: StreamId(4), quality }] = asked.as_slice() else {
             panic!("{asked:?}");
         };
-        assert_eq!((quality.fps, quality.bitrate_bps), (30, 8_000_000));
+        assert_eq!(quality.bitrate_bps, 8_000_000);
         assert_eq!(quality.codec, VideoCodec::Hevc, "8-bit HEVC, the one stream format");
         assert!(
             (quality.scale - 1.0).abs() < f32::EPSILON,
@@ -3945,25 +4047,21 @@ mod tests {
         view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         assert!(muted(cx), "the setting silences a live stream");
         view.update(cx, |v, _| v.toggle_mute());
-        theme.behaviour.stream.fps = 30;
+        theme.behaviour.stream.sharp_text = true;
         view.update(cx, |v, cx| v.set_theme(theme, cx));
         assert!(!muted(cx), "the pill's toggle stands");
-        assert!(!sent(&mut rx).is_empty(), "fps change asked");
+        assert!(!sent(&mut rx).is_empty(), "the depth asked");
     }
 
-    /// The stream asks for the refresh of the screen it is drawn on, up to the settings'
-    /// ceiling, whenever its view lands on a screen of another rate; a screen that does not
-    /// say counts as 60 Hz.
+    /// The stream asks for the refresh of the screen it is drawn on, up to 120, whenever its
+    /// view lands on a screen of another rate; a screen that does not say counts as 60 Hz.
     #[test]
     fn the_rate_follows_the_screen_up_to_the_ceiling() {
-        assert_eq!(stream_fps(120, 120), 120, "a ProMotion screen");
-        assert_eq!(stream_fps(120, 60), 60);
-        assert_eq!(stream_fps(120, 144), 120, "the ceiling holds");
-        assert_eq!(stream_fps(60, 120), 60);
-        assert_eq!(stream_fps(120, 0), 60, "a screen that does not say");
-        assert_eq!(stream_fps(30, 0), 30);
+        assert_eq!(stream_fps(120), 120, "a ProMotion screen");
+        assert_eq!(stream_fps(60), 60);
+        assert_eq!(stream_fps(144), 120, "the ceiling holds");
+        assert_eq!(stream_fps(0), 60, "a screen that does not say");
         let prefs = slopty_theme::StreamPrefs::default();
-        assert_eq!(prefs.fps, 120, "the default follows any screen");
         assert_eq!(quality_of(prefs, 1.0, 120).fps, 120);
         assert_eq!(hz_of(Some(Duration::from_micros(8_333))), 120);
         assert_eq!(hz_of(Some(Duration::from_micros(16_667))), 60);
@@ -3988,13 +4086,9 @@ mod tests {
         assert!(sent(&mut rx).is_empty(), "another screen at the same rate asks nothing");
         view.update(cx, |v, _| v.on_screen(Some(3), 60));
         assert_eq!(fps(&sent(&mut rx)), [60]);
-        let mut theme = Theme::default();
-        theme.behaviour.stream.fps = 30;
-        view.update(cx, |v, cx| v.set_theme(theme, cx));
-        assert_eq!(fps(&sent(&mut rx)), [30], "the ceiling came down");
-        view.update(cx, |v, _| v.on_screen(Some(1), 120));
-        assert!(sent(&mut rx).is_empty(), "no screen takes it past the ceiling");
-        assert_eq!(view.read_with(cx, |v, _| v.fps()), 30);
+        view.update(cx, |v, _| v.on_screen(Some(4), 144));
+        assert_eq!(fps(&sent(&mut rx)), [120], "no screen takes it past the ceiling");
+        assert_eq!(view.read_with(cx, |v, _| v.fps()), 120);
     }
 
     /// The worker's cursor picture replaces the drawn arrow at the pointer, its hotspot on
@@ -4084,6 +4178,41 @@ mod tests {
         assert_eq!(figures(cx), Some(0), "a render a period on samples nothing");
         view.update(cx, ScreenView::read_health);
         assert_eq!(figures(cx), Some(4), "the reading samples: rate, glass, bitrate, round trip");
+    }
+
+    /// Each reading adds to the overlay's half-minute trends, the oldest going past thirty;
+    /// "Details" shows them over the engineering lines, each said with its latest figure.
+    #[gpui::test]
+    fn the_details_show_the_last_half_minute_of_age_jitter_and_round_trip(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (view, _rx, cx) = windowed(cx);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        view.update(cx, |v, cx| {
+            v.set_hud(true, cx);
+            v.set_rtt(None, Some(Duration::from_millis(7)), cx);
+        });
+        let long_ago = Instant::now().checked_sub(CUT_FOR_TEST).expect("a clock past boot");
+        for _ in 0..HUD_HISTORY.saturating_add(2) {
+            view.update(cx, |v, cx| {
+                if let Some(hud) = v.hud.as_mut() {
+                    hud.sampled_at = long_ago;
+                }
+                ScreenView::read_health(v, cx);
+            });
+        }
+        let history = view.read_with(cx, |v, _| v.hud_history()).expect("the overlay");
+        assert_eq!((history.rtt.len(), history.pushed), (HUD_HISTORY, 32), "half a minute");
+        assert_eq!(history.rtt.back().copied(), Some(7.0));
+        assert!(history.age.back().is_some_and(|v| v.is_nan()), "no frame yet: a gap");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("stream-stats-trends").is_none(), "behind Details");
+        view.update(cx, ScreenView::toggle_hud_details);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("stream-trend-rtt").is_some());
+        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+        assert!(tree.iter().any(|n| n.is("Image", Some("Round trip 7 ms"))), "{tree:#?}");
+        assert!(tree.iter().any(|n| n.is("Image", Some("Frame age \u{2013}"))), "{tree:#?}");
     }
 
     /// Longer than the cut the header waits for ([`health::CUT_FOR`]).

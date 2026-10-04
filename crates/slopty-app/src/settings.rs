@@ -7,8 +7,8 @@ use std::path::Path;
 
 use gpui::WindowAppearance;
 use slopty_settings::{
-    Appearance, Color, ColorSettings, CursorBlink, CursorStyle, Loaded, OptionAsAlt, SecureEntry,
-    Settings, SettingsError, bounds,
+    Appearance, Color, ColorSettings, Companions, CursorBlink, CursorStyle, Loaded, OptionAsAlt,
+    SecureEntry, Settings, SettingsError, bounds,
 };
 use slopty_theme::{Contrast, Density, Rgb, TerminalPalette, Theme, Variant};
 
@@ -27,6 +27,8 @@ pub mod actions {
             OpenSettings,
             /// Open the settings on the Keyboard page: every command and its keys.
             OpenKeyboardShortcuts,
+            /// Open the settings on the About page: the version, the build and the links.
+            OpenAbout,
         ]
     );
 }
@@ -119,6 +121,8 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     theme.typography.mono_size =
         sized(settings.font.mono_size, &bounds::MONO_SIZE, defaults.mono_size);
     theme.typography.ui_size = sized(settings.font.ui_size, &bounds::UI_SIZE, defaults.ui_size);
+    theme.typography.prose_size =
+        sized(settings.font.prose_size, &bounds::PROSE_SIZE, defaults.prose_size);
     theme.typography.mono_line_height =
         sized(settings.font.mono_line_height, &bounds::LINE_HEIGHT, defaults.mono_line_height);
     theme.typography.ligatures = settings.font.ligatures;
@@ -142,7 +146,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     };
     theme.behaviour.paste_protection = settings.terminal.paste_protection;
     theme.behaviour.confirm_close = settings.terminal.confirm_close;
-    theme.behaviour.web_inspector = settings.web.inspector;
     theme.behaviour.natural_editing = settings.terminal.natural_editing;
     theme.behaviour.secure_entry = match settings.terminal.secure_keyboard_entry {
         SecureEntry::Passwords => slopty_theme::SecureEntry::Passwords,
@@ -153,6 +156,11 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     theme.terminal.bold_is_bright = settings.terminal.bold_is_bright;
     theme.behaviour.scroll_multiplier =
         hundredths(sized(settings.terminal.scroll_multiplier, &bounds::SCROLL, 1.0));
+    theme.behaviour.companions = match settings.theme.companions {
+        Companions::Off => slopty_theme::Companions::Off,
+        Companions::Quiet => slopty_theme::Companions::Quiet,
+        Companions::Lively => slopty_theme::Companions::Lively,
+    };
     theme.behaviour.cursor_blink = match settings.terminal.cursor_blink {
         CursorBlink::Program => slopty_theme::CursorBlink::Program,
         CursorBlink::Always => slopty_theme::CursorBlink::Always,
@@ -161,7 +169,6 @@ pub fn theme_for(settings: &Settings, window_dark: bool, contrast: Contrast) -> 
     let remote = &settings.remote;
     let defaults = slopty_theme::StreamPrefs::default();
     theme.behaviour.stream = slopty_theme::StreamPrefs {
-        fps: if bounds::FPS.contains(&remote.fps) { remote.fps } else { defaults.fps },
         max_bitrate_bps: if bounds::MBPS.contains(&remote.max_bitrate_mbps) {
             u32::from(remote.max_bitrate_mbps).saturating_mul(1_000_000)
         } else {
@@ -216,20 +223,14 @@ fn sized(v: f32, range: &std::ops::RangeInclusive<f32>, default: f32) -> f32 {
     if v.is_finite() && range.contains(&v) { v } else { default }
 }
 
-/// Whether a bell should sound the alert and bounce the Dock: only while the human is
-/// elsewhere (no window of ours active), and only when the settings say so.
-#[must_use]
-pub const fn bell_alerts(settings: &Settings, window_active: bool) -> bool {
-    settings.terminal.bell_alert && !window_active
-}
-
-/// Whether an agent needing the human should sound the alert and bounce the Dock.
+/// Whether a terminal's bell, or an agent needing the human, should sound the alert and
+/// bounce the Dock.
 ///
 /// As the settings say: by default only while the human is elsewhere (no window of ours
-/// active; in front, the tile, the inbox and the badge say it).
+/// active; in front, the tile flashes, and the inbox and the badge say it).
 #[must_use]
-pub const fn agent_alerts(settings: &Settings, window_active: bool) -> bool {
-    settings.terminal.agent_alert.sounds(window_active)
+pub const fn alerts(settings: &Settings, window_active: bool) -> bool {
+    settings.terminal.alert.sounds(window_active)
 }
 
 #[cfg(test)]
@@ -375,24 +376,17 @@ mod tests {
         assert_eq!(editable_text(&path), "[font]\nmono_size = 20\nkerning = true\n");
     }
 
+    /// A bell or an agent that needs the person sounds the alert only in the background by
+    /// default, never or always as the file says.
     #[test]
-    fn an_agent_alerts_only_in_the_background_and_when_asked() {
+    fn an_alert_sounds_only_in_the_background_unless_asked() {
         let mut s = Settings::default();
-        assert!(agent_alerts(&s, false));
-        assert!(!agent_alerts(&s, true), "in front of the window the tile says it");
-        s.terminal.agent_alert = slopty_settings::AgentAlert::Never;
-        assert!(!agent_alerts(&s, false), "never: the banner and the inbox only");
-        s.terminal.agent_alert = slopty_settings::AgentAlert::Always;
-        assert!(agent_alerts(&s, true), "always: in front too");
-    }
-
-    #[test]
-    fn a_bell_alerts_only_in_the_background_and_when_asked() {
-        let mut s = Settings::default();
-        assert!(bell_alerts(&s, false));
-        assert!(!bell_alerts(&s, true), "in front of the window the flash is enough");
-        s.terminal.bell_alert = false;
-        assert!(!bell_alerts(&s, false));
+        assert!(alerts(&s, false));
+        assert!(!alerts(&s, true), "in front of the window the tile says it");
+        s.terminal.alert = slopty_settings::Alert::Never;
+        assert!(!alerts(&s, false), "never: the flash, the banner and the inbox only");
+        s.terminal.alert = slopty_settings::Alert::Always;
+        assert!(alerts(&s, true), "always: in front too");
     }
 
     #[test]
@@ -446,6 +440,11 @@ mod tests {
             theme_for(&s, true, Contrast::Standard).behaviour.cursor_blink,
             slopty_theme::CursorBlink::Never
         );
+        s.theme.companions = Companions::Quiet;
+        assert_eq!(
+            theme_for(&s, true, Contrast::Standard).behaviour.companions,
+            slopty_theme::Companions::Quiet
+        );
         s.terminal.option_as_alt = OptionAsAlt::Left;
         assert_eq!(
             theme_for(&s, true, Contrast::Standard).behaviour.option_as_alt,
@@ -467,23 +466,28 @@ mod tests {
         );
     }
 
+    /// Reading has its own size on the theme, and a size out of range reads as the default.
+    #[test]
+    fn the_reading_size_rides_on_the_theme() {
+        let mut s = Settings::default();
+        s.font.prose_size = 20.0;
+        let typography = theme_for(&s, true, Contrast::Standard).typography;
+        assert_eq!((typography.prose(), typography.ui_size), (20.0, 13.0), "the chrome stays");
+        s.font.prose_size = 2.0;
+        assert_eq!(theme_for(&s, true, Contrast::Standard).typography.prose(), 15.0);
+    }
+
     #[test]
     fn remote_settings_ride_on_the_theme() {
         let mut s = Settings::default();
         let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
-        assert_eq!((stream.fps, stream.max_bitrate_bps), (120, 30_000_000));
-        s.remote.fps = 30;
+        assert_eq!(stream.max_bitrate_bps, 30_000_000);
         s.remote.max_bitrate_mbps = 8;
         let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
-        assert_eq!((stream.fps, stream.max_bitrate_bps), (30, 8_000_000));
-        s.remote.fps = 0;
+        assert_eq!(stream.max_bitrate_bps, 8_000_000);
         s.remote.max_bitrate_mbps = 500;
         let stream = theme_for(&s, true, Contrast::Standard).behaviour.stream;
-        assert_eq!(
-            (stream.fps, stream.max_bitrate_bps),
-            (120, 30_000_000),
-            "typos read as default"
-        );
+        assert_eq!(stream.max_bitrate_bps, 30_000_000, "typos read as default");
         assert!(!stream.muted);
         s.remote.muted = true;
         assert!(theme_for(&s, true, Contrast::Standard).behaviour.stream.muted);

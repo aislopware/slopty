@@ -62,8 +62,6 @@ pub enum SettingsEditorEvent {
     /// The file's face was saved: parse this text, and when it holds, write it, apply it and
     /// close.
     Save(String),
-    /// Hand the file to the system's editor instead.
-    OpenExternally,
     /// Closed: the form's changes were already applied, the file's face unsaved is dropped.
     Dismiss,
 }
@@ -81,6 +79,8 @@ pub enum Mode {
 #[derive(Debug)]
 pub struct SettingsEditor {
     text: Entity<EditorState>,
+    /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
+    scope: FocusHandle,
     form: Entity<SettingsForm>,
     mode: Mode,
     /// The file's name, shown beside the title on the file's face; the whole path is its
@@ -89,8 +89,6 @@ pub struct SettingsEditor {
     file_name: SharedString,
     /// Where the file lives.
     path: SharedString,
-    /// Offer "Open in editor" (the Mac; the phone has nothing to open it with).
-    external: bool,
     /// Why the last save was refused.
     error: Option<String>,
     /// How many lines the field shows: [`rows_for`] the text, kept as it is typed.
@@ -122,7 +120,6 @@ impl SettingsEditor {
     pub fn new(
         text: &str,
         path: &str,
-        external: bool,
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -149,6 +146,7 @@ impl SettingsEditor {
         });
         Self {
             text: state,
+            scope: cx.focus_handle(),
             form,
             mode: Mode::Form,
             file_name: SharedString::from(
@@ -157,7 +155,6 @@ impl SettingsEditor {
                     .map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned()),
             ),
             path: SharedString::from(path.to_owned()),
-            external,
             error: None,
             rows: rows_for(text),
             file: text.to_owned(),
@@ -417,7 +414,6 @@ impl Render for SettingsEditor {
             Mode::Toml => button("settings-edit-form", "Edit with controls", ButtonKind::Link)
                 .on_click(cx.listener(|this, _ev, window, cx| this.show_form(window, cx))),
         };
-        let external = self.external && self.mode == Mode::Toml;
         // The form has nothing to save, since each change is applied as it is made; the file's
         // face has, and Cancel drops it.
         let actions = div().flex().items_center().gap(px(spacing.xs)).map(|el| match self.mode {
@@ -473,14 +469,6 @@ impl Render for SettingsEditor {
                     .border_t(crate::kit::hair(&theme))
                     .border_color(hsla(s.border))
                     .child(swap)
-                    .when(external, |el| {
-                        el.child(
-                            button("settings-open-external", "Open in editor", ButtonKind::Link)
-                                .on_click(cx.listener(|_this, _ev, _w, cx| {
-                                    cx.emit(SettingsEditorEvent::OpenExternally);
-                                })),
-                        )
-                    })
                     .child(div().flex_1())
                     .child(actions),
             );
@@ -493,8 +481,10 @@ impl Render for SettingsEditor {
         }
         // The keyboard and the palette summon it, so it fades in where it stands, as the
         // palette does, with no travel, and leaves the same way ([`crate::kit::Presence`]).
-        let root = crate::kit::backdrop(&theme, window)
-            .id("settings-backdrop")
+        let home = self.focus_handle(cx);
+        crate::a11y::hold(&self.scope, &home, cx);
+        let root = crate::kit::backdrop(&theme, window).id("settings-backdrop");
+        let root = crate::a11y::trap(root, &self.scope)
             .key_context(CTX)
             .on_key_down(cx.listener(Self::key_down))
             // While an input method composes in a field, Esc and Enter are its own.
@@ -546,7 +536,6 @@ mod tests {
     fn editor<'a>(
         cx: &'a mut TestAppContext,
         text: &str,
-        external: bool,
         mode: Mode,
     ) -> (Entity<SettingsEditor>, Rc<RefCell<Vec<SettingsEditorEvent>>>, &'a mut VisualTestContext)
     {
@@ -556,14 +545,8 @@ mod tests {
         let events = Rc::new(RefCell::new(Vec::new()));
         let seen = Rc::clone(&events);
         let (view, cx) = cx.add_window_view(|window, cx| {
-            let mut view = SettingsEditor::new(
-                text,
-                "~/settings.toml",
-                external,
-                Theme::default(),
-                window,
-                cx,
-            );
+            let mut view =
+                SettingsEditor::new(text, "~/settings.toml", Theme::default(), window, cx);
             match mode {
                 Mode::Form => view.focus(window, cx),
                 Mode::Toml => view.show_toml(window, cx),
@@ -621,7 +604,7 @@ mod tests {
     /// its foot is Done.
     #[gpui::test]
     fn the_dialog_opens_on_the_form(cx: &mut TestAppContext) {
-        let (view, _events, cx) = editor(cx, "", true, Mode::Form);
+        let (view, _events, cx) = editor(cx, "", Mode::Form);
         assert_eq!(view.read_with(cx, |v, _| v.mode()), Mode::Form);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Dialog", Some("Settings"))), "{tree:#?}");
@@ -633,7 +616,7 @@ mod tests {
         for label in ["Edit as TOML", "Done"] {
             assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
         }
-        for label in ["Open in editor", "Cancel", "Save"] {
+        for label in ["Cancel", "Save"] {
             assert!(!tree.iter().any(|n| n.is("Button", Some(label))), "{label} is the file's");
         }
         let (role, label) = focused(cx);
@@ -655,7 +638,7 @@ mod tests {
         std::fs::write(&path, file).expect("the file");
 
         {
-            let (view, events, cx) = editor(cx, file, true, Mode::Form);
+            let (view, events, cx) = editor(cx, file, Mode::Form);
             // The app's half of an apply: the text goes to the file, as `settings::save` does.
             let applied = |events: &Rc<RefCell<Vec<SettingsEditorEvent>>>| {
                 let events = events.borrow();
@@ -696,7 +679,7 @@ mod tests {
         }
 
         let reread = std::fs::read_to_string(&path).expect("the file again");
-        let (view, _events, cx) = editor(cx, &reread, true, Mode::Form);
+        let (view, _events, cx) = editor(cx, &reread, Mode::Form);
         click(cx, "settings-section-1");
         assert_eq!(value_of(cx, "SpinButton", "Size").as_deref(), Some("15 pt"));
         let form = view.read_with(cx, |v, _| v.form.clone());
@@ -720,8 +703,11 @@ mod tests {
     /// line, until it is typed again, and the fixed value applies once the typing pauses.
     #[gpui::test]
     fn an_invalid_value_is_not_written_and_its_row_says_why(cx: &mut TestAppContext) {
-        let (view, events, cx) = editor(cx, "[colors]\ncursor = \"\"\n", false, Mode::Form);
+        let (view, events, cx) = editor(cx, "[colors]\ncursor = \"\"\n", Mode::Form);
         let ix = row("colors", "cursor");
+        // Narrowed to it first: the Appearance section runs past the test window's foot.
+        cx.simulate_input("cursor");
+        cx.run_until_parked();
         click(cx, leak(format!("settings-field-{ix}")));
         cx.simulate_input("#12");
         cx.executor().advance_clock(crate::settings_form::SETTLE);
@@ -751,7 +737,7 @@ mod tests {
     /// Done, applying the stepper that was still waiting first.
     #[gpui::test]
     fn the_keyboard_walks_the_form(cx: &mut TestAppContext) {
-        let (view, events, cx) = editor(cx, "", false, Mode::Form);
+        let (view, events, cx) = editor(cx, "", Mode::Form);
         cx.simulate_input("ligat");
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
@@ -771,6 +757,8 @@ mod tests {
         assert_eq!(focused(cx), ("RadioGroup".to_owned(), Some("Theme".to_owned())));
         press(cx, "right");
         assert_eq!(value_of(cx, "RadioGroup", "Theme").as_deref(), Some("Light"));
+        press(cx, "down");
+        assert_eq!(focused(cx), ("RadioGroup".to_owned(), Some("Companions".to_owned())));
         press(cx, "down");
         assert_eq!(focused(cx), ("SpinButton".to_owned(), Some("Text size".to_owned())));
         press(cx, "right");
@@ -805,7 +793,7 @@ mod tests {
     /// A query that matches nothing says so, and one that matches a key's file name finds it.
     #[gpui::test]
     fn a_search_finds_rows_by_their_words_and_their_key(cx: &mut TestAppContext) {
-        let (_view, _events, cx) = editor(cx, "", false, Mode::Form);
+        let (_view, _events, cx) = editor(cx, "", Mode::Form);
         cx.simulate_input("zzz");
         cx.run_until_parked();
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
@@ -822,7 +810,7 @@ mod tests {
     /// The page's first label stands on the search field's line, so the columns start together.
     #[gpui::test]
     fn the_columns_start_together(cx: &mut TestAppContext) {
-        let (_view, _events, cx) = editor(cx, "", false, Mode::Form);
+        let (_view, _events, cx) = editor(cx, "", Mode::Form);
         let search = cx.debug_bounds("settings-search").expect("the search");
         let label = cx.debug_bounds("settings-heading-0").expect("the first label");
         assert!(f32::from((search.top() - label.top()).abs()) < 0.5, "{search:?} {label:?}");
@@ -864,7 +852,7 @@ mod tests {
     #[test]
     fn a_description_wraps_and_never_cuts() {
         let mut cx = real_text();
-        let (_view, _events, cx) = editor(&mut cx, "", false, Mode::Form);
+        let (_view, _events, cx) = editor(&mut cx, "", Mode::Form);
         let all = descriptions(cx, NARROWEST[1]);
         let line = all.iter().map(|&(_, _, h)| h).fold(f32::INFINITY, f32::min);
         let &(ix, words, height) =
@@ -890,7 +878,7 @@ mod tests {
     #[test]
     fn every_description_fits_two_lines_at_the_narrowest_sheet() {
         let mut cx = real_text();
-        let (_view, _events, cx) = editor(&mut cx, "", false, Mode::Form);
+        let (_view, _events, cx) = editor(&mut cx, "", Mode::Form);
         for width in NARROWEST {
             let all = descriptions(cx, width);
             assert!(all.len() > 20, "{width}: {} rows", all.len());
@@ -926,7 +914,7 @@ mod tests {
     /// file's face names the file.
     #[gpui::test]
     fn keyboard_and_about_read_what_is_bound_and_built(cx: &mut TestAppContext) {
-        let (view, _events, cx) = editor(cx, "", true, Mode::Form);
+        let (view, _events, cx) = editor(cx, "", Mode::Form);
         assert!(cx.debug_bounds("settings-path").is_none(), "the form's title is Settings alone");
 
         click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
@@ -975,7 +963,7 @@ mod tests {
             cx.bind_keys([gpui::KeyBinding::new("cmd-t", crate::workspace::NewNote, None)]);
             cx.on_action(move |_: &crate::workspace::NewNote, _cx| *counted.borrow_mut() = true);
         });
-        let (_view, events, cx) = editor(cx, "", true, Mode::Form);
+        let (_view, events, cx) = editor(cx, "", Mode::Form);
         click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
         let keymap = crate::keymap::current();
         let note = keymap.find(Scope::Workspace, "new_note").expect("the command");
@@ -1027,7 +1015,7 @@ mod tests {
     fn recording_takes_only_a_chord_the_app_can_own(cx: &mut TestAppContext) {
         use crate::keymap::Scope;
         use crate::settings_form::{CANT_BIND, NEEDS_MODIFIER};
-        let (_view, events, cx) = editor(cx, "", true, Mode::Form);
+        let (_view, events, cx) = editor(cx, "", Mode::Form);
         click(cx, leak(format!("settings-section-{}", Section::Keyboard.index())));
         let keymap = crate::keymap::current();
         let note = keymap.find(Scope::Workspace, "new_note").expect("the command");
@@ -1068,7 +1056,7 @@ mod tests {
     #[gpui::test]
     fn a_folders_command_takes_a_key_alone(cx: &mut TestAppContext) {
         use crate::keymap::Scope;
-        let (_view, events, cx) = editor(cx, "", true, Mode::Form);
+        let (_view, events, cx) = editor(cx, "", Mode::Form);
         cx.simulate_input("folder.open");
         cx.run_until_parked();
         let open = crate::keymap::current().find(Scope::Folder, "open").expect("the command");
@@ -1083,7 +1071,7 @@ mod tests {
     /// Where the ligatures switch's knob sits from its track's left, on the first frame after
     /// turning it off.
     fn knob_after_turning(cx: &mut TestAppContext) -> f32 {
-        let (view, _events, cx) = editor(cx, "", false, Mode::Form);
+        let (view, _events, cx) = editor(cx, "", Mode::Form);
         click(cx, "settings-section-1");
         let ix = row("font", "ligatures");
         click(cx, leak(format!("settings-switch-{ix}")));
@@ -1108,10 +1096,10 @@ mod tests {
     /// edited text back, and a refused save shows its reason until the next keystroke.
     #[gpui::test]
     fn the_editor_saves_on_command_enter_and_shows_a_refusal(cx: &mut TestAppContext) {
-        let (view, events, cx) = editor(cx, "[font]\nmono_size = 13\n", true, Mode::Toml);
+        let (view, events, cx) = editor(cx, "[font]\nmono_size = 13\n", Mode::Toml);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         assert!(tree.iter().any(|n| n.is("Dialog", Some("Settings"))), "{tree:#?}");
-        for label in ["Edit with controls", "Open in editor", "Cancel", "Save"] {
+        for label in ["Edit with controls", "Cancel", "Save"] {
             assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
         }
         cx.simulate_keystrokes("enter [ t e r m i n a l ]");
@@ -1137,7 +1125,7 @@ mod tests {
     /// element's nearest labelled ancestor as focused.
     #[gpui::test]
     fn the_focused_field_is_what_a_screen_reader_hears(cx: &mut TestAppContext) {
-        let (_view, _events, cx) = editor(cx, "", true, Mode::Toml);
+        let (_view, _events, cx) = editor(cx, "", Mode::Toml);
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         let focused: Vec<_> = tree.iter().filter(|n| n.focused).collect();
         assert!(
@@ -1151,7 +1139,7 @@ mod tests {
     /// they paint), and keeps them across a theme change.
     #[gpui::test]
     fn the_field_colours_the_file_as_toml(cx: &mut TestAppContext) {
-        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", true, Mode::Toml);
+        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", Mode::Toml);
         let language = |cx: &mut VisualTestContext| {
             view.read_with(cx, |v, cx| v.text.read(cx).language_name().to_string())
         };
@@ -1162,13 +1150,10 @@ mod tests {
         assert_eq!(language(cx), "toml");
     }
 
-    /// Escape and the Cancel button discard, from the form's search and from a control alike;
-    /// the phone's dialog has no external editor.
+    /// Escape and the Cancel button discard, from the form's search and from a control alike.
     #[gpui::test]
-    fn escape_and_cancel_dismiss_and_the_phone_has_no_external_editor(cx: &mut TestAppContext) {
-        let (view, events, cx) = editor(cx, "", false, Mode::Toml);
-        let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-        assert!(!tree.iter().any(|n| n.is("Button", Some("Open in editor"))), "{tree:#?}");
+    fn escape_and_cancel_dismiss(cx: &mut TestAppContext) {
+        let (view, events, cx) = editor(cx, "", Mode::Toml);
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         click(cx, "settings-cancel");
@@ -1189,7 +1174,7 @@ mod tests {
     fn the_dialog_is_as_tall_as_the_file(cx: &mut TestAppContext) {
         // Measured where it lands, not on the frame it starts rising from.
         cx.update(|cx| cx.set_reduce_motion(true));
-        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", true, Mode::Toml);
+        let (view, _events, cx) = editor(cx, "[theme]\nappearance = \"light\"\n", Mode::Toml);
         let height = |cx: &mut VisualTestContext| {
             f32::from(cx.debug_bounds("settings-editor").expect("the dialog").size.height)
         };
@@ -1227,7 +1212,7 @@ mod tests {
     #[gpui::test]
     fn the_dialog_follows_the_file_and_writes_nothing_back(cx: &mut TestAppContext) {
         let (light, dark) = (LIGHT_FILE, DARK_FILE);
-        let (view, events, cx) = editor(cx, light, false, Mode::Form);
+        let (view, events, cx) = editor(cx, light, Mode::Form);
         view.update(cx, |v, cx| v.follow_file(dark.to_owned(), cx));
         cx.run_until_parked();
         assert_eq!(view.read_with(cx, SettingsEditor::text), dark, "the field follows");
@@ -1245,7 +1230,7 @@ mod tests {
     /// A field the person edited keeps their text when the file changes outside.
     #[gpui::test]
     fn an_edited_field_keeps_its_text_when_the_file_changes(cx: &mut TestAppContext) {
-        let (view, _events, cx) = editor(cx, LIGHT_FILE, false, Mode::Toml);
+        let (view, _events, cx) = editor(cx, LIGHT_FILE, Mode::Toml);
         cx.simulate_input("# mine\n");
         cx.run_until_parked();
         view.update(cx, |v, cx| v.follow_file(DARK_FILE.to_owned(), cx));

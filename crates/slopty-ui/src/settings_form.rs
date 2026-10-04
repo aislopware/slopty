@@ -895,11 +895,7 @@ impl SettingsForm {
         }
         if key == "tab" && !(m.control || m.alt || m.platform) {
             self.recording = None;
-            if m.shift {
-                window.focus_prev(cx);
-            } else {
-                window.focus_next(cx);
-            }
+            crate::a11y::step(!m.shift, window, cx);
             cx.notify();
             return;
         }

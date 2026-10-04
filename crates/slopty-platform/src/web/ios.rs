@@ -46,12 +46,7 @@ impl WebView {
     /// view until the tile's native host adopts [`Self::view`]. Events go to `sink`. `None`
     /// off the main thread, for an address `NSURL` refuses, or without `WebKit`.
     #[must_use]
-    pub fn new(
-        worker: u128,
-        url: &str,
-        inspectable: bool,
-        sink: Rc<dyn Fn(WebEvent)>,
-    ) -> Option<Self> {
+    pub fn new(worker: u128, url: &str, sink: Rc<dyn Fn(WebEvent)>) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let address = NSURL::URLWithString(&NSString::from_str(url))?;
         let class = AnyClass::get(c"WKWebView")?;
@@ -72,7 +67,7 @@ impl WebView {
         // SAFETY: WebKit rule: the navigation delegate is any object conforming to
         // `WKNavigationDelegate`, held weakly; `self` keeps it alive as long as the view.
         let () = unsafe { msg_send![&*web, setNavigationDelegate: &*delegate] };
-        super::adopt_view(&web, &delegate, inspectable);
+        super::adopt_view(&web, &delegate);
         let this = Self { web, sink, delegate, mtm };
         this.load_address(&address);
         Some(this)
@@ -205,17 +200,12 @@ impl WebView {
         super::count_in(&self.web, text, Rc::clone(&self.sink));
     }
 
-    /// An iOS page has no inspector of its own: an inspectable page's is Safari's, on a Mac,
-    /// in its Develop menu. Never opens one.
+    /// An iOS page has no inspector of its own: its inspector is Safari's, on a Mac, in its
+    /// Develop menu. Never opens one.
     #[must_use]
     #[expect(clippy::unused_self, reason = "the Mac twin opens its page's inspector")]
     pub const fn inspect(&self) -> bool {
         false
-    }
-
-    /// Open the page to Safari's Web Inspector, on a Mac, or close it.
-    pub fn set_inspectable(&self, inspectable: bool) {
-        super::set_inspectable(&self.web, inspectable);
     }
 
     /// Show the page at `zoom`, 1 being its own size.

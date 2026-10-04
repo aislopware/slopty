@@ -32,14 +32,14 @@ pub mod bounds {
     pub const MONO_SIZE: RangeInclusive<f32> = 6.0..=72.0;
     /// Chrome font size, in points.
     pub const UI_SIZE: RangeInclusive<f32> = 8.0..=32.0;
+    /// What is read at length, in points: under 10 an answer is a footnote, past 32 a poster.
+    pub const PROSE_SIZE: RangeInclusive<f32> = 10.0..=32.0;
     /// Half the font's line height packs rows past reading; twice it is a list, not a grid.
     pub const LINE_HEIGHT: RangeInclusive<f32> = 0.5..=2.0;
     /// A tenth of a line per wheel line is glacial; ten is a page.
     pub const SCROLL: RangeInclusive<f32> = 0.1..=10.0;
     /// WCAG ratios run from 1 (the same colour) to 21 (black on white).
     pub const CONTRAST: RangeInclusive<f32> = 1.0..=21.0;
-    /// Below 15 the stream is a slideshow; above 120 no display here refreshes.
-    pub const FPS: RangeInclusive<u16> = 15..=120;
     /// Under a megabit nothing decodes; 200 Mbit/s is past what one stream ever grows to.
     pub const MBPS: RangeInclusive<u16> = 1..=200;
     /// Minutes a display made for a client waits for it: none, up to a day.
@@ -77,11 +77,29 @@ pub enum Appearance {
     Dark,
 }
 
-/// When an agent that needs the person sounds the alert and bounces the Dock.
+/// How much the agents' companions do: the small pixel characters that stand in their marks'
+/// slots (`docs/decisions/brand.md`, "Companions").
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
-pub enum AgentAlert {
-    /// Never: the banner, the inbox and the badge say it.
+pub enum Companions {
+    /// None: each agent shows its mark.
+    #[schemars(title = "Off")]
+    Off,
+    /// In their marks' slots, holding a pose; only a working one moves.
+    #[schemars(title = "Quiet")]
+    Quiet,
+    /// Quiet, and they wave, hop, play in the yard and fall asleep while you are away.
+    #[default]
+    #[schemars(title = "Lively")]
+    Lively,
+}
+
+/// When a terminal's bell, or an agent that needs the person, sounds the alert and bounces
+/// the Dock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum Alert {
+    /// Never: the tile flashes, and the banner, the inbox and the badge say it.
     #[schemars(title = "Never")]
     Never,
     /// Only while no Slopty window is in front: in front, the tile says it.
@@ -93,7 +111,7 @@ pub enum AgentAlert {
     Always,
 }
 
-impl AgentAlert {
+impl Alert {
     /// Whether it sounds, with or without a Slopty window in front.
     #[must_use]
     pub const fn sounds(self, window_active: bool) -> bool {
@@ -317,6 +335,12 @@ pub struct Font {
     /// Chrome (top bar, pills, picker) font size in points.
     #[schemars(title = "Text size", range(min = *bounds::UI_SIZE.start(), max = *bounds::UI_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
     pub ui_size: f32,
+    /// Agents' answers and your messages; the bars keep their size.
+    ///
+    /// What is read at length, in points: an agent's answers, the messages sent to it and the
+    /// field they are written in. The chrome keeps the text size.
+    #[schemars(title = "Reading size", range(min = *bounds::PROSE_SIZE.start(), max = *bounds::PROSE_SIZE.end()), extend("x-step" = 1.0, "x-unit" = "pt"))]
+    pub prose_size: f32,
 }
 
 impl Default for Font {
@@ -327,6 +351,7 @@ impl Default for Font {
             mono_line_height: 1.0,
             ligatures: true,
             ui_size: 13.0,
+            prose_size: 15.0,
         }
     }
 }
@@ -339,6 +364,14 @@ pub struct ThemeSettings {
     /// Follow the system, or stay light or dark.
     #[schemars(title = "Theme")]
     pub appearance: Appearance,
+    /// Small pixel characters for the agents; lively ones wave and play.
+    ///
+    /// Each agent's companion, a pixel character in its mark's place: off, quiet (a pose
+    /// that says the state, only a working one moving) or lively (they also wave, hop and
+    /// play in the yard, and fall asleep two minutes after your last input). Under Reduce
+    /// Motion every companion holds still.
+    #[schemars(title = "Companions")]
+    pub companions: Companions,
 }
 
 /// `[terminal]`.
@@ -364,20 +397,14 @@ pub struct TerminalSettings {
     /// Ghostty's `copy-on-select = clipboard`, iTerm2's default.
     #[schemars(title = "Copy on select")]
     pub copy_on_select: bool,
-    /// Sound the alert and bounce the Dock; off, the tile only flashes.
-    ///
-    /// A bell while the app is in the background plays the alert sound and bounces the Dock;
-    /// off, it only flashes the tile.
-    #[schemars(title = "Bell in the background")]
-    pub bell_alert: bool,
     /// When hidden sounds it only while Slopty is behind other windows.
     ///
-    /// When an agent that needs you (an approval, a question, a finished turn) plays the
-    /// alert sound and bounces the Dock, as a Mac app's alert does: never (the banner and the
-    /// inbox say it), only while no Slopty window is in front (in front, the tile says it), or
-    /// always.
-    #[schemars(title = "Agent alert")]
-    pub agent_alert: AgentAlert,
+    /// When a terminal's bell, or an agent that needs you (an approval, a question, a
+    /// finished turn), plays the alert sound and bounces the Dock, as a Mac app's alert does:
+    /// never (the tile flashes, the banner and the inbox say it), only while no Slopty window
+    /// is in front (in front, the tile says it), or always.
+    #[schemars(title = "Alert")]
+    pub alert: Alert,
     /// Auto blinks when the shell or the editor asks.
     ///
     /// Whether the cursor blinks (ghostty's `cursor-style-blink`): the program's choice, or
@@ -448,8 +475,7 @@ impl Default for TerminalSettings {
         Self {
             minimum_contrast: 3.0,
             copy_on_select: false,
-            bell_alert: true,
-            agent_alert: AgentAlert::Hidden,
+            alert: Alert::Hidden,
             cursor_blink: CursorBlink::Program,
             cursor_style: CursorStyle::Program,
             paste_protection: true,
@@ -469,13 +495,6 @@ impl Default for TerminalSettings {
 #[serde(default)]
 #[schemars(title = "Remote windows and desktops")]
 pub struct RemoteSettings {
-    /// A stream follows its screen's refresh, never above this.
-    ///
-    /// The most frames per second the worker captures and encodes a stream at. A stream
-    /// follows the refresh of the screen its tile is on (120 on a 120 Hz Mac or iPad, 60 on
-    /// most external displays) and never asks for more than this; 120 follows any screen.
-    #[schemars(title = "Highest frame rate", range(min = *bounds::FPS.start(), max = *bounds::FPS.end()), extend("x-step" = 15, "x-unit" = "fps"))]
-    pub fps: u16,
     /// The most one stream may take; it grows toward it as the link allows.
     ///
     /// The most the worker may send per stream, in megabits per second: the ceiling its
@@ -503,7 +522,7 @@ pub struct RemoteSettings {
 
 impl Default for RemoteSettings {
     fn default() -> Self {
-        Self { fps: 120, max_bitrate_mbps: 30, muted: false, sharp_text: false }
+        Self { max_bitrate_mbps: 30, muted: false, sharp_text: false }
     }
 }
 
@@ -536,26 +555,6 @@ impl ClipboardSettings {
     #[must_use]
     pub fn shared_with(&self, name: &str) -> bool {
         self.workers.get(name).copied().unwrap_or(self.sync)
-    }
-}
-
-/// `[web]`: the browser tiles, which show a worker's pages.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-#[schemars(title = "Web pages")]
-pub struct WebSettings {
-    /// Web Inspector opens on a page, as a developer's browser does.
-    ///
-    /// "Inspect page" in the palette and "Inspect Element" in a page's menu open the inspector
-    /// on it, and Safari's Develop menu lists the page. Off, neither does; a page open already
-    /// keeps its menu item until it is opened again.
-    #[schemars(title = "Web Inspector")]
-    pub inspector: bool,
-}
-
-impl Default for WebSettings {
-    fn default() -> Self {
-        Self { inspector: true }
     }
 }
 
@@ -816,11 +815,6 @@ pub struct ProjectBounds {
     /// The highest limit of live agents any one project may set across the fleet.
     #[schemars(title = "Live agents per project", example = 24)]
     pub live_per_project: u16,
-    /// How deep a project's tree of tasks may grow.
-    ///
-    /// The deepest task tree any project may set: 1 allows only tasks with no parent.
-    #[schemars(title = "Task depth", example = 16)]
-    pub depth: u16,
     /// Timeline entries a project may keep.
     ///
     /// The most timeline entries any project may keep; older ones are dropped first.
@@ -872,7 +866,6 @@ impl Default for ProjectBounds {
             live_agents: 24,
             live_per_worker: 8,
             live_per_project: 24,
-            depth: 16,
             timeline_kept: 65_536,
             permission_flags: Vec::new(),
             projects: 64,
@@ -940,8 +933,6 @@ pub struct Settings {
     pub remote: RemoteSettings,
     /// The clipboard shared with the workers.
     pub clipboard: ClipboardSettings,
-    /// The browser tiles.
-    pub web: WebSettings,
     /// Terminal colours.
     pub colors: ColorSettings,
     /// The app's key bindings the file changes.
@@ -1051,10 +1042,16 @@ mono_line_height = {mono_line_height}
 ligatures = {ligatures}
 # Top bar, pills and picker size in points.
 ui_size = {ui_size}
+# Agents' answers and your messages, in points (10 to 32); the chrome keeps its size.
+prose_size = {prose_size}
 
 [theme]
 # \"dark\", \"light\" or \"system\" (follow the macOS appearance).
 appearance = {appearance}
+# The agents' pixel companions: \"off\", \"quiet\" (a pose for each state; only
+# a working one moves) or \"lively\" (they also wave, hop and play, and sleep
+# while you are away).
+companions = {companions}
 
 [terminal]
 # Least contrast ratio (1.0 to 21.0) between text and its background; text
@@ -1063,12 +1060,10 @@ appearance = {appearance}
 minimum_contrast = {minimum_contrast}
 # Copy a selection to the clipboard as soon as it is made.
 copy_on_select = {copy_on_select}
-# A bell while the app is in the background sounds the alert and bounces
-# the Dock; off, the tile only flashes.
-bell_alert = {bell_alert}
-# When an agent that needs you sounds the alert and bounces the Dock:
-# \"never\", \"hidden\" (only while no Slopty window is in front) or \"always\".
-agent_alert = {agent_alert}
+# When a terminal's bell, or an agent that needs you, sounds the alert and
+# bounces the Dock: \"never\" (the tile flashes), \"hidden\" (only while no
+# Slopty window is in front) or \"always\".
+alert = {alert}
 # \"program\" (the shell or editor decides), \"always\" or \"never\".
 cursor_blink = {cursor_blink}
 # \"program\" (the shell or editor decides), \"block\", \"bar\" or \"underline\".
@@ -1091,10 +1086,6 @@ confirm_close = {confirm_close}
 natural_editing = {natural_editing}
 
 [remote]
-# The most frames a second a remote window or display streams at (15 to 120).
-# Under it a stream follows the refresh of the screen its tile is on, so 120
-# follows any screen: 120 on a ProMotion Mac or iPad, 60 on most displays.
-fps = {fps}
 # Ceiling for one stream in megabits per second (1 to 200); the machine grows
 # towards it as the link allows.
 max_bitrate_mbps = {max_bitrate_mbps}
@@ -1181,11 +1172,12 @@ server = \"\"
             mono_line_height = toml_float(d.font.mono_line_height),
             ligatures = d.font.ligatures,
             ui_size = toml_float(d.font.ui_size),
+            prose_size = toml_float(d.font.prose_size),
             appearance = toml_string(appearance_name(d.theme.appearance)),
+            companions = toml_string(companions_name(d.theme.companions)),
             minimum_contrast = toml_float(d.terminal.minimum_contrast),
             copy_on_select = d.terminal.copy_on_select,
-            bell_alert = d.terminal.bell_alert,
-            agent_alert = toml_string(agent_alert_name(d.terminal.agent_alert)),
+            alert = toml_string(alert_name(d.terminal.alert)),
             clipboard_sync = d.clipboard.sync,
             cursor_blink = toml_string(cursor_blink_name(d.terminal.cursor_blink)),
             cursor_style = toml_string(cursor_style_name(d.terminal.cursor_style)),
@@ -1196,7 +1188,6 @@ server = \"\"
             option_as_alt = toml_string(option_as_alt_name(d.terminal.option_as_alt)),
             confirm_close = d.terminal.confirm_close,
             natural_editing = d.terminal.natural_editing,
-            fps = d.remote.fps,
             max_bitrate_mbps = d.remote.max_bitrate_mbps,
             muted = d.remote.muted,
             sharp_text = d.remote.sharp_text,
@@ -1359,6 +1350,14 @@ const fn appearance_name(a: Appearance) -> &'static str {
     }
 }
 
+const fn companions_name(c: Companions) -> &'static str {
+    match c {
+        Companions::Off => "off",
+        Companions::Quiet => "quiet",
+        Companions::Lively => "lively",
+    }
+}
+
 const fn cursor_style_name(c: CursorStyle) -> &'static str {
     match c {
         CursorStyle::Program => "program",
@@ -1377,11 +1376,11 @@ const fn option_as_alt_name(o: OptionAsAlt) -> &'static str {
     }
 }
 
-const fn agent_alert_name(a: AgentAlert) -> &'static str {
+const fn alert_name(a: Alert) -> &'static str {
     match a {
-        AgentAlert::Never => "never",
-        AgentAlert::Hidden => "hidden",
-        AgentAlert::Always => "always",
+        Alert::Never => "never",
+        Alert::Hidden => "hidden",
+        Alert::Always => "always",
     }
 }
 
@@ -1427,9 +1426,10 @@ mod tests {
         assert_eq!(d.font.mono_line_height, 1.0, "the font's own");
         assert_eq!(d.font.ui_size, 13.0);
         assert_eq!(d.theme.appearance, Appearance::System);
+        assert_eq!(d.theme.companions, Companions::Lively, "they run and play");
         assert_eq!(d.terminal.minimum_contrast, 3.0, "on: a dark prompt reads on light");
         assert!(!d.terminal.copy_on_select, "\u{2318}C copies, as on the Mac");
-        assert!(d.terminal.bell_alert, "a bell in the background is heard");
+        assert_eq!(d.terminal.alert, Alert::Hidden, "heard while Slopty is hidden");
         assert_eq!(d.terminal.cursor_blink, CursorBlink::Program, "DECSCUSR decides");
         assert_eq!(d.terminal.cursor_style, CursorStyle::Program, "and its shape");
         assert!(d.terminal.paste_protection, "a pasted newline asks first");
@@ -1437,18 +1437,17 @@ mod tests {
         assert!(d.terminal.hide_pointer_while_typing, "as Terminal.app");
         assert_eq!(d.terminal.scroll_multiplier, 1.0, "one for one");
         assert!(d.font.ligatures, "the font's own");
-        assert_eq!((d.remote.fps, d.remote.max_bitrate_mbps), (120, 30));
+        assert_eq!(d.remote.max_bitrate_mbps, 30);
     }
 
     #[test]
     fn remote_keys() {
-        let loaded = Settings::parse(
-            "[remote]\nfps = 30\nmax_bitrate_mbps = 8\nmuted = true\nsharp_text = true\n",
-        );
+        let loaded =
+            Settings::parse("[remote]\nmax_bitrate_mbps = 8\nmuted = true\nsharp_text = true\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(
             loaded.settings.remote,
-            RemoteSettings { fps: 30, max_bitrate_mbps: 8, muted: true, sharp_text: true }
+            RemoteSettings { max_bitrate_mbps: 8, muted: true, sharp_text: true }
         );
         assert!(!Settings::default().remote.muted, "sound on, as the worker plays it");
         assert!(!Settings::default().remote.sharp_text, "4:2:0 unless asked: fewer bits");
@@ -1507,35 +1506,23 @@ mod tests {
         assert_eq!(Settings::parse(&back).settings.keys, *keys, "written back as read:\n{back}");
     }
 
-    /// Web Inspector opens on a page unless `[web] inspector` says not, and a value that is no
-    /// switch is the file's error.
-    #[test]
-    fn web_inspector_is_on_unless_the_file_says_not() {
-        assert!(Settings::default().web.inspector);
-        let off = Settings::parse("[web]\ninspector = false\n");
-        assert!(off.error.is_none() && off.warnings.is_empty(), "{off:?}");
-        assert!(!off.settings.web.inspector);
-        assert!(Settings::parse("[web]\ninspector = \"yes\"\n").error.is_some(), "a switch");
-    }
-
     /// The clipboard is shared with every worker unless `sync` says not; a worker named under
     /// `[clipboard.workers]` is shared with or not whatever `sync` says. Both default to
-    /// sharing, and the agent's alert to sounding while Slopty is hidden.
+    /// sharing, and the alert to sounding while Slopty is hidden.
     #[test]
     fn the_clipboard_is_shared_by_default_and_per_worker_by_name() {
         let d = Settings::default();
         assert!(d.clipboard.sync && d.clipboard.shared_with("studio"));
-        assert_eq!(d.terminal.agent_alert, AgentAlert::Hidden, "heard while Slopty is hidden");
         let loaded = Settings::parse(
-            "[terminal]\nagent_alert = \"never\"\n[clipboard]\nsync = false\n[clipboard.workers]\nstudio = true\n",
+            "[terminal]\nalert = \"never\"\n[clipboard]\nsync = false\n[clipboard.workers]\nstudio = true\n",
         );
         assert!(loaded.error.is_none() && loaded.warnings.is_empty(), "{loaded:?}");
         let s = &loaded.settings;
-        assert_eq!(s.terminal.agent_alert, AgentAlert::Never);
-        let ways = [AgentAlert::Never, AgentAlert::Hidden, AgentAlert::Always];
+        assert_eq!(s.terminal.alert, Alert::Never);
+        let ways = [Alert::Never, Alert::Hidden, Alert::Always];
         let heard = ways.map(|a| (a.sounds(false), a.sounds(true)));
         assert_eq!(heard, [(false, false), (true, false), (true, true)], "hidden, then in front");
-        assert!(Settings::parse("[terminal]\nagent_alert = true\n").error.is_some(), "no bool");
+        assert!(Settings::parse("[terminal]\nalert = true\n").error.is_some(), "no bool");
         assert!(s.clipboard.shared_with("studio"), "named: shared");
         assert!(!s.clipboard.shared_with("shared-mac"), "the rest follow sync");
         let shared = Settings::parse("[clipboard.workers]\nshared-mac = false\n").settings;
@@ -1579,7 +1566,7 @@ mod tests {
     #[test]
     fn terminal_keys() {
         let loaded = Settings::parse(
-            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nbell_alert = false\ncursor_blink = \"never\"\npaste_protection = false\nbold_is_bright = true\nhide_pointer_while_typing = false\nscroll_multiplier = 3\nconfirm_close = false\nnatural_editing = false\n",
+            "[font]\nmono_line_height = 1.2\n[terminal]\nminimum_contrast = 3\ncopy_on_select = true\nalert = \"always\"\ncursor_blink = \"never\"\npaste_protection = false\nbold_is_bright = true\nhide_pointer_while_typing = false\nscroll_multiplier = 3\nconfirm_close = false\nnatural_editing = false\n",
         );
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert!(!loaded.settings.terminal.confirm_close);
@@ -1587,7 +1574,7 @@ mod tests {
         assert_eq!(loaded.settings.font.mono_line_height, 1.2);
         assert_eq!(loaded.settings.terminal.minimum_contrast, 3.0);
         assert!(loaded.settings.terminal.copy_on_select);
-        assert!(!loaded.settings.terminal.bell_alert);
+        assert_eq!(loaded.settings.terminal.alert, Alert::Always);
         assert_eq!(loaded.settings.terminal.cursor_blink, CursorBlink::Never);
         assert!(!loaded.settings.terminal.paste_protection);
         assert!(loaded.settings.terminal.bold_is_bright);
@@ -1635,10 +1622,12 @@ mod tests {
 
     #[test]
     fn integer_sizes_are_accepted() {
-        let loaded = Settings::parse("[font]\nmono_size = 14\nui_size = 12\n");
+        let loaded = Settings::parse("[font]\nmono_size = 14\nui_size = 12\nprose_size = 18\n");
         assert!(loaded.error.is_none(), "{:?}", loaded.error);
         assert_eq!(loaded.settings.font.mono_size, 14.0);
         assert_eq!(loaded.settings.font.ui_size, 12.0);
+        assert_eq!(loaded.settings.font.prose_size, 18.0, "reading has its own size");
+        assert_eq!(Settings::default().font.prose_size, 15.0, "two over the chrome's");
     }
 
     #[test]
@@ -1653,6 +1642,20 @@ mod tests {
         }
         let bad = Settings::parse("[theme]\nappearance = \"sepia\"\n");
         assert!(bad.error.is_some(), "an unknown variant is an error");
+        assert_eq!(bad.settings, Settings::default());
+    }
+
+    #[test]
+    fn companions_values() {
+        for (text, want) in
+            [("off", Companions::Off), ("quiet", Companions::Quiet), ("lively", Companions::Lively)]
+        {
+            let loaded = Settings::parse(&format!("[theme]\ncompanions = \"{text}\"\n"));
+            assert_eq!(loaded.settings.theme.companions, want, "{text}");
+            assert_eq!(companions_name(want), text, "written as read");
+        }
+        let bad = Settings::parse("[theme]\ncompanions = \"loud\"\n");
+        assert!(bad.error.is_some(), "an unknown level is an error");
         assert_eq!(bad.settings, Settings::default());
     }
 
@@ -1720,6 +1723,7 @@ mod tests {
         assert_eq!(loaded.settings, Settings::default());
         assert!(text.contains("mono_size = 13.0"), "{text}");
         assert!(text.contains("appearance = \"system\""), "{text}");
+        assert!(text.contains("companions = \"lively\""), "{text}");
         assert!(text.contains("minimum_contrast = 3.0"), "{text}");
         assert!(text.contains("copy_on_select = false"), "{text}");
         assert!(text.contains("max_bitrate_mbps = 30"), "{text}");
@@ -1837,12 +1841,12 @@ mod tests {
     fn server_project_bounds() {
         let d = Settings::default().server.projects;
         assert_eq!(
-            (d.live_agents, d.live_per_worker, d.live_per_project, d.depth, d.timeline_kept),
-            (24, 8, 24, 16, 65_536)
+            (d.live_agents, d.live_per_worker, d.live_per_project, d.timeline_kept),
+            (24, 8, 24, 65_536)
         );
         assert!(d.permission_flags.is_empty(), "no project loosens permissions by default");
         let loaded = Settings::parse(
-            "[server.projects]\nlive_agents = 40\ndepth = 4\npermission_flags = [\"nightly\"]\n\
+            "[server.projects]\nlive_agents = 40\npermission_flags = [\"nightly\"]\n\
              projects = 8\ntasks_per_project = 100\ntitle_max = 80\nbrief_max = 4096\n\
              owns_max = 16\ncomprehension_depth = 2\n",
         );
@@ -1851,7 +1855,6 @@ mod tests {
             loaded.settings.server.projects,
             ProjectBounds {
                 live_agents: 40,
-                depth: 4,
                 permission_flags: vec!["nightly".to_owned()],
                 projects: 8,
                 tasks_per_project: 100,
@@ -1865,7 +1868,7 @@ mod tests {
         assert!(Settings::parse("[server.projects]\ncomprehension_depth = 300\n").error.is_some());
         let typo = Settings::parse("[server.projects]\nlive_agent = 40\n");
         assert_eq!(typo.warnings, ["unknown key `server.projects.live_agent`"]);
-        assert!(Settings::parse("[server.projects]\ndepth = -1\n").error.is_some());
+        assert!(Settings::parse("[server.projects]\nlive_agents = -1\n").error.is_some());
     }
 
     #[test]

@@ -71,7 +71,11 @@ impl Section {
 
 /// The pages' groups in order, each with its keys (`table.key`) in order.
 const LAYOUT: &[(Section, &str, &[&str])] = &[
-    (Section::Appearance, "Interface", &["theme.appearance", "font.ui_size"]),
+    (
+        Section::Appearance,
+        "Interface",
+        &["theme.appearance", "theme.companions", "font.ui_size", "font.prose_size"],
+    ),
     (
         Section::Appearance,
         "Terminal colours",
@@ -91,11 +95,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
     ),
     (Section::Terminal, "Cursor", &["terminal.cursor_style", "terminal.cursor_blink"]),
     (Section::Terminal, "Text", &["terminal.minimum_contrast", "terminal.bold_is_bright"]),
-    (
-        Section::Terminal,
-        "Behaviour",
-        &["terminal.confirm_close", "terminal.bell_alert", "terminal.agent_alert"],
-    ),
+    (Section::Terminal, "Behaviour", &["terminal.confirm_close", "terminal.alert"]),
     (
         Section::Input,
         "Keys",
@@ -111,12 +111,7 @@ const LAYOUT: &[(Section, &str, &[&str])] = &[
         "Pointer",
         &["terminal.hide_pointer_while_typing", "terminal.scroll_multiplier"],
     ),
-    (
-        Section::Streams,
-        "Remote windows and desktops",
-        &["remote.fps", "remote.max_bitrate_mbps", "remote.muted"],
-    ),
-    (Section::Streams, "Web pages", &["web.inspector"]),
+    (Section::Streams, "Remote windows and desktops", &["remote.max_bitrate_mbps", "remote.muted"]),
     (Section::Network, "This app", &["client.server"]),
     (
         Section::Network,
@@ -138,7 +133,7 @@ fn home(table: &str) -> Section {
     let root = table.split_once('.').map_or(table, |(root, _)| root);
     match root {
         "theme" | "colors" => Section::Appearance,
-        "remote" | "web" => Section::Streams,
+        "remote" => Section::Streams,
         "clipboard" => Section::Input,
         "client" | "worker" | "server" => Section::Network,
         _ => Section::Terminal,
@@ -286,12 +281,11 @@ impl KeyRow {
 }
 
 /// The Keyboard page's groups, in order.
-pub const KEY_GROUPS: [&str; 10] = [
+pub const KEY_GROUPS: [&str; 9] = [
     "General",
     "Layout",
     "Terminal",
     "Conversation",
-    "Inbox",
     "Files",
     "Folders",
     "Project boards",
@@ -317,7 +311,6 @@ fn key_group(command: &Command) -> &'static str {
         Scope::File => "Files",
         Scope::Folder => "Folders",
         Scope::Project => "Project boards",
-        Scope::Inbox => "Inbox",
         Scope::Search => "Search in files",
         Scope::Page => "Pages",
     }

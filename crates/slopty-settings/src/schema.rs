@@ -338,8 +338,9 @@ mod tests {
                 unit: "pt".to_owned()
             })
         );
-        assert!(matches!(&field("remote", "fps").kind, Kind::Number(n) if n.integer));
-        assert_eq!(field("remote", "fps").default, Value::Number(120.0));
+        let ceiling = field("remote", "max_bitrate_mbps");
+        assert!(matches!(&ceiling.kind, Kind::Number(n) if n.integer));
+        assert_eq!(ceiling.default, Value::Number(30.0));
         let sharp = field("remote", "sharp_text");
         assert_eq!((sharp.title.as_str(), &sharp.kind), ("Sharp text", &Kind::Switch));
         assert_eq!(sharp.default, Value::Bool(false));
@@ -353,6 +354,10 @@ mod tests {
             [("false", "Off"), ("true", "Both"), ("left", "Left"), ("right", "Right")]
         );
         assert_eq!(field("theme", "appearance").default, Value::Str("system".to_owned()));
+        let Kind::Choice(levels) = &field("theme", "companions").kind else { panic!("a choice") };
+        let levels: Vec<_> = levels.iter().map(|c| (c.value.as_str(), c.title.as_str())).collect();
+        assert_eq!(levels, [("off", "Off"), ("quiet", "Quiet"), ("lively", "Lively")]);
+        assert_eq!(field("theme", "companions").default, Value::Str("lively".to_owned()));
         assert_eq!(field("font", "ligatures").kind, Kind::Switch);
         assert_eq!(field("colors", "cursor").kind, Kind::Colour);
         assert_eq!(field("colors", "ansi").kind, Kind::List);

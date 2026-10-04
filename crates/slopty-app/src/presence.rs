@@ -106,7 +106,7 @@ impl Workspace {
     pub(crate) fn heard_notice(&mut self, notice: &Notice, cx: &Context<Self>) {
         let Some(heard) = self.view.read(cx).heard(notice) else { return };
         let in_front = cx.active_window().is_some();
-        if heard.kind == NoticeKind::NeedsYou && settings::agent_alerts(&self.settings, in_front) {
+        if heard.kind == NoticeKind::NeedsYou && settings::alerts(&self.settings, in_front) {
             alert();
         }
         self.attention.notice(&heard);

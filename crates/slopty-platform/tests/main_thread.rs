@@ -31,10 +31,7 @@ mod mac {
             "a_download_shows_on_its_file_and_finders_cancel_ends_it",
             a_download_shows_on_its_file_and_finders_cancel_ends_it,
         ),
-        (
-            "web_inspector_opens_on_a_page_only_while_the_setting_is_on",
-            web_inspector_opens_on_a_page_only_while_the_setting_is_on,
-        ),
+        ("every_page_is_open_to_web_inspector", every_page_is_open_to_web_inspector),
     ];
 
     /// Run the main run loop until `done`, five seconds at most.
@@ -96,27 +93,15 @@ mod mac {
         }
     }
 
-    /// A page opened with `[web] inspector` on is open to Web Inspector, one opened with it off
-    /// is not and opens none, and the setting turned either way follows on a page already
-    /// open. Nothing is shown: the page is in no window, and no inspector is opened.
-    fn web_inspector_opens_on_a_page_only_while_the_setting_is_on() {
+    /// Every page is open to Web Inspector, as a developer's browser is. Nothing is shown:
+    /// the page is in no window, and no inspector is opened.
+    fn every_page_is_open_to_web_inspector() {
         let mtm = MainThreadMarker::new().unwrap();
         let gpui = NSView::new(mtm);
         let host = NonNull::from(&*gpui).cast();
         // Worker 0: a store that keeps nothing on disk.
-        let page = |inspectable| {
-            WebView::new(host, 0, "about:blank", inspectable, std::rc::Rc::new(|_event| {}))
-                .unwrap()
-        };
-        let on = page(true);
-        assert!(on.inspectable(), "open to the inspector");
-        on.set_inspectable(false);
-        assert!(!on.inspectable(), "closed when the setting goes off");
-        let off = page(false);
-        assert!(!off.inspectable(), "not open to it");
-        assert!(!off.inspect(), "and none opens");
-        off.set_inspectable(true);
-        assert!(off.inspectable(), "open once the setting comes on");
+        let page = WebView::new(host, 0, "about:blank", std::rc::Rc::new(|_event| {})).unwrap();
+        assert!(page.inspectable(), "open to the inspector");
     }
 }
 

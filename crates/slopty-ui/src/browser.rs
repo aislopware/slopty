@@ -422,9 +422,6 @@ impl BrowserView {
     /// Draw by another theme.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         if self.theme != theme {
-            if self.theme.behaviour.web_inspector != theme.behaviour.web_inspector {
-                self.native.set_inspectable(theme.behaviour.web_inspector);
-            }
             self.theme = theme;
             cx.notify();
         }
@@ -437,9 +434,8 @@ impl BrowserView {
         let sink: Rc<dyn Fn(native::Event)> = Rc::new(move |event| {
             let _sent = tx.send(event);
         });
-        let inspectable = self.theme.behaviour.web_inspector;
-        let opened = self.native.create(window, self.worker, address, inspectable, sink)
-            && self.compose_in(window, cx);
+        let opened =
+            self.native.create(window, self.worker, address, sink) && self.compose_in(window, cx);
         if !opened {
             self.native = native::Native::default();
             self.page.failed = Some("This device has no web view".to_owned());
@@ -753,7 +749,7 @@ impl BrowserView {
     }
 
     /// Web Inspector on the page, in its own window. Whether it opened: a page that is open
-    /// in the Mac app, while `[web] inspector` is on.
+    /// in the Mac app.
     pub fn inspect(&self) -> bool {
         self.native.inspect()
     }
@@ -1461,23 +1457,18 @@ mod native {
             window: &Window,
             worker: WorkerKey,
             url: &str,
-            inspectable: bool,
             sink: Rc<dyn Fn(Event)>,
         ) -> bool {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let worker = worker.value();
             self.view = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
                 #[cfg(target_os = "macos")]
-                Ok(RawWindowHandle::AppKit(handle)) => slopty_platform::web::WebView::new(
-                    handle.ns_view,
-                    worker,
-                    url,
-                    inspectable,
-                    sink,
-                ),
+                Ok(RawWindowHandle::AppKit(handle)) => {
+                    slopty_platform::web::WebView::new(handle.ns_view, worker, url, sink)
+                }
                 #[cfg(target_os = "ios")]
                 Ok(RawWindowHandle::UiKit(_)) => {
-                    slopty_platform::web::WebView::new(worker, url, inspectable, sink)
+                    slopty_platform::web::WebView::new(worker, url, sink)
                 }
                 _ => None,
             };
@@ -1566,12 +1557,6 @@ mod native {
 
         pub(super) fn inspect(&self) -> bool {
             self.view.as_ref().is_some_and(slopty_platform::web::WebView::inspect)
-        }
-
-        pub(super) fn set_inspectable(&self, inspectable: bool) {
-            if let Some(view) = &self.view {
-                view.set_inspectable(inspectable);
-            }
         }
 
         pub(super) fn set_zoom(&self, zoom: f64) {

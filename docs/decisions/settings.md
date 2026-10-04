@@ -248,3 +248,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-ui` `settings_editor` `a_description_wraps_and_never_cuts`,
     `every_description_fits_two_lines_at_the_narrowest_sheet`, both shaping with the platform's
     own text system.
+
+- ✅ **Fewer settings: one alert, no frame-rate ceiling, no inspector switch, no external
+  editor** (2026-10-04, the day's cuts; `docs/decisions/ui.md`, "One way to branch, and
+  continuing when a limit lifts").
+  - `[terminal] bell_alert` and `agent_alert` are one `[terminal] alert`: "never", "hidden"
+    (the default: only while no Slopty window is in front) or "always", for a terminal's bell
+    and an agent that needs the person alike (`slopty_app::settings::alerts`). The two said
+    the same thing in two ways.
+  - `[remote] fps` is gone: a stream asks for its screen's refresh up to 120, as the default
+    did, and nobody lowered it.
+  - `[web] inspector` is gone: every page is open to Web Inspector.
+  - The Mac's "Open in editor" in the settings dialog is gone; the dialog's file face is the
+    editor. `slopty settings init` still writes the commented defaults.
+  - These supersede the `bell_alert`, `agent_alert` and `[web] inspector` entries above, and
+    the "Open in editor" button of the settings dialog's entry.
+  - Tests: `slopty_app::settings::tests::an_alert_sounds_only_in_the_background_unless_asked`,
+    `slopty_settings` `the_clipboard_is_shared_by_default_and_per_worker_by_name` (the alert
+    keys), `terminal_keys`, `remote_keys`.

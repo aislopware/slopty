@@ -712,19 +712,14 @@ fn disposition(response: &AnyObject) -> Option<String> {
 }
 
 /// Hand `web`'s UI to `delegate` (pop-ups, a script's dialogs), and open it to Web Inspector
-/// when `inspectable` (Safari's Develop menu, for a Mac or a simulator).
-fn adopt_view(web: &AnyObject, delegate: &Delegate, inspectable: bool) {
+/// (Safari's Develop menu, for a Mac or a simulator): a worker's dev page is a browser tile's
+/// main use, so every page can be inspected.
+fn adopt_view(web: &AnyObject, delegate: &Delegate) {
     // SAFETY: WebKit rule: the UI delegate is any object answering `WKUIDelegate`'s
     // selectors, held weakly; the view's owner keeps `delegate` as long as the view.
     let () = unsafe { msg_send![web, setUIDelegate: delegate] };
     // SAFETY: WebKit rule: `inspectable` is a BOOL property of `WKWebView`, settable any time.
-    let () = unsafe { msg_send![web, setInspectable: inspectable] };
-}
-
-/// Open `web` to Web Inspector or close it, at any time.
-fn set_inspectable(web: &AnyObject, inspectable: bool) {
-    // SAFETY: WebKit rule: `inspectable` is a BOOL property of `WKWebView`, settable any time.
-    let () = unsafe { msg_send![web, setInspectable: inspectable] };
+    let () = unsafe { msg_send![web, setInspectable: true] };
 }
 
 /// Take `web`'s UI back from its delegate, which is going, and stop its downloads.

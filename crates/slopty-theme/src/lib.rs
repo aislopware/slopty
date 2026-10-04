@@ -492,6 +492,10 @@ pub struct Typography {
     pub ui_family: String,
     /// UI base size.
     pub ui_size: f32,
+    /// What is read at length, in points: an agent's answers and the person's messages, and
+    /// the composer they are written in. Its own setting, so reading can grow while the chrome
+    /// keeps its size.
+    pub prose_size: f32,
 }
 
 impl Typography {
@@ -519,11 +523,17 @@ impl Typography {
         (self.ui_size - 1.0).max(7.0)
     }
 
-    /// Titles of panels and dialogs, and prose read at length: an assistant's answer and the
-    /// prompt it answers, at the regular weight on [`Self::prose_line_height`] (base + 2).
+    /// Titles of panels and dialogs (base + 2).
     #[must_use]
     pub fn title(&self) -> f32 {
         self.ui_size + 2.0
+    }
+
+    /// Prose read at length: an assistant's answer and the prompt it answers, at the regular
+    /// weight on [`Self::prose_line_height`]; [`Self::prose_size`], never under 6.
+    #[must_use]
+    pub const fn prose(&self) -> f32 {
+        self.prose_size.max(6.0)
     }
 
     /// An icon beside chrome text: a tile's kind, a status mark, a bar button (base + 1).
@@ -568,6 +578,7 @@ impl Default for Typography {
             prose_line_height: 1.6,
             ui_family: ".SystemUIFont".to_owned(),
             ui_size: 13.0,
+            prose_size: 15.0,
         }
     }
 }
@@ -736,6 +747,12 @@ pub mod alpha {
 
 /// Slopty's green: OKLCH 0.72 0.16 150 (`docs/decisions/brand.md`).
 pub const BRAND: Rgb = Rgb::hex(0x004a_c06c);
+
+/// pi's three colours: its mark's top bar, left leg and right leg.
+///
+/// As its MIT mark draws them (`slopty-ui/assets/agents/pi.svg`, under `LICENSE-pi`), fixed in
+/// both variants as pi keeps them. Its companion wears them.
+pub const PI: [Rgb; 3] = [Rgb::hex(0x00e4_8a7a), Rgb::hex(0x004f_8eb3), Rgb::hex(0x00ea_b65d)];
 
 /// WCAG AA for body text: the least contrast chrome text has on any surface it lands on.
 const AA: f32 = 4.5;
@@ -975,9 +992,11 @@ const DARK_TONES: Tones = Tones {
     accent_fill: BRAND_OKLCH,
     accent_ink: ON_GREEN,
     warn: Rgb::hex(0xe5c07b),
-    // One Dark's red (`f06c75`) lighter, the least that reads APCA |Lc| 45, a status word's
-    // floor, on the selected wash over a float; AA alone wanted only `f1767e` (Lc 43).
-    error: Rgb::hex(0xf27d84),
+    // A light coral, near Radix's dark red 11 (`ff9592`): at One Dark's lightness (`f27d84`)
+    // the red sat 0.02 Oklab from the green for a deuteranope, one just-noticeable step, so
+    // lines added and removed read alike; a step lighter keeps them apart for every
+    // dichromacy (`vision`), and reads well past APCA |Lc| 45 on a float's selected wash.
+    error: Rgb::hex(0xff9095),
     warn_fill: Rgb::hex(0xf5b83d),
     error_fill: Rgb::hex(0xf0555f),
     fill_fg: Rgb::hex(0x0a0b0e),
@@ -1012,7 +1031,11 @@ const LIGHT_TONES: Tones = Tones {
     accent_fill: Oklch { l: 0.65, c: 0.16, h: BRAND_OKLCH.h },
     accent_ink: ON_GREEN,
     warn: Rgb::hex(0x8b5d00),
-    error: Rgb::hex(0xc7212c),
+    // A deep red, near Tailwind's red 800: at the green's and the amber's lightness
+    // (`c7212c`) a deuteranope saw the amber and the red as one brown (0.03 Oklab apart);
+    // a step darker keeps failed apart from waiting and from added for every dichromacy
+    // (`vision`), and on white it reads past AAA.
+    error: Rgb::hex(0x8f1d1d),
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
     fill_fg: Rgb::hex(0x0a0b0e),
@@ -1570,8 +1593,8 @@ pub struct Behaviour {
     pub secure_entry: SecureEntry,
     /// What a remote window or display stream asks the worker for.
     pub stream: StreamPrefs,
-    /// Web Inspector opens on a browser tile's page (`[web] inspector`).
-    pub web_inspector: bool,
+    /// How much the agents' pixel companions do (`[theme] companions`).
+    pub companions: Companions,
 }
 
 impl Default for Behaviour {
@@ -1588,9 +1611,21 @@ impl Default for Behaviour {
             natural_editing: true,
             secure_entry: SecureEntry::Passwords,
             stream: StreamPrefs::default(),
-            web_inspector: true,
+            companions: Companions::Lively,
         }
     }
+}
+
+/// How much the agents' pixel companions do (`docs/decisions/brand.md`, "Companions").
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum Companions {
+    /// None: each agent shows its mark.
+    Off,
+    /// A pose for each state in the mark's slot; only a working one moves.
+    Quiet,
+    /// Quiet, and they wave, hop, play in the yard and sleep while the person is away.
+    #[default]
+    Lively,
 }
 
 /// Whether ⌥ is Alt (ghostty's `macos-option-as-alt`): a modifier that sends an escape
@@ -1677,9 +1712,6 @@ impl CursorBlink {
 /// not this).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StreamPrefs {
-    /// The most frames per second a stream asks for: it asks for the refresh of the screen its
-    /// view is on, up to this.
-    pub fps: u16,
     /// The bitrate ceiling, bits per second.
     pub max_bitrate_bps: u32,
     /// A stream opens with its audio silenced on this client (the title-bar pill still
@@ -1691,7 +1723,7 @@ pub struct StreamPrefs {
 
 impl Default for StreamPrefs {
     fn default() -> Self {
-        Self { fps: 120, max_bitrate_bps: 30_000_000, muted: false, sharp_text: false }
+        Self { max_bitrate_bps: 30_000_000, muted: false, sharp_text: false }
     }
 }
 
@@ -1796,6 +1828,9 @@ impl Theme {
         }
     }
 }
+
+#[cfg(test)]
+mod vision;
 
 #[cfg(test)]
 mod tests {
