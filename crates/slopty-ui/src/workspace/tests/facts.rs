@@ -231,6 +231,10 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     let full = "Thread logs cannot be written: No space left on device";
     let failing = WorkerCaps { writes_failing: Some(full.to_owned()), ..linux.clone() };
     assert_eq!(navigator::worker_warning(&failing).as_deref(), Some(full), "on any machine");
+    let how = "it stops when you log out: run `sudo loginctl enable-linger $USER` there";
+    let lingerless = WorkerCaps { stops_at_logout: Some(how.to_owned()), ..linux.clone() };
+    let warned = navigator::worker_warning(&lingerless);
+    assert_eq!(warned.as_deref(), Some(navigator::STOPS_AT_LOGOUT), "for as long as it does");
 
     view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
     cx.run_until_parked();
@@ -245,6 +249,10 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
 
     let facts = view.read_with(cx, |v, _| v.machine_facts(key));
     assert!(facts.first().is_some_and(|l| l.starts_with("Linux")), "its machine: {facts:?}");
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, lingerless, cx));
+    let facts = view.read_with(cx, |v, _| v.machine_facts(key));
+    let said = facts.get(1).map(String::as_str);
+    assert!(said.is_some_and(|l| l.starts_with("It stops when you log out: run")), "{facts:?}");
     assert_eq!(navigator::host_line(&healthy(), Some(2.1)), "macOS 26.5 \u{b7} load 2.1");
     assert_eq!(navigator::host_line(&healthy(), None), "macOS 26.5", "no load heard yet");
 }

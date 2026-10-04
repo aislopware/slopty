@@ -234,6 +234,15 @@ pub struct ShareClipboard {
     pub share: bool,
 }
 
+/// "Edit `worker`'s settings": that machine's `settings.toml`, where its greeting said it is,
+/// in a file tile; the machine applies what is saved as it reads it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
+#[action(namespace = workspace, no_json)]
+pub struct EditMachineSettings {
+    /// The machine.
+    pub worker: slopty_client::layout::WorkerKey,
+}
+
 /// "Make this agent `project`'s orchestrator": the focused terminal's agent becomes the one
 /// the project's board talks to, in place of the one it had.
 #[derive(Clone, PartialEq, Eq, Debug, gpui::Action)]

@@ -1794,6 +1794,7 @@ pub(crate) mod tests {
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
+            stops_at_logout: None,
         }
     }
 

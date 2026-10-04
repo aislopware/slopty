@@ -418,9 +418,14 @@ struct Changed {
     reregister: bool,
     /// The server registered with from now, when `reregister`; `None` runs on its own.
     server: Option<slopty_net::HostAddr>,
-    /// The keys that take effect only when the worker starts again
-    /// ([`slopty_settings::schema::restart_keys`]).
-    waits: Vec<String>,
+    /// `keep_awake` changed: what keeps the machine awake from now.
+    keeping: Option<slopty_worker::wake::Policy>,
+    /// `input_source_sync` changed: whether a client's input source is selected from now.
+    follow_sources: Option<bool>,
+    /// `display_linger_mins` changed: how long a client's display waits from its next let-go.
+    linger: Option<std::time::Duration>,
+    /// `[worker.acp]` changed: the person's own ACP agents, for the capabilities to probe.
+    acp: Option<std::collections::BTreeMap<String, Vec<String>>>,
 }
 
 /// [`Changed`] for a file that went from `before` to `now`.
@@ -434,14 +439,33 @@ fn changed(
     let registers = |settings| server::configured(flag, settings).ok().flatten();
     let (was, server) = (registers(before), registers(now));
     let reregister = was != server;
-    let waits = slopty_settings::schema::restart_keys(before, now, "worker");
-    Changed { allow, reregister, server, waits }
+    let (before, now) = (&before.worker, &now.worker);
+    let sync = now.input_source_sync;
+    Changed {
+        allow,
+        reregister,
+        server,
+        keeping: (before.keep_awake != now.keep_awake).then(|| policy(now.keep_awake)),
+        follow_sources: (before.input_source_sync != sync).then_some(sync),
+        linger: (before.display_linger() != now.display_linger()).then(|| now.display_linger()),
+        acp: (before.acp != now.acp).then(|| now.acp.clone()),
+    }
+}
+
+/// The sleep policy `[worker] keep_awake` names.
+const fn policy(keep: slopty_settings::KeepAwake) -> slopty_worker::wake::Policy {
+    match keep {
+        slopty_settings::KeepAwake::Working => slopty_worker::wake::Policy::Working,
+        slopty_settings::KeepAwake::Attached => slopty_worker::wake::Policy::Attached,
+        slopty_settings::KeepAwake::Never => slopty_worker::wake::Policy::Never,
+    }
 }
 
 /// Follow `settings.toml` under `data_dir` for as long as the daemon runs, applying each change
-/// of `[worker]` it can as it is read ([`Changed`]): the allowed ranges from the next peer on,
-/// and a new server registered with at once, `joined` (the registration running now) ended
-/// first. A key that waits for the next start says so in the log. A file that does not parse
+/// of `[worker]` as it is read ([`Changed`]): the allowed ranges from the next peer on, a new
+/// server registered with at once (`joined`, the registration running now, ended first), the
+/// sleep policy and the input-source sync at once, a client's display's linger from its next
+/// let-go, and the person's ACP agents probed again into `acp`. A file that does not parse
 /// changes nothing.
 async fn follow_settings(
     daemon: Daemon,
@@ -449,6 +473,7 @@ async fn follow_settings(
     flag: Option<String>,
     ctl_path: PathBuf,
     mut joined: Option<Joined>,
+    acp: tokio::sync::watch::Sender<std::collections::BTreeMap<String, Vec<String>>>,
 ) -> ! {
     let path = slopty_settings::path_in(&data_dir);
     let mut seen = slopty_settings::follow::Seen::of(&path);
@@ -464,7 +489,8 @@ async fn follow_settings(
             continue;
         }
         let now = loaded.settings;
-        let Changed { allow, reregister, server, waits } = changed(&applied, &now, flag.as_deref());
+        let Changed { allow, reregister, server, keeping, follow_sources, linger, acp: own_acp } =
+            changed(&applied, &now, flag.as_deref());
         if let Some(allow) = allow {
             let ranges: Vec<String> = allow.iter().map(ToString::to_string).collect();
             tracing::info!(?ranges, "[worker] allow changed: applied");
@@ -482,29 +508,49 @@ async fn follow_settings(
                 daemon.server_link.send_replace(None);
             }
         }
-        for key in waits {
-            tracing::warn!(key, "changed; it takes effect when the worker restarts");
+        if let Some(policy) = keeping {
+            tracing::info!(?policy, "[worker] keep_awake changed: applied");
+            daemon.wake.lock().set_policy(policy);
+        }
+        if let Some(follow) = follow_sources {
+            tracing::info!(follow, "[worker] input_source_sync changed: applied");
+            daemon.sources.follow_clients(follow);
+        }
+        if let Some(linger) = linger {
+            tracing::info!(?linger, "[worker] display_linger_mins changed: applied");
+            if let Some(displays) = &daemon.displays {
+                displays.set_linger(linger);
+            }
+        }
+        if let Some(own) = own_acp {
+            tracing::info!(agents = ?own.keys().collect::<Vec<_>>(), "[worker.acp] changed: probing");
+            acp.send_replace(own);
         }
         applied = now;
     }
 }
 
 /// Keep `caps` and `load` current (the agents' versions follow once their `--version`
-/// answers, the person's own ACP agents from `own_acp` among them) and tell every client each
-/// change.
+/// answers, the person's own ACP agents as `own_acp` last says among them) and tell every
+/// client each change.
 fn watch_caps(
     caps: tokio::sync::watch::Sender<slopty_proto::server::WorkerCaps>,
     load: tokio::sync::watch::Sender<f32>,
     events: broadcast::Sender<slopty_proto::WorkerMsg>,
-    own_acp: std::collections::BTreeMap<String, Vec<String>>,
+    mut own_acp: tokio::sync::watch::Receiver<std::collections::BTreeMap<String, Vec<String>>>,
 ) {
     let mut changed = caps.subscribe();
     let mut moved = load.subscribe();
     let load_events = events.clone();
     tokio::spawn(async move {
-        let agents = slopty_worker::caps::installed_agents(&own_acp).await;
-        caps.send_modify(|c| c.agents.clone_from(&agents));
-        slopty_worker::caps::watch(caps, load, agents).await;
+        let own = own_acp.borrow_and_update().clone();
+        let (installed, agents) =
+            tokio::sync::watch::channel(slopty_worker::caps::installed_agents(&own).await);
+        tokio::spawn(slopty_worker::caps::watch(caps, load, agents));
+        while own_acp.changed().await.is_ok() {
+            let own = own_acp.borrow_and_update().clone();
+            installed.send_replace(slopty_worker::caps::installed_agents(&own).await);
+        }
     });
     tokio::spawn(async move {
         while changed.changed().await.is_ok() {
@@ -624,9 +670,11 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     sources.keep_at(data_dir.join("input-source"));
     if !own.input_source_sync {
         tracing::info!("input-source sync off: clients compose, the worker keeps its own source");
-        sources.refuse_claims();
     }
-    let displays = displays.map(|d| d.lingering(own.display_linger()));
+    sources.follow_clients(own.input_source_sync);
+    if let Some(displays) = &displays {
+        displays.set_linger(own.display_linger());
+    }
     // And the Caps Lock such a run left set, unless it was changed since.
     #[cfg(target_os = "macos")]
     slopty_input::keep_caps(data_dir.join("caps-lock"), &mut slopty_input::System);
@@ -648,13 +696,8 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
     let slopty_worker::manager::Reports { mut exits, port_hints, mut moves } = reports;
     let (events, _keep) = broadcast::channel(EVENT_BUFFER);
     let items = ItemStore::open(&data_dir.join("items.json"))?;
-    let keeping = match own.keep_awake {
-        slopty_settings::KeepAwake::Working => slopty_worker::wake::Policy::Working,
-        slopty_settings::KeepAwake::Attached => slopty_worker::wake::Policy::Attached,
-        slopty_settings::KeepAwake::Never => slopty_worker::wake::Policy::Never,
-    };
     let wake = Arc::new(parking_lot::Mutex::new(
-        slopty_worker::wake::Wake::new(Assertions::default()).keeping(keeping),
+        slopty_worker::wake::Wake::new(Assertions::default()).keeping(policy(own.keep_awake)),
     ));
     let screens = slopty_worker::screen::Registry::default();
     screens.observe({
@@ -662,9 +705,13 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         move |live| wake.lock().streams(live)
     });
     let paths = tailnet::Paths::spawn(listener.admission().clone());
-    let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(&[], None));
+    let (caps_tx, caps) = tokio::sync::watch::channel(slopty_worker::caps::probe(
+        &[],
+        &slopty_worker::caps::Seldom::default(),
+    ));
     let (load_tx, load) = tokio::sync::watch::channel(slopty_worker::caps::load());
-    watch_caps(caps_tx, load_tx, events.clone(), own.acp.clone());
+    let (own_acp, acp) = tokio::sync::watch::channel(own.acp.clone());
+    watch_caps(caps_tx, load_tx, events.clone(), acp);
     let ctl_path = args.ctl_socket.unwrap_or_else(paths::ctl_socket);
     let mod_path = modsock::beside(&ctl_path);
     let claude_mod = match slopty_agent::claude_mod::install(&data_dir) {
@@ -827,6 +874,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         args.server.clone(),
         ctl_path,
         joined,
+        own_acp,
     ));
 
     let allow: Vec<String> =
@@ -951,22 +999,28 @@ mod tests {
     use super::{Changed, admission, changed};
 
     /// A change of the file asks the running worker for what changed and nothing else: new
-    /// ranges, a new server or none, and the keys that wait for its next start; a server named
-    /// by `--server` holds over the file's.
+    /// ranges, a new server or none, the sleep policy, the input-source sync, the display's
+    /// linger and the ACP agents; a server named by `--server` holds over the file's.
     #[test]
-    fn a_change_of_the_file_is_applied_or_said_to_wait() {
+    fn a_change_of_the_file_is_applied_as_it_is_read() {
         let before = slopty_settings::Settings::default();
         assert_eq!(changed(&before, &before, None), Changed::default(), "nothing changed");
         let mut now = before.clone();
         now.worker.allow = vec!["10.0.0.0/8".to_owned(), "bogus".to_owned()];
         now.worker.server = Some(slopty_net::HostAddr::new("hub", 45_560));
         now.worker.display_linger_mins = 30;
+        now.worker.keep_awake = slopty_settings::KeepAwake::Never;
+        now.worker.input_source_sync = !before.worker.input_source_sync;
+        now.worker.acp.insert("mine".to_owned(), vec!["/opt/mine".to_owned()]);
         let asked = changed(&before, &now, None);
         let ranges: Vec<String> = asked.allow.iter().flatten().map(ToString::to_string).collect();
         assert_eq!(ranges, ["10.0.0.0/8"], "a range that does not parse is skipped");
         assert!(asked.reregister);
         assert_eq!(asked.server, Some(slopty_net::HostAddr::new("hub", 45_560)));
-        assert_eq!(asked.waits, ["worker.display_linger_mins"]);
+        assert_eq!(asked.keeping, Some(slopty_worker::wake::Policy::Never));
+        assert_eq!(asked.follow_sources, Some(now.worker.input_source_sync));
+        assert_eq!(asked.linger, Some(std::time::Duration::from_mins(30)));
+        assert_eq!(asked.acp.as_ref(), Some(&now.worker.acp));
         let cleared = changed(&now, &before, None);
         assert_eq!((cleared.reregister, cleared.server), (true, None), "cleared: on its own");
         assert!(!changed(&before, &now, Some("other")).reregister, "the flag holds");

@@ -40,8 +40,6 @@ pub mod actions {
             /// Install the worker on this Mac and walk its permissions until the server lists
             /// it.
             UseThisMac,
-            /// Start this Mac's worker again, so it reads what only its start reads.
-            RestartThisMacWorker,
         ]
     );
 }
@@ -58,8 +56,6 @@ pub const BLURB: &str = "Slopty shares this Mac's shells and windows through you
 /// Why Slopty moves before it installs: where it runs now is gone after a restart.
 pub const MISPLACED: &str =
     "Slopty runs from outside Applications, so this Mac would stop sharing after a restart.";
-/// The palette's line that starts this Mac's worker again; its sessions stay with ptyd.
-pub const RESTART: &str = "Restart slopty-worker on this Mac";
 /// This Mac as an SSH target and as the host of a server started here: loopback.
 pub const LOOPBACK: &str = "127.0.0.1";
 /// How many times, [`RETRY`] apart (20 s in all), a new worker's listing is looked for in the

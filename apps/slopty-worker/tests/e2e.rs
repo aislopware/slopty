@@ -5394,4 +5394,39 @@ mod tests {
         assert_eq!(names, want, "every entry once, in order");
         println!("a page of {FOLDER_ENTRIES} entries on loopback: {took:?}");
     }
+
+    /// A `[worker] allow` saved while the worker runs lets a peer in with no restart: this
+    /// Mac dialing its own LAN address is not loopback, so it is refused until the file lists
+    /// that address, and let in once the worker has read it.
+    #[tokio::test]
+    async fn a_saved_allow_lets_a_peer_in_with_no_restart() {
+        let lan = slopty_tailnet::lan::ports()
+            .first()
+            .map(|port| port.addr)
+            .expect("this Mac has a LAN address to dial itself at");
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, loopback) = daemons(dir.path()).await;
+        let addr = SocketAddr::from((lan, loopback.port()));
+        let endpoint = bind_client().unwrap();
+        let hello = Hello { client: ClientId::new(), name: "e2e".to_owned() };
+        let refused = tokio::time::timeout(STEP, connect_addr(&endpoint, addr, hello.clone()))
+            .await
+            .expect("a refusal is answered, not left to time out");
+        assert!(refused.is_err(), "{lan} is not let in before the file lists it");
+
+        let settings = slopty_settings::path_in(&dir.path().join("data"));
+        std::fs::write(&settings, format!("[worker]\nallow = [\"{lan}/32\"]\n")).unwrap();
+        let admitted = tokio::time::timeout(STEP, async {
+            loop {
+                if let Ok(worker) = connect_addr(&endpoint, addr, hello.clone()).await {
+                    break worker;
+                }
+                tokio::time::sleep(slopty_settings::follow::POLL / 4).await;
+            }
+        })
+        .await
+        .expect("let in once the worker has read the file, with no restart");
+        let named = PathBuf::from(&admitted.ack.settings);
+        assert_eq!(named.canonicalize().ok(), settings.canonicalize().ok(), "the file it follows");
+    }
 }

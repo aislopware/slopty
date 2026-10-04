@@ -368,20 +368,26 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
 /// well. A worker whose own writes fail (a full or read-only disk) says which and why first,
 /// as its kept screens and thread logs are being lost. A Mac that has not granted Screen
 /// Recording cannot share a window, and one without Accessibility cannot take the keys. A
-/// worker on another build never links at all: its status says so
-/// ([`WorkerStatus::NeedsUpdate`]), from the wire's own fingerprint.
+/// machine whose services stop when the person logs out there (a Linux user without
+/// lingering) says so for as long as they do; its menu says what to run. A worker on another
+/// build never links at all: its status says so ([`WorkerStatus::NeedsUpdate`]), from the
+/// wire's own fingerprint.
 pub(super) fn worker_warning(caps: &WorkerCaps) -> Option<String> {
     let mac = caps.os == Os::MacOs;
     let wrong: Vec<String> = [
         caps.writes_failing.as_deref().map(|why| kit::first_line(why).to_owned()),
         (mac && !caps.can_capture).then(|| "Screen Recording off".to_owned()),
         (mac && !caps.can_inject).then(|| "Accessibility off".to_owned()),
+        caps.stops_at_logout.is_some().then(|| STOPS_AT_LOGOUT.to_owned()),
     ]
     .into_iter()
     .flatten()
     .collect();
     (!wrong.is_empty()).then(|| wrong.join(META_SEPARATOR))
 }
+
+/// The warn line's word for a machine whose services stop at logout.
+pub(super) const STOPS_AT_LOGOUT: &str = "Stops at logout";
 
 /// A worker's machine in a line, as the hosts list reads it: `macOS 26.5 · load 2.1`, without
 /// the load until one is known.

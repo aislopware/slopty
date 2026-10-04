@@ -237,6 +237,11 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
         grants,
         wake_line(h.caps.wake_on_lan).into_iter().collect(),
         h.caps.writes_failing.iter().map(|why| format!("✘ {why}")).collect(),
+        h.caps
+            .stops_at_logout
+            .iter()
+            .map(|how| format!("✘ the worker's services: {how}"))
+            .collect(),
         vec![format!("{} clients connected, {} sessions", h.clients, h.sessions)],
     ]
     .concat();
@@ -374,11 +379,14 @@ mod tests {
         let full = slopty_proto::ctl::Health {
             caps: WorkerCaps {
                 writes_failing: Some("Thread logs cannot be written: disk full".to_owned()),
+                stops_at_logout: Some("it stops when you log out: run `x` there".to_owned()),
                 ..h.caps.clone()
             },
             ..h.clone()
         };
-        assert!(doctor_report(&full, true).contains("✘ Thread logs cannot be written: disk full"));
+        let said = doctor_report(&full, true);
+        assert!(said.contains("✘ Thread logs cannot be written: disk full"), "{said}");
+        assert!(said.contains("✘ the worker's services: it stops when you log out"), "{said}");
         assert!(!doctor_report(&wakes, true).contains("cannot be written"));
         let link = |link| {
             let server =

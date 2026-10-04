@@ -164,7 +164,7 @@ impl WorkspaceView {
         ack: HelloAck,
         cx: &mut Context<Self>,
     ) {
-        let HelloAck { name, home, caps, load, sessions, .. } = ack;
+        let HelloAck { name, home, settings, caps, load, sessions, .. } = ack;
         let known: Vec<SessionId> = self
             .workers
             .get(&key)
@@ -182,6 +182,7 @@ impl WorkspaceView {
         self.focus_link_reset(key);
         let Some(w) = self.workers.get_mut(&key) else { return };
         w.home = (!home.is_empty()).then_some(home);
+        w.settings = (!settings.is_empty()).then_some(settings);
         w.caps = Some(caps);
         w.load = Some(load);
         w.relay.reset();

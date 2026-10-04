@@ -20,9 +20,8 @@ use tokio::sync::watch;
 /// How often permissions and displays are looked at: TCC and display changes come with no
 /// notification a daemon can take.
 const CHECK_PERIOD: Duration = Duration::from_secs(5);
-/// How often "Wake for network access" is read: a child process, and a setting people rarely
-/// touch.
-const WAKE_PERIOD: Duration = Duration::from_mins(1);
+/// How often what costs a child process is read ([`Seldom`]): settings people rarely touch.
+const SELDOM_PERIOD: Duration = Duration::from_mins(1);
 /// How often a load change is reported, and by how much it must have moved.
 const LOAD_PERIOD: Duration = Duration::from_secs(30);
 const LOAD_STEP: f32 = 0.5;
@@ -123,9 +122,30 @@ fn agent_command(program: &str, args: &[&str], shell: Option<&str>) -> tokio::pr
     login
 }
 
-/// Everything about this worker as it is now; `agents` from [`installed_agents`] and
-/// `wake_on_lan` from [`wake_on_lan`].
-pub fn probe(agents: &[InstalledAgent], wake_on_lan: Option<bool>) -> WorkerCaps {
+/// What of a worker is read only once a minute, each answer costing a child process.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Seldom {
+    /// [`wake_on_lan`].
+    pub wake_on_lan: Option<bool>,
+    /// What the person runs so the services outlive their last logout, while they do not
+    /// (`slopty_platform::service::Session::stops_at_logout`).
+    pub stops_at_logout: Option<String>,
+}
+
+impl Seldom {
+    /// Both, read now.
+    pub async fn read() -> Self {
+        let stops = tokio::task::spawn_blocking(|| {
+            slopty_platform::service::Session::native().stops_at_logout()
+        });
+        let wake_on_lan = wake_on_lan().await;
+        Self { wake_on_lan, stops_at_logout: stops.await.ok().flatten() }
+    }
+}
+
+/// Everything about this worker as it is now; `agents` from [`installed_agents`] and the rest
+/// from [`Seldom::read`].
+pub fn probe(agents: &[InstalledAgent], seldom: &Seldom) -> WorkerCaps {
     let desktop = desktop();
     WorkerCaps {
         os: if cfg!(target_os = "linux") { Os::Linux } else { Os::MacOs },
@@ -142,8 +162,9 @@ pub fn probe(agents: &[InstalledAgent], wake_on_lan: Option<bool>) -> WorkerCaps
         virtual_displays: desktop.virtual_displays,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         lan: slopty_tailnet::lan::ports(),
-        wake_on_lan,
+        wake_on_lan: seldom.wake_on_lan,
         writes_failing: writes_failing(),
+        stops_at_logout: seldom.stops_at_logout.clone(),
     }
 }
 
@@ -252,7 +273,8 @@ fn memory() -> u64 {
     info.totalram.saturating_mul(u64::from(info.mem_unit))
 }
 
-/// Keep `caps` and `load` current until every receiver of both is gone.
+/// Keep `caps` and `load` current until every receiver of both is gone, with the agents
+/// installed as `agents` last says: a change of them is probed at once.
 ///
 /// Permissions and displays every 5 s (the displays from CoreGraphics, since a ScreenCaptureKit
 /// enumeration that often raises the private-window consent prompt again and again), the load
@@ -260,32 +282,43 @@ fn memory() -> u64 {
 pub async fn watch(
     caps: watch::Sender<WorkerCaps>,
     load: watch::Sender<f32>,
-    agents: Vec<InstalledAgent>,
+    mut agents: watch::Receiver<Vec<InstalledAgent>>,
 ) {
     let mut tick = tokio::time::interval(CHECK_PERIOD);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut load_at = tokio::time::Instant::now();
-    let mut wakes: Option<(tokio::time::Instant, Option<bool>)> = None;
+    let mut seldom = Seldom::default();
+    let mut seldom_at: Option<tokio::time::Instant> = None;
+    let mut following = true;
     loop {
-        tick.tick().await;
+        tokio::select! {
+            _ = tick.tick() => {}
+            changed = agents.changed(), if following => following = changed.is_ok(),
+        }
         if caps.is_closed() && load.is_closed() {
             return;
         }
-        let wake = match wakes {
-            Some((at, wake)) if at.elapsed() < WAKE_PERIOD => wake,
-            _ => {
-                let wake = wake_on_lan().await;
-                if wake == Some(false) && wakes.is_none_or(|(_, was)| was != wake) {
-                    tracing::warn!(
-                        "Wake for network access is off: a client cannot wake this machine \
-                         once it sleeps (`sudo pmset -a womp 1`)"
-                    );
-                }
-                wakes = Some((tokio::time::Instant::now(), wake));
-                wake
+        if seldom_at.is_none_or(|at| at.elapsed() >= SELDOM_PERIOD) {
+            let now = Seldom::read().await;
+            let was = seldom_at.map(|_| &seldom);
+            if now.wake_on_lan == Some(false)
+                && was.is_none_or(|was| was.wake_on_lan != now.wake_on_lan)
+            {
+                tracing::warn!(
+                    "Wake for network access is off: a client cannot wake this machine once it \
+                     sleeps (`sudo pmset -a womp 1`)"
+                );
             }
-        };
-        let next = probe(&agents, wake);
+            if let Some(how) = &now.stops_at_logout
+                && was.is_none_or(|was| was.stops_at_logout != now.stops_at_logout)
+            {
+                tracing::warn!("the worker's services stop at logout: {how}");
+            }
+            seldom = now;
+            seldom_at = Some(tokio::time::Instant::now());
+        }
+        let installed = agents.borrow_and_update().clone();
+        let next = probe(&installed, &seldom);
         caps.send_if_modified(|current| {
             let changed = *current != next;
             if changed {
@@ -375,7 +408,7 @@ mod tests {
         not_written(WHAT, &"No space left on device");
         let said = writes_failing().expect("said");
         assert!(said.starts_with("Test writes"), "{said}");
-        assert_eq!(probe(&[], None).writes_failing.as_deref(), Some(said.as_str()));
+        assert_eq!(probe(&[], &Seldom::default()).writes_failing.as_deref(), Some(said.as_str()));
         not_written(OTHER, &"Read-only file system");
         wrote(WHAT);
         assert_eq!(
@@ -439,7 +472,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_probe_reads_this_mac() {
-        let caps = probe(&[], None);
+        let caps = probe(&[], &Seldom::default());
         assert!(
             caps.os_version.split('.').next().is_some_and(|major| major.parse::<u32>().is_ok()),
             "{caps:?}"

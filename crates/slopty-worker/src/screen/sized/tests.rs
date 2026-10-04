@@ -239,7 +239,8 @@ fn released(fake: &Fake, id: u32) -> bool {
 async fn a_display_let_go_lingers_for_its_client_and_goes_when_the_linger_runs_out() {
     let fake = Fake::scripted(Some(0));
     let linger = Duration::from_secs(600);
-    let displays = displays(&fake, Duration::from_secs(5)).lingering(linger);
+    let displays = displays(&fake, Duration::from_secs(5));
+    displays.set_linger(linger);
     let lease = displays.acquire(KEY, &shape(2752, 2064, 2.0)).await.unwrap();
     assert_eq!(lease.settled().await, Ok(1));
     drop(lease);
@@ -272,7 +273,8 @@ async fn a_display_let_go_lingers_for_its_client_and_goes_when_the_linger_runs_o
 #[tokio::test(start_paused = true)]
 async fn a_lost_display_is_released_at_once_and_a_linger_is_its_own_keys() {
     let fake = Fake::scripted(Some(0));
-    let displays = displays(&fake, Duration::from_secs(5)).lingering(Duration::from_secs(600));
+    let displays = displays(&fake, Duration::from_secs(5));
+    displays.set_linger(Duration::from_secs(600));
     let lease = displays.acquire(KEY, &shape(1920, 1080, 1.0)).await.unwrap();
     assert_eq!(lease.settled().await, Ok(1));
     lease.lost();

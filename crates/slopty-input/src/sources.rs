@@ -251,7 +251,7 @@ struct Inner {
     /// The platform reports every switch ([`Sources::hearing`]); without, a selection made here
     /// counts as heard at once.
     hearing: AtomicBool,
-    /// No source is selected for a client ([`Sources::refuse_claims`]).
+    /// No source is selected for a client ([`Sources::follow_clients`]).
     refusing: AtomicBool,
     /// Where the worker's own source is kept while a claim holds, and what was written there.
     kept: parking_lot::Mutex<(Option<PathBuf>, Option<Kept>)>,
@@ -341,11 +341,17 @@ impl Sources {
         }));
     }
 
-    /// Select no client's source from now on (`[worker] input_source_sync = false`): the
-    /// person at the worker keeps theirs. A claim is answered as typing under the client's
-    /// source only while the worker is under it anyway, and every other client composes.
-    pub fn refuse_claims(&self) {
-        self.0.refusing.store(true, Ordering::Relaxed);
+    /// Whether a client's source is selected for it (`[worker] input_source_sync`, followed as
+    /// the file changes). Off, the person at the worker keeps theirs: a claim is answered as
+    /// typing under the client's source only while the worker is under it anyway, and every
+    /// other client composes. Turning it off lets go of every claim held, so the worker's own
+    /// source comes back at once and each stream hears the switch and tells its client.
+    pub fn follow_clients(&self, follow: bool) {
+        let was_refusing = self.0.refusing.swap(!follow, Ordering::Relaxed);
+        if !follow && !was_refusing {
+            let inner = Arc::clone(&self.0);
+            self.0.tis.on_main(Box::new(move || inner.release_all()));
+        }
     }
 
     /// The platform reports every switch through [`Self::heard`] from now on.
@@ -417,9 +423,7 @@ impl Sources {
         let (done, finished) = oneshot::channel();
         let inner = Arc::clone(&self.0);
         self.0.tis.on_main(Box::new(move || {
-            let back = inner.claims.lock().release_all();
-            inner.restore(back);
-            inner.keep();
+            inner.release_all();
             let _gone = done.send(());
         }));
         async move {
@@ -429,6 +433,14 @@ impl Sources {
 }
 
 impl Inner {
+    /// Let go of every claim, on the main queue: the worker's own source back, and what the
+    /// claims turned on off.
+    fn release_all(&self) {
+        let back = self.claims.lock().release_all();
+        self.restore(back);
+        self.keep();
+    }
+
     /// Run `who`'s ask, on the main queue.
     fn claim(&self, who: Claimant, source: String) -> Claimed {
         let current = self.tis.current();

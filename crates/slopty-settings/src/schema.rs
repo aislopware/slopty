@@ -3,11 +3,11 @@
 //! [`Settings`] and its tables derive [`JsonSchema`](schemars::JsonSchema), so a key's type, its
 //! range, its choices and its words live on the field that holds it: a `title` names it, the
 //! doc comment's first paragraph says what it does in a line, `range` bounds a number and
-//! `x-step` and `x-unit` say how a stepper moves it and what it counts, and `x-restarts` names
-//! the daemon that reads it only when it starts. [`fields`] walks that schema once and takes
-//! each key's default from [`Settings::default`], so a key added to a table is a row of the
-//! settings form with no second edit anywhere; [`restart_keys`] reads the same schema to say
-//! which changes wait for a daemon's restart.
+//! `x-step` and `x-unit` say how a stepper moves it and what it counts. [`fields`] walks that
+//! schema once and takes each key's default from [`Settings::default`], so a key added to a
+//! table is a row of the settings form with no second edit anywhere. Every key takes effect as
+//! the file is saved: the app, the worker and the server each follow the file
+//! ([`crate::follow`]).
 
 use std::sync::LazyLock;
 
@@ -21,10 +21,6 @@ pub const COLOR: &str = "color";
 
 /// The `format` of a font family's name.
 pub const FONT_FAMILY: &str = "font-family";
-
-/// The extension naming the daemon that reads a key only when it starts (`worker`); every other
-/// key takes effect as the file is saved.
-pub const RESTARTS: &str = "x-restarts";
 
 /// One key of the file.
 #[derive(Clone, PartialEq, Debug)]
@@ -45,9 +41,6 @@ pub struct Field {
     pub default: Value,
     /// A value it could take, as a field shows it (a list's items joined by `, `).
     pub example: Option<String>,
-    /// The daemon that reads it only when it starts (`worker`); `None` when it takes effect as
-    /// the file is saved.
-    pub restarts: Option<String>,
 }
 
 /// What a key holds, and so how it is set.
@@ -165,43 +158,10 @@ fn fields_of(schema: &Json, defaults: &toml::Table) -> Vec<Field> {
                 kind,
                 default,
                 example: field.get("examples").and_then(|e| e.get(0)).map(example),
-                restarts: restarts(field),
             });
         }
     }
     out
-}
-
-/// The keys whose change from `before` to `now` takes effect only when `daemon` starts again,
-/// as `table.key`, in the schema's order: those it names in [`RESTARTS`], a map's included.
-#[must_use]
-pub fn restart_keys(before: &Settings, now: &Settings, daemon: &str) -> Vec<String> {
-    static SCHEMA: LazyLock<Json> = LazyLock::new(|| {
-        let schema = schemars::generate::SchemaSettings::draft2020_12()
-            .with(|s| s.inline_subschemas = true)
-            .into_generator()
-            .into_root_schema_for::<Settings>();
-        schema.as_value().clone()
-    });
-    let (Ok(before), Ok(now)) = (toml::Table::try_from(before), toml::Table::try_from(now)) else {
-        return Vec::new();
-    };
-    let mut keys = Vec::new();
-    for (table, table_schema) in tables(&SCHEMA) {
-        for (key, field) in properties(table_schema) {
-            if restarts(field).as_deref() == Some(daemon)
-                && value_at(&before, &table, key) != value_at(&now, &table, key)
-            {
-                keys.push(format!("{table}.{key}"));
-            }
-        }
-    }
-    keys
-}
-
-/// The daemon a key's schema says reads it only when it starts.
-fn restarts(schema: &Json) -> Option<String> {
-    schema.get(RESTARTS).and_then(Json::as_str).map(str::to_owned)
 }
 
 fn properties(schema: &Json) -> impl Iterator<Item = (&String, &Json)> {
@@ -397,25 +357,6 @@ mod tests {
         let server = field("client", "server");
         assert_eq!((&server.kind, &server.default), (&Kind::Text, &Value::Str(String::new())));
         assert_eq!(field("worker", "allow").example.as_deref(), Some("100.64.0.0/10, fd00::/8"));
-    }
-
-    /// The keys the worker reads only when it starts are told apart from those it applies as
-    /// the file changes, a map's among them, and only a change of one counts.
-    #[test]
-    fn a_change_the_worker_reads_only_at_its_start_is_named() {
-        let before = Settings::default();
-        assert!(restart_keys(&before, &before, "worker").is_empty(), "nothing changed");
-        let mut now = before.clone();
-        now.worker.allow = vec!["10.0.0.0/8".to_owned()];
-        now.worker.server = Some(crate::HostAddr::new("hub", 45_560));
-        assert!(restart_keys(&before, &now, "worker").is_empty(), "both applied as read");
-        now.worker.keep_awake = crate::KeepAwake::Never;
-        now.worker.acp.insert("mine".to_owned(), vec!["mine".to_owned(), "--acp".to_owned()]);
-        assert_eq!(restart_keys(&before, &now, "worker"), ["worker.acp", "worker.keep_awake"]);
-        assert!(restart_keys(&before, &now, "server").is_empty(), "the worker's, not the server's");
-        assert_eq!(field("worker", "keep_awake").restarts.as_deref(), Some("worker"));
-        assert_eq!(field("worker", "allow").restarts, None);
-        assert_eq!(field("server", "allow").restarts, None, "the server applies it as read");
     }
 
     /// A value is checked against its key's type alone, and a refusal is the parser's reason.

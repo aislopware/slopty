@@ -139,6 +139,9 @@ pub struct WorkerCaps {
     /// volume): its terminals' kept screens, its agents' thread logs. `None` while every
     /// write goes through.
     pub writes_failing: Option<String>,
+    /// What the person runs there so its services outlive their last logout, while they do
+    /// not (a Linux user without lingering); `None` while they do, as launchd's always do.
+    pub stops_at_logout: Option<String>,
 }
 
 impl WorkerCaps {
@@ -162,6 +165,7 @@ impl WorkerCaps {
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
+            stops_at_logout: None,
         }
     }
 }

@@ -43,6 +43,7 @@ mod tests {
                 lan: Vec::new(),
                 wake_on_lan: None,
                 writes_failing: None,
+                stops_at_logout: None,
             },
             load: 0.0,
             last_seen_ms: slopty_core::WallMs::ZERO,

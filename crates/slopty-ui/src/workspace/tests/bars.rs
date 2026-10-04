@@ -900,3 +900,70 @@ fn the_title_bars_empty_span_moves_and_zooms_the_window(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert!(asks(cx).is_empty(), "a button's press is its own");
 }
+
+/// "Edit <machine>'s settings" opens that machine's own `settings.toml`, where its greeting
+/// said it is, in a file tile on it, from the palette and from its menu; a machine that named
+/// no file offers neither.
+#[gpui::test]
+fn a_machines_settings_open_in_a_file_tile_on_it(cx: &mut TestAppContext) {
+    const PATH: &str = "/Users/me/Library/Application Support/Slopty/settings.toml";
+    let (view, cx) = workspace(cx);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
+    let (tx, rx) = mpsc::channel(256);
+    let key = WorkerKey::new(1);
+    let factory: ScreenFactory =
+        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
+    view.update_in(cx, |v, _window, cx| {
+        v.add_worker(key, "studio".to_owned(), cx);
+        let me = ClientId::new();
+        let ack = HelloAck { settings: PATH.to_owned(), ..hello("studio", Vec::new()) };
+        v.connect_worker(
+            key,
+            WorkerLink { me, out: tx, open_screen: factory, remote: None },
+            ack,
+            cx,
+        );
+        v.apply_sync(key, ItemSync::Snapshot { version: 0, items: Vec::new() }, cx);
+    });
+    cx.run_until_parked();
+    let mut studio = Fake { key, me: ClientId::new(), rx };
+    studio.drain();
+    let laptop = connect(&view, cx, 2, "laptop");
+
+    let lines: Vec<String> = view.update(cx, |v, cx| {
+        v.palette_lines(cx)
+            .into_iter()
+            .map(|l| l.label)
+            .filter(|l| l.ends_with("settings"))
+            .collect()
+    });
+    assert_eq!(lines, ["Edit studio's settings"], "only a machine that said where");
+
+    let opened = |studio: &mut Fake| {
+        studio.drain().into_iter().find_map(|m| match m {
+            ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::File { path }, .. })) => Some(path),
+            _ => None,
+        })
+    };
+    cx.simulate_keystrokes("cmd-shift-p");
+    cx.run_until_parked();
+    cx.simulate_input("Edit studio's settings");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(opened(&mut studio).as_deref(), Some(PATH), "a file tile on the studio");
+
+    machine_menu(cx, laptop.key);
+    assert!(cx.debug_bounds("menu-Edit settings").is_none(), "the laptop named no file");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    machine_menu(cx, key);
+    click(cx, "menu-Edit settings");
+    assert!(cx.debug_bounds("menu").is_none(), "and the menu goes");
+    let focused = view.read_with(cx, |v, _| {
+        v.focused().and_then(|t| v.item(t)).map(|i| (v.focused().map(|t| t.worker), i.kind.clone()))
+    });
+    let file = ItemKind::File { path: PATH.to_owned() };
+    assert_eq!(focused, Some((Some(key), file)), "the open tile, focused, not a second one");
+    assert_eq!(opened(&mut studio), None, "no second tile");
+}

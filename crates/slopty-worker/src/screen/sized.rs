@@ -5,7 +5,7 @@
 //! [`DisplayKey`], and a stream's task hands its asks over as jobs ([`Main`]) and waits for the
 //! answer. One key has one display; a second stream with the same key shares it.
 //!
-//! The last stream letting go keeps the display for its linger ([`Displays::lingering`],
+//! The last stream letting go keeps the display for its linger ([`Displays::set_linger`],
 //! `[worker] display_linger_mins`, 10 minutes unless the person sets it), and the same key
 //! asking again within it takes the display back, windows where they were. A phone
 //! that roams between networks, or a laptop whose lid closes, would otherwise have macOS move
@@ -88,6 +88,8 @@ pub struct Registry<F: Factory> {
     /// The last linger started: each has its own number, so a timer outlived by a take-back
     /// and a later let-go releases nothing.
     lingers: u64,
+    /// How long a display is kept after its last lease; zero releases it with the lease.
+    linger: Duration,
 }
 
 impl<F: Factory> std::fmt::Debug for Registry<F> {
@@ -99,7 +101,7 @@ impl<F: Factory> std::fmt::Debug for Registry<F> {
 impl<F: Factory> Registry<F> {
     /// No display yet; `factory` makes them.
     pub fn new(factory: F) -> Self {
-        Self { factory, displays: HashMap::new(), lingers: 0 }
+        Self { factory, displays: HashMap::new(), lingers: 0, linger: Duration::ZERO }
     }
 }
 
@@ -163,16 +165,11 @@ pub enum Resized {
 pub struct Displays<F: Factory> {
     main: Arc<dyn Main<Registry<F>>>,
     settle_within: Duration,
-    linger: Duration,
 }
 
 impl<F: Factory> Clone for Displays<F> {
     fn clone(&self) -> Self {
-        Self {
-            main: Arc::clone(&self.main),
-            settle_within: self.settle_within,
-            linger: self.linger,
-        }
+        Self { main: Arc::clone(&self.main), settle_within: self.settle_within }
     }
 }
 
@@ -180,7 +177,6 @@ impl<F: Factory> std::fmt::Debug for Displays<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Displays")
             .field("settle_within", &self.settle_within)
-            .field("linger", &self.linger)
             .finish_non_exhaustive()
     }
 }
@@ -211,13 +207,14 @@ impl<F: Factory> Displays<F> {
     /// Displays living where `main` runs its jobs, given `settle_within` to settle, each
     /// released with its last lease.
     pub fn new(main: Arc<dyn Main<Registry<F>>>, settle_within: Duration) -> Self {
-        Self { main, settle_within, linger: Duration::ZERO }
+        Self { main, settle_within }
     }
 
-    /// Keep a display `linger` after its last lease, for its key to take back.
-    #[must_use]
-    pub fn lingering(self, linger: Duration) -> Self {
-        Self { linger, ..self }
+    /// Keep a display `linger` after its last lease from now on, for its key to take back: set
+    /// at the start and again as the person changes it. A linger already running keeps the
+    /// length it started with.
+    pub fn set_linger(&self, linger: Duration) {
+        self.main.run(Box::new(move |registry| registry.linger = linger));
     }
 
     /// Ask the main thread `job` and wait for its answer; `None` when the main thread dropped
@@ -348,7 +345,7 @@ impl<F: Factory> Displays<F> {
         if entry.users > 0 {
             return;
         }
-        if !entry.keep || self.linger.is_zero() {
+        if !entry.keep || registry.linger.is_zero() {
             Self::release(registry, key);
             return;
         }
@@ -356,9 +353,9 @@ impl<F: Factory> Displays<F> {
         let linger = registry.lingers;
         entry.lingering = Some(linger);
         let id = registry.factory.id(&entry.display);
-        tracing::info!(id, linger = ?self.linger, "virtual display kept for its client");
+        tracing::info!(id, linger = ?registry.linger, "virtual display kept for its client");
         self.main.run_after(
-            self.linger,
+            registry.linger,
             Box::new(move |registry| {
                 if registry.displays.get(&key).is_some_and(|e| e.lingering == Some(linger)) {
                     Self::release(registry, key);

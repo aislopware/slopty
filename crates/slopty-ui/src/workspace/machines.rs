@@ -6,9 +6,10 @@
 //! runs where, and at what version, is one look away. Nothing there signs in or installs: an
 //! agent's own word is all Slopty shows of it. Then what the app lets the person do to the
 //! machine: "Update" while it runs another build, "Connect" while its link is down, "Wake"
-//! while the server can wake it, sharing the clipboard with it or not, and "Forget" for one
-//! added by address. The app says which of those it can do ([`HostActions`]); the workspace
-//! only shows machines.
+//! while the server can wake it, sharing the clipboard with it or not, editing its settings
+//! file in a file tile, and "Forget" for one the server lists as away. The app says which of
+//! the connections and the forgetting it can do ([`HostActions`]); the workspace only shows
+//! machines.
 
 use std::collections::HashMap;
 
@@ -23,6 +24,9 @@ pub(super) const STOP_SHARING_CLIPBOARD: &str = "Unshare clipboard";
 /// A machine row's way to share the clipboard with it again.
 pub(super) const SHARE_CLIPBOARD: &str = "Share clipboard";
 
+/// A machine row's way to its settings file.
+pub(super) const EDIT_SETTINGS: &str = "Edit settings";
+
 /// What a machine's menu is called, after its name.
 pub(super) const MACHINE_MENU: &str = "Machine actions";
 
@@ -31,7 +35,7 @@ pub(super) const MACHINE_MENU: &str = "Machine actions";
 pub struct HostActions {
     /// Dial it now rather than at the end of the backoff; offered while its link is down.
     pub connect: Option<MenuRun>,
-    /// Forget it: offered for a worker added by address, which the server does not list.
+    /// Forget it: offered while the server lists it as not online, and asked of the server.
     pub forget: Option<MenuRun>,
     /// Wake it from sleep: offered while the server can send it a magic packet
     /// (`slopty_client::directory::Directory::can_wake`). The palette offers it too.
@@ -90,8 +94,9 @@ impl WorkspaceView {
         self.machines.hosts.get(&key)
     }
 
-    /// The lines that lead `key`'s menu, read-only: its system and load, then each agent
-    /// installed there with its version. Empty until the worker has said what it is.
+    /// The lines that lead `key`'s menu, read-only: its system and load, what to run there
+    /// while its services stop at logout, then each agent installed there with its version.
+    /// Empty until the worker has said what it is.
     pub(super) fn machine_facts(&self, key: WorkerKey) -> Vec<String> {
         let Some(caps) = self.workers.get(&key).and_then(|w| Some((w.caps.as_ref()?, w.load)))
         else {
@@ -99,6 +104,14 @@ impl WorkspaceView {
         };
         let (caps, load) = caps;
         let system = (!caps.os_version.is_empty()).then(|| super::navigator::host_line(caps, load));
+        // The worker's words start lower case, to follow the machine's name in a sentence.
+        let stops = caps.stops_at_logout.as_deref().map(|how| {
+            let mut chars = how.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default()
+        });
         let agents = caps.agents.iter().map(|installed| {
             let name = super::projects::agent_label(&installed.agent);
             // `claude --version` says "2.1.3 (Claude Code)" and `codex --version` "codex-cli
@@ -110,7 +123,7 @@ impl WorkspaceView {
                 None => name,
             }
         });
-        system.into_iter().chain(agents).collect()
+        system.into_iter().chain(stops).chain(agents).collect()
     }
 
     /// `key`'s facts as its menu leads with them: a quiet line each, then a rule.
@@ -161,11 +174,20 @@ impl WorkspaceView {
         };
         let shared = self.clipboard_shared(key);
         let share = super::actions::ShareClipboard { worker: key, share: !shared };
-        let entity = entity.clone();
+        let sharer = entity.clone();
         let share: MenuRun = std::rc::Rc::new(move |window, cx| {
-            let _gone = entity.update(cx, |this, cx| this.share_clipboard(&share, window, cx));
+            let _gone = sharer.update(cx, |this, cx| this.share_clipboard(&share, window, cx));
         });
         let clipboard = if shared { STOP_SHARING_CLIPBOARD } else { SHARE_CLIPBOARD };
+        let settings = w.settings.is_some().then(|| {
+            let entity = entity.clone();
+            let edit = super::actions::EditMachineSettings { worker: key };
+            let run: MenuRun = std::rc::Rc::new(move |window, cx| {
+                let _gone =
+                    entity.update(cx, |this, cx| this.edit_machine_settings(&edit, window, cx));
+            });
+            run
+        });
         let update = self.update_run(key, cx);
         let connect = host.connect.filter(|_| !w.status.is_up());
         [
@@ -173,10 +195,40 @@ impl WorkspaceView {
             connect.map(|run| entry(MenuGroup::Connections, "Connect", run)),
             host.wake.map(|run| entry(MenuGroup::Connections, "Wake", run)),
             Some(entry(MenuGroup::Settings, clipboard, share)),
+            settings.map(|run| entry(MenuGroup::Settings, EDIT_SETTINGS, run)),
             host.forget.map(|run| entry(MenuGroup::Removal, "Forget", run)),
         ]
         .into_iter()
         .flatten()
         .collect()
+    }
+
+    /// "Edit <machine>'s settings": its `settings.toml` in a file tile, an open one focused.
+    pub(super) fn edit_machine_settings(
+        &mut self,
+        edit: &super::actions::EditMachineSettings,
+        _window: &mut gpui::Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.workers.get(&edit.worker).and_then(|w| w.settings.clone()) else {
+            return;
+        };
+        self.open_file_on(Some(edit.worker), &path, None, cx);
+    }
+
+    /// "Edit <machine>'s settings" for each machine whose greeting said where its file is.
+    pub(super) fn settings_lines(&self) -> Vec<crate::palette::PaletteItem> {
+        self.workers
+            .iter()
+            .filter(|(_, w)| w.settings.is_some())
+            .map(|(key, w)| {
+                crate::palette::PaletteItem::new(
+                    &format!("Edit {}'s settings", w.name),
+                    crate::icons::IconName::Settings,
+                    Box::new(super::actions::EditMachineSettings { worker: *key }),
+                    &[],
+                )
+            })
+            .collect()
     }
 }

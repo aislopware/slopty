@@ -114,6 +114,7 @@ impl WorkspaceView {
         items.extend(self.pin_lines());
         items.extend(self.orchestrator_lines());
         items.extend(self.clipboard_lines());
+        items.extend(self.settings_lines());
         // What the focused remote tile can do beyond its header, only while one has the focus.
         items.extend(self.screen_lines(cx));
         items.extend(self.palette_extra.iter().cloned());

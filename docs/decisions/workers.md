@@ -803,7 +803,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     worker installed over SSH died with the SSH session, which the app's install always is.
     `Session::keep_running` (it replaced `install_note`) turns lingering on with `loginctl
     enable-linger`, which logind lets a user do for themselves, and only when that fails tells
-    the person to run it with `sudo`. Every install on Linux runs it, worker or server.
+    the person to run it with `sudo`. Every install on Linux runs it, worker or server. A
+    worker whose services still stop at logout says so for as long as they do (2026-10-05,
+    readiness N28): its capabilities carry `stops_at_logout`, read once a minute beside Wake
+    for network access (`caps::Seldom`). Every client's navigator shows "Stops at logout" on
+    the machine's warn line, its menu says what to run there, and `slopty worker doctor` lists
+    it. It clears itself once lingering is on. The install's one-time notice stays. Tests:
+    `slopty-ui` `a_workers_health_shows_only_when_something_is_wrong`, `slopty-cli`
+    doctor report, golden `server_caps_stops_at_logout`.
   - **The server, from the app.** The server panel's SSH entry is "Set up the server over SSH",
     and "Run the server on this Mac" sits beside it (`ssh::Workspace::serve_here_row`, for the
     panel to place). Both run `slopty_deploy::serve`: the same first step and upload as a
@@ -1069,26 +1076,36 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     machine added by address there is nothing to register, so "Register machines with the
     server", its notice and its test are gone.
 
-- ✅ **The daemons follow `settings.toml` live where they can, and say what waits** (2026-10-04,
-  readiness audit N10, A25). Each daemon read its table once at start, and nothing said so.
+- ✅ **The daemons follow `settings.toml` live, every key of their tables** (2026-10-04,
+  readiness audit N10, A25; finished 2026-10-05, #11). Each daemon read its table once at
+  start, and nothing said so.
   - The worker and the server poll the file's stamp every second (`slopty_settings::follow`,
-    where the app's own watcher moved). The worker applies `allow` (admission's ranges, shared
-    by every clone) and `server` (it drops its registration and joins the new one, and new
-    shells get the new environment) as the file changes. The server applies `allow` and the
-    project bounds.
-  - A key read only at start is marked in the schema (`x-restarts = "worker"`), and
-    `schema::restart_keys` names the ones a change touched. The worker logs them. After a change,
-    when a worker answers on this Mac, the app says "<titles> takes effect when slopty-worker
-    restarts on this Mac" and offers "Restart slopty-worker on this Mac" in the palette. That
-    restarts the worker alone, so ptyd and every session stay.
+    where the app's own watcher moved), and apply each change as they read it. A file that
+    does not parse changes nothing.
+  - The worker: `allow` sets admission's ranges, shared by every clone, from the next peer
+    on. `server` drops its registration and joins the new one, and new shells get the new
+    environment. `keep_awake` takes and releases the sleep holds at once (`Wake::set_policy`).
+    `input_source_sync` turned off lets go of every claim, so the worker's own source comes
+    back and every stream tells its client (`Sources::follow_clients`). `display_linger_mins`
+    lives with the displays on the main thread and counts from the next display let go
+    (`Displays::set_linger`). `[worker.acp]` is probed again into the capabilities at once,
+    and a thread's ACP start already read it per start.
+  - The server applies `allow` and the project bounds.
+  - Every key applying live left nothing to wait for a restart, so the `x-restarts` schema
+    marker, `schema::restart_keys`, the app's "takes effect when slopty-worker restarts"
+    notice and its "Restart slopty-worker on this Mac" palette line are deleted.
+  - Another machine's settings are a file tile away. The greeting names the worker's
+    `settings.toml` (`HelloAck::settings`), and the palette offers "Edit <machine>'s
+    settings" for each machine that named one, as does the machine's menu ("Edit settings").
+    Saving it applies on that machine as above.
   - The worker and server tables are not listed on an iPhone or an iPad, which runs neither.
-  - Editing another machine's settings from a client needs the worker's settings path on the
-    wire (`HelloAck`) and a file tile for it. That belongs to the wire's owner.
-  - Tests: `slopty-settings` `a_change_the_worker_reads_only_at_its_start_is_named`, `follow`;
-    `slopty-workerd` `a_change_of_the_file_is_applied_or_said_to_wait`; `slopty-serverd`
-    `an_edit_of_the_file_is_applied_as_it_is_read`; `slopty-app`
-    `a_change_the_worker_reads_at_its_start_says_so_and_how`; `slopty-ui`
-    `a_phone_lists_no_daemon_table`.
+  - Tests: `slopty-settings` `follow`; `slopty-workerd`
+    `a_change_of_the_file_is_applied_as_it_is_read` and e2e `a_saved_allow_lets_a_peer_in_with_no_restart` (this Mac dials its own LAN
+    address, refused, then let in once the file lists it); `slopty-worker`
+    `a_policy_changed_while_running_applies_at_once`; `slopty-input`
+    `syncing_turned_off_while_running_gives_the_worker_its_source_back`; `slopty-serverd`
+    `an_edit_of_the_file_is_applied_as_it_is_read`; `slopty-ui`
+    `a_machines_settings_open_in_a_file_tile_on_it`, `a_phone_lists_no_daemon_table`.
 
 - ✅ **The person's word is "machine"** (2026-10-04, `.research/rulings-2026-10-04.md` §8).
   Chrome said "worker", a role's jargon that also names another product, beside "machine" and

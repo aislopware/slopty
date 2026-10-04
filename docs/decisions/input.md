@@ -1067,11 +1067,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `worker_screen_field`.
 
 - ✅ **A worker can keep its own input source** (2026-10-03, readiness C10). `[worker]
-  input_source_sync = false` makes the worker refuse every claim (`Sources::refuse_claims`):
+  input_source_sync = false` makes the worker refuse every claim (`Sources::follow_clients`):
   a client whose source is already the worker's is answered `applied: true`, any other
   `applied: false` and composes on its side, as for a source the worker cannot select. For a
-  worker whose person types at it too and wants their source left alone. Read at start, like
-  the rest of `[worker]`. Test: `sources::tests::a_worker_that_refuses_claims_keeps_its_own_source`.
+  worker whose person types at it too and wants their source left alone. Applied as the file
+  changes (2026-10-05): turned off, every claim is let go, so the worker's own source comes
+  back at once and each stream hears the switch and tells its client to compose. Tests:
+  `sources::tests::a_worker_that_refuses_claims_keeps_its_own_source`,
+  `syncing_turned_off_while_running_gives_the_worker_its_source_back`.
 
 - ✅ **A remote window keeps its chords and reaches ours with ⌃** (2026-10-03, readiness
   A22). With a remote window focused, ⌘⇧P, ⌘⇧M and ⌘⇧I are the remote app's (VS Code's

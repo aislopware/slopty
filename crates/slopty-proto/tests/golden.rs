@@ -406,6 +406,7 @@ mod golden {
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
+            stops_at_logout: None,
         };
         snap(
             "worker_hello_ack",
@@ -1849,6 +1850,7 @@ mod golden {
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
+            stops_at_logout: None,
         };
         snap(
             "server_worker_hello",
@@ -2296,9 +2298,15 @@ mod orchestration {
             lan: vec![en0.clone()],
             wake_on_lan: Some(true),
             writes_failing: None,
+            stops_at_logout: None,
             ..WorkerCaps::bare(Os::MacOs)
         };
         snap("server_caps_lan", &ToServer::Caps(caps));
+        let lingerless = WorkerCaps {
+            stops_at_logout: Some("run `sudo loginctl enable-linger $USER` there".to_owned()),
+            ..WorkerCaps::bare(Os::Linux)
+        };
+        snap("server_caps_stops_at_logout", &ToServer::Caps(lingerless));
         let wake = Verb::Wake { worker };
         assert!(!wake.changes(), "a second packet wakes nothing the first did not");
         snap("server_client_wake", &ToServer::Request { id: 8, key: None, verb: wake });
@@ -2442,6 +2450,7 @@ mod ctl {
                 lan: Vec::new(),
                 wake_on_lan: None,
                 writes_failing: None,
+                stops_at_logout: None,
             },
             listen: "[::]:45550".to_owned(),
             allow: vec!["10.0.0.0/8".to_owned()],

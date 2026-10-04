@@ -12,9 +12,9 @@
 //! a build computes, a dev server waiting for requests does not. A paused turn holds the
 //! machine for [`PAUSED_CEILING`] at most, whatever it does, since a watcher that polls never
 //! ends. Otherwise an unattended worker sleeps as its owner set it to. The person may narrow it
-//! ([`Policy`], `[worker] keep_awake`): to attached clients only, or to nothing at all. The
-//! policy is pure and counts; the assertions behind [`Holds`] are the daemon's (`NSProcessInfo`
-//! activities through `slopty_platform::Activity`).
+//! ([`Policy`], `[worker] keep_awake`, applied as the file changes): to attached clients only, or
+//! to nothing at all. The policy is pure and counts; the assertions behind [`Holds`] are the
+//! daemon's (`NSProcessInfo` activities through `slopty_platform::Activity`).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -88,6 +88,18 @@ impl<H: Holds> Wake<H> {
     #[must_use]
     pub fn keeping(self, policy: Policy) -> Self {
         Self { policy, ..self }
+    }
+
+    /// The person changed the policy while the worker runs: hold from now on only what
+    /// `policy` lets hold, releasing what it no longer does. Agents stop counting at once under
+    /// a policy that does not count them, and count again from the next sample.
+    pub fn set_policy(&mut self, policy: Policy) {
+        self.policy = policy;
+        if !self.counts_agents() {
+            self.agents = 0;
+        }
+        self.hold_system();
+        self.streams(self.streams);
     }
 
     /// A client connected: the first one holds the machine awake.
@@ -300,6 +312,27 @@ mod tests {
 
     /// An agent whose terminal prints keeps counting; one silent for the cap stops, and
     /// counts again as soon as it prints; one that stops working is forgotten.
+    /// A policy changed while the worker runs takes and releases the holds at once.
+    #[test]
+    fn a_policy_changed_while_running_applies_at_once() {
+        let mut wake = Wake::new(Log::default());
+        wake.agents(1);
+        wake.streams(1);
+        assert_eq!(wake.holds.0, ["system on", "display on"]);
+        wake.set_policy(Policy::Attached);
+        assert_eq!(wake.holds.0, ["system on", "display on", "system off"], "agents stop");
+        assert_eq!(wake.awake().agents, 0, "and stop counting");
+        wake.client_joined();
+        wake.set_policy(Policy::Never);
+        assert_eq!(
+            wake.holds.0,
+            ["system on", "display on", "system off", "system on", "system off", "display off"]
+        );
+        wake.set_policy(Policy::Working);
+        assert_eq!(wake.holds.0.len(), 8, "the client and the stream hold again");
+        assert!(wake.awake().system && wake.awake().display);
+    }
+
     #[test]
     fn the_cap_lets_a_silent_agent_go() {
         let (a, b) = (SessionId::new(), SessionId::new());

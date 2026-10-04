@@ -55,6 +55,7 @@ mod golden_machine {
             lan: Vec::new(),
             wake_on_lan: None,
             writes_failing: None,
+            stops_at_logout: None,
         };
         snap(
             "machine_hello_ack",

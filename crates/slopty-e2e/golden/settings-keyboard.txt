@@ -133,8 +133,6 @@ ListItem │ Update the server
 Button │ Keys for Update the server
 ListItem │ Use this Mac
 Button │ Keys for Use this Mac
-ListItem │ Restart slopty-worker on this Mac
-Button │ Keys for Restart slopty-worker on this Mac
 ListItem │ Install on a machine over SSH
 Button │ Keys for Install on a machine over SSH
 ListItem │ Show machines in Finder

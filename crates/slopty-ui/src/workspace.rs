@@ -412,6 +412,9 @@ struct Worker {
     /// Its home directory as its hello said, so a path under it reads `~/…`; `None` until a
     /// link has said, or when the daemon has none.
     home: Option<String>,
+    /// Where its `settings.toml` is, as its hello said; `None` until a link has said, or when
+    /// the daemon has none.
+    settings: Option<String>,
     /// What it can do, as its link or the server's directory last said.
     caps: Option<WorkerCaps>,
     /// Its one-minute load average, as its link or the server last said.
@@ -469,6 +472,7 @@ impl Worker {
             relay: RelayWatch::default(),
             relay_due: None,
             home: None,
+            settings: None,
             caps: None,
             load: None,
             hooks_offered: false,
@@ -1934,7 +1938,8 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::scope_to))
             .on_action(cx.listener(Self::pin_to_project))
             .on_action(cx.listener(Self::name_project))
-            .on_action(cx.listener(Self::share_clipboard));
+            .on_action(cx.listener(Self::share_clipboard))
+            .on_action(cx.listener(Self::edit_machine_settings));
         // Only while they apply to the focus ([`actions::Applies`]).
         let root = root
             .when(applies.tile, |el| {

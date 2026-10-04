@@ -1,5 +1,5 @@
 //! Following the file for changes, as every reader of it does: the app, and the worker and the
-//! server, which apply an edit of their own table without a restart where they can.
+//! server, which apply an edit of their own table as they read it.
 //!
 //! A reader looks at the file's modification time and size once every [`POLL`] rather than
 //! watching it. Editors save atomically (write a temporary file, rename it over the old one),

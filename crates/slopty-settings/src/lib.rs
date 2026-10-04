@@ -672,8 +672,7 @@ impl JsonSchema for Chords {
 
 /// `[worker]`: what `slopty-worker` reads from the same file.
 ///
-/// It follows the file, applying `allow` and `server` as they change; a key marked
-/// `x-restarts` waits for its next start ([`schema::restart_keys`]).
+/// It follows the file, applying every key as it changes.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 #[schemars(title = "Share this Mac's shells and windows")]
@@ -717,10 +716,9 @@ pub struct WorkerSettings {
     /// A name and the command line that serves the Agent Client Protocol on stdio
     /// (`mine = ["/opt/mine/bin/agent", "--acp"]`). A name Slopty already knows (`gemini`,
     /// `opencode`, the ACP registry's) is started this way instead, and an empty list takes it
-    /// away. Its threads' agent is `acp:<name>`. Read at each start.
+    /// away. Its threads' agent is `acp:<name>`. A change is probed again at once.
     #[schemars(
         title = "ACP agents",
-        extend("x-restarts" = "worker"),
         example = serde_json::json!({ "mine": ["/opt/mine/bin/agent", "--acp"], "goose": [] })
     )]
     pub acp: BTreeMap<String, Vec<String>>,
@@ -729,24 +727,23 @@ pub struct WorkerSettings {
     /// While a remote window has the keyboard, the worker selects the client's keyboard input
     /// source, so keys go by their place and the remote app's own input methods compose. Off,
     /// the worker keeps its own source for the person at it, and each client composes on its
-    /// side and sends the text. Read when the worker starts.
-    #[schemars(title = "Follow the client's input source", extend("x-restarts" = "worker"))]
+    /// side and sends the text. Turned off, the worker's own source comes back at once.
+    #[schemars(title = "Follow the client's input source")]
     pub input_source_sync: bool,
     /// While working also counts an agent at work with nobody attached.
     ///
     /// What keeps this Mac out of idle sleep: a client attached or an agent at work, a client
     /// attached only, or nothing (the Mac sleeps as its own settings say, a streamed display
-    /// too). Read when the worker starts.
-    #[schemars(title = "Keep awake", extend("x-restarts" = "worker"))]
+    /// too). Applied at once.
+    #[schemars(title = "Keep awake")]
     pub keep_awake: KeepAwake,
     /// How long a client's display waits for it to return; 0 ends it.
     ///
     /// A display the worker made in a client's shape stays this many minutes after its last
-    /// stream ends, windows in place, for the same client to take back. Read when the worker
-    /// starts.
+    /// stream ends, windows in place, for the same client to take back. A change counts from
+    /// the next display let go.
     #[schemars(
         title = "Keep a client's display",
-        extend("x-restarts" = "worker"),
         range(min = *bounds::DISPLAY_LINGER_MINS.start(), max = *bounds::DISPLAY_LINGER_MINS.end()),
         extend("x-step" = 5, "x-unit" = "min")
     )]
