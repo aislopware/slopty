@@ -4,7 +4,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    AppContext as _, Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, px, size,
+};
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::detail::Hunk;
 use slopty_proto::thread::wire::{
@@ -13,7 +15,7 @@ use slopty_proto::thread::wire::{
 use slopty_proto::thread::{Cursor, Delivery, Patch, TurnId};
 use slopty_theme::Theme;
 
-use super::view::ReviewView;
+use super::view::{ReviewEvent, ReviewView};
 use crate::conversation::thread::{HubEvent, ThreadHub, fixtures};
 
 type Sent = Rc<RefCell<Vec<ClientMsg>>>;
@@ -159,7 +161,7 @@ fn keeping_a_hunk_sends_its_pick_and_says_so_at_once(cx: &mut TestAppContext) {
 }
 
 /// A click on a line opens a comment there; Return keeps it; the foot sends every comment as
-/// one message, `path L<n>: body`, and none wait after.
+/// one message, each under the code it is on, and none wait after.
 #[gpui::test]
 fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     let (_view, _hub, sent, cx) = tile(cx, 800.0);
@@ -173,12 +175,55 @@ fn line_comments_go_as_one_message(cx: &mut TestAppContext) {
     assert_eq!(
         intents(&sent),
         [Intent::Send {
-            text: "src/lib.rs L11: Why new?".to_owned(),
+            text: "In `src/lib.rs` line 11:\n```diff\n+    new();\n```\nWhy new?".to_owned(),
             delivery: Delivery::Steer,
             attachments: vec![]
         }]
     );
     assert!(cx.debug_bounds("review-comment-0").is_none());
+}
+
+/// A drag over a hunk's lines comments on the run, quoted whole with its numbers; a
+/// shift-press past it reaches further. "Add to message" hands the comments to the thread's
+/// draft and sends nothing.
+#[gpui::test]
+fn a_drag_comments_on_a_run_and_add_to_message_sends_nothing(cx: &mut TestAppContext) {
+    let (view, _hub, sent, cx) = tile(cx, 800.0);
+    let heard: Rc<RefCell<Vec<ReviewEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
+            into.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    let at = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).unwrap().center();
+    let (from, to) = (at(cx, "review-line-1-0-0"), at(cx, "review-line-1-0-1"));
+    cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::none());
+    cx.run_until_parked();
+    let past = at(cx, "review-line-1-0-2");
+    cx.simulate_mouse_down(past, MouseButton::Left, Modifiers::shift());
+    cx.simulate_mouse_up(past, MouseButton::Left, Modifiers::shift());
+    cx.run_until_parked();
+    cx.simulate_input("Why swap these?");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "under the run's last line");
+
+    click(cx, "review-add");
+    assert!(intents(&sent).is_empty(), "nothing sent");
+    assert_eq!(
+        *heard.borrow(),
+        [ReviewEvent::AddToMessage {
+            thread: view.read_with(cx, |v, _| v.thread()),
+            text: "In `src/lib.rs` lines 10\u{2013}11:\n```diff\n fn main() {\n-    old();\n+    \
+                   new();\n```\nWhy swap these?"
+                .to_owned(),
+        }]
+    );
+    assert!(cx.debug_bounds("review-comment-0").is_none(), "none wait after");
 }
 
 /// "Mark reviewed" keeps every file shown.

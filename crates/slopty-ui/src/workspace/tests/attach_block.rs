@@ -37,7 +37,7 @@ fn a_block_from_a_shell_lands_in_the_last_agents_draft(cx: &mut TestAppContext) 
 
     let block = "The terminal ran `false`, which exited 1:\n\n(no output)\n";
     let terminal = view.read_with(cx, |v, _| v.terminals.get(&shell).cloned()).expect("drawn");
-    terminal.update(cx, |_, cx| cx.emit(TerminalViewEvent::AttachBlock(block.to_owned())));
+    terminal.update(cx, |_, cx| cx.emit(TerminalViewEvent::Attach(block.to_owned())));
     cx.run_until_parked();
     let face = view.read_with(cx, |v, _| v.conversation(agent).cloned()).expect("a face");
     let draft = face.read_with(cx, ConversationView::draft);

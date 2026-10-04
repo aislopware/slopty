@@ -1,5 +1,5 @@
-//! A thread's review opens as a tile of its own on the agent's worker, takes the keyboard, and
-//! lets the thread go once its tile is closed.
+//! A thread's review opens as a tile of its own on the agent's worker, takes the keyboard,
+//! hands its comments to the agent's draft, and lets the thread go once its tile is closed.
 
 use slopty_core::WallMs;
 use slopty_proto::thread::Cursor;
@@ -10,7 +10,8 @@ use crate::conversation::thread::ThreadViewEvent;
 
 /// The thread view's "Review" adds a review item on the agent's worker; once the registry has
 /// it, its tile draws the review and holds the keyboard, and a second ask goes to that tile
-/// rather than adding another. The tile removed, the review view is let go.
+/// rather than adding another. Comments added to the message land in the agent's draft, with
+/// the agent's tile in front. The tile removed, the review view is let go.
 #[gpui::test]
 fn a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -78,6 +79,22 @@ fn a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it(cx: &mut TestAp
     let again = studio.drain();
     assert!(!again.iter().any(|m| matches!(m, ClientMsg::Items(ItemOp::Add(_)))), "{again:?}");
     assert_eq!(focused(&view, cx), Some(tile), "a second ask goes to the open tile");
+
+    let words = "In `src/lib.rs` line 11:\n```diff\n+    new();\n```\nWhy new?";
+    let shown = view.read_with(cx, |v, _| v.review_of(thread).cloned()).expect("the review");
+    shown.update(cx, |_, cx| {
+        cx.emit(crate::review::ReviewEvent::AddToMessage { thread, text: words.to_owned() });
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("the face");
+    assert_eq!(
+        face.read_with(cx, crate::conversation::thread::ThreadView::draft),
+        words,
+        "in the agent's draft"
+    );
+    assert_eq!(focused(&view, cx), Some(agent), "the agent's tile comes to the front");
 
     let op = ItemOp::Remove(review.id);
     view.update_in(cx, |v, _w, cx| v.apply_sync(key, ItemSync::Delta { version: 3, by, op }, cx));

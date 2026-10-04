@@ -560,6 +560,7 @@ pub fn defaults() -> Vec<Command> {
         c(Terminal, "note_last_block", t::NoteLastBlock, &[], &[TERMINAL]),
         c(Terminal, "copy_block_output", t::CopyBlockOutput, &[], &[TERMINAL]),
         c(Terminal, "attach_block", t::AttachBlock, &[], &[TERMINAL]),
+        c(Terminal, "attach_selection", t::AttachSelection, &[], &[TERMINAL]),
         c(Terminal, "clear_screen", t::ClearScreen, &["cmd-k"], &[TERMINAL]),
     ]);
     // AppKit's menu and WebKit take these nowhere a page's field would expect; the page does

@@ -118,19 +118,36 @@ pub enum Side {
     New,
 }
 
-/// A comment on a line, waiting to be sent with the rest.
+/// A comment on a line or a run of lines, waiting to be sent with the rest.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Comment {
     /// The file.
     pub path: String,
-    /// The line's number on its side.
+    /// The first line's number on its side.
     pub line: u32,
+    /// The last line's number on its side: `line` for a comment on one line.
+    pub end: u32,
     /// Its side.
     pub side: Side,
-    /// A hash of the line's text: where the comment belongs if the diff moves under it.
+    /// A hash of the first line's text: where the comment belongs if the diff moves under it.
     pub anchor: u64,
+    /// The lines it is on, quoted as the agent reads them
+    /// ([`crate::conversation::diff::quote`]): where they are, then a fenced diff.
+    pub quote: String,
     /// What the person wrote.
     pub body: String,
+}
+
+impl Comment {
+    /// Where it is, in a few words: "Line 12", "Lines 12–18".
+    #[must_use]
+    pub fn place(&self) -> String {
+        if self.end > self.line {
+            format!("Lines {}\u{2013}{}", self.line, self.end)
+        } else {
+            format!("Line {}", self.line)
+        }
+    }
 }
 
 /// The hash a comment is anchored by.
@@ -141,18 +158,15 @@ pub fn anchor(text: &str) -> u64 {
     h.finish()
 }
 
-/// The comments as one message to the agent, a line each: `path L<n>: body`, and `path
-/// L<n> (removed): body` for a line only the old file had.
+/// The comments as one message to the agent: each the code it is on, quoted with where it is,
+/// then what the person wrote, so the agent need not open the file to know what was meant.
 #[must_use]
 pub fn message(comments: &[Comment]) -> String {
     comments
         .iter()
-        .map(|c| {
-            let side = if c.side == Side::Old { " (removed)" } else { "" };
-            format!("{} L{}{side}: {}", c.path, c.line, c.body.trim())
-        })
+        .map(|c| format!("{}{}", c.quote, c.body.trim()))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n\n")
 }
 
 /// What a review is and what the person did over it.
@@ -314,27 +328,36 @@ mod tests {
     }
 
     #[test]
-    fn comments_go_as_one_message_a_line_each() {
+    fn comments_go_as_one_message_each_under_its_code() {
         let comments = [
             Comment {
                 path: "src/a.rs".to_owned(),
                 line: 12,
+                end: 13,
                 side: Side::New,
                 anchor: anchor("let x = 1;"),
-                body: "Name this better ".to_owned(),
+                quote:
+                    "In `src/a.rs` lines 12\u{2013}13:\n```diff\n+let x = 1;\n+let y = 2;\n```\n"
+                        .to_owned(),
+                body: "Name these better ".to_owned(),
             },
             Comment {
                 path: "src/b.rs".to_owned(),
                 line: 3,
+                end: 3,
                 side: Side::Old,
                 anchor: anchor("old();"),
+                quote: "In `src/b.rs` line 3:\n```diff\n-old();\n```\n".to_owned(),
                 body: "Why did this go?".to_owned(),
             },
         ];
         assert_eq!(
             message(&comments),
-            "src/a.rs L12: Name this better\nsrc/b.rs L3 (removed): Why did this go?"
+            "In `src/a.rs` lines 12\u{2013}13:\n```diff\n+let x = 1;\n+let y = 2;\n```\nName these \
+             better\n\nIn `src/b.rs` line 3:\n```diff\n-old();\n```\nWhy did this go?"
         );
+        assert_eq!(comments[0].place(), "Lines 12\u{2013}13");
+        assert_eq!(comments[1].place(), "Line 3");
     }
 
     #[test]
@@ -344,8 +367,10 @@ mod tests {
         let on = |text: &str, side| Comment {
             path: "src/a.rs".to_owned(),
             line: 1,
+            end: 1,
             side,
             anchor: anchor(text),
+            quote: String::new(),
             body: "Look".to_owned(),
         };
         model.comment(on("new line", Side::New));

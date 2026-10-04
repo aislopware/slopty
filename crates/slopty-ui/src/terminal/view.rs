@@ -109,15 +109,18 @@ mod actions {
             /// Attach the selected command block (the last one with none selected) to an
             /// agent's thread as context.
             AttachBlock,
+            /// Attach the selected text to an agent's thread as context, fenced and named after
+            /// the command whose output it is.
+            AttachSelection,
             /// Clear the screen and the history (⌘K, as in every Mac terminal).
             ClearScreen,
         ]
     );
 }
 pub use actions::{
-    AttachBlock, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput, Find, FindNext,
-    FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast, ScrollPageDown,
-    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
+    AttachBlock, AttachSelection, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput,
+    Find, FindNext, FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
 };
 
 /// The terminal's key bindings in effect: the keymap's terminal scope ([`crate::keymap`], where
@@ -245,10 +248,11 @@ pub enum TerminalViewEvent {
     /// "Save as note" on a block's menu: the block as a note's Markdown (`block_note`); the
     /// workspace puts a note tile with it beside the shell.
     NoteBlock(String),
-    /// "Attach to agent" on a block's menu, or the palette's "Attach block to agent": the block
-    /// as context for an agent's message, Markdown (`block_context`), for the workspace to put
-    /// in the draft of the agent it picks. Offered only while the attach probe finds one.
-    AttachBlock(String),
+    /// Context for an agent's message, Markdown, for the workspace to put in the draft of the
+    /// agent it picks: a block from "Attach to agent" on its menu or the palette's "Attach block
+    /// to agent" (`block_context`), or the selection from "Attach selection to agent"
+    /// (`selection_context`). Offered only while the attach probe finds an agent.
+    Attach(String),
     /// "View" on a tool call that named a file, or ⌘-click on a path while a command runs:
     /// the workspace opens (or reveals) a file tile for it, a relative path made absolute
     /// against the session's directory, landing on `line` (1-based) when one is known.
@@ -1421,6 +1425,9 @@ impl TerminalView {
         }
         if has_selection {
             items.push(BlockMenuItem::Copy);
+            if can_attach {
+                items.push(BlockMenuItem::AttachSelection);
+            }
             if block.is_none() {
                 items.push(BlockMenuItem::Note);
             }
@@ -1444,6 +1451,7 @@ impl TerminalView {
             BlockMenuItem::Paste => self.paste_clipboard(&Paste, window, cx),
             BlockMenuItem::Find => self.find(&Find, window, cx),
             BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
+            BlockMenuItem::AttachSelection => self.attach_selection(&AttachSelection, window, cx),
             BlockMenuItem::Note => {
                 let text = match menu.block {
                     Some(block) => block_note(&block),
@@ -1490,9 +1498,10 @@ impl TerminalView {
                     self.run_text(command, cx);
                 }
             }
-            BlockMenuItem::Attach => cx.emit(TerminalViewEvent::AttachBlock(block_context(&block))),
+            BlockMenuItem::Attach => cx.emit(TerminalViewEvent::Attach(block_context(&block))),
             BlockMenuItem::SelectBlock => self.select_block(&block),
             BlockMenuItem::Copy
+            | BlockMenuItem::AttachSelection
             | BlockMenuItem::Paste
             | BlockMenuItem::Find
             | BlockMenuItem::ClearScreen
@@ -1535,7 +1544,7 @@ impl TerminalView {
     }
 
     /// The palette's "Attach block to agent": the block `target_block` picks goes to an agent's
-    /// draft as context ([`TerminalViewEvent::AttachBlock`]). With no agent to take it
+    /// draft as context ([`TerminalViewEvent::Attach`]). With no agent to take it
     /// ([`Self::set_attach_probe`]) the palette lists no line for it, and a key bound to it says
     /// so.
     pub fn attach_block(&mut self, _: &AttachBlock, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1544,9 +1553,40 @@ impl TerminalView {
             return;
         }
         match self.target_block() {
-            Some(block) => cx.emit(TerminalViewEvent::AttachBlock(block_context(&block))),
+            Some(block) => cx.emit(TerminalViewEvent::Attach(block_context(&block))),
             None => cx.emit(TerminalViewEvent::Notice("No command block to attach".to_owned())),
         }
+    }
+
+    /// The palette's "Attach selection to agent", and the menu's: the selected text goes to an
+    /// agent's draft as context ([`TerminalViewEvent::Attach`]), fenced and named after the
+    /// command whose block the selection starts in. With no agent to take it, or nothing
+    /// selected, it says so.
+    pub fn attach_selection(
+        &mut self,
+        _: &AttachSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.can_attach(cx) {
+            cx.emit(TerminalViewEvent::Notice("No agent to attach the selection to".to_owned()));
+            return;
+        }
+        let Some(text) = self.selected_text().filter(|t| !t.trim().is_empty()) else {
+            cx.emit(TerminalViewEvent::Notice("Nothing selected to attach".to_owned()));
+            return;
+        };
+        let block = self
+            .selection
+            .filter(|_| !self.state.modes().contains(TermModes::ALT_SCREEN))
+            .and_then(|selection| self.state.command_block(selection.ordered().0.0));
+        cx.emit(TerminalViewEvent::Attach(selection_context(&text, block.as_ref())));
+    }
+
+    /// Whether some text is selected: the palette offers "Attach selection to agent" only then.
+    #[must_use]
+    pub fn has_selection(&self) -> bool {
+        self.selection_has_text()
     }
 
     /// ⇧-arrow with a selection: where its head moves (a cell sideways, wrapping at the row's
@@ -4179,6 +4219,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::note_last_block))
             .on_action(cx.listener(Self::copy_block_output))
             .on_action(cx.listener(Self::attach_block))
+            .on_action(cx.listener(Self::attach_selection))
             .on_action(cx.listener(Self::clear_screen))
             .on_action(cx.listener(Self::scroll_page_up))
             .on_action(cx.listener(Self::scroll_page_down))
@@ -4393,6 +4434,8 @@ enum BlockMenuItem {
     Note,
     /// The block into an agent's draft as context.
     Attach,
+    /// The selection into an agent's draft as context.
+    AttachSelection,
     /// Select the whole block, prompt to last output row.
     SelectBlock,
     /// The selection to the clipboard.
@@ -4432,6 +4475,24 @@ pub(super) fn block_context(block: &CommandBlock) -> String {
     format!("{text}\n{fence}\n{}\n{fence}\n", block.output)
 }
 
+/// Selected terminal text as context for an agent's message: whose output it is, when the
+/// selection starts in a block with a command, then the text fenced (with a fence longer than
+/// any run of backticks in it).
+#[must_use]
+pub(super) fn selection_context(text: &str, block: Option<&CommandBlock>) -> String {
+    let command = block.and_then(|b| b.command.as_deref()).filter(|c| !c.trim().is_empty());
+    let from = match command {
+        Some(command) if command.contains('\n') => {
+            format!("From the terminal, what this printed:\n\n```sh\n{command}\n```\n")
+        }
+        Some(command) => format!("From the terminal, what `{command}` printed:\n"),
+        None => "From the terminal:\n".to_owned(),
+    };
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2).saturating_add(1));
+    format!("{from}\n{fence}\n{text}\n{fence}\n")
+}
+
 /// A command block as a note: the command as a heading and a runnable `sh` fence, the
 /// output as a plain fence under it; either half alone when the block has only that.
 #[must_use]
@@ -4463,6 +4524,7 @@ impl BlockMenuItem {
             Self::Rerun => "rerun",
             Self::Note => "note",
             Self::Attach => "attach",
+            Self::AttachSelection => "attach-selection",
             Self::SelectBlock => "select-block",
             Self::Copy => "copy",
             Self::Paste => "paste",
@@ -4478,6 +4540,7 @@ impl BlockMenuItem {
             Self::Rerun => "Rerun",
             Self::Note => "Save as note",
             Self::Attach => "Attach to agent",
+            Self::AttachSelection => "Attach selection to agent",
             Self::SelectBlock => "Select block",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
@@ -6054,6 +6117,67 @@ mod tests {
         assert!(cx.debug_bounds("block-menu").is_none());
     }
 
+    /// "Attach selection to agent" hands the workspace the selected text fenced, named after
+    /// the command whose output it is; the menu offers it only with text selected and an agent
+    /// to take it, and the action says why it does nothing otherwise.
+    #[gpui::test]
+    fn a_selection_is_attached_named_after_its_command(cx: &mut TestAppContext) {
+        let (view, _rx, cx) = terminal(cx);
+        with_command_blocks(&view, cx);
+        let dispatch = |cx: &mut VisualTestContext, action: Box<dyn gpui::Action>| {
+            cx.update(|window, cx| window.dispatch_action(action, cx));
+            cx.run_until_parked();
+        };
+        let (attached, notices) =
+            (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(Vec::new())));
+        let (seen, heard) = (Rc::clone(&attached), Rc::clone(&notices));
+        cx.update(|_window, cx| {
+            cx.subscribe(&view, move |_view, event, _cx| match event {
+                TerminalViewEvent::Attach(text) => seen.borrow_mut().push(text.clone()),
+                TerminalViewEvent::Notice(text) => heard.borrow_mut().push(text.clone()),
+                _ => {}
+            })
+            .detach();
+        });
+        let menu = |cx: &mut VisualTestContext| {
+            view.read_with(cx, |v, cx| {
+                TerminalView::block_menu_items(None, v.has_selection(), v.can_attach(cx))
+            })
+        };
+        // Lines 5 and 6 are `seq 2`'s output.
+        view.update(cx, |view, _cx| {
+            view.selection = Some(Selection::run((LineIndex(5), 0), (LineIndex(6), 9)));
+        });
+        dispatch(cx, Box::new(AttachSelection));
+        assert_eq!(notices.borrow().as_slice(), ["No agent to attach the selection to"]);
+        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection));
+
+        let probe: AttachProbe = Rc::new(|_cx: &App| true);
+        view.update(cx, |view, _cx| view.set_attach_probe(probe));
+        assert!(menu(cx).contains(&BlockMenuItem::AttachSelection));
+        dispatch(cx, Box::new(AttachSelection));
+        assert_eq!(
+            attached.borrow().as_slice(),
+            ["From the terminal, what `seq 2` printed:\n\n```\n1\n2\n```\n"]
+        );
+
+        view.update(cx, |view, _cx| view.selection = None);
+        assert!(!menu(cx).contains(&BlockMenuItem::AttachSelection), "nothing selected");
+        dispatch(cx, Box::new(AttachSelection));
+        assert_eq!(notices.borrow().last().map(String::as_str), Some("Nothing selected to attach"));
+        assert_eq!(attached.borrow().len(), 1);
+    }
+
+    /// Selected text off every block is "From the terminal", and a fence outruns the backticks
+    /// in it.
+    #[test]
+    fn a_selection_s_fence_outruns_its_backticks() {
+        assert_eq!(
+            selection_context("a ``` b", None),
+            "From the terminal:\n\n````\na ``` b\n````\n"
+        );
+    }
+
     /// Warp's block gestures. A click in the gutter beside a block selects it whole, its prompt
     /// to its last output row, and is not the program's; the palette's "Copy block output"
     /// copies that block's output and "Attach block to agent" hands the workspace the block as
@@ -6093,7 +6217,7 @@ mod tests {
         let seen = Rc::clone(&attached);
         cx.update(|_window, cx| {
             cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::AttachBlock(text) = event {
+                if let TerminalViewEvent::Attach(text) = event {
                     seen.borrow_mut().push(text.clone());
                 }
             })

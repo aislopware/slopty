@@ -120,7 +120,7 @@ impl WorkspaceView {
             );
         }
         items.extend(super::actions::palette_items());
-        items.extend(self.attach_line());
+        items.extend(self.attach_lines(cx));
         items.extend(self.group_lines());
         items.extend(self.scope_lines());
         items.extend(self.pin_lines());

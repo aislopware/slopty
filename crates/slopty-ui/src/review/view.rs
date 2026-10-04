@@ -3,6 +3,11 @@
 //! The diff is one virtualized list of rows (a file's head, a hunk's head, a line or a pair of
 //! lines, a comment, the field a comment is written in), so a review of thousands of lines lays
 //! out only what is in view.
+//!
+//! A press on a line comments on it; a drag over a hunk's lines, or a shift-press past the
+//! line commented on, comments on the run. A comment carries the code it is on, quoted, so the
+//! agent reads what was meant. The comments go to the agent at once, or into the thread's
+//! draft to send with more words.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -13,8 +18,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
     Focusable, FontWeight, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, list, px,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px,
 };
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::threads::Mirror;
@@ -23,7 +28,7 @@ use slopty_proto::thread::{Delivery, IntentId, ThreadId};
 use slopty_theme::{Theme, Typography};
 
 use super::model::{self, Comment, Model, Scope, Side};
-use crate::colors::hsla;
+use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::{HubEvent, ThreadHub};
@@ -43,12 +48,20 @@ const LIST_WIDTH: f32 = 240.0;
 const OVERDRAW: f32 = 2048.0;
 
 /// What the tile tells its host.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ReviewEvent {
     /// The comments went to the agent: the thread is where its answer shows.
     CommentsSent {
         /// The thread.
         thread: ThreadId,
+    },
+    /// The comments are for the thread's draft, to go with more words: the host puts `text`
+    /// at its end and gives it the keyboard.
+    AddToMessage {
+        /// The thread.
+        thread: ThreadId,
+        /// The comments as one message.
+        text: String,
     },
 }
 
@@ -71,14 +84,41 @@ enum Row {
     Draft,
 }
 
-/// The line a comment is being written on.
+/// Rows of one hunk picked for a comment, by their place among the hunk's rows (its lines in
+/// a column, its pairs side by side): where the press went down and where it is now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Span {
+    at: usize,
+    hunk: usize,
+    from: usize,
+    to: usize,
+}
+
+impl Span {
+    /// The first and last rows picked.
+    fn range(self) -> (usize, usize) {
+        (self.from.min(self.to), self.from.max(self.to))
+    }
+
+    /// Whether row `ix` of hunk `hunk` of the file at `at` is picked.
+    fn holds(self, at: usize, hunk: usize, ix: usize) -> bool {
+        let (lo, hi) = self.range();
+        self.at == at && self.hunk == hunk && (lo..=hi).contains(&ix)
+    }
+}
+
+/// The lines a comment is being written on.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Drafting {
     path: String,
     line: u32,
+    end: u32,
     side: Side,
     anchor: u64,
-    /// The row it hangs under.
+    quote: String,
+    /// The rows picked.
+    span: Span,
+    /// The row it hangs under: the last picked.
     after: Row,
 }
 
@@ -98,6 +138,8 @@ pub struct ReviewView {
     blocks: HashMap<usize, Rc<[Block]>>,
     rows: Vec<Row>,
     list: ListState,
+    /// The rows the pointer is picking, while it is down.
+    marking: Option<Span>,
     drafting: Option<Drafting>,
     draft: Entity<InputState>,
     /// Keeps and put-backs this tile sent, until the worker has acted on them: then the
@@ -162,6 +204,7 @@ impl ReviewView {
             blocks: HashMap::new(),
             rows: Vec::new(),
             list: ListState::new(0, ListAlignment::Top, px(OVERDRAW)),
+            marking: None,
             drafting: None,
             draft,
             picks: HashSet::new(),
@@ -286,6 +329,7 @@ impl ReviewView {
             }
         }
         self.drafting = None;
+        self.marking = None;
         self.rebuild();
     }
 
@@ -330,7 +374,7 @@ impl ReviewView {
     /// is being written there.
     fn under(&self, rows: &mut Vec<Row>, path: &str, lines: &[&Line], row: Row) {
         for (ix, c) in self.model.comments().iter().enumerate() {
-            if c.path == path && lines.iter().any(|l| on(l, c.side, c.line)) {
+            if c.path == path && lines.iter().any(|l| on(l, c.side, c.end)) {
                 rows.push(Row::Comment(ix));
             }
         }
@@ -377,30 +421,125 @@ impl ReviewView {
         cx.notify();
     }
 
-    /// Start a comment on `line` of the file at `at`, under `row`.
-    fn start_comment(
+    /// Put the comments into the thread's draft rather than send them: the host gives the
+    /// draft the keyboard.
+    fn add_to_message(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self.model.take_message() else { return };
+        self.rebuild();
+        cx.emit(ReviewEvent::AddToMessage { thread: self.thread, text });
+        cx.notify();
+    }
+
+    /// The row of the diff that row `ix` of hunk `hunk` of the file at `at` is, in the layout
+    /// on show.
+    fn row_of(&self, at: usize, hunk: usize, ix: usize) -> Row {
+        if self.split() { Row::Pair(at, hunk, ix) } else { Row::Line(at, hunk, ix) }
+    }
+
+    /// The lines of `span`, in the diff's order: a pair's removed line before its added one,
+    /// a context line once.
+    fn span_lines(&self, span: Span) -> Vec<Line> {
+        let Some(block) = self.blocks.get(&span.at).and_then(|b| b.get(span.hunk)) else {
+            return Vec::new();
+        };
+        let (lo, hi) = span.range();
+        if !self.split() {
+            return block.lines.get(lo..=hi).map(<[Line]>::to_vec).unwrap_or_default();
+        }
+        let (mut out, mut removed, mut added) = (Vec::new(), Vec::new(), Vec::new());
+        for pair in diff::pairs(block).get(lo..=hi).unwrap_or_default() {
+            match *pair {
+                (Some(old), Some(new)) if std::ptr::eq(old, new) => {
+                    out.append(&mut removed);
+                    out.append(&mut added);
+                    out.push(old.clone());
+                }
+                (old, new) => {
+                    removed.extend(old.cloned());
+                    added.extend(new.cloned());
+                }
+            }
+        }
+        out.append(&mut removed);
+        out.append(&mut added);
+        out
+    }
+
+    /// The pointer went down on row `ix` of a hunk: it is picked, and a drag picks on from it.
+    /// With shift, the run goes from the row a comment is being written on.
+    fn press_line(
         &mut self,
         at: usize,
-        line: &Line,
-        row: Row,
-        window: &mut Window,
+        hunk: usize,
+        ix: usize,
+        shift: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = self.model.file(at).map(|f| f.path.clone()) else { return };
-        let (side, number) = match (line.kind, line.new, line.old) {
-            (Kind::Removed, _, Some(old)) => (Side::Old, old),
-            (_, Some(new), _) => (Side::New, new),
-            _ => return,
+        let from = self
+            .drafting
+            .as_ref()
+            .map(|d| d.span)
+            .filter(|s| shift && s.at == at && s.hunk == hunk)
+            .map_or(ix, |s| s.from);
+        self.marking = Some(Span { at, hunk, from, to: ix });
+        cx.notify();
+    }
+
+    /// The pointer dragged onto row `ix` of a hunk: the run reaches it, within the hunk it
+    /// started in.
+    fn drag_line(&mut self, at: usize, hunk: usize, ix: usize, cx: &mut Context<Self>) {
+        if let Some(span) = &mut self.marking
+            && span.at == at
+            && span.hunk == hunk
+            && span.to != ix
+        {
+            span.to = ix;
+            cx.notify();
+        }
+    }
+
+    /// The pointer let go: a comment starts on the rows it picked.
+    fn release_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(span) = self.marking.take() {
+            self.start_comment(span, window, cx);
+        }
+    }
+
+    /// Start a comment on the lines of `span`, under its last row. Its numbers are the new
+    /// file's, the old file's for removals alone.
+    fn start_comment(&mut self, span: Span, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.model.file(span.at).map(|f| f.path.clone()) else { return };
+        let lines = self.span_lines(span);
+        let new: Vec<&Line> = lines.iter().filter(|l| l.kind != Kind::Removed).collect();
+        let (side, numbered) = if new.is_empty() {
+            (Side::Old, lines.iter().filter(|l| l.old.is_some()).collect::<Vec<_>>())
+        } else {
+            (Side::New, new.into_iter().filter(|l| l.new.is_some()).collect())
         };
+        let number = |l: &&Line| if side == Side::Old { l.old } else { l.new };
+        let (Some(first), Some(line), Some(end)) = (
+            numbered.first(),
+            numbered.iter().filter_map(number).min(),
+            numbered.iter().filter_map(number).max(),
+        ) else {
+            return;
+        };
+        let quoted: Vec<&Line> = lines.iter().collect();
         self.drafting = Some(Drafting {
-            path,
-            line: number,
+            path: path.clone(),
+            line,
+            end,
             side,
-            anchor: model::anchor(&line.text),
-            after: row,
+            anchor: model::anchor(&first.text),
+            quote: diff::quote(&path, &quoted),
+            span,
+            after: self.row_of(span.at, span.hunk, span.range().1),
         });
+        let placeholder =
+            if end > line { "Comment on these lines" } else { "Comment on this line" };
         self.draft.update(cx, |d, cx| {
             d.set_value("", window, cx);
+            d.set_placeholder(placeholder, window, cx);
             d.focus(window, cx);
         });
         self.rebuild();
@@ -413,8 +552,10 @@ impl ReviewView {
         self.model.comment(Comment {
             path: d.path,
             line: d.line,
+            end: d.end,
             side: d.side,
             anchor: d.anchor,
+            quote: d.quote,
             body,
         });
         self.draft.update(cx, |d, cx| d.set_value("", window, cx));
@@ -788,22 +929,12 @@ impl ReviewView {
             return div().into_any_element();
         };
         let ink = self.ink(at);
-        let row = Row::Line(at, hunk, ix);
-        let picked = line.clone();
-        let id = format!("review-line-{at}-{hunk}-{ix}");
-        let selector = id.clone();
-        div()
-            .id(ElementId::Name(id.into()))
-            .debug_selector(move || selector)
-            .w_full()
-            .cursor_pointer()
-            .font_family(self.mono())
-            .text_size(self.z(self.theme.typography.small()))
-            .child(ink.unified(line))
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                this.start_comment(at, &picked, row, window, cx);
-            }))
-            .into_any_element()
+        self.pickable(
+            format!("review-line-{at}-{hunk}-{ix}"),
+            (at, hunk, ix),
+            ink.unified(line),
+            cx,
+        )
     }
 
     fn pair_row(&self, at: usize, hunk: usize, ix: usize, cx: &Context<Self>) -> AnyElement {
@@ -813,21 +944,43 @@ impl ReviewView {
         let pairs = diff::pairs(block);
         let Some(pair) = pairs.get(ix).copied() else { return div().into_any_element() };
         let ink = self.ink(at);
-        let row = Row::Pair(at, hunk, ix);
-        let picked = pair.1.or(pair.0).cloned();
-        let id = format!("review-pair-{at}-{hunk}-{ix}");
+        self.pickable(format!("review-pair-{at}-{hunk}-{ix}"), (at, hunk, ix), ink.split(pair), cx)
+    }
+
+    /// Row `ix` of hunk `hunk` of the file at `at`, drawn as `lines`, as a press and a drag
+    /// pick it for a comment, washed while it is picked.
+    fn pickable(
+        &self,
+        id: String,
+        (at, hunk, ix): (usize, usize, usize),
+        lines: Div,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let picked = self
+            .marking
+            .or_else(|| self.drafting.as_ref().map(|d| d.span))
+            .is_some_and(|span| span.holds(at, hunk, ix));
+        let wash = hsla_alpha(self.theme.surfaces.accent, slopty_theme::alpha::FAINT);
         let selector = id.clone();
         div()
             .id(ElementId::Name(id.into()))
             .debug_selector(move || selector)
+            .relative()
             .w_full()
             .cursor_pointer()
             .font_family(self.mono())
             .text_size(self.z(self.theme.typography.small()))
-            .child(ink.split(pair))
-            .on_click(cx.listener(move |this, _ev, window, cx| {
-                if let Some(line) = &picked {
-                    this.start_comment(at, line, row, window, cx);
+            .child(lines)
+            .when(picked, |el| el.child(div().absolute().inset_0().bg(wash)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {
+                    this.press_line(at, hunk, ix, ev.modifiers.shift, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _w, cx| {
+                if ev.pressed_button == Some(MouseButton::Left) {
+                    this.drag_line(at, hunk, ix, cx);
                 }
             }))
             .into_any_element()
@@ -839,9 +992,18 @@ impl ReviewView {
         let s = theme.surfaces;
         let id = format!("review-uncomment-{ix}");
         let selector = id.clone();
+        let ranged = comment.end > comment.line;
         self.note()
             .debug_selector(move || format!("review-comment-{ix}"))
             .child(self.icon(IconName::MessageSquare, s.text_muted))
+            .when(ranged, |el| {
+                el.child(
+                    kit::tabular(div())
+                        .flex_none()
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(comment.place())),
+                )
+            })
             .child(
                 div()
                     .min_w_0()
@@ -917,6 +1079,10 @@ impl ReviewView {
             .child(div().flex_1())
             .when(n > 0, |el| {
                 el.child(
+                    self.action("review-add".to_owned(), "Add to message", false)
+                        .on_click(cx.listener(|this, _ev, _w, cx| this.add_to_message(cx))),
+                )
+                .child(
                     div()
                         .id(selector)
                         .debug_selector(move || selector.to_owned())
@@ -1007,6 +1173,14 @@ impl Render for ReviewView {
             .track_focus(&self.focus)
             .role(Role::Group)
             .aria_label("Review")
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| this.release_line(window, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _ev, window, cx| this.release_line(window, cx)),
+            )
             .size_full()
             .flex()
             .flex_col()

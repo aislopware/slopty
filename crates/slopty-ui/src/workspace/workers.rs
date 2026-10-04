@@ -109,6 +109,17 @@ impl WorkspaceView {
             self.show_notice("No agent to attach the block to".to_owned(), cx);
             return;
         };
+        self.quote_to_agent(agent, text, cx);
+    }
+
+    /// `text` at the end of `agent`'s draft: its tile is brought into view on its face, and the
+    /// text lands once the face's composer is there, with the keyboard.
+    pub(super) fn quote_to_agent(
+        &mut self,
+        agent: SessionId,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
         self.reveal_session(agent, cx);
         self.show_face(agent, true, cx);
         let workspace = cx.entity().downgrade();
@@ -869,7 +880,7 @@ impl WorkspaceView {
                 this.chrome.notify(cx);
             }
             TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
-            TerminalViewEvent::AttachBlock(text) => this.attach_block(sid, text.clone(), cx),
+            TerminalViewEvent::Attach(text) => this.attach_block(sid, text.clone(), cx),
             TerminalViewEvent::ViewFile { path, line } => {
                 let path = this.absolute_in_session(sid, path);
                 if let Some(worker) = this.worker_of_session(sid) {

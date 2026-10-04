@@ -6,7 +6,8 @@
 //! goes to the one already open, so a review tile is placed, restored and closed like any other. A
 //! tile gone, closed here or by another client, lets the thread go
 //! ([`WorkspaceView::review_closed`]). Comments sent from it go to the agent, so the keyboard goes
-//! back to the agent's tile, where the answer shows.
+//! back to the agent's tile, where the answer shows; comments added to the message land at the
+//! end of the agent's draft, with the keyboard, to go with more words.
 
 use std::collections::{HashMap, HashSet};
 
@@ -118,6 +119,12 @@ impl WorkspaceView {
                     this.reveal_session(session, cx);
                 }
             }
+            ReviewEvent::AddToMessage { thread, text } => match this.thread_session(*thread, cx) {
+                Some(session) => this.quote_to_agent(session, text.clone(), cx),
+                None => {
+                    this.show_notice("Open the agent's tile to add to its message".to_owned(), cx);
+                }
+            },
         });
         self.reviews.hearing.insert(thread, hearing);
     }

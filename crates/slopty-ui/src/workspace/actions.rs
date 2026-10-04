@@ -460,14 +460,28 @@ pub fn palette_items() -> Vec<PaletteItem> {
 }
 
 impl super::WorkspaceView {
-    /// "Attach block to agent", while the focused terminal's blocks have an agent to go to
-    /// ([`super::WorkspaceView::block_target`]): the palette offers no line that would do
-    /// nothing.
-    pub(super) fn attach_line(&self) -> Option<PaletteItem> {
-        self.block_target(self.focused_session()?)?;
+    /// "Attach block to agent", and "Attach selection to agent" while text is selected, when the
+    /// focused terminal has an agent to go to ([`super::WorkspaceView::block_target`]): the
+    /// palette offers no line that would do nothing.
+    pub(super) fn attach_lines(&self, cx: &gpui::App) -> Vec<PaletteItem> {
+        let Some(session) = self.focused_session() else { return Vec::new() };
+        if self.block_target(session).is_none() {
+            return Vec::new();
+        }
         let terminal = crate::terminal::key_bindings();
-        let attach = Box::new(crate::terminal::AttachBlock);
-        Some(PaletteItem::new("Attach block to agent", IconName::Paperclip, attach, &terminal))
+        let block = Box::new(crate::terminal::AttachBlock);
+        let mut lines =
+            vec![PaletteItem::new("Attach block to agent", IconName::Paperclip, block, &terminal)];
+        if self.terminals.get(&session).is_some_and(|t| t.read(cx).has_selection()) {
+            let selection = Box::new(crate::terminal::AttachSelection);
+            lines.push(PaletteItem::new(
+                "Attach selection to agent",
+                IconName::Paperclip,
+                selection,
+                &terminal,
+            ));
+        }
+        lines
     }
 }
 

@@ -5949,6 +5949,65 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the_times_run_forward_from_now}`, `conversation::figures::tests::{tomorrow_at_an_hour_reads_as_tomorrow_then,
     a_message_s_day_reads_by_how_far_back_it_is}`.
 
+- ✅ **The tray's sections each stand apart, and background work says what is true**
+  (2026-10-04, a design review of the `thread-work` renders).
+  - **Sections.** The tray over the composer stacks refusals, answers, the plan, the edits,
+    the queue, the commands run in the background, the agent's background tasks and the meter.
+    Each is now parted from the next by a `border_subtle` hairline. Before, they were parted
+    only by space, and a background command read as a step of the plan above it. This amends
+    the earlier "no rule between the two" ruling for the composer's pending work. The
+    background tasks opened from their chip sit under their own quiet head, "In the
+    background" with their count words and a chevron that folds them.
+  - **Output.** A command's row is its title, then how it stands at the right in tabular
+    figures. While it runs, its last line of output sits under it as a second line, in the code
+    face and the quiet tone, cut to one line past the mark's slot. Once it ends, the line goes,
+    because "Completed · 1m 5s" says all that is left to say. Raw output, backticks and all,
+    never runs inline after a title in body text.
+  - **The chip says what is true.** While any task runs it says "2 running", with a spinner.
+    Once none does it says how they ended: "1 finished", "2 finished · 1 failed",
+    "1 stopped". A failure turns its mark to the error tone. "1 in the background" read as
+    still running, so it is gone. The chip stays rather than hiding, because what finished
+    while the person was away is worth one glance and one press. The words are one function,
+    `tray::tasks_words`, shared by the chip and the head.
+  - **A plan card's head is its title.** The map mark says it is a plan, so the "Plan" label
+    that ran into the title at the same weight is gone. The title stands alone at the base size
+    and the medium weight, a step over the card's small chrome (the strong weight stays for
+    titles of panels and pages, as `kit::tests::strong_weight_is_for_titles` holds), and how it
+    stands sits muted at the small size. Screen readers still hear "Plan: {title},
+    {standing}".
+  - **The picture frame** already follows the picture's aspect up to the 3:1 cap. The
+    renders' frame looked empty because the made-up screenshot was a 640 × 400 page that was
+    mostly white. It is now a 600 × 200 crop of the header it shows, as a person pastes one.
+  - Tests: `conversation::thread::tests::face::background_work_opens_from_a_chip`,
+    `conversation::thread::view::tray::tests::background_work_says_what_is_true`,
+    `conversation::thread::tests::face::a_plan_is_a_card_that_takes_its_answer`; goldens
+    `thread-work`, `thread-work-open`.
+
+- ✅ **Review comments carry the code, as a range, and can go into the draft** (2026-10-04,
+  stage 4 item 9, T3 #4).
+  - **Ranges.** A press on a line of the review tile comments on it, as before. A drag over a
+    hunk's lines comments on the run, and a shift-press past the line being commented on
+    reaches to it, so a run is a press and a reach where a drag is awkward. A run stays within
+    one hunk, because a quote is one contiguous diff. Picked rows wear the accent's faint
+    wash, the one the conversation face's diff quotes wear, laid over each line's own
+    added or removed tone. The field says "Comment on these lines" for a run, and a kept
+    comment names its run ("Lines 10–11") before the words.
+  - **The code goes with it.** Each comment carries its lines quoted by
+    `conversation::diff::quote`: "In `src/lib.rs` lines 10–11:" and the lines as a fenced
+    diff, signs kept, numbered by the new file and by the old one for removals alone. Then come
+    the person's words. Comments are parted by a blank line. Before, a comment went as `path
+    L<n>: body`, so the agent had to reopen the file to know what was meant. A comment is
+    anchored by its first line's text, so it goes if that line changes under it.
+  - **Add to message.** Beside "Send N comments", "Add to message" puts the same text at the
+    end of the agent's draft (`ReviewEvent::AddToMessage`, which the workspace hears). The
+    agent's tile comes to the front with the keyboard in its composer, so the person adds
+    words and sends once. Nothing is sent. Where no tile shows the thread, a notice says to
+    open it.
+  - Tests: `review::tests::{a_drag_comments_on_a_run_and_add_to_message_sends_nothing,
+    line_comments_go_as_one_message}`,
+    `review::model::tests::comments_go_as_one_message_each_under_its_code`,
+    `workspace::tests::review_tile::a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it`.
+
 - ✅ **Snooze is the server's, with presets** (2026-10-04, `.research/t3code-ui-2026-10-03.md`
   §3.14). Amends "Snooze, honestly".
   - Before: a snooze lasted an hour, held in one client's memory. Another device still showed
@@ -6002,3 +6061,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     anywhere goes at once.
   - The workspace side is lane D's (`workspace/toast.rs`, `agents.rs`, triage), with the
     contract in `target/lanes/ui-queue.md`.
+
+- ✅ **A terminal selection goes to an agent, not only a block** (2026-10-04, stage 4 item 10,
+  T3 #5).
+  - With text selected and an agent to take it (the attach probe), the terminal's menu offers
+    "Attach selection to agent" after Copy. The palette has the same line
+    (`terminal::AttachSelection`, no default key, as the palette rule has it) while the
+    focused terminal has text selected, beside "Attach block to agent".
+  - The text goes into the agent's draft as the block does, fenced with a fence longer than
+    any run of backticks in it. It is named after the command whose block the selection starts
+    in: "From the terminal, what `cargo test` printed:". A multi-line command goes in an `sh`
+    fence, and a selection off every block, or on the alternate screen, says "From the
+    terminal:". Nothing is sent. With no agent, or nothing selected, the action says so in a
+    notice.
+  - The terminal's event for both is `TerminalViewEvent::Attach`, renamed from `AttachBlock`
+    now that a block is not the only thing attached.
+  - Tests: `terminal::view::tests::{a_selection_is_attached_named_after_its_command,
+    a_selection_s_fence_outruns_its_backticks}`,
+    `workspace::tests::attach_block` (the event's new name).

@@ -13,9 +13,9 @@ pub use element::{CellMetrics, Prepared, TerminalElement};
 #[cfg(test)]
 pub(crate) use element::{captions_drawn, family_picks, rows_prepared};
 pub use view::{
-    AttachBlock, AttachProbe, BACK_TO_LIVE, ClearScreen, ClipHook, ClipPaste, CloseFind, Copy,
-    CopyBlockOutput, CopyLastOutput, Find, FindNext, FindPrev, Guesses, LinkArrival, NextPrompt,
-    NoteLastBlock, Paste, PlacedImage, PrevPrompt, RerunLast, ScrollPageDown, ScrollPageUp,
-    ScrollToBottom, ScrollToTop, SelectAll, Selection, TOOK_MIN, TerminalView, TerminalViewEvent,
-    key_bindings,
+    AttachBlock, AttachProbe, AttachSelection, BACK_TO_LIVE, ClearScreen, ClipHook, ClipPaste,
+    CloseFind, Copy, CopyBlockOutput, CopyLastOutput, Find, FindNext, FindPrev, Guesses,
+    LinkArrival, NextPrompt, NoteLastBlock, Paste, PlacedImage, PrevPrompt, RerunLast,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, Selection, TOOK_MIN,
+    TerminalView, TerminalViewEvent, key_bindings,
 };
