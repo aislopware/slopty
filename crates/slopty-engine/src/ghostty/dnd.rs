@@ -86,6 +86,19 @@ pub enum Dropped {
     Given,
 }
 
+/// Where streamed bytes of a dropped type went ([`GhosttyEngine::drop_chunk`]).
+///
+/// [`GhosttyEngine::drop_chunk`]: crate::GhosttyEngine::drop_chunk
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Streamed {
+    /// Into the answer to the program's request, as its input.
+    Answered,
+    /// Held whole until the program asks for the type.
+    Held,
+    /// Nowhere: the type is here whole already, or will not come.
+    Unwanted,
+}
+
 /// The callback's side: what happened, and a flag the write path reads for free.
 pub(super) struct Shared {
     drops: Rc<RefCell<Drops>>,
@@ -194,27 +207,32 @@ impl GhosttyEngine {
     /// # Errors
     ///
     /// libghostty-vt failing.
-    pub fn drop_chunk(&mut self, index: usize, bytes: &[u8]) -> Result<(), EngineError> {
+    pub fn drop_chunk(&mut self, index: usize, bytes: &[u8]) -> Result<Streamed, EngineError> {
         let serving = self.serving(index)?;
         let mut drops = self.drops.drops.borrow_mut();
-        let Some(rep) = drops.reps.get_mut(index) else { return Ok(()) };
-        match (std::mem::take(rep), serving) {
+        let Some(rep) = drops.reps.get_mut(index) else { return Ok(Streamed::Unwanted) };
+        Ok(match (std::mem::take(rep), serving) {
             (RepState::Absent | RepState::Wanted | RepState::Streaming(_), Some(id)) => {
                 *rep = RepState::Streaming(id);
                 drop(drops);
                 self.term.dnd_drop_respond_data(id, bytes)?;
+                Streamed::Answered
             }
             (RepState::Absent | RepState::Wanted, None) => {
                 *rep = RepState::Arriving(bytes.to_vec());
+                Streamed::Held
             }
             (RepState::Arriving(mut held), _) => {
                 held.extend_from_slice(bytes);
                 *rep = RepState::Arriving(held);
+                Streamed::Held
             }
             // Given already, or gone: a late stream adds nothing.
-            (state, _) => *rep = state,
-        }
-        Ok(())
+            (state, _) => {
+                *rep = state;
+                Streamed::Unwanted
+            }
+        })
     }
 
     /// The stream of the dropped type at `index` ended: `complete` when all of it came. A

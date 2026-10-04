@@ -454,6 +454,18 @@ impl SessionHandle {
         self.send(Cmd::DragData { drag, data })
     }
 
+    /// Representation `kind` of item `item` of drag `drag`, to stream in on `stream`, paced by
+    /// the program reading it.
+    #[must_use]
+    pub fn drag_stream(
+        &self,
+        drag: DragId,
+        rep: (u16, slopty_proto::transfer::ClipType),
+        stream: slopty_core::XferId,
+    ) -> DragStream {
+        DragStream::new(self.clone(), drag, rep, stream)
+    }
+
     /// A person has typed into the session and not pressed Enter since: what they wrote may
     /// sit unsent in the program's input line, and anything typed now would be merged into it.
     #[must_use]
@@ -1693,6 +1705,7 @@ impl Actor {
                 Err(e) => return self.input_failed(&e),
             }
         }
+        self.input_taken();
         let (mut done, mut typed) = (false, false);
         while let Some(&(end, origin)) = self.input.ends.front() {
             if end > self.input.written {
@@ -1732,6 +1745,7 @@ impl Actor {
         self.input.pending.clear();
         self.input.ends.clear();
         self.input.written = self.input.queued;
+        self.input_taken();
         self.broadcast(&TermEvent::Error(TermError::Write(e.to_string())));
     }
 
@@ -2548,7 +2562,7 @@ fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
 
 mod dnd;
 
-pub use dnd::{DragData, DragFetch, MAX_DROP_REP_BYTES};
+pub use dnd::{DragData, DragFetch, DragStream, Taken};
 mod paste;
 
 #[cfg(test)]

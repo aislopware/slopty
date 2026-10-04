@@ -101,7 +101,7 @@ fn a_streamed_type_answers_as_it_arrives() {
 
     e.write(b"\x1b]72;t=r:x=2\x1b\\");
     assert_eq!(drained(&e).1, [EngineEvent::DropWants { index: 1 }]);
-    e.drop_chunk(1, b"a.").unwrap();
+    assert_eq!(e.drop_chunk(1, b"a.").unwrap(), Streamed::Answered);
     // "a."
     let (told, _) = drained(&e);
     assert!(told == "\x1b]72;t=r:x=2:m=0;YS4=\x1b\\", "streams at once: {told:?}");
@@ -111,9 +111,10 @@ fn a_streamed_type_answers_as_it_arrives() {
     // "png", then the end
     assert_eq!(told, "\x1b]72;t=r:x=2:m=0;cG5n\x1b\\\x1b]72;t=r:x=2\x1b\\");
 
-    e.drop_chunk(0, b"file:///a\r\n").unwrap();
+    assert_eq!(e.drop_chunk(0, b"file:///a\r\n").unwrap(), Streamed::Held);
     e.drop_end(0, true).unwrap();
     assert_eq!(drained(&e), (String::new(), Vec::new()), "held until asked");
+    assert_eq!(e.drop_chunk(0, b"late").unwrap(), Streamed::Unwanted, "here whole already");
     e.write(b"\x1b]72;t=r:x=1\x1b\\");
     // "file:///a\r\n"
     assert!(drained(&e).0.contains("t=r:x=1:m=0;ZmlsZTovLy9hDQo="));

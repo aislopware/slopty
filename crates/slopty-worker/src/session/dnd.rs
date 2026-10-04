@@ -13,28 +13,30 @@
 //! [`TermRequest::DragEnter`]: slopty_proto::terminal::TermRequest::DragEnter
 //! [`TermRequest::DropFiles`]: slopty_proto::terminal::TermRequest::DropFiles
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bytes::Bytes;
-use slopty_core::ClientId;
-use slopty_engine::{DropOperation, DropPoint, Dropped};
+use slopty_core::{ClientId, XferId};
+use slopty_engine::{DropOperation, DropPoint, Dropped, Streamed};
 use slopty_proto::WorkerMsg;
 use slopty_proto::drag::{DragId, DragItem};
-use slopty_proto::terminal::{DropFrom, TermEvent, drop_offer};
+use slopty_proto::terminal::{DROP_HELD_MAX_BYTES, DropFrom, TermEvent, drop_offer};
 use slopty_proto::transfer::{ClipMsg, ClipType, RepRef, Source};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
-use super::{Actor, engine_error};
+use super::{Actor, SessionHandle, engine_error};
 
-/// The most bytes one type of a drop may carry to the program.
-///
-/// The program reads it on its input, base64 and all, so this keeps the answer well inside the
-/// input queue, as a paste's copy is kept (`PASTE_CARRY_BYTES`). A larger one is answered as
-/// not coming, and is fetched no further than this.
-pub const MAX_DROP_REP_BYTES: usize = 8 * 1024 * 1024;
+/// How many bytes of one stream of a drag may be handed to the session and not yet taken by
+/// the program's input. Enough to keep the tty fed while the next chunks come; what waits on
+/// the worker for a slow program is this, in base64, whatever the type's size.
+const STREAM_WINDOW_BYTES: usize = 1 << 20;
 
 /// Where a session posts the fetches of a viewer's drag: that viewer's connection.
 pub type DragFetch = mpsc::Sender<WorkerMsg>;
+
+/// Told once a chunk of a drag's stream is taken: held for the drop, or written to the
+/// program's input. Dropped untold when no more of the stream is wanted.
+pub type Taken = oneshot::Sender<()>;
 
 /// Bytes of a viewer's drag, pushed ahead of the drop or fetched for it.
 #[derive(Debug)]
@@ -56,6 +58,10 @@ pub enum DragData {
         kind: ClipType,
         /// The next bytes.
         bytes: Bytes,
+        /// The stream they came on.
+        stream: XferId,
+        /// Told when they are taken; dropped when no more is wanted.
+        taken: Taken,
     },
     /// The stream of representation `kind` of item `item` ended: `complete` when all of it
     /// came.
@@ -64,6 +70,8 @@ pub enum DragData {
         item: u16,
         /// Which representation.
         kind: ClipType,
+        /// The stream that ended.
+        stream: XferId,
         /// All of it came.
         complete: bool,
     },
@@ -96,6 +104,72 @@ pub(super) enum Act {
     Data { drag: DragId, data: DragData },
 }
 
+/// One representation of a viewer's drag streaming into its session, paced by the program:
+/// no more than a window of it (1 MiB) waits to be taken.
+#[derive(Debug)]
+pub struct DragStream {
+    session: SessionHandle,
+    drag: DragId,
+    item: u16,
+    kind: ClipType,
+    stream: XferId,
+    /// Chunks handed over and not yet taken, with their lengths.
+    waiting: VecDeque<(usize, oneshot::Receiver<()>)>,
+    /// Their bytes.
+    waiting_bytes: usize,
+}
+
+impl DragStream {
+    pub(super) fn new(
+        session: SessionHandle,
+        drag: DragId,
+        rep: (u16, ClipType),
+        stream: XferId,
+    ) -> Self {
+        let (item, kind) = rep;
+        Self { session, drag, item, kind, stream, waiting: VecDeque::new(), waiting_bytes: 0 }
+    }
+
+    /// Hand the session the next `bytes`, once the window has room for them. False when the
+    /// session wants no more of the stream (or is gone): the stream should stop.
+    pub async fn send(&mut self, bytes: Bytes) -> bool {
+        loop {
+            let full = self.waiting_bytes.saturating_add(bytes.len()) > STREAM_WINDOW_BYTES;
+            let Some((len, taken)) = self.waiting.front_mut() else { break };
+            let told = if full {
+                taken.await
+            } else {
+                match taken.try_recv() {
+                    Ok(()) => Ok(()),
+                    Err(oneshot::error::TryRecvError::Empty) => break,
+                    Err(oneshot::error::TryRecvError::Closed) => return false,
+                }
+            };
+            if told.is_err() {
+                return false;
+            }
+            self.waiting_bytes = self.waiting_bytes.saturating_sub(*len);
+            self.waiting.pop_front();
+        }
+        let len = bytes.len();
+        let (taken, told) = oneshot::channel();
+        let (item, kind, stream) = (self.item, self.kind.clone(), self.stream);
+        let chunk = DragData::Chunk { item, kind, bytes, stream, taken };
+        if self.session.drag_data(self.drag, chunk).is_err() {
+            return false;
+        }
+        self.waiting.push_back((len, told));
+        self.waiting_bytes = self.waiting_bytes.saturating_add(len);
+        true
+    }
+
+    /// The stream ended: `complete` when all of it came.
+    pub fn end(self, complete: bool) {
+        let end = DragData::End { item: self.item, kind: self.kind, stream: self.stream, complete };
+        let _gone = self.session.drag_data(self.drag, end);
+    }
+}
+
 /// The session's side of the protocol.
 #[derive(Debug, Default)]
 pub(super) struct Drops {
@@ -107,11 +181,14 @@ pub(super) struct Drops {
     hover: Option<Drag>,
     /// The drop the program reads, until it concludes it.
     dropped: Option<Drag>,
+    /// Chunks streamed into the program's input, each told it was taken once the input is
+    /// written up to where it ends.
+    taken: VecDeque<(u64, Taken)>,
 }
 
 impl Drops {
     pub(super) const fn new(accepts: bool) -> Self {
-        Self { accepts, viewer: None, hover: None, dropped: None }
+        Self { accepts, viewer: None, hover: None, dropped: None, taken: VecDeque::new() }
     }
 
     pub(super) const fn accepts(&self) -> bool {
@@ -133,8 +210,12 @@ struct Drag {
     early: HashMap<DropFrom, Early>,
     /// The representations fetched and not yet whole or gone.
     asked: HashSet<(u16, ClipType)>,
-    /// The bytes streamed so far of each representation streaming after the drop.
-    streamed: HashMap<(u16, ClipType), usize>,
+    /// The bytes of each representation streaming after the drop that the engine holds for a
+    /// request still to come. Past [`DROP_HELD_MAX_BYTES`] the stream is failed.
+    held: HashMap<(u16, ClipType), usize>,
+    /// The streams told to stop: what is still on its way of them is not heard, so it never
+    /// mixes with a later stream of the same representation.
+    stopped: HashSet<XferId>,
 }
 
 /// Bytes of a drag that arrived before its drop.
@@ -142,6 +223,8 @@ struct Drag {
 enum Early {
     Whole(Vec<u8>),
     Coming(Vec<u8>),
+    /// Too big to hold: the program's request fetches it, streamed.
+    Over,
     Gone,
 }
 
@@ -157,8 +240,40 @@ impl Drag {
             mimes,
             early: HashMap::new(),
             asked: HashSet::new(),
-            streamed: HashMap::new(),
+            held: HashMap::new(),
+            stopped: HashSet::new(),
         }
+    }
+
+    /// More of a stream of representation `kind` of item `item`, held until the drop: false
+    /// when no more of it is wanted, held or not.
+    fn hold_chunk(&mut self, item: u16, kind: ClipType, bytes: &[u8], stream: XferId) -> bool {
+        if self.stopped.contains(&stream) {
+            return false;
+        }
+        let from = DropFrom::Rep { item, kind };
+        let (early, wanted) = match self.early.remove(&from) {
+            None => (Early::Coming(Vec::new()), true),
+            Some(Early::Coming(held)) => (Early::Coming(held), true),
+            Some(early @ Early::Over) => (early, false),
+            Some(Early::Whole(_) | Early::Gone) => (Early::Gone, false),
+        };
+        let early = match early {
+            Early::Coming(held) if held.len().saturating_add(bytes.len()) > DROP_HELD_MAX_BYTES => {
+                Early::Over
+            }
+            Early::Coming(mut held) => {
+                held.extend_from_slice(bytes);
+                Early::Coming(held)
+            }
+            early => early,
+        };
+        let wanted = wanted && matches!(early, Early::Coming(_));
+        self.early.insert(from, early);
+        if !wanted {
+            self.stopped.insert(stream);
+        }
+        wanted
     }
 
     /// The indices of the program's list that `from` gives.
@@ -166,35 +281,29 @@ impl Drag {
         self.offer.iter().enumerate().filter(move |(_, (_, f))| f == from).map(|(i, _)| i)
     }
 
-    /// `data`, held until the drop.
+    /// `data`, held until the drop. A type past [`DROP_HELD_MAX_BYTES`] is not held: its
+    /// stream is stopped, and the program's request fetches it.
     fn hold(&mut self, data: DragData) {
         let (from, early) = match data {
-            DragData::Whole { item, kind, bytes } if bytes.len() <= MAX_DROP_REP_BYTES => {
+            DragData::Whole { item, kind, bytes } if bytes.len() <= DROP_HELD_MAX_BYTES => {
                 (DropFrom::Rep { item, kind }, Early::Whole(bytes))
             }
-            DragData::Whole { item, kind, .. } | DragData::Gone { item, kind } => {
-                (DropFrom::Rep { item, kind }, Early::Gone)
+            DragData::Whole { item, kind, .. } => (DropFrom::Rep { item, kind }, Early::Over),
+            DragData::Gone { item, kind } => (DropFrom::Rep { item, kind }, Early::Gone),
+            DragData::Chunk { item, kind, bytes, stream, taken } => {
+                if self.hold_chunk(item, kind, &bytes, stream) {
+                    let _streaming = taken.send(());
+                }
+                return;
             }
-            DragData::Chunk { item, kind, bytes } => {
-                let from = DropFrom::Rep { item, kind };
-                let early = match self.early.remove(&from) {
-                    None => Early::Coming(bytes.to_vec()),
-                    Some(Early::Coming(mut held))
-                        if held.len().saturating_add(bytes.len()) <= MAX_DROP_REP_BYTES =>
-                    {
-                        held.extend_from_slice(&bytes);
-                        Early::Coming(held)
-                    }
-                    Some(_) => Early::Gone,
-                };
-                (from, early)
-            }
-            DragData::End { item, kind, complete } => {
+            DragData::End { stream, .. } if self.stopped.contains(&stream) => return,
+            DragData::End { item, kind, complete, .. } => {
                 let from = DropFrom::Rep { item, kind };
                 let early = match self.early.remove(&from) {
                     Some(Early::Coming(held)) if complete => Early::Whole(held),
                     None if complete => Early::Whole(Vec::new()),
                     Some(Early::Whole(held)) => Early::Whole(held),
+                    Some(Early::Over) => Early::Over,
                     _ => Early::Gone,
                 };
                 (from, early)
@@ -226,6 +335,7 @@ fn uri_list(paths: &[String]) -> Vec<u8> {
 
 impl Actor {
     pub(super) fn dnd(&mut self, client: ClientId, act: Act) {
+        let mut taken = None;
         let result = match act {
             Act::Enter { drag, items, fetch } => {
                 self.drops.hover = Some(Drag::new(drag, client, &items, fetch));
@@ -248,6 +358,12 @@ impl Actor {
                 let data = landed.map(|paths| uri_list(&paths));
                 self.drag_files(client, drag, data)
             }
+            Act::Data {
+                drag,
+                data: DragData::Chunk { item, kind, bytes, stream, taken: told },
+            } => self
+                .drag_chunk(drag, (item, kind), &bytes, stream)
+                .map(|wanted| taken = wanted.then_some(told)),
             Act::Data { drag, data } => self.drag_data(drag, data),
         };
         if let Err(e) = result {
@@ -255,6 +371,21 @@ impl Actor {
         }
         // The program's answers go to its input, and what it said back to the viewer.
         self.after_output();
+        if let Some(taken) = taken {
+            // Taken once the input is written up to the chunk's answer, so a program that reads
+            // slowly holds back the stream rather than having the worker hold its bytes.
+            self.drops.taken.push_back((self.input.queued, taken));
+            self.input_taken();
+        }
+    }
+
+    /// Tell the streams whose chunks the program's input has taken.
+    pub(super) fn input_taken(&mut self) {
+        while self.drops.taken.front().is_some_and(|(end, _)| *end <= self.input.written) {
+            if let Some((_, taken)) = self.drops.taken.pop_front() {
+                let _gone = taken.send(());
+            }
+        }
     }
 
     /// The viewer whose drag `drag` is over the tile or was dropped.
@@ -294,12 +425,14 @@ impl Actor {
                                 self.engine.drop_data(index, Some(bytes.clone()))?;
                             }
                             Early::Coming(bytes) => {
-                                self.engine.drop_chunk(index, bytes)?;
+                                let _held_or_answered = self.engine.drop_chunk(index, bytes)?;
                                 if let DropFrom::Rep { item, kind } = &from {
-                                    drag.streamed.insert((*item, kind.clone()), bytes.len());
+                                    drag.held.insert((*item, kind.clone()), bytes.len());
                                     drag.asked.insert((*item, kind.clone()));
                                 }
                             }
+                            // Not here: the program's request fetches it.
+                            Early::Over => {}
                             Early::Gone => self.engine.drop_data(index, None)?,
                         }
                     }
@@ -331,14 +464,64 @@ impl Actor {
         for index in indices {
             let data = match &early {
                 Early::Whole(list) => Some(list.clone()),
-                Early::Coming(_) | Early::Gone => None,
+                Early::Coming(_) | Early::Over | Early::Gone => None,
             };
             self.engine.drop_data(index, data)?;
         }
         Ok(())
     }
 
-    /// Bytes of drag `drag`: held while it hovers, handed to the program once it is dropped.
+    /// More bytes of a stream of drag `drag`: held while it hovers, handed to the program once
+    /// it is dropped. False when no more of the stream is wanted.
+    fn drag_chunk(
+        &mut self,
+        drag: DragId,
+        key: (u16, ClipType),
+        bytes: &Bytes,
+        stream: XferId,
+    ) -> Result<bool, slopty_engine::EngineError> {
+        if let Some(hover) = self.drops.hover.as_mut().filter(|d| d.id == drag) {
+            let (item, kind) = key;
+            return Ok(hover.hold_chunk(item, kind, bytes, stream));
+        }
+        // Concluded, or another drag's: late bytes add nothing.
+        let Some(dropped) = self.drops.dropped.as_mut().filter(|d| d.id == drag) else {
+            return Ok(false);
+        };
+        if dropped.stopped.contains(&stream) {
+            return Ok(false);
+        }
+        let from = DropFrom::Rep { item: key.0, kind: key.1.clone() };
+        let indices: Vec<usize> = dropped.indices(&from).collect();
+        let mut went = Vec::with_capacity(indices.len());
+        for &index in &indices {
+            went.push(self.engine.drop_chunk(index, bytes)?);
+        }
+        let Some(dropped) = self.drops.dropped.as_mut() else { return Ok(false) };
+        if went.contains(&Streamed::Held) {
+            let held = dropped.held.entry(key.clone()).or_default();
+            *held = held.saturating_add(bytes.len());
+            // Past the cap of what is held, the held copies fail; a request it is streaming
+            // into goes on.
+            if *held > DROP_HELD_MAX_BYTES {
+                dropped.held.remove(&key);
+                for (&index, _) in indices.iter().zip(&went).filter(|(_, w)| **w == Streamed::Held)
+                {
+                    self.engine.drop_end(index, false)?;
+                }
+                went.retain(|w| *w == Streamed::Answered);
+            }
+        }
+        let wanted = went.iter().any(|w| *w != Streamed::Unwanted);
+        if !wanted && let Some(dropped) = self.drops.dropped.as_mut() {
+            dropped.asked.remove(&key);
+            dropped.stopped.insert(stream);
+        }
+        Ok(wanted)
+    }
+
+    /// Bytes of drag `drag` other than a stream's next: held while it hovers, handed to the
+    /// program once it is dropped.
     fn drag_data(
         &mut self,
         drag: DragId,
@@ -359,38 +542,26 @@ impl Actor {
             | DragData::End { item, kind, .. }
             | DragData::Gone { item, kind } => vec![(*item, kind.clone())],
         };
-        for (item, kind) in sources {
-            let key = (item, kind);
+        if let DragData::End { stream, .. } = &data
+            && dropped.stopped.contains(stream)
+        {
+            return Ok(());
+        }
+        for key in sources {
             let from = DropFrom::Rep { item: key.0, kind: key.1.clone() };
             let indices: Vec<usize> = dropped.indices(&from).collect();
-            // Past the cap a stream is as one that failed, and the rest of it is not heard.
-            let over = match &data {
-                DragData::Chunk { bytes, .. } => {
-                    let streamed = dropped.streamed.entry(key.clone()).or_default();
-                    let before = *streamed;
-                    *streamed = streamed.saturating_add(bytes.len());
-                    if before > MAX_DROP_REP_BYTES {
-                        continue;
-                    }
-                    *streamed > MAX_DROP_REP_BYTES
-                }
-                DragData::End { .. } => {
-                    dropped.streamed.remove(&key).is_some_and(|n| n > MAX_DROP_REP_BYTES)
-                }
-                _ => false,
-            };
-            if !matches!(data, DragData::Chunk { .. }) || over {
-                dropped.asked.remove(&key);
-            }
+            dropped.held.remove(&key);
+            dropped.asked.remove(&key);
             for index in indices {
                 match &data {
-                    _ if over => self.engine.drop_end(index, false)?,
-                    DragData::Whole { bytes, .. } if bytes.len() <= MAX_DROP_REP_BYTES => {
+                    DragData::Whole { bytes, .. } if bytes.len() <= DROP_HELD_MAX_BYTES => {
                         self.engine.drop_data(index, Some(bytes.clone()))?;
                     }
-                    DragData::Chunk { bytes, .. } => self.engine.drop_chunk(index, bytes)?,
                     DragData::End { complete, .. } => self.engine.drop_end(index, *complete)?,
-                    DragData::Whole { .. } | DragData::Gone { .. } | DragData::AllGone => {
+                    DragData::Chunk { .. }
+                    | DragData::Whole { .. }
+                    | DragData::Gone { .. }
+                    | DragData::AllGone => {
                         self.engine.drop_data(index, None)?;
                     }
                 }
@@ -419,8 +590,8 @@ impl Actor {
             return;
         };
         let rep = RepRef { source: Source::Drag(drag.id), item: key.0, kind: key.1 };
-        let max = Some(MAX_DROP_REP_BYTES as u64);
-        let msg = WorkerMsg::Clip(ClipMsg::Fetch { rep, max, urgent: true });
+        // Streamed into the answer as the program reads it, so no size is too big.
+        let msg = WorkerMsg::Clip(ClipMsg::Fetch { rep, max: None, urgent: true });
         tokio::task::spawn_local(async move {
             let _gone = fetch.send(msg).await;
         });
@@ -459,6 +630,8 @@ impl Actor {
     /// The program is done with the drop, or another drag ended it, or it was refused.
     pub(super) fn drop_concluded(&mut self, operation: DropOperation) {
         self.drops.dropped = None;
+        // Untold, the streams still going into it stop.
+        self.drops.taken.clear();
         if let Some(viewer) = self.drops.viewer {
             self.send_to(viewer, &TermEvent::DropConcluded { operation });
         }

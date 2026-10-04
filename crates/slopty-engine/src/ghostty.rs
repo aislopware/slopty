@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub use clipboard::{ClipboardSource, PasteRep, TEXT_MIME};
-pub use dnd::{DropOperation, DropPoint, Dropped};
+pub use dnd::{DropOperation, DropPoint, Dropped, Streamed};
 use libghostty_vt::fmt::{Format, Formatter, FormatterOptions};
 use libghostty_vt::kitty::graphics::{self as kitty_graphics, PlacementIterator};
 use libghostty_vt::render::{CellIterator, Dirty, RenderState, RowIteration, RowIterator};

@@ -2841,17 +2841,13 @@ exec sleep 60"#;
         session.request(client, TermRequest::Drop { at }).unwrap();
         let asked = tokio::time::timeout(Duration::from_secs(30), fetched.recv()).await.unwrap();
         let rep = RepRef { source: Source::Drag(drag), item: 0, kind: kind.clone() };
-        let max = Some(slopty_worker::MAX_DROP_REP_BYTES as u64);
-        assert_eq!(asked, Some(WorkerMsg::Clip(ClipMsg::Fetch { rep, max, urgent: true })));
+        let fetch_all = ClipMsg::Fetch { rep, max: None, urgent: true };
+        assert_eq!(asked, Some(WorkerMsg::Clip(fetch_all)));
+        let mut stream = session.drag_stream(drag, (0, kind.clone()), slopty_core::XferId::new());
         for part in ["héllo ", "wörld"] {
-            let bytes = bytes::Bytes::from(part.as_bytes().to_vec());
-            session
-                .drag_data(drag, DragData::Chunk { item: 0, kind: kind.clone(), bytes })
-                .unwrap();
+            assert!(stream.send(bytes::Bytes::from(part.as_bytes().to_vec())).await);
         }
-        session
-            .drag_data(drag, DragData::End { item: 0, kind: kind.clone(), complete: true })
-            .unwrap();
+        stream.end(true);
         written(dir.path(), "got1").await;
         assert_eq!(std::fs::read_to_string(dir.path().join("got1")).unwrap(), "héllo wörld");
 
@@ -2873,11 +2869,186 @@ exec sleep 60"#;
         let _killed = child.kill().await;
     }
 
-    /// The session's peak footprint over a drop of an 8 MiB text the program asked for, given
-    /// whole (`streamed` false: as the worker held a type before drops were read lazily) or in
-    /// 64 KiB chunks as a bulk stream brings them. The stand-in hands what it reads straight to
-    /// a file, so what is measured is the worker's side.
-    async fn drop_footprint(streamed: bool) -> u64 {
+    /// A stand-in that accepts text, asks for it on the drop and, once `$0/go` exists, hands
+    /// what it reads to `$0/raw`.
+    const DROP_TO_RAW: &str = r#"stty -echo -icanon
+printf '\033]72;t=a;text/plain\033\\ready\n'
+IFS= read -r -d '\' moved
+printf '\033]72;t=m:o=1;text/plain\033\\'
+IFS= read -r -d '\' dropped
+printf '\033]72;t=r:x=2\033\\'
+while [ ! -e "$0/go" ]; do sleep 0.05; done
+exec cat > "$0/raw""#;
+
+    /// The bytes the program's answer carried, from its base64 messages, once its empty
+    /// closing message came; `None` before then.
+    fn answered_bytes(raw: &std::path::Path) -> Option<usize> {
+        let raw = std::fs::read(raw).ok()?;
+        let end = b"\x1b]72;t=r:x=2\x1b\\";
+        if !raw.ends_with(end) {
+            return None;
+        }
+        let mut bytes = 0_usize;
+        for message in raw.split(|&b| b == b'\\') {
+            let Some(at) = message.iter().rposition(|&b| b == b';') else { continue };
+            let payload = message.get(at.saturating_add(1)..).unwrap_or_default();
+            let payload = payload.strip_suffix(b"\x1b").unwrap_or(payload);
+            if !message.windows(10).any(|w| w == b"t=r:x=2:m=") {
+                continue;
+            }
+            let padding = payload.iter().rev().take_while(|&&b| b == b'=').count();
+            bytes =
+                bytes.saturating_add((payload.len() / 4).saturating_mul(3).saturating_sub(padding));
+        }
+        Some(bytes)
+    }
+
+    /// Wait for the program's answer to close, and say how many bytes it carried.
+    async fn answered(raw: &std::path::Path) -> usize {
+        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(120)).unwrap();
+        loop {
+            if let Some(bytes) = answered_bytes(raw) {
+                return bytes;
+            }
+            assert!(std::time::Instant::now() < deadline, "the answer never closed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Start [`DROP_TO_RAW`] in `dir`, drag a text over it and drop it: the session, its child,
+    /// the viewer's id, the drag and the fetches it posts.
+    async fn dragging_text(
+        dir: &std::path::Path,
+    ) -> (
+        session::SessionHandle,
+        slopty_pty::Child,
+        ClientId,
+        slopty_proto::drag::DragId,
+        mpsc::Receiver<slopty_proto::WorkerMsg>,
+    ) {
+        use slopty_proto::terminal::DropPoint;
+
+        let (session, child) = start(&["/bin/bash", "-c", DROP_TO_RAW, dir.to_str().unwrap()]);
+        let (tx, mut rx) = viewer(4096);
+        let client = ClientId::new();
+        session.attach(client, size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        let (fetch, fetched) = mpsc::channel(8);
+        let drag = slopty_proto::drag::DragId::new();
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        session.drag_enter(client, drag, text_drag(), fetch).unwrap();
+        session.request(client, TermRequest::DragOver { at }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
+        })
+        .await;
+        // The viewer keeps listening, so frames never back up behind the test.
+        tokio::spawn(async move { while rx.rx.recv().await.is_some() {} });
+        (session, child, client, drag, fetched)
+    }
+
+    /// A dropped type streams into the program's answer only as fast as the program reads it:
+    /// while the program reads nothing, the stream is held to about its window, and once it
+    /// reads, every byte of a type three times what a worker holds reaches it.
+    #[tokio::test]
+    async fn a_dropped_stream_goes_as_fast_as_the_program_reads() {
+        use slopty_proto::terminal::{DROP_HELD_MAX_BYTES, DropPoint};
+        use slopty_proto::transfer::{ClipFormat, ClipType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (session, mut child, client, drag, mut fetched) = dragging_text(dir.path()).await;
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        let _asked = tokio::time::timeout(Duration::from_secs(30), fetched.recv()).await.unwrap();
+
+        let total = 3 * DROP_HELD_MAX_BYTES;
+        let text: bytes::Bytes =
+            (0..total).map(|i| b"abcdefghijklmnopqrstuvwxyz\n"[i % 27]).collect::<Vec<u8>>().into();
+        let kind = ClipType::Format(ClipFormat::Text);
+        let mut stream = session.drag_stream(drag, (0, kind), slopty_core::XferId::new());
+        let chunks: Vec<bytes::Bytes> = (0..total)
+            .step_by(64 << 10)
+            .map(|at| text.slice(at..at.saturating_add(64 << 10).min(total)))
+            .collect();
+        let mut chunks = chunks.into_iter();
+        let mut before_reading = 0_usize;
+        for chunk in chunks.by_ref() {
+            let len = chunk.len();
+            match tokio::time::timeout(Duration::from_millis(500), stream.send(chunk.clone())).await
+            {
+                Ok(sent) => assert!(sent, "the session stopped the stream"),
+                Err(_held) => {
+                    // Held back: the program reads now, and this chunk goes once it has.
+                    std::fs::write(dir.path().join("go"), b"").unwrap();
+                    assert!(stream.send(chunk).await);
+                    break;
+                }
+            }
+            before_reading += len;
+        }
+        println!("MEASURE a drop stream to a program reading nothing: {before_reading} bytes went");
+        assert!(
+            before_reading < 4 << 20,
+            "{before_reading} bytes went to a program reading nothing"
+        );
+        for chunk in chunks {
+            assert!(stream.send(chunk).await, "the session stopped the stream");
+        }
+        stream.end(true);
+        assert_eq!(answered(&dir.path().join("raw")).await, total);
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A type pushed during the hover that outgrows what a worker holds is not held: its push
+    /// is stopped, and the program's request on the drop fetches it whole.
+    #[tokio::test]
+    async fn a_push_past_what_a_worker_holds_is_fetched_on_the_drop() {
+        use slopty_proto::WorkerMsg;
+        use slopty_proto::terminal::{DROP_HELD_MAX_BYTES, DropPoint};
+        use slopty_proto::transfer::{ClipFormat, ClipMsg, ClipType, RepRef, Source};
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("go"), b"").unwrap();
+        let (session, mut child, client, drag, mut fetched) = dragging_text(dir.path()).await;
+        // Past the cap by more than the stream's window, so the push hears it was stopped.
+        let total = DROP_HELD_MAX_BYTES + (2 << 20);
+        let text: bytes::Bytes = vec![b'x'; total].into();
+        let kind = ClipType::Format(ClipFormat::Text);
+
+        let mut push = session.drag_stream(drag, (0, kind.clone()), slopty_core::XferId::new());
+        let mut pushed = 0_usize;
+        while pushed < total
+            && push.send(text.slice(pushed..pushed.saturating_add(64 << 10).min(total))).await
+        {
+            pushed += 64 << 10;
+        }
+        assert!(pushed < total, "a push past {DROP_HELD_MAX_BYTES} bytes was held whole");
+        push.end(true);
+
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        let asked = tokio::time::timeout(Duration::from_secs(30), fetched.recv()).await.unwrap();
+        let rep = RepRef { source: Source::Drag(drag), item: 0, kind: kind.clone() };
+        let fetch_all = ClipMsg::Fetch { rep, max: None, urgent: true };
+        assert_eq!(asked, Some(WorkerMsg::Clip(fetch_all)));
+        let mut fetch = session.drag_stream(drag, (0, kind), slopty_core::XferId::new());
+        for at in (0..total).step_by(64 << 10) {
+            assert!(fetch.send(text.slice(at..at.saturating_add(64 << 10).min(total))).await);
+        }
+        fetch.end(true);
+        assert_eq!(answered(&dir.path().join("raw")).await, total);
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The session's peak footprint over a drop of a `bytes`-byte text the program asked for,
+    /// given whole (`streamed` false: as the worker held a type before drops were read lazily)
+    /// or in 64 KiB chunks as a bulk stream brings them. The stand-in hands what it reads
+    /// straight to a file, so what is measured is the worker's side.
+    async fn drop_footprint(streamed: bool, bytes: usize) -> u64 {
+        use std::io::{Read as _, Seek as _};
+
         use slopty_proto::drag::DragId;
         use slopty_proto::terminal::DropPoint;
         use slopty_proto::transfer::{ClipFormat, ClipType};
@@ -2909,37 +3080,44 @@ exec cat > "$0/raw""#;
         session.request(client, TermRequest::Drop { at }).unwrap();
         let _asked = tokio::time::timeout(Duration::from_secs(30), fetched.recv()).await.unwrap();
 
-        let text: bytes::Bytes = (0..slopty_worker::MAX_DROP_REP_BYTES)
-            .map(|i| b"abcdefghijklmnopqrstuvwxyz\n"[i % 27])
-            .collect::<Vec<u8>>()
-            .into();
+        let text: bytes::Bytes =
+            (0..bytes).map(|i| b"abcdefghijklmnopqrstuvwxyz\n"[i % 27]).collect::<Vec<u8>>().into();
         let before = slopty_testkit::process::own().unwrap().peak_footprint;
+        let began = std::time::Instant::now();
         let kind = ClipType::Format(ClipFormat::Text);
         if streamed {
+            let mut stream = session.drag_stream(drag, (0, kind), slopty_core::XferId::new());
             for at in (0..text.len()).step_by(64 << 10) {
                 let bytes = text.slice(at..at.saturating_add(64 << 10).min(text.len()));
-                session
-                    .drag_data(drag, DragData::Chunk { item: 0, kind: kind.clone(), bytes })
-                    .unwrap();
+                assert!(stream.send(bytes).await, "the session stopped the stream");
             }
-            session.drag_data(drag, DragData::End { item: 0, kind, complete: true }).unwrap();
+            stream.end(true);
         } else {
             let bytes = text.to_vec();
             session.drag_data(drag, DragData::Whole { item: 0, kind, bytes }).unwrap();
         }
-        // The answer ends with an empty message for the request.
+        // The answer ends with an empty message for the request. Only the file's tail is read,
+        // so the check adds nothing to the footprint.
         let raw = dir.path().join("raw");
         let end = b"\x1b]72;t=r:x=2\x1b\\";
-        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(60)).unwrap();
+        let ended = || {
+            let mut file = std::fs::File::open(&raw).ok()?;
+            let back = i64::try_from(end.len()).ok()?;
+            file.seek(std::io::SeekFrom::End(back.checked_neg()?)).ok()?;
+            let mut tail = [0_u8; 14];
+            file.read_exact(&mut tail).ok()?;
+            Some(tail == *end)
+        };
+        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(120)).unwrap();
         loop {
-            let bytes = std::fs::read(&raw).unwrap_or_default();
-            if bytes.ends_with(end) {
+            if ended() == Some(true) {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "the answer never ended");
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         let peak = slopty_testkit::process::own().unwrap().peak_footprint;
+        println!("MEASURE {bytes} bytes into the program in {} ms", began.elapsed().as_millis());
         session.close();
         let _killed = child.kill().await;
         peak.saturating_sub(before)
@@ -2951,7 +3129,7 @@ exec cat > "$0/raw""#;
     #[tokio::test]
     #[ignore = "measurement: cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint"]
     async fn drop_footprint_whole() {
-        let grew = drop_footprint(false).await;
+        let grew = drop_footprint(false, slopty_proto::terminal::DROP_HELD_MAX_BYTES).await;
         println!("MEASURE drop of 8 MiB given whole: peak footprint +{} KiB", grew >> 10);
     }
 
@@ -2959,7 +3137,15 @@ exec cat > "$0/raw""#;
     #[tokio::test]
     #[ignore = "measurement: cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint"]
     async fn drop_footprint_streamed() {
-        let grew = drop_footprint(true).await;
+        let grew = drop_footprint(true, slopty_proto::terminal::DROP_HELD_MAX_BYTES).await;
         println!("MEASURE drop of 8 MiB streamed: peak footprint +{} KiB", grew >> 10);
+    }
+
+    /// See [`drop_footprint_whole`]: a type eight times what a worker holds goes, paced.
+    #[tokio::test]
+    #[ignore = "measurement: cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint"]
+    async fn drop_footprint_streamed_large() {
+        let grew = drop_footprint(true, 64 << 20).await;
+        println!("MEASURE drop of 64 MiB streamed: peak footprint +{} KiB", grew >> 10);
     }
 }

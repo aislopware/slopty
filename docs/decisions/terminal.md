@@ -3237,17 +3237,28 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`slopty_proto::terminal::drop_offer`): `text/uri-list` first when there are files, then
     each item's types, text both as `text/plain;charset=utf-8` and as kitty's `text/plain`.
   - **What the program accepts goes up during the hover.** Its acceptance lists the types it
-    wants. The client sends those at once, inline up to 64 KiB and as a bulk stream past that,
-    and starts the files' upload into the drag's landing on the worker, so the files are often
+    wants. The client sends those at once, inline up to 64 KiB and as a bulk stream past that
+    up to the 8 MiB a worker holds ahead of the drop (`DROP_HELD_MAX_BYTES`), and starts the
+    files' upload into the drag's landing on the worker, so the files are often
     there by the drop. A drag with a promised file waits for the drop, which writes it, and
     then sends every file together, so the program gets one list. A drag that leaves stops its
     upload, and the worker deletes its landing.
   - **The rest is fetched when the program asks.** The engine says which type a request wants
     (`EngineEvent::DropWants`). The session asks the dragging viewer's connection for it with
-    the clipboard's own fetch (`ClipMsg::Fetch` under `Source::Drag`), capped at 8 MiB. The
+    the clipboard's own fetch (`ClipMsg::Fetch` under `Source::Drag`), with no cap. The
     client answers from the tile's copy. A big answer streams, and the engine passes each chunk
     to the program as it arrives (`drop_chunk`, `drop_end`), so the worker never holds it
     whole. A type wanted under two names is fetched once.
+  - **A stream goes as fast as the program reads** (2026-10-05). Each chunk is taken once the
+    program's input is written past its answer, and a stream (`slopty_worker::DragStream`)
+    keeps no more than 1 MiB handed over and not taken. While the program reads slowly, the
+    rest waits in QUIC's flow control on the viewer's side, not on the worker. So a dropped
+    type of any size costs the worker the same footprint, and the 8 MiB cap is gone from the
+    streamed path. It remains only for what is held for a request still to come: a push
+    during the hover, and a type streaming for one name while the program reads the other.
+    A push that outgrows it is stopped and fetched on the program's request instead. A
+    stopped stream is never heard again by its id, so what is still on its way of it never
+    mixes with the fetch that replaces it.
   - **A drop the program never accepted is refused.** The program hears the drag leave and is
     not given the drop, and the viewer hears it concluded as nothing at once.
   - **Why not eager.** Sending every type on every drop costs a picture's bytes for a program
@@ -3258,10 +3269,14 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_request_past_the_list_is_not_found`, `an_unaccepted_drop_is_refused`; proto
     `a_drop_offers_each_type_once_files_first`; client
     `what_the_program_accepts_goes_up_once`, `unaccepted_files_stay_here`,
-    `a_drag_with_a_promise_waits_for_the_drop`; worker
-    `a_drop_the_program_never_accepted_is_refused` and
+    `a_drag_with_a_promise_waits_for_the_drop`,
+    `a_type_past_what_a_worker_holds_waits_for_the_fetch`; worker
+    `a_drop_the_program_never_accepted_is_refused`,
     `a_dropped_text_is_fetched_when_the_program_asks` (a bash stand-in reads a text it asked
-    for, fetched and streamed, then one pushed during the hover, with nothing fetched); e2e
+    for, fetched and streamed, then one pushed during the hover, with nothing fetched),
+    `a_dropped_stream_goes_as_fast_as_the_program_reads` (24 MiB, held to its window while
+    the stand-in reads nothing, then every byte) and
+    `a_push_past_what_a_worker_holds_is_fetched_on_the_drop`; e2e
     `files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_copies`, over a link
     shaped as a tailnet's. Numbers in MEASUREMENTS.md, 2026-10-05.
 

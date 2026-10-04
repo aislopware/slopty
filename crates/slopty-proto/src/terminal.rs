@@ -337,6 +337,12 @@ pub const URI_LIST: &str = "text/uri-list";
 /// [`ClipFormat::Text`]'s `text/plain;charset=utf-8`.
 pub const PLAIN_TEXT: &str = "text/plain";
 
+/// The most bytes of one type a worker holds for a drag before its program reads them.
+///
+/// A viewer pushes no larger type during the hover. The program's request fetches it, and it
+/// streams into the answer as fast as the program reads, however large.
+pub const DROP_HELD_MAX_BYTES: usize = 8 << 20;
+
 /// Where the bytes of a type a drop offers come from.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum DropFrom {

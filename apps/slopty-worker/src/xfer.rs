@@ -15,7 +15,6 @@ use slopty_proto::transfer::{
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::screen::drag::Heard;
 use slopty_worker::xfer::{Again, Claim, Landed, Receiving, XferError, outgoing, resume_points};
-use slopty_worker::{DragData, MAX_DROP_REP_BYTES};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
 
@@ -151,9 +150,9 @@ async fn read_rep(
     (bytes.len() as u64 == header.size).then_some(bytes)
 }
 
-/// A representation of a terminal drag, handed to its session as it streams in, so the
-/// program reads it as it arrives and the worker never holds it whole. One past
-/// [`MAX_DROP_REP_BYTES`], or longer or shorter than its header said, ends as not whole.
+/// A representation of a terminal drag, handed to its session as it streams in and paced by
+/// its program reading it, so the worker never holds it whole. One longer or shorter than its
+/// header said ends as not whole.
 async fn stream_drop(
     daemon: &Daemon,
     session: SessionId,
@@ -166,13 +165,9 @@ async fn stream_drop(
         rx.stop();
         return;
     };
-    let max = MAX_DROP_REP_BYTES as u64;
+    let mut stream = handle.drag_stream(drag, (item, kind), header.xfer);
     let mut got = 0_u64;
     let complete = loop {
-        if header.size > max {
-            rx.stop();
-            break false;
-        }
         match rx.chunk(CHUNK).await {
             Ok(Some(bytes)) => {
                 got = got.saturating_add(bytes.len() as u64);
@@ -180,8 +175,7 @@ async fn stream_drop(
                     rx.stop();
                     break false;
                 }
-                let chunk = DragData::Chunk { item, kind: kind.clone(), bytes };
-                if handle.drag_data(drag, chunk).is_err() {
+                if !stream.send(bytes).await {
                     rx.stop();
                     return;
                 }
@@ -190,7 +184,7 @@ async fn stream_drop(
             Err(_) => break false,
         }
     };
-    let _gone = handle.drag_data(drag, DragData::End { item, kind, complete });
+    stream.end(complete);
 }
 
 /// A stream's bytes, when it carries all its header announced and that is no more than `max`

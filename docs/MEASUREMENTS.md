@@ -14584,3 +14584,40 @@ slowly: the fourth stream's median is 5.7 s against 15.0 s before. At 0.5 and 1 
 threshold, every stream runs as fast as the first, before and after. The shape's 3 % is a stress
 figure: on the real tailnet path the worker's QUIC counted no loss in 15 of 16 runs
 (`harness::TAILNET`'s comment).
+
+## 2026-10-05 — a drop stream paced by the program (M3 again)
+
+A dropped type now streams into the program's answer only as fast as the program's input takes
+it: each chunk is taken once the input is written past its answer, and a stream keeps no more
+than 1 MiB handed over and not taken (`docs/decisions/terminal.md`, "Drops are read lazily").
+The 8 MiB cap is gone from the streamed path, so a type of any size goes. M3 of the lazy drop,
+again, with a 64 MiB type beside it:
+
+```sh
+cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint --no-capture
+cargo nextest run -p slopty-worker --test session_actor a_dropped_stream_goes --no-capture
+```
+
+The measurement now reads only the tail of the stand-in's output file to see the answer end.
+It used to read the whole file into the test's own process every 50 ms, which put up to 11 MiB
+of base64 into every figure. Three runs each, in a process of its own:
+
+| | peak footprint growth | into the program |
+|---|---|---|
+| 8 MiB given whole | +55.0 MiB (55.0, 55.0, 55.1) | 1 163–1 211 ms |
+| 8 MiB streamed, before pacing (the earlier entry, with the old read) | +39.1 MiB | |
+| 8 MiB streamed, paced | +16.2 MiB (15.4, 16.2, 16.2) | 1 174–1 240 ms |
+| 64 MiB streamed, paced (refused at 8 MiB before) | +16.3 MiB (16.3, 15.4, 16.3) | 9 197–9 649 ms |
+
+The footprint no longer grows with the type: 64 MiB costs what 8 MiB does. Pacing costs no
+rate. Streamed and whole reach the stand-in at the same 7 MB/s, which the debug build, the pty
+and the stand-in's `cat` set. The worker test holds a stand-in that reads nothing for a moment:
+exactly the window, 1 048 576 bytes, went before the stream was held back (three runs), and
+once it reads, all 24 MiB arrive.
+
+What is left of the 16 MiB is not the window. A 64 KiB drop costs +0.3 MiB, 1 MiB costs
++4.5 MiB and 3 MiB costs +11 MiB, and a quarter of the window takes only about 3 MiB off. `heap`
+on the test process after a 64 MiB drop shows one live 4 MiB block and 8 MiB of freed large
+blocks still dirty. The live block is most likely the input queue's buffer, which keeps the
+capacity a drop or a paste grew it to (not traced to its allocation). The rest is the allocator
+keeping freed pages. Neither grows with the type.

@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use slopty_proto::drag::{DragId, DragItem};
-use slopty_proto::terminal::{DropFrom, drop_offer};
+use slopty_proto::terminal::{DROP_HELD_MAX_BYTES, DropFrom, drop_offer};
 use slopty_proto::transfer::{ClipType, RepRef, Source};
 
 use super::Read;
@@ -111,7 +111,11 @@ impl TermDrag {
                     if !self.pushed.insert((*item, kind.clone())) {
                         continue;
                     }
-                    if let Some(bytes) = self.bytes(*item, kind) {
+                    // A worker holds no more than this ahead of the drop: a larger type is
+                    // fetched when the program asks, and streams in as it reads.
+                    if let Some(bytes) =
+                        self.bytes(*item, kind).filter(|b| b.len() <= DROP_HELD_MAX_BYTES)
+                    {
                         let rep = RepRef {
                             source: Source::Drag(self.drag),
                             item: *item,
@@ -241,6 +245,24 @@ mod tests {
         assert_eq!(drag.fetch(1, &png, Some(2)), Fetched::TooBig(3));
         assert_eq!(drag.fetch(0, &png, None), Fetched::Gone);
         assert_eq!(drag.accepted(&["image/x-unknown".to_owned()]), Accepted::default());
+    }
+
+    /// A type larger than a worker holds ahead of the drop is not pushed, even accepted: the
+    /// program's request fetches it whole.
+    #[test]
+    fn a_type_past_what_a_worker_holds_waits_for_the_fetch() {
+        let png = ClipType::Format(ClipFormat::Png);
+        let big = vec![b'x'; DROP_HELD_MAX_BYTES + 1];
+        let picture =
+            Rep { kind: png.clone(), size: Some(big.len() as u64), hash: None, inline: None };
+        let read = Read {
+            items: vec![DragItem { file: None, promised: None, reps: vec![picture] }],
+            files: Vec::new(),
+            pushes: vec![Push { item: 0, kind: png.clone(), bytes: big.clone() }],
+        };
+        let mut drag = TermDrag::new(read);
+        assert_eq!(drag.accepted(&["image/png".to_owned()]), Accepted::default());
+        assert_eq!(drag.fetch(0, &png, None), Fetched::Data(big));
     }
 
     /// Files the program never accepted never go up.

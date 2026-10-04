@@ -30,7 +30,7 @@ pub mod search;
 
 pub use ghostty::{
     ClipboardSource, Compression, DropOperation, DropPoint, Dropped, GhosttyEngine, Joined, Memory,
-    PasteRep, TEXT_MIME,
+    PasteRep, Streamed, TEXT_MIME,
 };
 pub use graphics::ImageUpload;
 use slopty_proto::terminal::{ColorOverrides, PointerShape, Progress, TermSize};
