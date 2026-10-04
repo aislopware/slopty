@@ -1254,6 +1254,11 @@ mod tests {
 
         use tokio::io::AsyncWriteExt as _;
 
+        // An argument may hold newlines (an appended prompt carries Slopty's pointer), so the
+        // stub ends each word with US and each run with RS.
+        const WORD: char = '\u{1f}';
+        const RUN: char = '\u{1e}';
+
         let dir = tempfile::tempdir().unwrap();
         let place = dir.path().join("project");
         let bin = dir.path().join("bin");
@@ -1263,7 +1268,7 @@ mod tests {
         let claude = bin.join("claude");
         std::fs::write(
             &claude,
-            "#!/bin/sh\nprintf '%s|' \"$PWD\" \"$@\" >> \"$CLAUDE_RAN\"\necho >> \"$CLAUDE_RAN\"\n\
+            "#!/bin/sh\nprintf '%s\\037' \"$PWD\" \"$@\" >> \"$CLAUDE_RAN\"\nprintf '\\036' >> \"$CLAUDE_RAN\"\n\
              echo fake-claude-up\nsleep 120\n",
         )
         .unwrap();
@@ -1349,7 +1354,7 @@ mod tests {
         let runs = tokio::time::timeout(STEP, async {
             loop {
                 let text = std::fs::read_to_string(&ran).unwrap_or_default();
-                if text.lines().count() >= 2 {
+                if text.matches(RUN).count() >= 2 {
                     return text;
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1358,7 +1363,7 @@ mod tests {
         .await
         .expect("the agent is resumed");
         // The shell's `claude` adds Slopty's mod and the relay's settings; the rest is the resume.
-        let mut words = runs.lines().nth(1).unwrap().split('|').filter(|w| !w.is_empty());
+        let mut words = runs.split(RUN).nth(1).unwrap().split(WORD).filter(|w| !w.is_empty());
         let mut resumed = Vec::new();
         while let Some(word) = words.next() {
             if word == "--settings" {
@@ -1367,7 +1372,7 @@ mod tests {
                 resumed.push(word);
             }
         }
-        let (cwd, args) = resumed.split_first().unwrap();
+        let Some((cwd, args)) = resumed.split_first() else { panic!("no command in {runs:?}") };
         assert_eq!(
             std::path::Path::new(cwd).canonicalize().unwrap(),
             place.canonicalize().unwrap()
