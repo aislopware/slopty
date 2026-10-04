@@ -447,10 +447,19 @@ impl Phase {
 /// What a thread waits on, in words.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Wait {
-    /// Open: `permission`, `question`, `plan`, `input`, `task`, `wakeup`.
+    /// Open: `permission`, `question`, `plan`, `input`, `task`, `command`, `wakeup`.
     pub kind: String,
     /// What it waits for, worded by the adapter ("Wants to run cargo test").
     pub text: String,
+}
+
+impl Wait {
+    /// At rest with only commands left running in the background (a dev server, say), named
+    /// in its text: nothing of the agent's own work holds it.
+    pub const COMMAND: &'static str = "command";
+    /// At rest with work of its own left running in the background: a subagent, a monitor, a
+    /// scheduled prompt, or work the adapter cannot tell apart.
+    pub const TASK: &'static str = "task";
 }
 
 /// Whether the thread's agent is there, beside where it is.

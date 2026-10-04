@@ -790,3 +790,69 @@ fn slash_commands_are_the_threads() {
     assert_eq!(thread.commands[1].argument_hint.as_deref(), Some("<branch>"));
     assert!(observed.commands(&listed).is_empty(), "told once");
 }
+
+/// An agent at rest whose only work left running is commands it started in the background
+/// waits on them by name (`Wait::COMMAND`), worded again once the transcript shows them; a
+/// subagent among them, more work than the transcript shows (a monitor) or a scheduled prompt
+/// is a task of its own.
+#[test]
+fn a_wait_on_commands_left_running_names_them() {
+    use serde_json::json;
+    let waiting = |tasks, crons| AgentEvent {
+        session: SessionId::nil(),
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Waiting { tasks, crons },
+        agent_session: None,
+        detail: None,
+        attention: false,
+        source: AgentSource::Hook,
+        since_ms: WallMs::from_millis(3),
+        mode: None,
+    };
+    let main = conv::ThreadId::Main;
+    let mut conversation = Conversation::default();
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    let wait = |host: &Host, observed: &Observed| {
+        host.thread(observed.main()).status.wait.clone().expect("a wait")
+    };
+
+    host.take(observed.status(&waiting(1, 0)));
+    assert_eq!(wait(&host, &observed).kind, Wait::TASK, "nothing named running yet");
+    let input = json!({"command": "npm run dev", "run_in_background": true});
+    let call = json!({
+        "type": "assistant", "uuid": "a1", "timestamp": "2026-09-27T03:15:26.000Z",
+        "message": { "role": "assistant", "content": [
+            { "type": "tool_use", "id": "t1", "name": "Bash", "input": input },
+        ] },
+    });
+    let started = json!({
+        "type": "user", "uuid": "u1", "parentUuid": "a1",
+        "timestamp": "2026-09-27T03:15:27.000Z",
+        "message": { "role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "t1",
+            "content": "Command running in background with ID: b1. Output is being written \
+                        to: /tmp/b1.output.",
+        }] },
+        "toolUseResult": { "stdout": "", "stderr": "", "backgroundTaskId": "b1" },
+    });
+    let mut changes = conversation.ingest(&main, &call);
+    changes.extend(conversation.ingest(&main, &started));
+    host.take(observed.transcript(&changes, &[]));
+    let state = host.thread(observed.main());
+    let [task] = state.tasks.as_slice() else { panic!("one task: {:?}", state.tasks) };
+    assert_eq!(task.kind, BackgroundTask::SHELL);
+    assert_eq!(
+        wait(&host, &observed),
+        Wait { kind: Wait::COMMAND.to_owned(), text: task.title.clone() },
+        "worded again once the transcript names it"
+    );
+
+    host.take(observed.status(&waiting(2, 0)));
+    assert_eq!(wait(&host, &observed).kind, Wait::TASK, "a monitor the transcript does not show");
+    host.take(observed.status(&waiting(1, 1)));
+    assert_eq!(wait(&host, &observed).kind, Wait::TASK, "a scheduled prompt holds it");
+    host.take(observed.status(&waiting(1, 0)));
+    assert_eq!(wait(&host, &observed).kind, Wait::COMMAND);
+}

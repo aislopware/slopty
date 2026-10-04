@@ -15,9 +15,9 @@
 //! - **Items.** An entry keeps its id. A tool call's kind comes from the decoder's typed detail,
 //!   not from Claude Code's tool names, and its title is worded here.
 //! - **Live blocks.** Where the mod is heard, a block the model is writing is an item of its own,
-//!   appended to as it grows, and removed once the transcript's entry settles it, the way the face
-//!   shows it today ([`crate::live::Overlay`], which this keeps as one follower). A tool call's
-//!   live block takes the call's own id, so the transcript's entry replaces it.
+//!   appended to as it grows, and removed once the transcript's entry settles it
+//!   ([`crate::live::Overlay`], which this keeps for the thread). A tool call's live block takes
+//!   the call's own id, so the transcript's entry replaces it.
 //! - **Requests.** A permission prompt the worker holds is a request with the answers Claude Code
 //!   takes: allow, allow always (with what the suggestions grant), deny, and deny and stop.
 //!   [`verdict`] maps a chosen answer back. A prompt is held only through the `PermissionRequest`
@@ -257,6 +257,9 @@ pub struct Observed {
     held_block: Option<WallMs>,
     /// The kind of request the agent's block asks for, while it is blocked on the person.
     blocked_kind: Option<&'static str>,
+    /// What the agent waits on at rest, as the tracker counts it (background tasks, scheduled
+    /// prompts), while it waits: the wait is worded again as the transcript names those tasks.
+    waiting_on: Option<(u32, u32)>,
     out: Vec<Out>,
     /// The title is the session's own name, which its first prompt replaces.
     named: bool,
@@ -349,6 +352,7 @@ impl Observed {
             in_terminal: None,
             held_block: None,
             blocked_kind: None,
+            waiting_on: None,
             named: false,
             hooked: false,
             commands: Vec::new(),
@@ -478,12 +482,12 @@ impl Observed {
                 (Phase::NeedsYou, Some(Wait { kind: kind.to_owned(), text }), Liveness::Live)
             }
             AgentStatus::Waiting { tasks, crons } => {
-                let text = match (tasks, crons) {
-                    (0, n) => format!("{n} scheduled"),
-                    (n, _) => format!("{n} in the background"),
-                };
-                (Phase::Waiting, Some(Wait { kind: "task".to_owned(), text }), Liveness::Live)
+                (Phase::Waiting, Some(self.wait_on(*tasks, *crons)), Liveness::Live)
             }
+        };
+        self.waiting_on = match event.status {
+            AgentStatus::Waiting { tasks, crons } => Some((tasks, crons)),
+            _ => None,
         };
         let phase = if phase == Phase::Done && self.failed { Phase::Failed } else { phase };
         let status = Status { phase, wait, liveness, since_ms: event.since_ms };
@@ -496,6 +500,44 @@ impl Observed {
             self.push(self.meta.id, Action::MetersSet(self.meters.clone()));
         }
         self.drain()
+    }
+
+    /// What an agent at rest waits on: `tasks` left running and `crons` scheduled prompts, as
+    /// the tracker counts them. When every one is a command the session's own transcript shows
+    /// running in the background (a dev server, say), it waits on [`Wait::COMMAND`], named by
+    /// those commands; a subagent, a monitor or a scheduled prompt among them is a task.
+    fn wait_on(&self, tasks: u32, crons: u32) -> Wait {
+        let running: Vec<&BackgroundTask> = self
+            .threads
+            .get(&conv::ThreadId::Main)
+            .map(|m| m.tasks.iter().filter(|t| t.is_running()).collect())
+            .unwrap_or_default();
+        let only_commands = crons == 0
+            && tasks > 0
+            && usize::try_from(tasks).is_ok_and(|n| n == running.len())
+            && running.iter().all(|t| t.kind == BackgroundTask::SHELL);
+        if only_commands {
+            let named: Vec<&str> = running.iter().map(|t| t.title.as_str()).collect();
+            return Wait { kind: Wait::COMMAND.to_owned(), text: named.join(", ") };
+        }
+        let text = match (tasks, crons) {
+            (0, n) => format!("{n} scheduled"),
+            (n, _) => format!("{n} in the background"),
+        };
+        Wait { kind: Wait::TASK.to_owned(), text }
+    }
+
+    /// Word the wait again once the transcript changed what runs in the background, while the
+    /// agent waits at rest.
+    fn rewait(&mut self) {
+        let Some((tasks, crons)) = self.waiting_on else { return };
+        let wait = self.wait_on(tasks, crons);
+        let Some(status) = self.status.as_mut().filter(|s| s.wait.as_ref() != Some(&wait)) else {
+            return;
+        };
+        status.wait = Some(wait);
+        let status = status.clone();
+        self.push(self.meta.id, Action::Status(status));
     }
 
     /// The terminal's title changed, or was first heard. Claude Code paints the session's own
@@ -864,6 +906,7 @@ impl Observed {
         for action in actions {
             self.push(id, action);
         }
+        self.rewait();
         // A new prompt leaves the failure behind: its own turn's end says how it went.
         if began {
             self.failed = false;
@@ -893,6 +936,7 @@ impl Observed {
         for action in actions {
             self.push(id, action);
         }
+        self.rewait();
     }
 
     fn turn(&mut self, thread: &conv::ThreadId, record: &conv::Turn) {
