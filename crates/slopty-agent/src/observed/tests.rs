@@ -249,6 +249,55 @@ fn live_blocks_stream_after_their_prompt_then_the_transcript_settles_them() {
     }
 }
 
+/// Claude Code's own lists, as the recorded mod sent them, are the thread's menu and models:
+/// its commands in its order, a custom one on disk lending its hint and source, and the
+/// aliases `/model` takes in place of the compiled-in four. The same catalog again tells
+/// nothing.
+#[test]
+fn the_mods_catalog_is_the_threads_menu_and_models() {
+    let catalog = live_events("bash")
+        .into_iter()
+        .find_map(|e| match e {
+            ModEvent::Catalog(c) => Some(c),
+            _ => None,
+        })
+        .expect("the recorded catalog");
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    let own = conv::SlashCommand {
+        name: "init".to_owned(),
+        description: "Mine".to_owned(),
+        argument_hint: Some("[dir]".to_owned()),
+        source: conv::CommandSource::Project,
+    };
+    host.take(observed.commands(std::slice::from_ref(&own)));
+    let main = observed.main();
+    assert_eq!(host.thread(main).commands.len(), 1, "alone until the mod speaks");
+    host.take(observed.catalog(&catalog));
+    let state = host.thread(main);
+    let names: Vec<&str> = state.commands.iter().map(|c| c.name.as_str()).collect();
+    let recorded: Vec<&str> = catalog.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, recorded, "Claude Code's list, in its order");
+    let init = state.commands.iter().find(|c| c.name == "init").expect("init");
+    assert_eq!((init.source.as_str(), init.argument_hint.as_deref()), ("project", Some("[dir]")));
+    let model = state.commands.iter().find(|c| c.name == "model").expect("model");
+    assert_eq!(model.source, "built-in");
+    let ids: Vec<&str> = state.meta.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, catalog.models.iter().map(String::as_str).collect::<Vec<_>>());
+    assert!(ids.contains(&"opus[1m]"), "{ids:?}");
+    let wide = state.meta.models.iter().find(|m| m.id == "sonnet[1m]").expect("sonnet[1m]");
+    assert_eq!(wide.label, "Sonnet 1M");
+    assert!(observed.catalog(&catalog).is_empty(), "the same catalog again");
+}
+
+fn live_events(scenario: &str) -> Vec<ModEvent> {
+    let text = std::fs::read_to_string(dir("mod", scenario).join("events.jsonl")).expect("events");
+    text.lines()
+        .flat_map(|line| serde_json::from_str::<live::Batch>(line).expect("a batch").decoded())
+        .collect()
+}
+
 /// A held prompt is a request with the answers Claude Code takes, each mapping back to the
 /// verdict it stands for; settled, it says who answered.
 #[test]

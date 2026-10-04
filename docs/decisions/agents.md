@@ -257,7 +257,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - **An interrupt and a model are checked before they are taken.** Esc is refused over a
     draft, while a person is asked, and when the agent is not working. A model must be in the
     thread's catalogue (`ThreadMeta::models`). For Claude Code the catalogue is the aliases
-    `/model` takes (`observed::MODELS`), so no client keeps a list of its own. `/model` waits
+    `/model` takes, as the mod lists them (`observed::MODELS` where it is not heard), so no
+    client keeps a list of its own. `/model` waits
     for the agent to be at rest. Mode stays read-only.
   - **Each thread with something to send has one task**, which sends one thing at a time, so
     two messages never interleave in the terminal. It wakes on the thread's batches, on a new

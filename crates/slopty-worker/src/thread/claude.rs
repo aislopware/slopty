@@ -371,6 +371,9 @@ impl Session {
             if let Some(meters) = &seen.meters {
                 take(&self.host, observed.meters(meters));
             }
+            if let Some(catalog) = &seen.catalog {
+                take(&self.host, observed.catalog(catalog));
+            }
         }
         self.meters.clone_from(&seen.meters);
         if let Some(observed) = self.observed.as_mut() {
@@ -493,8 +496,10 @@ impl Session {
         }
     }
 
-    /// Tell the thread the slash commands Claude Code takes in its folder, read on the blocking
-    /// pool once for each thread and folder: its own, the person's and the project's.
+    /// Tell the thread the person's and the project's own slash commands in its folder, read on
+    /// the blocking pool once for each thread and folder. Claude Code's whole list comes from
+    /// the mod where it is heard ([`Observed::catalog`]); these give it their argument hints,
+    /// and stand alone where it is not.
     async fn offer_commands(&mut self) {
         let Some(main) = self.observed.as_ref().map(Observed::main) else { return };
         let wanted = (main, self.cwd.clone());
@@ -506,9 +511,9 @@ impl Session {
         let home = slopty_platform::dirs::home();
         let listed = tokio::task::spawn_blocking(move || {
             if cwd.as_os_str().is_empty() {
-                slopty_agent::commands::built_in().collect()
+                Vec::new()
             } else {
-                slopty_agent::commands::all(&home, &cwd)
+                slopty_agent::commands::custom(&home, &cwd)
             }
         })
         .await;

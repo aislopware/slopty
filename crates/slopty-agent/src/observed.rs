@@ -78,10 +78,21 @@ pub const CAPS: [&str; 10] = [
     Cap::STEER,
 ];
 
-/// The models `/model` takes, by the aliases Claude Code resolves to its current ones: its
-/// catalogue as the thread offers it.
+/// The models `/model` takes, by the aliases Claude Code resolves to its current ones, until
+/// the mod lists Claude Code's own ([`Observed::catalog`]); where it is not heard, these stand.
 pub const MODELS: [(&str, &str); 4] =
     [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("default", "Default")];
+
+/// A model alias for people: `sonnet[1m]` is "Sonnet 1M", `opusplan` "Opusplan".
+fn alias_label(alias: &str) -> String {
+    let (base, wide) = match alias.strip_suffix("[1m]") {
+        Some(base) => (base, " 1M"),
+        None => (alias, ""),
+    };
+    let mut chars = base.chars();
+    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    format!("{first}{}{wide}", chars.as_str())
+}
 
 /// Who answered a request the agent asked in its own terminal ([`Answerer::name`]).
 pub const IN_TERMINAL: &str = "terminal";
@@ -282,6 +293,10 @@ pub struct Observed {
     hooked: bool,
     /// The slash commands as last told.
     commands: Vec<thread::Command>,
+    /// The person's and the project's own commands on disk (`crate::commands::custom`).
+    custom: Vec<conv::SlashCommand>,
+    /// Claude Code's own lists, as the mod last sent them.
+    catalog: Option<live::Catalog>,
     /// The main thread's last turn ended failed, so its agent's done is a failure.
     failed: bool,
 }
@@ -372,6 +387,8 @@ impl Observed {
             named: false,
             hooked: false,
             commands: Vec::new(),
+            custom: Vec::new(),
+            catalog: None,
             failed: false,
         }
     }
@@ -584,9 +601,40 @@ impl Observed {
         self.drain()
     }
 
-    /// The slash commands Claude Code takes in this session's folder
-    /// (`crate::commands::all`), for the composer to offer.
-    pub fn commands(&mut self, listed: &[conv::SlashCommand]) -> Vec<Out> {
+    /// The person's and the project's own commands in this session's folder
+    /// (`crate::commands::custom`): the menu where the mod is not heard, and the argument hints
+    /// of Claude Code's own list where it is.
+    pub fn commands(&mut self, custom: &[conv::SlashCommand]) -> Vec<Out> {
+        custom.clone_into(&mut self.custom);
+        self.tell_commands();
+        self.drain()
+    }
+
+    /// Claude Code's own lists, as the mod sent them: its slash commands become the menu
+    /// ([`crate::commands::listed`]), and the aliases `/model` takes the thread's models, in
+    /// place of [`MODELS`].
+    pub fn catalog(&mut self, catalog: &live::Catalog) -> Vec<Out> {
+        if self.catalog.as_ref() == Some(catalog) {
+            return self.drain();
+        }
+        self.catalog = Some(catalog.clone());
+        self.tell_commands();
+        let models: Vec<Model> = catalog
+            .models
+            .iter()
+            .map(|id| Model { id: id.clone(), label: alias_label(id) })
+            .collect();
+        if !models.is_empty() && models != self.meta.models {
+            self.meta.models = models;
+            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
+        }
+        self.drain()
+    }
+
+    /// Tell the thread its menu, when it changed.
+    fn tell_commands(&mut self) {
+        let agent = self.catalog.as_ref().map(|c| c.commands.as_slice());
+        let listed = crate::commands::listed(agent, &self.custom);
         let commands: Vec<thread::Command> = listed
             .iter()
             .map(|c| thread::Command {
@@ -606,7 +654,6 @@ impl Observed {
             self.commands.clone_from(&commands);
             self.push(self.meta.id, Action::CommandsSet(commands));
         }
-        self.drain()
     }
 
     /// The status line's meters.

@@ -1151,7 +1151,8 @@ mod threads {
 
     /// A Claude Code session works where its hooks say, whatever folder its terminal reports:
     /// its thread's folder is the agent's own, known before any transcript is, and the slash
-    /// commands the composer offers are those Claude Code takes there.
+    /// commands the composer offers are the project's own there (with no mod heard, nothing of
+    /// Claude Code's own list is known).
     #[tokio::test]
     async fn a_session_works_where_its_hooks_say() {
         let dir = tempfile::tempdir().unwrap();
@@ -1159,7 +1160,8 @@ mod threads {
         let mut a = Client::connect(&daemons, ClientId::new()).await;
         let session = open_shell(&mut a, dir.path()).await;
         let work = std::fs::canonicalize(dir.path()).unwrap().join("work");
-        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(work.join(".claude/commands")).unwrap();
+        std::fs::write(work.join(".claude/commands/ship.md"), "Ship the build\n").unwrap();
         // Claude Code has written nothing to its transcript yet.
         let transcript = daemons.dir.join("projects").join("h1.jsonl");
         std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
@@ -1175,11 +1177,9 @@ mod threads {
         a.follow(thread).await;
         let cwd = work.to_string_lossy().into_owned();
         a.until(|c| c.thread.as_ref().is_some_and(|s| s.meta.cwd == cwd)).await;
-        // The commands Claude Code takes there, its own among them.
-        a.until(|c| {
-            c.thread.as_ref().is_some_and(|s| s.commands.iter().any(|c| c.name == "compact"))
-        })
-        .await;
+        // The project's own command there.
+        a.until(|c| c.thread.as_ref().is_some_and(|s| s.commands.iter().any(|c| c.name == "ship")))
+            .await;
     }
 
     /// A question Claude Code asks while nobody follows its thread is not held, so it is asked

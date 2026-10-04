@@ -117,6 +117,9 @@ pub enum ModEvent {
     /// The session's context.
     #[serde(rename = "measure")]
     Measure(Measure),
+    /// Claude Code's own command list and model aliases.
+    #[serde(rename = "catalog")]
+    Catalog(Catalog),
     /// `session.end`.
     #[serde(rename = "bye")]
     Bye,
@@ -183,6 +186,35 @@ impl At {
     pub fn id(&self) -> LiveId {
         LiveId { turn: self.step.turn.clone(), step: self.step.index, block: self.block }
     }
+}
+
+/// What Claude Code lists for the person: its slash commands (`$.command.list()`) and the
+/// aliases `/model` takes (the `/config` menu's `model` row).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct Catalog {
+    /// Every command the person can run now, in the typeahead's order.
+    #[serde(default)]
+    pub commands: Vec<CommandInfo>,
+    /// The model aliases, in the menu's order.
+    #[serde(default)]
+    pub models: Vec<String>,
+    /// The alias in use.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// One slash command as Claude Code lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct CommandInfo {
+    /// What the person runs it by, without the slash.
+    pub name: String,
+    /// The typeahead's line for it.
+    #[serde(default)]
+    pub description: String,
+    /// Where it comes from: `builtin`, `plugin`, `user` (the person's or the project's own
+    /// file) or `mcp` (an MCP server's prompt).
+    #[serde(default)]
+    pub source: String,
 }
 
 /// `session.measure`.
@@ -309,6 +341,7 @@ impl Board {
             ModEvent::Hello(_)
             | ModEvent::StepStart(_)
             | ModEvent::Measure(_)
+            | ModEvent::Catalog(_)
             | ModEvent::Other => false,
         };
         let before = self.blocks.len();

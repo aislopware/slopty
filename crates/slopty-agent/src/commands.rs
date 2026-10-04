@@ -1,9 +1,10 @@
 //! The slash commands an agent takes, for the conversation face's composer menu.
 //!
-//! Two kinds:
-//! - **Claude Code's own**, from a table read out of the version the fixtures pin ([`BUILT_IN`]).
-//!   Its commands are compiled in, and the one list a running Claude Code could give (the mod's
-//!   `command.list`) has a shape nobody has checked, so the table is the source until then.
+//! Two sources:
+//! - **Claude Code's own list**, every command the person can run now, built-in, plugin, the
+//!   person's and the project's, and MCP prompts alike, in the typeahead's order. The mod sends it
+//!   (`$.command.list()`, [`crate::live::Catalog`]) where it is heard. It is the menu there:
+//!   nothing is compiled in, so a new Claude Code's commands come with it.
 //! - **Custom commands**, read from where Claude Code loads them ([`custom`]): the person's
 //!   `~/.claude/commands` and `~/.claude/skills`, the project's `.claude/commands` and
 //!   `.claude/skills` in the agent's directory and each one above it short of the home directory,
@@ -13,8 +14,9 @@
 //! its front matter's `description` and `argument-hint` say what it does and takes; with no
 //! description, its first line of text does. A skill is its `SKILL.md`'s `name` (else its
 //! directory's), unless it says `user-invocable: false`. A plugin's are named
-//! `<plugin>:<name>`. The first of a name wins, in the order project, personal, plugin, Claude
-//! Code's own, so the menu lists each name once.
+//! `<plugin>:<name>`. The first of a name wins, in the order project, personal, plugin, so the
+//! menu lists each name once. They give Claude Code's list their argument hints and where each
+//! comes from, which it does not say, and stand alone where the mod is not heard ([`listed`]).
 
 use std::collections::HashSet;
 use std::io::Read as _;
@@ -23,92 +25,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use slopty_proto::conversation::{CommandSource, SlashCommand};
 
-/// The Claude Code version [`BUILT_IN`] was read from.
-pub const BUILT_IN_VERSION: &str = "2.1.283";
-
-/// Claude Code's own commands and bundled skills a person can type.
-///
-/// Each is `(name, description, argument hint)`: the ones enabled in an ordinary interactive
-/// session of [`BUILT_IN_VERSION`], with the words its `/help` shows.
-pub const BUILT_IN: &[(&str, &str, Option<&str>)] = &[
-    ("add-dir", "Add a new working directory", Some("<path>")),
-    ("background", "Send this session to the background and free the terminal", Some("[prompt]")),
-    ("batch", "Plan a large change; background agents each open a PR", None),
-    ("branch", "Create a branch of the current conversation at this point", Some("[name]")),
-    (
-        "btw",
-        "Ask a quick side question without interrupting the main conversation",
-        Some("[question]"),
-    ),
-    ("cd", "Move this session to a new working directory", Some("<path>")),
-    (
-        "clear",
-        "Start a new session with empty context; the previous one stays resumable",
-        Some("[name]"),
-    ),
-    ("code-review", "Review the current diff for correctness bugs", None),
-    (
-        "compact",
-        "Free up context by summarizing the conversation so far",
-        Some("<optional custom summarization instructions>"),
-    ),
-    ("config", "Open settings", Some("[key=value]")),
-    ("context", "Visualize current context usage as a colored grid", Some("[all]")),
-    ("copy", "Copy Claude's last response to clipboard (or /copy N for the Nth-latest)", None),
-    ("debug", "Turn on debug logging and investigate problems", Some("[issue description]")),
-    ("doctor", "Health-check your setup and fix issues", None),
-    ("effort", "Set effort level for model usage", None),
-    ("exit", "Exit Claude Code", None),
-    ("export", "Export the current conversation to a file or clipboard", Some("[filename]")),
-    ("feedback", "Send feedback to Anthropic or report a bug", Some("[report]")),
-    ("fewer-permission-prompts", "Add an allowlist for the read-only commands you run most", None),
-    ("fork", "Spawn a background agent that inherits the full conversation", Some("<directive>")),
-    ("goal", "Set a goal Claude checks before stopping", Some("[<condition> | clear]")),
-    ("help", "Show help and available commands", None),
-    ("hooks", "View hook configurations for tool events", None),
-    ("ide", "Manage IDE integrations and show status", Some("[open]")),
-    ("init", "Initialize a new CLAUDE.md file with codebase documentation", None),
-    ("insights", "Generate a report analyzing your Claude Code sessions", None),
-    ("keybindings", "Open your keyboard shortcuts file", None),
-    ("login", "Sign in with your Anthropic account", None),
-    ("logout", "Sign out from your Anthropic account", None),
-    ("loop", "Run a prompt or slash command on a recurring interval", Some("[interval] <prompt>")),
-    ("mcp", "Manage MCP servers", Some("[reconnect <server>|enable|disable [<server>|all]]")),
-    ("memory", "Edit CLAUDE.md files and memory settings", None),
-    ("model", "Set the AI model for Claude Code", Some("[model]")),
-    ("output-style", "List output styles or switch to one", Some("[style]")),
-    ("permissions", "Manage allow and deny tool permission rules", None),
-    ("plan", "Enable plan mode or view the current session plan", Some("[open|<description>]")),
-    ("plugin", "Manage Claude Code plugins", None),
-    ("recap", "Generate a one-line session recap now", None),
-    ("release-notes", "View release notes", None),
-    ("reload-plugins", "Activate pending plugin changes in the current session", Some("[--force]")),
-    ("reload-skills", "Pick up skills added or changed on disk during this session", None),
-    ("rename", "Rename the current conversation", Some("[name]")),
-    ("resume", "Resume a previous conversation", Some("[conversation id or search term]")),
-    ("rewind", "Restore the code and/or conversation to a previous point", None),
-    (
-        "security-review",
-        "Complete a security review of the pending changes on the current branch",
-        None,
-    ),
-    ("simplify", "Review the changed code for reuse, simplification and efficiency", None),
-    ("skills", "List available skills", None),
-    (
-        "status",
-        "Show Claude Code status: version, model, account, API connectivity and tools",
-        None,
-    ),
-    ("statusline", "Set up Claude Code's status line UI", None),
-    (
-        "subtask",
-        "Send a subagent off with your full context; its result comes back here",
-        Some("<task>"),
-    ),
-    ("tasks", "View and manage everything running in the background", None),
-    ("theme", "Change the theme", None),
-    ("usage", "Show session cost, plan usage, and activity stats", None),
-];
+use crate::live::CommandInfo;
 
 /// Most bytes of a command or skill file read for its front matter and first line.
 const HEAD_BYTES: u64 = 8 * 1024;
@@ -122,26 +39,40 @@ const MAX_DEPTH: usize = 4;
 /// Longest description kept, in characters.
 const DESCRIPTION_CHARS: usize = 160;
 
-/// Claude Code's own commands, from [`BUILT_IN`].
-pub fn built_in() -> impl Iterator<Item = SlashCommand> {
-    BUILT_IN.iter().map(|(name, description, hint)| SlashCommand {
-        name: (*name).to_owned(),
-        description: (*description).to_owned(),
-        argument_hint: hint.map(str::to_owned),
-        source: CommandSource::BuiltIn,
-    })
+/// The menu: Claude Code's own list (`agent`) where the mod sent one, each command with the
+/// argument hint and the source its file on disk gives (`custom`); else the custom commands
+/// alone. Each name once.
+#[must_use]
+pub fn listed(agent: Option<&[CommandInfo]>, custom: &[SlashCommand]) -> Vec<SlashCommand> {
+    let mut seen = HashSet::new();
+    let Some(agent) = agent.filter(|a| !a.is_empty()) else {
+        return custom.iter().filter(|c| seen.insert(c.name.clone())).cloned().collect();
+    };
+    agent
+        .iter()
+        .filter(|c| seen.insert(c.name.clone()))
+        .map(|c| {
+            let own = custom.iter().find(|o| o.name == c.name);
+            SlashCommand {
+                name: c.name.clone(),
+                description: cut(c.description.trim()),
+                argument_hint: own.and_then(|o| o.argument_hint.clone()),
+                source: own.map_or_else(|| source_of(&c.source), |o| o.source),
+            }
+        })
+        .collect()
 }
 
-/// Every command an agent running in `cwd`, for a person whose home is `home`, takes: the
-/// custom ones first, then Claude Code's own, each name once.
-#[must_use]
-pub fn all(home: &Path, cwd: &Path) -> Vec<SlashCommand> {
-    let mut seen = HashSet::new();
-    custom(home, cwd)
-        .into_iter()
-        .chain(built_in())
-        .filter(|c| seen.insert(c.name.clone()))
-        .collect()
+/// Where Claude Code says a command comes from, as the menu ranks it. Its `user` is the
+/// person's or the project's file, which a file found on disk tells apart; one not found is
+/// taken as the person's. An MCP server's prompt ranks as a plugin's: both are added to
+/// Claude Code rather than written by the person.
+fn source_of(said: &str) -> CommandSource {
+    match said {
+        "builtin" => CommandSource::BuiltIn,
+        "user" => CommandSource::Personal,
+        _ => CommandSource::Plugin,
+    }
 }
 
 /// The custom commands and skills Claude Code would load for an agent in `cwd`, in the order
@@ -409,7 +340,8 @@ mod tests {
             r#"{ "enabledPlugins": { "cloudflare@cloudflare": true, "lsp@official": false } }"#,
         );
 
-        let listed = all(&home, &cwd);
+        let own = custom(&home, &cwd);
+        let listed = listed(None, &own);
         let find = |name: &str| listed.iter().find(|c| c.name == name);
         let said = |name: &str| find(name).map(|c| (c.description.as_str(), c.source));
         assert_eq!(said("deploy"), Some(("Near deploy", CommandSource::Project)), "nearest wins");
@@ -425,22 +357,48 @@ mod tests {
         assert_eq!(said("cloudflare:build-agent"), Some(("Build an agent", CommandSource::Plugin)));
         assert_eq!(said("cloudflare:wrangler"), Some(("Use wrangler", CommandSource::Plugin)));
         assert_eq!(said("lsp:hover"), None, "a disabled plugin");
-        assert_eq!(said("compact"), Some(("My compact", CommandSource::Personal)), "custom first");
-        assert_eq!(listed.iter().filter(|c| c.name == "compact").count(), 1, "each name once");
-        assert_eq!(
-            said("model"),
-            Some(("Set the AI model for Claude Code", CommandSource::BuiltIn))
-        );
+        assert_eq!(said("compact"), Some(("My compact", CommandSource::Personal)));
+        assert_eq!(listed.iter().filter(|c| c.name == "deploy").count(), 1, "each name once");
+        assert_eq!(said("model"), None, "nothing of Claude Code's own is compiled in");
     }
 
-    /// Claude Code's table names each command once.
+    /// Where the mod sent Claude Code's list, it is the menu, in its order: a command with a
+    /// file on disk takes the file's argument hint and source, the rest are ranked by what
+    /// Claude Code says of them, and a long description is cut. With an empty list the
+    /// custom commands stand alone.
     #[test]
-    fn the_built_in_table_names_each_command_once() {
-        let mut names: Vec<&str> = BUILT_IN.iter().map(|(name, ..)| *name).collect();
-        let count = names.len();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), count);
-        assert!(names.contains(&"rewind") && names.contains(&"model"));
+    fn claude_codes_own_list_is_the_menu_with_the_disks_hints() {
+        let info = |name: &str, description: &str, source: &str| CommandInfo {
+            name: name.to_owned(),
+            description: description.to_owned(),
+            source: source.to_owned(),
+        };
+        let own = vec![SlashCommand {
+            name: "review".to_owned(),
+            description: "Review the diff".to_owned(),
+            argument_hint: Some("[focus]".to_owned()),
+            source: CommandSource::Project,
+        }];
+        let long = "x".repeat(400);
+        let agent = [
+            info("model", "Set the AI model", "builtin"),
+            info("review", "Review the diff", "user"),
+            info("deploy", &long, "user"),
+            info("github:pr", "Open a PR", "mcp"),
+            info("model", "again", "builtin"),
+        ];
+        let listed = listed(Some(&agent), &own);
+        let names: Vec<&str> = listed.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["model", "review", "deploy", "github:pr"]);
+        let review = &listed[1];
+        assert_eq!(
+            (review.source, review.argument_hint.as_deref()),
+            (CommandSource::Project, Some("[focus]"))
+        );
+        assert_eq!(listed[0].source, CommandSource::BuiltIn);
+        assert_eq!(listed[2].source, CommandSource::Personal);
+        assert_eq!(listed[2].description.chars().count(), DESCRIPTION_CHARS);
+        assert_eq!(listed[3].source, CommandSource::Plugin);
+        assert_eq!(super::listed(Some(&[]), &own), own, "an empty list is no list");
     }
 }

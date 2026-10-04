@@ -19,6 +19,31 @@ import type { EngineInterface, Register } from "claude-code";
 /** What the worker's version gate checks beside Claude Code's own version. */
 const MOD_PROTOCOL = 1;
 
+/** The catalog last sent, as sent, so an unchanged one is not sent again. */
+let catalogSent: string | undefined;
+
+/**
+ * Claude Code's own lists, for the worker's composer and model menu: every slash command the
+ * person can run now (`$.command.list()`, built-in, plugin, user and MCP alike, in the
+ * typeahead's order) and the aliases `/model` takes (the `/config` menu's `model` row, with the
+ * one in use). Sent at the start and after each turn, when it changed.
+ */
+async function sendCatalog($: EngineInterface): Promise<void> {
+  if (socket === undefined) return;
+  const commands = await $.command.list();
+  const row = (await $.config.list()).find((r) => r.key === "model");
+  const catalog = {
+    kind: "catalog",
+    commands,
+    models: row?.options ?? [],
+    model: typeof row?.value === "string" ? row.value : undefined,
+  };
+  const text = JSON.stringify(catalog);
+  if (text === catalogSent) return;
+  catalogSent = text;
+  send($, catalog);
+}
+
 /** Events waiting for the next request. */
 let queue: unknown[] = [];
 /** A request is on its way. */
@@ -68,6 +93,7 @@ export const register: Register = (on) => {
         cwd: e.cwd,
         interactive: e.isInteractive,
       });
+      await sendCatalog($);
     }
     return result;
   });
@@ -124,7 +150,9 @@ export const register: Register = (on) => {
       durationMs: e.durationMs,
       usage: e.usage,
     });
-    return next(e);
+    const result = await next(e);
+    if (e.agentId === undefined) await sendCatalog($);
+    return result;
   });
 
   on("session.measure", async ($, e, next) => {

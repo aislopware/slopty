@@ -231,6 +231,8 @@ pub struct Seen {
     pub subagents: BTreeSet<PathBuf>,
     /// The blocks the mod reports, once it is trusted.
     pub live: live::Board,
+    /// Claude Code's own command list and model aliases, as the trusted mod last listed them.
+    pub catalog: Option<live::Catalog>,
 }
 
 /// Whether a session's mod is heard.
@@ -274,7 +276,7 @@ impl Board {
 
     /// The mod in `session` reported `events`, at `now`. A `hello` decides whether it is heard
     /// ([`live::gate`]); nothing else counts until one passed. Watchers wake only when the
-    /// blocks or the meters changed.
+    /// blocks, the meters or the catalog changed.
     pub fn reported(&mut self, session: SessionId, events: &[ModEvent], now: Instant) {
         let mut trust = self.mods.get(&session).copied();
         let seen =
@@ -301,6 +303,10 @@ impl Board {
                         let meters = measure.onto(seen.meters.take());
                         seen.meters = Some(meters);
                         changed = true;
+                    }
+                    ModEvent::Catalog(catalog) => {
+                        changed |= seen.catalog.as_ref() != Some(catalog);
+                        seen.catalog = Some(catalog.clone());
                     }
                     event => changed |= seen.live.apply(event, now),
                 }
@@ -575,12 +581,22 @@ mod tests {
         board.reported(trusted, &[mod_event(&measure)], now);
         let meters = seen.borrow_and_update().meters.clone().expect("meters");
         assert_eq!((meters.context_used_pct, meters.context_window), (Some(3.5), Some(200_000)));
+        let catalog = serde_json::json!({
+            "kind": "catalog", "models": ["default", "opus"], "model": "opus",
+            "commands": [{"name": "model", "description": "Set the model", "source": "builtin"}],
+        });
+        board.reported(trusted, &[mod_event(&catalog)], now);
+        let listed = seen.borrow_and_update().catalog.clone().expect("the catalog");
+        assert_eq!((listed.models.len(), listed.commands.len()), (2, 1));
+        board.reported(trusted, &[mod_event(&catalog)], now);
+        assert!(!seen.has_changed().unwrap_or(true), "the same catalog wakes nobody");
 
         let other = board.watch(refused);
         board.reported(refused, &[hello("0.0.1"), piece("unheard")], now);
-        board.reported(refused, &[hello("0.0.1"), mod_event(&measure)], now);
+        board.reported(refused, &[hello("0.0.1"), mod_event(&measure), mod_event(&catalog)], now);
         assert!(!other.has_changed().unwrap_or(true), "a refused mod wakes nobody");
         assert!(texts(&other).is_empty() && other.borrow().meters.is_none());
+        assert!(other.borrow().catalog.is_none(), "nor lists anything");
         assert_eq!(board.mods.get(&refused), Some(&Trust::Refused));
         board.reported(refused, &[hello(verified), piece("heard")], now);
         assert_eq!(texts(&other), ["heard"], "a later hello that passes is heard");

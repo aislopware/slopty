@@ -1598,7 +1598,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **A plan is approved or kept.** `ExitPlanMode` keeps the permission card with "Approve
     plan" (an allow carrying the plan's input) and "Keep planning" (a denial with the field's
     words and no interrupt). There is no "Always allow": a plan is not a rule.
-  - **Slash commands come from a table and the disk, not from the mod.**
+  - **Slash commands come from a table and the disk, not from the mod.** *Superseded
+    2026-10-04: the mod sends Claude Code's own list and the table is gone. See "Claude Code's
+    own command list and model aliases come from the mod" below.*
     `ConversationEvent::Commands` carries the whole list after `Current`, and again when it
     changes. Each follower looks every five seconds. The list is:
     - Claude Code's own commands, from a table read out of the version the fixtures pin
@@ -1661,7 +1663,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       (a question's `Choice`);
     - the agent: `an_answer_and_a_plan_approval_carry_the_calls_input`,
       `custom_commands_are_found_where_claude_code_loads_them`,
-      `the_built_in_table_names_each_command_once`;
+      `the_built_in_table_names_each_command_once` (deleted with the table);
     - the worker: `a_mention_ranks_names_first_and_skips_the_ignored`;
     - the face in a window (`view/tests/composing.rs`): the command menu, a mention's search
       and pick, a question answered by digit, click and Enter, a plan kept then approved,
@@ -2057,3 +2059,48 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - The resume runs in the directory the hooks last named, which for such a session is the
     worktree.
   - Test: `a_worktree_is_entered_again_by_claude_code_not_made_again`.
+
+- ✅ **Claude Code's own command list and model aliases come from the mod** (2026-10-04, prune
+  FIX 2 and FIX 3). The slash menu came from a table of 2.1.283's commands compiled into
+  Slopty, and the model menu from four aliases written in `observed::MODELS`. Both went stale
+  with each Claude Code release.
+  - **What the plugin API publishes** (2.1.286's own declarations, `.claude-plugin/types`):
+    `$.command.list()` gives every command the person can run now, built-in, plugin, user and
+    MCP alike, in the typeahead's order, each with its name, its typeahead line and its source.
+    It gives no argument hint. `$.config.list()` gives the `/config` menu's rows; the `model` row
+    is a choice whose options are the aliases `/model` takes (`default`, `sonnet`, `opus`,
+    `haiku`, `fable`, `best`, the `[1m]` ones, `opusplan` on 2.1.286) and whose value is the one
+    in use. `$.session.model()` gives the resolved model id.
+  - **The mod sends a `catalog`** right after its `hello`, and again after a main-loop turn
+    when it changed. The worker takes it only from a trusted mod (`Seen::catalog`). The thread's
+    menu is then that list (`commands::listed`): a command whose file is on disk lends its
+    argument hint and tells the person's from the project's, a long line is cut, and an MCP
+    prompt ranks with the plugins. The thread's models are the aliases, labelled for people
+    ("Sonnet 1M").
+  - **Without the mod** (an untrusted Claude Code, or none loaded) the menu is the person's and
+    the project's own commands from disk, and the models stay `observed::MODELS`. Nothing of
+    Claude Code's own list is guessed.
+  - The recording pins the shape: `cargo xtask fixtures claude-mod` records the catalog with the
+    official build against the canned API, and `the_mods_catalog_is_the_threads_menu_and_models`
+    reads it back. A Claude Code whose catalog moves fails that test before the gate trusts it.
+  - Tests: `the_mods_catalog_is_the_threads_menu_and_models` and
+    `claude_codes_own_list_is_the_menu_with_the_disks_hints` (`slopty-agent`);
+    `the_mod_is_heard_after_its_hello_passes` (the worker holds a trusted catalog only);
+    `a_session_works_where_its_hooks_say` (`slopty-workerd`, the project's own command with no
+    mod).
+
+- ✅ **Private local doors yes, Anthropic requests never** (2026-10-04, the owner's standing
+  ruling for every Claude Code integration).
+  - Allowed: whatever integrates best, Claude Code's private and undocumented local interfaces
+    included: its internal plugin and Mods APIs, state reachable from inside its process, and
+    its own files, sockets and protocols. Where the published plugin API lacks something the
+    internals hold, the mod may read the internals. The shape is pinned by a recording and
+    guarded by the version check, so an update that moves it fails a test loudly instead of
+    going wrong quietly.
+  - Never: a network request to Anthropic or claude.ai in Claude Code's name. No use of its
+    OAuth token or `.credentials.json`, no private endpoints (usage, limits, models over the
+    network), and no imitation of its client headers. Only the real Claude Code talks to
+    Anthropic; a figure Slopty wants comes from what Claude Code already fetched and holds
+    locally.
+  - The command list and model aliases above needed no private door: the published plugin API
+    has both.
