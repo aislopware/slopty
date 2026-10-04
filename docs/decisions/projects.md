@@ -56,7 +56,8 @@ model no longer needs).
     one daily cap, and so does the review limit.
   - **The server's reviewer stage.** Review goes through the agent's own door: the review tile
     gains a way to ask the thread's agent for its own review (Claude Code's `/code-review`,
-    Codex's `/review`), with the findings as line comments. An orchestrator may still start a
+    Codex's `review/start`), with the findings as line comments (`docs/decisions/agents.md`,
+    "Review with <agent>"). An orchestrator may still start a
     read-only task to review, in words.
   - **Path claims.** Worktrees isolate writers, and a conflict comes back as a give-back on
     rebase. Claude Code Projects and Cursor coordinate without claims.

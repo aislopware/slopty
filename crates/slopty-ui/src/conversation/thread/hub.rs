@@ -655,6 +655,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Aside => "Couldn't ask aside".to_owned(),
         Intent::Discard => "Couldn't close the aside".to_owned(),
         Intent::KeepAside => "Couldn't keep the aside".to_owned(),
+        Intent::Review { .. } => "The review didn't start".to_owned(),
     };
     format!("{what}: {why}")
 }

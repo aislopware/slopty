@@ -20,12 +20,12 @@ pub mod thread;
 
 pub use actions::{
     AskAside, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
-    RefreshPullRequest,
+    RefreshPullRequest, ReviewWithAgent,
 };
 pub use attach::Attach;
 
-/// The thread's and the review's own lines in the palette: the commit sheet and the pull
-/// request's refresh, which no button carries a key for.
+/// The thread's and the review's own lines in the palette: the commit sheet, the pull
+/// request's refresh and the agent's own review, which no button carries a key for.
 #[must_use]
 pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::PaletteItem> {
     use crate::icons::IconName;
@@ -34,6 +34,12 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
             "Commit\u{2026}",
             IconName::GitBranch,
             Box::new(OpenCommit),
+            bindings,
+        ),
+        crate::palette::PaletteItem::new(
+            "Review with the agent",
+            IconName::ListChecks,
+            Box::new(ReviewWithAgent),
             bindings,
         ),
         crate::palette::PaletteItem::new(

@@ -1,11 +1,14 @@
-//! A review as the tile holds it: the files by weight, the person's line comments, and what
-//! they kept or put back on its way. Nothing here draws.
+//! A review as the tile holds it: the files by weight, the person's line comments, the
+//! findings of the agent's own review, and what they kept or put back on its way. Nothing here
+//! draws.
 
 use std::hash::{Hash as _, Hasher as _};
 use std::sync::Arc;
 
 use slopty_proto::thread::wire::{FileDiff, Intent, Pick, Review, ReviewScope};
 use slopty_proto::thread::{ThreadState, TurnId};
+
+use super::findings::Finding;
 
 /// Which span of the thread's work the tile shows.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
@@ -134,8 +137,10 @@ pub struct Comment {
     /// The lines it is on, quoted as the agent reads them
     /// ([`crate::conversation::diff::quote`]): where they are, then a fenced diff.
     pub quote: String,
-    /// What the person wrote.
+    /// What the person wrote, or the agent found.
     pub body: String,
+    /// The agent whose own review raised it, by name; `None` for the person's.
+    pub by: Option<String>,
 }
 
 impl Comment {
@@ -158,13 +163,38 @@ pub fn anchor(text: &str) -> u64 {
     h.finish()
 }
 
-/// The comments as one message to the agent: each the code it is on, quoted with where it is,
-/// then what the person wrote, so the agent need not open the file to know what was meant.
+/// A finding of the agent's own review that has no line in the diff on show: a file or lines
+/// outside it, or no place at all. It is kept beside the comments, never dropped.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Note {
+    /// The agent whose review raised it, by name.
+    pub by: String,
+    /// What it found.
+    pub finding: Finding,
+}
+
+impl Note {
+    /// How the agent reads it: where it is, when it says, then what was found.
+    #[must_use]
+    pub fn message(&self) -> String {
+        let text = self.finding.text();
+        match &self.finding.place {
+            Some(place) => format!("In `{}`:\n{}", place.words(), text.trim()),
+            None => text.trim().to_owned(),
+        }
+    }
+}
+
+/// The comments and notes as one message to the agent.
+///
+/// Each comment is the code it is on, quoted with where it is, then what was written of it, so
+/// the agent need not open the file to know what was meant; each note follows.
 #[must_use]
-pub fn message(comments: &[Comment]) -> String {
+pub fn message(comments: &[Comment], notes: &[Note]) -> String {
     comments
         .iter()
         .map(|c| format!("{}{}", c.quote, c.body.trim()))
+        .chain(notes.iter().map(Note::message))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -175,6 +205,7 @@ pub struct Model {
     review: Option<Arc<Review>>,
     listed: Vec<Listed>,
     comments: Vec<Comment>,
+    notes: Vec<Note>,
 }
 
 impl Model {
@@ -223,13 +254,44 @@ impl Model {
         }
     }
 
-    /// The comments as one message, and none waiting after.
+    /// The agent's findings that have no line on show.
+    #[must_use]
+    pub fn notes(&self) -> &[Note] {
+        &self.notes
+    }
+
+    /// Keep a finding with no line on show.
+    pub fn note(&mut self, note: Note) {
+        self.notes.push(note);
+    }
+
+    /// Let a note go.
+    pub fn unnote(&mut self, ix: usize) {
+        if ix < self.notes.len() {
+            self.notes.remove(ix);
+        }
+    }
+
+    /// How many comments and notes would go.
+    #[must_use]
+    pub const fn waiting(&self) -> usize {
+        self.comments.len().saturating_add(self.notes.len())
+    }
+
+    /// Whether anything the agent's review found is still here.
+    #[must_use]
+    pub fn has_findings(&self) -> bool {
+        !self.notes.is_empty() || self.comments.iter().any(|c| c.by.is_some())
+    }
+
+    /// The comments and notes as one message, and none waiting after.
     pub fn take_message(&mut self) -> Option<String> {
-        if self.comments.is_empty() {
+        if self.waiting() == 0 {
             return None;
         }
-        let text = message(&self.comments);
+        let text = message(&self.comments, &self.notes);
         self.comments.clear();
+        self.notes.clear();
         Some(text)
     }
 
@@ -340,6 +402,7 @@ mod tests {
                     "In `src/a.rs` lines 12\u{2013}13:\n```diff\n+let x = 1;\n+let y = 2;\n```\n"
                         .to_owned(),
                 body: "Name these better ".to_owned(),
+                by: None,
             },
             Comment {
                 path: "src/b.rs".to_owned(),
@@ -349,12 +412,25 @@ mod tests {
                 anchor: anchor("old();"),
                 quote: "In `src/b.rs` line 3:\n```diff\n-old();\n```\n".to_owned(),
                 body: "Why did this go?".to_owned(),
+                by: None,
             },
         ];
+        let note = Note {
+            by: "Codex".to_owned(),
+            finding: Finding {
+                title: "[P2] Stale doc".to_owned(),
+                body: "It says v1.".to_owned(),
+                place: Some(super::super::findings::Place {
+                    path: "README.md".to_owned(),
+                    lines: Some((4, 4)),
+                }),
+            },
+        };
         assert_eq!(
-            message(&comments),
+            message(&comments, std::slice::from_ref(&note)),
             "In `src/a.rs` lines 12\u{2013}13:\n```diff\n+let x = 1;\n+let y = 2;\n```\nName these \
-             better\n\nIn `src/b.rs` line 3:\n```diff\n-old();\n```\nWhy did this go?"
+             better\n\nIn `src/b.rs` line 3:\n```diff\n-old();\n```\nWhy did this go?\n\nIn \
+             `README.md:4`:\n[P2] Stale doc\nIt says v1."
         );
         assert_eq!(comments[0].place(), "Lines 12\u{2013}13");
         assert_eq!(comments[1].place(), "Line 3");
@@ -372,6 +448,7 @@ mod tests {
             anchor: anchor(text),
             quote: String::new(),
             body: "Look".to_owned(),
+            by: None,
         };
         model.comment(on("new line", Side::New));
         model.comment(on("old line", Side::Old));

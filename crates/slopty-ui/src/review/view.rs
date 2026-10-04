@@ -8,6 +8,13 @@
 //! line commented on, comments on the run. A comment carries the code it is on, quoted, so the
 //! agent reads what was meant. The comments go to the agent at once, or into the thread's
 //! draft to send with more words.
+//!
+//! "Review with `<agent>`" asks the thread's agent for its own review of the change on show,
+//! through its own door ([`Intent::Review`]), where it has one. The tile holds what it shows
+//! while the agent reviews, and reads the findings from the agent's answer once it rests: each
+//! one on a line of the diff becomes a comment under it, marked as the agent's, and one with no
+//! line on show is a note above the diff. The person lets any go and sends the rest as one
+//! message, with their own comments.
 
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -24,16 +31,19 @@ use gpui::{
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use slopty_client::threads::Mirror;
 use slopty_proto::thread::wire::{Intent, Review, ReviewScope};
-use slopty_proto::thread::{Delivery, IntentId, ThreadId};
+use slopty_proto::thread::{
+    AgentId, Cap, Delivery, IntentId, ItemBody, Phase, ThreadId, ThreadState, TurnId, TurnState,
+};
 use slopty_theme::{Theme, Typography};
 
-use super::model::{self, Comment, Model, Scope, Side};
+use super::findings::{self, Finding};
+use super::model::{self, Comment, Model, Note, Scope, Side};
 use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::lines::{self, Ink};
 use crate::conversation::thread::commit::{CommitEvent, CommitSheet};
 use crate::conversation::thread::{HubEvent, ThreadHub};
-use crate::conversation::{OpenCommit, RefreshPullRequest};
+use crate::conversation::{OpenCommit, RefreshPullRequest, ReviewWithAgent};
 use crate::icons::{IconName, IconSize};
 use crate::kit;
 
@@ -45,6 +55,9 @@ const LIST_FROM: f32 = 720.0;
 
 /// The file list's width, in points at zoom 1.
 const LIST_WIDTH: f32 = 240.0;
+
+/// The most the band of the agent's findings above the diff takes before it scrolls.
+const FINDINGS_HEIGHT: f32 = 240.0;
 
 /// How far past the viewport the diff lays rows out.
 const OVERDRAW: f32 = 2048.0;
@@ -109,6 +122,28 @@ impl Span {
     }
 }
 
+/// The agent's own review, asked and not yet answered.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Reviewing {
+    /// The intent that asked it.
+    intent: IntentId,
+    /// The thread's last turn when it was asked: the answer is in the turns after it.
+    after: Option<TurnId>,
+    /// The agent, by name.
+    agent: String,
+}
+
+/// How the agent's own review came out, said above the diff until the person lets it go.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Came {
+    /// The agent, by name.
+    agent: String,
+    /// What it came to, in words.
+    words: String,
+    /// The intent the worker turned down, when it did not run.
+    refused: Option<IntentId>,
+}
+
 /// The lines a comment is being written on.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Drafting {
@@ -151,6 +186,13 @@ pub struct ReviewView {
     pull_asked: bool,
     /// The commit sheet over the tile, while it is open.
     commit: Option<(Entity<CommitSheet>, Subscription)>,
+    /// The agent's own review, while it runs.
+    reviewing: Option<Reviewing>,
+    /// How the last one came out, until the person lets it go.
+    came: Option<Came>,
+    /// The span the agent was asked to review, held on show while it reviews and while its
+    /// findings are here, though the thread moves on.
+    pinned: Option<ReviewScope>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -217,6 +259,9 @@ impl ReviewView {
             picks: HashSet::new(),
             pull_asked: false,
             commit: None,
+            reviewing: None,
+            came: None,
+            pinned: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![writing, hearing, watching],
         };
@@ -263,7 +308,6 @@ impl ReviewView {
             sheet.update(cx, |sheet, cx| sheet.set_theme(theme.clone(), cx));
         }
         self.theme = theme;
-        self.blocks.clear();
         self.list.remeasure();
         cx.notify();
     }
@@ -273,6 +317,7 @@ impl ReviewView {
         if self.scope != scope {
             self.scope = scope;
             self.asked = None;
+            self.pinned = None;
             self.ask(cx);
             cx.notify();
         }
@@ -288,13 +333,17 @@ impl ReviewView {
 
     // ----- what comes ------------------------------------------------------------------
 
-    /// Ask for the scope on show, unless it was asked over the same turns already.
+    /// Ask for the scope on show, unless it was asked over the same turns already. While the
+    /// agent reviews, or its findings are here, the change it was asked about stays on show.
     fn ask(&mut self, cx: &mut Context<Self>) {
         let hub = self.hub.read(cx);
         let Some(state) = hub.threads().mirror(self.thread).and_then(Mirror::state) else {
             return;
         };
-        let Some(scope) = self.scope.wire(state) else { return };
+        let held = self.reviewing.is_some() || self.model.has_findings();
+        let Some(scope) = self.pinned.filter(|_| held).or_else(|| self.scope.wire(state)) else {
+            return;
+        };
         if self.asked.as_ref() == Some(&scope) {
             return;
         }
@@ -369,6 +418,7 @@ impl ReviewView {
         if acted {
             self.asked = None;
         }
+        self.settle_review(cx);
         self.ask(cx);
         self.ask_pull(cx);
         cx.notify();
@@ -475,11 +525,146 @@ impl ReviewView {
         }
     }
 
+    /// The agent that reviews the thread's changes through its own door, by name, where it has
+    /// one ([`Cap::REVIEW`]).
+    #[must_use]
+    pub fn door(&self, cx: &App) -> Option<String> {
+        self.door_of(cx).map(|(_, name)| name)
+    }
+
+    /// The agent that reviews through its own door, and its name.
+    fn door_of(&self, cx: &App) -> Option<(AgentId, String)> {
+        let hub = self.hub.read(cx);
+        let state = hub.threads().mirror(self.thread).and_then(Mirror::state)?;
+        let agent = state.meta.agent.clone();
+        let name = crate::conversation::thread::view::agent_label(&agent);
+        state.meta.can(Cap::REVIEW).then_some((agent, name))
+    }
+
+    /// Whether the agent's own review runs now.
+    #[must_use]
+    pub const fn reviewing(&self) -> bool {
+        self.reviewing.is_some()
+    }
+
+    /// Ask the thread's agent for its own review of the change on show. The span stays on show
+    /// until its findings are answered or let go.
+    pub fn review_with_agent(&mut self, cx: &mut Context<Self>) {
+        if self.reviewing.is_some() {
+            return;
+        }
+        let Some(agent) = self.door(cx) else { return };
+        let Some(review) = self.model.review().filter(|r| !r.files.is_empty()) else { return };
+        let (Some(from), Some(to)) = (review.from.clone(), review.to.clone()) else { return };
+        let after = self
+            .hub
+            .read(cx)
+            .threads()
+            .mirror(self.thread)
+            .and_then(Mirror::state)
+            .and_then(|s| s.last_turn().map(|t| t.id));
+        self.pinned = self.asked;
+        self.came = None;
+        let intent = self.intent(Intent::Review { from, to }, cx);
+        self.reviewing = Some(Reviewing { intent, after, agent });
+        cx.notify();
+    }
+
+    /// The agent's review was refused, or has ended: its findings are read from what it
+    /// answered, each put on its line in the diff or kept as a note.
+    fn settle_review(&mut self, cx: &App) {
+        let Some(asked) = self.reviewing.clone() else { return };
+        let hub = self.hub.read(cx);
+        let refused =
+            hub.refusals(self.thread).find(|r| r.id == asked.intent).map(|r| r.words.clone());
+        if let Some(words) = refused {
+            self.reviewing = None;
+            self.pinned = None;
+            self.came = Some(Came { agent: asked.agent, words, refused: Some(asked.intent) });
+            return;
+        }
+        let Some(state) = hub.threads().mirror(self.thread).and_then(Mirror::state) else {
+            return;
+        };
+        let Some(answer) = answered(state, &asked) else { return };
+        self.reviewing = None;
+        let found = findings::read(&answer);
+        let agent = asked.agent;
+        let words = match found.len() {
+            0 => findings::summary(&answer).map_or_else(
+                || format!("{agent} raised nothing"),
+                |said| format!("{agent} raised nothing: {said}"),
+            ),
+            1 => format!("{agent} raised 1 finding"),
+            n => format!("{agent} raised {n} findings"),
+        };
+        for finding in found {
+            match self.placed(&agent, &finding) {
+                Some(comment) => self.model.comment(comment),
+                None => self.model.note(Note { by: agent.clone(), finding }),
+            }
+        }
+        if !self.model.has_findings() {
+            self.pinned = None;
+        }
+        self.came = Some(Came { agent, words, refused: None });
+        self.rebuild();
+    }
+
+    /// `finding` as a comment on its lines in the diff on show, when they are in it.
+    fn placed(&self, agent: &str, finding: &Finding) -> Option<Comment> {
+        let place = finding.place.as_ref()?;
+        let (from, to) = place.lines?;
+        let review = self.model.review()?;
+        let path = findings::resolve(&place.path, review.files.iter().map(|f| f.path.as_str()))?;
+        let at = review.files.iter().position(|f| f.path == path)?;
+        let blocks = self.blocks.get(&at)?;
+        let lines: Vec<&Line> = blocks
+            .iter()
+            .flat_map(|b| b.lines.iter())
+            .filter(|l| l.kind != Kind::Removed && l.new.is_some_and(|n| (from..=to).contains(&n)))
+            .collect();
+        let (first, last) = (lines.first()?, lines.last()?);
+        Some(Comment {
+            path: path.to_owned(),
+            line: first.new?,
+            end: last.new?,
+            side: Side::New,
+            anchor: model::anchor(&first.text),
+            quote: diff::quote(path, &lines),
+            body: finding.text(),
+            by: Some(agent.to_owned()),
+        })
+    }
+
+    /// Let the word of how the agent's review came out go.
+    fn dismiss_came(&mut self, cx: &mut Context<Self>) {
+        if let Some(refused) = self.came.take().and_then(|c| c.refused) {
+            self.hub.update(cx, |hub, cx| hub.dismiss(refused, cx));
+        }
+        cx.notify();
+    }
+
+    fn unnote(&mut self, ix: usize, cx: &mut Context<Self>) {
+        self.model.unnote(ix);
+        self.release_pin();
+        cx.notify();
+    }
+
+    /// The agent's findings are all gone: the tile follows its scope again.
+    fn release_pin(&mut self) {
+        if self.reviewing.is_none() && !self.model.has_findings() && self.pinned.take().is_some() {
+            self.asked = None;
+        }
+    }
+
     /// Send the comments as one message.
     fn send_comments(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.model.take_message() else { return };
         let _id = self
             .intent(Intent::Send { text, delivery: Delivery::Steer, attachments: Vec::new() }, cx);
+        self.came = None;
+        self.release_pin();
         self.rebuild();
         cx.emit(ReviewEvent::CommentsSent { thread: self.thread });
         cx.notify();
@@ -489,6 +674,8 @@ impl ReviewView {
     /// draft the keyboard.
     fn add_to_message(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.model.take_message() else { return };
+        self.came = None;
+        self.release_pin();
         self.rebuild();
         cx.emit(ReviewEvent::AddToMessage { thread: self.thread, text });
         cx.notify();
@@ -621,6 +808,7 @@ impl ReviewView {
             anchor: d.anchor,
             quote: d.quote,
             body,
+            by: None,
         });
         self.draft.update(cx, |d, cx| d.set_value("", window, cx));
         self.rebuild();
@@ -629,6 +817,7 @@ impl ReviewView {
 
     fn uncomment(&mut self, ix: usize, cx: &mut Context<Self>) {
         self.model.uncomment(ix);
+        self.release_pin();
         self.rebuild();
         cx.notify();
     }
@@ -755,8 +944,228 @@ impl ReviewView {
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(scope, cx)))
             }))
             .child(div().flex_1())
+            .children(self.review_part(cx))
             .children(self.git_part(cx))
             .into_any_element()
+    }
+
+    /// The agent's own review: the way to ask it, where the agent has a door and there is a
+    /// change on show, or that it runs. A tile too narrow for the words beside the scopes shows
+    /// the agent's mark alone, its words in a hint.
+    fn review_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let (agent, name) = self.door_of(cx)?;
+        let mark = self.agent_mark(&agent);
+        let roomy = self.width >= LIST_FROM;
+        let hint_theme = theme.clone();
+        let hinted = move |el: gpui::Stateful<Div>, words: String| {
+            if roomy {
+                el.child(SharedString::from(words))
+            } else {
+                kit::hint_timing(el).tooltip(move |_window, cx| {
+                    let theme = Rc::new(hint_theme.clone());
+                    cx.new(|_| kit::Hint::new(words.clone(), "", theme)).into()
+                })
+            }
+        };
+        if self.reviewing.is_some() {
+            let words = format!("{name} is reviewing\u{2026}");
+            let pill = div()
+                .id("review-by-agent-running")
+                .debug_selector(|| "review-by-agent-running".to_owned())
+                .role(Role::Status)
+                .aria_label(SharedString::from(words.clone()))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
+                .px(self.z(theme.spacing.sm))
+                .py(self.z(theme.spacing.xxs))
+                .text_color(hsla(s.text_secondary))
+                .child(crate::icons::status_icon(
+                    theme,
+                    crate::icons::Status::Working,
+                    self.z(theme.typography.icon()),
+                    hsla(s.text_muted),
+                ));
+            return Some(hinted(pill, words).into_any_element());
+        }
+        self.model.review().filter(|r| !r.files.is_empty() && r.from.is_some())?;
+        let label = format!("Review with {name}");
+        let selector = "review-by-agent";
+        let el = div()
+            .id(selector)
+            .debug_selector(move || selector.to_owned())
+            .role(Role::Button)
+            .aria_label(SharedString::from(label.clone()))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .px(self.z(theme.spacing.sm))
+            .py(self.z(theme.spacing.xxs))
+            .rounded(self.z(theme.radii.sm))
+            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+            .text_color(hsla(s.text_secondary))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+            .child(mark)
+            .on_click(cx.listener(|this, _ev, _w, cx| this.review_with_agent(cx)));
+        Some(crate::a11y::tab_stop(hinted(el, label), s.accent).into_any_element())
+    }
+
+    /// `agent`'s mark at the size of an icon.
+    fn agent_mark(&self, agent: &AgentId) -> AnyElement {
+        let theme = &self.theme;
+        let glyph = crate::icons::Glyph::agent(&agent.0);
+        crate::icons::glyph(
+            theme,
+            glyph,
+            self.z(theme.typography.icon()),
+            hsla(theme.surfaces.text_secondary),
+        )
+    }
+
+    /// Above the diff: how the agent's own review came out, and its findings that have no line
+    /// on show, each with the way to let it go.
+    fn findings_band(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if self.came.is_none() && self.model.notes().is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let agent = self.door_of(cx).map(|(agent, _)| agent);
+        let head = self.came.as_ref().map(|came| {
+            let tone = if came.refused.is_some() { s.error } else { s.text_secondary };
+            div()
+                .debug_selector(|| "review-came".to_owned())
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(self.z(theme.spacing.xs))
+                .px(self.z(theme.spacing.sm))
+                .py(self.z(theme.spacing.xs))
+                .children(agent.as_ref().map(|a| self.agent_mark(a)))
+                .child(
+                    div()
+                        .id("review-came-words")
+                        .role(Role::Status)
+                        .aria_label(SharedString::from(came.words.clone()))
+                        .min_w_0()
+                        .flex_1()
+                        .whitespace_normal()
+                        .text_color(hsla(tone))
+                        .child(SharedString::from(came.words.clone())),
+                )
+                .child(self.close(
+                    "review-came-close",
+                    "Dismiss",
+                    cx.listener(|this, _ev, _w, cx| this.dismiss_came(cx)),
+                ))
+        });
+        let notes = self.model.notes().iter().enumerate().map(|(ix, note)| {
+            let finding = &note.finding;
+            let id = format!("review-note-{ix}");
+            let selector = id.clone();
+            let label = format!(
+                "{}. {}",
+                finding.title,
+                finding.place.as_ref().map(findings::Place::words).unwrap_or_default()
+            );
+            div()
+                .id(ElementId::Name(id.into()))
+                .debug_selector(move || selector)
+                .role(Role::ListItem)
+                .aria_label(SharedString::from(label))
+                .w_full()
+                .flex()
+                .items_start()
+                .gap(self.z(theme.spacing.xs))
+                .px(self.z(theme.spacing.sm))
+                .py(self.z(theme.spacing.xs))
+                .border_t(kit::hair(theme))
+                .border_color(hsla(s.border_subtle))
+                .child(self.icon(IconName::MessageSquare, s.text_muted))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(self.z(theme.spacing.xxs))
+                        .children(finding.place.as_ref().map(|place| {
+                            div()
+                                .font_family(self.mono())
+                                .text_color(hsla(s.text_muted))
+                                .child(SharedString::from(place.words()))
+                        }))
+                        .child(
+                            div()
+                                .whitespace_normal()
+                                .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                                .text_color(hsla(s.text))
+                                .child(SharedString::from(finding.title.clone())),
+                        )
+                        .when(!finding.body.is_empty(), |el| {
+                            el.child(
+                                div()
+                                    .whitespace_normal()
+                                    .text_color(hsla(s.text_secondary))
+                                    .child(SharedString::from(finding.body.clone())),
+                            )
+                        }),
+                )
+                .child(self.close(
+                    format!("review-unnote-{ix}"),
+                    "Let the finding go",
+                    cx.listener(move |this, _ev, _w, cx| this.unnote(ix, cx)),
+                ))
+        });
+        Some(
+            div()
+                .flex_none()
+                .w_full()
+                .px(self.z(theme.spacing.md))
+                .pt(self.z(theme.spacing.sm))
+                .child(
+                    kit::card(theme)
+                        .id("review-findings")
+                        .debug_selector(|| "review-findings".to_owned())
+                        .role(Role::List)
+                        .aria_label("The agent's review")
+                        .w_full()
+                        .max_h(self.z(FINDINGS_HEIGHT))
+                        .overflow_y_scroll()
+                        .text_size(self.z(theme.typography.small()))
+                        .children(head)
+                        .children(notes),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A quiet ✕ that lets something go.
+    fn close(
+        &self,
+        id: impl Into<SharedString>,
+        label: &'static str,
+        then: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> gpui::Stateful<Div> {
+        let id: SharedString = id.into();
+        let selector = id.clone();
+        let s = self.theme.surfaces;
+        div()
+            .id(ElementId::Name(id))
+            .debug_selector(move || selector.to_string())
+            .role(Role::Button)
+            .aria_label(label)
+            .flex_none()
+            .rounded(self.z(self.theme.radii.sm))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.hover)))
+            .child(self.icon(IconName::X, s.text_muted))
+            .on_click(then)
     }
 
     /// At the scope bar's end: the branch's pull request where it stands, and the way to the
@@ -1105,9 +1514,19 @@ impl ReviewView {
         let id = format!("review-uncomment-{ix}");
         let selector = id.clone();
         let ranged = comment.end > comment.line;
+        let agent = comment.by.as_ref().and_then(|_| self.door_of(cx)).map(|(agent, _)| agent);
+        let (title, rest) = match &comment.by {
+            Some(_) => {
+                comment.body.split_once('\n').map_or((comment.body.as_str(), ""), |(t, r)| (t, r))
+            }
+            None => (comment.body.as_str(), ""),
+        };
         self.note()
             .debug_selector(move || format!("review-comment-{ix}"))
-            .child(self.icon(IconName::MessageSquare, s.text_muted))
+            .child(match &agent {
+                Some(agent) => self.agent_mark(agent),
+                None => self.icon(IconName::MessageSquare, s.text_muted),
+            })
             .when(ranged, |el| {
                 el.child(
                     kit::tabular(div())
@@ -1120,9 +1539,25 @@ impl ReviewView {
                 div()
                     .min_w_0()
                     .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(self.z(theme.spacing.xxs))
                     .whitespace_normal()
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(comment.body.clone())),
+                    .child(
+                        div()
+                            .text_color(hsla(s.text))
+                            .when(comment.by.is_some(), |el| {
+                                el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            })
+                            .child(SharedString::from(title.to_owned())),
+                    )
+                    .when(!rest.trim().is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_color(hsla(s.text_secondary))
+                                .child(SharedString::from(rest.trim().to_owned())),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -1171,7 +1606,7 @@ impl ReviewView {
     fn foot(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let n = self.model.comments().len();
+        let n = self.model.waiting();
         let send_words = match n {
             1 => "Send 1 comment".to_owned(),
             n => format!("Send {n} comments"),
@@ -1227,6 +1662,7 @@ impl ReviewView {
                 .id("review-empty")
                 .debug_selector(|| "review-empty".to_owned())
                 .role(Role::Status)
+                .aria_label(SharedString::from(words.clone()))
                 .flex_1()
                 .flex()
                 .items_center()
@@ -1264,6 +1700,37 @@ impl ReviewView {
     }
 }
 
+/// The agent's answer to review `asked`, once it rests: every answer it wrote in the turns
+/// after the one the review was asked over, the first of them ended, and the request no longer
+/// waiting. `None` while it works, waits on its own background work, or has not begun.
+fn answered(state: &ThreadState, asked: &Reviewing) -> Option<String> {
+    if state.pending.iter().any(|p| p.intent == asked.intent)
+        || matches!(state.status.phase, Phase::Working | Phase::Waiting)
+    {
+        return None;
+    }
+    let after: Vec<TurnId> =
+        state.turns.iter().map(|t| t.id).filter(|t| asked.after.is_none_or(|a| *t > a)).collect();
+    let ended = state
+        .turns
+        .iter()
+        .filter(|t| after.contains(&t.id))
+        .any(|t| !matches!(t.state, TurnState::Active));
+    if !ended {
+        return None;
+    }
+    let said: Vec<&str> = state
+        .items
+        .iter()
+        .filter(|i| after.contains(&i.turn))
+        .filter_map(|i| match &i.body {
+            ItemBody::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    Some(said.join("\n\n"))
+}
+
 /// Whether `line` is the one numbered `number` on `side`.
 fn on(line: &Line, side: Side, number: u32) -> bool {
     match side {
@@ -1277,7 +1744,9 @@ impl Render for ReviewView {
         let theme = self.theme.clone();
         let s = theme.surfaces;
         let scopes = self.scope_bar(cx);
+        let band = self.findings_band(cx);
         let body = self.body(cx);
+        let door = self.door_of(cx).is_some();
         let foot = self.foot(cx);
         div()
             .id("review")
@@ -1303,8 +1772,14 @@ impl Render for ReviewView {
             .text_color(hsla(s.text))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
+            .when(door, |el| {
+                el.on_action(
+                    cx.listener(|this, _: &ReviewWithAgent, _w, cx| this.review_with_agent(cx)),
+                )
+            })
             .relative()
             .child(scopes)
+            .children(band)
             .child(body)
             .child(foot)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))

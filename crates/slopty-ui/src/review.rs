@@ -10,9 +10,11 @@
 //! It reads the worker's review frames through the thread's hub, and what the person does goes
 //! through the hub's outbox like any other intent.
 //!
+//! * [`findings`] — what an agent's own review found, read from its answer.
 //! * [`model`] — the files in order, the comments, and the picks; nothing draws.
 //! * [`view`] — the tile, [`ReviewView`], for the strip to host.
 
+pub mod findings;
 pub mod model;
 pub mod view;
 

@@ -21,5 +21,7 @@ gpui::actions!(
         CycleEffort,
         /// Ask the draft of a fork of the thread, in a sheet over it.
         AskAside,
+        /// Ask the thread's agent for its own review of the changes the review tile shows.
+        ReviewWithAgent,
     ]
 );

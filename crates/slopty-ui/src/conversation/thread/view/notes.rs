@@ -93,8 +93,10 @@ impl ThreadView {
                 let words = if cut { shown } else { n.text.text.trim().to_owned() };
                 (IconName::Info, words, n.retry.as_ref().map(retrying), None)
             }
-            ItemBody::Review { .. } => {
-                (IconName::ListChecks, "Reviewed the changes".to_owned(), None, None)
+            // Codex's reviewer begins here; what it found follows as its answer.
+            ItemBody::Review { entered } => {
+                let words = if *entered { "Reviewed the changes" } else { "Review ended" };
+                (IconName::ListChecks, words.to_owned(), None, None)
             }
             ItemBody::Extra { kind, .. } => (IconName::Info, composer::sentence(kind), None, None),
             _ => return div().into_any_element(),

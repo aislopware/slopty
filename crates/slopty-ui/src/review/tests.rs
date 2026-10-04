@@ -7,15 +7,17 @@ use std::rc::Rc;
 use gpui::{
     AppContext as _, Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext, px, size,
 };
+use slopty_core::WallMs;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::detail::Hunk;
 use slopty_proto::thread::wire::{
     FileDiff, Intent, IntentDone, Outcome, Review, ReviewScope, ThreadFrame, ThreadRequest,
 };
-use slopty_proto::thread::{Cursor, Delivery, Patch, TurnId};
+use slopty_proto::thread::{Cap, Cursor, Delivery, Patch, ThreadId, TreeRef, TurnId};
 use slopty_theme::Theme;
 
 use super::view::{ReviewEvent, ReviewView};
+use crate::conversation::ReviewWithAgent;
 use crate::conversation::thread::{HubEvent, ThreadHub, fixtures};
 
 type Sent = Rc<RefCell<Vec<ClientMsg>>>;
@@ -140,6 +142,15 @@ fn under_960_points_the_lines_run_in_a_column(cx: &mut TestAppContext) {
     let (_view, _hub, _sent, cx) = tile(cx, 800.0);
     assert!(cx.debug_bounds("review-line-1-0-0").is_some());
     assert!(cx.debug_bounds("review-pair-1-0-0").is_none());
+}
+
+/// A change of appearance draws the same lines in the new theme.
+#[gpui::test]
+fn the_lines_stay_when_the_appearance_changes(cx: &mut TestAppContext) {
+    let (view, _hub, _sent, cx) = tile(cx, 800.0);
+    view.update(cx, |view, cx| view.set_theme(Theme::new(slopty_theme::Variant::Light), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-line-1-0-0").is_some(), "the lines in the light");
 }
 
 /// A keep goes as a pick of the hunk as the review showed it, and the hunk says so in that
@@ -299,4 +310,200 @@ fn the_tile_shows_the_branch_s_pull_request_and_opens_the_commit_sheet(cx: &mut 
     click(cx, "review-pull");
     assert!(cx.debug_bounds("commit-sheet").is_some(), "the sheet opens over the review");
     assert!(cx.debug_bounds("commit-merge").is_none(), "no merge while changes are asked for");
+}
+
+/// A review tile like [`tile`], over a thread whose agent reviews through its own door, with
+/// the recorded review's two trees, and the thread it is on.
+fn door_tile(
+    cx: &mut TestAppContext,
+) -> (Entity<ReviewView>, Entity<ThreadHub>, Sent, &mut VisualTestContext) {
+    let (view, hub, sent, cx) = tile(cx, 1200.0);
+    let thread = view.read_with(cx, |v, _| v.thread());
+    let mut state = fixtures::thread("edit");
+    state.meta.id = thread;
+    state.meta.caps.push(Cap::named(Cap::REVIEW));
+    let snapshot =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, state: Box::new(state) };
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot, cx));
+    let mut trees = review();
+    (trees.from, trees.to) = (Some(TreeRef("aa".to_owned())), Some(TreeRef("bb".to_owned())));
+    hub.update(cx, |hub, cx| hub.frame(thread, ThreadFrame::Review(Box::new(trees)), cx));
+    cx.run_until_parked();
+    (view, hub, sent, cx)
+}
+
+/// The thread as it is once the agent has answered `answer` in a turn of its own and rests.
+fn answered(hub: &Entity<ThreadHub>, cx: &mut VisualTestContext, thread: ThreadId, answer: &str) {
+    use slopty_proto::thread::{
+        Changed, Clipped, Item, ItemBody, ItemId, Phase, Turn, TurnState, Usage,
+    };
+    let mut state = hub
+        .read_with(cx, |h, _| h.threads().mirror(thread).and_then(|m| m.state().cloned()))
+        .expect("the thread");
+    let turn = TurnId(state.turns.iter().map(|t| t.id.0).max().unwrap_or(0).saturating_add(1));
+    state.turns.push(Turn {
+        id: turn,
+        input: None,
+        state: TurnState::Complete,
+        started_ms: WallMs::ZERO,
+        ended_ms: Some(WallMs::ZERO),
+        usage: Usage::default(),
+        models: Vec::new(),
+        changed: Changed::default(),
+        before: None,
+        after: None,
+    });
+    state.items.push(Item {
+        id: ItemId(format!("answer-{}", turn.0)),
+        turn,
+        at_ms: WallMs::ZERO,
+        body: ItemBody::Text(Clipped::whole(answer)),
+    });
+    state.status.phase = Phase::Idle;
+    state.pending.clear();
+    let snapshot =
+        ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 9 }, state: Box::new(state) };
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot, cx));
+    cx.run_until_parked();
+}
+
+fn reviews_asked(sent: &Sent) -> Vec<ReviewScope> {
+    sent.borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Review { scope, .. }) => Some(*scope),
+            _ => None,
+        })
+        .collect()
+}
+
+/// "Review with `<agent>`" shows only where the thread's agent has its own review door, and is
+/// a line of the palette there and nowhere else.
+#[gpui::test]
+fn review_with_the_agent_shows_only_where_it_has_a_door(cx: &mut TestAppContext) {
+    let (view, _hub, _sent, cx) = tile(cx, 1200.0);
+    assert!(cx.debug_bounds("review-by-agent").is_none(), "no door, no button");
+    let offered = |cx: &mut VisualTestContext| {
+        let focus = view.read_with(cx, gpui::Focusable::focus_handle);
+        cx.update(|window, cx| {
+            window.focus(&focus, cx);
+            window.is_action_available(&ReviewWithAgent, cx)
+        })
+    };
+    assert!(!offered(cx), "nor a palette line");
+
+    let (view, _hub, _sent, cx) = door_tile(cx);
+    assert!(cx.debug_bounds("review-by-agent").is_some());
+    assert_eq!(view.read_with(cx, ReviewView::door).as_deref(), Some("Claude Code"));
+    let focus = view.read_with(cx, gpui::Focusable::focus_handle);
+    let available = cx.update(|window, cx| {
+        window.focus(&focus, cx);
+        window.is_action_available(&ReviewWithAgent, cx)
+    });
+    assert!(available, "the palette's line");
+}
+
+/// The press asks the agent for its own review of the two trees on show and says it runs;
+/// the span stays on show though the thread moves on. Once the agent rests, each finding on a
+/// line in the diff is a comment under it, marked as the agent's, one about a file not on show
+/// is a note above the diff, and the band says what came. Every one goes back as one message.
+#[gpui::test]
+fn the_agents_findings_become_comments_and_notes_sent_as_one(cx: &mut TestAppContext) {
+    let (view, hub, sent, cx) = door_tile(cx);
+    let thread = view.read_with(cx, |v, _| v.thread());
+    click(cx, "review-by-agent");
+    assert_eq!(
+        intents(&sent),
+        [Intent::Review { from: TreeRef("aa".to_owned()), to: TreeRef("bb".to_owned()) }]
+    );
+    assert!(cx.debug_bounds("review-by-agent-running").is_some(), "it says it runs");
+    assert!(cx.debug_bounds("review-by-agent").is_none());
+    let asked = reviews_asked(&sent).len();
+
+    answered(
+        &hub,
+        cx,
+        thread,
+        "Two things.\n\n\
+         - [P1] Call the new one only once \u{2014} /w/src/lib.rs:11-11\n  It runs twice on retry.\n\
+         - [P3] Say it in the README \u{2014} /w/README.md:3-3\n  The old name is still there.",
+    );
+    assert_eq!(reviews_asked(&sent).len(), asked, "the span on show stays, not the new turn's");
+    assert!(cx.debug_bounds("review-by-agent-running").is_none());
+    assert!(cx.debug_bounds("review-comment-0").is_some(), "on its line");
+    assert!(cx.debug_bounds("review-note-0").is_some(), "not on show: a note");
+    let came = cx.debug_bounds("review-came").is_some();
+    assert!(came, "the band says what came");
+    let heard = said(cx);
+    assert!(heard.iter().any(|l| l == "Claude Code raised 2 findings"), "{heard:?}");
+
+    click(cx, "review-send");
+    let sent_words = intents(&sent).into_iter().rev().find_map(|i| match i {
+        Intent::Send { text, .. } => Some(text),
+        _ => None,
+    });
+    assert_eq!(
+        sent_words.as_deref(),
+        Some(
+            "In `src/lib.rs` line 11:\n```diff\n+    new();\n```\n[P1] Call the new one only once\n\
+             It runs twice on retry.\n\nIn `/w/README.md:3`:\n[P3] Say it in the README\nThe old \
+             name is still there."
+        )
+    );
+    assert!(cx.debug_bounds("review-findings").is_none(), "nothing waits after");
+}
+
+/// A finding the person lets go is gone from what is sent; a review that raised nothing says
+/// what the agent said of it; a refused one says why, in the error's tone.
+#[gpui::test]
+fn findings_are_let_go_and_a_review_says_how_it_came_out(cx: &mut TestAppContext) {
+    let (view, hub, _sent, cx) = door_tile(cx);
+    let thread = view.read_with(cx, |v, _| v.thread());
+    click(cx, "review-by-agent");
+    answered(&hub, cx, thread, "- Nothing placed here\n- Another loose one");
+    assert!(cx.debug_bounds("review-note-1").is_some(), "kept, though they name no place");
+    click(cx, "review-unnote-0");
+    click(cx, "review-unnote-0");
+    assert!(cx.debug_bounds("review-note-0").is_none());
+    click(cx, "review-came-close");
+    assert!(cx.debug_bounds("review-findings").is_none(), "all let go");
+
+    click(cx, "review-by-agent");
+    answered(&hub, cx, thread, "No issues found. The change does what it says.");
+    let heard = said(cx);
+    assert!(
+        heard
+            .iter()
+            .any(|l| l
+                == "Claude Code raised nothing: No issues found. The change does what it says."),
+        "{heard:?}"
+    );
+
+    click(cx, "review-came-close");
+    click(cx, "review-by-agent");
+    let id = hub
+        .read_with(cx, |h, _| h.threads().outbox().all().last().map(|s| s.id))
+        .expect("the review is on its way");
+    let done = IntentDone {
+        id,
+        outcome: Outcome::Refused { reason: "Codex is still working on this thread".to_owned() },
+    };
+    hub.update(cx, |hub, cx| hub.done(&done, cx));
+    cx.run_until_parked();
+    let heard = said(cx);
+    assert!(
+        heard.iter().any(|l| l == "The review didn't start: Codex is still working on this thread"),
+        "{heard:?}"
+    );
+    assert!(cx.debug_bounds("review-by-agent").is_some(), "it can be asked again");
+}
+
+/// What the tile says to a screen reader, every label in its tree.
+fn said(cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|window, _cx| {
+        window.set_a11y_active(true);
+        window.refresh();
+    });
+    cx.run_until_parked();
+    cx.update(|window, _cx| crate::a11y::tree(window)).into_iter().filter_map(|n| n.label).collect()
 }

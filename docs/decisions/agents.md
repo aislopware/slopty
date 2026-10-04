@@ -456,6 +456,60 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   comments are anchored by their line's text, dropped when it changes, and go as one message
   of `path L<n>: body` lines. A keep or revert the worker acted on asks for the review again.
 
+- ✅ **"Review with <agent>" runs the agent's own review over the change on show, and its
+  findings become the tile's comments** (2026-10-04, frontier must-have M1; replaces the
+  projects' reviewer stage). The research behind it is in
+  `.research/feature-prune-frontier-2026-10-04.md` §6, with each agent's door checked against
+  its own docs and source.
+  - **The doors.**
+    - Claude Code: its built-in `/code-review` skill. `/review` is now its alias, and the
+      `code-review` plugin reviews GitHub pull requests only. It takes a ref range, so the
+      worker writes the change the tile shows as two private commits under
+      `refs/slopty/threads/<t>/review-{base,head}`: the old tree, then the new tree on it.
+      `base...head` is then exactly that change. The command goes as the person's turn,
+      through the composer like any command of theirs, only on their press.
+    - Codex: `review/start` with target `commit` (the head commit) and delivery `inline`,
+      Codex's own reviewer. Detached delivery is deprecated. Codex's `exitedReviewMode` text
+      is now the agent's answer in the thread, where it used to be dropped.
+    - pi publishes no review command and ACP no review method, so neither shows the action.
+  - **The door is a capability.** `Cap::REVIEW` and `Intent::Review { from, to }` (two
+    snapshot trees, as data). Codex always has it. Claude Code has it exactly while its own
+    command list names `code-review` (`observed::REVIEW_COMMAND`). The button and the palette
+    line show only where it is there.
+  - **The private refs stay home.** Each thread keeps one pair, overwritten by each review,
+    and an aside closed for good takes every ref of its thread with it (`Repo::forget`). A push
+    names the person's branches, never `refs/slopty`, and no review commit is an ancestor of
+    a branch. A test pushes `main` to a bare remote and finds neither the refs nor the commit.
+  - **The findings.** While the agent reviews, the tile holds the change it asked about,
+    though the thread moves on. Once the agent rests, with nothing pending and no background
+    work, it reads every answer written after the request (`review::findings`).
+    - The reading is tolerant: Codex's `- title — path:start-end` lines, and Claude Code's
+      prose naming `path:12`, `path:12-18`, `path#L12-L18` or "`path` line 12".
+    - A finding on a line in the diff becomes a comment under it, with the agent's mark and
+      its title.
+    - A finding with no line on show, or no place at all, is a note above the diff, never
+      dropped.
+    - The person lets any of them go, and sends the rest with their own comments as one
+      message, or adds them to the draft.
+    - A review that raised nothing says what the agent said of it. A refused one says why, in
+      the error's tone.
+  - Tests:
+    - `codexs_findings_are_read_with_their_places_and_bodies` and the other cases in
+      `review/findings.rs`.
+    - `the_agents_findings_become_comments_and_notes_sent_as_one` and
+      `findings_are_let_go_and_a_review_says_how_it_came_out` (`review/tests.rs`).
+    - `an_agents_review_names_the_change_as_one_pair_that_never_leaves`
+      (`slopty-worker/tests/review.rs`).
+    - `a_review_by_claude_code_is_its_own_code_review_over_the_range`
+      (`slopty-workerd/tests/threads.rs`).
+    - `a_thread_reviews_while_claude_code_lists_code_review` (`slopty-agent`).
+    - `a_review_asks_codexs_reviewer_and_its_findings_are_its_answer`
+      (`slopty-agent/tests/codex.rs`).
+    - `a_review_goes_to_codexs_reviewer_over_the_head_commit`
+      (`slopty-worker/tests/codex.rs`).
+    - The e2e `the_agents_own_review_puts_its_findings_on_the_diff`, with goldens
+      `review-agent` and `review-agent-dark`.
+
 - ✅ **The thread composer's menus never blank, and a waiting message is changed in place**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/composing.rs`;
   `thread/tests/composing.rs`). `/` lists the commands the thread says its agent takes, ranked
