@@ -15,7 +15,7 @@
 //! door for is not offered.
 //!
 //! A fresh thread carries nothing over itself. Its composer opens on a short pointer back
-//! ([`pointer`]): the old thread's id, folder and branch, and the command that reads it. The
+//! ([`pointer()`]): the old thread's id, folder and branch, and the command that reads it. The
 //! new agent reads what it needs with its own tools, and the person sends, changes or clears
 //! the pointer first; an account written by rule would only guess at what matters.
 

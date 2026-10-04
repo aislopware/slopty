@@ -539,7 +539,7 @@ pub struct Workspace {
     /// so it is not suspended while the answer waits for its link.
     #[cfg(target_os = "ios")]
     answer_grace: Option<slopty_platform::notify::BackgroundGrace>,
-    /// Tells the system the taps are done, and lets [`Self::answer_grace`] go, once the
+    /// Tells the system the taps are done, and on iOS lets the answer grace go, once the
     /// answers have had time to leave.
     answer_flush: Option<gpui::Task<()>>,
     /// The system's paste button over the key bar's Paste, made with the first key bar, so a
