@@ -826,6 +826,15 @@ impl Hub {
                 self.task_attempts(caller, key, project, task, launches).await
             }
             Verb::TaskPick { project, attempt } => self.task_pick(caller, key, &project, attempt),
+            verb @ (Verb::ScheduleSet { .. } | Verb::ScheduleDelete { .. }) => {
+                self.schedule_change(caller, key, &verb)
+            }
+            Verb::ScheduleRun { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "a schedule's run spends the plan, so only the person runs one; start the task \
+                 once with task_spawn",
+            ),
+            Verb::ScheduleRun { project, schedule } => self.schedule_run(project, schedule).await,
             Verb::TaskStart { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "a proposed task is the person's to start; task_spawn proposed it, and you hear \
@@ -1579,6 +1588,7 @@ fn remember(
         | Verb::TaskStart { project, .. }
         | Verb::TaskAttempts { project, .. }
         | Verb::TaskPick { project, .. }
+        | Verb::ScheduleRun { project, .. }
         | Verb::TaskTell { project, .. }
         | Verb::ProjectNeeds { project, .. }
         | Verb::TaskReport { project, .. }
@@ -1717,6 +1727,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskStart { .. }
         | Verb::TaskAttempts { .. }
         | Verb::TaskPick { .. }
+        | Verb::ScheduleSet { .. }
+        | Verb::ScheduleDelete { .. }
+        | Verb::ScheduleRun { .. }
         | Verb::TaskTell { .. }
         | Verb::ProjectNeeds { .. }
         | Verb::PlacementSuggest { .. }
@@ -1815,6 +1828,8 @@ fn run_seed() -> u64 {
 mod attempt_tests;
 #[cfg(test)]
 mod project_tests;
+#[cfg(test)]
+mod schedule_tests;
 
 #[cfg(test)]
 mod outcome_tests;

@@ -604,6 +604,8 @@ pub struct Project {
     pub metadata: Option<String>,
     /// What each kind of its work needs of the machine it runs on ([`Need`]).
     pub needs: Vec<Need>,
+    /// The tasks it runs on a schedule the person set, at most [`SCHEDULES_MAX`].
+    pub schedules: Vec<Schedule>,
     /// When it was made, by the server's clock.
     pub created_ms: WallMs,
 }
@@ -1262,6 +1264,91 @@ pub struct Attempts {
     pub picked: Option<TaskId>,
 }
 
+/// The most schedules a project keeps.
+pub const SCHEDULES_MAX: usize = 16;
+/// The longest schedule rule kept, in bytes ([`ScheduleSpec::when`]).
+pub const WHEN_MAX: usize = 128;
+/// The longest time zone name kept, in bytes ([`ScheduleSpec::zone`]).
+pub const ZONE_MAX: usize = 64;
+
+/// What a schedule makes and starts each time it runs, and when.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ScheduleSpec {
+    /// The task each run makes, as [`crate::orchestration::Verb::TaskCreate`] would: it
+    /// hangs from no other and depends on none.
+    pub task: TaskSpec,
+    /// What starts for it, as [`crate::orchestration::Verb::TaskSpawn`] would start it.
+    pub launch: TaskLaunch,
+    /// When it runs: five cron fields (minute, hour, day of the month, month, day of the
+    /// week), or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`.
+    pub when: String,
+    /// The IANA time zone [`Self::when`] is read in, the person's own; the server's own when
+    /// empty.
+    pub zone: String,
+    /// It runs only when the person says ([`crate::orchestration::Verb::ScheduleRun`]).
+    pub paused: bool,
+}
+
+/// One run of a schedule: the task it made, or why it made none or could not start it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ScheduleRun {
+    /// When, by the server's clock.
+    pub at_ms: WallMs,
+    /// The task it made.
+    pub task: Option<TaskId>,
+    /// Why it made no task, or could not start the one it made.
+    pub why: Option<String>,
+}
+
+/// A task the server makes and starts on a schedule the person set.
+///
+/// A nightly dependency bump, a weekly audit. Only the person sets one, since every run spends
+/// the plan; it runs under the project's placement, limits and budget as any start does.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Schedule {
+    /// Its number within the project.
+    pub id: u32,
+    /// What it makes, and when.
+    pub spec: ScheduleSpec,
+    /// When it runs next, by the server's clock; none while paused.
+    pub next_ms: Option<WallMs>,
+    /// Its last run.
+    pub last: Option<ScheduleRun>,
+    /// When it was set.
+    pub created_ms: WallMs,
+}
+
+impl Schedule {
+    /// About how many bytes it takes on the wire, never less.
+    #[must_use]
+    pub fn approx_bytes(&self) -> usize {
+        let ScheduleSpec { task, launch, when, zone, .. } = &self.spec;
+        let texts = [&task.title, &task.brief, &task.kind, &launch.cwd, when, zone]
+            .into_iter()
+            .map(String::len)
+            .chain(task.owns.iter().map(String::len))
+            .chain(task.verifier.as_deref().map(str::len))
+            .chain(task.placement.require.iter().map(String::len))
+            .chain(task.placement.prefer.iter().map(|p| p.expr.len()))
+            .chain(launch.env.iter().map(|(k, v)| k.len().saturating_add(v.len())))
+            .chain(self.last.as_ref().and_then(|l| l.why.as_deref()).map(str::len));
+        let run = match &launch.run {
+            Runner::Claude { prompt, args } | Runner::Codex { prompt, args } => prompt
+                .as_deref()
+                .map_or(0, str::len)
+                .saturating_add(args.iter().map(String::len).sum()),
+            Runner::Command { argv } => argv.iter().map(String::len).sum(),
+            Runner::Agent { agent, prompt, model, args } => agent
+                .0
+                .len()
+                .saturating_add(prompt.as_deref().map_or(0, str::len))
+                .saturating_add(model.as_deref().map_or(0, str::len))
+                .saturating_add(args.iter().map(String::len).sum()),
+        };
+        texts.fold(run.saturating_add(160), |sum, len| sum.saturating_add(len).saturating_add(5))
+    }
+}
+
 /// How long an agent worked: the stretches it was at work, the waits between left out.
 ///
 /// The server follows the agent's status ([`Spent::works`]): a stretch begins when it starts
@@ -1908,6 +1995,7 @@ impl Project {
             self.metadata.as_deref().map_or(0, str::len),
             self.repo_id.as_ref().map_or(0, |id| id.keys().map(str::len).sum()),
             self.needs.iter().map(Need::approx_bytes).sum(),
+            self.schedules.iter().map(Schedule::approx_bytes).sum(),
             self.spend.windows.keys().map(|k| k.len().saturating_add(5)).sum(),
             self.limits
                 .budget

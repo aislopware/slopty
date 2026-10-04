@@ -378,6 +378,9 @@ impl Orchestrator {
             | Verb::TaskStart { .. }
             | Verb::TaskAttempts { .. }
             | Verb::TaskPick { .. }
+            | Verb::ScheduleSet { .. }
+            | Verb::ScheduleDelete { .. }
+            | Verb::ScheduleRun { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectNeeds { .. }
             | Verb::ProjectList

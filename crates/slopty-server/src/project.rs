@@ -35,6 +35,8 @@ pub use tally::Tally;
 use crate::placement;
 
 mod attempts;
+mod schedule;
+mod when;
 
 /// Latest timeline entries a connecting client gets, and a status read with no cursor.
 pub const RECENT_ENTRIES: usize = 64;
@@ -1170,6 +1172,7 @@ impl Projects {
         within("a target branch", Some(&new.target), REF_MAX)?;
         let project = Project {
             needs: Vec::new(),
+            schedules: Vec::new(),
             orchestrator_spent: Spent::default(),
             spend: slopty_proto::project::Spend::default(),
             id: new.id.clone(),

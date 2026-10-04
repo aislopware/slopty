@@ -55,6 +55,9 @@ regex = "1.13.1"
 # Projects' placement rules over the workers' facts (`docs/decisions/projects.md`). No chrono or
 # regex: a fact is a word, a number or a list, and time never decides where work runs.
 cel = { version = "0.14.5", default-features = false }
+# When a project's schedules run, read in the person's IANA time zone (`docs/decisions/projects.md`).
+# The database is built in, since the server ships static and often runs with no zoneinfo.
+jiff = { version = "0.2.37", features = [ "tzdb-bundle-always" ] }
 # NFC for comparing the paths tasks claim, as APFS compares names.
 icu_normalizer = "2.3.0"
 # Owned paths compare case-folded (Unicode full case folding), as a case-insensitive volume does.

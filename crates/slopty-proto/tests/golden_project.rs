@@ -18,9 +18,9 @@ mod golden_project {
         AgentReport, Assignment, Attempts, Bounds, Budget, Commits, Fact, Facts, Limits,
         LimitsChange, Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives,
         Need, NodeDetail, Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus,
-        ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Spend, Spent,
-        StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
-        TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
+        ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Schedule,
+        ScheduleRun, ScheduleSpec, Spend, Spent, StepKind, StepState, Suggestion, Task, TaskChange,
+        TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -71,6 +71,7 @@ mod golden_project {
                 windows: BTreeMap::from([("five-hour".to_owned(), 3_100)]),
             },
             needs: Vec::new(),
+            schedules: vec![schedule()],
             orchestrator_spent: Spent { active_ms: 480_000, since_ms: None },
             id: project_id(),
             title: "Projects mode".to_owned(),
@@ -339,6 +340,38 @@ mod golden_project {
         snap("answer_request", &request(answer));
     }
 
+    fn schedule_spec() -> ScheduleSpec {
+        let task = TaskSpec {
+            title: "Bump dependencies".to_owned(),
+            brief: "cargo update, then the gate.".to_owned(),
+            kind: "chore".to_owned(),
+            ..TaskSpec::default()
+        };
+        let run = Runner::Claude { prompt: Some("Read your brief.".to_owned()), args: Vec::new() };
+        ScheduleSpec {
+            task,
+            launch: launch(run),
+            when: "0 9 * * 1-5".to_owned(),
+            zone: "Europe/Berlin".to_owned(),
+            paused: false,
+        }
+    }
+
+    fn schedule() -> Schedule {
+        let last = ScheduleRun {
+            at_ms: at(),
+            task: Some(TaskId(4)),
+            why: Some("task 4 did not start: no worker fits".to_owned()),
+        };
+        Schedule {
+            id: 1,
+            spec: schedule_spec(),
+            next_ms: Some(WallMs::from_millis(1_790_060_000_000)),
+            last: Some(last),
+            created_ms: at(),
+        }
+    }
+
     fn launch(run: Runner) -> TaskLaunch {
         TaskLaunch {
             pin: None,
@@ -516,6 +549,17 @@ mod golden_project {
             }),
         );
         snap("task_pick", &request(Verb::TaskPick { project: project_id(), attempt: TaskId(9) }));
+        let set = Verb::ScheduleSet {
+            project: project_id(),
+            schedule: Some(1),
+            spec: Box::new(schedule_spec()),
+        };
+        snap("schedule_set", &request(set));
+        snap(
+            "schedule_delete",
+            &request(Verb::ScheduleDelete { project: project_id(), schedule: 1 }),
+        );
+        snap("schedule_run", &request(Verb::ScheduleRun { project: project_id(), schedule: 1 }));
         let start = Start {
             agent: AgentId::acp("gemini"),
             cwd: "/w/slopty".to_owned(),

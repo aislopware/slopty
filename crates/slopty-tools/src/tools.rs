@@ -2310,6 +2310,7 @@ mod tests {
             project: Project {
                 spend: slopty_proto::project::Spend::default(),
                 needs: Vec::new(),
+                schedules: Vec::new(),
                 orchestrator_spent: slopty_proto::project::Spent::default(),
                 id,
                 title: "Slopty".to_owned(),

@@ -13,7 +13,7 @@ use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Attempts, Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, Need,
     NodeDetail, Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer,
-    StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry,
+    Schedule, StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry,
     VerifierRun,
 };
 use slopty_proto::server::Os;
@@ -111,7 +111,55 @@ pub struct ProjectView<'a> {
     /// What each kind of its work needs of its machines.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     needs: Vec<NeedView<'a>>,
+    /// The tasks it runs on a schedule the person set.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    schedules: Vec<ScheduleView<'a>>,
     created_ms: WallMs,
+}
+
+/// A schedule, for JSON: what it makes, when, and how its last run went.
+#[derive(Debug, Serialize)]
+pub struct ScheduleView<'a> {
+    schedule: u32,
+    title: &'a str,
+    when: &'a str,
+    zone: &'a str,
+    paused: bool,
+    next_ms: Option<WallMs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_ms: Option<WallMs>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_task: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_why: Option<&'a str>,
+}
+
+fn schedule(s: &Schedule) -> ScheduleView<'_> {
+    let last = s.last.as_ref();
+    ScheduleView {
+        schedule: s.id,
+        title: &s.spec.task.title,
+        when: &s.spec.when,
+        zone: &s.spec.zone,
+        paused: s.spec.paused,
+        next_ms: s.next_ms,
+        last_ms: last.map(|l| l.at_ms),
+        last_task: last.and_then(|l| l.task).map(|t| t.0),
+        last_why: last.and_then(|l| l.why.as_deref()),
+    }
+}
+
+/// A schedule on one line: its number, when, what, and how its last run went.
+#[must_use]
+pub fn schedule_text(s: &Schedule) -> String {
+    let when = format!("{} {}", s.spec.when, s.spec.zone);
+    let paused = if s.spec.paused { "  paused" } else { "" };
+    let last = s.last.as_ref().map_or_else(String::new, |l| match (&l.why, l.task) {
+        (Some(why), _) => format!("  last: {why}"),
+        (None, Some(task)) => format!("  last: #{task}"),
+        (None, None) => String::new(),
+    });
+    format!("schedule {} [{when}] {}{paused}{last}", s.id, s.spec.task.title)
 }
 
 /// A need, for JSON.
@@ -152,6 +200,7 @@ pub fn project(p: &Project) -> ProjectView<'_> {
                     .collect(),
             })
             .collect(),
+        schedules: p.schedules.iter().map(schedule).collect(),
         created_ms: p.created_ms,
     }
 }
@@ -911,6 +960,9 @@ pub fn status_text<S: std::hash::BuildHasher>(
     counts_text(&mut out, s.orchestrator_natives, 2);
     for need in &p.needs {
         let _infallible = writeln!(out, "  {}", need_text(need));
+    }
+    for s in &p.schedules {
+        let _infallible = writeln!(out, "  {}", schedule_text(s));
     }
     let mut children: HashMap<Option<u32>, Vec<&TaskCard>> = HashMap::new();
     for t in &s.tasks {

@@ -2098,3 +2098,62 @@ follow-up)
   its agent. Waking takes the place back.
 - Tests: `an_asleep_thread_counts_as_no_live_agent_and_stays_on_its_task` and
   `a_thread_s_subagents_are_its_task_s_natives` (`slopty-server`).
+
+**A thread put to sleep is no news, and stands below idle.** ✅ 2026-10-04
+- The person puts an agent to sleep at rest. Its turn finished before that, and the Finished
+  notice went then, so the ladder sends no notice when a thread goes to `Rung::Sleeping`.
+  That holds even for a thread that slept straight from work (`moved` rules the arm
+  explicitly). Sleep still ends the stretch the thread was busy for.
+- A root's rung starts from its own rung and rises with its family's. A default once stood in
+  for an empty family and lifted a sleeping root to idle, so a thread put to sleep from work
+  read as finished. That default is gone.
+- Test: `a_thread_put_to_sleep_is_no_news` (`hub::ladder`).
+
+**A project runs tasks on a schedule the person sets.** ✅ 2026-10-04 (R12)
+- Before: recurring work (a nightly dependency bump, a weekly audit) needed the person, or an
+  orchestrator kept alive for it, to start each run by hand.
+- Prior art: T3 Code's `schedule_task` family of tools.
+- `Project.schedules` holds up to `SCHEDULES_MAX` (16) schedules. Each `Schedule { id, spec,
+  next_ms, last, created_ms }` keeps a `ScheduleSpec`, made of:
+  - the task each run makes, as a `TaskSpec` that hangs from no task and depends on none;
+  - its `TaskLaunch`;
+  - `when`, five cron fields (minute, hour, day of the month, month, day of the week, with
+    lists, ranges, steps and names) or `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly`;
+  - `zone`, an IANA time zone;
+  - `paused`.
+  The verbs are `ScheduleSet { project, schedule, spec }` (a new schedule, or one set anew),
+  `ScheduleDelete` and `ScheduleRun`.
+- **The person's alone.** Every run spends the plan, so the server refuses all three from an
+  agent, and there is no MCP tool for them. Agents see the schedules in `project_status`. The
+  CLI has `slopty project schedule set|rm|run|ls`.
+- **In the person's time.** A rule is read in its zone, not the server's. The CLI sends this
+  machine's zone (`TZ`, else where `/etc/localtime` points) unless `--zone` names one, and the
+  server fills in its own zone when none is given.
+  - The server ships as a static binary that often runs in a container with no zone
+    database, so jiff's database is built in (`tzdb-bundle-always`). A zone the system
+    cannot resolve is looked up in the built-in copy. jiff is the one new dependency, and it
+    was already in the lock.
+  - The cron matching is the server's own (`project::when`), about 150 lines.
+  - A time that a change to summer time skips runs at the first moment after it. A time
+    that the change back repeats runs once.
+- **When due.** The delivery loop also wakes for the earliest `next_ms` and runs every
+  schedule that is due.
+  - A run makes the task, marked `{"schedule": n}` in its metadata, and starts it as
+    `task_spawn` would, under the project's placement, limits and budget.
+  - The next run is set past now, so a run missed while the server was down runs once when
+    it is back, never once per missed time.
+  - A run whose last task is still under way is skipped. A run that made no task, or whose
+    task did not start, says why on `last` and on the timeline.
+- Setting, changing and taking away a schedule are timeline notes. The tasks a schedule made
+  stay after it is gone.
+- Tests:
+  - `project::when`: a rule in the person's zone across Berlin's change of clocks, from the
+    built-in database, and cron's grammar and refusals.
+  - `project::schedule`: the next run in the zone, paused, refusals, due runs that never
+    pile up, and a missed run that runs once.
+  - `a_schedule_is_the_person_s_and_runs_its_task_once_at_a_time` (hub).
+  - `a_schedule_set_from_the_cli_runs_its_task_on_the_worker` (CLI e2e, a real server and
+    worker).
+  - The goldens `schedule_set`, `schedule_delete` and `schedule_run`, with a schedule on the
+    golden project.
+- Left for later: the board showing the schedules (lane D).

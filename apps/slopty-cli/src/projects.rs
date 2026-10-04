@@ -11,7 +11,9 @@ use slopty_proto::project::{
     LimitsChange, Preference, ProjectStatus, Report, ReportKind, RunOn, Runner, Task, TaskChange,
     TaskState, VerifierRun,
 };
-use slopty_tools::ops::{self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec};
+use slopty_tools::ops::{
+    self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, ScheduleWhen,
+};
 use slopty_tools::resolve::Resolver;
 use slopty_tools::view::projects as view;
 
@@ -157,6 +159,11 @@ pub enum ProjectCmd {
     },
     /// Every project.
     List,
+    /// A project's schedules: tasks it makes and starts at set times, as the person sets them.
+    Schedule {
+        #[command(subcommand)]
+        cmd: Box<ScheduleCmd>,
+    },
     /// A project's tree, bounds and timeline.
     Status {
         /// The project (this session's own when omitted).
@@ -168,6 +175,198 @@ pub enum ProjectCmd {
         #[arg(long, default_value_t = 0)]
         timeout: u32,
     },
+}
+
+/// `slopty project schedule …`.
+#[derive(Subcommand, Debug)]
+pub enum ScheduleCmd {
+    /// Set a schedule: a task made and started each time its rule comes round, in your time
+    /// zone. With `--schedule` it sets that one anew.
+    Set(Box<SetSchedule>),
+    /// Take a schedule away; the tasks it made stay.
+    Rm {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The schedule's number.
+        schedule: u32,
+    },
+    /// Run a schedule now, paused or not, and print the task it made.
+    Run {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The schedule's number.
+        schedule: u32,
+    },
+    /// List a project's schedules.
+    Ls {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
+/// `slopty project schedule set`.
+#[derive(Args, Debug)]
+pub struct SetSchedule {
+    /// The project (this session's own when omitted).
+    #[arg(long)]
+    project: Option<String>,
+    /// The schedule to set anew, by its number.
+    #[arg(long)]
+    schedule: Option<u32>,
+    /// When: five cron fields (minute, hour, day of the month, month, day of the week),
+    /// such as `0 9 * * 1-5`, or `@daily`, `@weekly` and the like.
+    #[arg(long)]
+    when: String,
+    /// The IANA time zone it is read in; this machine's own when omitted.
+    #[arg(long)]
+    zone: Option<String>,
+    /// It runs only when you say (`schedule run`).
+    #[arg(long)]
+    paused: bool,
+    /// Each run's task, in a line.
+    #[arg(long)]
+    title: String,
+    /// What its agent is told to do.
+    #[arg(long, default_value = "")]
+    brief: String,
+    /// What sort of work it is.
+    #[arg(long, default_value = "")]
+    kind: String,
+    /// A repository-relative path it alone may write; repeatable.
+    #[arg(long = "owns", value_name = "PATH")]
+    owns: Vec<String>,
+    /// It only reads: it owns nothing.
+    #[arg(long, conflicts_with = "owns")]
+    read_only: bool,
+    #[command(flatten)]
+    placement: PlacementArgs,
+    /// Its own verifier, over the project's.
+    #[arg(long)]
+    verifier: Option<String>,
+    /// The agent: `claude` (the default), `codex`, `pi`, or an ACP agent by name.
+    #[arg(long)]
+    agent: Option<String>,
+    /// The model, by the agent's own id.
+    #[arg(long)]
+    model: Option<String>,
+    /// The agent's first prompt.
+    #[arg(long)]
+    prompt: Option<String>,
+    /// This worker over the task's placement (name or id).
+    #[arg(long)]
+    worker: Option<String>,
+    /// Working directory on the worker; beside a clone of the project's repository when
+    /// omitted.
+    #[arg(long)]
+    cwd: Option<String>,
+    /// Run the words after `--` as the program, not as the agent's arguments.
+    #[arg(long, conflicts_with_all = ["agent", "model", "prompt"])]
+    command: bool,
+    /// Arguments for the agent, or with `--command` the program and its arguments.
+    #[arg(last = true)]
+    args: Vec<String>,
+}
+
+/// This machine's IANA time zone: `TZ` when it names one, else where `/etc/localtime` points
+/// in the zone database; empty when neither says, for the server's own.
+fn local_zone() -> String {
+    let named = std::env::var("TZ").ok().map(|tz| tz.trim_start_matches(':').to_owned());
+    if let Some(tz) = named.filter(|tz| tz.contains('/') && !tz.starts_with('/')) {
+        return tz;
+    }
+    std::fs::read_link("/etc/localtime")
+        .ok()
+        .and_then(|target| zone_of(&target.to_string_lossy()))
+        .unwrap_or_default()
+}
+
+/// The zone a path into the zone database names: `…/zoneinfo/Europe/Berlin` is `Europe/Berlin`.
+fn zone_of(path: &str) -> Option<String> {
+    path.split_once("zoneinfo/").map(|(_, zone)| zone.to_owned()).filter(|z| !z.is_empty())
+}
+
+/// Run a `slopty project schedule …`.
+async fn schedule(
+    cmd: ScheduleCmd,
+    res: &mut Resolver<'_, Link>,
+    link: &Link,
+    (json, key): (bool, Option<IdempotencyKey>),
+) -> Result<()> {
+    let status = match cmd {
+        ScheduleCmd::Set(set) => {
+            let SetSchedule {
+                project,
+                schedule,
+                when,
+                zone,
+                paused,
+                title,
+                brief,
+                kind,
+                owns,
+                read_only,
+                placement,
+                verifier,
+                agent,
+                model,
+                prompt,
+                worker,
+                cwd,
+                command,
+                args,
+            } = *set;
+            let new = NewTask {
+                parent: None,
+                depends_on: Vec::new(),
+                kind,
+                title,
+                brief,
+                owns,
+                read_only,
+                placement: placement.spec(),
+                verifier,
+                metadata: None,
+            };
+            let launch = LaunchSpec {
+                pin: worker,
+                cwd: cwd.unwrap_or_default(),
+                run: if command {
+                    Runner::Command { argv: args }
+                } else {
+                    ops::agent_runner(agent.as_deref(), prompt, model, args)
+                },
+                env: Vec::new(),
+                size: None,
+                ignore_dependencies: false,
+            };
+            let zone = zone.unwrap_or_else(local_zone);
+            let when = ScheduleWhen { when, zone, paused };
+            ops::schedule_set(res, project.as_deref(), schedule, (new, launch, when), key).await?
+        }
+        ScheduleCmd::Rm { project, schedule } => {
+            ops::schedule_delete(link, project.as_deref(), schedule, key).await?
+        }
+        ScheduleCmd::Run { project, schedule } => {
+            let task = ops::schedule_run(link, project.as_deref(), schedule, key).await?;
+            return print_task(&task, json);
+        }
+        ScheduleCmd::Ls { project } => {
+            ops::project_status(link, project.as_deref(), None, 0).await?
+        }
+    };
+    if json {
+        return print_json(&view::status(&status));
+    }
+    if status.project.schedules.is_empty() {
+        println!("{} has no schedule", status.project.id);
+    }
+    for s in &status.project.schedules {
+        println!("{}", view::schedule_text(s));
+    }
+    Ok(())
 }
 
 /// Which project and task: this session's own when omitted.
@@ -643,6 +842,7 @@ pub async fn project(
                 Ok(())
             }
         }
+        ProjectCmd::Schedule { cmd } => schedule(*cmd, &mut res, link, (json, key)).await,
         ProjectCmd::Status { project, since, timeout } => {
             let status = ops::project_status(link, project.as_deref(), since, timeout).await?;
             print_status(&mut res, &status, json).await
@@ -954,7 +1154,16 @@ fn finding(text: &str) -> slopty_proto::project::Finding {
 
 #[cfg(test)]
 mod tests {
-    use super::{Attempt, attempt};
+    use super::{Attempt, attempt, zone_of};
+
+    /// The zone this machine is in is read from where its zone file points.
+    #[test]
+    fn the_local_zone_is_read_from_its_zone_file() {
+        let macos = "/var/db/timezone/zoneinfo/Asia/Ho_Chi_Minh";
+        assert_eq!(zone_of(macos).as_deref(), Some("Asia/Ho_Chi_Minh"));
+        assert_eq!(zone_of("/usr/share/zoneinfo/Europe/Berlin").as_deref(), Some("Europe/Berlin"));
+        assert_eq!(zone_of("/etc/localtime"), None);
+    }
 
     /// An attempt names its agent first, then a model and a worker in either order; anything
     /// else is refused saying what it takes.

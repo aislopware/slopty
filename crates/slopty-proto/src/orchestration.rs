@@ -947,6 +947,33 @@ pub enum Verb {
         /// The attempt.
         attempt: TaskId,
     },
+    /// Set a schedule of `project` ([`crate::project::Schedule`]): `schedule` anew, or a new
+    /// one when none is named. Answered with [`Outcome::Project`]. The person's alone, since
+    /// every run spends the plan.
+    ScheduleSet {
+        /// The project.
+        project: ProjectId,
+        /// The schedule to set anew, by its number; a new one when absent.
+        schedule: Option<u32>,
+        /// What it makes and starts, and when.
+        spec: Box<crate::project::ScheduleSpec>,
+    },
+    /// Take a schedule of `project` away; the tasks it made stay. Answered with
+    /// [`Outcome::Project`]; the person's alone.
+    ScheduleDelete {
+        /// The project.
+        project: ProjectId,
+        /// The schedule, by its number.
+        schedule: u32,
+    },
+    /// Run a schedule of `project` now, paused or not: its task made and started, answered
+    /// with [`Outcome::Task`]. The person's alone.
+    ScheduleRun {
+        /// The project.
+        project: ProjectId,
+        /// The schedule, by its number.
+        schedule: u32,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1041,7 +1068,10 @@ impl Verb {
             | Self::StartThread { .. }
             | Self::FsChange { .. }
             | Self::TaskAttempts { .. }
-            | Self::TaskPick { .. } => true,
+            | Self::TaskPick { .. }
+            | Self::ScheduleSet { .. }
+            | Self::ScheduleDelete { .. }
+            | Self::ScheduleRun { .. } => true,
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
             Self::Upload { part, .. } => matches!(part, UploadPart::Finish { .. }),

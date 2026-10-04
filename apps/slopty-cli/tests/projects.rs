@@ -497,6 +497,86 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// A schedule the person sets with the CLI is kept with its next run in the zone named;
+    /// run on their word it makes its task and starts its command on the worker, with its
+    /// project and task in its environment; a run while that task is under way is skipped,
+    /// saying so; and taken away, its task stays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_schedule_set_from_the_cli_runs_its_task_on_the_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (server, _daemons, _worker) = fleet(&root, "").await;
+        let addr = server.quic_addr();
+        let repo = root.to_string_lossy().into_owned();
+        slopty(&root, addr, &["project", "create", "demo", "--title", "Demo", "--repo", &repo])
+            .await;
+
+        let out = root.join("ran");
+        let script =
+            format!("printf %s \"$SLOPTY_PROJECT/$SLOPTY_TASK\" > '{}'; exec cat", out.display());
+        let set = [
+            "--json",
+            "project",
+            "schedule",
+            "set",
+            "--project",
+            "demo",
+            "--when",
+            "0 3 * * *",
+            "--zone",
+            "Asia/Ho_Chi_Minh",
+            "--title",
+            "Nightly check",
+            "--read-only",
+            "--cwd",
+            &repo,
+            "--command",
+            "--",
+            "/bin/sh",
+            "-c",
+            &script,
+        ];
+        let set: Value = serde_json::from_str(&slopty(&root, addr, &set).await).unwrap();
+        let held = &set["project"]["schedules"][0];
+        assert_eq!(
+            (held["schedule"].as_u64(), held["zone"].as_str()),
+            (Some(1), Some("Asia/Ho_Chi_Minh")),
+            "{set}"
+        );
+        assert!(held["next_ms"].as_u64().is_some(), "{held}");
+
+        let ran =
+            slopty(&root, addr, &["project", "schedule", "run", "--project", "demo", "1"]).await;
+        assert!(ran.starts_with("#1 running  Nightly check"), "{ran}");
+        let wrote = until("the scheduled command ran", async || {
+            std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
+        })
+        .await;
+        assert_eq!(wrote, "demo/1");
+
+        let again =
+            slopty_refused(&root, addr, &["project", "schedule", "run", "--project", "demo", "1"])
+                .await;
+        assert!(again.contains("still under way"), "{again}");
+        let listed = slopty(&root, addr, &["project", "schedule", "ls", "--project", "demo"]).await;
+        assert!(
+            listed.contains("schedule 1 [0 3 * * * Asia/Ho_Chi_Minh] Nightly check"),
+            "{listed}"
+        );
+        assert!(listed.contains("still under way"), "{listed}");
+
+        let gone =
+            slopty(&root, addr, &["project", "schedule", "rm", "--project", "demo", "1"]).await;
+        assert!(gone.contains("demo has no schedule"), "{gone}");
+        let status: Value = serde_json::from_str(
+            &slopty(&root, addr, &["--json", "project", "status", "demo"]).await,
+        )
+        .unwrap();
+        assert_eq!(status["tasks"][0]["title"], "Nightly check", "its task stays: {status}");
+
+        server.shutdown().await;
+    }
+
     /// What a worker's person says of it, labels and probe commands in its settings, reaches
     /// `slopty workers` as facts, and a task's placement rules read them. A command task made
     /// with the CLI runs where its rules place it, with its project and task in its

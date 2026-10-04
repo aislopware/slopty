@@ -14,8 +14,8 @@ use slopty_proto::orchestration::{
 };
 use slopty_proto::project::{
     BadProjectId, LimitsChange, Moment, NodeDetail, Peer, Placement, Preference, Project,
-    ProjectId, ProjectStatus, Report, Runner, StepState, Suggestion, Task, TaskChange, TaskId,
-    TaskLaunch, TaskSpec, TimelineEntry, WorkerFacts,
+    ProjectId, ProjectStatus, Report, Runner, ScheduleSpec, StepState, Suggestion, Task,
+    TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
@@ -856,6 +856,82 @@ pub async fn project_needs<D: Dispatch>(
 ) -> Result<ProjectStatus, ToolError> {
     let project = project_named(project, &own(dispatch).await?)?;
     project_answer(dispatch, key, Verb::ProjectNeeds { project, needs }).await
+}
+
+/// When a schedule runs: its cron rule, the IANA time zone it is read in (the server's own
+/// when empty), and whether it waits paused.
+#[derive(Debug, Default)]
+pub struct ScheduleWhen {
+    /// Five cron fields, or `@daily` and the like.
+    pub when: String,
+    /// The time zone.
+    pub zone: String,
+    /// It runs only when the person says.
+    pub paused: bool,
+}
+
+/// Set a schedule of a project, as the person: `number` anew, or a new one. Each run makes
+/// `new` (which hangs from no task and depends on none) and starts `launch` for it.
+///
+/// # Errors
+/// As [`task_spawn`] for the worker and [`task_create`] for the placement; refused for an
+/// agent, or a spec the server refuses.
+pub async fn schedule_set<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    project: Option<&str>,
+    number: Option<u32>,
+    (new, launch, when): (NewTask, LaunchSpec, ScheduleWhen),
+    key: Option<IdempotencyKey>,
+) -> Result<ProjectStatus, ToolError> {
+    let project = project_named(project, &own(res.dispatch()).await?)?;
+    let placement = placement(res, new.placement).await?;
+    let task = TaskSpec {
+        parent: None,
+        depends_on: Vec::new(),
+        kind: new.kind,
+        title: new.title,
+        brief: new.brief,
+        owns: new.owns,
+        read_only: new.read_only,
+        placement,
+        verifier: new.verifier,
+        metadata: None,
+    };
+    let pin = res.some_worker(launch.pin.as_deref()).await?;
+    let LaunchSpec { cwd, run, env, size, ignore_dependencies, .. } = launch;
+    let launch = TaskLaunch { pin, cwd, run, env, size, ignore_dependencies };
+    let ScheduleWhen { when, zone, paused } = when;
+    let spec = ScheduleSpec { task, launch, when, zone, paused };
+    let verb = Verb::ScheduleSet { project, schedule: number, spec: Box::new(spec) };
+    project_answer(res.dispatch(), key, verb).await
+}
+
+/// Take a schedule of a project away, as the person; its tasks stay.
+///
+/// # Errors
+/// Refused for an agent, or a schedule the project does not have.
+pub async fn schedule_delete<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    number: u32,
+    key: Option<IdempotencyKey>,
+) -> Result<ProjectStatus, ToolError> {
+    let project = project_named(project, &own(dispatch).await?)?;
+    project_answer(dispatch, key, Verb::ScheduleDelete { project, schedule: number }).await
+}
+
+/// Run a schedule of a project now, as the person: its task made and started.
+///
+/// # Errors
+/// Refused for an agent, while its last run's task is under way, or as a start is.
+pub async fn schedule_run<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    number: u32,
+    key: Option<IdempotencyKey>,
+) -> Result<Task, ToolError> {
+    let project = project_named(project, &own(dispatch).await?)?;
+    task_answer(dispatch, key, Verb::ScheduleRun { project, schedule: number }).await
 }
 
 /// Every project.
