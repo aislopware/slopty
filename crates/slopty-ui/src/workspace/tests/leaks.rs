@@ -149,7 +149,7 @@ fn a_closed_file_with_an_edit_leaves_nothing(cx: &mut TestAppContext) {
     let version = Cell::new(1);
     let key = fake.key;
     closes_clean(&view, cx, |cx| {
-        let path = format!("/w/notes-{}.md", version.get());
+        let path = format!("/w/notes-{}.txt", version.get());
         let tile = arrives(&view, cx, &fake, ItemKind::File { path: path.clone() }, next(&version));
         let text = slopty_proto::file::FileRead::Text {
             text: "# Notes".to_owned(),

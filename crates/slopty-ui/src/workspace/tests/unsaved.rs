@@ -7,7 +7,7 @@ use slopty_proto::file::{FileRead, WriteResult};
 
 use super::*;
 
-const PATH: &str = "/w/notes.md";
+const PATH: &str = "/w/notes.txt";
 
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -128,7 +128,7 @@ fn a_kept_edit_comes_back_on_its_tile_or_on_a_new_one(cx: &mut TestAppContext) {
         kept_ms: WallMs::now(),
     };
     store.put(&kept_edit(item.id, PATH, "draft # Notes"), 1).expect("put");
-    store.put(&kept_edit(ItemId::new(), "/w/orphan.md", "lost tile"), 2).expect("put");
+    store.put(&kept_edit(ItemId::new(), "/w/orphan.txt", "lost tile"), 2).expect("put");
     let store = relaunched(&dir);
     let (view, cx) = workspace(cx);
     view.update(cx, |v, cx| v.set_unsaved_store(store.clone(), cx));
@@ -147,13 +147,13 @@ fn a_kept_edit_comes_back_on_its_tile_or_on_a_new_one(cx: &mut TestAppContext) {
     let sent: Vec<ClientMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let reopened = sent.iter().filter(|m| {
         matches!(m, ClientMsg::Items(ItemOp::Add(Item { kind: ItemKind::File { path }, .. }))
-            if path == "/w/orphan.md")
+            if path == "/w/orphan.txt")
     });
     assert_eq!(reopened.count(), 1, "the edit whose tile went has a tile again: {sent:?}");
 
     view.update_in(cx, |v, _w, cx| {
         v.file_read(key, PATH, &read("# Notes", 1_000), cx);
-        v.file_read(key, "/w/orphan.md", &read("", 1_000), cx);
+        v.file_read(key, "/w/orphan.txt", &read("", 1_000), cx);
     });
     cx.run_until_parked();
     let texts = view.read_with(cx, |v, cx| {
@@ -164,7 +164,7 @@ fn a_kept_edit_comes_back_on_its_tile_or_on_a_new_one(cx: &mut TestAppContext) {
     });
     assert!(texts.contains(&(PATH.to_owned(), "draft # Notes".to_owned(), true)), "{texts:?}");
     assert!(
-        texts.contains(&("/w/orphan.md".to_owned(), "lost tile".to_owned(), true)),
+        texts.contains(&("/w/orphan.txt".to_owned(), "lost tile".to_owned(), true)),
         "{texts:?}"
     );
     assert!(cx.debug_bounds(selector("unsaved", tile.item)).is_some(), "the header says so");

@@ -51,7 +51,7 @@ fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestA
     let row = asking(None);
     let thread = row.id;
     let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
-    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.md".to_owned() }, 2);
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.txt".to_owned() }, 2);
     table(&view, cx, key, vec![row.clone()]);
 
     view.update(cx, |v, _| {

@@ -7,6 +7,8 @@ use super::*;
 /// The keyboard in the editor with the selection at `range`.
 fn select(view: &Entity<FileView>, cx: &mut VisualTestContext, range: std::ops::Range<usize>) {
     view.update_in(cx, |v, window, cx| {
+        // A Markdown file is written in its source.
+        v.show_preview(false, window, cx);
         v.focus(window, cx);
         v.editor().update(cx, |e, cx| e.set_selected_range(range, cx));
     });

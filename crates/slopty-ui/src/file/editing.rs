@@ -20,7 +20,7 @@ use slopty_theme::alpha;
 use super::edit::{self, Indent, LineEdit};
 use super::{
     CloseGoToLine, DuplicateLine, FileView, GoToLine, GoToSymbol, JumpToBracket, MoveLineDown,
-    MoveLineUp, ToggleComment, ToggleReplace, ToggleSoftWrap,
+    MoveLineUp, ToggleComment, TogglePreview, ToggleReplace, ToggleSoftWrap,
 };
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
@@ -57,6 +57,7 @@ pub fn palette_items(bindings: &[KeyBinding]) -> Vec<PaletteItem> {
         line("Duplicate line", IconName::Copy, Box::new(DuplicateLine)),
         line("Jump to matching bracket", IconName::MoveHorizontal, Box::new(JumpToBracket)),
         line("Wrap long lines", IconName::CornerDownLeft, Box::new(ToggleSoftWrap)),
+        line("Show preview or source", IconName::Eye, Box::new(TogglePreview)),
         line("Find and replace", IconName::Replace, Box::new(ToggleReplace)),
         line("Jump to symbol", IconName::ListTree, Box::new(GoToSymbol)),
         line(

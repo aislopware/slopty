@@ -299,6 +299,8 @@ ListItem │ Jump to matching bracket │ ⇧⌘\
 Button │ Keys for Jump to matching bracket │ ⇧⌘\
 ListItem │ Wrap long lines
 Button │ Keys for Wrap long lines
+ListItem │ Show preview or source │ ⇧⌘V
+Button │ Keys for Show preview or source │ ⇧⌘V
 ListItem │ Find and replace │ ⇧⌘H
 Button │ Keys for Find and replace │ ⇧⌘H
 ListItem │ Toggle match case │ ⌥⌘C

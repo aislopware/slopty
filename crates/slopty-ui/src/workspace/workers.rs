@@ -1431,6 +1431,7 @@ impl WorkspaceView {
                     let command = crate::file::terminal_command(line);
                     this.open_session_on(worker, dir.filter(|d| !d.is_empty()), command, None, cx);
                 }
+                FileViewEvent::RunBlock(code) => this.run_in_shell(code.clone(), cx),
                 FileViewEvent::Edited { id, outcome } => this.file_edited(worker, *id, *outcome),
                 FileViewEvent::OpenThread(opens) => this.open_thread_at(*opens, cx),
                 FileViewEvent::Stamped => this.author_file(&view, cx),
@@ -1464,6 +1465,8 @@ impl WorkspaceView {
         if let Some(waits) = self.file_wait(worker, &path) {
             view.update(cx, |v, cx| v.set_waiting(Some(waits), cx));
         }
+        let can = self.run_target().is_some();
+        view.update(cx, |v, cx| v.set_can_run(can, cx));
         self.files.insert(id, view);
         if let Some(w) = self.workers.get(&worker) {
             w.send(ClientMsg::ReadFile { path });

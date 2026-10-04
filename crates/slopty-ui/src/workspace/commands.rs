@@ -452,11 +452,14 @@ impl WorkspaceView {
         })
     }
 
-    /// Tell every note whether there is a shell to run a fenced block in.
+    /// Tell every note and file whether there is a shell to run a fenced block in.
     pub(super) fn update_run_targets(&self, cx: &mut Context<Self>) {
         let can = self.run_target().is_some();
         for note in self.notes.values() {
             note.update(cx, |n, cx| n.set_can_run(can, cx));
+        }
+        for file in self.files.values() {
+            file.update(cx, |f, cx| f.set_can_run(can, cx));
         }
     }
 

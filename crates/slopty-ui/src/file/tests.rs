@@ -66,6 +66,8 @@ fn arrives(view: &Entity<FileView>, cx: &mut VisualTestContext, read: FileRead) 
 /// The caret goes to the start of the text and `typed` goes in, as keys would.
 fn types(view: &Entity<FileView>, cx: &mut VisualTestContext, typed: &str) {
     view.update_in(cx, |v, window, cx| {
+        // A Markdown file is written in its source.
+        v.show_preview(false, window, cx);
         v.focus(window, cx);
         v.editor().update(cx, |e, cx| e.set_selected_range(0..0, cx));
     });
@@ -789,6 +791,7 @@ fn measure_the_reload_diff_at_its_bound() {
 }
 
 mod editing;
+mod reading;
 
 /// A file not on disk yet opens as an empty editor that says so; ⌘S makes it unedited, based
 /// on the epoch so the worker refuses to write over a file made meanwhile, and the read that

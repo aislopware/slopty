@@ -96,17 +96,24 @@ impl ScreenFacts {
     }
 }
 
-/// What the workspace shows of a file: whether its edit is not yet on disk. Its editor
-/// changes with every keystroke and caret blink; the header's dot, a few times an edit.
+/// What the workspace shows of a file: whether its edit is not yet on disk, and which face a
+/// Markdown file shows. Its editor changes with every keystroke and caret blink; the header's
+/// dot and toggle, a few times an edit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct FileFacts {
     /// An edit not yet on disk, or a save not yet answered.
     pub unsaved: bool,
+    /// A Markdown file's text is in: whether its preview shows (else its source). `None` for
+    /// any other file, or one with no text yet.
+    pub preview: Option<bool>,
 }
 
 impl FileFacts {
-    pub(super) const fn of(view: &FileView) -> Self {
-        Self { unsaved: view.dirty() || view.saving() }
+    pub(super) fn of(view: &FileView) -> Self {
+        Self {
+            unsaved: view.dirty() || view.saving(),
+            preview: (view.has_preview() && view.shows_text()).then(|| view.previewing()),
+        }
     }
 }
 

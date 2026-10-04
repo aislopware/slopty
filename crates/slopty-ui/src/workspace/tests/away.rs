@@ -77,7 +77,7 @@ fn file_state(
 fn a_closed_file_tile_comes_back_with_its_edit(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
-    let path = "/w/notes.md";
+    let path = "/w/notes.txt";
     let tile = file_tile(&view, cx, &mut studio, path);
     cx.simulate_input("x");
     cx.run_until_parked();
@@ -164,7 +164,7 @@ fn a_shell_closed_while_its_worker_is_away_is_closed_when_it_is_back(cx: &mut Te
 fn a_save_is_never_left_waiting_on_a_worker_that_went_away(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
-    let path = "/w/notes.md";
+    let path = "/w/notes.txt";
     let tile = file_tile(&view, cx, &mut studio, path);
     cx.simulate_input("x");
     cx.simulate_keystrokes("cmd-s");

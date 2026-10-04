@@ -398,7 +398,8 @@ pub fn defaults() -> Vec<Command> {
         c(File, "save", crate::file::SaveFile, &["cmd-s"], &[FILE]),
         // In the editor too, over its own ⌘↩ (a new line), only while a program waits.
         c(File, "finish_edit", crate::file::FinishEdit, &["cmd-enter"], &[FILE, FILE_INPUT]),
-        c(File, "find", t::Find, &["cmd-f"], &[FILE_INPUT]),
+        // The tile's own too, for a Markdown preview, which holds no field.
+        c(File, "find", t::Find, &["cmd-f"], &[FILE_INPUT, FILE]),
         c(File, "close_find", t::CloseFind, &["escape"], &[FILE_SEARCH]),
         c(File, "find_next", t::FindNext, &["cmd-g"], &[FILE_SEARCH]),
         c(File, "find_previous", t::FindPrev, &["cmd-shift-g"], &[FILE_SEARCH]),
@@ -411,6 +412,7 @@ pub fn defaults() -> Vec<Command> {
         c(File, "duplicate_line", crate::file::DuplicateLine, &["alt-shift-down"], &[FILE_TEXT]),
         c(File, "jump_to_bracket", crate::file::JumpToBracket, &["cmd-shift-\\"], &[FILE_TEXT]),
         c(File, "toggle_soft_wrap", crate::file::ToggleSoftWrap, &[], &[FILE]),
+        c(File, "toggle_preview", crate::file::TogglePreview, &["cmd-shift-v"], &[FILE]),
         // Zed's replace key; the find bar's toggles are the search surface's.
         c(
             File,

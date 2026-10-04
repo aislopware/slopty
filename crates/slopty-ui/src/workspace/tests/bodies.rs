@@ -49,7 +49,7 @@ fn a_remote_window_waits_blank_then_says_what_is_opening(cx: &mut TestAppContext
 fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let path = "/w/notes.md";
+    let path = "/w/notes.txt";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),
@@ -71,6 +71,40 @@ fn the_unsaved_dot_follows_the_title(cx: &mut TestAppContext) {
     let place = bounds(cx, selector("place", tile.item));
     near(f32::from(dot.left() - name.right()), Theme::default().spacing.xs);
     assert!(place.left() > dot.right(), "the directory after them: {place:?} {dot:?}");
+}
+
+/// A Markdown file's header carries the toggle between its preview and its source, which the
+/// file opens on the preview; a click swaps the body and the toggle's words.
+#[gpui::test]
+fn a_markdown_file_s_header_swaps_its_preview_and_source(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let path = "/w/PLAN.md";
+    let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
+    let text = slopty_proto::file::FileRead::Text {
+        text: "# Plan\n\n- [ ] ship".to_owned(),
+        size: 19,
+        modified_ms: WallMs::from_millis(1_000),
+        final_newline: true,
+        editorconfig: Vec::new(),
+    };
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.file_read(key, path, &text, cx);
+        v.focus_tile(tile, cx);
+    });
+    cx.run_until_parked();
+    let toggle = selector("preview", tile.item);
+    let said = |cx: &mut VisualTestContext, label: &str| {
+        tree(cx).iter().any(|n| n.role == "Button" && n.label.as_deref() == Some(label))
+    };
+    assert!(said(cx, crate::file::SHOW_SOURCE), "{:#?}", tree(cx));
+    assert!(cx.debug_bounds(selector("file-preview", tile.item)).is_some(), "the preview");
+    let at = bounds(cx, toggle).center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(said(cx, crate::file::SHOW_PREVIEW));
+    assert!(cx.debug_bounds(selector("file-preview", tile.item)).is_none(), "the source");
 }
 
 /// A shell whose last command failed leaves the failure to the grid while the grid shows it,

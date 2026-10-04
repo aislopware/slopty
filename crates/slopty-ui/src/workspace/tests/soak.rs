@@ -90,7 +90,7 @@ fn items(
     held: &Held,
 ) {
     let key = fake.key;
-    let path = format!("/w/notes-{}.md", version.get());
+    let path = format!("/w/notes-{}.txt", version.get());
     let tile = arrives(view, cx, fake, ItemKind::File { path: path.clone() }, next(version));
     let text = FileRead::Text {
         text: "# Notes".to_owned(),

@@ -6564,3 +6564,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   effort, `/` and `@` lists stay as they are: they are pickers bound to the field, which keeps
   the keyboard while they filter, so a panel that takes the keyboard is the wrong shape for them.
   The status bar's popovers show facts and hold no rows to choose, so they are not menus.
+- ✅ **A Markdown file opens on its preview** (2026-10-05). File tiles showed Markdown only as
+  source, while notes drew it rendered (readiness gap #16). A `.md`, `.markdown`, `.mdown` or
+  `.mkd` tile now opens on its preview once its text is in, drawn as the note was drawn: prose
+  through `crate::markdown::style`, task lines as boxes that tick, and fenced blocks with Copy, and
+  Run while there is a shell. The rows are segments in a gpui `list`, so a long file lays out
+  only what is in view. ⌘⇧V (Zed's and VS Code's key), the header's toggle ("Show source" /
+  "Show preview", sitting where an agent's face toggle does) and the palette swap the preview
+  and the source. The preview draws the editor's text, so an edit not yet saved shows in it. A
+  tile opened to be edited opens on the source: a file not on disk yet, an empty one, one opened
+  at a line, one a program waits on, or one holding an edit kept from before a quit. ⌘F swaps to
+  the source, where the hits are marked. A tick in the preview changes its line in the editor.
+  On a file with nothing else unsaved it saves at once, since the tick is the whole edit. Under
+  an edit it waits for ⌘S with the rest. The header reads which face shows from the workspace's
+  file facts and never from the view. Reading the view would rebuild the strip at each caret
+  blink, which `a_file_tiles_caret_blinks_without_building_the_strip` caught. This is the base
+  the notes merge into.

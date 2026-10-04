@@ -430,7 +430,7 @@ fn a_drag_held_at_the_edge_scrolls_one_frame_at_a_time(cx: &mut TestAppContext) 
 fn a_file_tiles_caret_blinks_without_building_the_strip(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let path = "/w/notes.md";
+    let path = "/w/notes.txt";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
     let text = slopty_proto::file::FileRead::Text {
         text: "# Notes".to_owned(),

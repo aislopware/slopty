@@ -174,7 +174,7 @@ fn a_shell_left_for_a_file_is_drawn_without_the_keyboard(cx: &mut TestAppContext
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
     let shell = opens_in(&view, cx, &studio, session, studio.me, 1, Some("/w"));
-    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.md".to_owned() }, 2);
+    let file = arrives(&view, cx, &studio, ItemKind::File { path: "/w/a.txt".to_owned() }, 2);
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
     cx.run_until_parked();
     assert!(terminal_focused(&view, cx, session));
@@ -417,7 +417,7 @@ fn a_file_tile_is_titled_by_its_name_and_placed_by_its_directory() {
 fn a_file_tile_is_edited_and_saved_through_its_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
-    let path = "/w/notes.md";
+    let path = "/w/notes.txt";
     let tile = arrives(&view, cx, &studio, ItemKind::File { path: path.to_owned() }, 1);
     assert!(
         studio.drain().iter().any(|m| matches!(m, ClientMsg::ReadFile { path: p } if p == path)),

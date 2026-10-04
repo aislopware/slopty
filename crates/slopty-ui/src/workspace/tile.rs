@@ -1153,9 +1153,10 @@ impl WorkspaceView {
             agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
         let silenced = self.silenced(tile, item, chrome, cx);
-        let face = agent
-            .map(|(session, _)| self.face_toggles(tile, session, chrome, cx))
-            .unwrap_or_default();
+        let face = match agent {
+            Some((session, _)) => self.face_toggles(tile, session, chrome, cx),
+            None => self.preview_toggle(tile, chrome, cx).into_iter().collect(),
+        };
         // The kind's own actions stay out of sight until the tile is hovered or focused: a wall
         // of tiles reads as titles, not buttons. Touch has no hover, so the focused tile shows
         // them.
@@ -2012,6 +2013,35 @@ impl WorkspaceView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| {
                     this.focus_tile(tile, cx);
                     this.show_face(session, !face, cx);
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// The button that turns a Markdown file's tile between its preview and its source, as ⌘⇧V
+    /// does; `None` for any other tile, or one with no text to show yet.
+    fn preview_toggle(
+        &self,
+        tile: TileRef,
+        chrome: Chrome,
+        cx: &Draw<'_, Self>,
+    ) -> Option<gpui::AnyElement> {
+        // From the facts, not the view: reading the view would build the strip again at each
+        // of its caret's blinks.
+        let previewing = self.file_facts(tile.item).preview?;
+        let (icon, label) = if previewing {
+            (IconName::Pencil, crate::file::SHOW_SOURCE)
+        } else {
+            (IconName::Eye, crate::file::SHOW_PREVIEW)
+        };
+        let id = format!("preview-{}", tile.item.as_uuid());
+        Some(
+            kit::icon_button_at(&self.theme, id, icon, label, chrome.k)
+                .on_click(cx.listener(move |this, _ev, window, cx| {
+                    this.focus_tile(tile, cx);
+                    if let Some(view) = this.files.get(&tile.item).cloned() {
+                        view.update(cx, |v, cx| v.toggle_preview(window, cx));
+                    }
                 }))
                 .into_any_element(),
         )

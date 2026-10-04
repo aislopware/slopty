@@ -25,6 +25,7 @@ pub mod edit;
 mod editing;
 pub mod find;
 mod preview;
+mod reading;
 mod search;
 mod symbols;
 
@@ -46,6 +47,7 @@ use gpui_kit::component::input::{
     RangeDecorationStyle, Rope, RopeExt as _,
 };
 pub use preview::{NextScreen, PAGES_CTX, PreviousScreen, ScrollDown, ScrollUp};
+pub use reading::{SHOW_PREVIEW, SHOW_SOURCE, is_markdown};
 pub use search::SEARCH_CTX;
 use slopty_client::layout::WorkerKey;
 use slopty_client::unsaved::Unsaved;
@@ -97,13 +99,15 @@ mod actions {
             NextSymbol,
             /// The previous symbol in the list.
             PreviousSymbol,
+            /// Show a Markdown file's preview in place of its source, or back.
+            TogglePreview,
         ]
     );
 }
 pub use actions::{
     CloseGoToLine, CloseSymbols, DuplicateLine, FinishEdit, GoToLine, GoToSymbol, JumpToBracket,
-    MoveLineDown, MoveLineUp, NextSymbol, PreviousSymbol, SaveFile, ToggleComment, ToggleReplace,
-    ToggleSoftWrap,
+    MoveLineDown, MoveLineUp, NextSymbol, PreviousSymbol, SaveFile, ToggleComment, TogglePreview,
+    ToggleReplace, ToggleSoftWrap,
 };
 
 /// The key context of a file tile; ⌘S is bound in it.
@@ -172,6 +176,8 @@ pub enum FileViewEvent {
     /// A file too large to edit here: run this shell line in a terminal on the file's worker
     /// ([`terminal_command`] makes the program to run it).
     Run(String),
+    /// A fenced block's "Run" in a Markdown preview: type its code into the workspace's shell.
+    RunBlock(String),
     /// The person is done with the file a program waits on (handoff `id`): saved and answered
     /// by the worker for [`EditOutcome::Done`], dropped for [`EditOutcome::Cancelled`].
     Edited {
@@ -422,6 +428,10 @@ pub struct FileView {
     syntax: Option<Syntax>,
     /// The picture or PDF the file is, while it is one.
     preview: Option<preview::Preview>,
+    /// A Markdown file's preview; none for any other file.
+    reading: Option<reading::Reading>,
+    /// The workspace has a shell for a fenced block's "Run".
+    can_run: bool,
     /// How the file indents, read from its text at each read; Tab follows it.
     indent: Indent,
     /// Long lines wrap at the tile's width (on for prose).
@@ -512,6 +522,8 @@ impl FileView {
             edit: 0,
             syntax: None,
             preview: None,
+            reading: is_markdown(path).then(reading::Reading::new),
+            can_run: false,
             indent: Indent::DEFAULT,
             wrap: false,
             wrapped: false,
@@ -680,7 +692,7 @@ impl FileView {
 
     /// Give the tile the keyboard: the editor when it is drawn, else the tile itself.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shows_text() {
+        if self.shows_text() && !self.previewing() {
             self.editor.update(cx, |e, cx| e.focus(window, cx));
         } else {
             window.focus(&self.focus_handle, cx);
@@ -697,9 +709,10 @@ impl FileView {
     /// held it, and back to the tile when the text goes (the file turned binary or went away).
     fn settle_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         let editor = gpui::Focusable::focus_handle(self.editor.read(cx), cx);
-        if self.shows_text() && self.focus_handle.is_focused(window) {
+        let editing = self.shows_text() && !self.previewing();
+        if editing && self.focus_handle.is_focused(window) {
             self.editor.update(cx, |e, cx| e.focus(window, cx));
-        } else if !self.shows_text() && editor.is_focused(window) {
+        } else if !editing && editor.is_focused(window) {
             window.focus(&self.focus_handle, cx);
         }
     }
@@ -710,6 +723,10 @@ impl FileView {
         self.focus = line.and_then(|l| usize::try_from(l).ok()).map(|l| l.saturating_sub(1));
         if self.focus.is_some() {
             self.pending_line = self.focus;
+            // A line is a place in the source.
+            if let Some(reading) = self.reading.as_mut() {
+                reading.keep_source();
+            }
         }
         cx.notify();
     }
@@ -763,6 +780,10 @@ impl FileView {
             && let Some(kept) = self.restoring.take()
         {
             self.restore_over(&read, &kept, cx);
+            // An edit kept unsaved is gone on with in the source.
+            if let Some(reading) = self.reading.as_mut() {
+                reading.keep_source();
+            }
             self.read = Some(read);
             cx.notify();
             return;
@@ -821,6 +842,7 @@ impl FileView {
             }
         }
         self.read = Some(read);
+        self.settle_preview(cx);
         cx.notify();
     }
 
@@ -1636,6 +1658,7 @@ impl Render for FileView {
                 self.notice(IconName::FileText, CANNOT_READ, Some(error.clone()), None)
             }
             Some(FileRead::Media { .. }) if self.base.is_none() => self.render_preview(cx),
+            Some(_) if self.previewing() => self.render_reading(cx),
             Some(_) => div()
                 .key_context(TEXT_CTX)
                 .flex_1()
@@ -1671,7 +1694,12 @@ impl Render for FileView {
                 }))
             })
             .on_action(cx.listener(|this, _: &Find, window, cx| this.find(window, cx)))
-            .when(self.shows_text(), |el| Self::editing_keys(el, cx))
+            .when(self.has_preview(), |el| {
+                el.on_action(cx.listener(|this, _: &TogglePreview, window, cx| {
+                    this.toggle_preview(window, cx);
+                }))
+            })
+            .when(self.shows_text() && !self.previewing(), |el| Self::editing_keys(el, cx))
             .when(self.shows_pages(), |el| Self::page_keys(el, cx))
             .relative()
             .size_full()

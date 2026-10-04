@@ -54,6 +54,10 @@ pub(super) struct FileSearch {
 impl FileView {
     /// ⌘F: open the find bar, or put the caret back in it with the text selected.
     pub fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // The hits are marked in the source.
+        if self.previewing() {
+            self.show_preview(false, window, cx);
+        }
         // One field over the corner at a time: the find bar takes the place of the others.
         self.goto = None;
         self.symbols = None;
