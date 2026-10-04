@@ -5,8 +5,8 @@
 //! the app, as `e2e app` builds it. Worker B is a second ptyd + worker under a root of its own
 //! with a private HOME (`harness::SecondWorker`), so the real `~/.claude` is never touched and
 //! `slopty hook install` is never run; the app reaches it only through a relay that adds the
-//! mesh's round trip, jitter and loss (`harness::TAILNET`). The app adds both and drives, in one
-//! serial test:
+//! mesh's round trip and jitter (`harness::TAILNET`) at 3 % loss. The app adds both and drives, in
+//! one serial test:
 //!
 //! 1. the dump shows two connected workers, and both workers' tiles in the one layout;
 //! 2. a shell on worker B round-trips a command over the shaped link;
@@ -33,6 +33,11 @@ mod tests {
     /// shaped link. Noticing a killed worker (the app's 3 s silence bar), giving its link up (the
     /// 5 s drop bar) and finding it restarted all fit well inside this.
     const STEP: Duration = Duration::from_secs(30);
+
+    /// Worker B's link: the tailnet's delay and jitter at 3 % loss, so the run's few hundred
+    /// packets lose some both ways and the control traffic is seen to survive it. The tailnet's
+    /// own 1 % (`TAILNET`) may lose none in a run this short.
+    const LINK: slopty_shape::Link = slopty_shape::Link { loss: 0.03, ..TAILNET };
 
     /// How long worker B stays away in the last scenario after the app gives its link up: long
     /// enough that the first redials have failed and the backoff is what finds it.
@@ -122,7 +127,7 @@ mod tests {
         // Worker B behind the shaped link, registered with A's server: the app finds it in
         // the directory, at the relay's address.
         let launch_b = Instant::now();
-        let mut worker_b = SecondWorker::launch(B, TAILNET, &stack.server).await.unwrap();
+        let mut worker_b = SecondWorker::launch(B, LINK, &stack.server).await.unwrap();
         println!(
             "MEASURE workers: brought worker B up in {:.1} s",
             launch_b.elapsed().as_secs_f64()

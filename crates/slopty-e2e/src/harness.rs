@@ -1729,15 +1729,17 @@ impl Worker {
 ///
 /// 4 ms each way plus up to 2 ms of jitter is a round trip of 8 to 12 ms. That run's ICMP pings
 /// lost 13 to 21 % each way, but the worker's QUIC counted no loss in 15 of its 16 runs, so the
-/// ICMP figure is about how ICMP is treated, not what the UDP path drops. 3 % independent loss
-/// still puts a retransmission (and the keystroke's datagram copy) into every step of a test
-/// that sends a few hundred packets, while a lost handshake or close costs a step one timeout,
-/// not the run. A link that loses a fifth of its packets is the worker e2e's own test
-/// (`typing_through_a_lossy_link_lands_once_in_order`).
+/// ICMP figure is about how ICMP is treated, not what the UDP path drops. 1 % independent loss
+/// still puts a retransmission (and the keystroke's datagram copy) into a test step that sends a
+/// few hundred packets, and stays under the 2 % loss threshold of BBR version 3, which a path
+/// that loses nothing never crosses: at 3 % every bulk transfer slid as no real tailnet makes it
+/// (`docs/MEASUREMENTS.md`, "a connection's second bulk stream"). A lost handshake or close
+/// costs a step one timeout, not the run. A link that loses a fifth of its packets is the worker
+/// e2e's own test (`typing_through_a_lossy_link_lands_once_in_order`).
 pub const TAILNET: slopty_shape::Link = slopty_shape::Link {
     delay: Duration::from_millis(4),
     jitter: Duration::from_millis(2),
-    loss: 0.03,
+    loss: 0.01,
     ..slopty_shape::Link::CLEAR
 };
 
