@@ -581,3 +581,36 @@ fn a_held_message_says_when_and_goes_now_on_a_press(cx: &mut TestAppContext) {
     cx.simulate_click(at, Modifiers::none());
     assert_eq!(intents(&sent), [Intent::Promote { pending: held.intent }]);
 }
+
+/// After the person stops a turn, what waited in the queue is held for them: one line over the
+/// queue says so, each held message can be sent now, and the line goes once the worker lets
+/// them wait for their turn again.
+#[gpui::test]
+fn a_stop_pauses_the_queue_until_the_next_message(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = state();
+    let thread = state.meta.id;
+    let mut first = waiting("then the docs");
+    assert!(first.hold_for_stop());
+    state.pending = vec![first.clone()];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-queue-paused").is_some(), "the queue says it paused");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let said = format!("then the docs, {}", Pending::STOPPED);
+    assert!(!tree.iter().any(|n| n.label.as_deref() == Some(&said)), "said once, not per row");
+
+    let send_now = format!("promote-{}", first.intent).leak();
+    let at = cx.debug_bounds(send_now).expect("a held message can go now").center();
+    cx.simulate_click(at, Modifiers::none());
+    assert_eq!(intents(&sent), [Intent::Promote { pending: first.intent }]);
+
+    first.state = PendingState::Waiting;
+    state.pending = vec![first];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-queue-paused").is_none(), "let go");
+}

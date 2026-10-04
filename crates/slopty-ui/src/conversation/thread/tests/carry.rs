@@ -80,7 +80,7 @@ fn branching_to_another_agent_carries_the_thread_over(cx: &mut TestAppContext) {
     let into = Rc::clone(&started);
     cx.update(|cx| {
         cx.subscribe(&hub, move |_hub, event: &HubEvent, _cx| {
-            if let HubEvent::Started { from, thread } = event {
+            if let HubEvent::Started { from, thread, .. } = event {
                 into.borrow_mut().push((*from, *thread));
             }
         })
@@ -217,4 +217,29 @@ fn branching_from_a_message_keeps_or_puts_back_the_files(cx: &mut TestAppContext
     click(cx, "branch-go");
     assert_eq!(intents(&sent), [Intent::Rewind { turn: TurnId(1), files: true }]);
     assert!(cx.debug_bounds("branch-panel").is_none(), "the choice is made");
+
+    // Another thread edits the same folder: the worker turns the files down, and going back
+    // without them is one press away.
+    let id = sent
+        .borrow()
+        .iter()
+        .find_map(|m| match m {
+            slopty_proto::ClientMsg::Thread(
+                slopty_proto::thread::wire::ThreadRequest::Intent { id, .. },
+            ) => Some(*id),
+            _ => None,
+        })
+        .expect("sent");
+    let reason = "\u{201c}Docs\u{201d} is working in the same folder".to_owned();
+    let done = IntentDone { id, outcome: Outcome::Refused { reason } };
+    hub.update(cx, |hub, cx| hub.done(&done, cx));
+    cx.run_until_parked();
+    click(cx, Box::leak(format!("refused-no-files-{id}").into_boxed_str()));
+    assert_eq!(
+        intents(&sent).last(),
+        Some(&Intent::Rewind { turn: TurnId(1), files: false }),
+        "the same turn, the files left as they are"
+    );
+    let refused = format!("refused-{id}");
+    assert!(cx.debug_bounds(Box::leak(refused.into_boxed_str())).is_none(), "the refusal goes");
 }

@@ -31,6 +31,8 @@ pub struct Queued {
     pub delivery: Delivery,
     /// Where it is, in words, when something holds it.
     pub held: Option<String>,
+    /// It waits on the person's stop: their next message, or sending it now, lets it go.
+    pub stopped: bool,
     /// The worker has it; until then it is on its way from here.
     pub on_worker: bool,
     /// A withdrawal of it is on its way.
@@ -133,6 +135,7 @@ impl<'a> Activity<'a> {
                         PendingState::Held { reason } => Some(reason.clone()),
                         PendingState::Waiting | PendingState::Sending => None,
                     },
+                    stopped: p.stopped(),
                     on_worker: true,
                     withdrawing: withdrawing.contains(&p.intent),
                     going: matches!(p.state, PendingState::Sending),
@@ -171,6 +174,7 @@ impl<'a> Activity<'a> {
                     text: text.clone(),
                     delivery: *delivery,
                     held: None,
+                    stopped: false,
                     on_worker: false,
                     withdrawing: false,
                     going: false,
