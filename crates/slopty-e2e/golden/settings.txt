@@ -46,7 +46,14 @@ RadioGroup │ Theme │ Light
 RadioButton │ System
 RadioButton │ Light
 RadioButton │ Dark
+RadioGroup │ Companions │ Lively
+RadioButton │ Off
+RadioButton │ Quiet
+RadioButton │ Lively
 SpinButton │ Text size │ 13 pt
+Button │ Decrease
+Button │ Increase
+SpinButton │ Reading size │ 15 pt
 Button │ Decrease
 Button │ Increase
 Heading │ Terminal colours

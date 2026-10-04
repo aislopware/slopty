@@ -12,9 +12,9 @@ Button │ Show terminal
 Button │ Close tile
 Group │ Thread
 Article │ You: Do these steps in order with the named tools, then reply "done". 1) Read notes.txt. 2) Edit notes.txt: change beta to BETA. 3) Write notes.txt again with this exact content, four lines: alpha, BETA, gamma, delta. 4) Read notes.txt lines 2 to 3 only (offset 2, limit 2).
+Button │ Branch from here
 Button │ Copy message
 Button │ Worked 23 s: Edited notes.txt · Read 3 files
-Button │ Fork from here
 Article │ done
 Button │ Copy message
 Group │ Activity
@@ -31,9 +31,9 @@ MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Opus 5.5
 Label │ Mode, Default
+Button │ Commit
 Button │ Review the changes
 Button │ Context 34% of 200k
-Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker

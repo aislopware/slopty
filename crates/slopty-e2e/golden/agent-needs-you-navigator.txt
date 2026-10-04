@@ -2,8 +2,12 @@ Window │ Slopty
 Group │ Workspace
 Navigation │ Navigator
 TextInput │ Filter
+Heading │ Needs you
+Button │ Claude Code, Wants to run a command, Needs you
+Heading │ Machines
 Button │ e2e-worker
 Button │ New shell on e2e-worker
+Button │ Machine actions, e2e-worker
 Button │ Claude Code, Needs approval
 Image │ Needs you
 Button │ Close tile
@@ -31,7 +35,7 @@ Button │ Answer in the terminal
 MultilineTextInput │ Message
 Button │ Attach files
 Button │ Model, Claude
-Button │ Send later
+Button │ Commit
 Button │ Send
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
@@ -43,7 +47,9 @@ Status │ Nothing here yet
 MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Claude
-Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker
+Group │ Agents
+Button │ Claude Code · Needs approval: Bash
+Button │ Claude Code · Idle

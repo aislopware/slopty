@@ -4,6 +4,7 @@ Navigation │ Navigator
 TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
+Button │ Machine actions, e2e-worker
 Button │ The header clips its chips on a narrow window,…
 Button │ Close tile
 Button │ Navigator
@@ -35,8 +36,10 @@ MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Opus 5.5
 Button │ 1 finished
+Button │ Commit
 Button │ Context 34% of 200k
-Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker
+Group │ Agents
+Button │ Claude Code · Idle

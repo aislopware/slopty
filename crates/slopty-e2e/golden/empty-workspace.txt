@@ -6,6 +6,7 @@ Button │ New workspace
 Button │ New
 Button │ Needs you
 Button │ More
+Button │ Dot
 Button │ New agent
 Button │ New terminal
 Button │ Add a window or display
