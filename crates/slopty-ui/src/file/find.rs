@@ -1,65 +1,14 @@
 //! A file tile's find and replace over its text, as plain functions.
 //!
-//! The matches of a query (text or a regular expression, whole words, smart case or exact),
-//! and what a replace makes of one match or all of them, `$1` and `${name}` expanded for a
-//! regular expression.
+//! The matches of a query ([`crate::kit::find::Query`]), and what a replace makes of one match
+//! or all of them, `$1` and `${name}` expanded for a regular expression.
 
 use std::ops::Range;
 
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 
 /// Matches a find tints and steps through at most; past it the count says so with a `+`.
 pub const MATCHES_MAX: usize = 10_000;
-
-/// The compiled program a pattern may grow to: a pathological one says it is too large instead
-/// of taking the UI thread's memory (the crate's default is 10 MiB).
-const PROGRAM_BYTES: usize = 4 << 20;
-
-/// What the find bar asks for.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Query {
-    /// What was typed.
-    pub needle: String,
-    /// Case as typed. Off is smart case, the terminal's rule: a needle with no capital matches
-    /// in any case, one with a capital as typed.
-    pub match_case: bool,
-    /// Only where the match starts and ends at a word's edge.
-    pub whole_word: bool,
-    /// The needle is a regular expression (Rust's `regex` syntax).
-    pub regex: bool,
-}
-
-impl Query {
-    /// The matcher, `None` for an empty needle, or why the pattern does not compile.
-    ///
-    /// # Errors
-    /// The regular expression's own message, for a pattern it refuses.
-    pub fn matcher(&self) -> Result<Option<Regex>, String> {
-        if self.needle.is_empty() {
-            return Ok(None);
-        }
-        let pattern = if self.regex { self.needle.clone() } else { regex::escape(&self.needle) };
-        let pattern = if self.whole_word { format!(r"\b(?:{pattern})\b") } else { pattern };
-        let exact = self.match_case || self.needle.chars().any(char::is_uppercase);
-        RegexBuilder::new(&pattern)
-            .case_insensitive(!exact)
-            .multi_line(true)
-            .size_limit(PROGRAM_BYTES)
-            .build()
-            .map(Some)
-            .map_err(|e| first_line(&e.to_string()))
-    }
-}
-
-/// A regex error's own first line, without the pattern echoed above it.
-fn first_line(error: &str) -> String {
-    error
-        .lines()
-        .rev()
-        .find(|l| l.starts_with("error:"))
-        .unwrap_or("not a valid pattern")
-        .to_owned()
-}
 
 /// The byte ranges `matcher` finds in `text`, in order, at most [`MATCHES_MAX`]; an empty
 /// match is kept (a `^` marks every line start, for a replace to put something there).
@@ -138,6 +87,7 @@ pub fn rows(text: &str, matches: &[Range<usize>]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kit::find::Query;
 
     fn query(needle: &str) -> Query {
         Query { needle: needle.to_owned(), ..Query::default() }

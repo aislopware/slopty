@@ -22,15 +22,15 @@ use gpui_kit::component::input::{
 use regex::Regex;
 use slopty_theme::alpha;
 
-use super::find::{self, MATCHES_MAX, Query};
+use super::find::{self, MATCHES_MAX};
 use super::{FileView, FileViewEvent};
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::IconName;
-use crate::kit::FIND_PLACEHOLDER;
-use crate::search::{
-    MATCH_CASE, REGEX, REPLACE_ALL, REPLACE_LINE, REPLACE_PLACEHOLDER, ToggleMatchCase,
-    ToggleRegex, ToggleWholeWord, WHOLE_WORD,
+use crate::kit::find::{
+    MATCH_CASE, PLACEHOLDER as FIND_PLACEHOLDER, Query, REGEX, REPLACE as REPLACE_LINE,
+    REPLACE_ALL, REPLACE_PLACEHOLDER, WHOLE_WORD,
 };
+use crate::search::{ToggleMatchCase, ToggleRegex, ToggleWholeWord};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 
 /// The key context of the find bar; its keys are bound in it.

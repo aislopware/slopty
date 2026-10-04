@@ -43,7 +43,8 @@ use slopty_theme::Theme;
 
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
-use crate::kit::{self, ButtonKind, FIND_PLACEHOLDER};
+use crate::kit::find::PLACEHOLDER as FIND_PLACEHOLDER;
+use crate::kit::{self, ButtonKind};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 use crate::workspace::actions::{PageCut, PageRedo, PageSelectAll, PageUndo, UndoClose};
 

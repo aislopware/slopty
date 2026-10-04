@@ -23,16 +23,14 @@ use crate::colors::{hsla, hsla_alpha};
 
 mod change;
 mod disclosure;
+pub mod find;
 mod fit;
 mod spark;
 pub use change::{Gliding, Rolling, on_change};
 pub use disclosure::Disclosure;
+pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
 pub use spark::Spark;
-
-/// What a find bar says before anything is typed. The terminal and the file tile share it: the
-/// same bar, the same word.
-pub const FIND_PLACEHOLDER: &str = "Find";
 
 /// Figures of one width: OpenType `tnum`, which the system UI font and the terminal face both
 /// carry. Built once; each use clones an `Arc`.
@@ -1616,7 +1614,14 @@ mod tests {
     #[test]
     fn chrome_text_is_sentence_case() {
         let chrome = [
-            FIND_PLACEHOLDER,
+            find::PLACEHOLDER,
+            find::REPLACE_PLACEHOLDER,
+            find::MATCH_CASE,
+            find::WHOLE_WORD,
+            find::REGEX,
+            find::REPLACE_ALL,
+            find::NO_MATCHES,
+            find::BAD_PATTERN,
             crate::workspace::INSTALL_HOOKS,
             crate::workspace::TAKE_OVER,
             crate::workspace::HOOKS,
@@ -2342,7 +2347,7 @@ mod tests {
         const SHEETS: [(&str, &str); 6] = [
             ("slopty-ui/src/kit.rs", "pub fn dialog("),
             ("slopty-ui/src/conversation/thread/view/composer.rs", "fn shell<"),
-            ("slopty-ui/src/conversation/thread/view/finding.rs", ".id(\"thread-find\")"),
+            ("slopty-ui/src/kit/find.rs", "super::elevate(div(), &theme)"),
             ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
             ("slopty-ui/src/workspace/titlebar.rs", "fn menu_panel("),
             ("slopty-app/src/lib.rs", ".id(\"add-worker\")"),

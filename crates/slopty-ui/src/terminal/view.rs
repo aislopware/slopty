@@ -34,7 +34,7 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
-use crate::kit::FIND_PLACEHOLDER;
+use crate::kit::find::PLACEHOLDER as FIND_PLACEHOLDER;
 use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
 use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
