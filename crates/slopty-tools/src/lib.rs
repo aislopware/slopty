@@ -59,8 +59,8 @@ pub trait Dispatch: Send + Sync {
 /// Where the caller runs, as a Slopty session's environment says: its terminal, and for an
 /// agent Slopty started for a task, the project and the task.
 ///
-/// An agent's `task_create` then makes a subtask of its own task in its own project, and its
-/// `task_update` moves its own task, with nothing to name.
+/// An agent's `task_start` then starts a task in its own project, and its `task_update` moves its
+/// own task, with nothing to name.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Scope {
     /// The terminal it runs in (`SLOPTY_SESSION`).

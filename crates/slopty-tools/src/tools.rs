@@ -45,17 +45,13 @@ read_output from the line you started at. Prefer wait_for (one terminal) and eve
 fleet: agents needing you, terminals opening and closing, workers coming and going) to polling \
 read_screen or read_output in a loop. To follow another coding agent's work, read_thread; its \
 requests are the person's to answer, never an agent's, so never type its menu's digits. \
-For a goal bigger than one agent, make a project (project_create) and split it into tasks \
-(task_create): each owns the paths it writes (or only reads), may depend on others and nest to \
-any depth the project allows, and says where it may run as CEL rules over the workers' facts \
-(list_workers shows them; placement_suggest ranks the workers with reasons) or pins a worker \
-outright; project_needs says once what each kind of the project's work needs of its machines. \
-Start what runs for a task, Claude Code, Codex or any command, with task_spawn; to compare \
-agents, models or machines on one task, task_attempts tries it several ways at once and \
-task_pick keeps the attempt that lands. Follow the tree with project_status (since and \
-timeout_ms wait for news; bounds and live say how much room there is), or wait for tasks' \
-news with task_wait; task_tell says something to a task's agent under you. Agents started for a \
-task have these tools too, their project and task the defaults.";
+For a goal bigger than one agent, make a project (project_create) and start its tasks with \
+task_start: each task is one agent, Claude Code, Codex or any command, working from its brief \
+in its own worktree on the worker it pins or one its placement allows. Tasks sit side by side \
+under the project and do not nest. Follow the project with project_status (since and \
+timeout_ms wait for news), or wait for tasks' news with task_wait; task_tell says something \
+to a task's agent, and task_update changes a task. A task's agent reports with task_report. \
+Agents started for a task have these tools too, their project and task the defaults.";
 
 /// How often a `wait_for` with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);

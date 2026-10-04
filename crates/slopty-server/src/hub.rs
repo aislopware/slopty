@@ -855,7 +855,7 @@ impl Hub {
             },
             Verb::CloneRepo { .. } | Verb::BundleBranch { .. } | Verb::FetchBundle { .. } => error(
                 ErrorCode::Forbidden,
-                "the server clones and carries branches for tasks itself; task_spawn and \
+                "the server clones and carries branches for tasks itself; task_start and \
                      task_report do it",
             ),
             Verb::TaskReview { project, task, verdict } => {
@@ -901,7 +901,7 @@ impl Hub {
             ),
             Verb::StartThread { .. } => error(
                 ErrorCode::Forbidden,
-                "the server starts a task's thread itself; task_spawn with an agent asks for it",
+                "the server starts a task's thread itself; task_start with an agent asks for it",
             ),
             verb @ (Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
