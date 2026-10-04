@@ -118,57 +118,36 @@ const fn picture_extension(format: gpui::ImageFormat) -> Option<&'static str> {
     }
 }
 
-/// The composer an upload's chip is in, which hears how it goes: a conversation face's or a
-/// thread view's.
+/// The thread view an upload's chip is in, which hears how it goes.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Target {
-    /// The conversation face's.
-    Face(gpui::WeakEntity<super::ConversationView>),
-    /// The thread view's.
-    Thread(gpui::WeakEntity<super::thread::ThreadView>),
-}
+pub struct Target(pub gpui::WeakEntity<super::thread::ThreadView>);
 
 impl Target {
     /// Show the chip of `what`, which the workspace sends up itself; which chip it is, unless
     /// the composer is gone.
     pub fn start(&self, what: &Attach, cx: &mut gpui::App) -> Option<u64> {
-        match self {
-            Self::Face(face) => face.update(cx, |v, _cx| v.start_attachment(what)).ok(),
-            Self::Thread(view) => view.update(cx, |v, _cx| v.start_attachment(what)).ok(),
-        }
+        self.0.update(cx, |v, _cx| v.start_attachment(what)).ok()
     }
 
     /// Put `text` at the end of the draft and give the composer the keyboard, unless the
     /// composer is gone.
     pub fn quote(&self, text: &str, window: &mut gpui::Window, cx: &mut gpui::App) {
-        let _gone = match self {
-            Self::Face(face) => face.update(cx, |v, cx| v.quote_into_draft(text, window, cx)),
-            Self::Thread(view) => view.update(cx, |v, cx| v.quote_into_draft(text, window, cx)),
-        };
+        let _gone = self.0.update(cx, |v, cx| v.quote_into_draft(text, window, cx));
     }
 
     /// Chip `id` is `fraction` of the way up.
     pub fn progress(&self, id: u64, fraction: f32, cx: &mut gpui::App) {
-        let _gone = match self {
-            Self::Face(face) => face.update(cx, |v, cx| v.attachment_progress(id, fraction, cx)),
-            Self::Thread(view) => view.update(cx, |v, cx| v.attachment_progress(id, fraction, cx)),
-        };
+        let _gone = self.0.update(cx, |v, cx| v.attachment_progress(id, fraction, cx));
     }
 
     /// Chip `id` landed at `paths` on the worker.
     pub fn landed(&self, id: u64, paths: &[String], cx: &mut gpui::App) {
-        let _gone = match self {
-            Self::Face(face) => face.update(cx, |v, cx| v.attachment_landed(id, paths, cx)),
-            Self::Thread(view) => view.update(cx, |v, cx| v.attachment_landed(id, paths, cx)),
-        };
+        let _gone = self.0.update(cx, |v, cx| v.attachment_landed(id, paths, cx));
     }
 
     /// Chip `id`'s upload is over, however it ended.
     pub fn ended(&self, id: u64, cx: &mut gpui::App) {
-        let _gone = match self {
-            Self::Face(face) => face.update(cx, |v, cx| v.attachment_ended(id, cx)),
-            Self::Thread(view) => view.update(cx, |v, cx| v.attachment_ended(id, cx)),
-        };
+        let _gone = self.0.update(cx, |v, cx| v.attachment_ended(id, cx));
     }
 }
 

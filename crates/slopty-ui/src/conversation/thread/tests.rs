@@ -412,6 +412,7 @@ fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
     println!("every step opened or folded by ctrl-o: {:?}", median(every));
 }
 
+mod aside;
 mod carry;
 mod commit;
 mod composing;

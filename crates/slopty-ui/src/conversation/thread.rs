@@ -11,9 +11,6 @@
 //! * [`activity`] — what the bar over the composer stacks.
 //! * [`questions`] — an agent's questions as a questionnaire, and the answer that goes back.
 //! * [`view`] — the thread view itself.
-//!
-//! It stands beside the conversation face ([`super::ConversationView`]) until the old path
-//! goes.
 
 pub mod activity;
 pub mod commit;

@@ -435,7 +435,10 @@ fn background_work_opens_from_a_chip(cx: &mut TestAppContext) {
     let chip = cx.debug_bounds("thread-tasks").expect("the chip says one runs").center();
     cx.simulate_click(chip, Modifiers::none());
     assert!(cx.debug_bounds("task-b1").is_some(), "the panel lists it");
-    assert!(labelled(cx, "In the background, 1 running"), "under its own head");
+    assert!(labelled(cx, "In the background"), "under its own head");
+    let count = cx.update(|window, _cx| crate::a11y::tree(window));
+    let said = count.iter().filter(|n| n.label.as_deref() == Some("1 running")).count();
+    assert_eq!(said, 1, "the count once, on the chip that opened it");
     assert!(labelled(cx, "cargo build: Running"), "what it printed stays off its line");
 
     state.tasks = vec![task("b1", BackgroundTask::COMPLETED), task("b2", BackgroundTask::FAILED)];
@@ -806,4 +809,44 @@ fn a_web_search_lists_its_sources(cx: &mut TestAppContext) {
         cx.opened_url().as_deref(),
         Some("https://docs.rs/gpui/latest/gpui/struct.ListState.html")
     );
+}
+
+/// A goal the agent works toward is one line over the field: what it is for, where it stands
+/// and the tokens against its budget, with a bar for the budget; without a budget, no bar, and
+/// none once the agent holds no goal.
+#[gpui::test]
+fn a_goal_is_one_quiet_line_with_its_budget(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.goal = Some(slopty_proto::thread::Goal {
+        objective: "Make the parser fast".to_owned(),
+        state: "budget-limited".to_owned(),
+        tokens_used: 190_000,
+        token_budget: Some(200_000),
+        time_used_s: 720,
+        updated_ms: WallMs::ZERO,
+    });
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let said = "Goal: Make the parser fast, Budget limited, 190k of 200k tokens";
+    assert!(tree.iter().any(|n| n.is("Status", Some(said))), "{tree:#?}");
+    assert!(cx.debug_bounds("thread-goal-bar").is_some(), "the budget's bar");
+
+    if let Some(goal) = state.goal.as_mut() {
+        goal.token_budget = None;
+    }
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-goal").is_some());
+    assert!(cx.debug_bounds("thread-goal-bar").is_none(), "no budget, no bar");
+
+    state.goal = None;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-goal").is_none(), "gone with the goal");
 }

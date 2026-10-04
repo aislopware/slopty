@@ -287,6 +287,9 @@ impl ThreadView {
         paths: &[String],
         cx: &mut Context<Self>,
     ) {
+        if let Some(view) = self.aside.as_ref().and_then(super::aside::Aside::view) {
+            view.update(cx, |v, cx| v.files_found(root, query, paths, cx));
+        }
         let asked = self.composing.asked.as_deref();
         if self.root(cx).as_deref() != Some(root) || asked.is_none_or(|a| !a.starts_with(query)) {
             return;
@@ -632,7 +635,7 @@ impl ThreadView {
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(command.description.clone())),
             )
-            .children(menu::Listed::source_label(command).map(|source| {
+            .children(menu::source_label(command).map(|source| {
                 div()
                     .flex_none()
                     .text_size(self.z(theme.typography.small()))

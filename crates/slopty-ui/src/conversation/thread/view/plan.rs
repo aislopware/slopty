@@ -168,7 +168,7 @@ impl ThreadView {
 
 /// A plan's title (its first heading, else its first line) and the Markdown under it.
 #[must_use]
-pub(crate) fn plan_parts(plan: &str) -> (String, &str) {
+fn plan_parts(plan: &str) -> (String, &str) {
     let trimmed = plan.trim_start();
     let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
     match first.trim().strip_prefix('#') {

@@ -689,7 +689,8 @@ async fn the_thread_shows_the_work_beyond_words() {
     .await
     .unwrap();
     golden(drv, &dir, "thread-work-open").await;
-    scroll_up_until(drv, "the thinking", |d: &Dump| has(d, "Button", "Thought")).await;
+    // "Thought for 4 s", or "Thought for a moment": how long it thought, where it says.
+    scroll_up_until(drv, "the thinking", |d: &Dump| button_starts(d, "Thought")).await;
     // Above the steps: the prompt, with the screenshot pasted on it.
     let prompt = |d: &Dump| {
         labels(d, "Article").iter().any(|l| l.starts_with("You: ")) && has(d, "Button", picture)
