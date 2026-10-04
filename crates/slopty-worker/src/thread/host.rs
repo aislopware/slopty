@@ -14,8 +14,8 @@ use parking_lot::Mutex;
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
-    Action, AgentId, Cap, Cursor, Delivery, Edge, Fork, IntentId, ItemBody, ItemId, Liveness,
-    Pending, PendingState, Phase, Status, ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId,
+    Action, AgentId, Cap, Cursor, Delivery, Edge, Fork, IntentId, ItemBody, ItemId, Pending,
+    PendingState, Phase, ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -156,23 +156,11 @@ struct Own {
     seat: Option<String>,
     /// The seat it was started at, all of it, kept in its directory ([`SEAT_FILE`]).
     seated: Option<Seated>,
-    /// Whether the person put its agent to sleep: an adapter tells only that it ended.
-    sleep: Sleep,
+    /// The thread it is an aside of, while it is one ([`ThreadMeta::ASIDE_FACT`]).
+    aside: Option<ThreadId>,
     /// The messages the worker holds until their moment ([`super::schedule`]), which no
     /// adapter knows: put back in every pending list an adapter tells.
     scheduled: Vec<Pending>,
-}
-
-/// Where the person's sleep of a thread's agent is ([`Host::sleep`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Sleep {
-    /// Not asked for, or woken.
-    #[default]
-    Awake,
-    /// Asked for at this time: the agent's end, when it comes, is its sleep.
-    Falling(WallMs),
-    /// Its agent ended asleep at this time; the agent running again wakes it.
-    Asleep(WallMs),
 }
 
 /// Messages typed whose items are waited for; past it the oldest is given up.
@@ -196,10 +184,7 @@ impl Own {
             .collect();
         let fork = state.meta.forked_from;
         let seat = state.meta.facts.get(slopty_proto::project::SEAT_FACT).cloned();
-        let sleep = match state.status.liveness {
-            Liveness::Asleep { since_ms } => Sleep::Asleep(since_ms),
-            _ => Sleep::Awake,
-        };
+        let aside = state.meta.aside_of();
         // One going as the worker stopped is never sent again.
         let scheduled = state
             .pending
@@ -213,7 +198,7 @@ impl Own {
                 _ => p.clone(),
             })
             .collect();
-        Self { typed: VecDeque::new(), sent, trees, fork, seat, seated: None, sleep, scheduled }
+        Self { typed: VecDeque::new(), sent, trees, fork, seat, seated: None, aside, scheduled }
     }
 
     /// `pending`, an adapter's list, with the messages the worker holds put back after it.
@@ -222,25 +207,17 @@ impl Own {
         pending.extend(self.scheduled.iter().cloned());
     }
 
-    /// `meta` with what the worker knows of it: where it branched, the seat it was started at.
+    /// `meta` with what the worker knows of it: where it branched, the seat it was started at,
+    /// whether it is an aside.
     fn meta(&self, meta: &mut ThreadMeta) {
         self.branched(meta);
         if let Some(seat) = &self.seat {
             meta.facts.insert(slopty_proto::project::SEAT_FACT.to_owned(), seat.clone());
         }
-    }
-
-    /// `status` as the person's sleep makes it: the end of an agent put to sleep is its sleep,
-    /// and an agent that runs again after it is awake.
-    const fn status(&mut self, status: &mut Status) {
-        match (self.sleep, status.liveness) {
-            (Sleep::Falling(since) | Sleep::Asleep(since), Liveness::Exited { .. }) => {
-                status.liveness = Liveness::Asleep { since_ms: since };
-                self.sleep = Sleep::Asleep(since);
-            }
-            (Sleep::Asleep(_), Liveness::Live) => self.sleep = Sleep::Awake,
-            _ => {}
-        }
+        match self.aside {
+            Some(of) => meta.facts.insert(ThreadMeta::ASIDE_FACT.to_owned(), of.to_string()),
+            None => meta.facts.remove(ThreadMeta::ASIDE_FACT),
+        };
     }
 
     /// `meta` with where the worker branched it, unless its agent says more: an agent that
@@ -259,7 +236,6 @@ impl Own {
         for action in actions {
             match action {
                 Action::Meta(meta) => self.meta(meta),
-                Action::Status(status) => self.status(status),
                 Action::PendingSet(pending) => self.pending(pending),
                 Action::ItemStarted(item)
                 | Action::ItemUpdated(item)
@@ -366,6 +342,18 @@ impl Host {
         ids
     }
 
+    /// What `see` makes of each thread held, those it makes nothing of left out. The lock is
+    /// taken for one thread at a time, so an adapter waits on no more than one thread's look.
+    pub fn visit<T>(&self, mut see: impl FnMut(&ThreadState) -> Option<T>) -> Vec<T> {
+        self.threads()
+            .into_iter()
+            .filter_map(|thread| {
+                let inner = self.inner.lock();
+                inner.threads.get(&thread).and_then(|hosted| see(hosted.log.state()))
+            })
+            .collect()
+    }
+
     /// Apply `actions` to `thread`, log them and send them to its followers; the cursor after
     /// them, or `None` for a thread not held. A log that cannot be written is warned of, and
     /// the actions count anyway.
@@ -418,7 +406,6 @@ impl Host {
         // One that was being typed may be in the terminal already, so it is not typed again.
         let mut state = state;
         hosted.own.meta(&mut state.meta);
-        hosted.own.status(&mut state.status);
         state.pending.clone_from(&hosted.log.state().pending);
         state.to_review = hosted.log.state().to_review;
         for pending in &mut state.pending {
@@ -447,6 +434,19 @@ impl Host {
             Some(hosted) => hosted.log.delete(),
             None => Ok(()),
         }
+    }
+
+    /// `thread` is an aside of thread `of` from now on, across a restart and a read again from
+    /// its agent; with `None`, an ordinary thread again. Whether it is held.
+    pub fn aside(&self, thread: ThreadId, of: Option<ThreadId>) -> bool {
+        let meta = {
+            let mut inner = self.inner.lock();
+            let Some(hosted) = inner.threads.get_mut(&thread) else { return false };
+            hosted.own.aside = of;
+            hosted.log.state().meta.clone()
+        };
+        self.apply(thread, vec![Action::Meta(Box::new(meta))]);
+        true
     }
 
     /// `thread` was branched off another as `fork` says, by the worker: kept with it from now on,
@@ -604,37 +604,6 @@ impl Host {
         Some(outcome)
     }
 
-    /// Put `thread`'s agent to sleep for intent `id` once, on the person's word: only one that
-    /// can be ([`Cap::SLEEP`]) and may be now ([`super::sleep::refusal`]). `end` asks its
-    /// adapter to end the agent. When it is done or taken, the agent's end, whenever its adapter
-    /// tells it, is told as its sleep ([`Liveness::Asleep`]). Decided under the lock, so no
-    /// message slips in between the look and the mark. `None` for a thread not held.
-    pub fn sleep<F>(&self, thread: ThreadId, id: IntentId, end: F) -> Option<Outcome>
-    where
-        F: FnOnce(&ThreadState) -> Outcome,
-    {
-        let mut inner = self.inner.lock();
-        let hosted = inner.threads.get_mut(&thread)?;
-        if let Some(outcome) = hosted.intents.outcome(&id) {
-            return Some(outcome.clone());
-        }
-        let state = hosted.log.state();
-        let outcome = if !state.meta.can(Cap::SLEEP) {
-            Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) }
-        } else if let Some(why) = super::sleep::refusal(state) {
-            Outcome::Refused { reason: why.to_owned() }
-        } else {
-            end(state)
-        };
-        if matches!(outcome, Outcome::Done | Outcome::Accepted) {
-            hosted.own.sleep = Sleep::Falling(WallMs::now());
-        }
-        if let Err(e) = hosted.intents.record(id, outcome.clone()) {
-            tracing::warn!(%thread, "an intent could not be recorded: {e}");
-        }
-        Some(outcome)
-    }
-
     /// Change `thread`'s scheduled messages for intent `id` once ([`super::schedule::act`]):
     /// `change` decides from the thread's state what comes of it and edits the list the worker
     /// holds, which goes into the thread's pending list and log. `None` for a thread not held.
@@ -679,8 +648,7 @@ impl Host {
     }
 
     /// The scheduled messages whose moment has come at `now`, each marked as going, and when
-    /// the next one may come; a message waiting on a thread no longer here is held, saying so.
-    /// Each goes queued where its thread's agent queues, else as a steer.
+    /// the next one may come. Each goes queued where its thread's agent queues, else as a steer.
     pub fn due(&self, now: WallMs) -> (Vec<super::schedule::Due>, Option<WallMs>) {
         use super::schedule::{Due, When, when};
         let mut guard = self.inner.lock();
@@ -691,13 +659,7 @@ impl Host {
         for (thread, hosted) in &inner.threads {
             for pending in hosted.own.scheduled.iter().filter(|p| p.state == PendingState::Waiting)
             {
-                let watched = match pending.delivery {
-                    Delivery::After { thread: watched, .. } => {
-                        inner.threads.get(&watched).map(|h| h.log.state())
-                    }
-                    _ => None,
-                };
-                match when(pending, watched, now) {
+                match when(pending, now) {
                     When::Now => {
                         let meta = &hosted.log.state().meta;
                         let delivery =
@@ -712,10 +674,6 @@ impl Host {
                     }
                     When::At(at) => next = Some(next.map_or(at, |n| n.min(at))),
                     When::Later => {}
-                    When::Held(why) => {
-                        let held = PendingState::Held { reason: why.to_owned() };
-                        moved.push((*thread, pending.intent, held));
-                    }
                 }
             }
         }

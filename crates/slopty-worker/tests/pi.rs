@@ -20,8 +20,8 @@ mod pi {
     use slopty_proto::thread::wire::{Intent, Outcome, Pick, Start};
     use slopty_proto::thread::{
         Action, AgentId, Answerer, Cap, Changed, Delivery, Drive, Fork, IntentId, Item, ItemBody,
-        ItemId, Liveness, Phase, RequestState, Status, ThreadId, ThreadMeta, ThreadState,
-        ToolState, Turn, TurnId, TurnState, Usage, UserMessage,
+        ItemId, Liveness, Phase, RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, Turn,
+        TurnId, TurnState, Usage, UserMessage,
     };
     use slopty_worker::thread::carry::carry;
     use slopty_worker::thread::log::Limits;
@@ -123,6 +123,11 @@ mod pi {
 
         /// A rig whose stand-in TUI exits once it has written, when `exits`.
         fn with_tui(exits: bool) -> Self {
+            Self::replaying(exits, str::to_owned)
+        }
+
+        /// A rig whose stand-in replays what `fixture` makes of the gate's recording.
+        fn replaying(exits: bool, replayed: impl FnOnce(&str) -> String) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path().canonicalize().unwrap();
             let (data, work, programs) = (root.join("data"), root.join("work"), root.join("bin"));
@@ -130,10 +135,10 @@ mod pi {
                 std::fs::create_dir_all(made).unwrap();
             }
             std::os::unix::fs::symlink(bin("slopty-stub-pi"), programs.join("pi")).unwrap();
-            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../slopty-agent/tests/fixtures/pi/gate.jsonl")
-                .canonicalize()
-                .unwrap();
+            let gate = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../slopty-agent/tests/fixtures/pi/gate.jsonl");
+            let fixture = root.join("fixture.jsonl");
+            std::fs::write(&fixture, replayed(&std::fs::read_to_string(gate).unwrap())).unwrap();
             let record = root.join("record.json");
             let tui_record = root.join("tui-record.json");
             let session_file = root.join("session.jsonl");
@@ -459,63 +464,17 @@ mod pi {
         assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
-    /// Put to sleep at rest, pi's stdin is closed, pi's own way to end, and the thread is kept
-    /// asleep. A wake runs pi again on the same session, reads the thread again from its record
-    /// and sends nothing.
+    /// A message scheduled for a time waits on the worker, not in pi; at its time it goes to pi
+    /// as the person's message, and leaves the pending list.
     #[tokio::test]
-    async fn a_pi_put_to_sleep_is_woken_on_its_session() {
-        let rig = Rig::new();
-        let (pi, _served) = rig.serve();
-        let id = IntentId::new();
-        let Outcome::Started { thread } = pi.start(id, rig.start("Say hello.")).await else {
-            panic!("not started");
-        };
-        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
-
-        let sleep = IntentId::new();
-        let decide = |s: &ThreadState| pi.decide(s, sleep, &Intent::Sleep, rig.by());
-        assert_eq!(rig.host.sleep(thread, sleep, decide), Some(Outcome::Done));
-        let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
-        let state = rig.until(thread, "pi ends asleep", asleep).await;
-        assert_eq!(state.turns.len(), 1, "the thread kept");
-        let (_, compact) = rig.intent(&pi, thread, &Intent::Compact);
-        assert!(matches!(compact, Outcome::Refused { .. }), "asleep, pi runs not: {compact:?}");
-
-        let (_, woken) = rig.intent(&pi, thread, &Intent::Wake);
-        assert_eq!(woken, Outcome::Done);
-        let awake = |s: &ThreadState| s.status.liveness == Liveness::Live && s.turns.len() == 4;
-        let state = rig.until(thread, "pi runs on its session again", awake).await;
-        assert_eq!(users(&state).len(), 5, "read again from the session, nothing sent");
-        let record = rig.record_once(|r| r["heard"][0]["type"] == "get_entries").await;
-        assert_eq!(record["argv"][5], id.to_string(), "the same session");
-        assert_eq!(record["unexpected"], serde_json::json!([]));
-        let (_, again) = rig.intent(&pi, thread, &Intent::Wake);
-        assert_eq!(again, Outcome::Done, "awake already");
-    }
-
-    /// A message scheduled to go once another thread rests waits on the worker, not in pi; once
-    /// that thread has rested for the settle, it goes to pi as the person's message, and leaves
-    /// the pending list.
-    #[tokio::test]
-    async fn a_message_scheduled_after_another_thread_goes_to_pi_once_it_rests() {
+    async fn a_message_scheduled_for_a_time_goes_to_pi_at_its_time() {
         let rig = Rig::new();
         let (pi, _served) = rig.serve();
         let Outcome::Started { thread } = pi.start(IntentId::new(), rig.start("Say hello.")).await
         else {
             panic!("not started");
         };
-        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
-        let mut watched = state.meta.clone();
-        watched.id = ThreadId::new();
-        let other = watched.id;
-        rig.host.create(watched).unwrap();
-        let working = Status {
-            phase: Phase::Working,
-            wait: None,
-            liveness: Liveness::Live,
-            since_ms: WallMs::now(),
-        };
-        rig.host.apply(other, vec![Action::Status(working.clone())]);
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
 
         // As the daemon sends it: the person's message, decided once per id.
         let (sending, host, by) = (pi.clone(), rig.host.clone(), rig.by());
@@ -526,20 +485,19 @@ mod pi {
         });
         let _scheduler = schedule::spawn(rig.host.clone(), fire);
         let later = IntentId::new();
+        let at_ms = WallMs::from_millis(WallMs::now().as_millis() + 300);
         let send = Intent::Send {
             text: "Make a file called made-by-pi.".to_owned(),
-            delivery: Delivery::After { thread: other, settle_ms: 100 },
+            delivery: Delivery::At { at_ms },
             attachments: vec![],
         };
         assert_eq!(schedule::act(&rig.host, thread, later, &send), Some(Outcome::Accepted));
         let state = rig.until(thread, "it waits on the worker", |s| s.pending.len() == 1).await;
         assert!(state.pending[0].delivery.is_scheduled());
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(rig.host.state(thread).unwrap().0.turns.len(), 1, "not while it works");
+        assert_eq!(state.turns.len(), 1, "not before its time");
 
-        let rested = Status { phase: Phase::Done, since_ms: WallMs::now(), ..working };
-        rig.host.apply(other, vec![Action::Status(rested)]);
         let state = rig.until(thread, "the scheduled message's ask", asking(1)).await;
+        assert!(WallMs::now().as_millis() >= at_ms.as_millis(), "at its time");
         assert!(state.pending.is_empty(), "it went");
         let users = users(&state);
         let sent = users.last().unwrap();
@@ -570,6 +528,7 @@ mod pi {
             caps: vec![Cap::named(Cap::CONTINUE)],
             models: Vec::new(),
             modes: Vec::new(),
+            efforts: Vec::new(),
             facts: std::collections::BTreeMap::new(),
             created_ms: WallMs::ZERO,
         };
@@ -870,6 +829,85 @@ mod pi {
         let missing = bare.start(IntentId::new(), rig.start("Say hello.")).await;
         assert_eq!(missing, Outcome::Refused { reason: "pi is not installed".to_owned() });
         assert!(!rig.record.exists(), "no pi ran");
+    }
+
+    /// The gate's recording through its first turn, then pi's answers to a thinking level set
+    /// to `high` (its response and `thinking_level_changed`) and to the levels the model
+    /// supports, as pi's RPC mode writes them (`docs/rpc-commands.md` of pi 1.0.0).
+    fn thinking(gate: &str) -> String {
+        let mut kept = Vec::new();
+        for line in gate.lines() {
+            kept.push(line.to_owned());
+            if line.contains("\"agent_settled\"") {
+                break;
+            }
+        }
+        let steps = [
+            serde_json::json!({"dir": "in", "msg": {"id": "think", "type": "set_thinking_level",
+                "level": "high"}}),
+            serde_json::json!({"dir": "out", "msg": {"id": "think", "type": "response",
+                "command": "set_thinking_level", "success": true}}),
+            serde_json::json!({"dir": "out", "msg": {"type": "thinking_level_changed",
+                "level": "high"}}),
+            serde_json::json!({"dir": "in", "msg": {"id": "levels",
+                "type": "get_available_thinking_levels"}}),
+            serde_json::json!({"dir": "out", "msg": {"id": "levels", "type": "response",
+                "command": "get_available_thinking_levels", "success": true,
+                "data": {"levels": ["off", "minimal", "low", "medium", "high", "xhigh"]}}}),
+        ];
+        kept.extend(steps.iter().map(Value::to_string));
+        kept.join("\n")
+    }
+
+    /// A pi thread offers the thinking levels pi says the model supports, and an effort set
+    /// from them goes to pi as its own `set_thinking_level`; the meters say the level pi took.
+    /// A level pi does not offer is refused before anything goes.
+    #[tokio::test]
+    async fn a_pi_threads_effort_is_set_among_the_levels_pi_offers() {
+        let rig = Rig::replaying(false, thinking);
+        let (pi, _served) = rig.serve();
+        let outcome = pi.start(IntentId::new(), rig.start("Say hello.")).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let state = rig
+            .until(thread, "the levels", |s| {
+                !s.meta.efforts.is_empty() && turn_ended(1, TurnState::Complete)(s)
+            })
+            .await;
+        let levels: Vec<(&str, &str)> =
+            state.meta.efforts.iter().map(|e| (e.id.as_str(), e.label.as_str())).collect();
+        let want = [
+            ("off", "Off"),
+            ("minimal", "Minimal"),
+            ("low", "Low"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("xhigh", "Extra high"),
+        ];
+        assert_eq!(levels, want);
+        assert!(state.meta.can(Cap::SET_EFFORT));
+
+        let max = Intent::SetEffort { effort: "max".to_owned() };
+        let (_, refused) = rig.intent(&pi, thread, &max);
+        assert!(matches!(refused, Outcome::Refused { .. }), "not offered: {refused:?}");
+        let high = Intent::SetEffort { effort: "high".to_owned() };
+        assert_eq!(rig.intent(&pi, thread, &high).1, Outcome::Done);
+        rig.until(thread, "the level pi took", |s| s.meters.effort.as_deref() == Some("high"))
+            .await;
+        // The stand-in writes its record after what it answers.
+        let record = rig
+            .record_once(|r| {
+                r["heard"].as_array().is_some_and(|h| h.iter().any(|c| c["level"] == "high"))
+            })
+            .await;
+        assert_eq!(record["unexpected"], serde_json::json!([]), "{record:#}");
+        let set: Vec<&Value> = record["heard"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["type"] == "set_thinking_level")
+            .collect();
+        assert_eq!(set.len(), 1, "once: {record:#}");
+        assert_eq!(set[0]["level"], "high");
     }
 
     const PNG: [u8; 12] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];

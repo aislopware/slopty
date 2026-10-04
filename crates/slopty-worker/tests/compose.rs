@@ -16,13 +16,13 @@ mod compose {
     use slopty_proto::terminal::{TermRequest, TermSize};
     use slopty_proto::thread::wire::{Intent, Outcome};
     use slopty_proto::thread::{
-        Action, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, PendingState,
-        ThreadId, ThreadState, Turn, TurnId, TurnState, Usage, UserMessage,
+        Action, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Pending,
+        PendingState, ThreadId, ThreadState, Turn, TurnId, TurnState, Usage, UserMessage,
     };
     use slopty_pty::{Pty, SpawnSpec};
     use slopty_worker::orchestrate::Agents;
     use slopty_worker::session::{self, SessionHandle, SessionStart};
-    use slopty_worker::thread::compose::{DRAFT, TAKEN_BACK, Terminals};
+    use slopty_worker::thread::compose::{DRAFT, RETRY, TAKEN_BACK, Terminals};
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::{Composer, Host};
     use tokio::sync::mpsc;
@@ -235,27 +235,42 @@ mod compose {
         assert!(rig.state().pending.is_empty(), "and nothing sent again");
     }
 
-    /// Queued messages go in the order the person puts them in, and one promoted goes at once,
-    /// into the turn under way, while the rest wait for the agent to be at rest.
+    /// The person's stop holds what is queued: the turn is stopped with Esc, every queued
+    /// message says it waits on the stop, and none is typed once the agent rests. Their next
+    /// message lets them go again, in their order, ahead of it.
     #[tokio::test]
-    async fn a_queued_message_moves_in_the_list_or_goes_now() {
+    async fn a_stop_holds_the_queue_until_the_person_sends_again() {
         let rig = Rig::new().await;
         rig.agent(AgentStatus::Working);
-        let q1 = rig.send("q1", Delivery::Queue);
+        rig.send("q1", Delivery::Queue);
+        rig.send("q2", Delivery::Queue);
+        rig.until(|s| s.pending.len() == 2).await;
+        assert_eq!(rig.intent(IntentId::new(), &Intent::Interrupt), Outcome::Accepted);
+        rig.until(|s| s.pending.iter().all(Pending::stopped)).await;
+        rig.recorded("\x1b").await;
+        rig.agent(AgentStatus::Idle);
+        tokio::time::sleep(RETRY * 4).await;
+        assert_eq!(read(&rig.record), "\x1b", "nothing goes while the stop holds");
+
+        rig.send("q3", Delivery::Queue);
+        rig.recorded("\x1bq1\r").await;
+        let left = rig.until(|s| s.pending.len() == 2).await;
+        let order: Vec<(&str, bool)> =
+            left.pending.iter().map(|p| (p.text.as_str(), p.stopped())).collect();
+        assert_eq!(order, [("q2", false), ("q3", false)], "the rest in order, the new one last");
+    }
+
+    /// A queued message promoted goes at once, into the turn under way, while the rest wait for
+    /// the agent to be at rest.
+    #[tokio::test]
+    async fn a_queued_message_promoted_goes_now() {
+        let rig = Rig::new().await;
+        rig.agent(AgentStatus::Working);
+        rig.send("q1", Delivery::Queue);
         let q2 = rig.send("q2", Delivery::Queue);
-        let q3 = rig.send("q3", Delivery::Queue);
+        rig.send("q3", Delivery::Queue);
         rig.until(|s| s.pending.len() == 3).await;
         let order = |s: &ThreadState| s.pending.iter().map(|p| p.text.clone()).collect::<Vec<_>>();
-
-        let first = Intent::Reorder { pending: q3, before: Some(q1) };
-        assert_eq!(rig.intent(IntentId::new(), &first), Outcome::Done);
-        assert_eq!(order(&rig.state()), ["q3", "q1", "q2"]);
-        let last = Intent::Reorder { pending: q3, before: None };
-        assert_eq!(rig.intent(IntentId::new(), &last), Outcome::Done);
-        assert_eq!(order(&rig.state()), ["q1", "q2", "q3"]);
-        let nowhere = Intent::Reorder { pending: q1, before: Some(IntentId::new()) };
-        let refused = rig.intent(IntentId::new(), &nowhere);
-        assert!(matches!(refused, Outcome::Refused { .. }), "{refused:?}");
 
         let now = Intent::Promote { pending: q2 };
         assert_eq!(rig.intent(IntentId::new(), &now), Outcome::Done);

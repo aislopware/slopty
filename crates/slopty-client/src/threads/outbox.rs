@@ -71,7 +71,6 @@ impl Sent {
             }
             Intent::Withdraw { .. }
             | Intent::Promote { .. }
-            | Intent::Reorder { .. }
             | Intent::SetModel { .. }
             | Intent::SetMode { .. }
             | Intent::Compact
@@ -81,10 +80,12 @@ impl Sent {
             | Intent::Keep(_)
             | Intent::Revert(_)
             | Intent::Fork { .. }
-            | Intent::Sleep
-            | Intent::Wake
             | Intent::Continue { .. }
-            | Intent::Rewind { .. } => self.outcome.is_some(),
+            | Intent::Rewind { .. }
+            | Intent::SetEffort { .. }
+            | Intent::Aside
+            | Intent::Discard
+            | Intent::KeepAside => self.outcome.is_some(),
         }
     }
 

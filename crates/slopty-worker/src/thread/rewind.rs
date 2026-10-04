@@ -7,8 +7,13 @@
 //! the new thread as a draft ([`schedule::draft`]), and with the files the folder goes back to
 //! the turn's before-snapshot, what it held first kept under the thread's refs
 //! ([`super::review::Snapshots::restore`]).
+//!
+//! The files go back over the whole work tree, so they are refused while another thread works
+//! in it: its edits would go back under it mid-turn. Going back without the files, or once that
+//! thread rests, is the person's choice.
 
 use std::future::Future;
+use std::path::Path;
 
 use slopty_proto::thread::wire::Outcome;
 use slopty_proto::thread::{
@@ -48,6 +53,9 @@ where
         if files && state.turns.iter().find(|t| t.id == turn).is_none_or(|t| t.before.is_none()) {
             return refused("No snapshot was taken before that turn, so its files cannot go back");
         }
+        if files && let Some(why) = busy_beside(host, &state) {
+            return refused(&why);
+        }
     }
     let outcome = branch().await;
     let Outcome::Started { thread } = outcome else { return outcome };
@@ -85,6 +93,29 @@ fn prompt(state: &ThreadState, turn: TurnId) -> Option<String> {
         .as_ref()
         .and_then(|input| state.items.iter().find(|i| i.id == *input).and_then(|i| mine(&i.body)));
     input.or_else(|| items.find_map(|i| mine(&i.body)))
+}
+
+/// Why `state`'s files cannot go back now, in words: another thread works in the same work
+/// tree, and its edits would go back under it. `None` when none does, or outside git.
+fn busy_beside(host: &Host, state: &ThreadState) -> Option<String> {
+    let root = crate::repo::root_of(Path::new(&state.meta.cwd))?;
+    let from = state.meta.id;
+    // Read under the host's lock, one thread at a time; the folders are looked at after.
+    let working = host.visit(|s| {
+        (s.meta.id != from && working(s)).then(|| (s.meta.title.clone(), s.meta.cwd.clone()))
+    });
+    let (title, _) = working
+        .into_iter()
+        .find(|(_, cwd)| crate::repo::root_of(Path::new(cwd)).is_some_and(|r| r == root))?;
+    let who = if title.trim().is_empty() {
+        "Another thread".to_owned()
+    } else {
+        format!("\u{201c}{}\u{201d}", title.trim())
+    };
+    Some(format!(
+        "{who} is working in the same folder, and its edits would go back too. Go back without \
+         the files, or once it rests"
+    ))
 }
 
 /// Whether `state`'s agent has a turn under way.

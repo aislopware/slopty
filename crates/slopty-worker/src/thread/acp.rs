@@ -89,14 +89,6 @@ enum Ask {
         limit: u32,
         reply: Listed,
     },
-    /// The person put the thread's agent to sleep: it ends, its session kept.
-    Sleep {
-        thread: ThreadId,
-    },
-    /// The person woke it: the agent runs again and loads its session.
-    Wake {
-        thread: ThreadId,
-    },
 }
 
 /// Where a list of an agent's sessions goes, or why there is none.
@@ -105,14 +97,39 @@ type Listed = oneshot::Sender<Result<Vec<PastSession>, String>>;
 /// What a client asks of one thread.
 #[derive(Debug)]
 enum ThreadAsk {
-    Send { text: String, attachments: Vec<String>, intent: IntentId },
-    Withdraw { intent: IntentId },
-    Edit { intent: IntentId, text: String },
-    Reorder { intent: IntentId, before: Option<IntentId> },
+    Send {
+        text: String,
+        attachments: Vec<String>,
+        intent: IntentId,
+    },
+    /// Sent by interrupt: first in the queue, and the turn under way stopped.
+    Interrupting {
+        text: String,
+        attachments: Vec<String>,
+        intent: IntentId,
+    },
+    Withdraw {
+        intent: IntentId,
+    },
+    Edit {
+        intent: IntentId,
+        text: String,
+    },
     Interrupt,
-    Answer { ask: AskId, choice: String, by: Answerer },
-    SetMode { mode: String },
-    SetModel { model: String },
+    Answer {
+        ask: AskId,
+        choice: String,
+        by: Answerer,
+    },
+    SetMode {
+        mode: String,
+    },
+    SetModel {
+        model: String,
+    },
+    SetEffort {
+        effort: String,
+    },
 }
 
 /// Where clients' asks go to the ACP threads. Cheap to clone.
@@ -203,15 +220,6 @@ impl Acp {
     ) -> Outcome {
         let live = state.status.liveness == Liveness::Live;
         let thread = state.meta.id;
-        match ask {
-            Intent::Sleep => return self.ask(Ask::Sleep { thread }),
-            Intent::Wake if live => return Outcome::Done,
-            Intent::Wake if !driven::resumable(&state.meta) => {
-                return refused("The agent cannot take this session up again");
-            }
-            Intent::Wake => return self.ask(Ask::Wake { thread }),
-            _ => {}
-        }
         // An ACP permission's answer carries no words: a reason given with it goes as the
         // person's next message, queued behind the turn under way.
         let reason = match ask {
@@ -236,26 +244,21 @@ impl Acp {
             Intent::Send { .. } if !live && !driven::resumable(&state.meta) => {
                 return refused("The agent cannot take this session up again; start a new thread");
             }
-            Intent::Send { text, attachments, .. } => {
+            Intent::Send { text, attachments, delivery } => {
                 if let Err(why) = super::attach::check(attachments) {
                     return refused(&why);
                 }
-                ThreadAsk::Send { text: text.clone(), attachments: attachments.clone(), intent }
+                let (text, attachments) = (text.clone(), attachments.clone());
+                if *delivery == Delivery::Interrupt {
+                    ThreadAsk::Interrupting { text, attachments, intent }
+                } else {
+                    ThreadAsk::Send { text, attachments, intent }
+                }
             }
-            Intent::Withdraw { pending }
-            | Intent::Edit { pending, .. }
-            | Intent::Reorder { pending, .. }
+            Intent::Withdraw { pending } | Intent::Edit { pending, .. }
                 if !state.pending.iter().any(|p| p.intent == *pending) =>
             {
                 return refused("That message is not waiting");
-            }
-            Intent::Reorder { before: Some(before), .. }
-                if !state.pending.iter().any(|p| p.intent == *before) =>
-            {
-                return refused("That message has already gone");
-            }
-            Intent::Reorder { pending, before } => {
-                ThreadAsk::Reorder { intent: *pending, before: *before }
             }
             Intent::Withdraw { pending } => ThreadAsk::Withdraw { intent: *pending },
             Intent::Edit { pending, text } => {
@@ -293,6 +296,12 @@ impl Acp {
                 ThreadAsk::SetModel { model: model.clone() }
             }
             Intent::SetMode { mode } => ThreadAsk::SetMode { mode: mode.clone() },
+            Intent::SetEffort { effort } => {
+                if !state.meta.efforts.iter().any(|e| e.id == *effort) {
+                    return refused(&format!("There is no thought level {effort} here"));
+                }
+                ThreadAsk::SetEffort { effort: effort.clone() }
+            }
             other => return Outcome::Unsupported { cap: Cap::named(other.needs()) },
         };
         if !live && !matches!(asked, ThreadAsk::Send { .. }) {
@@ -302,16 +311,6 @@ impl Acp {
             if self.0.send(Ask::Thread { thread, ask }).is_err() {
                 return refused("ACP threads are not served here");
             }
-        }
-        Outcome::Done
-    }
-}
-
-impl Acp {
-    /// Send `ask`: done once it is on its way.
-    fn ask(&self, ask: Ask) -> Outcome {
-        if self.0.send(ask).is_err() {
-            return refused("ACP threads are not served here");
         }
         Outcome::Done
     }
@@ -353,14 +352,6 @@ pub fn spawn(host: Host, path: Option<OsString>, own: Own, Asks(mut asks): Asks)
                         served.running.remove(&thread);
                         let _gone = done.send(());
                     }
-                    Some(Ask::Sleep { thread }) => {
-                        // Its task closes the agent's stdin once nothing can ask it more.
-                        served.running.remove(&thread);
-                    }
-                    Some(Ask::Wake { thread }) if !served.running.contains_key(&thread) => {
-                        served.reopen(thread, Vec::new()).await;
-                    }
-                    Some(Ask::Wake { .. }) => {}
                     Some(Ask::Fork { thread, id, after, reply }) => {
                         let outcome = served.fork(thread, id, after).await;
                         let _gone = reply.send(outcome);

@@ -1022,8 +1022,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_started_thread_opens_as_a_tile_and_a_refusal_is_said` and
     `an_open_palette_takes_the_agents_as_they_arrive` (`workspace/tests/thread_start.rs`).
 
-- ✅ **An edit can be allowed as the person changed it, through the hook's `updatedInput`**
-  (2026-10-04, rulings §5a). The
+- ❌ **An edit can be allowed as the person changed it, through the hook's `updatedInput`**
+  (2026-10-04, rulings §5a). *Deleted the same day: see "Sleep, waits on another thread, queue
+  reordering and edited allows are gone" below.* The
   hooks reference documents `updatedInput` on a `PermissionRequest` allow as the call's changed
   input, which Claude Code checks against its rules again before it runs it.
   - `PermissionPrompt::editable` and `Request::editable` carry the parts of the call the person
@@ -1314,8 +1315,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_seats_thread_is_loaded_with_its_variables_and_slopty_tools` and
     `the_tools_are_an_mcp_server_entry_the_gate_registers` (`slopty-agent`).
 
-- ✅ **The person puts an agent to sleep at rest, and wakes it on its own session** (2026-10-04,
-  from the Ghostex study's second idea). The item registry's `sleeping` flag only ever released
+- ❌ **The person puts an agent to sleep at rest, and wakes it on its own session** (2026-10-04,
+  from the Ghostex study's second idea). *Deleted the same day: see "Sleep, waits on another
+  thread, queue reordering and edited allows are gone" below.* The item registry's `sleeping` flag only ever released
   a client's view, and nothing set it, so it is gone. In its place, `Intent::Sleep` and
   `Intent::Wake` act on a thread (`Cap::SLEEP`), and a thread put to sleep reads as
   `Liveness::Asleep`.
@@ -1363,7 +1365,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `intent_wake`, `frame_actions` and `attention_ladder`.
 
 - ✅ **The person schedules a message for a time, or for when another thread rests** (2026-10-04,
-  from the Ghostex study's seventh idea). Two deliveries join the two a message already has:
+  from the Ghostex study's seventh idea). *`Delivery::After` was deleted the same day; `At` stays
+  for "Continue at" a limit's reset. See "Sleep, waits on another thread, queue reordering and
+  edited allows are gone" below.* Two deliveries join the two a message already has:
   `Delivery::At { at_ms }` and `Delivery::After { thread, settle_ms }`. They need
   `Cap::SCHEDULE`, which every adapter has, since the worker holds the message and not the agent.
   - **Kept on the worker.** A scheduled message is a pending one, so the thread view already
@@ -1436,11 +1440,12 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   cancel and resend). `Delivery::Interrupt` needs `Cap::INTERRUPT` and `Cap::QUEUE`. It is for
   an agent without `Cap::STEER`, today any ACP agent, whose message otherwise waits for the turn
   to end.
-  - **Through the agent's own doors, on the person's word.** The worker (`thread::steer::act`)
-    takes the send in steps, each an intent of its own, decided once. First it queues the message
-    under the person's intent, so the pending list and the turn it starts name it as theirs. Then
-    it moves the message before anything already queued. Last it stops the turn under way, when
-    there is one. The stopped turn ends as the agent ends it, and the queue sends the message
+  - **Through the agent's own doors, on the person's word.** The ACP adapter queues the message
+    first, under the person's intent, so the pending list and the turn it starts name it as
+    theirs, and stops the turn under way, when there is one, in the same step
+    (`ThreadAsk::Interrupting`; the worker's earlier three-step `thread::steer` went with
+    `Intent::Reorder`, see "Sleep, waits on another thread, queue reordering and edited allows
+    are gone"). The stopped turn ends as the agent ends it, and the queue sends the message
     next. Nothing is typed into a screen and nothing is answered for the person: the open request
     is withdrawn by the agent's own cancel.
   - **No race to lose.** The stop is the agent's to make. A turn that ends before the stop lands
@@ -1448,8 +1453,7 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     intents take the same path.
   - **Not yet.** The composer's "Interrupt and send" for such an agent is the client's half.
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
-    (`slopty-worker/tests/acp.rs`); `it_goes_before_what_waits_and_stops_only_a_turn_under_way`
-    (`thread::steer`); golden `intent_send_interrupt`.
+    (`slopty-worker/tests/acp.rs`); golden `intent_send_interrupt`.
 
 - ✅ **Edit from a turn goes back in a new thread, through the agent's own door** (2026-10-04,
   §11 of the T3 Code UI study). `Intent::Rewind { turn, files }` needs `Cap::REWIND`.
@@ -1484,3 +1488,212 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     (`slopty-worker/tests/codex.rs`, a stand-in Codex daemon and a real git folder);
     `a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from`
     (`slopty-agent/tests/codex.rs`); golden `intent_rewind`.
+
+- ✅ **Model, effort and mode are switched through each agent's own settings door** (2026-10-04).
+  `Intent::SetEffort { effort }` joins `SetModel` and `SetMode`, with `Cap::SET_EFFORT`. A thread
+  says what it can be switched to: `ThreadMeta::models`, `ThreadMeta::efforts` (new, each an
+  `Effort { id, label, description }`) and `ThreadMeta::modes`. Each list is the agent's own, so
+  no client keeps one, and a value it does not offer is refused before anything goes.
+  - **Codex, through `thread/settings/update`.** The setting holds for the thread's next turns,
+    the TUI's included, so a switch here and one in the TUI are the same switch. Codex then tells
+    every client what it holds (`thread/settings/updated`, read now instead of passed over), so a
+    switch made in the TUI shows here too.
+    - The models are Codex's `model/list`, asked once as the worker joins the daemon, every
+      page, hidden models left out. A model is named by its slug (`model`), which is what the
+      thread runs, and shown by its display name.
+    - The efforts are the running model's `supportedReasoningEfforts`. A model that lacks the
+      thread's effort goes with its own `defaultReasoningEffort`, as Codex's own picker sets it.
+    - The modes are the three approval policies, `untrusted`, `on-request` and `never`.
+      `granular` is shown when Codex says it and is never offered. The sandbox is not a mode:
+      it stays as the person's Codex configuration sets it.
+    - A per-turn override on `turn/start` was the other door. It was not taken, because it
+      reaches only Slopty's own next turn and leaves the TUI and the meters on the old values
+      until then.
+    - Codex's collaboration mode (plan or default) is a second axis beside the approval policy.
+      It is experimental in the pinned build and stays unswitched for now.
+    - A switch Codex refuses leaves the meters as they were and says why in the thread
+      ("Codex didn't switch: …"), since the intent was done once it went.
+  - **pi, through its RPC.** The efforts are `get_available_thinking_levels`, asked with the
+    state and the models, and again after a model switch, since pi clamps the level to the new
+    model. A model that does not reason has only `off`, which offers nothing to choose. An effort
+    goes as `set_thinking_level`, and the meter follows pi's `thinking_level_changed`.
+  - **ACP, through the session's config options.** The efforts are the values of the option
+    whose category is `thought_level`, with their descriptions, and an effort goes as
+    `session/set_config_option`. The agent answers with the options as they now stand. The cap
+    is there only while the agent offers the option, as it is for models and modes.
+  - **Claude Code, observed: the model only.** `/model <id>` stays: it is the TUI's own typed
+    command, sent on the person's word through the composer's guard. The pinned 2.1.283 also
+    lists `/effort` and `/plan`, but neither is a whole switch. `/effort` takes no argument and
+    opens a menu, and `/plan` only enters plan mode, while leaving it or reaching any other mode
+    is Shift-Tab's cycle. Driving either means keys into a menu or a mode cycle, which Slopty
+    never types, so an observed thread has no `SET_MODE` and no `SET_EFFORT`. Its mode and
+    effort stay read-only meters.
+  - **Not yet.** The effort picker beside the model and mode chips is the client's half
+    (`target/lanes/ui-queue.md`).
+  - Tests: `a_thread_switches_among_what_codex_offers` and
+    `the_threads_settings_are_its_mode_and_effort` (`slopty-agent/tests/codex.rs`);
+    `a_switch_goes_to_codex_as_the_threads_settings` (`slopty-worker/tests/codex.rs`, a
+    stand-in daemon that takes and refuses switches);
+    `a_pi_threads_effort_is_set_among_the_levels_pi_offers` (`slopty-worker/tests/pi.rs`);
+    `an_acp_threads_effort_is_set_through_its_thought_level_option`
+    (`slopty-worker/tests/acp.rs`); golden `intent_set_effort`.
+
+- ✅ **What was said in the threads is searched on the worker that holds them** (2026-10-04,
+  `crates/slopty-worker/src/thread/search.rs`). `ThreadRequest::Search { query, limit }` is
+  answered with `WorkerMsg::ThreadHits` on the control stream.
+  - **What is searched.** Each thread's state as the worker's log keeps it: the person's
+    messages, the agent's answers and reasoning, its calls' titles and its notices, in every
+    thread held, a subagent's and an exited one's among them. A text the log keeps clipped is
+    searched as far as it is kept. The rest is the agent's own session's, and reading every
+    agent's session files for a palette keystroke would cost more than it finds. Past prompts in
+    sessions the worker does not hold stay `ThreadRequest::Sessions`'s.
+  - **The match is the prompt search's.** Every word in one item, case ignored unless a word
+    has a capital, accents ignored, through the same matcher (`nucleo-matcher` substring atoms).
+    A whole word ranks above one inside another word. The excerpt is cut round the first match
+    the same way too: `history::excerpt` serves both. A thread ranks by its best item, then by
+    its newest match.
+  - **Lean answers.** A hit names its thread, item and turn, so a client scrolls to it, and
+    says what kind of words matched (open: `person`, `agent`, `reasoning`, `tool`, `notice`).
+    Title, agent and folder are the thread's row in the table the client already holds, so they
+    are not sent again. At most `SEARCH_THREADS` threads, `HITS_PER_THREAD` items each and
+    `ITEM_HIT_BYTES` of each, with counts of what was left out.
+  - **No adapter waits on a search.** It runs on the blocking pool, and the host's lock is
+    taken one thread at a time (`Host::visit`).
+  - **Not yet.** The palette's "Threads" section is the client's half
+    (`target/lanes/ui-queue.md`), and a CLI verb waits on a control-socket request of its own.
+  - Tests: `every_word_is_found_in_what_was_said_the_best_and_newest_first` and
+    `a_hit_shows_its_match_and_the_limit_counts_what_it_left_out` (`thread::search`); goldens
+    `client_thread_search` and `link_worker_thread_hits`.
+
+- ✅ **Sleep, waits on another thread, queue reordering and edited allows are gone** (2026-10-04,
+  the session's cut list, from the feature audit and the orchestrator study). The user's
+  standing rule is that nothing is hidden: a feature nobody reaches for, or that isn't worth its
+  place, is deleted, and pre-release nothing is kept for compatibility.
+  - **Sleep and wake.** Nothing ever sent `Intent::Sleep`, and settling a finished task's agent
+    (`hub/settle.rs`) already frees a resting one. `Intent::Sleep`, `Intent::Wake`,
+    `Cap::SLEEP`, `Liveness::Asleep`, `Rung::Sleeping` with `Counts::sleeping`, the worker's
+    `thread/sleep.rs` and the host's sleep marking, each adapter's sleep and wake, and the
+    thread view's Wake door are deleted. Resume stays: an exited agent goes on through its own
+    resume, by the next message or the Resume strip. Codex's own let-go of a resting thread
+    (`thread/unsubscribe`, taken up again on a follow or an ask) is not sleep, and stays.
+  - **`Delivery::After`.** A message that waits for another thread to rest went with the
+    general "Send later…" menu. `Delivery::At` stays, for "Continue at" a usage limit's reset,
+    with drafts. The scheduler now only watches times (`schedule::when`).
+  - **`Intent::Reorder` and `Pending::reorder`.** Nobody reordered a queue, and both studies
+    agreed. The one inner use, a message sent by interrupt going first, now belongs to the one
+    adapter that needs it. An agent that steers takes "now" as a steer (the daemon turns
+    `Delivery::Interrupt` into `Delivery::Steer` where the thread has `Cap::STEER`). An ACP
+    agent, which has no steer, puts the message first in its own queue and cancels the turn
+    under way in one step (`ThreadAsk::Interrupting`). `thread/steer.rs`, which reordered
+    through the wire intent, is deleted.
+  - **The "Edit…" allow.** `Verdict::AllowEdited`, `Editable`, `Request::editable`,
+    `PermissionPrompt::editable` and the relay's edited `updatedInput` are deleted. Deny with a
+    reason stays, and so do `updatedInput` answers to `AskUserQuestion` and `ExitPlanMode`,
+    which are the person's answers rather than an edit.
+  - Tests kept or reworked: `what_a_resting_thread_left_ranks_it_above_rest` (`slopty-proto`),
+    `a_message_goes_at_its_time` (`thread::schedule`),
+    `a_scheduled_message_waits_on_the_worker_and_outlives_a_restart` and
+    `the_worker_sends_a_scheduled_message_at_its_moment` (`slopty-worker/tests/threads.rs`),
+    `a_message_scheduled_for_a_time_goes_to_pi_at_its_time` (`slopty-worker/tests/pi.rs`),
+    `a_message_sent_by_interrupt_stops_the_turn_and_goes_next` (`slopty-worker/tests/acp.rs`),
+    `a_queued_message_promoted_goes_now` (`slopty-worker/tests/compose.rs`) and
+    `a_held_message_promoted_steers_the_turn` (`slopty-agent/tests/codex.rs`).
+
+- ✅ **The person's stop holds what is queued until they speak again** (2026-10-04, A1 of the
+  T3 Code delta study, after T3's "Queue paused" once Stop is pressed). Before this, a queued
+  message went as soon as the stopped turn ended, so Stop with a message queued started it.
+  - **Held, in words.** `Intent::Interrupt` holds every queued message not yet on its way as
+    `PendingState::Held { reason: Pending::STOPPED }` ("Held since you stopped the turn",
+    `Pending::hold_for_stop`). The person's next send releases them in order, behind it or
+    after the new message as each agent queues. `Promote` sends one now and lets the rest go
+    behind it. `Withdraw` and `Edit` work as before. A turn the agent ends by itself holds
+    nothing.
+  - **Each adapter's own queue.**
+    - Claude Code (`thread/compose.rs`): the composer holds the worker's queue and skips a
+      stopped message. One already in the terminal (typed, or taken back) is not the
+      worker's to hold.
+    - Codex (`Shared::stop`): the interrupt and the hold are one step, and `next_queued` waits
+      while the front is held.
+    - ACP (`Session::hold_queue`, `release_queue`): the same, in the adapter's own queue.
+    - pi has no `Cap::QUEUE`, so there is nothing to hold.
+  - **`Delivery::Interrupt` is exempt.** Its message is meant to go next. It releases what a
+    stop held and goes first. Where the thread has `Cap::STEER`, the daemon now sends it as a
+    steer.
+  - No wire change: `PendingState::Held` already existed, and the view already draws a held
+    message.
+  - Tests: `a_stop_holds_the_queue_until_the_person_sends_again` in
+    `slopty-worker/tests/compose.rs` (Claude Code), `slopty-worker/tests/acp.rs` (a stub ACP
+    agent) and `slopty-agent/tests/codex.rs` (Codex).
+
+- ✅ **The files go back only while no other thread works in the same folder** (2026-10-04,
+  A10 of the T3 Code delta study, after T3 replaced its path-scoped revert with a refusal,
+  #12306).
+  - `Intent::Rewind { files: true }` restores the whole work tree. So another thread whose
+    folder has the same git root, with a turn under way or waiting on the person, would have
+    its edits go back under it mid-turn.
+  - That rewind is refused before anything happens, in words: "“{title}” is working in the same
+    folder, and its edits would go back too. Go back without the files, or once it rests"
+    (`thread::rewind`).
+  - Going back without the files, which is only the branch, still goes.
+  - T3's blanket refusal is not taken: Slopty keeps what the folder held under `<turn>-rewound`,
+    so the person's own edits are never lost.
+  - Test: `an_edit_from_a_turn_branches_before_it_and_puts_its_files_back`
+    (`slopty-worker/tests/codex.rs`) is first refused while a second stand-in Codex thread works
+    in the same repository, and the files go back once that thread rests.
+
+- ✅ **A Codex goal shows as Codex holds it, read-only** (2026-10-04, A11 of the T3 Code delta
+  study; T3's #6777 and #15133, and #7935 for why goal controls stay out).
+  - **The model.** `ThreadState::goal` is an open `Goal`, set by `Action::GoalSet`. It holds the
+    objective, the state in open words (`active`, `paused`, `blocked`, `usage-limited`,
+    `budget-limited`, `complete`: Codex's names in kebab case), the tokens used against the budget, the
+    time used and when it changed.
+  - **From Codex.** The adapter reads `thread/goal/updated` and `thread/goal/cleared`. On a
+    resume it asks `thread/goal/get`, so a goal set while Slopty was away still shows.
+  - **Setting, pausing or clearing a goal stays in Codex's TUI.** An active goal means Codex may
+    start turns by itself after a stop. The thread view says so at its Stop door rather than
+    fighting it. The turns Codex starts are seen through `turn/started` as any turn is, so
+    T3's #15133 (a goal thread shown as done while it ran) does not arise.
+  - Generated subset: `thread/goal/get`, `thread/goal/updated` and `thread/goal/cleared`
+    (`cargo xtask codex schema`, Codex 0.160.0).
+  - Tests: `a_codex_goal_shows_as_codex_holds_it` (`slopty-agent/tests/codex.rs`); `GoalSet` in
+    the `golden_thread` actions.
+
+- ✅ **An archived Codex thread is unarchived and taken up again, once** (2026-10-04, A8 of the
+  T3 Code delta study, after T3's `44bd4c9c` (#15389), which closes #10481).
+  - A Codex thread archived outside Slopty, by Codex's own TUI or `codex archive`, makes
+    `thread/resume` fail.
+  - On that refusal only, the worker calls `thread/unarchive` for the same native id and then
+    repeats the identical resume once (`Waiting::Unarchive`).
+  - Codex says the thread is archived only in words: "session <id> is archived", or its hint to
+    run `codex unarchive`. They are read as T3 reads them (`thread::codex::archived`).
+  - Any other refusal stays a refusal. A second one after unarchiving is told as it comes. No
+    fresh session is ever started in its place, which is the fallback T3 kept.
+  - Not measured against a signed-in Codex, which no test runs. The words are T3's, and they
+    are taken from Codex's own message.
+  - Tests: `an_archived_thread_is_unarchived_and_taken_up_again` (`slopty-worker/tests/codex.rs`,
+    a stand-in daemon that refuses until unarchived); `only_an_archived_thread_is_unarchived`
+    (`thread::codex`).
+
+- ✅ **Ask aside: a side question on a fork that goes away** (2026-10-04, A9 of the T3 Code
+  delta study; T3's most-upvoted idea, #7311, never merged there).
+  - **The wire.** All three intents need `Cap::FORK`.
+    - `Intent::Aside` forks the whole thread as `Intent::Fork` does, so Claude Code's
+      `--fork-session` keeps the prompt cache. It answers `Started { thread }`.
+    - The new thread carries the open fact `slopty.aside` (`ThreadMeta::ASIDE_FACT`, read by
+      `aside_of`), naming the thread it was asked beside. The client sends the question to it
+      as its first message.
+    - `Intent::KeepAside` drops the fact, so the thread becomes an ordinary thread of its own.
+    - `Intent::Discard` ends the aside's agent as a settled task's is ended, and the worker
+      forgets the thread and its log. Discard is refused for a thread that is not an aside. It
+      is answered once with the worker's starts, since the thread is gone after.
+  - **The agent's session stays** wherever the agent keeps it, as every session does. Nothing
+    is written into the main thread's session.
+  - **Not sleep.** The study's sketch put a closed aside to sleep. Sleep was deleted the same
+    day, so a closed aside ends.
+  - **Kept by the worker.** The fact is the worker's own (`Own::aside`) and is put back on every
+    meta, so an agent's rename or resume does not drop it. It outlives a worker restart.
+  - **The client's half.** The sheet over the thread, and passing over `slopty.aside` threads
+    in the navigator, the inbox and the attention ladder, belong to the UI and server lanes.
+  - Tests: `an_aside_keeps_its_mark_until_it_is_kept_or_forgotten`
+    (`slopty-worker/tests/threads.rs`); goldens `intent_aside`, `intent_discard`,
+    `intent_keep_aside`.

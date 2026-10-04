@@ -48,6 +48,7 @@ mod tests {
             caps: Vec::new(),
             models: Vec::new(),
             modes: Vec::new(),
+            efforts: Vec::new(),
             facts: std::collections::BTreeMap::new(),
             created_ms: WallMs::ZERO,
         };

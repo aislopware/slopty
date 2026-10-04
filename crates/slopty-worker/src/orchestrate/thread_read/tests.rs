@@ -13,6 +13,7 @@ use super::*;
 fn state() -> ThreadState {
     ThreadState::new(ThreadMeta {
         modes: Vec::new(),
+        efforts: Vec::new(),
         id: ThreadId::derived(&["read"]),
         agent: AgentId::named(AgentId::PI),
         agent_version: "0.9".to_owned(),
@@ -215,7 +216,6 @@ fn a_read_says_what_it_skipped_and_offers_the_open_requests() {
     assert!(!held.skipped, "nothing after turn 1 was let go");
 
     let ask = |id: &str, state: RequestState| Request {
-        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),

@@ -1,5 +1,5 @@
-//! Messages the person schedules: sent at a time ([`Delivery::At`]), or once another thread has
-//! rested for a while ([`Delivery::After`]).
+//! Messages the person schedules: sent at a time ([`Delivery::At`]), as "Continue at" a usage
+//! limit's reset.
 //!
 //! Each is the person's own message, held on the worker beside the thread's other pending ones
 //! and kept in its log, so it outlives a restart ([`super::Host::schedule`]). No adapter holds
@@ -19,10 +19,7 @@ use std::time::Duration;
 
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Intent, Outcome};
-use slopty_proto::thread::{
-    Cap, Delivery, IntentId, Liveness, Pending, PendingState, Phase, ThreadId, ThreadState,
-    TurnState,
-};
+use slopty_proto::thread::{Cap, Delivery, IntentId, Pending, PendingState, ThreadId};
 use tokio::task::JoinHandle;
 
 use super::Host;
@@ -45,46 +42,23 @@ pub struct Due {
     pub send: Intent,
 }
 
-/// Since when `state`'s agent has been at rest: its turn ended, nothing asked of the person,
-/// no work of its own under way. `None` while it is not.
-#[must_use]
-pub fn rested_since(state: &ThreadState) -> Option<WallMs> {
-    let working = matches!(state.status.phase, Phase::Working | Phase::Waiting | Phase::NeedsYou)
-        || state.last_turn().is_some_and(|turn| turn.state == TurnState::Active)
-        || state.open_requests().next().is_some()
-        || matches!(state.status.liveness, Liveness::Sleeping { .. });
-    (!working).then_some(state.status.since_ms)
-}
-
-/// When `pending`, waiting on the worker, goes, with `watched` the thread an
-/// [`Delivery::After`] waits on (`None` when it is not held here).
+/// When `pending`, waiting on the worker, goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum When {
     /// Now.
     Now,
-    /// At this time, unless what it waits on changes first.
+    /// At this time.
     At(WallMs),
-    /// Not until something changes.
+    /// Not on its own: a draft, which goes on the person's word.
     Later,
-    /// Never, held for this reason.
-    Held(&'static str),
 }
 
 /// When `pending` goes, at `now`.
 #[must_use]
-pub fn when(pending: &Pending, watched: Option<&ThreadState>, now: WallMs) -> When {
+pub const fn when(pending: &Pending, now: WallMs) -> When {
     match pending.delivery {
-        Delivery::At { at_ms } if at_ms <= now => When::Now,
+        Delivery::At { at_ms } if at_ms.as_millis() <= now.as_millis() => When::Now,
         Delivery::At { at_ms } => When::At(at_ms),
-        Delivery::After { .. } if watched.is_none() => When::Held("There is no such thread here"),
-        Delivery::After { settle_ms, .. } => match watched.and_then(rested_since) {
-            Some(since) => {
-                let at =
-                    WallMs::from_millis(since.as_millis().saturating_add(u64::from(settle_ms)));
-                if at <= now { When::Now } else { When::At(at) }
-            }
-            None => When::Later,
-        },
         Delivery::Steer | Delivery::Queue | Delivery::Draft | Delivery::Interrupt => When::Later,
     }
 }
@@ -140,11 +114,6 @@ pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Opti
                 if let Err(why) = super::attach::check(attachments) {
                     return refused(&why);
                 }
-                if let Delivery::After { thread: watched, .. } = delivery
-                    && *watched == state.meta.id
-                {
-                    return refused("A message cannot wait on its own thread");
-                }
                 scheduled.push(Pending {
                     intent: id,
                     text: text.clone(),
@@ -159,7 +128,6 @@ pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Opti
         Intent::Withdraw { pending }
         | Intent::Edit { pending, .. }
         | Intent::Promote { pending }
-        | Intent::Reorder { pending, .. }
             if host.is_scheduled(thread, *pending) =>
         {
             let decided = host.schedule(thread, id, |_, scheduled| {
@@ -185,7 +153,7 @@ pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Opti
                             p.state = PendingState::Waiting;
                         }
                     }
-                    _ => return refused("A scheduled message goes at its own moment"),
+                    _ => {}
                 }
                 Outcome::Done
             });
@@ -197,8 +165,8 @@ pub fn act(host: &Host, thread: ThreadId, id: IntentId, intent: &Intent) -> Opti
 
 /// Send each scheduled message in `host` at its moment through `fire`, until the host is gone.
 ///
-/// It looks again whenever a schedule changes or the table does (a thread waited on came to
-/// rest), and at the next time one is due.
+/// It looks again whenever a schedule changes or the table does, and at the next time one is
+/// due; it ends once the table's watch does.
 pub fn spawn(host: Host, fire: Fire) -> JoinHandle<()> {
     tokio::spawn(async move {
         let changed = host.schedule_changed();
@@ -226,38 +194,7 @@ pub fn spawn(host: Host, fire: Fire) -> JoinHandle<()> {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::thread::{AgentId, Drive, Status, ThreadMeta, Turn, TurnId, Usage};
-
     use super::*;
-
-    fn state(phase: Phase, since: u64) -> ThreadState {
-        let meta = ThreadMeta {
-            id: ThreadId::new(),
-            agent: AgentId::named(AgentId::PI),
-            agent_version: String::new(),
-            native: "s".to_owned(),
-            cwd: "/w".to_owned(),
-            title: String::new(),
-            terminal: None,
-            parent: None,
-            origin: ThreadMeta::PERSON.to_owned(),
-            forked_from: None,
-            drive: Drive::named(Drive::DRIVEN),
-            caps: Vec::new(),
-            models: Vec::new(),
-            modes: Vec::new(),
-            facts: std::collections::BTreeMap::new(),
-            created_ms: WallMs::ZERO,
-        };
-        let mut state = ThreadState::new(meta);
-        state.status = Status {
-            phase,
-            wait: None,
-            liveness: Liveness::Live,
-            since_ms: WallMs::from_millis(since),
-        };
-        state
-    }
 
     fn pending(delivery: Delivery) -> Pending {
         Pending {
@@ -269,38 +206,16 @@ mod tests {
         }
     }
 
-    /// A timed message goes at its time; one after another thread goes once that thread has
-    /// rested for the settle from when it came to rest, waits while it works, and is held when
-    /// the thread is not here.
+    /// A timed message goes at its time, a draft never on its own, and each is sent apart
+    /// from the intent that scheduled it, once.
     #[test]
-    fn a_message_goes_at_its_time_or_once_its_thread_has_settled() {
+    fn a_message_goes_at_its_time() {
         let ms = WallMs::from_millis;
         let at = pending(Delivery::At { at_ms: ms(5_000) });
-        assert_eq!(when(&at, None, ms(4_999)), When::At(ms(5_000)));
-        assert_eq!(when(&at, None, ms(5_000)), When::Now);
-
-        let after = pending(Delivery::After { thread: ThreadId::new(), settle_ms: 10_000 });
-        let done = state(Phase::Done, 1_000);
-        assert_eq!(when(&after, Some(&done), ms(5_000)), When::At(ms(11_000)));
-        assert_eq!(when(&after, Some(&done), ms(11_000)), When::Now);
-        assert_eq!(when(&after, Some(&state(Phase::Working, 1_000)), ms(99_000)), When::Later);
-        assert_eq!(when(&after, Some(&state(Phase::NeedsYou, 1_000)), ms(99_000)), When::Later);
-        let mut turning = state(Phase::Idle, 1_000);
-        turning.turns.push(Turn {
-            id: TurnId(1),
-            input: None,
-            state: TurnState::Active,
-            started_ms: WallMs::ZERO,
-            ended_ms: None,
-            usage: Usage::default(),
-            models: Vec::new(),
-            changed: slopty_proto::thread::Changed::default(),
-            before: None,
-            after: None,
-        });
-        assert_eq!(when(&after, Some(&turning), ms(99_000)), When::Later, "a turn under way");
-        assert_eq!(when(&after, None, ms(1)), When::Held("There is no such thread here"));
-        assert_eq!(when(&pending(Delivery::Queue), None, ms(1)), When::Later);
+        assert_eq!(when(&at, ms(4_999)), When::At(ms(5_000)));
+        assert_eq!(when(&at, ms(5_000)), When::Now);
+        assert_eq!(when(&pending(Delivery::Draft), ms(1)), When::Later);
+        assert_eq!(when(&pending(Delivery::Queue), ms(1)), When::Later);
         assert_ne!(sent_as(at.intent), at.intent, "sent apart from its schedule");
         assert_eq!(sent_as(at.intent), sent_as(at.intent), "once");
     }

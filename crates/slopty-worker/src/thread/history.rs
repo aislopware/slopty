@@ -659,7 +659,38 @@ impl<'a> Session<'a> {
 /// `prompt` as a hit for `pattern`: cut to [`PROMPT_HIT_BYTES`] round its first match, the
 /// matches marked.
 fn hit(pattern: &Pattern, matcher: &mut Matcher, prompt: &Prompt) -> PromptHit {
-    let text = prompt.text.as_str();
+    let cut = excerpt(pattern, matcher, &prompt.text, PROMPT_HIT_BYTES, LEAD_BYTES);
+    PromptHit {
+        text: cut.text,
+        spans: cut.spans,
+        cut_before: cut.cut_before,
+        cut_after: cut.cut_after,
+        at_ms: prompt.at_ms,
+    }
+}
+
+/// Some of a text a search found, round its first match.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Excerpt {
+    /// The text shown.
+    pub text: String,
+    /// Where the matches are in [`Self::text`], in order, never overlapping.
+    pub spans: Vec<Span>,
+    /// Text before [`Self::text`] was cut off.
+    pub cut_before: bool,
+    /// Text after it was cut off.
+    pub cut_after: bool,
+}
+
+/// `text` cut to `bytes` round `pattern`'s first match in it, from `lead` bytes before it, the
+/// matches marked.
+pub(super) fn excerpt(
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    text: &str,
+    bytes: usize,
+    lead: usize,
+) -> Excerpt {
     let mut chars = Vec::new();
     let mut at = Vec::new();
     let _score = pattern.indices(Utf32Str::new(text, &mut chars), matcher, &mut at);
@@ -667,7 +698,7 @@ fn hit(pattern: &Pattern, matcher: &mut Matcher, prompt: &Prompt) -> PromptHit {
     at.dedup();
     let spans = spans_of(text, &at);
     let first = spans.first().map_or(0, |span| usize::try_from(span.start).unwrap_or(0));
-    let (start, end) = window(text, first);
+    let (start, end) = window(text, first, bytes, lead);
     let shown = text.get(start..end).unwrap_or_default().to_owned();
     let spans = spans
         .into_iter()
@@ -679,13 +710,7 @@ fn hit(pattern: &Pattern, matcher: &mut Matcher, prompt: &Prompt) -> PromptHit {
             })
         })
         .collect();
-    PromptHit {
-        text: shown,
-        spans,
-        cut_before: start > 0,
-        cut_after: end < text.len(),
-        at_ms: prompt.at_ms,
-    }
+    Excerpt { text: shown, spans, cut_before: start > 0, cut_after: end < text.len() }
 }
 
 /// The byte spans of the characters at `chars` (sorted, unique) in `text`, runs joined.
@@ -707,18 +732,17 @@ fn spans_of(text: &str, chars: &[u32]) -> Vec<Span> {
     spans
 }
 
-/// The bytes of `text` a hit shows: [`PROMPT_HIT_BYTES`] from a little before `first`, on
-/// characters' boundaries.
-fn window(text: &str, first: usize) -> (usize, usize) {
-    if text.len() <= PROMPT_HIT_BYTES {
+/// The bytes of `text` an excerpt shows: `bytes` from `lead` before `first`, on characters'
+/// boundaries.
+fn window(text: &str, first: usize, bytes: usize, lead: usize) -> (usize, usize) {
+    if text.len() <= bytes {
         return (0, text.len());
     }
-    let mut start =
-        first.saturating_sub(LEAD_BYTES).min(text.len().saturating_sub(PROMPT_HIT_BYTES));
+    let mut start = first.saturating_sub(lead).min(text.len().saturating_sub(bytes));
     while !text.is_char_boundary(start) {
         start = start.saturating_sub(1);
     }
-    let mut end = start.saturating_add(PROMPT_HIT_BYTES).min(text.len());
+    let mut end = start.saturating_add(bytes).min(text.len());
     while !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }

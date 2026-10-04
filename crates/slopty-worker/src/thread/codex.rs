@@ -5,7 +5,10 @@
 //! TUI: it joins the daemon's control socket, a WebSocket on a Unix socket, follows every
 //! thread the daemon has loaded or starts, and puts what each says into the [`Host`]. What a
 //! client asks of a Codex thread goes back as the JSON-RPC Codex's own TUI would send: an
-//! approval's answer, a turn, a steer, an interrupt. Nothing is typed into the TUI.
+//! approval's answer, a turn, a steer, an interrupt, a switch of the model, its reasoning effort
+//! or the approval policy (`thread/settings/update`, for the thread's next turns, the TUI's
+//! included). Nothing is typed into the TUI. The models a thread can switch to are Codex's own
+//! list (`model/list`), asked once as the worker joins.
 //!
 //! A thread is followed by `thread/resume`, which brings back what Codex holds of it and keeps
 //! this connection subscribed, so the thread stays loaded while the worker runs. A thread is
@@ -42,7 +45,7 @@
 //! thread names that terminal while it runs, so a client shows it. With no daemon running it is
 //! refused: only a start brings the daemon up.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -50,15 +53,16 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use serde_json::Value;
+use slopty_agent::attach::Attached;
 use slopty_agent::codex::daemon::{self, Daemon};
 use slopty_agent::codex::protocol::{self as p, Method, RequestId, ServerNotification};
 use slopty_agent::codex::rpc::{self, Incoming};
-use slopty_agent::codex::shared::{Send, Shared};
+use slopty_agent::codex::shared::{Send, Setting, Settings, Shared};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, PastSession, Start};
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Delivery, Drive, Fork, IntentId, ItemBody, Link, Liveness,
-    Phase, Status, ThreadId, ThreadState, TurnId,
+    Pending, Phase, Status, ThreadId, ThreadState, TurnId,
 };
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
@@ -153,11 +157,6 @@ enum Ask {
         thread: ThreadId,
         intent: IntentId,
     },
-    Reorder {
-        thread: ThreadId,
-        intent: IntentId,
-        before: Option<IntentId>,
-    },
     Interrupt {
         thread: ThreadId,
     },
@@ -193,9 +192,10 @@ enum Ask {
         thread: ThreadId,
         done: oneshot::Sender<()>,
     },
-    /// The person put the thread to sleep: Codex lets it go now, and the thread says so.
-    Sleep {
+    /// Switch a setting of the thread's for its next turns.
+    Set {
         thread: ThreadId,
+        setting: Setting,
     },
 }
 
@@ -208,16 +208,13 @@ impl Ask {
             | Self::Withdraw { thread, .. }
             | Self::Edit { thread, .. }
             | Self::Promote { thread, .. }
-            | Self::Reorder { thread, .. }
             | Self::Interrupt { thread }
             | Self::Release { thread, .. }
             | Self::Fork { thread, .. }
+            | Self::Set { thread, .. }
             | Self::Wake { thread } => Some(*thread),
             // A thread let go is not taken up again to be closed.
-            Self::Start { .. }
-            | Self::Sessions { .. }
-            | Self::Close { .. }
-            | Self::Sleep { .. } => None,
+            Self::Start { .. } | Self::Sessions { .. } | Self::Close { .. } => None,
         }
     }
 }
@@ -402,9 +399,10 @@ impl Codex {
         let _gone = self.0.send(Ask::Promote { thread, intent });
     }
 
-    /// Move the message `intent` queued in `thread` to just before `before`, or to the end.
-    pub fn reorder(&self, thread: ThreadId, intent: IntentId, before: Option<IntentId>) {
-        let _gone = self.0.send(Ask::Reorder { thread, intent, before });
+    /// Switch `thread`'s `setting` for its next turns, the TUI's included
+    /// (`thread/settings/update`).
+    pub fn set(&self, thread: ThreadId, setting: Setting) {
+        let _gone = self.0.send(Ask::Set { thread, setting });
     }
 
     /// Stop the turn under way in `thread`.
@@ -415,12 +413,6 @@ impl Codex {
     /// Someone follows `thread`: Codex takes it up again if the worker let it go.
     pub fn wake(&self, thread: ThreadId) {
         let _gone = self.0.send(Ask::Wake { thread });
-    }
-
-    /// Put `thread` to sleep on the person's word: Codex lets it go now, its thread kept, and a
-    /// message, a wake or a follow takes it up again.
-    pub fn sleep(&self, thread: ThreadId) -> bool {
-        self.0.send(Ask::Sleep { thread }).is_ok()
     }
 
     /// Hand `thread`'s requests to Codex's own TUI for intent `id`, once: done when it runs on
@@ -506,6 +498,20 @@ fn checked(start: &Start) -> Result<Begin, String> {
         return Err(format!("There is no folder {} here", start.cwd));
     }
     Ok(Begin::New(Box::new(slopty_agent::codex::shared::start(&start.cwd, start.model.as_deref()))))
+}
+
+/// Whether Codex refused a resume because the thread is archived: "session <id> is archived",
+/// or its hint to run `codex unarchive`. Codex says so only in words, so they are read as T3
+/// Code reads them; any other refusal stays one.
+fn archived(message: &str) -> bool {
+    let message = message.to_lowercase();
+    let words: Vec<&str> = message.split_whitespace().collect();
+    message.contains("codex unarchive")
+        || words.windows(4).any(|w| {
+            w.first() == Some(&"session")
+                && w.get(2) == Some(&"is")
+                && w.get(3).is_some_and(|last| last.trim_end_matches(['.', ',', ';']) == "archived")
+        })
 }
 
 /// Each start in `held` refused with `reason`, once, and told to whoever waits on it.
@@ -731,6 +737,23 @@ enum Waiting {
     Unsubscribe {
         native: String,
     },
+    /// The models Codex offers, the pages before this one gathered.
+    Models {
+        gathered: Vec<p::Model>,
+    },
+    /// A switch of `thread`'s settings.
+    Settings {
+        thread: ThreadId,
+        update: Box<p::ThreadSettingsUpdateParams>,
+    },
+    /// The goal Codex holds for Codex thread `native`.
+    Goal {
+        native: String,
+    },
+    /// Codex thread `native`, archived, put back so it can be taken up again.
+    Unarchive {
+        native: String,
+    },
 }
 
 /// A followed thread.
@@ -755,6 +778,8 @@ struct Session {
     native: HashMap<ThreadId, String>,
     /// Threads being resumed, or to resume at their next status change.
     resuming: HashMap<String, bool>,
+    /// Threads put back from Codex's archive to be taken up again: each is tried once.
+    unarchived: HashSet<String>,
     /// Whether the handshake is done, so a thread can be started.
     ready: bool,
     /// Starts asked before it was.
@@ -775,9 +800,13 @@ struct Session {
     rest: Duration,
     /// The threads let go: Codex may have unloaded them, and they are taken up again when
     /// someone follows or asks.
-    asleep: HashSet<String>,
+    unloaded: HashSet<String>,
     /// What was asked of each thread let go, sent once it is followed again.
     waking: HashMap<String, Vec<Ask>>,
+    /// The models Codex offers, once it said, for each thread followed from now on.
+    models: Option<Vec<p::Model>>,
+    /// The messages each thread being read again held, held again once it is followed.
+    requeue: HashMap<String, VecDeque<(Pending, Vec<Attached>)>>,
 }
 
 /// What a server task's thread is loaded with: the seat's variables and Slopty's tools.
@@ -796,6 +825,7 @@ impl Session {
             threads: HashMap::new(),
             native: HashMap::new(),
             resuming: HashMap::new(),
+            unarchived: HashSet::new(),
             ready: false,
             held: Vec::new(),
             starting: HashMap::new(),
@@ -804,8 +834,10 @@ impl Session {
             parents: HashMap::new(),
             forking: HashMap::new(),
             rest,
-            asleep: HashSet::new(),
+            unloaded: HashSet::new(),
             waking: HashMap::new(),
+            models: None,
+            requeue: HashMap::new(),
         }
     }
 
@@ -886,9 +918,9 @@ impl Session {
     /// Every followed thread, and every one let go, is left exited and resumable: Codex is not
     /// there to say more.
     fn exited(&self) {
-        let asleep =
-            self.asleep.iter().map(|native| slopty_agent::codex::shared::thread_of(native));
-        for thread in self.threads.values().map(|f| f.id).chain(asleep) {
+        let unloaded =
+            self.unloaded.iter().map(|native| slopty_agent::codex::shared::thread_of(native));
+        for thread in self.threads.values().map(|f| f.id).chain(unloaded) {
             let status = Status {
                 phase: Phase::Idle,
                 wait: None,
@@ -916,32 +948,10 @@ impl Session {
             .collect();
         for native in resting {
             self.threads.remove(&native);
-            self.asleep.insert(native.clone());
+            self.unloaded.insert(native.clone());
             let params = p::ThreadUnsubscribeParams { thread_id: native.clone() };
             self.request(&params, Waiting::Unsubscribe { native }).await?;
         }
-        Ok(())
-    }
-
-    /// Let thread `thread` go on the person's word, and say it ended: the host tells that as its
-    /// sleep. It is taken up again as any thread let go is.
-    async fn sleep(&mut self, thread: ThreadId) -> Result<(), String> {
-        let Some(native) = self.native.get(&thread).cloned() else { return Ok(()) };
-        if self.threads.remove(&native).is_some() {
-            self.asleep.insert(native.clone());
-            let params = p::ThreadUnsubscribeParams { thread_id: native.clone() };
-            self.request(&params, Waiting::Unsubscribe { native }).await?;
-        }
-        let now = WallMs::now();
-        self.host.update(thread, |state| {
-            let status = Status {
-                phase: state.status.phase,
-                wait: None,
-                liveness: Liveness::Exited { resumable: true },
-                since_ms: now,
-            };
-            (vec![Action::Status(status)], ())
-        });
         Ok(())
     }
 
@@ -953,7 +963,7 @@ impl Session {
             self.request(&params, Waiting::Turn { thread }).await?;
         }
         if self.threads.remove(&native).is_some() {
-            self.asleep.insert(native.clone());
+            self.unloaded.insert(native.clone());
             let params = p::ThreadUnsubscribeParams { thread_id: native.clone() };
             self.request(&params, Waiting::Unsubscribe { native }).await?;
         }
@@ -1033,6 +1043,8 @@ impl Session {
                 self.send(rpc::notification("initialized")).await?;
                 let list = p::ThreadLoadedListParams::default();
                 self.request(&list, Waiting::Loaded).await?;
+                let models = p::ModelListParams::default();
+                self.request(&models, Waiting::Models { gathered: Vec::new() }).await?;
                 self.ready = true;
                 for ask in std::mem::take(&mut self.held) {
                     self.ask(ask).await?;
@@ -1050,11 +1062,20 @@ impl Session {
                 self.resuming.remove(&native);
                 match rpc::response::<p::ThreadResumeParams>(result) {
                     Ok(resumed) => {
+                        self.unarchived.remove(&native);
                         self.follow(&resumed.thread);
-                        self.settled(&resumed.thread.id, resumed.approval_policy, &resumed.sandbox);
+                        let settings = Settings {
+                            approval: resumed.approval_policy,
+                            sandbox: &resumed.sandbox,
+                            model: &resumed.model,
+                            effort: resumed.reasoning_effort.as_deref(),
+                        };
+                        self.settled(&resumed.thread.id, &settings);
                         for ask in self.waking.remove(&native).unwrap_or_default() {
                             self.ask(ask).await?;
                         }
+                        let goal = p::ThreadGoalGetParams { thread_id: native.clone() };
+                        self.request(&goal, Waiting::Goal { native: native.clone() }).await?;
                         self.read_usage(native).await?;
                     }
                     Err(e) => {
@@ -1063,18 +1084,43 @@ impl Session {
                     }
                 }
             }
+            // Archived outside Slopty: put back from the archive and taken up again, once.
+            (Waiting::Resume { native }, Err(e))
+                if archived(&e.message) && self.unarchived.insert(native.clone()) =>
+            {
+                tracing::info!(%native, "a Codex thread was archived: unarchived to resume it");
+                let params = p::ThreadUnarchiveParams { thread_id: native.clone() };
+                self.request(&params, Waiting::Unarchive { native }).await?;
+            }
             (Waiting::Resume { native }, Err(e)) => {
                 // Not written yet: tried again at its next status change.
                 tracing::trace!(%native, "a Codex thread is not resumable yet: {e}");
-                self.reopened(&native, &format!("Codex couldn't take the thread up again: {e}"));
-                if let Some(held) = self.waking.remove(&native) {
-                    let reason = format!("Codex couldn't take the thread up again: {e}");
-                    for ask in held {
-                        self.unanswered(ask, &reason);
+                self.unresumed(native, &e.to_string());
+            }
+            (Waiting::Unarchive { native }, Ok(_)) => {
+                self.resuming.remove(&native);
+                self.resume(native).await?;
+            }
+            (Waiting::Unarchive { native }, Err(e)) => {
+                tracing::debug!(%native, "Codex did not unarchive a thread: {e}");
+                self.unresumed(native, &e.to_string());
+            }
+            (Waiting::Goal { native }, Ok(result)) => {
+                let read = rpc::response::<p::ThreadGoalGetParams>(result);
+                match (read, self.threads.get(&native)) {
+                    (Ok(read), Some(followed)) => {
+                        if let Some(goal) = read.goal {
+                            let goal = slopty_agent::codex::shared::goal_of(&goal);
+                            self.host.apply(followed.id, vec![Action::GoalSet(Some(goal))]);
+                        }
                     }
-                    self.asleep.insert(native.clone());
+                    (Err(e), _) => tracing::debug!(%native, "Codex's goal did not read: {e}"),
+                    (Ok(_), None) => {}
                 }
-                self.resuming.insert(native, false);
+            }
+            (Waiting::Goal { native }, Err(e)) => {
+                // A Codex built without goals.
+                tracing::trace!(%native, "Codex gave no goal: {e}");
             }
             (Waiting::Turn { thread }, Err(e)) => {
                 tracing::debug!(%thread, "Codex refused a turn: {e}");
@@ -1085,7 +1131,13 @@ impl Session {
                         if !self.threads.contains_key(&started.thread.id) {
                             self.follow(&started.thread);
                         }
-                        self.settled(&started.thread.id, started.approval_policy, &started.sandbox);
+                        let settings = Settings {
+                            approval: started.approval_policy,
+                            sandbox: &started.sandbox,
+                            model: &started.model,
+                            effort: started.reasoning_effort.as_deref(),
+                        };
+                        self.settled(&started.thread.id, &settings);
                         match self.threads.get(&started.thread.id) {
                             Some(followed) => {
                                 if let Some(seated) = seated.as_deref() {
@@ -1119,7 +1171,13 @@ impl Session {
                         if !self.threads.contains_key(&forked.thread.id) {
                             self.follow(&forked.thread);
                         }
-                        self.settled(&forked.thread.id, forked.approval_policy, &forked.sandbox);
+                        let settings = Settings {
+                            approval: forked.approval_policy,
+                            sandbox: &forked.sandbox,
+                            model: &forked.model,
+                            effort: forked.reasoning_effort.as_deref(),
+                        };
+                        self.settled(&forked.thread.id, &settings);
                         match self.threads.get(&forked.thread.id).map(|f| f.id) {
                             Some(thread) => {
                                 self.host.forked(thread, Fork { thread: from, turn });
@@ -1152,7 +1210,7 @@ impl Session {
             // Still subscribed, so still followed.
             (Waiting::Unsubscribe { native }, Err(e)) => {
                 tracing::debug!(%native, "Codex kept a thread it was asked to let go: {e}");
-                self.asleep.remove(&native);
+                self.unloaded.remove(&native);
                 self.resume(native).await?;
             }
             (Waiting::Usage { native }, Ok(result)) => {
@@ -1171,6 +1229,42 @@ impl Session {
             (Waiting::Usage { native }, Err(e)) => {
                 // An account Codex does not bill through, or a build that does not say.
                 tracing::trace!(%native, "Codex gave no usage: {e}");
+            }
+            (Waiting::Models { mut gathered }, Ok(result)) => {
+                match rpc::response::<p::ModelListParams>(result) {
+                    Ok(page) => {
+                        gathered.extend(page.data);
+                        if let Some(cursor) = page.next_cursor {
+                            let next =
+                                p::ModelListParams { cursor: Some(cursor), ..Default::default() };
+                            return self.request(&next, Waiting::Models { gathered }).await;
+                        }
+                        for followed in self.threads.values_mut() {
+                            let actions = followed.shared.models(&gathered);
+                            if !actions.is_empty() {
+                                self.host.apply(followed.id, actions);
+                            }
+                        }
+                        self.models = Some(gathered);
+                    }
+                    Err(e) => tracing::debug!("Codex's models did not read: {e}"),
+                }
+            }
+            // Without the models a thread offers no switch of model or effort.
+            (Waiting::Models { .. }, Err(e)) => tracing::debug!("Codex listed no models: {e}"),
+            (Waiting::Settings { thread, update }, Ok(_)) => {
+                if let Some(followed) = self.followed(thread) {
+                    let actions = followed.shared.switched(&update);
+                    if !actions.is_empty() {
+                        self.host.apply(thread, actions);
+                    }
+                }
+            }
+            (Waiting::Settings { thread, .. }, Err(e)) => {
+                if let Some(followed) = self.followed(thread) {
+                    let actions = followed.shared.unswitched(&e.to_string(), WallMs::now());
+                    self.host.apply(thread, actions);
+                }
             }
             (Waiting::Loaded | Waiting::Turn { .. }, _) => {}
         }
@@ -1196,6 +1290,20 @@ impl Session {
             ..p::ThreadResumeParams::default()
         };
         self.request(&params, Waiting::Resume { native }).await
+    }
+
+    /// Codex thread `native` could not be taken up again, for `why`: what waited on it is
+    /// refused, and it is tried again at its next status change.
+    fn unresumed(&mut self, native: String, why: &str) {
+        let reason = format!("Codex couldn't take the thread up again: {why}");
+        self.reopened(&native, &reason);
+        if let Some(held) = self.waking.remove(&native) {
+            for ask in held {
+                self.unanswered(ask, &reason);
+            }
+            self.unloaded.insert(native.clone());
+        }
+        self.resuming.insert(native, false);
     }
 
     /// Ask what Codex thread `native` has cost so far.
@@ -1227,6 +1335,12 @@ impl Session {
             if let Some(limits) = &self.limits {
                 late.extend(followed.shared.rate_limits(limits));
             }
+            if let Some(models) = &self.models {
+                late.extend(followed.shared.models(models));
+            }
+            if let Some(queued) = self.requeue.remove(&thread.id) {
+                late.extend(followed.shared.requeue(queued));
+            }
             if let Some(link) = self.parents.get(&id) {
                 late.extend(followed.shared.adopted(link.clone()));
             }
@@ -1246,10 +1360,10 @@ impl Session {
         }
     }
 
-    /// Codex's thread `native` runs under `approval` in `sandbox`, as its start or resume said.
-    fn settled(&mut self, native: &str, approval: p::AskForApproval, sandbox: &p::SandboxPolicy) {
+    /// Codex's thread `native` runs with `settings`, as its start, resume or fork said.
+    fn settled(&mut self, native: &str, settings: &Settings<'_>) {
         if let Some(followed) = self.threads.get_mut(native) {
-            let actions = followed.shared.settings(approval, sandbox);
+            let actions = followed.shared.settings(settings);
             if !actions.is_empty() {
                 self.host.apply(followed.id, actions);
             }
@@ -1304,6 +1418,14 @@ impl Session {
             return Ok(());
         }
         let Some(native) = thread else { return Ok(()) };
+        // A client rewrote the thread's history (`thread/revert`): it is read again whole, its
+        // held messages kept.
+        if matches!(note, ServerNotification::ThreadReverted(_))
+            && let Some(mut followed) = self.threads.remove(&native)
+        {
+            self.requeue.insert(native.clone(), followed.shared.take_queued());
+            return self.resume(native).await;
+        }
         match self.threads.get_mut(&native) {
             Some(followed) => {
                 followed.heard = Instant::now();
@@ -1324,11 +1446,11 @@ impl Session {
                 }
             }
             // A thread let go is taken up again only when it works: its unloading is no news.
-            None if self.asleep.contains(&native) => {
+            None if self.unloaded.contains(&native) => {
                 if let ServerNotification::ThreadStatusChanged(changed) = note
                     && matches!(changed.status, p::ThreadStatus::Active { .. })
                 {
-                    self.asleep.remove(&native);
+                    self.unloaded.remove(&native);
                     self.resume(native).await?;
                 }
             }
@@ -1364,7 +1486,7 @@ impl Session {
         {
             if let Some(followed) = self.threads.get_mut(&native) {
                 followed.heard = Instant::now();
-            } else if self.asleep.remove(&native) || self.waking.contains_key(&native) {
+            } else if self.unloaded.remove(&native) || self.waking.contains_key(&native) {
                 // Let go: held until Codex has taken the thread up again.
                 let held = self.waking.entry(native.clone()).or_default();
                 if !matches!(ask, Ask::Wake { .. }) {
@@ -1375,7 +1497,6 @@ impl Session {
         }
         match ask {
             Ask::Wake { .. } => Ok(()),
-            Ask::Sleep { thread } => self.sleep(thread).await,
             Ask::Close { thread, done } => {
                 let result = self.close(thread).await;
                 let _gone = done.send(());
@@ -1483,7 +1604,11 @@ impl Session {
                     }
                     Send::Held(actions) => {
                         self.host.apply(thread, actions);
-                        Ok(())
+                        // What a stop held goes again at rest, ahead of this message.
+                        let next = self.followed(thread).and_then(|f| f.shared.next_queued());
+                        let Some((params, taken)) = next else { return Ok(()) };
+                        self.host.apply(thread, taken);
+                        self.request(params.as_ref(), Waiting::Turn { thread }).await
                     }
                 }
             }
@@ -1518,22 +1643,34 @@ impl Session {
                     }
                 }
             }
-            Ask::Reorder { thread, intent, before } => {
-                let moved = self.followed(thread).and_then(|f| f.shared.reorder(intent, before));
-                if let Some(actions) = moved {
-                    self.host.apply(thread, actions);
-                }
-                Ok(())
-            }
             Ask::Release { thread, id, reply } => {
                 self.release(thread, id, reply);
                 Ok(())
             }
             Ask::Interrupt { thread } => {
-                let Some(params) = self.followed(thread).and_then(|f| f.shared.interrupt()) else {
+                let Some((params, held)) = self.followed(thread).and_then(|f| f.shared.stop())
+                else {
                     return Ok(());
                 };
+                if !held.is_empty() {
+                    self.host.apply(thread, held);
+                }
                 self.request(&params, Waiting::Turn { thread }).await
+            }
+            Ask::Set { thread, setting } => {
+                let Some(followed) = self.followed(thread) else { return Ok(()) };
+                match followed.shared.switch(&setting) {
+                    Ok(update) => {
+                        let waiting =
+                            Waiting::Settings { thread, update: Box::new(update.clone()) };
+                        self.request(&update, waiting).await
+                    }
+                    Err(why) => {
+                        let actions = followed.shared.unswitched(&why, WallMs::now());
+                        self.host.apply(thread, actions);
+                        Ok(())
+                    }
+                }
             }
         }
     }
@@ -1616,4 +1753,27 @@ impl Session {
 #[must_use]
 pub fn is_shared(state: &ThreadState) -> bool {
     state.meta.agent.is(AgentId::CODEX) && state.meta.drive.is(Drive::SHARED)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::archived;
+
+    /// Only Codex's words for an archived thread unarchive it: an archived workspace, a missing
+    /// thread or an unrelated path under the archive stay refusals.
+    #[test]
+    fn only_an_archived_thread_is_unarchived() {
+        assert!(archived("session saved-thread is archived"));
+        assert!(archived("Session 019a-77 is archived."));
+        assert!(archived("Run `codex unarchive saved-thread` to unarchive it first."));
+        for other in [
+            "thread not found",
+            "no rollout found",
+            "authentication failed",
+            "workspace is archived",
+            "permission denied reading archived_sessions/saved-thread",
+        ] {
+            assert!(!archived(other), "{other}");
+        }
+    }
 }

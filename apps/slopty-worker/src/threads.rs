@@ -11,12 +11,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use slopty_agent::codex::shared::Setting;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
 use slopty_proto::orchestration::ErrorCode;
 use slopty_proto::thread::wire::{
     Expanded, Intent, IntentDone, Outcome, PastSessions, ReviewScope, Start, TableFrame,
-    ThreadFrame, ThreadRequest,
+    ThreadFrame, ThreadHits, ThreadRequest,
 };
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, Liveness,
@@ -35,7 +36,7 @@ use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
-use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule, steer};
+use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
@@ -443,6 +444,27 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // An aside starts a thread, and closing one ends an agent: on tasks of their own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Aside } => {
+                tracing::info!(client = %at.client, %id, %thread, "aside");
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let outcome = aside(&threads, thread, id).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
+            ThreadRequest::Intent { id, thread, intent: Intent::Discard } => {
+                tracing::info!(client = %at.client, %id, %thread, "discard an aside");
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let outcome = discard(&threads, thread, id).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
+            ThreadRequest::Intent { id, thread, intent: Intent::KeepAside } => {
+                let outcome = keep_aside(&threads, thread, id);
+                at.post(WorkerMsg::IntentDone(IntentDone { id, outcome }));
+            }
             // An edit from a turn branches the thread and may put files back: on a task of its own.
             ThreadRequest::Intent { id, thread, intent: Intent::Rewind { turn, files } } => {
                 tracing::info!(client = %at.client, %id, %thread, turn = turn.0, files, "rewind");
@@ -460,23 +482,6 @@ impl Following {
                     let host = threads.host.clone();
                     let begun = |id, start| begin(&threads, id, Box::new(start));
                     let outcome = carry(&host, thread, id, agent, begun).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
-            // A sleep may close a terminal, and a wake open one: on tasks of their own.
-            ThreadRequest::Intent { id, thread, intent: Intent::Sleep } => {
-                tracing::info!(client = %at.client, %id, %thread, "sleep");
-                let (out, by) = (at.out.clone(), answerer(at.client));
-                at.tasks.spawn(async move {
-                    let outcome = sleep(&threads, thread, id, by).await;
-                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
-                });
-            }
-            ThreadRequest::Intent { id, thread, intent: Intent::Wake } => {
-                tracing::info!(client = %at.client, %id, %thread, "wake");
-                let (out, by) = (at.out.clone(), answerer(at.client));
-                at.tasks.spawn(async move {
-                    let outcome = wake(&threads, thread, id, by).await;
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
@@ -499,6 +504,22 @@ impl Following {
                 at.tasks.spawn(async move {
                     let listed = sessions(&threads, agent, cwd, query, limit).await;
                     let _gone = out.send(WorkerMsg::Sessions(listed)).await;
+                });
+            }
+            // Every thread held is read: on the blocking pool.
+            ThreadRequest::Search { query, limit } => {
+                let (host, out) = (threads.host, at.out.clone());
+                at.tasks.spawn(async move {
+                    let asked = query.clone();
+                    let found = tokio::task::spawn_blocking(move || {
+                        slopty_worker::thread::search::search(&host, &query, limit)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("a thread search failed: {e}");
+                        ThreadHits { query: asked, threads: Vec::new(), more: 0 }
+                    });
+                    let _gone = out.send(WorkerMsg::ThreadHits(found)).await;
                 });
             }
         }
@@ -560,6 +581,57 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
     }
 }
 
+/// Ask aside of `thread` for intent `id`, once: a fork of the whole thread, marked as its aside
+/// so lists and attention pass over it until it is kept.
+async fn aside(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
+    let outcome = fork(threads, thread, id, None).await;
+    if let Outcome::Started { thread: aside } = outcome
+        && !threads.host.aside(aside, Some(thread))
+    {
+        tracing::warn!(%thread, %aside, "an aside left before it was marked");
+    }
+    outcome
+}
+
+/// Close aside `thread` for intent `id`, once: its agent ends as a settled task's does, its
+/// session kept where the agent keeps it, and the worker forgets the thread. A thread that is
+/// no aside is refused.
+async fn discard(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
+    // Answered once, though the thread is gone after: kept with the worker's starts.
+    if let Some(first) = threads.host.started(id) {
+        return first;
+    }
+    let Some((state, _)) = threads.host.state(thread) else {
+        return refused("no such thread".to_owned());
+    };
+    let outcome = if state.meta.aside_of().is_none() {
+        refused("Only an aside is closed for good".to_owned())
+    } else {
+        if let Err(e) = threads.end(&state).await {
+            tracing::warn!(%thread, "an aside's agent did not end: {e}");
+        }
+        if let Err(e) = threads.host.remove(thread) {
+            tracing::warn!(%thread, "an aside's log stayed: {e}");
+        }
+        Outcome::Done
+    };
+    threads.host.record_start(id, outcome)
+}
+
+/// Keep aside `thread` for intent `id`, once, as an ordinary thread of its own.
+fn keep_aside(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
+    if let Some(first) = threads.host.outcome(thread, id) {
+        return first;
+    }
+    let Some((state, _)) = threads.host.state(thread) else {
+        return refused("no such thread".to_owned());
+    };
+    if state.meta.aside_of().is_some() {
+        threads.host.aside(thread, None);
+    }
+    threads.host.intent(thread, id, |_| (Outcome::Done, Vec::new())).unwrap_or(Outcome::Done)
+}
+
 /// Edit `thread` from turn `turn` for intent `id`, once, its files going back too with `files`
 /// ([`slopty_worker::thread::rewind`]): only Codex branches a session before a turn, and every
 /// other agent is refused in words.
@@ -581,94 +653,6 @@ async fn rewind(
     let (host, snapshots) = (&threads.host, &threads.snapshots);
     slopty_worker::thread::rewind::rewind(host, snapshots, (thread, id), (turn, files), branch)
         .await
-}
-
-/// Put `thread`'s agent to sleep for intent `id`, once, when it rests with nothing under way
-/// ([`Host::sleep`]): each agent ends its own way, and Claude Code with its terminal, closed
-/// once the decision is made.
-async fn sleep(threads: &Threads, thread: ThreadId, id: IntentId, by: Answerer) -> Outcome {
-    let mut terminal = None;
-    let outcome = threads.host.sleep(thread, id, |state| {
-        if codex::is_shared(state) {
-            if state.meta.terminal.is_some() {
-                return refused("Codex's own terminal holds this thread".to_owned());
-            }
-            if threads.codex.sleep(thread) {
-                Outcome::Done
-            } else {
-                refused("Codex threads are not served here".to_owned())
-            }
-        } else if pi::is_pi(state) {
-            threads.pi.decide(state, id, &Intent::Sleep, by)
-        } else if acp::is_acp(state) {
-            threads.acp.decide(state, id, &Intent::Sleep, by)
-        } else if let Some(session) = state.meta.terminal {
-            terminal = Some(session);
-            Outcome::Done
-        } else {
-            refused("Its agent runs in no terminal here".to_owned())
-        }
-    });
-    // Claude Code ends with its terminal, as when the person closes it: its session is
-    // written as it goes.
-    if let Some(session) = terminal
-        && let Err(e) = threads.worker.close(session).await
-    {
-        tracing::warn!(%thread, %session, "the terminal of an agent put to sleep stayed: {e}");
-    }
-    outcome.unwrap_or_else(|| refused("no such thread".to_owned()))
-}
-
-/// Wake `thread`'s agent for intent `id`, once: its session is taken up again through the
-/// agent's own resume. An agent that runs is awake already.
-async fn wake(threads: &Threads, thread: ThreadId, id: IntentId, by: Answerer) -> Outcome {
-    if let Some(first) = threads.host.outcome(thread, id) {
-        return first;
-    }
-    let Some((state, _)) = threads.host.state(thread) else {
-        return refused("no such thread".to_owned());
-    };
-    let outcome = if !state.meta.can(Cap::SLEEP) {
-        Outcome::Unsupported { cap: Cap::named(Cap::SLEEP) }
-    } else if codex::is_shared(&state) {
-        threads.codex.wake(thread);
-        Outcome::Done
-    } else if pi::is_pi(&state) {
-        threads.pi.decide(&state, id, &Intent::Wake, by)
-    } else if acp::is_acp(&state) {
-        threads.acp.decide(&state, id, &Intent::Wake, by)
-    } else {
-        claude_woken(threads, &state, id).await
-    };
-    threads.host.intent(thread, id, |_| (outcome.clone(), Vec::new())).unwrap_or(outcome)
-}
-
-/// Claude Code taken up again on `state`'s session in a terminal of its own (`--resume`).
-async fn claude_woken(threads: &Threads, state: &ThreadState, id: IntentId) -> Outcome {
-    match state.status.liveness {
-        Liveness::Live | Liveness::Silent { .. } | Liveness::Sleeping { .. } => Outcome::Done,
-        Liveness::Exited { resumable: false } => {
-            refused("Claude Code cannot take this session up again".to_owned())
-        }
-        Liveness::Exited { resumable: true } | Liveness::Asleep { .. } => {
-            let start = Start {
-                agent: state.meta.agent.clone(),
-                cwd: state.meta.cwd.clone(),
-                drive: None,
-                prompt: None,
-                model: None,
-                args: vec![slopty_agent::resume::RESUME_FLAG.to_owned(), state.meta.native.clone()],
-            };
-            let started = match threads.host.seated_of(state.meta.id) {
-                Some(seated) => threads.claude_start.start_at(id, start, seated).await,
-                None => threads.claude_start.start(id, start).await,
-            };
-            match started {
-                Outcome::Started { .. } => Outcome::Done,
-                other => other,
-            }
-        }
-    }
 }
 
 /// Who answers for a client: Slopty, on its behalf.
@@ -786,12 +770,6 @@ fn act_as(
     if let Some(outcome) = schedule::act(&threads.host, thread, id, intent) {
         return outcome;
     }
-    // A message sent by interrupt is queued, then the turn under way stopped, each its own
-    // intent.
-    let step = |id, intent: &Intent| act_as(who, threads, thread, id, intent);
-    if let Some(outcome) = steer::act(&threads.host, thread, id, intent, step) {
-        return outcome;
-    }
     let decided = threads.host.intent(thread, id, |state| decide(who, threads, state, id, intent));
     decided.unwrap_or_else(|| refused("no such thread".to_owned()))
 }
@@ -845,6 +823,18 @@ fn decide(
     let needs = intent.needs();
     if !state.meta.can(needs) {
         return (Outcome::Unsupported { cap: Cap::named(needs) }, Vec::new());
+    }
+    if let Intent::Send { text, attachments, delivery: Delivery::Interrupt } = intent {
+        // "Now" goes by the agent's own steer where it has one. Only an agent without one is
+        // interrupted, and its adapter puts the message first in its queue.
+        if state.meta.can(Cap::STEER) {
+            let (text, attachments) = (text.clone(), attachments.clone());
+            let steer = Intent::Send { text, attachments, delivery: Delivery::Steer };
+            return decide(who, threads, state, id, &steer);
+        }
+        if !state.meta.can(Cap::QUEUE) {
+            return (Outcome::Unsupported { cap: Cap::named(Cap::QUEUE) }, Vec::new());
+        }
     }
     if codex::is_shared(state) {
         return (shared(who, &threads.codex, state, id, intent), Vec::new());
@@ -942,15 +932,9 @@ fn shared(
         Intent::Withdraw { pending }
         | Intent::Edit { pending, .. }
         | Intent::Promote { pending }
-        | Intent::Reorder { pending, .. }
             if !state.pending.iter().any(|p| p.intent == *pending) =>
         {
             refused("That message is not waiting".to_owned())
-        }
-        Intent::Reorder { before: Some(before), .. }
-            if !state.pending.iter().any(|p| p.intent == *before) =>
-        {
-            refused("That message has already gone".to_owned())
         }
         Intent::Withdraw { pending } => {
             codex.withdraw(thread, *pending);
@@ -960,16 +944,33 @@ fn shared(
             codex.promote(thread, *pending);
             Outcome::Done
         }
-        Intent::Reorder { pending, before } => {
-            codex.reorder(thread, *pending, *before);
-            Outcome::Done
-        }
         Intent::Edit { pending, text } => {
             codex.edit(thread, *pending, text.clone());
             Outcome::Done
         }
         Intent::Interrupt => {
             codex.interrupt(thread);
+            Outcome::Done
+        }
+        Intent::SetModel { model } if !state.meta.models.iter().any(|m| m.id == *model) => {
+            refused(format!("Codex offers no model {model} here"))
+        }
+        Intent::SetEffort { effort } if !state.meta.efforts.iter().any(|e| e.id == *effort) => {
+            refused(format!("The model has no reasoning effort {effort}"))
+        }
+        Intent::SetMode { mode } if !state.meta.modes.iter().any(|m| m.id == *mode) => {
+            refused(format!("Codex has no approval policy {mode}"))
+        }
+        Intent::SetModel { model } => {
+            codex.set(thread, Setting::Model(model.clone()));
+            Outcome::Done
+        }
+        Intent::SetEffort { effort } => {
+            codex.set(thread, Setting::Effort(effort.clone()));
+            Outcome::Done
+        }
+        Intent::SetMode { mode } => {
+            codex.set(thread, Setting::Mode(mode.clone()));
             Outcome::Done
         }
         other => Outcome::Unsupported { cap: Cap::named(other.needs()) },
@@ -1186,24 +1187,29 @@ impl orchestrate::TaskThreads for Threads {
             let Some(thread) = self.host.seated_at(seat) else { return Ok(false) };
             let Some((state, _)) = self.host.state(thread) else { return Ok(false) };
             tracing::info!(%seat, %thread, "end a task's thread");
-            if codex::is_shared(&state) {
-                self.codex.close(thread).await;
-            } else if pi::is_pi(&state) {
-                self.pi.close(thread).await;
-            } else if acp::is_acp(&state) {
-                self.acp.close(thread).await;
-            } else if let Some(terminal) = state.meta.terminal {
-                // An agent in a terminal ends with it, as a seat's terminal is closed.
-                if let Err(e) = self.worker.close(terminal).await {
-                    return Err(Failure::new(ErrorCode::Failed, e.to_string()));
-                }
-            }
+            self.end(&state).await.map_err(|e| Failure::new(ErrorCode::Failed, e))?;
             Ok(true)
         })
     }
 }
 
 impl Threads {
+    /// End `state`'s agent, its session kept to take up again: each adapter ends its own, and
+    /// an agent in a terminal ends with it, as a seat's terminal is closed.
+    async fn end(&self, state: &ThreadState) -> Result<(), String> {
+        let thread = state.meta.id;
+        if codex::is_shared(state) {
+            self.codex.close(thread).await;
+        } else if pi::is_pi(state) {
+            self.pi.close(thread).await;
+        } else if acp::is_acp(state) {
+            self.acp.close(thread).await;
+        } else if let Some(terminal) = state.meta.terminal {
+            self.worker.close(terminal).await.map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
     /// The thread a server task started at `seat`, when one runs in no terminal of its own:
     /// what the server delivers to the seat goes to it as a message.
     #[must_use]

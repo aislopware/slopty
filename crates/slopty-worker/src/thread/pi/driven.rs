@@ -81,6 +81,8 @@ pub(super) enum Ready {
 enum Expect {
     State,
     Models,
+    /// The thinking levels the model in use supports.
+    Levels,
     Stats,
     Entries,
     /// A message, sent as this intent.
@@ -140,6 +142,7 @@ impl Task {
             Ready::Now(first) => {
                 self.ask_for(Command::GetState, Some(Expect::State)).await;
                 self.ask_for(Command::GetAvailableModels, Some(Expect::Models)).await;
+                self.ask_for(Command::GetAvailableThinkingLevels, Some(Expect::Levels)).await;
                 for ask in first {
                     self.ask(ask).await;
                 }
@@ -279,11 +282,17 @@ impl Task {
                 }
                 self.apply(actions);
             }
+            // Another model may think in other levels, and pi clamps the level to them.
             ThreadAsk::SetModel { model } => {
                 if let Some(command) = Driven::set_model(&model) {
                     self.ask_for(command, None).await;
                     self.ask_for(Command::GetState, Some(Expect::State)).await;
+                    self.ask_for(Command::GetAvailableThinkingLevels, Some(Expect::Levels)).await;
                 }
+            }
+            // pi says the level it took as it takes it (`thinking_level_changed`).
+            ThreadAsk::SetEffort { effort } => {
+                self.ask_for(Driven::set_effort(&effort), None).await;
             }
             ThreadAsk::Compact => {
                 self.ask_for(Command::Compact { custom_instructions: None }, None).await;
@@ -322,6 +331,13 @@ impl Task {
                             self.apply(actions);
                         }
                     }
+                    Expect::Levels => {
+                        let levels = data.get("levels").cloned().unwrap_or_default();
+                        if let Ok(levels) = serde_json::from_value::<Vec<String>>(levels) {
+                            let actions = self.driven.efforts(&levels);
+                            self.apply(actions);
+                        }
+                    }
                     Expect::Stats => {
                         if let Ok(stats) = serde_json::from_value::<Stats>(data) {
                             let actions = self.driven.stats(&stats);
@@ -341,7 +357,7 @@ impl Task {
                     self.lost = Some(format!("pi did not give the session back: {why}"));
                     return;
                 }
-                Expect::State | Expect::Models | Expect::Stats => {}
+                Expect::State | Expect::Models | Expect::Levels | Expect::Stats => {}
             }
         }
         let settled = matches!(record, Incoming::AgentSettled);
@@ -371,6 +387,7 @@ impl Task {
         }
         self.ask_for(Command::GetState, Some(Expect::State)).await;
         self.ask_for(Command::GetAvailableModels, Some(Expect::Models)).await;
+        self.ask_for(Command::GetAvailableThinkingLevels, Some(Expect::Levels)).await;
         for ask in self.held.take().unwrap_or_default() {
             self.ask(ask).await;
         }

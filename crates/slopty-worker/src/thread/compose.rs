@@ -9,13 +9,15 @@
 //! line typed and unsent in the terminal. Nothing it types ever clears that line.
 //!
 //! A message waits in the thread's pending list until it goes, where it can be withdrawn,
-//! edited, moved in the list, or promoted to go now as a steer:
+//! edited, or promoted to go now as a steer:
 //!
 //! - a steer goes as soon as the guard lets it, into the turn under way, which the agent takes at
 //!   its next step;
 //! - a queued one waits for the agent to be at rest, then goes, one per turn: the next waits until
 //!   the agent has taken it (it was seen working, or the turn it started ended);
-//! - one the guard holds says why ([`DRAFT`]), and goes once the way is clear.
+//! - one the guard holds says why ([`DRAFT`]), and goes once the way is clear;
+//! - once the person stops the turn, every queued one is held ([`Pending::STOPPED`]) until they
+//!   send again, a message or one of those now, which lets the rest go after it in their order.
 //!
 //! Each thread with something to send has a task of its own, which sends one thing at a time.
 
@@ -114,6 +116,9 @@ impl Composer {
                     return refused("There is nothing to send");
                 }
                 let mut pending = state.pending.clone();
+                for p in &mut pending {
+                    p.release_stop();
+                }
                 let text = text.clone();
                 pending.push(Pending {
                     intent: id,
@@ -152,6 +157,9 @@ impl Composer {
             }
             Intent::Promote { pending: which } => {
                 let mut pending = state.pending.clone();
+                for p in &mut pending {
+                    p.release_stop();
+                }
                 let Some(promoted) = pending.iter_mut().find(|p| p.intent == *which) else {
                     return refused("That message has already gone");
                 };
@@ -168,13 +176,6 @@ impl Composer {
                 self.kick(thread);
                 Some((Outcome::Done, vec![Action::PendingSet(pending)]))
             }
-            Intent::Reorder { pending: which, before } => {
-                let mut pending = state.pending.clone();
-                if !Pending::reorder(&mut pending, |p| p.intent, *which, *before) {
-                    return refused("That message has already gone");
-                }
-                Some((Outcome::Done, vec![Action::PendingSet(pending)]))
-            }
             Intent::Interrupt => {
                 let session = state.meta.terminal?;
                 let working = self
@@ -188,7 +189,17 @@ impl Composer {
                     return refused("The agent is not working");
                 }
                 self.job(thread, Job::Key("escape"));
-                Some((Outcome::Accepted, vec![]))
+                // The person's stop holds what is queued; one already in the terminal is not
+                // the worker's to hold.
+                let mut pending = state.pending.clone();
+                let mut held = false;
+                for p in pending.iter_mut().filter(|p| !in_terminal(p)) {
+                    held |= p.hold_for_stop();
+                }
+                Some((
+                    Outcome::Accepted,
+                    if held { vec![Action::PendingSet(pending)] } else { vec![] },
+                ))
             }
             Intent::SetModel { model } => {
                 if !state.meta.models.iter().any(|m| m.id == *model) {
@@ -376,10 +387,7 @@ fn next(
             *started = None;
         }
     }
-    let typed = PendingState::Held { reason: TYPED_NOT_SENT.to_owned() };
-    let back = PendingState::Held { reason: TAKEN_BACK.to_owned() };
-    let open =
-        |p: &&Pending| p.state != PendingState::Sending && p.state != typed && p.state != back;
+    let open = |p: &&Pending| p.state != PendingState::Sending && !in_terminal(p) && !p.stopped();
     let steer = state.pending.iter().filter(open).find(|p| p.delivery == Delivery::Steer);
     let queue = state.pending.iter().filter(open).find(|p| p.delivery == Delivery::Queue);
     let resting = started.is_none() && c.at_rest(session);
@@ -432,6 +440,12 @@ fn taken_back(
     let held = Pending { state: PendingState::Held { reason: TAKEN_BACK.to_owned() }, ..went };
     let pending = std::iter::once(held).chain(state.pending.iter().cloned()).collect();
     Some((vec![Action::PendingSet(pending)], Next::Wait { held: false }))
+}
+
+/// Whether `pending` was typed into the terminal and stays there unsent ([`TYPED_NOT_SENT`],
+/// [`TAKEN_BACK`]).
+fn in_terminal(pending: &Pending) -> bool {
+    matches!(&pending.state, PendingState::Held { reason } if reason == TYPED_NOT_SENT || reason == TAKEN_BACK)
 }
 
 /// `pending` with message `intent` in `state`.

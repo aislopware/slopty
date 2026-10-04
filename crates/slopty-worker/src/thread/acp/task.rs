@@ -251,9 +251,24 @@ impl Task {
         let now = WallMs::now();
         match ask {
             ThreadAsk::Send { text, attachments, intent } => {
-                if self.session.running() {
-                    let actions = self.session.queue(intent, &text, attachments);
+                // The person speaking again lets what their stop held go, ahead of this.
+                let released = self.session.release_queue();
+                if self.session.running() || released {
+                    let actions = self.session.queue(intent, &text, attachments, false);
                     self.apply(actions);
+                    self.next().await;
+                } else {
+                    self.prompt(&text, &attachments, intent).await;
+                }
+            }
+            ThreadAsk::Interrupting { text, attachments, intent } => {
+                if self.session.release_queue() {
+                    self.apply(vec![self.session.pending()]);
+                }
+                if self.session.running() {
+                    let actions = self.session.queue(intent, &text, attachments, true);
+                    self.apply(actions);
+                    self.cancel(now).await;
                 } else {
                     self.prompt(&text, &attachments, intent).await;
                 }
@@ -266,20 +281,10 @@ impl Task {
                 let actions = self.session.edit(intent, &text).unwrap_or_default();
                 self.apply(actions);
             }
-            ThreadAsk::Reorder { intent, before } => {
-                let actions = self.session.reorder(intent, before).unwrap_or_default();
-                self.apply(actions);
-            }
             ThreadAsk::Interrupt => {
-                let Some(Cancelled { notification, answers, actions }) = self.session.cancel(now)
-                else {
-                    return;
-                };
-                self.write(rpc::notification("session/cancel", &notification)).await;
-                for (id, response) in answers {
-                    self.write(rpc::result(&id, &response)).await;
-                }
-                self.apply(actions);
+                let held = self.session.hold_queue();
+                self.apply(held);
+                self.cancel(now).await;
             }
             ThreadAsk::Answer { ask, choice, by } => {
                 let Some(Answered { id, response, actions }) =
@@ -299,10 +304,34 @@ impl Task {
                 let switch = self.session.set_model(&model);
                 self.switch(switch, Expect::Option).await;
             }
+            ThreadAsk::SetEffort { effort } => {
+                let switch = self.session.set_effort(&effort);
+                self.switch(switch, Expect::Option).await;
+            }
         }
     }
 
     /// Send `switch`, a mode's answer read as `mode`.
+    /// Send the next message held, once no turn is under way and no stop holds it.
+    async fn next(&mut self) {
+        if let Some((next, actions)) = self.session.next_queued() {
+            self.apply(actions);
+            self.prompt(&next.text, &next.attachments, next.intent).await;
+        }
+    }
+
+    /// Cancel the turn under way, when one is, and answer what it still asked as cancelled.
+    async fn cancel(&mut self, now: WallMs) {
+        let Some(Cancelled { notification, answers, actions }) = self.session.cancel(now) else {
+            return;
+        };
+        self.write(rpc::notification("session/cancel", &notification)).await;
+        for (id, response) in answers {
+            self.write(rpc::result(&id, &response)).await;
+        }
+        self.apply(actions);
+    }
+
     async fn switch(&mut self, switch: Option<Switch>, mode: Expect) {
         match switch {
             Some(Switch::Mode(request)) => self.request("session/set_mode", &request, mode).await,
@@ -451,10 +480,7 @@ impl Task {
             (Expect::Prompt, outcome) => {
                 let actions = self.session.prompted(outcome.as_ref(), now);
                 self.apply(actions);
-                if let Some((next, actions)) = self.session.next_queued() {
-                    self.apply(actions);
-                    self.prompt(&next.text, &next.attachments, next.intent).await;
-                }
+                self.next().await;
             }
             (Expect::Mode(mode), Ok(_)) => {
                 let actions = self.session.mode_set(&mode);

@@ -15,12 +15,12 @@ mod acp {
     use slopty_core::{ClientId, SessionId};
     use slopty_proto::thread::wire::{Intent, Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Answerer, Cap, Delivery, Drive, Fork, IntentId, ItemBody, Liveness, Phase,
-        RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, TurnState,
+        AgentId, Answerer, Cap, Delivery, Drive, Fork, IntentId, ItemBody, Liveness, Pending,
+        Phase, RequestState, ThreadId, ThreadMeta, ThreadState, ToolState, TurnState,
     };
     use slopty_worker::thread::acp::{self, Acp};
     use slopty_worker::thread::log::Limits;
-    use slopty_worker::thread::{Host, Seated, steer};
+    use slopty_worker::thread::{Host, Seated};
 
     const WAIT: Duration = Duration::from_secs(30);
 
@@ -253,10 +253,8 @@ mod acp {
         rig.send(&acp, thread, "Remove it again.");
         rig.until(thread, "the call's ask", asking(1)).await;
         let id = IntentId::new();
-        let sent = steer::act(&rig.host, thread, id, &now("Say hello instead."), act);
-        assert_eq!(sent, Some(Outcome::Done));
-        let again = steer::act(&rig.host, thread, id, &now("Say hello instead."), act);
-        assert_eq!(again, Some(Outcome::Done), "once");
+        assert_eq!(act(id, &now("Say hello instead.")), Outcome::Done);
+        assert_eq!(act(id, &now("Say hello instead.")), Outcome::Done, "once");
         let state =
             rig.until(thread, "the message's turn", turn_ended(3, TurnState::Complete)).await;
         assert_eq!(state.turns[1].state, TurnState::Interrupted, "the turn under way stopped");
@@ -273,12 +271,58 @@ mod acp {
             .filter(|m| m["method"] == "session/cancel")
             .count();
         assert_eq!(cancels, 1, "stopped once");
+    }
 
-        let unknown = steer::act(&rig.host, ThreadId::new(), IntentId::new(), &now("x"), act);
-        assert!(matches!(unknown, Some(Outcome::Refused { .. })));
-        let queued =
-            Intent::Send { text: "x".into(), delivery: Delivery::Queue, attachments: vec![] };
-        assert_eq!(steer::act(&rig.host, thread, IntentId::new(), &queued, act), None);
+    /// The person's stop holds what is queued: the turn is cancelled, the message queued says it
+    /// waits on the stop, and no prompt follows once the cancelled turn ends. Their next message
+    /// lets it go first, and theirs after it, each as its own turn.
+    #[tokio::test]
+    async fn a_stop_holds_the_queue_until_the_person_sends_again() {
+        let rig = Rig::new();
+        // The recording's first turn, its third call's turn stopped, then two turns the agent
+        // answers as it answered the first.
+        let lines = lines("turns.jsonl");
+        let again = |text: &str| {
+            lines[4..13].iter().map(|l| l.replace("Say hello.", text)).collect::<Vec<_>>()
+        };
+        let composed: Vec<String> = lines[..13]
+            .iter()
+            .chain(&lines[35..44])
+            .cloned()
+            .chain(again("Say hello later."))
+            .chain(again("Say hello again."))
+            .collect();
+        rig.replay_lines(&composed);
+        let (acp, _served) = rig.serve();
+        let outcome = acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        rig.send(&acp, thread, "Remove it again.");
+        rig.until(thread, "the call's ask", asking(1)).await;
+        let later = rig.send(&acp, thread, "Say hello later.");
+        rig.until(thread, "it waits", |s| s.pending.len() == 1).await;
+
+        let (_, stopped) = rig.intent(&acp, thread, &Intent::Interrupt);
+        assert_eq!(stopped, Outcome::Done);
+        let state = rig.until(thread, "stopped", turn_ended(2, TurnState::Interrupted)).await;
+        assert!(state.pending.iter().all(Pending::stopped), "held: {:?}", state.pending);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let state = rig.host.state(thread).unwrap().0;
+        assert_eq!((state.turns.len(), state.pending.len()), (2, 1), "nothing went on its own");
+
+        let then = rig.send(&acp, thread, "Say hello again.");
+        let state = rig.until(thread, "both went", turn_ended(4, TurnState::Complete)).await;
+        assert!(state.pending.is_empty(), "both went");
+        let users = users(&state);
+        assert_eq!(
+            users[2..],
+            [
+                ("Say hello later.".to_owned(), Some(later)),
+                ("Say hello again.".to_owned(), Some(then))
+            ],
+            "the held one first, then theirs"
+        );
+        assert_eq!(rig.record()["unexpected"], serde_json::json!([]));
     }
 
     /// A thread started on an ACP agent runs the person's program for it, as the registry
@@ -338,10 +382,6 @@ mod acp {
         let queued = rig.send(&acp, thread, "Remove it.");
         let state = rig.until(thread, "the message waits", |s| s.pending.len() == 1).await;
         assert_eq!(state.pending[0].intent, queued);
-        let last = Intent::Reorder { pending: queued, before: None };
-        assert_eq!(rig.intent(&acp, thread, &last).1, Outcome::Done, "moved to where it is");
-        let nowhere = Intent::Reorder { pending: queued, before: Some(IntentId::new()) };
-        assert!(matches!(rig.intent(&acp, thread, &nowhere).1, Outcome::Refused { .. }));
         let now = Intent::Promote { pending: queued };
         let promoted = rig.intent(&acp, thread, &now).1;
         assert_eq!(promoted, Outcome::Unsupported { cap: Cap::named(Cap::STEER) }, "no steer");
@@ -454,37 +494,6 @@ mod acp {
         let record = rig.record();
         assert_eq!(record["heard"][1]["method"], "session/load", "the session, loaded");
         assert_eq!(record["heard"][1]["params"]["sessionId"], "ses_00000000000000000000000001");
-        assert_eq!(record["unexpected"], serde_json::json!([]));
-    }
-
-    /// Put to sleep at rest, the agent's stdin is closed and the thread is kept asleep. A wake
-    /// runs the agent again, which loads the session, and the thread is read again from what it
-    /// replays, with nothing sent.
-    #[tokio::test]
-    async fn an_acp_agent_put_to_sleep_is_woken_by_loading_its_session() {
-        let rig = Rig::new();
-        let (acp, _served) = rig.serve();
-        let Outcome::Started { thread } =
-            acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await
-        else {
-            panic!("not started");
-        };
-        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
-        assert!(state.meta.can(Cap::SLEEP), "the agent loads sessions: {:?}", state.meta.caps);
-
-        let sleep = IntentId::new();
-        let decide = |s: &ThreadState| acp.decide(s, sleep, &Intent::Sleep, rig.by());
-        assert_eq!(rig.host.sleep(thread, sleep, decide), Some(Outcome::Done));
-        let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
-        rig.until(thread, "the agent ends asleep", asleep).await;
-
-        rig.replay("load.jsonl");
-        let (_, woken) = rig.intent(&acp, thread, &Intent::Wake);
-        assert_eq!(woken, Outcome::Done);
-        let awake = |s: &ThreadState| s.status.liveness == Liveness::Live && s.turns.len() == 4;
-        let state = rig.until(thread, "the session loaded", awake).await;
-        assert_eq!(users(&state).len(), 4, "read again, nothing sent");
-        let record = rig.record_once(|r| r["heard"][1]["method"] == "session/load").await;
         assert_eq!(record["unexpected"], serde_json::json!([]));
     }
 
@@ -734,5 +743,84 @@ mod acp {
         again.prompt = None;
         again.args = past[0].resume.clone();
         assert_eq!(acp.start(IntentId::new(), again).await, Outcome::Started { thread });
+    }
+
+    /// The thought-level option the agent offers, beside its model and mode, as a select
+    /// (`thought_level`), and the session's options once it is set to `current`.
+    fn thought(current: &str) -> Value {
+        serde_json::json!({"category": "thought_level", "currentValue": current,
+            "id": "effort", "name": "Thinking", "type": "select", "options": [
+                {"value": "low", "name": "Low", "description": "Answers quickly"},
+                {"value": "high", "name": "High", "description": "Thinks longer"}]})
+    }
+
+    /// An agent that offers a thought level (an ACP config option of that category) lets the
+    /// thread's effort be set among its values: the switch goes as `session/set_config_option`,
+    /// and the meters say what the agent then holds. A value it does not offer is refused before
+    /// anything goes.
+    #[tokio::test]
+    async fn an_acp_threads_effort_is_set_through_its_thought_level_option() {
+        let rig = Rig::new();
+        let turns = lines("turns.jsonl");
+        let mut recording = turns[..3].to_vec();
+        let mut opened: Value = serde_json::from_str(&turns[3]).unwrap();
+        let options = opened["msg"]["result"]["configOptions"].as_array_mut().unwrap();
+        options.push(thought("low"));
+        let after: Vec<Value> = options
+            .iter()
+            .map(|o| if o["id"] == "effort" { thought("high") } else { o.clone() })
+            .collect();
+        recording.push(opened.to_string());
+        let answered =
+            turns.iter().position(|l| l.contains("\"stopReason\"")).expect("the first turn's end");
+        recording.extend(turns[4..=answered].iter().cloned());
+        let ask = serde_json::json!({"dir": "in", "msg": {"id": 4, "jsonrpc": "2.0",
+            "method": "session/set_config_option", "params": {
+                "sessionId": "ses_00000000000000000000000001", "configId": "effort",
+                "value": "high"}}});
+        let set = serde_json::json!({"dir": "out", "msg": {"id": 4, "jsonrpc": "2.0",
+            "result": {"configOptions": after}}});
+        recording.extend([ask.to_string(), set.to_string()]);
+        rig.replay_lines(&recording);
+        let (acp, _served) = rig.serve();
+        let outcome = acp.start(IntentId::new(), rig.start("acp:opencode", "Say hello.")).await;
+        let Outcome::Started { thread } = outcome else { panic!("{outcome:?}") };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.meta.can(Cap::SET_EFFORT), "{:?}", state.meta.caps);
+        let efforts: Vec<(&str, &str, Option<&str>)> = state
+            .meta
+            .efforts
+            .iter()
+            .map(|e| (e.id.as_str(), e.label.as_str(), e.description.as_deref()))
+            .collect();
+        assert_eq!(
+            efforts,
+            [("low", "Low", Some("Answers quickly")), ("high", "High", Some("Thinks longer"))]
+        );
+        assert_eq!(state.meters.effort.as_deref(), Some("Low"));
+
+        let max = Intent::SetEffort { effort: "max".to_owned() };
+        assert!(matches!(rig.intent(&acp, thread, &max).1, Outcome::Refused { .. }));
+        let high = Intent::SetEffort { effort: "high".to_owned() };
+        assert_eq!(rig.intent(&acp, thread, &high).1, Outcome::Done);
+        rig.until(thread, "the agent's level", |s| s.meters.effort.as_deref() == Some("High"))
+            .await;
+        // The stand-in writes its record after what it answers.
+        let record = rig
+            .record_once(|r| {
+                r["heard"]
+                    .as_array()
+                    .is_some_and(|h| h.iter().any(|m| m["method"] == "session/set_config_option"))
+            })
+            .await;
+        assert_eq!(record["unexpected"], serde_json::json!([]), "{record:#}");
+        let sent = record["heard"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["method"] == "session/set_config_option")
+            .unwrap();
+        assert_eq!(sent["params"]["configId"], "effort");
+        assert_eq!(sent["params"]["value"], "high");
     }
 }

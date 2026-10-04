@@ -14,8 +14,8 @@ mod codex {
     use slopty_core::SessionId;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        Action, AgentId, Delivery, Edge, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta,
-        ThreadState, TreeRef, TurnId, TurnState,
+        Action, AgentId, Delivery, Edge, Fork, IntentId, ItemBody, Liveness, Phase, Status,
+        ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId, TurnState,
     };
     use slopty_worker::thread::codex::{self, Codex};
     use slopty_worker::thread::log::Limits;
@@ -58,11 +58,36 @@ mod codex {
 
     type Ws = tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>;
 
+    /// The next frame the worker sent, handed to `heard`. Its ask for Codex's models, made once
+    /// as it joins, is answered here with [`catalog`] and passed over.
     async fn next(ws: &mut Ws, heard: &mpsc::UnboundedSender<Value>) -> Option<Value> {
-        let Some(Ok(Message::Text(text))) = ws.next().await else { return None };
-        let msg: Value = serde_json::from_str(&text).unwrap();
-        heard.send(msg.clone()).unwrap();
-        Some(msg)
+        loop {
+            let Some(Ok(Message::Text(text))) = ws.next().await else { return None };
+            let msg: Value = serde_json::from_str(&text).unwrap();
+            heard.send(msg.clone()).unwrap();
+            if msg["method"] != "model/list" {
+                return Some(msg);
+            }
+            say(ws, &json!({ "id": msg["id"], "result": catalog() })).await;
+        }
+    }
+
+    /// Codex's models as `model/list` answers it (Codex 0.160.0's schema): the recording's model
+    /// and a smaller one, each with the reasoning efforts it supports.
+    fn catalog() -> Value {
+        let model = |slug: &str, name: &str, efforts: &[&str], default: &str| {
+            json!({
+                "id": slug, "model": slug, "displayName": name, "description": "",
+                "hidden": false, "isDefault": false, "defaultReasoningEffort": default,
+                "supportedReasoningEfforts": efforts.iter().map(|e| json!({
+                    "reasoningEffort": e, "description": ""
+                })).collect::<Vec<_>>(),
+            })
+        };
+        json!({ "data": [
+            model("mock-model", "Mock", &["low", "medium", "high"], "medium"),
+            model("mini-model", "Mini", &["low"], "low"),
+        ], "nextCursor": null })
     }
 
     async fn say(ws: &mut Ws, msg: &Value) {
@@ -145,6 +170,24 @@ mod codex {
                     return state;
                 }
                 table.changed().await.unwrap();
+            }
+        });
+        waited.await.expect("the thread came to the state awaited")
+    }
+
+    /// `thread` once `done` holds of it, looked at every few milliseconds: for a change to the
+    /// thread that leaves its row in the table as it was (a notice, a goal).
+    async fn polled(
+        host: &Host,
+        thread: ThreadId,
+        done: impl Fn(&ThreadState) -> bool,
+    ) -> ThreadState {
+        let waited = tokio::time::timeout(BOUND, async {
+            loop {
+                if let Some((state, _)) = host.state(thread).filter(|(s, _)| done(s)) {
+                    return state;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         });
         waited.await.expect("the thread came to the state awaited")
@@ -683,7 +726,8 @@ mod codex {
     /// thread as a draft; with the files, the folder goes back to the turn's before-snapshot
     /// (a changed file back, a new one gone, the person's own index untouched), what it held
     /// first kept under the thread's refs. The thread edited from keeps every turn. A turn
-    /// with no snapshot cannot take its files back, and an agent with no door is refused.
+    /// with no snapshot cannot take its files back, nor can one while another thread works in
+    /// the same work tree, and an agent with no door is refused.
     #[tokio::test]
     async fn an_edit_from_a_turn_branches_before_it_and_puts_its_files_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -749,6 +793,26 @@ mod codex {
         host.apply(thread, vec![Action::Snapshot { turn, edge: Edge::Before, tree }]);
         std::fs::write(work.join("a.txt"), "changed by the turn\n").unwrap();
         std::fs::write(work.join("new.txt"), "made by the turn\n").unwrap();
+
+        // Another thread at work in a folder of the same tree: its edits would go back under it.
+        std::fs::create_dir_all(work.join("sub")).unwrap();
+        let mut beside = state.meta.clone();
+        beside.id = ThreadId::new();
+        beside.title = "Fix the parser".to_owned();
+        beside.cwd = work.join("sub").to_string_lossy().into_owned();
+        let other = beside.id;
+        host.create(beside).unwrap();
+        let status = |phase| {
+            let since_ms = slopty_core::WallMs::now();
+            Action::Status(Status { phase, wait: None, liveness: Liveness::Live, since_ms })
+        };
+        host.apply(other, vec![status(Phase::Working)]);
+        let busy = edit(IntentId::new()).await;
+        let Outcome::Refused { reason } = busy else { panic!("{busy:?}") };
+        let said = "\u{201c}Fix the parser\u{201d} is working in the same folder";
+        assert!(reason.starts_with(said), "{reason}");
+        assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "changed by the turn\n");
+        host.apply(other, vec![status(Phase::Idle)]);
 
         let id = IntentId::new();
         let Outcome::Started { thread: branch } = edit(id).await else { panic!("not edited") };
@@ -887,42 +951,183 @@ mod codex {
         until_sent(&mut heard, "thread/resume").await;
     }
 
-    /// Put to sleep at rest, the thread is let go at once (`thread/unsubscribe`) and kept
-    /// asleep; a wake takes it up again (`thread/resume`) and it is live once more.
+    /// A stand-in daemon that has the recording's thread loaded and takes it up again, then
+    /// takes each `thread/settings/update` and tells every client the settings it now holds
+    /// (`thread/settings/updated`), but refuses a switch to `mini-model`, as Codex refuses one
+    /// it cannot make. Every frame the worker sent goes to `heard`.
+    async fn switcher(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let resumed = resumed();
+        let native = resumed["result"]["thread"]["id"].clone();
+        let mut held = json!({
+            "approvalPolicy": "on-request", "approvalsReviewer": "user",
+            "collaborationMode": { "mode": "default", "settings": { "model": "mock-model" } },
+            "cwd": resumed["result"]["cwd"], "model": "mock-model", "modelProvider": "mock",
+            "sandboxPolicy": { "type": "readOnly" }, "effort": "medium",
+        });
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [native], "nextCursor": null } })
+                }
+                Some("thread/resume") => resumed.clone(),
+                Some("thread/settings/update") if msg["params"]["model"] == "mini-model" => {
+                    json!({ "error": { "code": -32600, "message": "mini-model is not available" } })
+                }
+                Some("thread/settings/update") => {
+                    for (field, value) in msg["params"].as_object().unwrap() {
+                        if field != "threadId" {
+                            held[field] = value.clone();
+                        }
+                    }
+                    json!({ "result": {} })
+                }
+                _ => continue,
+            };
+            let mut answer = answer;
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+            if msg["method"] == "thread/settings/update" && answer.get("result").is_some() {
+                let told = json!({ "method": "thread/settings/updated", "params": {
+                    "threadId": native, "threadSettings": held } });
+                say(&mut ws, &told).await;
+            }
+        }
+    }
+
+    /// A stand-in daemon whose one loaded thread was archived outside Slopty: it refuses the
+    /// first resume as Codex does, takes it up again once unarchived, and holds a goal for it.
+    async fn archivist(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let resumed = resumed();
+        let native = resumed["result"]["thread"]["id"].clone();
+        let mut archived = true;
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [native], "nextCursor": null } })
+                }
+                Some("thread/resume") if archived => {
+                    let said = format!("session {} is archived", native.as_str().unwrap());
+                    json!({ "error": { "code": -32600, "message": said } })
+                }
+                Some("thread/resume") => resumed.clone(),
+                Some("thread/unarchive") => {
+                    archived = false;
+                    json!({ "result": { "thread": resumed["result"]["thread"] } })
+                }
+                Some("thread/goal/get") => json!({ "result": { "goal": {
+                    "threadId": native, "objective": "Make every fixture pass",
+                    "status": "active", "tokensUsed": 41_000, "tokenBudget": null,
+                    "timeUsedSeconds": 380, "createdAt": 1_790_000_000_i64,
+                    "updatedAt": 1_790_000_380_i64,
+                } } }),
+                _ => continue,
+            };
+            let mut answer = answer;
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+        }
+    }
+
+    /// A thread archived outside Slopty is put back from Codex's archive and taken up again by
+    /// the same resume, once (`thread/unarchive`), never by starting a fresh session; the goal
+    /// Codex holds for it then shows on the thread.
     #[tokio::test]
-    async fn a_thread_put_to_sleep_is_let_go_and_woken_by_resuming_it() {
+    async fn an_archived_thread_is_unarchived_and_taken_up_again() {
         let dir = tempfile::tempdir().unwrap();
         let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
         let socket: PathBuf = short.path().join("s.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let (tx, mut heard) = mpsc::unbounded_channel();
-        let _server = tokio::spawn(unloader(listener, tx));
+        let _server = tokio::spawn(archivist(listener, tx));
+        let host = host(dir.path());
+        let (_handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        let sent = until_sent(&mut heard, "thread/goal/get").await;
+        let asked: Vec<&str> = sent
+            .iter()
+            .filter_map(|m| m["method"].as_str())
+            .filter(|m| m.starts_with("thread/") && *m != "thread/loaded/list")
+            .collect();
+        assert_eq!(
+            asked,
+            ["thread/resume", "thread/unarchive", "thread/resume", "thread/goal/get"]
+        );
+        let state = polled(&host, thread, |s| s.goal.is_some()).await;
+        let goal = state.goal.unwrap();
+        assert_eq!((goal.objective.as_str(), goal.is_active()), ("Make every fixture pass", true));
+        assert!(!state.turns.is_empty(), "the thread as Codex holds it");
+    }
+
+    /// A followed thread offers Codex's models, its model's efforts and the approval policies.
+    /// A switch goes to Codex as the thread's settings for its next turns, the TUI's included
+    /// (`thread/settings/update`), naming only what changes; the meters say what Codex then
+    /// holds. A switch Codex refuses leaves the meters as they were and says why in the thread.
+    #[tokio::test]
+    async fn a_switch_goes_to_codex_as_the_threads_settings() {
+        use slopty_agent::codex::shared::Setting;
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(switcher(listener, tx));
         let host = host(dir.path());
         let (handle, asks) = Codex::channel();
         let _served = codex::spawn(host.clone(), socket, None, asks);
         let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
         let thread = shared::thread_of(&native);
-        until_sent(&mut heard, "thread/resume").await;
-        let state = until(&host, thread, |s| !s.turns.is_empty()).await;
-        assert!(state.meta.can(slopty_proto::thread::Cap::SLEEP));
+        let state = until(&host, thread, |s| !s.meta.efforts.is_empty()).await;
+        let models: Vec<&str> = state.meta.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(models, ["mock-model", "mini-model"]);
+        let efforts: Vec<&str> = state.meta.efforts.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(efforts, ["low", "medium", "high"], "the running model's");
+        let modes: Vec<&str> = state.meta.modes.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(modes, ["untrusted", "on-request", "never"]);
+        assert_eq!(state.meters.model.as_deref(), Some("Mock"));
+        handle.set(thread, Setting::Effort("high".to_owned()));
+        let sent = until_sent(&mut heard, "thread/settings/update").await;
+        assert_eq!(
+            sent.last().unwrap()["params"],
+            json!({ "threadId": native, "effort": "high" }),
+            "only what changes"
+        );
+        until(&host, thread, |s| s.meters.effort.as_deref() == Some("high")).await;
 
-        let id = IntentId::new();
-        let ends = |_: &ThreadState| {
-            if handle.sleep(thread) {
-                Outcome::Done
-            } else {
-                Outcome::Refused { reason: "not served".to_owned() }
-            }
+        handle.set(thread, Setting::Mode("never".to_owned()));
+        let sent = until_sent(&mut heard, "thread/settings/update").await;
+        assert_eq!(
+            sent.last().unwrap()["params"],
+            json!({ "threadId": native, "approvalPolicy": "never" })
+        );
+        until(&host, thread, |s| s.meters.mode.as_deref() == Some("never")).await;
+
+        handle.set(thread, Setting::Model("mini-model".to_owned()));
+        let sent = until_sent(&mut heard, "thread/settings/update").await;
+        assert_eq!(
+            sent.last().unwrap()["params"],
+            json!({ "threadId": native, "model": "mini-model", "effort": "low" }),
+            "high is not the smaller model's, so its own default goes with it"
+        );
+        // A notice moves nothing in the table, which `until` waits on: it is looked for again.
+        let refused = |s: &ThreadState| {
+            s.items.iter().any(
+                |i| matches!(&i.body, ItemBody::Notice(n) if n.text.text.contains("not available")),
+            )
         };
-        assert_eq!(host.sleep(thread, id, ends), Some(Outcome::Done));
-        let sent = until_sent(&mut heard, "thread/unsubscribe").await;
-        assert_eq!(sent.last().unwrap()["params"], json!({ "threadId": native }));
-        let asleep = |s: &ThreadState| matches!(s.status.liveness, Liveness::Asleep { .. });
-        let state = until(&host, thread, asleep).await;
-        assert!(!state.turns.is_empty(), "the thread kept");
-
-        handle.wake(thread);
-        until_sent(&mut heard, "thread/resume").await;
-        until(&host, thread, |s| s.status.liveness == Liveness::Live).await;
+        let state = polled(&host, thread, refused).await;
+        assert_eq!(state.meters.model_id.as_deref(), Some("mock-model"), "refused, so kept");
+        assert_eq!(state.meters.effort.as_deref(), Some("high"));
     }
 }

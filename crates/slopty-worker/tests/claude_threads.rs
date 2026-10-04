@@ -241,7 +241,6 @@ mod claude_threads {
         assert_eq!(child, thread.subagent(&sub.meta.native));
 
         let prompt = PermissionPrompt {
-            editable: Vec::new(),
             session: rig.terminal,
             ask: 3,
             tool: "Bash".to_owned(),

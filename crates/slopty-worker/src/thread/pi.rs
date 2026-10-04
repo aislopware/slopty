@@ -97,14 +97,6 @@ enum Ask {
         thread: ThreadId,
         done: oneshot::Sender<()>,
     },
-    /// The person put the thread's agent to sleep: its pi ends, its session kept.
-    Sleep {
-        thread: ThreadId,
-    },
-    /// The person woke it: pi runs on its session again.
-    Wake {
-        thread: ThreadId,
-    },
 }
 
 /// What a client asks of one thread.
@@ -114,6 +106,7 @@ enum ThreadAsk {
     Interrupt,
     Answer { ask: AskId, choice: String, message: Option<String>, by: Answerer },
     SetModel { model: String },
+    SetEffort { effort: String },
     Compact,
     Handoff,
     TakeBack,
@@ -193,12 +186,6 @@ impl Pi {
         if tui && !matches!(ask, Intent::Handoff | Intent::TakeBack) {
             return refused("pi's terminal holds the session; take it back first");
         }
-        match ask {
-            Intent::Sleep => return self.ask(Ask::Sleep { thread }),
-            Intent::Wake if live => return Outcome::Done,
-            Intent::Wake => return self.ask(Ask::Wake { thread }),
-            _ => {}
-        }
         let asked = match ask {
             Intent::Handoff if tui => return refused("pi's terminal holds the session already"),
             Intent::Handoff => ThreadAsk::Handoff,
@@ -257,6 +244,12 @@ impl Pi {
                 }
                 ThreadAsk::SetModel { model: model.clone() }
             }
+            Intent::SetEffort { effort } => {
+                if !state.meta.efforts.iter().any(|e| e.id == *effort) {
+                    return refused(&format!("The model has no thinking level {effort}"));
+                }
+                ThreadAsk::SetEffort { effort: effort.clone() }
+            }
             Intent::Compact => ThreadAsk::Compact,
             other => return Outcome::Unsupported { cap: Cap::named(other.needs()) },
         };
@@ -269,16 +262,6 @@ impl Pi {
         }
         // A handoff happens once the agent rests.
         if waits { Outcome::Accepted } else { Outcome::Done }
-    }
-}
-
-impl Pi {
-    /// Send `ask`: done once it is on its way.
-    fn ask(&self, ask: Ask) -> Outcome {
-        if self.0.send(ask).is_err() {
-            return refused("pi threads are not served here");
-        }
-        Outcome::Done
     }
 }
 
@@ -336,15 +319,6 @@ pub fn spawn(
                         let _gone = reply.send(outcome);
                     }
                     Some(Ask::Thread { thread, ask }) => served.route(thread, vec![ask]).await,
-                    Some(Ask::Sleep { thread }) => {
-                        // Its task closes pi's stdin, pi's own way to end, once nothing can
-                        // ask it more.
-                        served.running.remove(&thread);
-                    }
-                    Some(Ask::Wake { thread }) if !served.running.contains_key(&thread) => {
-                        served.drive(thread, Vec::new()).await;
-                    }
-                    Some(Ask::Wake { .. }) => {}
                     Some(Ask::Close { thread, done }) => {
                         // Its task ends its agent once nothing can ask it more.
                         served.running.remove(&thread);
