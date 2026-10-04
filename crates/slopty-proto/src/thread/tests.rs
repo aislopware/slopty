@@ -179,7 +179,8 @@ fn requests_settle_and_the_settled_are_bounded() {
     assert_eq!(state.open_requests().count(), 1);
 }
 
-/// A rewind drops the turns after it, and their items; snapshots land on their turn's edge.
+/// A rewind drops the turns after it, and their items; snapshots land on their turn's edge and
+/// stay there when the agent tells the turn again.
 #[test]
 fn truncation_and_snapshots() {
     let mut state = run(&[
@@ -190,9 +191,11 @@ fn truncation_and_snapshots() {
         Action::ItemStarted(text("b", 2, "two")),
         Action::Snapshot { turn: TurnId(2), edge: Edge::Before, tree: TreeRef("t2".to_owned()) },
     ]);
+    state.apply(&Action::TurnStarted(turn(2)));
     assert_eq!(
         state.turn(TurnId(2)).and_then(|t| t.before.clone()),
-        Some(TreeRef("t2".to_owned()))
+        Some(TreeRef("t2".to_owned())),
+        "a turn told again keeps its snapshot"
     );
     state.apply(&Action::Truncated { after: Some(TurnId(1)) });
     let ids: Vec<&str> = state.items.iter().map(|i| i.id.0.as_str()).collect();

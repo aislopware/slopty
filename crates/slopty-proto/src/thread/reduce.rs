@@ -284,10 +284,14 @@ impl ThreadState {
         self.turns.binary_search_by_key(&id, |t| t.id).ok().and_then(|at| self.turns.get_mut(at))
     }
 
-    fn put_turn(&mut self, turn: Turn) {
+    /// A turn the agent tells again keeps the snapshots the worker took of it, since an
+    /// adapter's turn never carries them ([`Action::Snapshot`] does).
+    fn put_turn(&mut self, mut turn: Turn) {
         match self.turns.binary_search_by_key(&turn.id, |t| t.id) {
             Ok(at) => {
                 if let Some(have) = self.turns.get_mut(at) {
+                    turn.before = turn.before.or_else(|| have.before.take());
+                    turn.after = turn.after.or_else(|| have.after.take());
                     *have = turn;
                 }
             }
