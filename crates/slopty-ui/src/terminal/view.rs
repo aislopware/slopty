@@ -16,7 +16,7 @@ use gpui::{
     TextInputAction, TextInputConfiguration, TouchPhase, UTF16Selection, Window, anchored,
     deferred, div, point, px, relative, size,
 };
-use gpui_kit::component::input::{self, Input, InputEvent, InputState};
+use gpui_kit::component::input::{self, InputEvent, InputState};
 use slopty_client::term::{BlockHead, CommandBlock, TermImage};
 use slopty_client::{Effect, TermState};
 use slopty_core::SessionId;
@@ -34,7 +34,8 @@ use tokio::sync::mpsc;
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::keys;
-use crate::kit::find::PLACEHOLDER as FIND_PLACEHOLDER;
+use crate::kit::FindBar;
+use crate::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Query, Tally, Toggle};
 use crate::terminal::element::{CellMetrics, FailedLook, RowCache, TerminalElement};
 use crate::terminal::scrollbar::Visibility;
 use crate::terminal::{latency, url};
@@ -133,8 +134,10 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 /// The open search bar.
 struct Search {
     input: Entity<InputState>,
-    /// What the hits are for.
-    needle: String,
+    /// What is asked: the field's text and the toggles.
+    query: Query,
+    /// The pattern last sent for it ([`Query::source`]), which the worker's answers name.
+    asked: String,
     total: u32,
     /// Oldest first.
     matches: Vec<SearchMatch>,
@@ -147,9 +150,7 @@ struct Search {
     refresh: Option<gpui::Task<()>>,
     /// The next reply should jump to its newest hit (the needle just changed).
     reveal: bool,
-    /// The needle is a regular expression.
-    regex: bool,
-    /// The worker could not compile the regex.
+    /// The worker could not compile the pattern: its word on why.
     invalid: Option<String>,
     _subscription: gpui::Subscription,
 }
@@ -476,8 +477,8 @@ pub struct TerminalView {
     search: Option<Search>,
     /// The agent's state in this session, as the worker last reported it.
     agent: Option<AgentStatus>,
-    /// The search mode the next bar opens with (regex or plain).
-    search_regex: bool,
+    /// The toggles the next find bar opens with: the last bar's.
+    find_toggles: Query,
     /// What waits on a confirmation at the tile's foot: a paste held back by paste
     /// protection, or the close of a shell whose command is still running.
     pending: Option<Pending>,
@@ -624,7 +625,7 @@ impl TerminalView {
             wheel_gesture: None,
             search: None,
             agent: None,
-            search_regex: false,
+            find_toggles: Query::default(),
             pending: None,
             covered: false,
             sweep_since: None,
@@ -683,14 +684,14 @@ impl TerminalView {
             });
             self.search = Some(Search {
                 input,
-                needle: String::new(),
+                query: self.find_toggles.clone(),
+                asked: String::new(),
                 total: 0,
                 matches: Vec::new(),
                 current: None,
                 sent: cx.background_executor().now(),
                 refresh: None,
                 reveal: false,
-                regex: self.search_regex,
                 invalid: None,
                 _subscription: subscription,
             });
@@ -704,20 +705,22 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Open the find bar on `needle` (a find in every tile chose this one): the field holds
-    /// it and the newest hit is revealed when the worker answers.
-    pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the find bar on `query` (a search of the open tiles chose this one): the field
+    /// holds its needle, the toggles are its own, and the newest hit is revealed when the
+    /// worker answers.
+    pub fn find_with(&mut self, query: &Query, window: &mut Window, cx: &mut Context<Self>) {
         self.find(&Find, window, cx);
         let Some(search) = &mut self.search else { return };
-        search.input.update(cx, |input, cx| input.set_value(needle.to_owned(), window, cx));
-        needle.clone_into(&mut search.needle);
+        search.input.update(cx, |input, cx| input.set_value(query.needle.clone(), window, cx));
+        search.query = query.clone();
+        self.find_toggles = Query { needle: String::new(), ..query.clone() };
         self.restart_search(cx);
     }
 
-    /// The find bar's needle, when the bar is open.
+    /// The find bar's query, when the bar is open.
     #[must_use]
-    pub fn search_needle(&self) -> Option<&str> {
-        self.search.as_ref().map(|s| s.needle.as_str())
+    pub fn search_query(&self) -> Option<&Query> {
+        self.search.as_ref().map(|s| &s.query)
     }
 
     /// ⌘G / Enter.
@@ -753,14 +756,14 @@ impl TerminalView {
     fn search_changed(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
         let needle = search.input.read(cx).value().to_string();
-        if needle == search.needle {
+        if needle == search.query.needle {
             return;
         }
-        search.needle = needle;
+        search.query.needle = needle;
         self.restart_search(cx);
     }
 
-    /// Drop the hits and ask again (the needle or the mode changed).
+    /// Drop the hits and ask again (the needle or a toggle changed).
     fn restart_search(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
         search.matches.clear();
@@ -771,18 +774,18 @@ impl TerminalView {
         self.send_search(cx);
     }
 
-    /// Flip the search between plain text and regex; remembered for the next search bar.
-    fn toggle_search_regex(&mut self, cx: &mut Context<Self>) {
+    /// Flip one of the query's toggles; remembered for the next find bar.
+    fn toggle_search(&mut self, toggle: Toggle, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        search.regex = !search.regex;
-        self.search_regex = search.regex;
+        search.query.flip(toggle);
+        self.find_toggles.flip(toggle);
         self.restart_search(cx);
     }
 
-    /// The worker rejected the regex.
+    /// The worker rejected the pattern.
     fn search_invalid(&mut self, needle: &str, message: String, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        if needle != search.needle {
+        if needle != search.asked {
             return;
         }
         search.matches.clear();
@@ -796,20 +799,22 @@ impl TerminalView {
         let Some(search) = &mut self.search else { return };
         search.sent = cx.background_executor().now();
         search.refresh = None;
-        let needle = search.needle.clone();
-        if needle.is_empty() {
+        let Some(needle) = search.query.source() else {
+            search.asked.clear();
             cx.notify();
             return;
-        }
-        let regex = search.regex;
-        self.send(TermRequest::Search { needle, max: SEARCH_MAX, regex }, cx);
+        };
+        needle.clone_into(&mut search.asked);
+        // The toggles are written into the pattern, so the worker's own smart case never
+        // overrules them.
+        self.send(TermRequest::Search { needle, max: SEARCH_MAX, regex: true }, cx);
     }
 
     /// Output came while the bar is open: search again [`SEARCH_REFRESH`] after the last
     /// search, once however many frames come meanwhile, so the end of a burst is searched too.
     fn refresh_search(&mut self, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        if search.needle.is_empty() || search.refresh.is_some() {
+        if search.query.needle.is_empty() || search.refresh.is_some() {
             return;
         }
         let now = cx.background_executor().now();
@@ -876,7 +881,7 @@ impl TerminalView {
         cx: &mut Context<Self>,
     ) {
         let Some(search) = &mut self.search else { return };
-        if needle != search.needle {
+        if needle != search.asked {
             return;
         }
         // Keep the user on the same hit across a refresh when it is still there.
@@ -4075,101 +4080,42 @@ impl EntityInputHandler for TerminalView {
 }
 
 impl TerminalView {
-    /// The search bar: field, "n/total", close. Sits over the top-right corner of the grid.
+    /// The find bar over the top-right corner of the grid.
     fn render_search(&self, search: &Search, cx: &Context<Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        let wash = hsla_alpha(s.text, alpha::FAINT);
-        let bare = move |id: &'static str| {
-            div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .px(px(spacing.xs))
-                .rounded(px(radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(s.text_muted))
-                .hover(move |st| st.bg(wash))
-        };
-        let count: SharedString = if search.needle.is_empty() {
-            SharedString::default()
-        } else if search.invalid.is_some() {
-            "Bad regex".into()
-        } else if search.total == 0 {
-            "No matches".into()
+        let tally = if search.query.needle.is_empty() {
+            Tally::Quiet
+        } else if let Some(why) = &search.invalid {
+            Tally::Bad(why.clone())
         } else {
-            let at = search.current.map_or(0, |c| c.saturating_add(1));
-            let more = if search.total > SEARCH_MAX { "+" } else { "" };
-            format!("{at}/{}{more}", search.total).into()
+            Tally::Found {
+                at: search.current,
+                total: usize::try_from(search.total).unwrap_or(usize::MAX),
+                more: search.total > SEARCH_MAX,
+            }
         };
+        let this = cx.entity().downgrade();
+        let (stepping, closing) = (this.clone(), this.clone());
+        let bar = FindBar::new("terminal-find", "Find", &search.input, tally, &self.theme)
+            .toggles(&search.query, move |toggle, _window, cx| {
+                let _gone = this.update(cx, |v, cx| v.toggle_search(toggle, cx));
+            })
+            .on_step(move |delta, _window, cx| {
+                let _gone = stepping.update(cx, |v, cx| v.step_match(i64::from(delta), cx));
+            })
+            .on_close(move |window, cx| {
+                let _gone = closing.update(cx, |v, cx| v.close_find(&CloseFind, window, cx));
+            });
+        let spacing = self.theme.spacing;
         div()
-            .id("terminal-search")
-            .debug_selector(|| "terminal-search".to_owned())
-            // Over the grid: the pointer and a touch there are the bar's, not the text's.
-            .occlude()
             .key_context("TerminalSearch")
             .absolute()
             .top(px(spacing.sm))
             // A phone-wide terminal can be wider than the screen; its left edge is the part
             // that is on screen (the "take" pill sits there for the same reason).
-            .when(cfg!(target_os = "ios"), |bar| bar.left(px(spacing.sm)))
-            .when(!cfg!(target_os = "ios"), |bar| bar.right(px(spacing.sm)))
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .px(px(spacing.sm))
-            .py(px(spacing.xs))
-            .rounded(px(radii.sm))
-            .map(|el| crate::kit::elevate(el, theme))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text))
-            .font_family(self.theme.typography.ui_family.clone())
+            .when(cfg!(target_os = "ios"), |el| el.left(px(spacing.sm)))
+            .when(!cfg!(target_os = "ios"), |el| el.right(px(spacing.sm)))
             .on_action(cx.listener(Self::close_find))
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .role(gpui::accesskit::Role::Group)
-            .aria_label("Find")
-            .child(div().w(px(180.0)).child(Input::new(&search.input).aria_label("Find")))
-            .child(
-                bare("terminal-search-regex")
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label(if search.regex { "Plain text" } else { "Regular expression" })
-                    .when(search.regex, |el| crate::kit::selected(el, theme, true))
-                    .child(".*")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_search_regex(cx))),
-            )
-            .child(
-                div()
-                    .id("terminal-search-count")
-                    .min_w(px(40.0))
-                    .text_color(hsla(s.text_secondary))
-                    .role(gpui::accesskit::Role::Label)
-                    .aria_label("Matches")
-                    .aria_value(count.clone())
-                    .child(count),
-            )
-            .child(
-                bare("terminal-search-prev")
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label("Previous match")
-                    .child("↑")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(-1, cx))),
-            )
-            .child(
-                bare("terminal-search-next")
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label("Next match")
-                    .child("↓")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_match(1, cx))),
-            )
-            .child(
-                bare("terminal-search-close")
-                    .role(gpui::accesskit::Role::Button)
-                    .aria_label("Close find")
-                    .child("✕")
-                    .on_click(cx.listener(|this, _ev, window, cx| {
-                        this.close_find(&CloseFind, window, cx);
-                    })),
-            )
+            .child(bar)
             .into_any_element()
     }
 }
@@ -7500,6 +7446,39 @@ mod tests {
         assert_eq!(sent(), None, "one answer for both");
     }
 
+    /// The terminal's find bar takes the kit bar's toggles: each one asks again, its rule
+    /// written into the pattern the worker compiles, and the next bar opens with them.
+    #[gpui::test]
+    fn the_find_bars_toggles_ask_the_worker_again(cx: &mut TestAppContext) {
+        let (view, mut rx, cx) = terminal(cx);
+        let mut asked = move || {
+            let mut last = None;
+            while let Ok(msg) = rx.try_recv() {
+                if let ClientMsg::Term { req: TermRequest::Search { needle, regex, .. }, .. } = msg
+                {
+                    last = Some((needle, regex));
+                }
+            }
+            last
+        };
+        let ok = Query { needle: "a.b".to_owned(), ..Query::default() };
+        view.update_in(cx, |view, window, cx| view.find_with(&ok, window, cx));
+        cx.run_until_parked();
+        assert_eq!(asked(), Some((r"(?im)a\.b".to_owned(), true)), "text, any case");
+        for part in ["terminal-find-case", "terminal-find-word"] {
+            let at = cx.debug_bounds(part).expect("the toggle");
+            cx.simulate_click(at.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+        }
+        assert_eq!(asked(), Some((r"(?m-i)\b(?:a\.b)\b".to_owned(), true)), "exact, whole words");
+        view.update_in(cx, |view, window, cx| {
+            view.close_find(&CloseFind, window, cx);
+            view.find(&Find, window, cx);
+        });
+        let kept = view.read_with(cx, |v, _| v.search_query().cloned());
+        assert!(kept.is_some_and(|q| q.match_case && q.whole_word && !q.regex), "remembered");
+    }
+
     /// With the find bar open, output searches again at most every [`SEARCH_REFRESH`], and
     /// output that stops inside the wait is still searched when the wait ends: the hits
     /// include the last of a burst. Without output, nothing is searched again.
@@ -7515,7 +7494,9 @@ mod tests {
             n
         };
         searches();
-        view.update_in(cx, |view, window, cx| view.find_with("ok", window, cx));
+        view.update_in(cx, |view, window, cx| {
+            view.find_with(&Query { needle: "ok".to_owned(), ..Query::default() }, window, cx);
+        });
         cx.run_until_parked();
         assert_eq!(searches(), 1, "the needle");
         view.update_in(cx, |view, _window, cx| view.apply(moved_frame(1, 0, &["ok 1"]), cx));
@@ -8656,7 +8637,7 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-f");
         cx.run_until_parked();
-        let bar = cx.debug_bounds("terminal-search").expect("the find bar");
+        let bar = cx.debug_bounds("terminal-find").expect("the find bar");
         let press =
             |at| LongPressEvent { phase: TouchPhase::Started, start_position: at, position: at };
         cx.simulate_event(press(bar.center()));

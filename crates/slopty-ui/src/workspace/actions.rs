@@ -79,11 +79,9 @@ actions!(
         /// Name the focused tile: a field in its header, ↩ keeps the name (blank clears
         /// it), Esc leaves it as it was.
         RenameItem,
-        /// Find text in every tile: the palette lists the tiles it is in with their hit
-        /// counts, and ↩ opens that tile's find bar on it.
-        FindEverywhere,
-        /// Search the files under the focused tile's directory on its worker: the matches
-        /// grouped by file as they are found, ↩ opening one in a file tile at its line.
+        /// Search the files under the focused tile's directory on its worker, the matches
+        /// grouped by file as they are found and ↩ opening one in a file tile at its line; or,
+        /// with the scope chip, the open tiles, ↩ going to one with its find bar open.
         SearchInFiles,
         /// Focus the column to the left.
         FocusColumnLeft,
@@ -336,7 +334,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         ),
         w("Show or hide the navigator", IconName::PanelLeft, Box::new(ToggleNavigator)),
         w("Name this tile", IconName::Pencil, Box::new(RenameItem)),
-        w("Find in every tile", IconName::Search, Box::new(FindEverywhere)),
         w(super::project_search::SEARCH_IN_FILES, IconName::FolderSearch, Box::new(SearchInFiles)),
         w("Forwarded ports", IconName::Cable, Box::new(ListPorts)),
         w("Column to the left", IconName::ArrowLeft, Box::new(FocusColumnLeft)),

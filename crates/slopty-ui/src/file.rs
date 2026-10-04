@@ -333,36 +333,6 @@ struct Waiting {
     finishing: bool,
 }
 
-/// The lines holding `needle`, in order; none for an empty needle.
-///
-/// Found in the whole text at once: one pass for the matches and one count of the newlines
-/// between them, with no copy per line. Smart case, the terminal's rule: a needle with no
-/// capital matches in any case, one with a capital as typed.
-#[must_use]
-pub fn hit_lines(text: &str, needle: &str) -> Vec<usize> {
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    let folded;
-    let (haystack, needle) = if needle.chars().any(char::is_uppercase) {
-        (text, needle.to_owned())
-    } else {
-        // Folding keeps every newline where it was, so the lines are counted in the fold.
-        folded = text.to_lowercase();
-        (folded.as_str(), needle.to_lowercase())
-    };
-    let (mut hits, mut line, mut counted) = (Vec::new(), 0_usize, 0_usize);
-    for (at, _) in haystack.match_indices(needle.as_str()) {
-        let between = haystack.get(counted..at).unwrap_or_default();
-        line = line.saturating_add(between.matches('\n').count());
-        counted = at;
-        if hits.last() != Some(&line) {
-            hits.push(line);
-        }
-    }
-    hits
-}
-
 /// Why a file cannot be edited here: it is past the cap a tile holds. The notice's two lines,
 /// said as one.
 #[must_use]

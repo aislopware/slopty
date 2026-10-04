@@ -169,3 +169,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - the worker's `search::replace` and its tests.
 
   The surface's foot keeps ↑↓ and ↩, and the search itself is unchanged.
+
+- ✅ **⌘⇧F is the one search; its scope chip covers the open tiles** (2026-10-05). Two
+  surfaces searched across things: ⌘⇧F's palette mode, "Find in every tile", and ⌥⌘F's search
+  in files. Both took a query, listed where it was found and went there, and they differed only
+  in what they looked through, so they are one surface now. ⌘⇧F opens search in files; a
+  "Files / Open tiles" chip beside the files field turns the same query on the open tiles
+  (`slopty-ui::search::tiles`). There each shell is asked for the query as one pattern, with its
+  toggles written in (`kit::find::Query::source`), so a shell honours case and whole words as a
+  file tile does. The file tiles and notes are counted where their text is. A row is a tile and
+  its count, and ↩ goes there with the tile's own find bar open on the query, toggles and all.
+  Deleted with the merge: ⌥⌘F, the `FindEverywhere` action, the palette's find mode
+  (`CommandPalette::find`, `PaletteItem::hits`, `set_lines`, `PaletteRun::FindIn` and
+  `FindInFile`) and the plain-text line counter it used (`file::hit_lines`). Tests:
+  `the_tiles_scope_finds_in_the_open_tiles_and_goes_to_one`,
+  `the_find_bars_toggles_ask_the_worker_again`.
+

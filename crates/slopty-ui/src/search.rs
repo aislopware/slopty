@@ -15,6 +15,11 @@
 //! field, ↩ or a click opens the file tile at the line, Esc closes. Closing stops a search still
 //! going; the workspace keeps the surface, so it opens again as it was left and runs a stopped
 //! search again.
+//!
+//! The scope chip turns the same query on the tiles open in the workspace instead
+//! ([`SearchScope`]): one search surface for a worker's files and for what is on screen.
+
+mod tiles;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +42,7 @@ use slopty_client::search::{Row, SearchResults, SearchState};
 use slopty_proto::search::{ContextLine, FileHits, LineHit, MAX_LINES, SearchEvent, SearchQuery};
 use slopty_proto::{ClientMsg, RequestId};
 use slopty_theme::{Theme, Typography, alpha};
+pub use tiles::{SearchScope, TileHit, TileOpen};
 
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize};
@@ -105,6 +111,16 @@ pub enum ProjectSearchEvent {
         /// Line, from 1.
         line: u32,
     },
+    /// Find `query` in the open tiles: the workspace answers with [`ProjectSearch::set_tiles`].
+    /// An empty needle clears them.
+    FindTiles(crate::kit::find::Query),
+    /// Go to a tile the query was found in, its find bar open on `query`.
+    OpenTile {
+        /// Which tile, and how.
+        open: TileOpen,
+        /// The query, toggles and all.
+        query: crate::kit::find::Query,
+    },
     /// Esc, or a click outside.
     Dismiss,
 }
@@ -125,6 +141,10 @@ pub struct ProjectSearch {
     regex: bool,
     /// The lines round each match show.
     context: bool,
+    /// The files or the open tiles.
+    within: SearchScope,
+    /// The tiles found, while the open tiles are searched.
+    tiles: tiles::Tiles,
     /// The directory searched, as the worker is asked it.
     root: String,
     /// Where that is, as the surface says it (`~/w/slopty on studio`).
@@ -189,6 +209,8 @@ impl ProjectSearch {
             whole_word: false,
             regex: false,
             context: false,
+            within: SearchScope::Files,
+            tiles: tiles::Tiles::default(),
             root: root.to_owned(),
             place: place.to_owned(),
             results: None,
@@ -270,6 +292,13 @@ impl ProjectSearch {
 
     /// ↩: a search the typing has not started yet starts now; else the selected line opens.
     fn enter(&mut self, cx: &mut Context<Self>) {
+        if self.within == SearchScope::Tiles {
+            if self.pending.take().is_some() {
+                self.run(cx);
+            }
+            self.open_tile(cx);
+            return;
+        }
         if self.pending.take().is_some() || self.stale(cx) {
             self.run(cx);
         } else {
@@ -286,6 +315,11 @@ impl ProjectSearch {
     /// search before it on its own. An empty field clears the list and stops it.
     pub fn run(&mut self, cx: &mut Context<Self>) {
         self.pending = None;
+        if self.within == SearchScope::Tiles {
+            cx.emit(ProjectSearchEvent::FindTiles(self.tile_query(cx)));
+            cx.notify();
+            return;
+        }
         let query = self.query(cx);
         if query.pattern.is_empty() {
             self.stop(cx);
@@ -316,8 +350,13 @@ impl ProjectSearch {
         }
     }
 
-    /// The surface is shown again: a search its closing stopped runs again.
+    /// The surface is shown again: a search its closing stopped runs again, and the open
+    /// tiles, which may have changed, are asked again.
     pub fn resume(&mut self, cx: &mut Context<Self>) {
+        if self.within == SearchScope::Tiles {
+            self.run(cx);
+            return;
+        }
         if self.results.as_ref().is_some_and(|r| *r.state() == SearchState::Stopped) {
             self.results = None;
             self.run(cx);
@@ -386,6 +425,10 @@ impl ProjectSearch {
 
     /// Move the selection `delta` rows it can land on, stopping at the ends.
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.within == SearchScope::Tiles {
+            self.step_tile(delta, cx);
+            return;
+        }
         let Some(last) = self.rows.len().checked_sub(1) else { return };
         let target = match self.selected_index() {
             None => (0..=last).find(|ix| self.selectable(*ix)),
@@ -698,13 +741,16 @@ impl ProjectSearch {
                 &mut t.whole_word
             }))
             .child(toggle("search-regex", IconName::Regex, REGEX, self.regex, |t| &mut t.regex))
-            .child(toggle(
-                "search-context",
-                IconName::UnfoldVertical,
-                CONTEXT_LINES,
-                self.context,
-                |t| &mut t.context,
-            ));
+            .when(self.within == SearchScope::Files, |row| {
+                row.child(toggle(
+                    "search-context",
+                    IconName::UnfoldVertical,
+                    CONTEXT_LINES,
+                    self.context,
+                    |t| &mut t.context,
+                ))
+            });
+        let files = self.within == SearchScope::Files;
         let files_row = crate::kit::inset_x(div(), theme)
             .flex_none()
             .h(px(theme.density.row))
@@ -715,29 +761,36 @@ impl ProjectSearch {
             .border_b(crate::kit::hair(theme))
             .border_color(hsla(s.border_subtle))
             .text_size(px(theme.typography.small()))
-            .child(
-                div().flex_1().min_w_0().child(
-                    Input::new(&self.files)
-                        .appearance(false)
-                        .px_0()
-                        .text_size(px(theme.typography.small()))
-                        .aria_label("Files to include"),
-                ),
-            )
-            .child(
-                crate::kit::meta(div(), theme)
-                    .id("search-place")
-                    .debug_selector(|| "search-place".to_owned())
-                    .role(Role::Label)
-                    .aria_label(SharedString::from(self.place.clone()))
-                    .flex_none()
-                    .max_w(px(crate::kit::Overlay::Editor.bounds().0 / 2.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(self.place.clone())),
-            );
+            .when(!files, |row| row.child(self.every_tile()))
+            .when(files, |row| {
+                row.child(
+                    div().flex_1().min_w_0().child(
+                        Input::new(&self.files)
+                            .appearance(false)
+                            .px_0()
+                            .text_size(px(theme.typography.small()))
+                            .aria_label("Files to include"),
+                    ),
+                )
+                .child(self.place(theme))
+            })
+            .child(self.scope_chip(cx));
         div().flex_none().flex().flex_col().child(query_row).child(files_row).into_any_element()
+    }
+
+    /// Where the files searched are: `~/w/slopty on studio`.
+    fn place(&self, theme: &Theme) -> gpui::Stateful<gpui::Div> {
+        crate::kit::meta(div(), theme)
+            .id("search-place")
+            .debug_selector(|| "search-place".to_owned())
+            .role(Role::Label)
+            .aria_label(SharedString::from(self.place.clone()))
+            .flex_none()
+            .max_w(px(crate::kit::Overlay::Editor.bounds().0 / 2.0))
+            .overflow_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .child(SharedString::from(self.place.clone()))
     }
 
     /// What the foot says: how many matches in how many files, that the search stopped at the
@@ -762,10 +815,14 @@ impl ProjectSearch {
     }
 
     /// The foot: the search's state on the left, the keys on the right.
-    fn foot(&self) -> AnyElement {
+    fn foot(&self, cx: &App) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (said, warn) = self.status().unwrap_or_default();
+        let (said, warn) = if self.within == SearchScope::Tiles {
+            (self.tile_status(cx).unwrap_or_default(), false)
+        } else {
+            self.status().unwrap_or_default()
+        };
         let busy = self.results.as_ref().is_some_and(SearchResults::running);
         let key = |key: String, what: &'static str| {
             div()
@@ -822,9 +879,12 @@ impl ProjectSearch {
 
     /// The list, drawn as far as it is seen, or one quiet line for why there is none.
     fn list(&self, cx: &Context<Self>) -> AnyElement {
+        if self.within == SearchScope::Tiles && self.tiles_shown() {
+            return self.tile_list(cx);
+        }
         let theme = &self.theme;
         let pad = crate::palette::list_pad(theme);
-        if self.rows.is_empty() {
+        if self.rows.is_empty() || self.within == SearchScope::Tiles {
             let text = match self.results.as_ref().map(SearchResults::state) {
                 Some(SearchState::Running) => Some(SEARCHING),
                 Some(SearchState::Done(_)) => Some(NO_RESULTS),
@@ -884,10 +944,10 @@ impl Render for ProjectSearch {
             .aria_label(QUERY_PLACEHOLDER)
             .key_context(context)
             .max_h(px(ceiling.min(height * SHARE)))
-            .when(!self.rows.is_empty(), |el| el.h(px(ceiling.min(height * SHARE))))
+            .when(self.listing(), |el| el.h(px(ceiling.min(height * SHARE))))
             .child(self.fields(cx))
             .child(self.list(cx))
-            .when(self.results.is_some(), |el| el.child(self.foot()));
+            .when(self.footed(cx), |el| el.child(self.foot(cx)));
         // The keyboard summons it, so it fades in where it stands, with no travel.
         let panel = crate::kit::fade_in(panel, "search-open", cx);
         let page = isize::try_from(PAGE).unwrap_or(1);
@@ -949,6 +1009,24 @@ impl Render for ProjectSearch {
                 }),
             );
         gpui::deferred(root).with_priority(Layer::Dialog.priority())
+    }
+}
+
+impl ProjectSearch {
+    /// Whether rows are listed, so the surface takes its full height.
+    const fn listing(&self) -> bool {
+        match self.within {
+            SearchScope::Files => !self.rows.is_empty(),
+            SearchScope::Tiles => self.tiles_shown(),
+        }
+    }
+
+    /// Whether the foot shows: once there is something to say of a search.
+    fn footed(&self, cx: &App) -> bool {
+        match self.within {
+            SearchScope::Files => self.results.is_some(),
+            SearchScope::Tiles => self.tile_status(cx).is_some(),
+        }
     }
 }
 

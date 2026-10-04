@@ -9,26 +9,20 @@
 
 use std::ops::Range;
 
-use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement as _,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, px,
+    ParentElement as _, Styled as _, Subscription, Window, div, px,
 };
-use gpui_kit::component::input::{
-    Input, InputEvent, InputState, RangeDecoration, RangeDecorationStyle,
-};
+use gpui_kit::component::input::{InputEvent, InputState, RangeDecoration, RangeDecorationStyle};
 use regex::Regex;
-use slopty_theme::alpha;
 
 use super::find::{self, MATCHES_MAX};
 use super::{FileView, FileViewEvent};
-use crate::colors::{hsla, hsla_alpha};
-use crate::icons::IconName;
+use crate::colors::hsla;
+use crate::kit::FindBar;
 use crate::kit::find::{
-    MATCH_CASE, PLACEHOLDER as FIND_PLACEHOLDER, Query, REGEX, REPLACE as REPLACE_LINE,
-    REPLACE_ALL, REPLACE_PLACEHOLDER, WHOLE_WORD,
+    PLACEHOLDER as FIND_PLACEHOLDER, Query, REPLACE_PLACEHOLDER, Tally, Toggle,
 };
 use crate::search::{ToggleMatchCase, ToggleRegex, ToggleWholeWord};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
@@ -134,20 +128,14 @@ impl FileView {
         self.search.as_ref().is_some_and(|s| s.replace.is_some())
     }
 
-    /// Open the find bar on `needle` (a find in every tile chose this one): the field holds
-    /// it and the tile lands on the first match.
-    pub fn find_with(&mut self, needle: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Open the find bar on `query` (a search of the open tiles chose this one): the field
+    /// holds its needle, the toggles are its own, and the tile lands on the first match.
+    pub fn find_with(&mut self, query: &Query, window: &mut Window, cx: &mut Context<Self>) {
         self.find(window, cx);
         let Some(search) = &mut self.search else { return };
-        search.input.update(cx, |input, cx| input.set_value(needle.to_owned(), window, cx));
-        needle.clone_into(&mut search.query.needle);
+        search.input.update(cx, |input, cx| input.set_value(query.needle.clone(), window, cx));
+        search.query = query.clone();
         self.recompile(cx);
-    }
-
-    /// The find bar's needle, when the bar is open.
-    #[must_use]
-    pub fn search_needle(&self) -> Option<&str> {
-        self.search.as_ref().map(|s| s.query.needle.as_str())
     }
 
     /// Esc or ✕ in the find bar: close it; the editor takes the keyboard back.
@@ -185,10 +173,9 @@ impl FileView {
     }
 
     /// Flip one of the query's toggles (case, whole word, pattern) and find again.
-    pub fn toggle_query(&mut self, which: fn(&mut Query) -> &mut bool, cx: &mut Context<Self>) {
+    pub fn toggle_query(&mut self, toggle: Toggle, cx: &mut Context<Self>) {
         let Some(search) = &mut self.search else { return };
-        let on = which(&mut search.query);
-        *on = !*on;
+        search.query.flip(toggle);
         self.recompile(cx);
     }
 
@@ -362,165 +349,62 @@ impl FileView {
             .on_action(cx.listener(|this, _: &FindNext, _window, cx| this.step_hit(1, cx)))
             .on_action(cx.listener(|this, _: &FindPrev, _window, cx| this.step_hit(-1, cx)))
             .on_action(cx.listener(|this, _: &ToggleMatchCase, _window, cx| {
-                this.toggle_query(|q| &mut q.match_case, cx);
+                this.toggle_query(Toggle::MatchCase, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleWholeWord, _window, cx| {
-                this.toggle_query(|q| &mut q.whole_word, cx);
+                this.toggle_query(Toggle::WholeWord, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleRegex, _window, cx| {
-                this.toggle_query(|q| &mut q.regex, cx);
+                this.toggle_query(Toggle::Regex, cx);
             }))
     }
 
-    /// The find bar over the top-right corner, as the terminal's: the field, the query's
-    /// toggles, the count, the steps and the close; under it, while replacing, the replace
-    /// field and its two ways.
+    /// The find bar over the top-right corner, as the terminal's, with the replace row under
+    /// it while replacing.
     pub(super) fn render_search(&self, search: &FileSearch, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let (spacing, radii) = (theme.spacing, theme.radii);
-        let wash = hsla_alpha(s.text, alpha::FAINT);
-        let bare = move |id: &'static str| {
-            div()
-                .id(id)
-                .px(px(spacing.xs))
-                .rounded(px(radii.xs))
-                .cursor_pointer()
-                .text_color(hsla(s.text_muted))
-                .hover(move |st| st.bg(wash))
-        };
-        let count: SharedString = if search.query.needle.is_empty() {
-            SharedString::default()
-        } else if search.error.is_some() {
-            "Not a valid pattern".into()
-        } else if search.matches.is_empty() {
-            "No matches".into()
+        let tally = if search.query.needle.is_empty() {
+            Tally::Quiet
+        } else if let Some(why) = &search.error {
+            Tally::Bad(why.clone())
         } else {
-            let at = search.current.map_or(0, |c| c.saturating_add(1));
-            let more = if search.matches.len() >= MATCHES_MAX { "+" } else { "" };
-            format!("{at}/{}{more}", search.matches.len()).into()
+            Tally::Found {
+                at: search.current,
+                total: search.matches.len(),
+                more: search.matches.len() >= MATCHES_MAX,
+            }
         };
-        let q = &search.query;
-        let toggle = |id: &'static str, icon, label, on, which: fn(&mut Query) -> &mut bool| {
-            crate::kit::icon_toggle(theme, id, icon, label, on, 1.0)
-                .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |this, _ev, _window, cx| this.toggle_query(which, cx)))
-        };
-        let find_row = div()
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .child(div().w(px(180.0)).child(Input::new(&search.input).aria_label("Find in file")))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .child(toggle(
-                        "file-search-case",
-                        IconName::CaseSensitive,
-                        MATCH_CASE,
-                        q.match_case,
-                        |q| &mut q.match_case,
-                    ))
-                    .child(toggle(
-                        "file-search-word",
-                        IconName::WholeWord,
-                        WHOLE_WORD,
-                        q.whole_word,
-                        |q| &mut q.whole_word,
-                    ))
-                    .child(toggle("file-search-regex", IconName::Regex, REGEX, q.regex, |q| {
-                        &mut q.regex
-                    })),
-            )
-            .child(
-                div()
-                    .id("file-search-count")
-                    .min_w(px(40.0))
-                    .text_color(hsla(if search.error.is_some() {
-                        s.error
-                    } else {
-                        s.text_secondary
-                    }))
-                    .role(Role::Label)
-                    .aria_label("Matches")
-                    // A screen reader hears the pattern's own word on what is wrong.
-                    .aria_value(
-                        search.error.clone().map_or_else(|| count.clone(), SharedString::from),
-                    )
-                    .child(count),
-            )
-            .child(
-                bare("file-search-prev")
-                    .role(Role::Button)
-                    .aria_label("Previous match")
-                    .child("↑")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_hit(-1, cx))),
-            )
-            .child(
-                bare("file-search-next")
-                    .role(Role::Button)
-                    .aria_label("Next match")
-                    .child("↓")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.step_hit(1, cx))),
-            )
-            .child(
-                bare("file-search-close")
-                    .role(Role::Button)
-                    .aria_label("Close find")
-                    .child("✕")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_find(cx))),
-            );
-        let replace_row = search.replace.as_ref().map(|field| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(spacing.sm))
-                .child(div().w(px(180.0)).child(Input::new(field).aria_label(REPLACE_PLACEHOLDER)))
-                .child(
-                    crate::kit::icon_button(
-                        theme,
-                        "file-replace-one",
-                        IconName::Replace,
-                        REPLACE_LINE,
-                    )
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _ev, window, cx| this.replace_one(window, cx))),
-                )
-                .child(
-                    crate::kit::icon_button(
-                        theme,
-                        "file-replace-all",
-                        IconName::ReplaceAll,
-                        REPLACE_ALL,
-                    )
-                    .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-                    .on_click(cx.listener(|this, _ev, window, cx| this.replace_all(window, cx))),
-                )
-        });
+        let this = cx.entity().downgrade();
+        let (stepping, closing, replacing) = (this.clone(), this.clone(), this.clone());
+        let bar = FindBar::new("file-find", "Find in file", &search.input, tally, &self.theme)
+            .toggles(&search.query, move |toggle, _window, cx| {
+                let _gone = this.update(cx, |v, cx| v.toggle_query(toggle, cx));
+            })
+            .on_step(move |delta, _window, cx| {
+                let _gone = stepping.update(cx, |v, cx| v.step_hit(i64::from(delta), cx));
+            })
+            .on_close(move |_window, cx| {
+                let _gone = closing.update(cx, Self::close_find);
+            })
+            .when_some(search.replace.as_ref(), |bar, field| {
+                bar.replace(field, move |all, window, cx| {
+                    let _gone = replacing.update(cx, |v, cx| {
+                        if all {
+                            v.replace_all(window, cx);
+                        } else {
+                            v.replace_one(window, cx);
+                        }
+                    });
+                })
+            });
+        let spacing = self.theme.spacing;
         div()
-            .id("file-search")
-            .debug_selector(|| "file-search".to_owned())
             .key_context(SEARCH_CTX)
             .absolute()
             .top(px(spacing.sm))
             .right(px(spacing.sm))
-            .flex()
-            .flex_col()
-            .gap(px(spacing.xs))
-            .px(px(spacing.sm))
-            .py(px(spacing.xs))
-            .rounded(px(radii.sm))
-            .map(|el| crate::kit::elevate(el, theme))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text))
-            .font_family(theme.typography.ui_family.clone())
+            .id("file-find-keys")
             .map(|el| Self::search_keys(el, cx))
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .role(Role::Group)
-            .aria_label("Find in file")
-            .child(find_row)
-            .children(replace_row)
+            .child(bar)
             .into_any_element()
     }
 }

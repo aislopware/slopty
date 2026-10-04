@@ -105,7 +105,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   | ⌘O | add a window or display |
   | ⌘W / ⌘Z | close the tile / take it back (5 s) |
   | ⌘⇧P | command palette |
-  | ⌘F / ⌘⇧F | find in the tile / in every tile |
+  | ⌘F / ⌘⇧F | find in the tile / search the files, or with the scope chip the open tiles |
   | ⌘E | name the tile |
   | ⌘L | the page's address (with no page focused, "Open URL…") |
   | ⌘← / ⌘→ | page back / forward, while the page itself does not hold the keyboard |

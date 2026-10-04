@@ -9,30 +9,24 @@
 
 use std::time::Duration;
 
-use gpui::accesskit::Role;
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, Focusable as _, FollowMode,
-    InteractiveElement as _, IntoElement as _, ListOffset, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
+    AnyElement, AppContext as _, Context, Entity, Focusable as _, FollowMode, IntoElement as _,
+    ListOffset, ParentElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use slopty_proto::thread::{ItemBody, ThreadState};
 
 use super::ThreadView;
-use crate::colors::hsla;
 use crate::conversation::thread::find::{self, Found};
 use crate::conversation::thread::rows::Row;
-use crate::icons::IconName;
-use crate::kit;
+use crate::kit::find::{PLACEHOLDER, Tally};
+use crate::kit::{self, FindBar};
 
 /// How long the words rest before the worker is asked for older turns.
 pub(crate) const ASK_AFTER: Duration = Duration::from_millis(120);
 
 /// The fewest characters the worker is asked to search for.
 const ASK_FROM: usize = 2;
-
-/// The find bar's width, in points.
-const FIND_WIDTH: f32 = 320.0;
 
 /// The find bar: its field, the matches newest first, the one on show, and the older turns'
 /// matches the worker left out.
@@ -59,7 +53,7 @@ impl ThreadView {
             find.field.update(cx, |f, cx| f.focus(window, cx));
             return;
         }
-        let field = cx.new(|cx| InputState::new(window, cx).placeholder("Find in the thread"));
+        let field = cx.new(|cx| InputState::new(window, cx).placeholder(PLACEHOLDER));
         let typing =
             cx.subscribe_in(&field, window, |this, _field, event, _window, cx| match event {
                 InputEvent::Change => this.search(cx),
@@ -261,63 +255,31 @@ impl ThreadView {
     pub(super) fn find_bar(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let find = self.finder.as_ref()?;
         let theme = &self.theme;
-        let s = theme.surfaces;
         let count = find.found.len();
         let typed = !find.field.read(cx).value().trim().is_empty();
         let tally = match (count, typed) {
-            (0, false) => String::new(),
-            (0, true) if find.asking.is_some() || find.going.is_some() => "Finding…".to_owned(),
-            (0, true) => "No matches".to_owned(),
-            _ if find.more > 0 => format!("{} of {count}+", find.at.saturating_add(1)),
-            _ => format!("{} of {count}", find.at.saturating_add(1)),
+            (0, false) => Tally::Quiet,
+            (0, true) if find.asking.is_some() || find.going.is_some() => Tally::Finding,
+            _ => Tally::Found { at: Some(find.at), total: count, more: find.more > 0 },
         };
-        let step = |id: &'static str, icon: IconName, label: &'static str, delta: i8| {
-            self.icon_button(id, icon, label)
-                .on_click(cx.listener(move |this, _ev, _w, cx| this.step_find(delta, cx)))
-        };
-        let close = self.icon_button("thread-find-close", IconName::X, "Close find").on_click(
-            cx.listener(|this, _ev, window, cx| {
-                this.close_find(window, cx);
-            }),
-        );
-        let bar = kit::elevate(div(), theme)
-            .id("thread-find")
-            .debug_selector(|| "thread-find".to_owned())
-            .role(Role::Search)
-            .aria_label("Find in the thread")
-            .w(self.z(FIND_WIDTH))
-            .flex()
-            .items_center()
-            .gap(self.z(theme.spacing.xs))
-            .pl(self.z(theme.spacing.sm))
-            .pr(self.z(theme.spacing.xxs))
-            .py(self.z(theme.spacing.xxs))
-            .rounded(self.z(theme.radii.lg))
-            .text_size(self.z(theme.typography.small()))
-            .child(self.icon(IconName::Search, s.text_muted))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Input::new(&find.field).appearance(false).aria_label("Find")),
-            )
-            .child(
-                kit::tabular(div())
-                    .debug_selector(|| "thread-find-count".to_owned())
-                    .flex_none()
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(tally)),
-            )
-            .child(step("thread-find-newer", IconName::ChevronDown, "Newer match", -1))
-            .child(step("thread-find-older", IconName::ChevronUp, "Older match", 1))
-            .child(close);
+        let this = cx.entity().downgrade();
+        let closing = this.clone();
+        let bar = FindBar::new("thread-find", "Find in the thread", &find.field, tally, theme)
+            .zoom(self.zoom)
+            // Up is back in time: the older match.
+            .on_step(move |delta, _window, cx| {
+                let _gone = this.update(cx, |v, cx| v.step_find(delta.saturating_neg(), cx));
+            })
+            .on_close(move |window, cx| {
+                let _gone = closing.update(cx, |v, cx| v.close_find(window, cx));
+            });
         Some(
             div()
                 .absolute()
                 .top(self.z(theme.spacing.sm))
                 .right(self.z(theme.spacing.lg))
                 .child(kit::slide_fade(
-                    bar,
+                    div().child(bar),
                     "thread-find",
                     -theme.spacing.xs * self.zoom,
                     kit::Pace::Fade,

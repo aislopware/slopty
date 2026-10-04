@@ -43,8 +43,8 @@ use slopty_theme::Theme;
 
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
-use crate::kit::find::PLACEHOLDER as FIND_PLACEHOLDER;
-use crate::kit::{self, ButtonKind};
+use crate::kit::find::{PLACEHOLDER as FIND_PLACEHOLDER, Tally};
+use crate::kit::{self, ButtonKind, FindBar};
 use crate::terminal::{CloseFind, FindNext, FindPrev};
 use crate::workspace::actions::{PageCut, PageRedo, PageSelectAll, PageUndo, UndoClose};
 
@@ -62,9 +62,6 @@ const POLL: Duration = Duration::from_secs(1);
 
 /// How often a download under way is asked how far it has come.
 const DOWNLOAD_POLL: Duration = Duration::from_millis(250);
-
-/// The find field's width at most, as a file tile's.
-const FIND_WIDTH: f32 = 240.0;
 
 /// A script's dialog at its widest, as Safari's sheet.
 const DIALOG_WIDTH: f32 = 360.0;
@@ -743,12 +740,6 @@ impl BrowserView {
         self.search.as_ref().and_then(|s| s.found)
     }
 
-    /// What the find bar says of its matches: `3 matches`, `No matches`, or nothing yet.
-    #[must_use]
-    pub fn matches(&self) -> String {
-        self.search.as_ref().map(|s| match_status(&s.needle, s.found, s.count)).unwrap_or_default()
-    }
-
     /// Web Inspector on the page, in its own window. Whether it opened: a page that is open
     /// in the Mac app.
     pub fn inspect(&self) -> bool {
@@ -938,19 +929,20 @@ impl BrowserView {
     }
 }
 
-/// What a page's find bar says of `needle`'s matches, from the page's find (`found`) and its
-/// count: `3 matches`, `1 match`, `No matches`, or nothing while neither has answered.
+/// What a page's find bar says of `needle`'s matches: how many, none, or nothing yet.
+///
+/// From the page's find (`found`) and its count. The page steps through its matches without
+/// saying which one is on show.
 #[must_use]
-pub fn match_status(needle: &str, found: Option<bool>, count: Option<usize>) -> String {
+pub const fn match_tally(needle: &str, found: Option<bool>, count: Option<usize>) -> Tally {
     if needle.is_empty() {
-        return String::new();
+        return Tally::Quiet;
     }
     match (found, count) {
-        (Some(false), _) | (None, Some(0)) => "No matches".to_owned(),
-        (_, Some(1)) => "1 match".to_owned(),
-        (_, Some(n)) if n > 0 => format!("{n} matches"),
+        (Some(false), _) | (None, Some(0)) => Tally::Found { at: None, total: 0, more: false },
+        (_, Some(n)) if n > 0 => Tally::Found { at: None, total: n, more: false },
         // Found where the count does not reach (a frame of the page's), or not answered yet.
-        _ => String::new(),
+        _ => Tally::Quiet,
     }
 }
 
@@ -1166,6 +1158,7 @@ impl Render for BrowserView {
             .min_h_0()
             .overflow_hidden()
             .child(body)
+            .children(self.render_find(cx))
             .children(self.render_dialog(cx));
         div()
             .id(SharedString::from(format!("browser-{id}")))
@@ -1180,78 +1173,42 @@ impl Render for BrowserView {
             .overflow_hidden()
             // The tile's own body surface until the page draws over it.
             .bg(hsla(theme.content()))
-            .children(self.render_find(cx))
             .child(page)
             .children(self.render_downloads(cx))
     }
 }
 
 impl BrowserView {
-    /// The find bar, across the top of the tile's body.
+    /// The find bar over the page's top-right corner: drawn after the page, so over it.
     fn render_find(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let search = self.search.as_ref()?;
-        let theme = &self.theme;
-        let s = theme.surfaces;
         let id = *self.id.as_uuid();
-        let status = SharedString::from(match_status(&search.needle, search.found, search.count));
-        let bar = kit::inset_x(div(), theme)
-            .id("page-find")
-            .debug_selector(move || format!("page-find-{id}"))
-            .key_context("PageSearch")
-            .role(Role::Group)
-            .aria_label("Find in page")
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(theme.spacing.sm))
-            .py(px(theme.spacing.xs))
-            .border_b(kit::hair(theme))
-            .border_color(hsla(s.border))
-            .text_size(px(theme.typography.small()))
-            .font_family(theme.typography.ui_family.clone())
-            .text_color(hsla(s.text))
-            .on_action(cx.listener(|this, _: &CloseFind, _window, cx| this.close_find(cx)))
-            .on_action(cx.listener(|this, _: &Escape, _window, cx| this.close_find(cx)))
-            .on_action(cx.listener(|this, _: &FindNext, _window, _cx| this.find_step(false)))
-            .on_action(cx.listener(|this, _: &FindPrev, _window, _cx| this.find_step(true)))
-            .child(crate::icons::icon(
-                theme,
-                IconName::Search,
-                IconSize::Inline,
-                hsla(s.text_muted),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .max_w(px(FIND_WIDTH))
-                    .child(Input::new(&search.input).aria_label("Find in page")),
-            )
-            .child(
-                div()
-                    .id("page-find-status")
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(hsla(s.text_secondary))
-                    .role(Role::Label)
-                    .aria_label("Matches")
-                    .aria_value(status.clone())
-                    .child(status),
-            )
-            .child(
-                kit::icon_button(theme, "page-find-prev", IconName::ChevronUp, "Previous match")
-                    .on_click(cx.listener(|this, _ev, _window, _cx| this.find_step(true))),
-            )
-            .child(
-                kit::icon_button(theme, "page-find-next", IconName::ChevronDown, "Next match")
-                    .on_click(cx.listener(|this, _ev, _window, _cx| this.find_step(false))),
-            )
-            .child(
-                kit::icon_button(theme, "page-find-close", IconName::X, "Close find")
-                    .on_click(cx.listener(|this, _ev, _window, cx| this.close_find(cx))),
-            );
-        Some(bar.into_any_element())
+        let tally = match_tally(&search.needle, search.found, search.count);
+        let this = cx.entity().downgrade();
+        let closing = this.clone();
+        let bar = FindBar::new("page-find", "Find in page", &search.input, tally, &self.theme)
+            .on_step(move |delta, _window, cx| {
+                let _gone = this.update(cx, |v, _cx| v.find_step(delta < 0));
+            })
+            .on_close(move |_window, cx| {
+                let _gone = closing.update(cx, Self::close_find);
+            });
+        let spacing = self.theme.spacing;
+        Some(
+            div()
+                .id("page-find-keys")
+                .debug_selector(move || format!("page-find-{id}"))
+                .key_context("PageSearch")
+                .absolute()
+                .top(px(spacing.sm))
+                .right(px(spacing.sm))
+                .on_action(cx.listener(|this, _: &CloseFind, _window, cx| this.close_find(cx)))
+                .on_action(cx.listener(|this, _: &Escape, _window, cx| this.close_find(cx)))
+                .on_action(cx.listener(|this, _: &FindNext, _window, _cx| this.find_step(false)))
+                .on_action(cx.listener(|this, _: &FindPrev, _window, _cx| this.find_step(true)))
+                .child(bar)
+                .into_any_element(),
+        )
     }
 
     /// A script's dialog: a sheet over the page, under the scrim, which takes the pointer
@@ -1658,13 +1615,14 @@ mod tests {
 
     #[test]
     fn the_find_bar_counts_what_the_page_counted() {
-        assert_eq!(match_status("", Some(false), Some(0)), "", "nothing typed");
-        assert_eq!(match_status("x", None, None), "", "no answer yet");
-        assert_eq!(match_status("x", Some(false), Some(3)), "No matches", "find is the word");
-        assert_eq!(match_status("x", None, Some(0)), "No matches");
-        assert_eq!(match_status("x", Some(true), Some(1)), "1 match");
-        assert_eq!(match_status("x", None, Some(12)), "12 matches");
-        assert_eq!(match_status("x", Some(true), Some(0)), "", "found in a frame it cannot count");
+        let said = |needle, found, count| match_tally(needle, found, count).words();
+        assert_eq!(said("", Some(false), Some(0)), "", "nothing typed");
+        assert_eq!(said("x", None, None), "", "no answer yet");
+        assert_eq!(said("x", Some(false), Some(3)), "No matches", "find is the word");
+        assert_eq!(said("x", None, Some(0)), "No matches");
+        assert_eq!(said("x", Some(true), Some(1)), "1 match");
+        assert_eq!(said("x", None, Some(12)), "12 matches");
+        assert_eq!(said("x", Some(true), Some(0)), "", "found in a frame it cannot count");
     }
 
     #[test]

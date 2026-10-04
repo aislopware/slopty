@@ -1009,9 +1009,9 @@ lines, edited, trouble, read-only). The way in is the palette: a path typed in o
 `Open <path>` line against the active shell's directory, and a word asked of the worker's
 files does the same for its hits; either opens the tile with the keyboard in the editor. The
 palette lists every tile as "Go to <title>" after the sessions (`PaletteRun::Item`). ⌘F with the
-tile active opens a find bar like the terminal's (`FileView::find`, key context `FileSearch`):
-a hit is a line holding the text, smart-case (`file::hit_lines`), tinted in the warn tone,
-stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
+tile active opens the kit's find bar, as every tile does (`kit::FindBar`, `FileView::find`, key
+context `FileSearch`): a hit is a match of the query (`kit::find::Query`: smart case, whole word,
+pattern), tinted in the terminal's search tones, stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
 the editor, ⌘F is the tile's find, not gpui-kit's, and ⌘⌥↑/↓ move the focus between tiles, not add
 carets (bindings in `FileEditor > Input`).
 
@@ -1056,7 +1056,11 @@ files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search
 file's matching lines and, when the context toggle is on, the lines round each match merged
 once (`FileHits::context`). `slopty_client::search::SearchResults` keeps them in path order and
 lays out the rows: a file, then its matches and context in line order. It finds and does not
-replace: a match opens its file tile at the line, where ⌘⇧H replaces in that file. Scripts and
+replace: a match opens its file tile at the line, where ⌘⇧H replaces in that file. Its scope
+chip turns the same query on the open tiles (`search::tiles`): the workspace asks each shell for
+the query as one pattern (`TermRequest::Search`, the toggles written in by `Query::source`) and
+counts the file tiles and notes itself, and a row goes to its tile with that tile's find bar open
+on the query. Scripts and
 agents reach the same search through `Verb::Search` (`slopty search`), one capped reply in path
 order.
 

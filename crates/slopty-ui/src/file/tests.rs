@@ -13,6 +13,11 @@ use super::*;
 /// What the tile asked the workspace for, in order.
 type Events = Rc<RefCell<Vec<FileViewEvent>>>;
 
+/// A find for `text`, its toggles off.
+fn needle(text: &str) -> crate::kit::find::Query {
+    crate::kit::find::Query { needle: text.to_owned(), ..Default::default() }
+}
+
 fn text_read(text: &str, newline: bool, modified_ms: u64) -> FileRead {
     let size = u64::try_from(text.len()).unwrap_or(0).saturating_add(u64::from(newline));
     FileRead::Text {
@@ -308,12 +313,12 @@ fn a_twenty_thousand_line_file_stays_editable(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.dirty()));
     assert_eq!(view.read_with(cx, FileView::caret), (19_992, 1));
 
-    view.update_in(cx, |v, window, cx| v.find_with("LINE_1999", window, cx));
+    view.update_in(cx, |v, window, cx| v.find_with(&needle("LINE_1999"), window, cx));
     view.read_with(cx, |v, _| {
         let (hits, _) = v.hits().unwrap_or_default();
         assert!(hits.is_empty(), "a capital matches as typed");
     });
-    view.update_in(cx, |v, window, cx| v.find_with("line_1999", window, cx));
+    view.update_in(cx, |v, window, cx| v.find_with(&needle("line_1999"), window, cx));
     view.read_with(cx, |v, cx| {
         let rows = v.hit_rows(cx);
         assert_eq!(rows.len(), 11, "line_1999 and line_19990..=19999");
@@ -347,26 +352,6 @@ fn a_file_past_the_colour_limit_is_plain(cx: &mut TestAppContext) {
     assert_eq!(view.read_with(cx, FileView::line_count), 2, "and still editable text");
 }
 
-#[test]
-fn hit_lines_count_lines_across_a_case_fold_that_changes_lengths() {
-    let text = "Alpha beta\nbeta\n\nGAMMA beta beta\nİstanbul\nend";
-    let cases: [(&str, &[usize]); 10] = [
-        ("beta", &[0, 1, 3]),
-        ("Beta", &[]),
-        ("gamma", &[3]),
-        ("GAMMA", &[3]),
-        ("a", &[0, 1, 3, 4]),
-        ("\u{130}", &[4]),
-        ("i\u{307}", &[4]),
-        ("end", &[5]),
-        ("", &[]),
-        ("zz", &[]),
-    ];
-    for (needle, lines) in cases {
-        assert_eq!(hit_lines(text, needle), lines, "{needle:?}");
-    }
-}
-
 #[gpui::test]
 fn a_failed_save_says_why_until_the_next_keystroke(cx: &mut TestAppContext) {
     let (view, _events, cx) = tile(cx, "/w/ro.txt");
@@ -382,15 +367,6 @@ fn a_failed_save_says_why_until_the_next_keystroke(cx: &mut TestAppContext) {
     });
     types(&view, cx, "z");
     view.read_with(cx, |v, _| assert_eq!(v.trouble(), None));
-}
-
-#[test]
-fn hits_are_the_lines_holding_the_needle_with_smart_case() {
-    let text = "Alpha\nbeta\nalpha beta\ngamma";
-    assert_eq!(hit_lines(text, "alpha"), [0, 2], "no capital: any case");
-    assert_eq!(hit_lines(text, "Alpha"), [0], "a capital: as typed");
-    assert_eq!(hit_lines(text, "BETA"), Vec::<usize>::new());
-    assert_eq!(hit_lines(text, ""), Vec::<usize>::new(), "an empty needle finds nothing");
 }
 
 #[test]
@@ -464,7 +440,7 @@ fn timing_of_a_large_file(cx: &mut TestAppContext) {
         }
         let scroll = t.elapsed().checked_div(rounds).unwrap_or_default();
         let t = Instant::now();
-        view.update_in(cx, |v, window, cx| v.find_with("line_1", window, cx));
+        view.update_in(cx, |v, window, cx| v.find_with(&needle("line_1"), window, cx));
         let find = t.elapsed();
         view.update(cx, FileView::close_find);
         let t = Instant::now();

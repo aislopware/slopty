@@ -111,7 +111,7 @@ fn the_file_overrides_unbinds_and_wins_a_clash() {
     assert_eq!(said.len(), 3, "and the stats' ⇧⌘I: {said:?}");
     // The workspace's ⇧⌘F binds in a text field too; the terminal is a context of its own.
     assert_eq!(chords_of(&keymap, Scope::Terminal, "find"), ["cmd-shift-f"]);
-    assert_eq!(chords_of(&keymap, Scope::Workspace, "find_everywhere"), ["cmd-shift-f"]);
+    assert_eq!(chords_of(&keymap, Scope::Workspace, "search_in_files"), ["cmd-shift-f"]);
     assert!(keymap.is_set(keymap.find(Scope::Terminal, "find").unwrap_or_default()));
     let same = Keymap::new(&KeySettings::default(), Vec::new());
     assert!(same.binds_as(&Keymap::default()) && !keymap.binds_as(&same));

@@ -117,7 +117,7 @@ use tokio::sync::mpsc;
 use crate::file::FileView;
 use crate::folder::FolderView;
 use crate::note::NoteView;
-use crate::palette::{CommandPalette, PaletteItem, PaletteRun};
+use crate::palette::{CommandPalette, PaletteItem};
 use crate::picker::WindowPicker;
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::TerminalView;
@@ -782,11 +782,8 @@ pub struct WorkspaceView {
     palette_leaving: Option<Entity<CommandPalette>>,
     /// Search in files: the surface, shown or kept, and where the keyboard goes back to.
     search: project_search::Surface,
-    find_needle: Option<String>,
-    find_hits: HashMap<ItemId, (u32, PaletteRun)>,
-    pending_find: Option<(SessionId, String)>,
-    pending_find_file: Option<(ItemId, String)>,
-    last_find: String,
+    pending_find: Option<(SessionId, crate::kit::find::Query)>,
+    pending_find_file: Option<(ItemId, crate::kit::find::Query)>,
     rename: Option<Rename>,
     rename_return: Option<FocusHandle>,
     pending_focus_rename: bool,
@@ -1040,11 +1037,8 @@ impl WorkspaceView {
             palette: None,
             palette_leaving: None,
             search: project_search::Surface::default(),
-            find_needle: None,
-            find_hits: HashMap::new(),
             pending_find: None,
             pending_find_file: None,
-            last_find: String::new(),
             rename: None,
             rename_return: None,
             pending_focus_rename: false,
@@ -1595,7 +1589,7 @@ impl WorkspaceView {
             ("unseen", self.unseen.len()),
             ("parked", self.parked.len()),
             ("on_screen", self.drawn.on_screen.borrow().len()),
-            ("find_hits", self.find_hits.len()),
+            ("tile_hits", self.search.tile_hits()),
             ("palette_extra", self.palette_extra.len()),
             ("more_entries", self.more_entries.len()),
             // The closed list itself is kept on purpose, up to `CLOSED_KEPT`; what must not
@@ -1721,20 +1715,20 @@ impl WorkspaceView {
                 window.focus(&handle, cx);
             }
         }
-        if let Some((session, needle)) = self.pending_find.take()
+        if let Some((session, query)) = self.pending_find.take()
             && let Some(view) = self.terminals.get(&session).cloned()
         {
             // After this frame: the tile is drawn and focused first, then its find bar takes
             // the keyboard.
             window.defer(cx, move |window, cx| {
-                view.update(cx, |v, cx| v.find_with(&needle, window, cx));
+                view.update(cx, |v, cx| v.find_with(&query, window, cx));
             });
         }
-        if let Some((item, needle)) = self.pending_find_file.take()
+        if let Some((item, query)) = self.pending_find_file.take()
             && let Some(view) = self.files.get(&item).cloned()
         {
             window.defer(cx, move |window, cx| {
-                view.update(cx, |v, cx| v.find_with(&needle, window, cx));
+                view.update(cx, |v, cx| v.find_with(&query, window, cx));
             });
         }
         if std::mem::take(&mut self.pending_focus_picker)
@@ -1932,7 +1926,6 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::filter_navigator))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::edit_address))
-            .on_action(cx.listener(Self::find_everywhere))
             .on_action(cx.listener(Self::search_in_files))
             .on_action(cx.listener(Self::start_thread_action))
             .on_action(cx.listener(Self::new_agent_of))

@@ -134,7 +134,8 @@ pub enum Tally {
     Finding,
     /// The pattern does not compile: the pattern's own word on why.
     Bad(String),
-    /// The matches: the one on show (from 0) among `total`, `more` past a cap.
+    /// The matches: the one on show (from 0, when the owner knows it) among `total`, `more`
+    /// past a cap.
     Found {
         /// The match on show.
         at: Option<usize>,
@@ -154,9 +155,13 @@ impl Tally {
             Self::Finding => FINDING.to_owned(),
             Self::Bad(_) => BAD_PATTERN.to_owned(),
             Self::Found { total: 0, .. } => NO_MATCHES.to_owned(),
-            Self::Found { at, total, more } => {
-                let at = at.map_or(0, |at| at.saturating_add(1));
-                format!("{at} of {total}{}", if *more { "+" } else { "" })
+            Self::Found { at: Some(at), total, more } => {
+                format!("{} of {total}{}", at.saturating_add(1), if *more { "+" } else { "" })
+            }
+            // Where the owner cannot say which match is on show (a page's own find).
+            Self::Found { at: None, total: 1, more: false } => "1 match".to_owned(),
+            Self::Found { at: None, total, more } => {
+                format!("{total}{} matches", if *more { "+" } else { "" })
             }
         }
     }
@@ -419,6 +424,8 @@ mod tests {
         assert_eq!(Tally::Found { at: Some(1), total: 4, more: false }.words(), "2 of 4");
         assert_eq!(Tally::Found { at: Some(0), total: 10, more: true }.words(), "1 of 10+");
         assert_eq!(Tally::Found { at: None, total: 0, more: false }.words(), NO_MATCHES);
+        assert_eq!(Tally::Found { at: None, total: 1, more: false }.words(), "1 match");
+        assert_eq!(Tally::Found { at: None, total: 3, more: false }.words(), "3 matches");
         assert_eq!(Tally::Bad("error: x".into()).words(), BAD_PATTERN);
     }
 }

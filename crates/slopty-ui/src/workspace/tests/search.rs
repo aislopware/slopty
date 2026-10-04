@@ -1,6 +1,7 @@
 //! Search in files in the headless workspace: the directory it asks the worker to search, the
 //! pages it groups by file as they come, the toggles, a stale page dropped, a match opened as
-//! a file tile at its line, and the search stopped when the surface closes.
+//! a file tile at its line, the search stopped when the surface closes, and the same query
+//! on the open tiles.
 
 use slopty_proto::search::{
     FileHits, LineHit, SearchEvent, SearchQuery, SearchRequest, SearchSummary, Span,
@@ -80,7 +81,7 @@ fn a_search_streams_grouped_matches_and_opens_one_at_its_line(cx: &mut TestAppCo
     cx.run_until_parked();
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-alt-f");
+    cx.simulate_keystrokes("cmd-shift-f");
     cx.run_until_parked();
     assert!(cx.debug_bounds("search").is_some(), "the surface is up");
     assert!(requests(&mut studio).is_empty(), "nothing is searched before a query");
@@ -167,7 +168,7 @@ fn the_toggles_search_again_and_closing_stops_the_search(cx: &mut TestAppContext
     cx.run_until_parked();
     studio.drain();
 
-    cx.simulate_keystrokes("cmd-alt-f");
+    cx.simulate_keystrokes("cmd-shift-f");
     cx.run_until_parked();
     type_query(cx, "Foo");
     cx.simulate_keystrokes("cmd-alt-c");
@@ -201,11 +202,69 @@ fn the_toggles_search_again_and_closing_stops_the_search(cx: &mut TestAppContext
     let asked = requests(&mut studio);
     assert_eq!(asked, [SearchRequest::Stop { id: last.expect("a search") }], "the search stops");
 
-    cx.simulate_keystrokes("cmd-alt-f");
+    cx.simulate_keystrokes("cmd-shift-f");
     cx.run_until_parked();
     let again = requests(&mut studio);
     assert!(
         matches!(again.as_slice(), [SearchRequest::Start { query, .. }] if query.pattern == "Foo" && query.match_case),
         "the stopped search runs again as it was: {again:#?}"
     );
+}
+
+/// ⌘⇧F's scope chip turns the query on the open tiles: each shell is asked for the query as
+/// one pattern, its toggles written in, and a shell's answer is a row with its count. ↩ goes
+/// to that shell with its own find bar open on the query.
+#[gpui::test]
+fn the_tiles_scope_finds_in_the_open_tiles_and_goes_to_one(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let (one, two) = (SessionId::new(), SessionId::new());
+    let first = opens_in(&view, cx, &studio, one, studio.me, 1, Some("/w/a"));
+    opens_in(&view, cx, &studio, two, studio.me, 2, Some("/w/b"));
+    view.update_in(cx, |v, _w, cx| v.focus_tile(first, cx));
+    cx.run_until_parked();
+    studio.drain();
+
+    cx.simulate_keystrokes("cmd-shift-f");
+    cx.run_until_parked();
+    let chip = cx.debug_bounds("search-scope-tiles").expect("the scope chip");
+    cx.simulate_click(chip.center(), Modifiers::default());
+    cx.run_until_parked();
+    // The click left the keyboard on the chip; the field takes it back.
+    view.update_in(cx, |v, window, cx| {
+        if let Some(search) = v.search_view() {
+            search.update(cx, |s, cx| s.focus(window, cx));
+        }
+    });
+    type_query(cx, "needle");
+    let asked: Vec<(SessionId, String, bool)> = studio
+        .drain()
+        .into_iter()
+        .filter_map(|m| match m {
+            ClientMsg::Term { session, req: TermRequest::Search { needle, regex, .. } } => {
+                Some((session, needle, regex))
+            }
+            _ => None,
+        })
+        .collect();
+    let pattern = "(?im)needle".to_owned();
+    assert!(asked.contains(&(one, pattern.clone(), true)), "{asked:?}");
+    assert!(asked.contains(&(two, pattern.clone(), true)), "{asked:?}");
+
+    let answer = |total| TermEvent::Matches { needle: pattern.clone(), total, matches: Vec::new() };
+    view.update_in(cx, |v, _w, cx| {
+        v.term_event(one, answer(0), cx);
+        v.term_event(two, answer(3), cx);
+    });
+    cx.run_until_parked();
+    let listed = rows(cx);
+    assert_eq!(listed.len(), 1, "the shell with no hit is left out: {listed:?}");
+    assert!(listed[0].ends_with("3 matches"), "{listed:?}");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("search").is_none(), "the surface hides");
+    let query = view
+        .read_with(cx, |v, cx| v.terminal(two).and_then(|t| t.read(cx).search_query().cloned()));
+    assert_eq!(query.map(|q| q.needle), Some("needle".to_owned()), "its own find bar, open");
 }

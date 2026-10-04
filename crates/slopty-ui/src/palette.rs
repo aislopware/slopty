@@ -531,20 +531,6 @@ pub enum PaletteRun {
     OpenUrl(String),
     /// Open this address in a browser tile.
     OpenInTile(String),
-    /// Reveal this session and open its find bar on `needle` (find in every tile).
-    FindIn {
-        /// The tile's session.
-        session: SessionId,
-        /// What was typed.
-        needle: String,
-    },
-    /// Reveal this file tile and open its find bar on `needle` (find in every tile).
-    FindInFile {
-        /// The tile.
-        item: slopty_core::ItemId,
-        /// What was typed.
-        needle: String,
-    },
     /// Show this project's board in its orchestrator's tile.
     Project(slopty_proto::project::ProjectId),
     /// Go to the workspace that last held this project's tiles, and to its first tile there.
@@ -562,8 +548,6 @@ impl PaletteRun {
             Self::Session(_)
             | Self::Item(_)
             | Self::Worker(_)
-            | Self::FindIn { .. }
-            | Self::FindInFile { .. }
             | Self::Project(_)
             | Self::Group(_) => "Go to",
             Self::OpenFile { .. }
@@ -596,12 +580,6 @@ impl Clone for PaletteRun {
             Self::Project(project) => Self::Project(project.clone()),
             Self::Group(group) => Self::Group(group.clone()),
             Self::Reopen(closing) => Self::Reopen(*closing),
-            Self::FindIn { session, needle } => {
-                Self::FindIn { session: *session, needle: needle.clone() }
-            }
-            Self::FindInFile { item, needle } => {
-                Self::FindInFile { item: *item, needle: needle.clone() }
-            }
         }
     }
 }
@@ -625,12 +603,6 @@ impl std::fmt::Debug for PaletteRun {
             Self::OpenAgent { cwd } => f.debug_struct("OpenAgent").field("cwd", cwd).finish(),
             Self::OpenUrl(url) => f.debug_tuple("OpenUrl").field(url).finish(),
             Self::OpenInTile(url) => f.debug_tuple("OpenInTile").field(url).finish(),
-            Self::FindIn { session, needle } => {
-                f.debug_struct("FindIn").field("session", session).field("needle", needle).finish()
-            }
-            Self::FindInFile { item, needle } => {
-                f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
-            }
             Self::Project(project) => f.debug_tuple("Project").field(project).finish(),
             Self::Group(group) => f.debug_tuple("Group").field(group).finish(),
             Self::Reopen(closing) => f.debug_tuple("Reopen").field(closing).finish(),
@@ -871,30 +843,6 @@ impl PaletteItem {
         let mut agent = Self::open_agent(&cwd);
         agent.label = format!("New agent in {relative}");
         [shell, agent]
-    }
-
-    /// `<title>` with `N hits` on the right for a tile the needle was found in; ↩ does
-    /// `run` (the tile's own find bar, or the tile itself).
-    #[must_use]
-    pub fn hits(title: &str, total: u32, run: PaletteRun) -> Self {
-        let keys = if total == 1 { "1 hit".to_owned() } else { format!("{total} hits") };
-        let icon: Glyph = match &run {
-            PaletteRun::FindIn { .. } | PaletteRun::Session(_) => IconName::SquareTerminal.into(),
-            PaletteRun::OpenFile { path, .. } => Glyph::file(path),
-            PaletteRun::FindInFile { .. } => IconName::FileText.into(),
-            PaletteRun::Item(_) => IconName::StickyNote.into(),
-            PaletteRun::OpenFolder { .. } => IconName::Folder.into(),
-            PaletteRun::Project(_) | PaletteRun::Group(_) => IconName::Workflow.into(),
-            PaletteRun::Reopen(_) => IconName::Undo2.into(),
-            PaletteRun::Action(_)
-            | PaletteRun::Worker(_)
-            | PaletteRun::Wake(_)
-            | PaletteRun::OpenShell { .. }
-            | PaletteRun::OpenAgent { .. }
-            | PaletteRun::OpenUrl(_)
-            | PaletteRun::OpenInTile(_) => IconName::Search.into(),
-        };
-        Self::line(title.to_owned(), keys, run, icon, Section::Tiles)
     }
 
     /// `Open <path>` for a path typed into the field, `line N` on the right when it names one.
@@ -1393,8 +1341,6 @@ pub struct CommandPalette {
     list: ListState,
     /// The selection moved (a step, a new query): the next frame scrolls to it.
     reveal: bool,
-    /// A find in every tile: the field's text is a needle, never a path.
-    finding: bool,
     /// Whether key chords are worth printing: not on a touch device with no keyboard, where
     /// no chord can be pressed.
     chords: bool,
@@ -1447,7 +1393,7 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_field(items, "Type a command", false, theme, window, cx)
+        Self::with_field(items, "Type a command", theme, window, cx)
     }
 
     /// The palette as one step of a choice (an agent, a machine, a folder): only `items`, its
@@ -1459,28 +1405,12 @@ impl CommandPalette {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_field(items, placeholder, false, theme, window, cx)
-    }
-
-    /// The palette as a search across every tile: no commands, no path lines, the field
-    /// says what it is for, and the lines are what the workspace sets from the hits. `seed` is
-    /// what the field starts with (the active tile's own needle), selected so typing replaces
-    /// it; the workspace runs the first search itself, since a set value is no change.
-    pub fn find(seed: &str, theme: Theme, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let palette = Self::with_field(Vec::new(), "Find in every tile", true, theme, window, cx);
-        if !seed.is_empty() {
-            palette.input.update(cx, |input, cx| {
-                input.set_value(seed.to_owned(), window, cx);
-                input.select_all(window, cx);
-            });
-        }
-        palette
+        Self::with_field(items, placeholder, theme, window, cx)
     }
 
     fn with_field(
         items: Vec<PaletteItem>,
         placeholder: &'static str,
-        finding: bool,
         theme: Theme,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1505,7 +1435,6 @@ impl CommandPalette {
             selected: 0,
             list: ListState::new(0, ListAlignment::Top, px(OVERDRAW)).measure_all(),
             reveal: false,
-            finding,
             chords: true,
             brief: false,
             live: false,
@@ -1589,13 +1518,6 @@ impl CommandPalette {
         self.input.update(cx, |input, cx| input.set_value(text.to_owned(), window, cx));
         self.path_items = path_items(text);
         self.refresh(cx);
-    }
-
-    /// Replace the lines under the commands (the hits of a find in every tile).
-    pub fn set_lines(&mut self, lines: Vec<PaletteItem>, cx: &mut Context<Self>) {
-        self.found = lines;
-        self.refresh(cx);
-        cx.notify();
     }
 
     /// The worker found `paths` under `root` for `query`: they are `Open <path>` lines after
@@ -1736,7 +1658,7 @@ impl CommandPalette {
         self.selected = 0;
         self.reveal = true;
         let text = self.input.read(cx).value().to_string();
-        self.path_items = if self.finding { Vec::new() } else { path_items(&text) };
+        self.path_items = path_items(&text);
         self.found.clear();
         self.refresh(cx);
         cx.emit(PaletteEvent::Changed(text));
@@ -1983,9 +1905,7 @@ impl Render for CommandPalette {
             .get(chosen)
             .and_then(|at| self.at(*at))
             .map_or(RETURN_VERB, |item| item.run.verb());
-        // A find with nothing typed yet has nothing to report: the field says what it is for.
-        let waiting = self.finding && self.input.read(cx).value().trim().is_empty();
-        let nothing = self.lines.is_empty() && !waiting;
+        let nothing = self.lines.is_empty();
 
         let viewport = window.viewport_size();
         let height = f32::from(viewport.height);
@@ -2816,15 +2736,7 @@ mod tests {
         use gpui::AssetSource as _;
 
         let session = SessionId::new();
-        let mut names: Vec<Glyph> = [
-            PaletteRun::FindIn { session, needle: String::new() },
-            PaletteRun::FindInFile { item: ItemId::new(), needle: String::new() },
-            PaletteRun::Item(ItemId::new()),
-        ]
-        .map(|run| PaletteItem::hits("x", 1, run).icon)
-        .into_iter()
-        .collect();
-        names.push(PaletteItem::session("zsh", session).icon);
+        let mut names: Vec<Glyph> = vec![PaletteItem::session("zsh", session).icon];
         names.push(PaletteItem::worker("w", "", slopty_client::layout::WorkerKey::new(1)).icon);
         names.extend(PaletteItem::found_dir("/w", "src").map(|line| line.icon));
         names.extend([

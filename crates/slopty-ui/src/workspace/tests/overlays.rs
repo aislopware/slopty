@@ -5,6 +5,7 @@ use gpui::Modifiers;
 use slopty_core::WallMs;
 
 use super::*;
+use crate::palette::PaletteRun;
 
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())

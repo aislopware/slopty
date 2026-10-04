@@ -728,11 +728,8 @@ impl WorkspaceView {
 
     /// A session-stream event.
     pub fn term_event(&mut self, session: SessionId, event: TermEvent, cx: &mut Context<Self>) {
-        if let TermEvent::Matches { needle, total, .. } = &event
-            && self.find_needle.is_some()
-        {
-            let needle = needle.clone();
-            self.find_answered(session, &needle, *total, cx);
+        if let TermEvent::Matches { needle, total, .. } = &event {
+            self.tile_answered(session, needle, *total, cx);
         }
         // A refusal the person caused (typing into a program that stopped reading, a request
         // of a terminal that ended) is theirs to see, not only the log's.

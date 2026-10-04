@@ -544,7 +544,7 @@ async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
         .await
         .unwrap();
     drv.keys("cmd-f").await.unwrap();
-    drv.wait_for("the find bar", STEP, |d| d.a11y_node("Group", Some("Find in page")).is_some())
+    drv.wait_for("the find bar", STEP, |d| d.a11y_node("Search", Some("Find in page")).is_some())
         .await
         .unwrap();
     drv.type_text("apple").await.unwrap();
@@ -555,7 +555,7 @@ async fn a_blank_link_opens_a_tile_and_a_script_s_dialogs_are_sheets_in_it() {
     .unwrap();
     drv.keys("cmd-g").await.unwrap();
     drv.keys("escape").await.unwrap();
-    drv.wait_for("the bar closed", STEP, |d| d.a11y_node("Group", Some("Find in page")).is_none())
+    drv.wait_for("the bar closed", STEP, |d| d.a11y_node("Search", Some("Find in page")).is_none())
         .await
         .unwrap();
     stack.shutdown().await;

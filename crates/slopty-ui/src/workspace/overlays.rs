@@ -9,12 +9,12 @@ use slopty_core::SessionId;
 use slopty_proto::ClientMsg;
 use slopty_proto::items::ItemKind;
 use slopty_proto::screen::{DisplayInfo, WindowInfo};
-use slopty_proto::terminal::TermRequest;
 
 use super::WorkspaceView;
-use super::actions::{FindEverywhere, OpenFile, OpenFolder, OpenPalette, StartThread};
+use super::actions::{OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_status_text, needs_human};
 use crate::icons::Status;
+use crate::kit::find::Query;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
 
@@ -250,43 +250,17 @@ impl WorkspaceView {
         self.open_file_palette(&OpenFile, window, cx);
     }
 
-    /// ⌘⇧F: the palette as a find in every tile.
-    pub fn find_everywhere(
-        &mut self,
-        _: &FindEverywhere,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.palette.is_some() {
-            return;
-        }
-        let theme = self.theme.clone();
-        let seed = match self.active_needle(cx) {
-            own if own.is_empty() => self.last_find.clone(),
-            own => own,
-        };
-        let palette = cx.new(|cx| CommandPalette::find(&seed, theme, window, cx));
-        self.find_needle = Some(String::new());
-        self.find_hits.clear();
-        self.show_palette(palette, window, cx);
-        if !seed.is_empty() {
-            self.find_changed(&seed, cx);
-        }
-    }
-
-    /// The focused tile's own find-bar needle, to start a find in every tile from.
-    pub(super) fn active_needle(&self, cx: &gpui::App) -> String {
-        let Some(tile) = self.focused() else { return String::new() };
-        let Some(active) = self.item(tile) else { return String::new() };
-        let needle = match &active.kind {
-            ItemKind::Terminal { session } => self
-                .terminals
-                .get(session)
-                .and_then(|v| v.read(cx).search_needle().map(str::to_owned)),
-            ItemKind::File { .. } => self
-                .files
-                .get(&active.id)
-                .and_then(|v| v.read(cx).search_needle().map(str::to_owned)),
+    /// The focused tile's own find-bar query, to start a search from.
+    pub(super) fn active_query(&self, cx: &gpui::App) -> Query {
+        let Some(tile) = self.focused() else { return Query::default() };
+        let Some(active) = self.item(tile) else { return Query::default() };
+        let query = match &active.kind {
+            ItemKind::Terminal { session } => {
+                self.terminals.get(session).and_then(|v| v.read(cx).search_query().cloned())
+            }
+            ItemKind::File { .. } => {
+                self.files.get(&active.id).and_then(|v| v.read(cx).query().cloned())
+            }
             ItemKind::Note { .. }
             | ItemKind::Window { .. }
             | ItemKind::Display { .. }
@@ -295,7 +269,7 @@ impl WorkspaceView {
             | ItemKind::Review { .. }
             | ItemKind::Thread { .. } => None,
         };
-        needle.unwrap_or_default()
+        query.unwrap_or_default()
     }
 
     /// Keep drawing a dismissed palette for as long as its way out takes, then drop it; a
@@ -361,17 +335,11 @@ impl WorkspaceView {
         });
         cx.subscribe(&palette, |this, palette, event, cx| {
             if let PaletteEvent::Changed(text) = event {
-                if this.find_needle.is_some() {
-                    this.find_changed(text, cx);
-                } else {
-                    this.palette_changed(text);
-                }
+                this.palette_changed(text);
                 return;
             }
             this.palette = None;
             this.let_palette_leave(palette, cx);
-            this.find_needle = None;
-            this.find_hits.clear();
             match event {
                 PaletteEvent::Run(PaletteRun::Action(action)) => {
                     // Run from where the keyboard was, once it is back there.
@@ -430,11 +398,6 @@ impl WorkspaceView {
                         }
                     }
                 }
-                PaletteEvent::Run(PaletteRun::FindIn { session, needle }) => {
-                    this.palette_return = None;
-                    this.reveal_session(*session, cx);
-                    this.pending_find = Some((*session, needle.clone()));
-                }
                 PaletteEvent::Run(PaletteRun::Reopen(closing)) => {
                     this.palette_return = None;
                     this.take_back(Some(*closing), cx);
@@ -446,11 +409,6 @@ impl WorkspaceView {
                 PaletteEvent::Run(PaletteRun::Group(group)) => {
                     this.palette_return = None;
                     this.go_to_group(group, cx);
-                }
-                PaletteEvent::Run(PaletteRun::FindInFile { item, needle }) => {
-                    this.palette_return = None;
-                    this.go_to(*item, cx);
-                    this.pending_find_file = Some((*item, needle.clone()));
                 }
                 PaletteEvent::Dismiss | PaletteEvent::Changed(_) => {}
             }
@@ -476,102 +434,6 @@ impl WorkspaceView {
             .filter(|line| run_action(line).is_none_or(|a| !hidden.contains(&a.as_any().type_id())))
             .collect();
         palette.update(cx, |p, cx| p.set_items(items, cx));
-    }
-
-    /// The find-everywhere field changed: every live shell is asked for the needle (one hit
-    /// each is enough: the count is what the line says); the notes and file tiles are counted
-    /// here, where their text is.
-    fn find_changed(&mut self, text: &str, cx: &mut Context<Self>) {
-        let needle = text.trim().to_owned();
-        self.find_needle = Some(needle.clone());
-        self.find_hits.clear();
-        if needle.is_empty() {
-            self.refresh_find_lines(cx);
-            return;
-        }
-        needle.clone_into(&mut self.last_find);
-        for tile in self.reading_order() {
-            let Some(item) = self.item(tile) else { continue };
-            let id = item.id;
-            let (total, run) = match &item.kind {
-                ItemKind::Terminal { session } => {
-                    if !self.terminals.contains_key(session) {
-                        continue;
-                    }
-                    self.send(
-                        tile.worker,
-                        ClientMsg::Term {
-                            session: *session,
-                            req: TermRequest::Search {
-                                needle: needle.clone(),
-                                max: 1,
-                                regex: false,
-                            },
-                        },
-                    );
-                    continue;
-                }
-                ItemKind::Note { text } => {
-                    (crate::file::hit_lines(text, &needle).len(), PaletteRun::Item(id))
-                }
-                ItemKind::File { .. } => {
-                    let Some(view) = self.files.get(&id) else { continue };
-                    let total = crate::file::hit_lines(&view.read(cx).text(cx), &needle).len();
-                    (total, PaletteRun::FindInFile { item: id, needle: needle.clone() })
-                }
-                ItemKind::Window { .. }
-                | ItemKind::Display { .. }
-                | ItemKind::Browser { .. }
-                | ItemKind::Folder { .. }
-                | ItemKind::Review { .. }
-                | ItemKind::Thread { .. } => {
-                    continue;
-                }
-            };
-            if let Ok(total) = u32::try_from(total) {
-                self.find_hits.insert(id, (total, run));
-            }
-        }
-        self.refresh_find_lines(cx);
-    }
-
-    /// A shell answered the find-everywhere needle: its line says how many hits it holds.
-    pub(super) fn find_answered(
-        &mut self,
-        session: SessionId,
-        needle: &str,
-        total: u32,
-        cx: &mut Context<Self>,
-    ) {
-        if self.find_needle.as_deref() != Some(needle) || needle.is_empty() {
-            return;
-        }
-        if !self.terminals.contains_key(&session) {
-            return;
-        }
-        let Some(tile) = self.tile_of_session(session) else { return };
-        let run = PaletteRun::FindIn { session, needle: needle.to_owned() };
-        self.find_hits.insert(tile.item, (total, run));
-        self.refresh_find_lines(cx);
-    }
-
-    /// The find-everywhere lines: the tiles with a hit, in reading order, as they are known.
-    fn refresh_find_lines(&self, cx: &mut Context<Self>) {
-        if self.find_needle.is_none() {
-            return;
-        }
-        let lines: Vec<PaletteItem> = self
-            .reading_order()
-            .into_iter()
-            .filter_map(|tile| {
-                let (total, run) = self.find_hits.get(&tile.item)?;
-                let item = self.item(tile)?;
-                (*total > 0).then(|| PaletteItem::hits(&self.tile_title(item), *total, run.clone()))
-            })
-            .collect();
-        if let Some(palette) = &self.palette {
-            palette.update(cx, |p, cx| p.set_lines(lines, cx));
-        }
     }
 
     /// The palette's field changed: a word worth a lookup is asked of the context worker's

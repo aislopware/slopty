@@ -527,7 +527,8 @@ fn next_step(rng: &mut Rng, seq: &mut u64, first: &mut u64, cursor: &mut Cursor)
                         view.find(&Find, window, cx);
                     }
                     if let Some(search) = &mut view.search {
-                        search.needle = "x".to_owned();
+                        search.query.needle = "x".to_owned();
+                        search.asked = "x".to_owned();
                     }
                     let total = u32::try_from(lines.len()).unwrap_or(0);
                     view.matches_arrived("x", total, lines.clone(), cx);

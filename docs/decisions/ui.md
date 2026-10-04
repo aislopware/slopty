@@ -6530,3 +6530,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     OKLCH; `ansi_slots_keep_their_hue_across_modes` (within 10°, green 15°, neutral greys);
     `ansi_brights_are_at_least_as_strong_as_their_normals` (both modes, light normals within
     8 Lc); `a_comment_is_the_dim_slot_and_still_reads`.
+
+- ✅ **One find bar, the kit's** (2026-10-05). The terminal, the file tile, the thread and the
+  page each drew a find bar of their own. They had drifted apart: three widths, two arrow glyph
+  sets, "Bad regex" beside "Not a valid pattern", "2/9" beside "2 of 9", and a regex toggle only
+  the terminal had. After Ely GPUI Components' `FindWidget` (Ely study §5 #9), `kit::FindBar` is
+  the one bar. It holds the field, the case, word and pattern toggles (shown only where the owner
+  handles them), the tally in one wording (`kit::find::Tally`: "2 of 9", "No matches", "Not a
+  valid pattern" with the pattern's own word as its value, "Finding…"), the steps and the close,
+  plus the replace row where the owner has one. Each owner places the bar and binds its keys round
+  it. Its parts go by `{bar}-count`, `-previous`, `-next`, `-close`, `-case`, `-word`, `-regex`,
+  `-replace` and `-replace-all`, under `terminal-find`, `file-find`, `thread-find` and
+  `page-find`. The terminal gains case and whole word: the query reaches the worker as one
+  pattern with its rule written in, so the worker's own smart case never overrules a toggle. The
+  page's bar moved from a strip above the page to the top-right corner over it, as the others sit;
+  GPUI draws it after the page, so it shows over the native view. The query itself
+  (`kit::find::Query`) is the file tile's, moved to the kit so every bar shares it.
+

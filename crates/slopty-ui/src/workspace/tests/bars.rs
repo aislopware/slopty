@@ -10,6 +10,7 @@ use slopty_proto::orchestration::Port;
 use slopty_proto::tailnet::LinkPath;
 
 use super::*;
+use crate::palette::PaletteRun;
 
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
