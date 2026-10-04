@@ -770,13 +770,17 @@ mod threads {
     /// A loaded machine can open the block's "asked in the terminal" card first, when the hook
     /// comes after [`slopty_agent::observed::ASK_GRACE`]; the held prompt then withdraws it. So
     /// the wait is for the one open request to be the held one.
-    async fn asked(client: &mut Client) -> Request {
-        let held = |r: &Request| !r.id.0.starts_with("terminal-");
+    /// The one prompt the thread holds open, past `answered`: an answer's outcome can come back
+    /// before the frame that closes its request, so the request just answered is no new one.
+    async fn asked(client: &mut Client, answered: &[&Request]) -> Request {
+        let fresh = |r: &Request| {
+            !r.id.0.starts_with("terminal-") && answered.iter().all(|done| done.id != r.id)
+        };
         client
             .until(|c| {
-                c.thread
-                    .as_ref()
-                    .is_some_and(|s| s.open_requests().count() == 1 && s.open_requests().all(held))
+                c.thread.as_ref().is_some_and(|s| {
+                    s.open_requests().count() == 1 && s.open_requests().all(&fresh)
+                })
             })
             .await;
         client.state().open_requests().next().unwrap().clone()
@@ -812,9 +816,9 @@ mod threads {
         a.until(|c| c.thread.is_some()).await;
 
         let held = relay(dir.path(), session, &ask);
-        let request = asked(&mut a).await;
+        let first = asked(&mut a, &[]).await;
         let always =
-            Intent::Answer { ask: request.id.clone(), choice: "always".to_owned(), message: None };
+            Intent::Answer { ask: first.id.clone(), choice: "always".to_owned(), message: None };
         assert_eq!(a.intent(IntentId::new(), thread, always.clone()).await, Outcome::Done);
         let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
         let decision = &output["hookSpecificOutput"]["decision"];
@@ -824,7 +828,7 @@ mod threads {
         assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
 
         let mut gone = relay(dir.path(), session, &ask);
-        let request = asked(&mut a).await;
+        let request = asked(&mut a, &[&first]).await;
         gone.start_kill().unwrap();
         let withdrawn = |c: &Client| {
             c.state()
@@ -835,7 +839,7 @@ mod threads {
         a.until(withdrawn).await;
 
         let released = relay(dir.path(), session, &ask);
-        asked(&mut a).await;
+        asked(&mut a, &[&first, &request]).await;
         a.send(ThreadRequest::Unfollow { thread }).await;
         assert_eq!(printed(released).await, "", "no decision: the TUI's dialog");
         a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
