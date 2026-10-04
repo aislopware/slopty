@@ -19,5 +19,7 @@ gpui::actions!(
         RefreshPullRequest,
         /// Switch the thread's model to think at the next level its agent offers, round.
         CycleEffort,
+        /// Ask the draft of a fork of the thread, in a sheet over it.
+        AskAside,
     ]
 );

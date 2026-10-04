@@ -122,6 +122,7 @@ drawn![
     "lock",
     "map",
     "maximize-2",
+    "message-circle-question-mark",
     "message-square",
     "message-square-warning",
     "minus",

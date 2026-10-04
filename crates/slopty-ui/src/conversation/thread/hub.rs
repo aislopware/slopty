@@ -75,12 +75,16 @@ pub enum HubEvent {
     /// ([`ThreadHub::search`]).
     Hits,
     /// An intent on `from` started `thread`: a fork, a go in another agent, an edit from a
-    /// turn. The workspace opens it.
+    /// turn. The workspace opens it, unless it is an aside, which its view shows.
     Started {
         /// The thread the person acted on.
         from: ThreadId,
         /// The thread it started.
         thread: ThreadId,
+        /// The intent that started it.
+        intent: IntentId,
+        /// It is an aside (`Intent::Aside`), shown in a sheet over `from`'s view.
+        aside: bool,
     },
 }
 
@@ -291,7 +295,24 @@ impl ThreadHub {
             if let Some(sent) = sent {
                 let why = turned_down(&done.outcome).filter(|_| !speaks_for_itself(&sent.intent));
                 if let Outcome::Started { thread } = done.outcome {
-                    cx.emit(HubEvent::Started { from: sent.thread, thread });
+                    let aside = matches!(sent.intent, Intent::Aside);
+                    cx.emit(HubEvent::Started {
+                        from: sent.thread,
+                        thread,
+                        intent: sent.id,
+                        aside,
+                    });
+                }
+                // An aside kept is a thread of its own now: the workspace opens it as it opens
+                // a fork.
+                if matches!(sent.intent, Intent::KeepAside) && done.outcome == Outcome::Done {
+                    let thread = sent.thread;
+                    cx.emit(HubEvent::Started {
+                        from: thread,
+                        thread,
+                        intent: sent.id,
+                        aside: false,
+                    });
                 }
                 if let Some(why) = why {
                     let words = refused_words(&sent.intent, &why);
@@ -607,6 +628,14 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::KeepAside => "Couldn't keep the aside".to_owned(),
     };
     format!("{what}: {why}")
+}
+
+/// Whether `row` is an aside of another thread (`ThreadMeta::aside_of`): it shows only in its
+/// thread's sheet, so the lists that show threads, what needs the person and the notes pass
+/// over it.
+#[must_use]
+pub fn is_aside(row: &slopty_proto::thread::wire::ThreadRow) -> bool {
+    row.facts.contains_key(slopty_proto::thread::ThreadMeta::ASIDE_FACT)
 }
 
 fn file_name(path: &str) -> &str {
