@@ -381,6 +381,7 @@ impl WorkspaceView {
     /// ⌘⇧I: the stats overlay on every remote window.
     pub fn toggle_stats(&mut self, _: &ToggleStats, _window: &mut Window, cx: &mut Context<Self>) {
         self.show_stats = !self.show_stats;
+        self.bar.forget_frame_time();
         for view in self.screens.values() {
             view.update(cx, |v, cx| v.set_hud(self.show_stats, cx));
         }

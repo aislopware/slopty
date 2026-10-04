@@ -24,7 +24,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -69,15 +69,16 @@ const PLAN_AGED_FROM: Duration = Duration::from_mins(15);
 /// A plan window used this far, in hundredths of a percent, is said in `warn`.
 const PLAN_WARN_FROM_BP: u32 = 8_000;
 
-/// How long a frame-time readout stands before it is worked out again: the percentile sorts
-/// the probe's ring, which is not work for every frame.
+/// How often the bar's clock reads what changes with time (the frame time, a stream's rate) and
+/// draws the bar again: the frame time's percentile sorts the probe's ring, which is not work
+/// for every frame.
 const FRAME_READOUT_EVERY: Duration = Duration::from_secs(1);
 
 /// The status bar's own state.
 #[derive(Default)]
 pub(super) struct Bar {
-    /// The frame time's readout, and when it was worked out.
-    frame_text: RefCell<Option<(Instant, Option<SharedString>)>>,
+    /// The frame time's readout, as the bar's clock last read it.
+    frame_text: RefCell<FrameReading>,
     /// Draws the bar again when the frame time's readout is due, while the stats show.
     tick: RefCell<Option<Task<()>>>,
     /// [`Self::tick`] waits to fire. A draw while it waits leaves it be: one that set it going
@@ -93,6 +94,24 @@ pub(super) struct Bar {
     transfers_open: bool,
     /// The popover just closed, drawn for the moment it takes to fade away.
     leaving: Option<Popover>,
+}
+
+impl Bar {
+    /// Let the frame time's readout go, so the first draw with the stats reads it afresh
+    /// rather than print the one from when they last showed.
+    pub(super) fn forget_frame_time(&self) {
+        self.frame_text.take();
+    }
+}
+
+/// The frame time's readout as the bar's clock read it.
+#[derive(Clone, Default)]
+enum FrameReading {
+    /// Not read since the stats showed.
+    #[default]
+    Unread,
+    /// Read: the readout, or nothing before the app's probe has timed a frame.
+    Read(Option<SharedString>),
 }
 
 /// One of the bar's popovers.
@@ -201,21 +220,19 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// The frame time's readout, worked out at most once a [`FRAME_READOUT_EVERY`]; nothing
-    /// before the app's probe has timed a frame.
+    /// The frame time's readout, as the bar's clock last read it ([`Self::read_clock`]), read
+    /// here only for the first draw after the stats show; nothing before the app's probe has
+    /// timed a frame. A draw never reads the clock itself: one drawn from scratch a moment
+    /// after the frame on screen must print what that frame printed.
     fn frame_readout(&self, cx: &App) -> Option<SharedString> {
-        let now = Instant::now();
-        let mut readout = self.bar.frame_text.borrow_mut();
-        let fresh = readout
-            .as_ref()
-            .is_some_and(|(at, _)| now.saturating_duration_since(*at) < FRAME_READOUT_EVERY);
-        if !fresh {
-            let text = crate::frames::stats(cx)
-                .filter(|s| s.frames > 0)
-                .map(|s| format!("Frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into());
-            *readout = Some((now, text));
+        let mut reading = self.bar.frame_text.borrow_mut();
+        if matches!(*reading, FrameReading::Unread) {
+            *reading = FrameReading::Read(frame_text(cx));
         }
-        readout.as_ref().and_then(|(_, text)| text.clone())
+        match &*reading {
+            FrameReading::Read(text) => text.clone(),
+            FrameReading::Unread => None,
+        }
     }
 
     /// The rate stream `id` is painted at ([`crate::screen::ScreenView::paint_rate`]), as the bar's
@@ -233,12 +250,15 @@ impl WorkspaceView {
         Some(rate)
     }
 
-    /// What the bar's clock reads before it draws the bar again: the focused stream's rate.
+    /// What the bar's clock reads before it draws the bar again: the focused stream's rate,
+    /// and the frame time while the stats show.
     fn read_clock(&self, cx: &App) {
         self.bar.ticking.set(false);
         let focused = self.focused().map(|t| t.item);
         let rate = focused.and_then(|id| Some((id, self.screens.get(&id)?.read(cx).paint_rate())));
         self.bar.rate.set(rate);
+        *self.bar.frame_text.borrow_mut() =
+            if self.show_stats { FrameReading::Read(frame_text(cx)) } else { FrameReading::Unread };
     }
 
     /// What the bar says of the focused tile, by its kind: a file's language and caret, a
@@ -914,6 +934,14 @@ fn plan_words(
         parts.push(format!("{} ago", crate::palette::age_label(age)));
     }
     (parts.join(META_SEPARATOR), warn)
+}
+
+/// The frame time's readout now: the median of the frames the app's probe timed, or nothing
+/// before it has timed one.
+fn frame_text(cx: &App) -> Option<SharedString> {
+    crate::frames::stats(cx)
+        .filter(|s| s.frames > 0)
+        .map(|s| format!("Frame {:.1} ms", s.draw_p50.as_secs_f64() * 1e3).into())
 }
 
 /// A small dot of a state's fill beside a readout's words.
