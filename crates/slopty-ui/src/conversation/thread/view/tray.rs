@@ -13,8 +13,8 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, Div, ElementId, FollowMode, FontWeight, InteractiveElement as _,
-    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
-    Styled as _, div, relative,
+    IntoElement as _, LiveRegion as _, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, div, relative,
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
@@ -122,10 +122,49 @@ impl ThreadView {
         self.marks.get().asked == Some((row, Placement::Inline))
     }
 
-    /// The round way down to the newest row, over the list's foot while it is scrolled up.
+    /// Count what came since the list left its newest row, and once the count has held for
+    /// [`TELL_AFTER`], let the way down announce it: a run of arrivals is said once, when it
+    /// settles, not once per row.
+    ///
+    /// It goes by whether the list follows its newest row, not by the way down's mark: right
+    /// after rows come the list has not laid them out, and the mark reads as at the end.
+    pub(super) fn count_unseen(&mut self, cx: &Context<Self>) {
+        if self.list.is_following_tail() {
+            self.unseen_from = None;
+            self.told = 0;
+            self.telling = None;
+            return;
+        }
+        let items = self.state(cx).map_or(0, |state| state.items.len());
+        let new = items.saturating_sub(*self.unseen_from.get_or_insert(items));
+        if self.telling.as_ref().is_some_and(|(waiting, _)| *waiting == new) {
+            return;
+        }
+        if new == self.told {
+            self.telling = None;
+            return;
+        }
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(TELL_AFTER).await;
+            let _gone = this.update(cx, |this, cx| {
+                this.told = new;
+                this.telling = None;
+                cx.notify();
+            });
+        });
+        self.telling = Some((new, task));
+    }
+
+    /// The way down to the newest row, over the list's foot while it is scrolled up: a round
+    /// chevron, or a pill saying how much is new once anything came. What it says is
+    /// announced politely once the count settles.
     pub(super) fn down_button(&self, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
+        let new = self.unseen_from.map_or(0, |from| {
+            self.state(cx).map_or(0, |state| state.items.len()).saturating_sub(from)
+        });
+        let control = self.z(theme.density.control);
         // At the list's right edge, in the gutter beside the column where it has one: over the
         // text, it would sit on whatever the newest rows draw there.
         div()
@@ -138,16 +177,35 @@ impl ThreadView {
                     .debug_selector(|| "thread-down".to_owned())
                     .role(Role::Button)
                     .aria_label("Scroll to the newest")
-                    .size(self.z(theme.density.control))
+                    .when(self.told > 0, |el| {
+                        el.aria_live(gpui::accesskit::Live::Polite).aria_value(SharedString::from(
+                            format!("{} below", new_words(self.told)),
+                        ))
+                    })
+                    .h(control)
+                    .min_w(control)
                     .flex()
                     .items_center()
                     .justify_center()
+                    .gap(self.z(theme.spacing.xxs))
+                    .when(new > 0, |el| {
+                        el.pl(self.z(theme.spacing.sm)).pr(self.z(theme.spacing.xs))
+                    })
                     .rounded_full()
                     .border(kit::hair(theme))
                     .border_color(hsla(s.border))
                     .bg(hsla(s.elevated))
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
+                    .when(new > 0, |el| {
+                        el.child(
+                            kit::tabular(div())
+                                .debug_selector(|| "thread-down-count".to_owned())
+                                .text_size(self.z(theme.typography.small()))
+                                .text_color(hsla(s.text_secondary))
+                                .child(SharedString::from(new_words(new))),
+                        )
+                    })
                     .child(self.icon(IconName::ChevronDown, s.text_secondary))
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         this.list.scroll_to_end();
@@ -1088,6 +1146,15 @@ impl ThreadView {
     }
 }
 
+/// How long a count of new rows holds before the way down announces it, so a run of
+/// arrivals is said once.
+pub(super) const TELL_AFTER: Duration = Duration::from_millis(700);
+
+/// What the way down says of `n` new rows: "3 new", capped at "99+ new".
+pub(super) fn new_words(n: usize) -> String {
+    if n > 99 { "99+ new".to_owned() } else { format!("{n} new") }
+}
+
 /// How the work in the background stands, in a few words: how much runs while any does,
 /// else how it ended ("1 finished", "2 finished · 1 failed"), never "in the background" for
 /// work that is over.
@@ -1179,8 +1246,16 @@ mod tests {
     use slopty_core::WallMs;
     use slopty_proto::thread::{BackgroundTask as T, Choice, Effect};
 
-    use super::{answer_kinds, answer_label, answer_scope, tasks_words};
+    use super::{answer_kinds, answer_label, answer_scope, new_words, tasks_words};
     use crate::kit::ButtonKind;
+
+    /// The way down counts new rows to 99, then says "99+ new".
+    #[test]
+    fn a_count_of_new_rows_stops_at_99() {
+        assert_eq!(new_words(3), "3 new");
+        assert_eq!(new_words(99), "99 new");
+        assert_eq!(new_words(100), "99+ new");
+    }
 
     /// Work in the background says how much runs while any does, else how it ended, so a
     /// finished task never reads as still running.

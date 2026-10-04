@@ -68,6 +68,9 @@ pub struct Node {
     pub value: Option<String>,
     /// What the node does, beyond its label, if said.
     pub description: Option<String>,
+    /// How a live region announces a change to its value (`Polite`, `Assertive`); `None` off
+    /// every live region.
+    pub live: Option<String>,
     /// The node holds the keyboard focus.
     pub focused: bool,
     /// Window rect in points: x, y, w, h.
@@ -101,6 +104,7 @@ pub fn tree(window: &Window) -> Vec<Node> {
             label: node.label().map(str::to_owned),
             value: node.value().map(str::to_owned),
             description: node.description().map(str::to_owned),
+            live: node.live().map(|live| format!("{live:?}")),
             focused: id == update.focus,
             bounds,
         });

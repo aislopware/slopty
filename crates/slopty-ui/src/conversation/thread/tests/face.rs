@@ -255,6 +255,51 @@ fn a_thread_scrolled_up_offers_the_way_down(cx: &mut TestAppContext) {
     assert!(view.read_with(cx, |v, _| v.following()), "following the newest row again");
 }
 
+/// Scrolled up while the thread moves on, the way down says how much came ("3 new"), and
+/// announces it politely only once the count has held for 700 ms; back at the newest row
+/// the count goes.
+#[gpui::test]
+fn the_way_down_counts_what_came_and_says_it_once_it_settles(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::long(6, 4);
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    scroll(cx, 400.0);
+    assert!(cx.debug_bounds("thread-down").is_some());
+    assert!(cx.debug_bounds("thread-down-count").is_none(), "nothing new yet: the chevron");
+
+    let turn = state.items.last().map_or(TurnId(1), |i| i.turn);
+    for n in 0..3 {
+        let text = ItemBody::Text(Clipped::whole("More."));
+        state.items.push(Item { turn, ..item(&format!("new-{n}"), text) });
+    }
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    let down = |cx: &mut VisualTestContext| {
+        cx.update(|window, _cx| crate::a11y::tree(window))
+            .into_iter()
+            .find(|n| n.is("Button", Some("Scroll to the newest")))
+            .map(|n| (n.value, n.live))
+            .expect("the way down")
+    };
+    assert!(cx.debug_bounds("thread-down-count").is_some(), "the count shows at once");
+    assert_eq!(down(cx), (None, None), "not said before it settles");
+    cx.executor().advance_clock(std::time::Duration::from_millis(700));
+    cx.run_until_parked();
+    assert_eq!(down(cx), (Some("3 new below".to_owned()), Some("Polite".to_owned())));
+
+    let at = cx.debug_bounds("thread-down").expect("drawn").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    assert!(view.read_with(cx, |v, _| v.following()));
+    scroll(cx, 400.0);
+    assert!(cx.debug_bounds("thread-down-count").is_none(), "counted afresh");
+}
+
 /// Every step open on a long thread, the wheel thrown hard both ways, frame after frame: the
 /// view reads the list's scroll only once a frame is drawn, never from inside the list.
 #[gpui::test]

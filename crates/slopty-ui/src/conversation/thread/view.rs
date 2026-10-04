@@ -207,6 +207,13 @@ pub struct ThreadView {
     /// What the last frame drew from the list's scroll: where the request on show was
     /// answered and whether the way down showed.
     marks: Cell<tray::Marks>,
+    /// How many items the thread held when the list left its newest row: those after it are
+    /// new, and the way down counts them.
+    unseen_from: Option<usize>,
+    /// How many new items the way down announced, once the count held for
+    /// [`tray::TELL_AFTER`], and the count waiting out that time.
+    told: usize,
+    telling: Option<(usize, Task<()>)>,
     /// How many frames drew the marks wrong, found so once the list laid out.
     #[cfg(test)]
     marks_moved: Cell<usize>,
@@ -315,6 +322,9 @@ impl ThreadView {
             editing: None,
             reveal_terminal: false,
             marks: Cell::default(),
+            unseen_from: None,
+            told: 0,
+            telling: None,
             #[cfg(test)]
             marks_moved: Cell::default(),
             copied: None,
@@ -1682,6 +1692,7 @@ impl Render for ThreadView {
         self.settle_edit(window, cx);
         self.settle_questions(window, cx);
         self.marks.set(self.read_marks(cx));
+        self.count_unseen(cx);
         // The list lays out after this render: what its scroll then says is read once the
         // frame is drawn, and draws again only if that moved the request or the way down.
         cx.defer_in(window, |this, _window, cx| this.recheck_marks(cx));

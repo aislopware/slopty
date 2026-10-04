@@ -6079,3 +6079,25 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `terminal::view::tests::{a_selection_is_attached_named_after_its_command,
     a_selection_s_fence_outruns_its_backticks}`,
     `workspace::tests::attach_block` (the event's new name).
+
+- ✅ **The way down says how much is new, and says it once** (2026-10-04, stage 4 item 11,
+  designeer #4).
+  - Scrolled up while the thread moves on, the round way down becomes a pill: "3 new" in
+    tabular figures before the chevron, capped at "99+ new". It counts the thread's items that
+    came after the list stopped following its newest row, so a row that only grew (a streamed
+    answer) adds nothing and the round chevron stays. Back at the newest row the count starts
+    afresh. The count goes by the list's follow state, not by the way down's mark, because
+    right after rows come the list has not laid them out and the mark reads as at the end.
+  - Once a count has held for 700 ms (`tray::TELL_AFTER`), the button becomes a polite live
+    region with the value "3 new below". A run of arrivals is said once, when it settles,
+    never once per row. The label stays "Scroll to the newest", so nothing else is
+    re-announced.
+  - The live region is new in our gpui-fast fork: `gpui::LiveRegion::aria_live(Live)` sets
+    AccessKit's `live` on the node (aislopware/gpui-fast#26, moved into `fast::live_region`
+    behind one div.rs hook by #27, merged as caa325b; neither longbridge nor zed had an open
+    PR for it). On macOS, AccessKit then posts
+    `NSAccessibilityAnnouncementRequestedNotification` with the value at medium priority
+    (high for assertive). `a11y::Node` carries `live`, so tests can see it.
+  - Tests: `conversation::thread::tests::face::the_way_down_counts_what_came_and_says_it_once_it_settles`,
+    `conversation::thread::view::tray::tests::a_count_of_new_rows_stops_at_99`, and in the
+    fork `fast::tests::live_region::a_live_region_carries_its_politeness_and_value`.
