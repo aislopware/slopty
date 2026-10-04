@@ -1,6 +1,7 @@
 //! The server with a real worker behind it, driven the way people and agents drive it: the
-//! `slopty` binary with `--json`, and MCP over HTTP. `slopty-server`, `slopty-ptyd` and
-//! `slopty-worker` from this build run in a temporary directory on ports of their own.
+//! `slopty` binary with `--json`, and a project's tools over MCP's HTTP. `slopty-server`,
+//! `slopty-ptyd` and `slopty-worker` from this build run in a temporary directory on ports of
+//! their own.
 //!
 //! Live (`#[ignore]`), run by `cargo xtask e2e server`. It needs no permission from
 //! the machine, and nothing is typed into a shell the test did not open.
@@ -66,13 +67,26 @@ mod tests {
         Ok(all.iter().any(|t| t["term"] == term))
     }
 
-    /// A tool called over MCP: its result parsed, failing on a tool error.
-    async fn tool(stack: &ServerStack, id: u64, name: &str, arguments: Value) -> Result<Value> {
-        let params = json!({ "name": name, "arguments": arguments });
-        let called = stack.mcp(id, "tools/call", params).await?;
-        let result = &called["result"];
-        ensure!(result["isError"] != json!(true), "{name}: {called}");
-        Ok(serde_json::from_str(str_of(&result["content"][0], "text")?)?)
+    /// The fleet's event cursor as it stands: `slopty events` read from the start, page by page,
+    /// to the last `next`.
+    async fn cursor_now(stack: &ServerStack) -> Result<u64> {
+        let mut since = 0_u64;
+        loop {
+            let from = since.to_string();
+            let page = stack.slopty(&["events", "--since", &from, "--timeout", "0"]).await?;
+            let next = page["next"].as_u64().context("next")?;
+            let read = page["events"].as_array().context("events")?.len();
+            if read < 500 || next == since {
+                return Ok(next);
+            }
+            since = next;
+        }
+    }
+
+    /// The events after `since`, waiting up to `timeout_ms` for the first.
+    async fn events_after(stack: &ServerStack, since: u64, timeout_ms: u32) -> Result<Value> {
+        let (since, timeout) = (since.to_string(), timeout_ms.to_string());
+        stack.slopty(&["events", "--since", &since, "--timeout", &timeout]).await
     }
 
     /// The terminal as `slopty terminals --json` lists it.
@@ -127,12 +141,12 @@ mod tests {
         outcome.unwrap();
     }
 
-    /// Search in files from a script and from an agent: `slopty search` narrows by glob and
-    /// prints the context round a match, `.gitignore` keeps a file out, and `search_files`
-    /// over MCP stops at the lines asked for and says there are more.
+    /// Search in files from a script or an agent's shell: `slopty search` narrows by glob and
+    /// prints the context round a match, `.gitignore` keeps a file out, it stops at the lines
+    /// asked for and says there are more, and a pattern that does not parse is refused.
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e server"]
-    async fn search_in_files_through_the_cli_and_mcp() {
+    async fn search_in_files_through_the_cli() {
         let stack = ServerStack::launch("e2e-search").await.unwrap();
         let outcome = search_scenario(&stack).await;
         stack.shutdown().await;
@@ -184,21 +198,15 @@ mod tests {
         );
         ensure!(files[0]["lines"][1]["matches"] == json!([[5, 11]]), "{found}");
 
-        let asked = json!({ "worker": worker, "root": dir, "pattern": "NEEDLE", "max_lines": 2 });
-        let found = tool(stack, 40, "search_files", asked).await?;
+        let capped = ["search", "NEEDLE", &dir, "--worker", worker, "--max", "2"];
+        let found = stack.slopty(&capped).await?;
         ensure!(found["capped"] == json!(true) && found["lines"] == json!(2), "{found}");
-        let cased =
-            json!({ "worker": worker, "root": dir, "pattern": "NEEDLE", "match_case": true });
-        let found = tool(stack, 41, "search_files", cased).await?;
+        let cased = ["search", "NEEDLE", &dir, "--worker", worker, "--case-sensitive"];
+        let found = stack.slopty(&cased).await?;
         ensure!(found["files"] == json!([]) && found["capped"] == json!(false), "{found}");
 
-        let bad = json!({ "worker": worker, "root": dir, "pattern": "(", "regex": true });
-        let params = json!({ "name": "search_files", "arguments": bad });
-        let called = stack.mcp(42, "tools/call", params).await?;
-        ensure!(
-            called["result"]["isError"] == json!(true),
-            "a pattern that does not parse: {called}"
-        );
+        let bad = stack.slopty(&["search", "(", &dir, "--worker", worker, "--regex"]).await;
+        ensure!(bad.is_err(), "a pattern that does not parse: {bad:?}");
         Ok(())
     }
 
@@ -290,8 +298,7 @@ mod tests {
         ensure!(stat["exists"] == true && stat["size"] == binary.len(), "{stat}");
         clock.lap("put, cat, ls, stat");
 
-        // 3b. A file past one reply goes up and comes down in parts; the server's MCP endpoint,
-        //     which runs on another machine than its caller, refuses to move the caller's files.
+        // 3b. A file past one reply goes up and comes down in parts.
         bulk(stack, &worker).await?;
         clock.lap("push, pull past 8 MiB");
 
@@ -311,38 +318,52 @@ mod tests {
         stack.slopty(&["send", &term, "--keys", "ctrl+c"]).await?;
         clock.lap("ports");
 
-        // 7. MCP over HTTP: the tools, and the screen of a terminal as a tool reads it.
+        // 7. A project's tools over MCP's HTTP: the eight listed, and a call the hub answers. The
+        //    screen of a terminal, as an agent reads it with `slopty screen`.
         let listed = stack.mcp(1, "tools/list", json!({})).await?;
         let tools = listed["result"]["tools"].as_array().context("tools")?;
-        ensure!(tools.iter().any(|t| t["name"] == "read_screen"), "{listed}");
-        let shown = until("the marker on the screen MCP reads", STEP, async || {
-            let params = json!({ "name": "read_screen", "arguments": { "term": term } });
-            let called = stack.mcp(2, "tools/call", params).await?;
-            let result = &called["result"];
-            ensure!(result["isError"] != json!(true), "{called}");
-            let text = str_of(&result["content"][0], "text")?;
-            Ok(text.contains(&marker).then(|| text.to_owned()))
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        ensure!(names.len() == 8 && names.contains(&"task_start"), "{listed}");
+        let params = json!({ "name": "project_status", "arguments": { "project": "nope" } });
+        let called = stack.mcp(2, "tools/call", params).await?;
+        let said = str_of(&called["result"]["content"][0], "text")?;
+        ensure!(called["result"]["isError"] == json!(true), "{called}");
+        ensure!(said.contains("(UnknownProject)"), "the hub's own words: {said}");
+        let shown = until("the marker on the screen", STEP, async || {
+            let screen = stack.slopty(&["screen", &term]).await?.to_string();
+            Ok(screen.contains(&marker).then_some(screen))
         })
         .await?;
         ensure!(shown.contains("nc -l"), "the screen as it is now: {shown}");
-        clock.lap("mcp");
+        clock.lap("mcp, screen");
 
-        // 8. Over MCP: one events call sees a terminal open on the fleet; a terminal opened at a
-        //    size is resized, and the program in it sees the new width.
-        let cursor = tool(stack, 10, "events", json!({ "timeout_ms": 0 })).await?;
-        ensure!(cursor["events"] == json!([]), "from now: nothing yet: {cursor}");
+        // 8. One events call sees a terminal open on the fleet; a terminal opened at a size under a
+        //    key is opened once, then resized, and the program in it sees the new width.
+        let cursor = cursor_now(stack).await?;
         let cwd = stack.dir.path().to_string_lossy().into_owned();
-        let bash = ["/bin/bash", "--noprofile", "--norc", "-i"];
-        let open = json!({
-            "worker": worker, "cwd": cwd, "command": bash, "cols": 100, "rows": 30,
-            "idempotency_key": "e2e-mcp-open",
-        });
-        let sized = tool(stack, 11, "open_terminal", open.clone()).await?;
+        let sized_open = [
+            "open",
+            "--worker",
+            worker.as_str(),
+            "--cwd",
+            &cwd,
+            "--cols",
+            "100",
+            "--rows",
+            "30",
+            "--idempotency-key",
+            "e2e-sized-open",
+            "--",
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+            "-i",
+        ];
+        let sized = stack.slopty(&sized_open).await?;
         let sized = str_of(&sized, "term")?.to_owned();
-        let repeated = tool(stack, 18, "open_terminal", open).await?;
+        let repeated = stack.slopty(&sized_open).await?;
         ensure!(repeated["term"] == sized.as_str(), "the same terminal: {repeated}");
-        let since = json!({ "since": cursor["next"], "timeout_ms": 10_000 });
-        let heard = tool(stack, 12, "events", since).await?;
+        let heard = events_after(stack, cursor, 10_000).await?;
         let opened = heard["events"].as_array().context("events")?;
         let opens = opened.iter().filter(|e| e["kind"] == "session_opened").count();
         ensure!(opens == 1, "one terminal opened, not {opens}: {heard}");
@@ -352,29 +373,28 @@ mod tests {
         );
         let entry = terminal_entry(stack, &sized).await?;
         ensure!(entry["cols"] == 100 && entry["rows"] == 30, "opened at its size: {entry}");
-        let resize = json!({ "term": sized, "cols": 150, "rows": 40 });
-        tool(stack, 13, "resize_terminal", resize).await?;
+        let resized = stack.slopty(&["resize", &sized, "--cols", "150", "--rows", "40"]).await?;
+        ensure!(resized == json!({ "ok": true }), "{resized}");
         let entry = terminal_entry(stack, &sized).await?;
         ensure!(entry["cols"] == 150 && entry["rows"] == 40, "listed at the new size: {entry}");
         send_text(stack, &sized, "tput cols\n").await?;
         let width = stack.slopty(&["wait", &sized, "--output", "^150$"]).await?;
         ensure!(width["result"] == "met", "the program sees 150 columns: {width}");
-        let screen = tool(stack, 14, "read_screen", json!({ "term": sized })).await?;
+        let screen = stack.slopty(&["screen", &sized]).await?;
         let rows = screen["lines"].as_array().context("lines")?.len();
         ensure!(rows == 40, "40 rows on the screen, not {rows}");
-        let after = json!({ "since": heard["next"], "timeout_ms": 0 });
-        tool(stack, 15, "close_terminal", json!({ "term": sized })).await?;
-        let closed = tool(stack, 16, "events", after).await?;
+        let after = heard["next"].as_u64().context("next")?;
+        let closed = stack.slopty(&["close", &sized]).await?;
+        ensure!(closed == json!({ "ok": true }), "{closed}");
+        let closed = events_after(stack, after, 10_000).await?;
         let closed = closed["events"].as_array().context("events")?;
         ensure!(
             closed.iter().any(|e| e["kind"] == "session_closed" && e["term"] == sized.as_str()),
             "{closed:?}"
         );
-        let online = json!({ "worker": worker });
-        let params = json!({ "name": "forget_worker", "arguments": online });
-        let refused = stack.mcp(17, "tools/call", params).await?;
-        ensure!(refused["result"]["isError"] == json!(true), "an online worker stays: {refused}");
-        clock.lap("mcp events, resize");
+        let refused = stack.slopty(&["workers", "forget", &worker]).await;
+        ensure!(refused.is_err(), "an online worker stays: {refused:?}");
+        clock.lap("events, resize");
 
         // 8b. Another agent, played through the real hook relay: its thread read, its
         //     permission prompt held for orchestration and answered over the CLI; and a still
@@ -403,8 +423,7 @@ mod tests {
 
         // 6. The worker dies without a goodbye: unreachable within the lease; back under the same
         //    id. The fleet's events say both.
-        let cursor = tool(stack, 20, "events", json!({ "timeout_ms": 0 })).await?;
-        let cursor = cursor["next"].as_u64().context("next")?.to_string();
+        let cursor = cursor_now(stack).await?.to_string();
         stack.worker.kill_worker().await;
         let killed = Instant::now();
         stack.worker_is("unreachable", UNREACHABLE_BOUND).await?;
@@ -426,8 +445,7 @@ mod tests {
         Ok(())
     }
 
-    /// Push a file past the 8 MiB one read carries, pull it back, compare; and see the server's
-    /// endpoint refuse `upload_file`.
+    /// Push a file past the 8 MiB one read carries, pull it back, compare.
     async fn bulk(stack: &ServerStack, worker: &str) -> Result<()> {
         // 9 MiB and 3 bytes: past the 8 MiB one read carries, and not a whole number of parts.
         let size: usize = 9_437_187;
@@ -459,14 +477,6 @@ mod tests {
             .filter(|name| name.ends_with(".slopty-upload") || name.ends_with(".slopty-download"))
             .collect();
         ensure!(leftovers.is_empty(), "no parts left behind: {leftovers:?}");
-        let params = json!({
-            "name": "upload_file",
-            "arguments": { "worker": worker, "local": here_arg, "path": there },
-        });
-        let refused = stack.mcp(30, "tools/call", params).await?;
-        let text = str_of(&refused["result"]["content"][0], "text")?;
-        ensure!(refused["result"]["isError"] == json!(true), "{refused}");
-        ensure!(text.contains("(Unsupported)"), "{text}");
         Ok(())
     }
 
@@ -600,13 +610,7 @@ mod tests {
         ensure!(late.is_err(), "a second answer finds nothing: {late:?}");
 
         // A window no worker has: whether or not this one may record its screen, it answers
-        // without a picture (Unsupported, or Invalid past the preflight).
-        let capture = json!({ "worker": worker, "window": u32::MAX });
-        let params = json!({ "name": "capture_still", "arguments": capture });
-        let still = stack.mcp(43, "tools/call", params).await?;
-        let text = str_of(&still["result"]["content"][0], "text")?;
-        ensure!(still["result"]["isError"] == json!(true), "no picture is taken: {still}");
-        ensure!(text.contains("(Unsupported)") || text.contains("(Invalid)"), "{text}");
+        // without a picture.
         let cli = stack
             .slopty(&[
                 "capture",
@@ -618,7 +622,7 @@ mod tests {
                 "/dev/null",
             ])
             .await;
-        ensure!(cli.is_err(), "the CLI fails the same way: {cli:?}");
+        ensure!(cli.is_err(), "no picture is taken: {cli:?}");
         let closed = stack.slopty(&["close", &term]).await?;
         ensure!(closed == json!({ "ok": true }), "{closed}");
         Ok(())
