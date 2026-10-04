@@ -5838,8 +5838,8 @@ cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_convers
 
 The conversation stream is gone (2026-10-04): a session is followed as its thread now. The
 same measurement follows the session's thread on a thread stream
-(`echo_beside_a_followed_thread`, the lag read from the answers' items as they start); it has
-not been run on the thread path yet.
+(`echo_beside_a_followed_thread`, the lag read from the answers' items as they start); its
+first run is the 2026-10-04 entry "an echo beside a followed thread".
 
 ```sh
 cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_thread \
@@ -14364,4 +14364,33 @@ cargo-nextest nextest run --archive-file vt.tar.zst --workspace-remap ws --test-
   -E 'package(slopty-codec) | package(slopty-capture) | (package(slopty-worker) & kind(lib))'
 # on the host, 10 times each:
 target/debug/deps/slopty_worker-<hash> screen::synthetic:: screen::tests::a_rebuild_beside
+```
+
+## 2026-10-04 — an echo beside a followed thread
+
+The 2026-09-27 measurement again, on the thread path that replaced the conversation stream
+(`echo_beside_a_followed_thread`, apps/slopty-worker e2e, release, loopback, mac-studio (M1 Max),
+load average 9–12 from other lanes' builds, tree on 88d9f458). The same rig as before: 200 keys an
+arm into `/bin/cat`, three arms alternating for five rounds (quiet; an agent whose transcript grows
+by a 2 KB answer every 5 ms with a hook every 50 ms, nobody following; the same, its thread
+followed on the same connection). Each follow starts with no `have`, so the server sends the
+thread's last turn first: 340–371 actions per round.
+
+| arm | p50 / p90 / p99 / max, 1 000 keys |
+| --- | --- |
+| quiet | 0.43 / 1.10 / 5.63 / 16.62 ms |
+| busy, not followed | 0.58 / 1.67 / 7.22 / 13.96 ms |
+| busy, followed | 0.57 / 1.90 / 8.74 / 38.80 ms |
+
+Following the thread costs the echo nothing at the median. The p90 is 0.2 ms over the unfollowed
+arm, against 1.2–1.6 ms on the conversation stream. The p99 is 1.5 ms over. The 38.8 ms max is one
+key in round 4, and that round's p99 is 8.7 ms. Per-round p90s, followed, are 1.29–3.14 ms, and
+the busy unfollowed arm reads 0.47–2.47 ms. An answer appended to the transcript reached the
+follower in p50 25.5 / p90 48.3 / p99 218.6 / max 272.1 ms over 1 791 answers. That is the 250 ms
+tick and the hooks between ticks, as before, now at a lower tail (p99 was 420–500 ms).
+
+```sh
+cargo build --release -p slopty-ptyd -p slopty-cli
+cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_thread \
+  -- --ignored --nocapture
 ```
