@@ -78,6 +78,10 @@ pub const CAPS: [&str; 10] = [
     Cap::STEER,
 ];
 
+/// Claude Code's own review ([`Cap::REVIEW`]): its built-in skill, which takes a ref range
+/// (`a...b`) and reviews what it changes. A thread can review only while Claude Code lists it.
+pub const REVIEW_COMMAND: &str = "code-review";
+
 /// The models `/model` takes, by the aliases Claude Code resolves to its current ones, until
 /// the mod lists Claude Code's own ([`Observed::catalog`]); where it is not heard, these stand.
 pub const MODELS: [(&str, &str); 4] =
@@ -650,6 +654,16 @@ impl Observed {
                 .to_owned(),
             })
             .collect();
+        let reviews = commands.iter().any(|c| c.name == REVIEW_COMMAND);
+        let review = Cap::named(Cap::REVIEW);
+        let held = self.meta.caps.binary_search(&review);
+        if reviews != held.is_ok() {
+            match held {
+                Ok(at) => drop(self.meta.caps.remove(at)),
+                Err(at) => self.meta.caps.insert(at, review),
+            }
+            self.push(self.meta.id, Action::Meta(Box::new(self.meta.clone())));
+        }
         if commands != self.commands {
             self.commands.clone_from(&commands);
             self.push(self.meta.id, Action::CommandsSet(commands));

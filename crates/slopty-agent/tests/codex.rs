@@ -666,6 +666,34 @@ mod tests {
         assert_eq!((last.changed.added, last.changed.removed), (3, 2));
     }
 
+    /// A review is Codex's own reviewer over a commit's changes, in the thread (`review/start`,
+    /// inline), and never while a turn is under way. What it found is its answer, in Codex's
+    /// words, so a client reads the findings where it reads any answer.
+    #[test]
+    fn a_review_asks_codexs_reviewer_and_its_findings_are_its_answer() {
+        let (mut shared, mut state) = begun();
+        assert!(shared.meta().can(slopty_proto::thread::Cap::REVIEW));
+        let asked = shared.review("9d1e7aa", "Changes in turn 3").unwrap();
+        assert_eq!(
+            serde_json::to_value(&asked).unwrap(),
+            json!({"threadId": shared.meta().native, "delivery": "inline",
+                "target": {"type": "commit", "sha": "9d1e7aa", "title": "Changes in turn 3"}})
+        );
+        let turn = turn_begun(&mut shared, &mut state);
+        assert!(shared.review("9d1e7aa", "again").is_err(), "not while it works");
+
+        let thread = shared.meta().native.clone();
+        let found = "One finding.\n\nReview comment:\n\n- [P1] Off by one \u{2014} /repo/src/a.rs:3-4\n  The loop skips the last line.";
+        hear(
+            &mut shared,
+            &mut state,
+            "item/completed",
+            &json!({"threadId": thread, "turnId": turn, "completedAtMs": 1,
+                "item": {"type": "exitedReviewMode", "id": "r1", "review": found}}),
+        );
+        assert_eq!(texts(&state).last(), Some(&format!("text: {found}")));
+    }
+
     /// An edit's hunks keep the heading Codex's diff names after their ranges.
     #[test]
     fn an_edits_hunks_keep_their_heading() {

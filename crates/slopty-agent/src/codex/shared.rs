@@ -61,7 +61,7 @@ use super::protocol::{
 use crate::attach::Attached;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 14] = [
+pub const CAPS: [&str; 15] = [
     Cap::APPROVALS,
     Cap::CONTINUE,
     Cap::FORK,
@@ -69,6 +69,7 @@ pub const CAPS: [&str; 14] = [
     Cap::LIVE_TEXT,
     Cap::LIVE_TUI,
     Cap::QUEUE,
+    Cap::REVIEW,
     Cap::REWIND,
     Cap::SCHEDULE,
     Cap::SET_EFFORT,
@@ -1156,6 +1157,23 @@ impl Shared {
         vec![Action::Meta(Box::new(self.meta.clone()))]
     }
 
+    /// What asks Codex's own reviewer for the changes commit `sha` makes, in this thread
+    /// (`review/start`, inline), named `title`; why not, in words, while a turn is under way.
+    ///
+    /// # Errors
+    ///
+    /// While Codex works on a turn of the thread.
+    pub fn review(&self, sha: &str, title: &str) -> Result<p::ReviewStartParams, String> {
+        if self.current.is_some() {
+            return Err("Codex is still working on this thread".to_owned());
+        }
+        Ok(p::ReviewStartParams {
+            thread_id: self.meta.native.clone(),
+            target: p::ReviewTarget::Commit { sha: sha.to_owned(), title: Some(title.to_owned()) },
+            delivery: Some(p::ReviewDelivery::Inline),
+        })
+    }
+
     /// What stops the turn under way, when one is.
     #[must_use]
     pub fn interrupt(&self) -> Option<p::TurnInterruptParams> {
@@ -1611,7 +1629,10 @@ impl Shared {
                 (id, ItemBody::Tool(Box::new(call)))
             }
             ThreadItem::EnteredReviewMode { id, .. } => (id, ItemBody::Review { entered: true }),
-            ThreadItem::ExitedReviewMode { id, .. } => (id, ItemBody::Review { entered: false }),
+            // What the reviewer found is its answer: Codex's own words for it, findings and all.
+            ThreadItem::ExitedReviewMode { id, review } => {
+                (id, ItemBody::Text(Clipped::head(review, PROSE, None)))
+            }
             other => {
                 let json = serde_json::to_value(other).ok()?;
                 let id = json.get("id").and_then(Value::as_str)?.to_owned();

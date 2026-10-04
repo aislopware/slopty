@@ -121,6 +121,12 @@ impl Method for TurnInterruptParams {
     const METHOD: &'static str = "turn/interrupt";
 }
 
+impl Method for ReviewStartParams {
+    type Response = ReviewStartResponse;
+
+    const METHOD: &'static str = "review/start";
+}
+
 impl Method for ModelListParams {
     type Response = ModelListResponse;
 
@@ -3589,6 +3595,76 @@ pub enum ResponsesApiWebSearchAction {
     /// `other`.
     #[serde(rename = "other")]
     Other,
+}
+
+/// `ReviewDelivery`, as Codex's schema names it.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub enum ReviewDelivery {
+    /// `inline`.
+    #[serde(rename = "inline")]
+    Inline,
+    /// `detached`.
+    #[serde(rename = "detached")]
+    Detached,
+}
+
+/// `ReviewStartParams`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct ReviewStartParams {
+    /// Where to run the review: inline (default) on the current thread or detached on a new thread
+    /// (returned in `reviewThreadId`). Detached delivery is deprecated and emits
+    /// `deprecationNotice`. Use `thread/start` followed by an inline review for a separate review
+    /// thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<ReviewDelivery>,
+    /// `target`.
+    pub target: ReviewTarget,
+    /// `threadId`.
+    #[serde(rename = "threadId")]
+    pub thread_id: String,
+}
+
+/// `ReviewStartResponse`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ReviewStartResponse {
+    /// Identifies the thread where the review runs.
+    ///
+    /// For inline reviews, this is the original thread id. For detached reviews, this is the id of
+    /// the new review thread.
+    #[serde(rename = "reviewThreadId")]
+    pub review_thread_id: String,
+    /// `turn`.
+    pub turn: Turn,
+}
+
+/// `ReviewTarget`, as Codex's schema names it.
+#[derive(Clone, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ReviewTarget {
+    /// Review the working tree: staged, unstaged, and untracked files.
+    #[serde(rename = "uncommittedChanges")]
+    UncommittedChanges,
+    /// Review changes between the current branch and the given base branch.
+    #[serde(rename = "baseBranch")]
+    BaseBranch {
+        /// `branch`.
+        branch: String,
+    },
+    /// Review the changes introduced by a specific commit.
+    #[serde(rename = "commit")]
+    Commit {
+        /// `sha`.
+        sha: String,
+        /// Optional human-readable label (e.g., commit subject) for `UIs`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// Arbitrary instructions, equivalent to the old free-form prompt.
+    #[serde(rename = "custom")]
+    Custom {
+        /// `instructions`.
+        instructions: String,
+    },
 }
 
 /// `SandboxMode`, as Codex's schema names it.

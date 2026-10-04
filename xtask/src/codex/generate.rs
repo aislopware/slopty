@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use serde_json::{Map, Value};
 
 /// The requests Slopty sends.
-const CLIENT_REQUESTS: [&str; 17] = [
+const CLIENT_REQUESTS: [&str; 18] = [
     "initialize",
     "thread/start",
     "thread/resume",
@@ -29,6 +29,7 @@ const CLIENT_REQUESTS: [&str; 17] = [
     "turn/start",
     "turn/steer",
     "turn/interrupt",
+    "review/start",
     "model/list",
     "account/usage/read",
 ];

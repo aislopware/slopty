@@ -283,6 +283,7 @@ fn the_mods_catalog_is_the_threads_menu_and_models() {
     assert_eq!((init.source.as_str(), init.argument_hint.as_deref()), ("project", Some("[dir]")));
     let model = state.commands.iter().find(|c| c.name == "model").expect("model");
     assert_eq!(model.source, "built-in");
+    assert!(state.meta.can(Cap::REVIEW), "the recorded Claude Code lists /code-review");
     let ids: Vec<&str> = state.meta.models.iter().map(|m| m.id.as_str()).collect();
     assert_eq!(ids, catalog.models.iter().map(String::as_str).collect::<Vec<_>>());
     assert!(ids.contains(&"opus[1m]"), "{ids:?}");
@@ -856,6 +857,31 @@ fn slash_commands_are_the_threads() {
     assert_eq!(named, [("compact", "built-in"), ("ship", "project")]);
     assert_eq!(thread.commands[1].argument_hint.as_deref(), Some("<branch>"));
     assert!(observed.commands(&listed).is_empty(), "told once");
+}
+
+/// A thread reviews through Claude Code's own `/code-review` only while Claude Code lists it:
+/// the review capability comes with the command and goes with it.
+#[test]
+fn a_thread_reviews_while_claude_code_lists_code_review() {
+    let command = |name: &str| conv::SlashCommand {
+        name: name.to_owned(),
+        description: String::new(),
+        argument_hint: None,
+        source: conv::CommandSource::BuiltIn,
+    };
+    let mut observed = observed();
+    let mut host = Host::default();
+    host.take(observed.drain());
+    let reviews =
+        |host: &Host, observed: &Observed| host.thread(observed.main()).meta.can(Cap::REVIEW);
+    host.take(observed.commands(&[command("compact")]));
+    assert!(!reviews(&host, &observed), "no door without the command");
+    host.take(observed.commands(&[command("compact"), command(REVIEW_COMMAND)]));
+    assert!(reviews(&host, &observed), "the command is the door");
+    let caps = &host.thread(observed.main()).meta.caps;
+    assert!(caps.windows(2).all(|w| w[0] < w[1]), "still sorted: {caps:?}");
+    host.take(observed.commands(&[command("compact")]));
+    assert!(!reviews(&host, &observed), "and goes with it");
 }
 
 /// An agent at rest whose only work left running is commands it started in the background
