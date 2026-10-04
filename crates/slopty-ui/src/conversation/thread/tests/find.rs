@@ -205,3 +205,20 @@ fn a_match_in_an_older_turn_pages_back_to_it(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(pages(&sent), [TurnId(4)], "not again before the page comes");
 }
+
+/// A command reads as the person typed it, its own slash once and its words after.
+#[test]
+fn a_command_says_itself_before_its_words() {
+    let said = |command: Option<&str>, words: &str| {
+        crate::conversation::thread::find::said(&UserMessage {
+            text: Clipped::whole(words),
+            images: Vec::new(),
+            command: command.map(str::to_owned),
+            intent: None,
+        })
+    };
+    assert_eq!(said(Some("/code-review"), "a...b"), "/code-review a...b");
+    assert_eq!(said(Some("/compact"), " "), "/compact");
+    assert_eq!(said(Some("!"), "ls"), "! ls");
+    assert_eq!(said(None, "Look at the parser"), "Look at the parser");
+}

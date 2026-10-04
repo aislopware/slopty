@@ -7,7 +7,7 @@
 //! going to one pages the thread back to it.
 
 use slopty_proto::thread::wire::{ItemHit, ThreadHits};
-use slopty_proto::thread::{Item, ItemBody, ItemId, ThreadId, ThreadState, TurnId};
+use slopty_proto::thread::{Item, ItemBody, ItemId, ThreadId, ThreadState, TurnId, UserMessage};
 
 use super::rows::Row;
 
@@ -20,13 +20,20 @@ pub struct Found {
     pub turn: TurnId,
 }
 
+/// What the person said, as they typed it: a command (`/compact`, `!`) before its words.
+pub(in crate::conversation::thread) fn said(message: &UserMessage) -> String {
+    let words = message.text.text.trim();
+    match message.command.as_deref() {
+        Some(command) if words.is_empty() => command.to_owned(),
+        Some(command) => format!("{command} {words}"),
+        None => message.text.text.clone(),
+    }
+}
+
 /// What an item says, as find reads it; nothing for an item with no words of its own.
 fn words(item: &Item) -> Option<String> {
     match &item.body {
-        ItemBody::User(message) => Some(match &message.command {
-            Some(command) => format!("/{command} {}", message.text.text),
-            None => message.text.text.clone(),
-        }),
+        ItemBody::User(message) => Some(said(message)),
         ItemBody::Text(text) | ItemBody::Reasoning(text) => Some(text.text.clone()),
         ItemBody::Tool(call) => Some(call.title.clone()),
         ItemBody::Notice(notice) => Some(notice.text.text.clone()),

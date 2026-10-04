@@ -1146,10 +1146,7 @@ impl ThreadView {
             return div().into_any_element();
         };
         let (at_ms, turn) = (*at_ms, *turn);
-        let words = match &message.command {
-            Some(command) if message.text.text.trim().is_empty() => format!("/{command}"),
-            _ => message.text.text.clone(),
-        };
+        let words = super::find::said(message);
         let images = message.images.clone();
         let pictures = self.pictures_row(&images, true, cx);
         // A long message shows its start until the reader asks for the rest.
@@ -2099,7 +2096,7 @@ fn thought_for(took: Option<Duration>) -> String {
 
 /// An agent's name as a menu lists it: Claude Code, Codex, pi, an ACP agent by its registry's
 /// name.
-fn agent_label(agent: &AgentId) -> String {
+pub(crate) fn agent_label(agent: &AgentId) -> String {
     match agent.0.as_str() {
         AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
         _ => agent_name(agent).to_owned(),
