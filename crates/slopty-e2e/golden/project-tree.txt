@@ -4,7 +4,7 @@ Navigation │ Navigator
 TextInput │ Filter
 Heading │ Projects
 Button │ Ship the project board
-Button │ Board, 2 need you · 1 of 7 merged
+Button │ Board, 1 needs you · 1 of 6 merged
 Image │ Needs you
 Button │ Orchestrator
 Button │ Close tile
@@ -13,6 +13,7 @@ Button │ Close tile
 Heading │ Machines
 Button │ studio
 Button │ New shell on studio
+Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
 Button │ Navigator
@@ -33,13 +34,12 @@ Heading │ terminal Orchestrator
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
-Group │ Project board │ Needs you 2, Up next 3, Ready to merge 1, Merged 1 (focused)
+Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
 Heading
-Button │ Verifier and review
-Button │ Ask before each task starts
+Button │ Verifier
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal
-ProgressIndicator │ Needs you 2, Up next 3, Ready to merge 1, Merged 1
+ProgressIndicator │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1
 Group │ Needs you
 Heading │ Needs you
 TreeItem │ Draw the lanes, Which lanes come first?
@@ -51,7 +51,7 @@ Tab │ Machines
 TreeItem │ Orchestrator, studio · macOS
 Button │ Runs on studio, macOS. Click to see the machines
 TreeItem │ Mirror the server's projects, Waiting, Reading the snapshot parts · slopty/board/1, studio · macOS
-Button │ Runs on studio, macOS. Branch slopty/board/1. Why: it has room, and nothing is preferred. Click to see the machines
+Button │ Runs on studio, macOS. Branch slopty/board/1. Click to see the machines
 TreeItem │ Draw the lanes, Needs you, Which lanes come first?
 TreeItem │ Hold it to goldens, Planned, after #1 · reads only
 TreeItem │ Write the decision, Merged
@@ -59,10 +59,6 @@ TreeItem │ Check the wire goldens, Planned
 Log
 TreeItem │ Mirror the merge queue, Ready to merge, Passed at e5b0d17
 Button │ Merge #6
-TreeItem │ Name the reviewer, Planned
-Button │ Retry #7
-Button │ Approve #7
-List
 TextInput │ Tell the orchestrator
 Group │ #1 Mirror the server's projects
 Heading │ terminal #1 Mirror the server's projects
@@ -73,9 +69,12 @@ Group │ Thread
 Status │ Nothing here yet
 MultilineTextInput │ Message
 Button │ Attach files
+Button │ Ask aside
 Button │ Model, Claude
-Button │ Send later
 Button │ Send
 Group │ Status
 Status │ studio
+Group │ Agents
+Button │ Claude Code · Idle
+Button │ Claude Code · Idle
 Status │ Ship the project board: #5 Check the wire goldens: its verifier failed

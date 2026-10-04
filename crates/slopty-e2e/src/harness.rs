@@ -621,6 +621,11 @@ fn pin_appearance(app_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A project stack's app settings: [`pinned_settings`] and the server it follows.
+fn project_settings(appearance: &str, server: &ServerDaemon) -> String {
+    format!("{}\n[client]\nserver = \"{}\"\n", pinned_settings(appearance), server.address())
+}
+
 /// The settings an app under test runs with, in `appearance`.
 #[must_use]
 pub fn pinned_settings(appearance: &str) -> String {
@@ -2228,12 +2233,7 @@ impl ProjectStack {
         }
         let app_dir = root.join("app");
         std::fs::create_dir_all(&app_dir)?;
-        let settings = format!(
-            "{}\n[client]\nserver = \"{}\"\n",
-            pinned_settings(APPEARANCE),
-            server.address()
-        );
-        std::fs::write(app_dir.join("settings.toml"), settings)?;
+        std::fs::write(app_dir.join("settings.toml"), project_settings(APPEARANCE, &server))?;
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
         // The first run's own shell is in before any test opens another, so the tiles stand in
@@ -2251,6 +2251,18 @@ impl ProjectStack {
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
         self.dir.path().join(name)
+    }
+
+    /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
+    /// `settings.toml`, the server it follows kept; the app sees it within a second.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be written.
+    pub fn set_appearance(&self, appearance: &str) -> Result<()> {
+        let path = self.path("app").join("settings.toml");
+        std::fs::write(&path, project_settings(appearance, &self.server))?;
+        Ok(())
     }
 
     /// `slopty <args> --server <this server> --json`, parsed.

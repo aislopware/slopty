@@ -29,6 +29,37 @@ fn session_of(term: &str) -> String {
     term.rsplit_once('/').map_or(term, |(_, s)| s).to_owned()
 }
 
+/// The session a started task's terminal runs, from the task `slopty task start` printed.
+fn started_session(task: &Value) -> String {
+    session_of(&term(task))
+}
+
+/// Make a task that waits to be started: the start a task makes is refused while a task it
+/// depends on is not done, and the task is kept, as an orchestrator's would be. Then `deps`
+/// are what it depends on for good: none, or the ones named.
+async fn planned(stack: &ProjectStack, title: &str, extra: &[&str], deps: &[&str]) {
+    let mut start = vec!["task", "start", "--project", PROJECT, "--title", title];
+    start.extend_from_slice(extra);
+    start.extend_from_slice(&["--depends-on", "1"]);
+    let refused = stack.slopty(&start).await.expect_err("a start that waits on task 1");
+    assert!(refused.to_string().contains("did not start"), "{refused:#}");
+    let made = stack.slopty(&["project", "status", PROJECT]).await.unwrap();
+    let id = made["tasks"]
+        .as_array()
+        .and_then(|tasks| tasks.iter().rev().find(|t| t["title"] == title))
+        .and_then(|t| t["task"].as_u64())
+        .unwrap_or_else(|| panic!("{title} kept: {made}"))
+        .to_string();
+    let mut update = vec!["task", "update", "--project", PROJECT, "--task", &id];
+    if deps.is_empty() {
+        update.push("--no-dependencies");
+    }
+    for dep in deps {
+        update.extend_from_slice(&["--depends-on", dep]);
+    }
+    stack.slopty(&update).await.unwrap();
+}
+
 /// Wait until the worker says Claude Code is installed: an agent's task goes only to a worker
 /// known to have it, and a worker says so once its facts are gathered.
 async fn claude_installed(stack: &ProjectStack) {
@@ -50,11 +81,10 @@ async fn golden(stack: &mut ProjectStack, name: &str) {
     assert_matches(name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
 }
 
-/// The server's project, with an orchestrator and six tasks in five states, one of them run by
-/// an agent the server started, one whose verifier broke and one waiting to merge, reaches the
-/// app; ⇧⌘J turns the orchestrator's tile to its
-/// board, the lenses are keys, ↓↓↩ opens the task's agent, and a change on the server moves the
-/// board while it shows.
+/// The server's project, with an orchestrator and six tasks one level under it in five states,
+/// one of them run by an agent the server started, one whose verifier broke and one waiting to
+/// merge, reaches the app; ⇧⌘J turns the orchestrator's tile to its board, the lenses are keys,
+/// ↓↓↩ opens the task's agent, and a change on the server moves the board while it shows.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_project_board_follows_its_orchestration() {
@@ -75,41 +105,30 @@ async fn a_project_board_follows_its_orchestration() {
             "slopty",
             "--verifier",
             "cargo gate",
-            "--review",
-            "A wire change comes with its goldens",
             "--orchestrator",
             &orchestrator,
         ])
         .await
         .unwrap();
-    for args in [
-        &[
+    claude_installed(&stack).await;
+    let started = stack
+        .slopty(&[
+            "task",
+            "start",
+            "--project",
+            PROJECT,
             "--title",
             "Mirror the server's projects",
-            "--owns",
-            "crates/slopty-ui/src/project/model.rs",
-        ][..],
-        &[
-            "--title",
-            "Draw the lanes",
-            "--owns",
-            "crates/slopty-ui/src/project/view.rs",
-            "--parent",
-            "1",
-        ],
-        &["--title", "Hold it to goldens", "--read-only", "--depends-on", "1"],
-        &["--title", "Write the decision", "--owns", "docs/decisions/ui.md"],
-        &["--title", "Check the wire goldens", "--owns", "crates/slopty-proto/tests"],
-        &["--title", "Mirror the merge queue", "--owns", "crates/slopty-ui/src/project/tests.rs"],
-        &["--title", "Name the reviewer", "--owns", "crates/slopty-proto/src/project.rs"],
-    ] {
-        let mut create = vec!["task", "create", "--project", PROJECT];
-        create.extend_from_slice(args);
-        stack.slopty(&create).await.unwrap();
-    }
-    claude_installed(&stack).await;
-    let spawned =
-        stack.slopty(&["task", "spawn", "--project", PROJECT, "1", "--cwd", &repo]).await.unwrap();
+            "--cwd",
+            &repo,
+        ])
+        .await
+        .unwrap();
+    planned(&stack, "Draw the lanes", &[], &[]).await;
+    planned(&stack, "Hold it to goldens", &["--read-only"], &["1"]).await;
+    planned(&stack, "Write the decision", &[], &[]).await;
+    planned(&stack, "Check the wire goldens", &[], &[]).await;
+    planned(&stack, "Mirror the merge queue", &[], &[]).await;
     let update = |task: &'static str, more: &'static [&'static str]| {
         let mut args = vec!["task", "update", "--project", PROJECT, "--task", task];
         args.extend_from_slice(more);
@@ -126,31 +145,6 @@ async fn a_project_board_follows_its_orchestration() {
         .slopty(&update("2", &["--state", "blocked", "--status", "Which lanes come first?"]))
         .await
         .unwrap();
-    // A reviewer that asked for changes stays on its task with what it found, what blocks first.
-    // It lands before task 4 merges, so the board that shows the merge shows it too.
-    stack
-        .slopty(&update("7", &["--passed", "--head", "3b8d2a1", "--base", "c08d4c1"]))
-        .await
-        .unwrap();
-    stack
-        .slopty(&[
-            "task",
-            "review",
-            "--project",
-            PROJECT,
-            "--task",
-            "7",
-            "--changes",
-            "--summary",
-            "One blocker",
-            "--finding",
-            "crates/slopty-proto/src/project.rs:431: Project.review has no golden, so a wire change would pass unseen.",
-            "--finding",
-            "crates/slopty-proto/tests/golden_project.rs: The review fixture names no finding with a line.",
-        ])
-        .await
-        .unwrap();
-
     stack
         .slopty(&update(
             "4",
@@ -170,7 +164,7 @@ async fn a_project_board_follows_its_orchestration() {
         .unwrap();
     stack.slopty(&update("4", &["--state", "merged"])).await.unwrap();
     // A verifier that broke stays on its task until it is judged again, and one that passed
-    // waits on the board to merge.
+    // waits on the person to merge.
     stack
         .slopty(&update(
             "5",
@@ -194,15 +188,15 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
 
-    // The first run's own shell is a tile too: the task's agent is the terminal its spawn named.
-    let agent_session = session_of(&term(&spawned));
+    // The first task's own shell is a tile too: its agent is the terminal its start named.
+    let agent_session = started_session(&started);
     let d = stack
         .driver
         .wait_for("the project and its agent in the app", STEP, |d| {
             let agent =
                 d.items.iter().any(|i| i.session.as_deref() == Some(agent_session.as_str()));
             project(d)
-                .is_some_and(|p| p.tasks.len() == 7 && p.lanes.iter().any(|(l, _)| l == "merged"))
+                .is_some_and(|p| p.tasks.len() == 6 && p.lanes.iter().any(|(l, _)| l == "merged"))
                 && agent
         })
         .await
@@ -232,6 +226,11 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
     golden(&mut stack, "project-lanes").await;
+    stack.set_appearance("dark").unwrap();
+    stack.driver.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(&mut stack, "project-lanes-dark").await;
+    stack.set_appearance("light").unwrap();
+    stack.driver.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
 
     stack.driver.keys("3").await.unwrap();
     stack
@@ -281,8 +280,7 @@ const AT_WORK: Duration = Duration::from_secs(75);
 /// A live task as the board shows it: its agent at work for over a minute, its pull request's
 /// own checks failing as the worker's `gh` reports them, and its reviewer on the forge asking
 /// for changes. Its row says the time, the board offers Fix CI and Address comments, and its
-/// card draws the pipeline. The project needs a Mac for its Apple work, so the task goes to
-/// the Mac and its card says where and why. `gh` is a stand-in on the worker's `PATH`; no
+/// card draws the pipeline and where it runs. `gh` is a stand-in on the worker's `PATH`; no
 /// forge is asked.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
@@ -316,12 +314,6 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         ])
         .await
         .unwrap();
-    for title in ["Read a pull request's checks", "Draw the pipeline row"] {
-        stack.slopty(&["task", "create", "--project", PROJECT, "--title", title]).await.unwrap();
-    }
-    // What the work needs places it, and its card says so.
-    let need = ["project", "need", PROJECT, "Apple work", "--require", r#"os == "macos""#];
-    stack.slopty(&need).await.unwrap();
     let hooks = serde_json::json!([
         { "hook_event_name": "SessionStart", "source": "startup" },
         { "hook_event_name": "UserPromptSubmit", "prompt": "Read the checks with gh" },
@@ -345,11 +337,23 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
     ]);
     let env = format!("STUB_HOOKS={hooks}");
     claude_installed(&stack).await;
-    let spawned = stack
-        .slopty(&["task", "spawn", "--project", PROJECT, "1", "--cwd", &repo, "--env", &env])
+    let started = stack
+        .slopty(&[
+            "task",
+            "start",
+            "--project",
+            PROJECT,
+            "--title",
+            "Read a pull request's checks",
+            "--cwd",
+            &repo,
+            "--env",
+            &env,
+        ])
         .await
         .unwrap();
-    let agent_session = session_of(&term(&spawned));
+    let agent_session = started_session(&started);
+    planned(&stack, "Draw the pipeline row", &[], &[]).await;
 
     // The server reads the checks on its own round, and counts the agent's time from its
     // prompt.
@@ -364,7 +368,6 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
     assert_eq!(failing["tasks"][0]["checks"]["failing"], serde_json::json!(["clippy (macos)"]));
-    assert_eq!(failing["tasks"][0]["placed"], "Apple work", "{failing}");
     let since = failing["tasks"][0]["at_work_since_ms"].as_u64().unwrap();
     let at_work = || {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();

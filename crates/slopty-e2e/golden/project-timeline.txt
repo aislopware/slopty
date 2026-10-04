@@ -4,7 +4,7 @@ Navigation │ Navigator
 TextInput │ Filter
 Heading │ Projects
 Button │ Ship the project board
-Button │ Board, 2 need you · 1 of 7 merged
+Button │ Board, 1 needs you · 1 of 6 merged
 Image │ Needs you
 Button │ Orchestrator
 Button │ Close tile
@@ -13,6 +13,7 @@ Button │ Close tile
 Heading │ Machines
 Button │ studio
 Button │ New shell on studio
+Button │ Machine actions, studio
 Button │ Terminal
 Button │ Close tile
 Button │ Navigator
@@ -33,13 +34,12 @@ Heading │ terminal Orchestrator
 Button │ Show terminal
 Button │ Fullscreen tile
 Button │ Close tile
-Group │ Project board │ Needs you 2, Up next 3, Ready to merge 1, Merged 1 (focused)
+Group │ Project board │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1 (focused)
 Heading
-Button │ Verifier and review
-Button │ Ask before each task starts
+Button │ Verifier
 Button │ Push after each merge
 Button │ Show the orchestrator's terminal
-ProgressIndicator │ Needs you 2, Up next 3, Ready to merge 1, Merged 1
+ProgressIndicator │ Needs you 1, Working 1, Up next 2, Ready to merge 1, Merged 1
 Group │ Needs you
 Heading │ Needs you
 TreeItem │ Draw the lanes, Which lanes come first?
@@ -54,18 +54,15 @@ ListItem │ #5 Check the wire goldens: Verifier failed at 9c1e2f3: error: could
 ListItem │ #4 Write the decision: Merged, now
 ListItem │ #4 Write the decision: Verifier passed at 4a7aa6d, now
 ListItem │ #4 Write the decision: Ready to merge, now
-ListItem │ #7 Name the reviewer: You asked for changes at 3b8d2a1: Project.review has no golden, so a wire change would pass unseen., now
-ListItem │ #7 Name the reviewer: Verifier passed at 3b8d2a1, now
 ListItem │ #2 Draw the lanes: Needs you, now
 ListItem │ #1 Mirror the server's projects: On slopty/board/1, now
-ListItem │ #1 Mirror the server's projects: Working, now
-ListItem │ #1 Mirror the server's projects: Started on studio, now
-ListItem │ #7 Name the reviewer: Created, now
 ListItem │ #6 Mirror the merge queue: Created, now
 ListItem │ #5 Check the wire goldens: Created, now
 ListItem │ #4 Write the decision: Created, now
 ListItem │ #3 Hold it to goldens: Created, now
 ListItem │ #2 Draw the lanes: Created, now
+ListItem │ #1 Mirror the server's projects: Working, now
+ListItem │ #1 Mirror the server's projects: Started on studio, now
 ListItem │ #1 Mirror the server's projects: Created, now
 ListItem │ Orchestrator on studio, now
 ListItem │ Project created, now
@@ -79,9 +76,12 @@ Group │ Thread
 Status │ Nothing here yet
 MultilineTextInput │ Message
 Button │ Attach files
+Button │ Ask aside
 Button │ Model, Claude
-Button │ Send later
 Button │ Send
 Group │ Status
 Status │ studio
+Group │ Agents
+Button │ Claude Code · Idle
+Button │ Claude Code · Idle
 Status │ Ship the project board: #5 Check the wire goldens: its verifier failed
