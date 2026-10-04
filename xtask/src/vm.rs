@@ -79,6 +79,8 @@ const MEMORY_MB: &str = "8192";
 const USER: &str = "admin";
 /// The worker's QUIC port (`slopty_net::endpoint::WORKER_PORT`).
 const WORKER_PORT: u16 = 45550;
+/// The server's QUIC port (`slopty_net::endpoint::SERVER_PORT`).
+const SERVER_PORT: u16 = 45560;
 /// Where `slopty worker install` puts the worker in the guest: the path its grants are for.
 const WORKER_EXE: &str = "/Users/admin/Library/Application Support/Slopty/bin/slopty-worker";
 /// The worker's settings in the guest, as a shell word.
@@ -696,17 +698,22 @@ fn provision(home: &Utf8Path, macos: Macos, base: &str) -> Result<()> {
     Ok(())
 }
 
-/// Build the worker's binaries for this Mac (and so for the guest); the directory they are in.
+/// Build the worker's and the server's binaries for this Mac (and so for the guest); the
+/// directory they are in.
 fn build_worker(sh: &Shell) -> Result<Utf8PathBuf> {
     step(
-        "build slopty-ptyd, slopty-worker and slopty",
-        &cmd!(sh, "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-cli --bins"),
+        "build slopty-ptyd, slopty-worker, slopty-server and slopty",
+        &cmd!(
+            sh,
+            "cargo build -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli --bins"
+        ),
     )?;
     Ok(crate::tools::target_dir(sh)?.join("debug"))
 }
 
-/// Put the worker built into `bins` on `name` with `slopty worker deploy`, admitting this Mac's
-/// address on the VM network; how long it took. `name` is booted if it is not running.
+/// Put the server built into `bins` on `name` with `slopty server deploy`, then the worker
+/// registered with it with `slopty worker deploy`, admitting this Mac's address on the VM
+/// network; how long the two took. `name` is booted if it is not running.
 fn deploy(sh: &Shell, home: &Utf8Path, name: &str, bins: &Utf8Path) -> Result<Duration> {
     boot(home, name)?;
     let started = Instant::now();
@@ -721,9 +728,25 @@ fn deploy(sh: &Shell, home: &Utf8Path, name: &str, bins: &Utf8Path) -> Result<Du
         .status()?
         .success();
     let xtask = std::env::current_exe().context("this binary")?;
+    let mut serve = Command::new(bins.join("slopty"));
+    serve
+        .args(["server", "deploy", "vm", "--bin-dir"])
+        .arg(bins)
+        .arg("--ssh")
+        .arg(&xtask)
+        .env(SSH_HOST_VAR, &ip)
+        .env("SLOPTY_VM_HOME", home.as_str())
+        .current_dir(sh.current_dir())
+        .stdin(Stdio::null());
+    println!("▶ slopty server deploy → {name} ({ip})");
+    let status = serve.status().context("slopty server deploy")?;
+    ensure!(status.success(), "slopty server deploy: {status}");
+    // The worker reaches the server beside it at the guest's own address, which the server
+    // then lists it at.
+    let beside = format!("{ip}:{SERVER_PORT}");
     let mut deploy = Command::new(bins.join("slopty"));
     deploy
-        .args(["worker", "deploy", "vm", "--no-server", "--bin-dir"])
+        .args(["--server", &beside, "worker", "deploy", "vm", "--bin-dir"])
         .arg(bins)
         .arg("--ssh")
         .arg(&xtask)

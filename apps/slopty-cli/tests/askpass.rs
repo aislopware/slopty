@@ -186,7 +186,7 @@ mod askpass_helper {
         let plan = Plan {
             sources: vec![empty.path().to_path_buf()],
             update: false,
-            server: None,
+            server: slopty_deploy::Server { host: "studio".to_owned(), port: 45_560 },
             end_sessions: false,
             password: password.map(SecretString::from),
             add_key: false,

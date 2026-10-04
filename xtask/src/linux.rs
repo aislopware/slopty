@@ -116,8 +116,9 @@ const SERVER_PORT: u16 = 45560;
 /// How long the container's systemd may take to start the user's manager.
 const MANAGER_READY: Duration = Duration::from_secs(60);
 
-/// Deploy the worker and the server built into `bins` into a fresh systemd container with this
-/// Mac's CLI, and check each answers from here.
+/// Deploy the server built into `bins` into a fresh systemd container with this Mac's CLI, then
+/// the worker registered with it, and check each answers from here and the server lists the
+/// worker.
 fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
     step("cargo build -p slopty-cli", &cmd!(sh, "cargo build -p slopty-cli --bin slopty"))?;
     let cli = Utf8PathBuf::try_from(sh.current_dir().join("target/debug/slopty"))?;
@@ -178,8 +179,23 @@ fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     };
     let ssh = xtask.to_string_lossy().into_owned();
-    let deploy = ["worker", "deploy", "linux", "--bin-dir", bins.as_str(), "--ssh", &ssh];
-    let said = slopty(&[deploy.as_slice(), &["--no-server"]].concat())?;
+    // The server first: a worker registers with one, and this one runs beside it.
+    let serve = ["server", "deploy", "linux", "--bin-dir", bins.as_str(), "--ssh", &ssh];
+    println!("{}", slopty(&serve)?);
+    ensure!(user_unit("slopty-server")? == "active", "slopty-server is not an active user unit");
+    let server = published(&c, SERVER_PORT)?;
+    // The worker reaches the server beside it at the container's own address, which the server
+    // then lists it at.
+    let own = docker_out(&[
+        "inspect",
+        "--format",
+        "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+        &c.name,
+    ])?;
+    let beside = format!("{own}:{SERVER_PORT}");
+    let deploy = ["--server", &beside, "worker", "deploy", "linux", "--bin-dir", bins.as_str()];
+    let deploy = [deploy.as_slice(), &["--ssh", &ssh]].concat();
+    let said = slopty(&deploy)?;
     println!("{said}");
     for unit in ["slopty-ptyd", "slopty-worker"] {
         ensure!(user_unit(unit)? == "active", "{unit} is not an active user unit");
@@ -188,15 +204,12 @@ fn deploy_e2e(sh: &Shell, bins: &Utf8Path) -> Result<()> {
     slopty(&["ping", "--worker", &worker, "--count", "3"])?;
     println!("  ✓ the worker runs as systemd user units and answers at {worker}");
 
-    slopty(&[deploy.as_slice(), &["--no-server", "--update"]].concat())?;
+    slopty(&[deploy.as_slice(), &["--update"]].concat())?;
     slopty(&["ping", "--worker", &worker, "--count", "1"])?;
     println!("  ✓ a second deploy updates it in place");
 
-    let serve = ["server", "deploy", "linux", "--bin-dir", bins.as_str(), "--ssh", &ssh];
-    println!("{}", slopty(&serve)?);
-    ensure!(user_unit("slopty-server")? == "active", "slopty-server is not an active user unit");
-    let server = published(&c, SERVER_PORT)?;
-    slopty(&["--server", &server, "workers"])?;
+    let listed = slopty(&["--server", &server, "--json", "workers"])?;
+    ensure!(listed.contains(&own), "the server does not list the worker at {own}: {listed}");
     println!("  ✓ the server runs as a systemd user unit and answers at {server}");
     Ok(())
 }

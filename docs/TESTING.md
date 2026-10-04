@@ -37,8 +37,10 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    (the frame-time runs set `SLOPTY_E2E_MOTION=1` to keep it), and a frame whose two scratch
    draws disagree is in motion and not judged.
 3. **App self-test**, `cargo xtask e2e app` (`crates/slopty-e2e`):
-   launches ptyd + the worker + the app (built with `--features slopty/e2e`) in a temp dir, pairs
-   them, and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
+   launches a server, ptyd, the worker registered with the server, and the app (built with
+   `--features slopty/e2e`) following the server, in a temp dir, so the app reaches the worker
+   through the directory as every app does (`harness::Stack`; a first-run stack's app is pointed
+   at the server through its panel, `Stack::connect_server`), and drives the app over its own control socket (`SLOPTY_TEST_SOCKET`: keys, clicks,
    dump, render). `dump` is the structured state (tiles, focus, whether the overview is open,
    terminal rows, and `a11y`: the accessibility tree as role/label/value/focused/bounds in
    reading order, from the frame that painted the state in the same dump);
@@ -92,8 +94,9 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    puts the second client in the simulator: the Mac and the phone
    on one worker. `cargo xtask e2e workers` (serial)
    is one client and two workers on this Mac: a second ptyd + `slopty-worker` under a root of
-   its own with a private HOME (`harness::SecondWorker`), which the app reaches only through a
-   `slopty-shape` relay shaped like the tailnet path to another Mac (`harness::TAILNET`: 8 to
+   its own with a private HOME (`harness::SecondWorker`), registered with the stack's server,
+   whose directory lists a `slopty-shape` relay in front of it, shaped like the tailnet path to
+   another Mac (`harness::TAILNET`: 8 to
    12 ms round trip, 3 % loss). It proves cross-worker attention: the pill sums both workers, a
    banner routes to the worker holding its session, a hook is played only by spawning
    `slopty hook` with the payload on its stdin, never a real agent, and a killed worker shows

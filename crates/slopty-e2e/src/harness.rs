@@ -1,4 +1,5 @@
-//! ptyd + worker + the app, all from this build, in a temporary directory.
+//! A server, ptyd, a worker registered with the server, and the app, all from this build, in a
+//! temporary directory.
 //!
 //! Binaries come from `SLOPTY_E2E_BIN_DIR` (set by `cargo xtask e2e`), else `target/debug`
 //! next to the workspace, and run from a copy in the temporary directory ([`bin_dir`]). Every
@@ -92,13 +93,21 @@ fn fnv1a(name: &str) -> u32 {
     name.bytes().fold(0x811c_9dc5, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193))
 }
 
-/// The running stack.
+/// The running stack: the app reaches its worker as every app does, through the server's
+/// directory.
 #[derive(Debug)]
 pub struct Stack {
     /// The temporary directory (sockets, data dirs, artifacts).
     pub dir: StackDir,
-    /// Where the app reaches the worker: `127.0.0.1:<port>`, the port the worker picked.
+    /// Where the server's directory lists the worker, and so where the app dials it:
+    /// `127.0.0.1:<port>`, the port the worker picked, or `[::1]:<port>` where a relay or a cut
+    /// stands in front of it.
     pub address: String,
+    /// The server the worker registers with; the app follows it unless it is at its first run.
+    pub server: ServerDaemon,
+    /// The app's settings name the server: written so at launch, or by the app itself once
+    /// [`Self::connect_server`] connected it.
+    pub follows: bool,
     /// Connected to the app's test socket.
     pub driver: Driver,
     /// ptyd, the worker, app, and any helper windows; killed on drop.
@@ -116,7 +125,7 @@ pub struct Stack {
 }
 
 /// A second client of the same worker: another app process (or the app in a simulator) with
-/// its own data directory, identity and test socket, that added the same worker address.
+/// its own data directory, identity and test socket, following the same server.
 #[derive(Debug)]
 pub struct SecondApp {
     /// Connected to its test socket.
@@ -387,15 +396,53 @@ async fn wait_for_socket(path: &Path, what: &str) -> Result<()> {
     }
 }
 
+/// A stack's daemons ([`daemons`]).
+struct Daemons {
+    server: ServerDaemon,
+    /// ptyd, then the worker.
+    children: Vec<Child>,
+    /// Where the worker listens.
+    worker: std::net::SocketAddr,
+    /// Where the server's directory lists it.
+    listed: String,
+}
+
+/// A stack's server in `root/server`, ptyd, and the worker named `worker_name` registered with
+/// the server.
+///
+/// The worker listens on IPv4 loopback alone, so the server lists it there and never at a
+/// tailnet address this machine may have. `fronted`, it registers over IPv6 instead: the server
+/// lists a worker at the address it registered from and the port it listens on, so the
+/// directory then says `[::1]:<its port>`, where a relay or a cut in front of it binds, as
+/// [`SecondWorker`]'s does.
 async fn daemons(
     root: &Path,
     worker_name: &str,
     log: &str,
     env: &[(&str, &str)],
-) -> Result<(Vec<Child>, String)> {
+    fronted: bool,
+) -> Result<Daemons> {
+    let server_dir = root.join("server");
+    std::fs::create_dir_all(&server_dir)?;
+    let server = ServerDaemon::start(&server_dir, "e2e-server", log).await?;
     let ptyd = spawn_ptyd(root, log, env).await?;
-    let (worker, address) = spawn_worker(root, worker_name, log, env, None, 0).await?;
-    Ok((vec![ptyd, worker], address))
+    let register = if fronted { server.address_v6() } else { server.address().to_owned() };
+    let mut worker_env = vec![("SLOPTY_BIND", "127.0.0.1")];
+    worker_env.extend_from_slice(env);
+    let (worker, address) =
+        spawn_worker(root, worker_name, log, &worker_env, Some(&register), 0).await?;
+    let direct: std::net::SocketAddr = address.parse().context("the worker's address")?;
+    let listed = if fronted {
+        std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, direct.port())).to_string()
+    } else {
+        address
+    };
+    Ok(Daemons { server, children: vec![ptyd, worker], worker: direct, listed })
+}
+
+/// The daemons' log level: the run's `RUST_LOG`, else `info`.
+fn log_level() -> String {
+    std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned())
 }
 
 /// ptyd compiles ghostty's terminfo on start-up; keep it out of the developer's own
@@ -621,9 +668,21 @@ fn pin_appearance(app_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A project stack's app settings: [`pinned_settings`] and the server it follows.
-fn project_settings(appearance: &str, server: &ServerDaemon) -> String {
-    format!("{}\n[client]\nserver = \"{}\"\n", pinned_settings(appearance), server.address())
+/// An app's settings: [`pinned_settings`], and the server it follows when it has one.
+fn app_settings(appearance: &str, server: Option<&ServerDaemon>) -> String {
+    let pinned = pinned_settings(appearance);
+    match server {
+        Some(server) => format!("{pinned}\n[client]\nserver = \"{}\"\n", server.address()),
+        None => pinned,
+    }
+}
+
+/// Point the app whose data directory is `app_dir` at `server`, in [`APPEARANCE`], before it
+/// starts: it comes up linked to it, as a set-up Mac's app does.
+fn follow(app_dir: &Path, server: &ServerDaemon) -> Result<()> {
+    std::fs::create_dir_all(app_dir)?;
+    std::fs::write(app_dir.join("settings.toml"), app_settings(APPEARANCE, Some(server)))?;
+    Ok(())
 }
 
 /// The settings an app under test runs with, in `appearance`.
@@ -705,12 +764,11 @@ async fn spawn_simulator_app(
     }
 }
 
-/// Ping, add the worker at `address` and wait for it to connect.
-async fn add_worker(driver: &mut Driver, address: &str) -> Result<()> {
+/// Ping, then wait for the app to connect to the worker its server lists.
+async fn linked(driver: &mut Driver) -> Result<()> {
     driver.ok(&crate::Command::Ping).await?;
-    driver.ok(&crate::Command::AddWorker { address: address.to_owned() }).await?;
     driver
-        .wait_for("the worker to connect", STARTUP, |d| {
+        .wait_for("the worker the server lists to connect", STARTUP, |d| {
             d.workers.iter().any(|w| w.status == "connected")
         })
         .await?;
@@ -718,8 +776,8 @@ async fn add_worker(driver: &mut Driver, address: &str) -> Result<()> {
 }
 
 impl Stack {
-    /// Start ptyd, the worker (named `worker_name`) and the app; add the worker in the app and wait
-    /// until its workspace is up.
+    /// Start the server, ptyd, the worker (named `worker_name`) registered with the server, and
+    /// the app following the server; wait until the app has connected to the worker.
     ///
     /// # Errors
     ///
@@ -802,32 +860,43 @@ impl Stack {
         Self::launch_in(dir, worker_name, &[("HOME", &home)]).await
     }
 
-    /// [`Self::launch`] up to the app's first frame, before it knows any worker: what someone
-    /// opening the app for the first time sees. [`Self::add_worker`] goes on from there.
+    /// [`Self::launch`] up to the app's first frame, before it is pointed at the server: what
+    /// someone opening the app for the first time sees. [`Self::connect_server`] goes on from
+    /// there.
     ///
     /// # Errors
     ///
     /// As [`Self::launch`].
     pub async fn launch_first_run(worker_name: &str) -> Result<Self> {
-        Self::launch_first_run_with(worker_name, &[]).await
+        Self::launch_first_run_with(worker_name, |_server, _root| Vec::new()).await
     }
 
-    /// [`Self::launch_first_run`] with extra environment for the daemons and the app (a
-    /// stand-in for this Mac's worker, [`crate::THIS_MAC_ENV`]).
+    /// [`Self::launch_first_run`] with extra environment for the app, made once the server and
+    /// the worker are up from the server and the run's root (a stand-in for this Mac's worker
+    /// that names them, [`crate::THIS_MAC_ENV`]).
     ///
     /// # Errors
     ///
     /// As [`Self::launch`].
-    pub async fn launch_first_run_with(worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
+    pub async fn launch_first_run_with(
+        worker_name: &str,
+        env: impl FnOnce(&ServerDaemon, &Path) -> Vec<(String, String)>,
+    ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-")?;
-        let mut stack = Self::spawn_in(dir, worker_name, env).await?;
+        let log = log_level();
+        let daemons = daemons(dir.path(), worker_name, &log, &[], false).await?;
+        let env = env(&daemons.server, dir.path());
+        let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let mut stack = Self::assemble(dir, daemons, &log, &env, false).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
 
     /// [`Self::launch_with`], but the app reaches the worker through a relay in this process
-    /// shaped as `link`, so the connection sees that round trip, jitter and loss.
-    /// [`Self::address`] is then the relay's. The relay stops when the returned handle drops.
+    /// shaped as `link`, so the connection sees that round trip, jitter and loss: the worker
+    /// registers over IPv6, so the server's directory lists `[::1]` on its port, where the relay
+    /// binds, and [`Self::address`] is the relay's. The relay
+    /// stops when the returned handle drops.
     ///
     /// # Errors
     ///
@@ -838,58 +907,91 @@ impl Stack {
         link: slopty_shape::Link,
     ) -> Result<(Self, ShapedLink)> {
         let dir = StackDir::new("slopty-e2e-")?;
-        let mut stack = Self::spawn_in(dir, worker_name, env).await?;
-        let direct: std::net::SocketAddr = stack.address.parse().context("the worker's address")?;
-        // The wildcard, as `SecondWorker`'s relay: it answers the app from the port it dialled.
-        let any = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
-        let relay = slopty_shape::relay::Relay::bind(any, direct, link, 0x5107_7e2e)
-            .await
-            .context("bind the relay")?;
-        stack.address = relay.addr()?.to_string();
+        let log = log_level();
+        let daemons = daemons(dir.path(), worker_name, &log, env, true).await?;
+        let at: std::net::SocketAddr = daemons.listed.parse().context("the listed address")?;
+        let from = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let relay =
+            slopty_shape::relay::Relay::bind_apart(at, from, daemons.worker, link, 0x5107_7e2e)
+                .await
+                .context("bind the relay")?;
         let task = tokio::spawn(async move { relay.run().await });
-        Ok((Self::add(stack).await?, ShapedLink { _relay: RelayTask(task) }))
+        let stack = Self::assemble(dir, daemons, &log, env, true).await?;
+        Ok((stack, ShapedLink { _relay: RelayTask(task) }))
     }
 
-    /// Add the stack's worker in the app, as the panel would, and wait for it to connect.
+    /// Connect the app at its first run to the stack's server as a person does: its address
+    /// typed into the panel's field and Return. Waits for the worker the server lists to
+    /// connect.
     ///
     /// # Errors
     ///
-    /// When the worker does not connect in time.
-    pub async fn add_worker(&mut self) -> Result<()> {
-        let address = self.address.clone();
-        add_worker(&mut self.driver, &address).await
+    /// When the app refuses the keys or the worker does not connect in time.
+    pub async fn connect_server(&mut self) -> Result<()> {
+        let address = self.server.address().to_owned();
+        self.driver.type_text(&address).await?;
+        self.driver.keys("enter").await?;
+        linked(&mut self.driver).await?;
+        self.follows = true;
+        Ok(())
     }
 
     /// [`Self::launch`] with the worker behind a path the test can cut ([`crate::cut::Cut`]):
-    /// the app adds it at the cut's address.
+    /// the server's directory lists the cut, as [`Self::launch_shaped`]'s relay.
     ///
     /// # Errors
     ///
     /// As [`Self::launch`], and when the cut cannot bind.
     pub async fn launch_behind_cut(worker_name: &str) -> Result<(Self, crate::cut::Cut)> {
         let dir = StackDir::new("slopty-e2e-cut-")?;
-        let mut stack = Self::spawn_in(dir, worker_name, &[]).await?;
-        let worker: std::net::SocketAddr = stack.address.parse().context("the worker's address")?;
-        let cut = crate::cut::Cut::bind(worker).await?;
-        add_worker(&mut stack.driver, &cut.addr().to_string()).await?;
+        let log = log_level();
+        let daemons = daemons(dir.path(), worker_name, &log, &[], true).await?;
+        let at: std::net::SocketAddr = daemons.listed.parse().context("the listed address")?;
+        let cut = crate::cut::Cut::bind(at, daemons.worker).await?;
+        let stack = Self::assemble(dir, daemons, &log, &[], true).await?;
         Ok((stack, cut))
     }
 
     /// `env` goes to the daemons and the app alike, on top of the defaults.
     async fn launch_in(dir: StackDir, worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
-        Self::add(Self::spawn_in(dir, worker_name, env).await?).await
+        let log = log_level();
+        let daemons = daemons(dir.path(), worker_name, &log, env, false).await?;
+        Self::assemble(dir, daemons, &log, env, true).await
     }
 
-    /// The daemons and the app, the worker not yet added.
-    async fn spawn_in(dir: StackDir, worker_name: &str, env: &[(&str, &str)]) -> Result<Self> {
-        let root = dir.path();
-        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (mut children, address) = daemons(root, worker_name, &log, env).await?;
-        let (app, driver) = spawn_app(root, "app", &log, env).await?;
+    /// The app beside `daemons`, with `env` on top of its defaults; when it `follows` the
+    /// server, its settings say so and this waits for it to connect to the worker.
+    async fn assemble(
+        dir: StackDir,
+        daemons: Daemons,
+        log: &str,
+        env: &[(&str, &str)],
+        follows: bool,
+    ) -> Result<Self> {
+        let Daemons { server, mut children, listed, .. } = daemons;
+        if follows {
+            follow(&dir.path().join("app"), &server)?;
+        }
+        let (app, driver) = spawn_app(dir.path(), "app", log, env).await?;
         let app_ix = Some(children.len());
         children.push(app);
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
-        Ok(Self { dir, address, driver, children, app_ix, simulator: None, log, app_env })
+        let mut stack = Self {
+            dir,
+            address: listed,
+            server,
+            follows,
+            driver,
+            children,
+            app_ix,
+            simulator: None,
+            log: log.to_owned(),
+            app_env,
+        };
+        if follows {
+            linked(&mut stack.driver).await?;
+        }
+        Ok(stack)
     }
 
     /// Kill the app (SIGKILL: no goodbye to the worker, as a crash or a dead battery would
@@ -958,7 +1060,7 @@ impl Stack {
     }
 
     /// [`Self::launch`] plus a second app on the same worker: `b` gets its own data directory,
-    /// identity and socket, and adds the same worker address. The
+    /// identity and socket, and follows the same server. The
     /// first app is left to open its first shell before the second comes up, so the two do not
     /// both find an empty workspace and open one each.
     ///
@@ -968,8 +1070,9 @@ impl Stack {
     pub async fn launch_pair(worker_name: &str) -> Result<Pair> {
         let mut stack = Self::launch(worker_name).await?;
         stack.wait_first_shell().await?;
+        follow(&stack.path("b"), &stack.server)?;
         let (child, mut driver) = spawn_app(stack.dir.path(), "b", &stack.log, &[]).await?;
-        add_worker(&mut driver, &stack.address).await?;
+        linked(&mut driver).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: Some(child), simulator: None } })
     }
 
@@ -985,9 +1088,10 @@ impl Stack {
     ) -> Result<Pair> {
         let mut stack = Self::launch(worker_name).await?;
         stack.wait_first_shell().await?;
+        follow(&stack.path("b"), &stack.server)?;
         let mut driver =
             spawn_simulator_app(stack.dir.path(), "b", &stack.log, &simulator, &[]).await?;
-        add_worker(&mut driver, &stack.address).await?;
+        linked(&mut driver).await?;
         Ok(Pair { stack, b: SecondApp { driver, child: None, simulator: Some(simulator) } })
     }
 
@@ -1003,9 +1107,9 @@ impl Stack {
         Ok(())
     }
 
-    /// Start ptyd and the worker here and the app in a booted simulator (`simctl launch` with the
-    /// socket and data dir in its environment; the simulator shares this file system), then
-    /// add the worker and wait as [`Self::launch`] does.
+    /// Start the server, ptyd and the worker here and the app in a booted simulator (`simctl
+    /// launch` with the socket and data dir in its environment; the simulator shares this file
+    /// system and its network), following the server, and wait as [`Self::launch`] does.
     ///
     /// # Errors
     ///
@@ -1025,11 +1129,13 @@ impl Stack {
         simulator: Simulator,
         env: &[(&str, &str)],
     ) -> Result<Self> {
-        Self::add(Self::spawn_on_simulator(worker_name, simulator, env).await?).await
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, env, true).await?;
+        linked(&mut stack.driver).await?;
+        Ok(stack)
     }
 
-    /// [`Self::launch_on_simulator`] up to the first frame, before the app knows any worker,
-    /// as [`Self::launch_first_run`].
+    /// [`Self::launch_on_simulator`] up to the first frame, before the app is pointed at the
+    /// server, as [`Self::launch_first_run`].
     ///
     /// # Errors
     ///
@@ -1038,26 +1144,34 @@ impl Stack {
         worker_name: &str,
         simulator: Simulator,
     ) -> Result<Self> {
-        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[]).await?;
+        let mut stack = Self::spawn_on_simulator(worker_name, simulator, &[], false).await?;
         stack.driver.ok(&crate::Command::Ping).await?;
         Ok(stack)
     }
 
-    /// The daemons here and the app in the simulator, the worker not yet added.
+    /// The daemons here and the app in the simulator, its settings naming the server when it
+    /// `follows` it.
     async fn spawn_on_simulator(
         worker_name: &str,
         simulator: Simulator,
         env: &[(&str, &str)],
+        follows: bool,
     ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-ios-")?;
         let root = dir.path();
-        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
-        let (children, address) = daemons(root, worker_name, &log, &[]).await?;
+        let log = log_level();
+        let Daemons { server, children, listed, .. } =
+            daemons(root, worker_name, &log, &[], false).await?;
+        if follows {
+            follow(&root.join("app"), &server)?;
+        }
         let driver = spawn_simulator_app(root, "app", &log, &simulator, env).await?;
         let app_env = env.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
         Ok(Self {
             dir,
-            address,
+            address: listed,
+            server,
+            follows,
             driver,
             children,
             app_ix: None,
@@ -1067,13 +1181,6 @@ impl Stack {
         })
     }
 
-    /// Ping, add the worker and wait for the connection.
-    async fn add(mut stack: Self) -> Result<Self> {
-        let address = stack.address.clone();
-        add_worker(&mut stack.driver, &address).await?;
-        Ok(stack)
-    }
-
     /// Where to put a file for this run.
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
@@ -1081,14 +1188,15 @@ impl Stack {
     }
 
     /// Switch the app's theme to `appearance` (`dark`, `light`) by rewriting its
-    /// `settings.toml`, as a person editing the file would; the app sees it within a second.
+    /// `settings.toml`, the server it follows kept, as a person editing the file would; the app
+    /// sees it within a second.
     ///
     /// # Errors
     ///
     /// When the file cannot be written.
     pub fn set_appearance(&self, appearance: &str) -> Result<()> {
         let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, pinned_settings(appearance))?;
+        std::fs::write(&path, app_settings(appearance, self.follows.then_some(&self.server)))?;
         Ok(())
     }
 
@@ -1267,6 +1375,7 @@ impl Stack {
             let _killed = child.start_kill();
             let _reaped = child.wait().await;
         }
+        self.server.kill().await;
         #[cfg(target_os = "macos")]
         {
             release_pasteboards(self.dir.path());
@@ -1638,11 +1747,11 @@ pub struct ShapedLink {
 ///
 /// ptyd and the worker run from this build under a [`StackDir`] of their own, beside a
 /// [`Stack`]'s, with a private `HOME` there, so they never read the real `~/.claude` and
-/// `slopty hook install` is never run. The app does not dial the worker: it dials a
-/// [`slopty_shape::relay::Relay`] in this process that carries every packet over a shaped link
-/// ([`TAILNET`]), so the connection sees a mesh's round trip, jitter and loss. The worker keeps
-/// its port across [`Self::restart_worker`] and the relay outlives it, so the app redials the
-/// address it added.
+/// `slopty hook install` is never run. It registers with a server, whose directory lists a
+/// [`slopty_shape::relay::Relay`] in this process in front of it: the app dials the relay,
+/// which carries every packet over a shaped link ([`TAILNET`]), so the connection sees a mesh's
+/// round trip, jitter and loss. The worker keeps its port across [`Self::restart_worker`] and
+/// the relay outlives it, so the app redials the address listed.
 #[derive(Debug)]
 pub struct SecondWorker {
     worker: Worker,
@@ -1655,14 +1764,24 @@ pub struct SecondWorker {
 }
 
 impl SecondWorker {
-    /// Start ptyd and the worker named `name` under a root of their own, and a relay in front
-    /// of the worker shaped as `link`.
+    /// Start ptyd and the worker named `name` under a root of their own, registered with
+    /// `server`, and a relay in front of the worker shaped as `link`, which the server's
+    /// directory lists.
+    ///
+    /// The server lists a worker at the IP it registered from and the port it listens on. So the
+    /// worker listens on `127.0.0.1` only and registers over IPv6: the directory then says
+    /// `[::1]:<its port>`, where the relay listens
+    /// ([`slopty_shape::relay::Relay::bind_apart`]).
     ///
     /// # Errors
     ///
     /// When a binary is missing, a daemon does not come up or the relay cannot bind.
-    pub async fn launch(name: &str, link: slopty_shape::Link) -> Result<Self> {
-        Self::launch_with(name, link, None, &[]).await
+    pub async fn launch(
+        name: &str,
+        link: slopty_shape::Link,
+        server: &ServerDaemon,
+    ) -> Result<Self> {
+        Self::launch_env(name, link, server, &[]).await
     }
 
     /// [`Self::launch`] with `env` on top of the daemons' own (such as the drawn screen,
@@ -1674,34 +1793,7 @@ impl SecondWorker {
     pub async fn launch_env(
         name: &str,
         link: slopty_shape::Link,
-        env: &[(&str, &str)],
-    ) -> Result<Self> {
-        Self::launch_with(name, link, None, env).await
-    }
-
-    /// [`Self::launch`] with the worker registered with `server`, so the app finds it in the
-    /// directory and dials the address listed there, which is the relay's.
-    ///
-    /// The server lists a worker at the IP it registered from and the port it listens on. So the
-    /// worker listens on `127.0.0.1` only and registers over IPv6: the directory then says
-    /// `[::1]:<its port>`, where the relay listens
-    /// ([`slopty_shape::relay::Relay::bind_apart`]).
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::launch`].
-    pub async fn launch_registered(
-        name: &str,
-        link: slopty_shape::Link,
         server: &ServerDaemon,
-    ) -> Result<Self> {
-        Self::launch_with(name, link, Some(server), &[]).await
-    }
-
-    async fn launch_with(
-        name: &str,
-        link: slopty_shape::Link,
-        server: Option<&ServerDaemon>,
         extra: &[(&str, &str)],
     ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-second-")?;
@@ -1711,30 +1803,20 @@ impl SecondWorker {
         // `/var` is a link to `/private/var`: a shell's working directory is the resolved path,
         // and zsh shortens it to `~` only when `HOME` is spelled the same way.
         let home = std::fs::canonicalize(&home)?;
-        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let log = log_level();
         let home_env = home.to_string_lossy();
-        let mut env = vec![("HOME", &*home_env)];
+        let mut env = vec![("HOME", &*home_env), ("SLOPTY_BIND", "127.0.0.1")];
         env.extend_from_slice(extra);
-        let server = server.map(ServerDaemon::address_v6);
-        if server.is_some() {
-            env.push(("SLOPTY_BIND", "127.0.0.1"));
-        }
-        let worker = Worker::start(root, name, server.as_deref(), &log, &env).await?;
+        let worker = Worker::start(root, name, Some(&server.address_v6()), &log, &env).await?;
         let direct: std::net::SocketAddr =
             worker.address().parse().context("the worker's address")?;
         // A fixed seed, so a run's losses fall where the last run's did.
         let seed = 0x5107_7e2e;
-        let relay = if server.is_some() {
-            let at = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, direct.port()));
-            let from = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
-            slopty_shape::relay::Relay::bind_apart(at, from, direct, link, seed).await
-        } else {
-            // The wildcard, not loopback: the relay's socket then sends to the worker's port
-            // and answers the app from the same port, whichever address each end used.
-            let any = std::net::SocketAddr::from(([0, 0, 0, 0], 0));
-            slopty_shape::relay::Relay::bind(any, direct, link, seed).await
-        }
-        .context("bind the relay")?;
+        let at = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, direct.port()));
+        let from = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 0));
+        let relay = slopty_shape::relay::Relay::bind_apart(at, from, direct, link, seed)
+            .await
+            .context("bind the relay")?;
         let address = relay.addr()?.to_string();
         let relay = std::sync::Arc::new(relay);
         let task = tokio::spawn({
@@ -1744,7 +1826,7 @@ impl SecondWorker {
         Ok(Self { worker, relay, _relay_task: RelayTask(task), address, home, dir })
     }
 
-    /// Where the app adds it: the relay, `127.0.0.1:<port>`.
+    /// Where the server's directory lists it: the relay, `[::1]:<port>`.
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
@@ -1956,7 +2038,7 @@ impl ServerStack {
     pub async fn launch(worker_name: &str) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-server-")?;
         let root = dir.path();
-        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
         let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
@@ -2095,7 +2177,7 @@ impl ServerFleet {
     pub async fn launch(near: &str, far: &str, link: slopty_shape::Link) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-fleet-")?;
         let root = dir.path();
-        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
         let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
@@ -2104,7 +2186,7 @@ impl ServerFleet {
         let bind = [("SLOPTY_BIND", "127.0.0.1")];
         let near =
             Worker::start(&root.join("near"), near, Some(server.address()), &log, &bind).await?;
-        let far = SecondWorker::launch_registered(far, link, &server).await?;
+        let far = SecondWorker::launch(far, link, &server).await?;
         let cli = root.join("cli");
         let started = tokio::time::Instant::now();
         loop {
@@ -2217,7 +2299,7 @@ impl ProjectStack {
     ) -> Result<Self> {
         let dir = StackDir::new("slopty-e2e-projects-")?;
         let root = dir.path();
-        let log = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_owned());
+        let log = log_level();
         let server_dir = root.join("server");
         std::fs::create_dir_all(&server_dir)?;
         let server = ServerDaemon::start(&server_dir, "e2e-server", &log).await?;
@@ -2258,7 +2340,7 @@ impl ProjectStack {
         }
         let app_dir = root.join("app");
         std::fs::create_dir_all(&app_dir)?;
-        std::fs::write(app_dir.join("settings.toml"), project_settings(APPEARANCE, &server))?;
+        std::fs::write(app_dir.join("settings.toml"), app_settings(APPEARANCE, Some(&server)))?;
         let (app, mut driver) = spawn_app(root, "app", &log, &[]).await?;
         driver.ok(&crate::Command::Ping).await?;
         // The first run's own shell is in before any test opens another, so the tiles stand in
@@ -2286,7 +2368,7 @@ impl ProjectStack {
     /// When the file cannot be written.
     pub fn set_appearance(&self, appearance: &str) -> Result<()> {
         let path = self.path("app").join("settings.toml");
-        std::fs::write(&path, project_settings(appearance, &self.server))?;
+        std::fs::write(&path, app_settings(appearance, Some(&self.server)))?;
         Ok(())
     }
 

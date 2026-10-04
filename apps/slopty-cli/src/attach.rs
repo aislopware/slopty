@@ -26,19 +26,25 @@ const DETACH: u8 = 0x1d;
 
 pub async fn open(
     data_dir: &Path,
+    server: Option<&str>,
     worker: Option<&str>,
     cwd: Option<String>,
     command: Vec<String>,
 ) -> Result<ExitCode> {
-    let mut session = connect_to(data_dir, worker).await?;
+    let mut session = connect_to(data_dir, server, worker).await?;
     let size = local_size()?;
     let spec = OpenSession { size, cwd, command, env: Vec::new(), title: None, attach: true };
     let id = session.open(spec).await?;
     run(session, id).await
 }
 
-pub async fn attach(data_dir: &Path, worker: Option<&str>, needle: &str) -> Result<ExitCode> {
-    let mut session = connect_to(data_dir, worker).await?;
+pub async fn attach(
+    data_dir: &Path,
+    server: Option<&str>,
+    worker: Option<&str>,
+    needle: &str,
+) -> Result<ExitCode> {
+    let mut session = connect_to(data_dir, server, worker).await?;
     let needle = needle.to_lowercase();
     let mut hits =
         session.conn.ack.sessions.iter().filter(|s| s.id.to_string().starts_with(&needle));

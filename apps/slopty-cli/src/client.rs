@@ -1,23 +1,25 @@
-//! Known workers, adding one by address, and connecting as a client.
+//! Connecting straight to a worker as a client: one the server lists, or any `host:port`.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use slopty_client::update::UpdateNotice;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::client::{WorkerConn, bind_client, connect};
-use slopty_net::known::{KnownWorker, KnownWorkers};
 use slopty_net::{ClientMsg, Endpoint, HostAddr, WorkerMsg};
 use slopty_proto::RequestId;
 use slopty_proto::handshake::Hello;
+use slopty_proto::server::Role;
 use slopty_proto::terminal::OpenSession;
+use slopty_tools::Dispatch;
+use slopty_tools::resolve::Resolver;
 
 /// How long a closing endpoint may take to tell its peers.
 const CLOSE_GRACE: Duration = Duration::from_millis(500);
 
-fn known(data_dir: &Path) -> Result<KnownWorkers> {
-    Ok(KnownWorkers::open_in(data_dir)?)
+fn client_id(data_dir: &Path) -> Result<ClientId> {
+    Ok(slopty_net::known::client_id_in(data_dir)?)
 }
 
 fn hello(client: ClientId) -> Hello {
@@ -46,48 +48,44 @@ async fn dial(endpoint: &Endpoint, address: &HostAddr, hello: Hello) -> Result<W
     })
 }
 
-/// Connect to the worker at `address` and remember it under the id it answers with.
-pub async fn add(data_dir: &Path, address: &str) -> Result<()> {
-    let address: HostAddr = address.parse()?;
-    let mut me = known(data_dir)?;
+/// `needle` as an address of its own when it names a port (`host:port`, `[v6]:port`): a
+/// measurement's way to a worker no server lists.
+fn direct(needle: &str) -> Option<HostAddr> {
+    let needle = needle.trim();
+    let port = needle.rsplit_once(':').map(|(_, port)| port)?;
+    if port.parse::<u16>().is_err() {
+        return None;
+    }
+    needle.parse().ok()
+}
+
+/// Where the worker `needle` names is dialled, as the server's directory lists it: by name,
+/// id or id prefix, else the only one online.
+async fn listed(server: &impl Dispatch, needle: Option<&str>) -> Result<HostAddr> {
+    let mut res = Resolver::new(server);
+    let id = res.worker(needle).await?;
+    let info = res.workers().await?.iter().find(|w| w.worker == id).cloned();
+    let info = info.with_context(|| format!("the server lists no worker {id}"))?;
+    HostAddr::parse_with_port(&info.address, slopty_net::endpoint::WORKER_PORT)
+        .with_context(|| format!("the server lists {} at {:?}", info.name, info.address))
+}
+
+/// Where to connect: `needle` itself when it is a `host:port`, else the worker the server
+/// lists under it ([`listed`]), the server found as every verb finds it.
+async fn pick(data_dir: &Path, server: Option<&str>, needle: Option<&str>) -> Result<HostAddr> {
+    if let Some(address) = needle.and_then(direct) {
+        return Ok(address);
+    }
     let endpoint = bind_client()?;
-    eprintln!("connecting to {address}…");
-    let conn = dial(&endpoint, &address, hello(me.client())).await?;
-    me.remember(KnownWorker {
-        address: address.clone(),
-        name: conn.ack.name.clone(),
-        worker_id: conn.ack.worker,
-    })?;
-    println!("added {} at {address} ({})", conn.ack.name, conn.ack.worker);
-    conn.close();
+    let found = async {
+        let at = crate::link::locate(server, data_dir, &endpoint).await?;
+        let role = Role::Client { name: format!("slopty @ {}", machine_name()) };
+        let link = crate::link::Link::connect(&endpoint, &at, role).await?;
+        listed(&link, needle).await
+    }
+    .await;
     close_endpoint(&endpoint).await;
-    Ok(())
-}
-
-pub fn forget(data_dir: &Path, needle: &str) -> Result<()> {
-    let mut me = known(data_dir)?;
-    let worker = me.find(needle).context("no unique worker matches")?.clone();
-    me.forget(worker.worker_id)?;
-    println!("forgot {} ({})", worker.name, worker.address);
-    Ok(())
-}
-
-/// Where to connect: a known worker by name, address or id prefix; else `needle` itself as an
-/// address; else the only known worker.
-fn pick(me: &KnownWorkers, needle: Option<&str>) -> Result<HostAddr> {
-    if let Some(n) = needle {
-        if let Some(known) = me.find(n) {
-            return Ok(known.address.clone());
-        }
-        return n
-            .parse()
-            .with_context(|| format!("{n:?} is neither a known worker nor an address"));
-    }
-    match me.workers() {
-        [one] => Ok(one.address.clone()),
-        [] => bail!("no workers; run `slopty add <host[:port]>`"),
-        _many => bail!("several workers; pass --worker"),
-    }
+    found
 }
 
 /// A live connection to a worker.
@@ -140,20 +138,24 @@ fn open_answer(request: RequestId, msg: WorkerMsg) -> Option<Result<SessionId>> 
     }
 }
 
-pub async fn connect_to(data_dir: &Path, needle: Option<&str>) -> Result<Session> {
+/// Connect to the worker `needle` names ([`pick`]).
+pub async fn connect_to(
+    data_dir: &Path,
+    server: Option<&str>,
+    needle: Option<&str>,
+) -> Result<Session> {
     #[cfg(target_vendor = "apple")]
     slopty_client::warm_up_decoder();
-    let me = known(data_dir)?;
-    let address = pick(&me, needle)?;
-    let client = me.client();
+    let address = pick(data_dir, server, needle).await?;
+    let client = client_id(data_dir)?;
     let started = Instant::now();
     let endpoint = bind_client()?;
     let conn = dial(&endpoint, &address, hello(client)).await?;
     Ok(Session { conn, client, endpoint, connect_time: started.elapsed() })
 }
 
-pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
-    let session = connect_to(data_dir, needle).await?;
+pub async fn sessions(data_dir: &Path, server: Option<&str>, needle: Option<&str>) -> Result<()> {
+    let session = connect_to(data_dir, server, needle).await?;
     println!(
         "{}  {}",
         session.conn.ack.name,
@@ -172,11 +174,16 @@ pub async fn sessions(data_dir: &Path, needle: Option<&str>) -> Result<()> {
 /// Application-level round trips: `Ping` on the control stream, `Pong` back. Prints the time to
 /// the first `HelloAck`, per-probe and summary numbers, and QUIC's own view of the path, so
 /// transport and app latency can be compared.
-pub async fn ping(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
+pub async fn ping(
+    data_dir: &Path,
+    server: Option<&str>,
+    needle: Option<&str>,
+    count: u32,
+) -> Result<()> {
     use slopty_core::MonoTime;
     use slopty_proto::{ClientMsg, WorkerMsg};
 
-    let mut session = connect_to(data_dir, needle).await?;
+    let mut session = connect_to(data_dir, server, needle).await?;
     println!(
         "{}  connected in {:.1} ms",
         session.conn.ack.name,
@@ -274,5 +281,67 @@ mod tests {
         assert!(open_answer(OPEN_REQUEST, failed(OPEN_REQUEST + 1)).is_none());
         let error = open_answer(OPEN_REQUEST, failed(OPEN_REQUEST)).unwrap().unwrap_err();
         assert!(error.to_string().contains("no such directory"), "{error}");
+    }
+
+    /// A directory with two workers, one of them away.
+    struct Directory(Vec<slopty_proto::server::WorkerInfo>);
+
+    impl Dispatch for Directory {
+        fn send(
+            &self,
+            _key: Option<slopty_proto::orchestration::IdempotencyKey>,
+            verb: slopty_proto::orchestration::Verb,
+        ) -> impl Future<Output = slopty_proto::orchestration::Outcome> + Send {
+            use slopty_proto::orchestration::{Outcome, Verb};
+            std::future::ready(match verb {
+                Verb::ListWorkers => Outcome::Workers(self.0.clone()),
+                other => Outcome::Error { code: ErrorCode::Invalid, message: format!("{other:?}") },
+            })
+        }
+    }
+
+    /// A worker name, id prefix or nothing (the only one online) resolves to the address the
+    /// server lists it at; a `host:port` is dialled as it is, with no server asked.
+    #[tokio::test]
+    async fn a_worker_name_resolves_through_the_server() {
+        use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
+        let info = |id: &str, name: &str, address: &str, liveness| WorkerInfo {
+            worker: id.parse().unwrap(),
+            name: name.to_owned(),
+            address: address.to_owned(),
+            liveness,
+            caps: WorkerCaps::bare(Os::MacOs),
+            load: 0.0,
+            last_seen_ms: WallMs::from_millis(1),
+        };
+        let studio = info(
+            "01a10707-dc02-7034-b011-654084fa9cb9",
+            "studio",
+            "100.64.0.3:45551",
+            Liveness::Online,
+        );
+        let mini = info(
+            "01a10707-dc02-7034-b011-65418dc3a71e",
+            "mini",
+            "[fd7a:115c:a1e0::9]:45550",
+            Liveness::Unreachable,
+        );
+        let server = Directory(vec![studio, mini]);
+        let at = |a: &HostAddr| (a.host().to_owned(), a.port());
+        let named = listed(&server, Some("studio")).await.unwrap();
+        assert_eq!(at(&named), ("100.64.0.3".to_owned(), 45551));
+        let by_id = listed(&server, Some("01a10707-dc02-7034-b011-65418")).await.unwrap();
+        assert_eq!(at(&by_id), ("fd7a:115c:a1e0::9".to_owned(), 45550));
+        let only = listed(&server, None).await.unwrap();
+        assert_eq!(at(&only), ("100.64.0.3".to_owned(), 45551), "the only one online");
+        listed(&server, Some("nowhere")).await.unwrap_err();
+
+        assert_eq!(
+            direct("127.0.0.1:45551").map(|a| at(&a)),
+            Some(("127.0.0.1".to_owned(), 45551))
+        );
+        assert_eq!(direct("[::1]:7").map(|a| at(&a)), Some(("::1".to_owned(), 7)));
+        assert_eq!(direct("studio"), None, "a name is the server's to resolve");
+        assert_eq!(direct("Mac Studio"), None);
     }
 }

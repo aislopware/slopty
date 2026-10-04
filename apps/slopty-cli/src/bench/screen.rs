@@ -49,8 +49,8 @@ pub struct ScreenBench {
 }
 
 /// Print the worker's windows and displays.
-pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
-    let session = connect_to(data_dir, needle).await?;
+pub async fn list(data_dir: &Path, server: Option<&str>, needle: Option<&str>) -> Result<()> {
+    let session = connect_to(data_dir, server, needle).await?;
     let Session { conn, endpoint, .. } = session;
     let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events")?;
@@ -80,8 +80,13 @@ pub async fn list(data_dir: &Path, needle: Option<&str>) -> Result<()> {
 }
 
 /// Stream for `bench.seconds` and print the numbers.
-pub async fn screen(data_dir: &Path, needle: Option<&str>, bench: ScreenBench) -> Result<()> {
-    let session = connect_to(data_dir, needle).await?;
+pub async fn screen(
+    data_dir: &Path,
+    server: Option<&str>,
+    needle: Option<&str>,
+    bench: ScreenBench,
+) -> Result<()> {
+    let session = connect_to(data_dir, server, needle).await?;
     let Session { conn, endpoint, .. } = session;
     let mut link = WorkerLink::start(conn);
     let mut events = link.events().context("events")?;

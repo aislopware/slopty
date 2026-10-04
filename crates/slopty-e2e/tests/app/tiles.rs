@@ -452,6 +452,22 @@ async fn a_page_on_a_host_only_the_worker_names_loads_through_its_proxy() {
     let store = slopty_e2e::harness::page_store(&root).expect("the worker's id");
     assert!(store.exists(), "the worker's pages keep a store of their own: {}", store.display());
     let id = slopty_e2e::harness::worker_id(&root).unwrap();
+    // The server forgets only a worker that is not online.
+    stack.kill_worker().await.unwrap();
+    let cli = stack.path("cli");
+    let gone = async {
+        loop {
+            let listed =
+                slopty_e2e::harness::slopty_json(stack.server.address(), &cli, &["workers"], b"")
+                    .await
+                    .unwrap();
+            if listed.as_array().is_some_and(|all| all.iter().all(|w| w["liveness"] != "online")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(STEP, gone).await.expect("the server to see the worker go");
     stack.driver.ok(&Command::ForgetWorker { id }).await.unwrap();
     let deadline = std::time::Instant::now() + STEP;
     while store.exists() && std::time::Instant::now() < deadline {

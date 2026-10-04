@@ -1,8 +1,7 @@
 Window │ Slopty
 Label │ Slopty
 Heading │ Connect to a server
-Status │ Nothing answered on your tailnet
 Button │ Use this Mac
+Status │ Nothing answered on your tailnet
 TextInput │ Server address (focused)
 Button │ Connect
-Button │ Add a machine by address instead

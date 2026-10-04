@@ -105,16 +105,19 @@ fn worker(sh: &Shell, opts: &RunOpts) -> Result<()> {
     let flags = opts.cargo_flags();
     step(
         "build worker daemons",
-        &cmd!(sh, "cargo build {flags...} -p slopty-ptyd -p slopty-workerd -p slopty-cli"),
+        &cmd!(
+            sh,
+            "cargo build {flags...} -p slopty-ptyd -p slopty-workerd -p slopty-serverd -p slopty-cli"
+        ),
     )?;
-    // The build just ad-hoc signed both daemons, which throws away yesterday's Screen Recording
+    // The build just ad-hoc signed the daemons, which throws away yesterday's Screen Recording
     // and Accessibility approvals; re-sign them under their stable identifiers before they start.
     crate::sign::sign_if_possible(sh, opts.release);
     let mut ptyd = spawn(sh, "slopty-ptyd", &[], opts)?;
     wait_for_socket(&ptyd_socket(opts), &mut ptyd)?;
     println!(
-        "▶ add this worker from a client with `slopty add <this Mac's tailnet name or IP>[:port]` \
-         or the app's \"Add worker…\"; it listens on:"
+        "▶ this worker registers with the server `[worker] server` names in its settings \
+         (`cargo xtask run server` runs one); it listens on:"
     );
     let mut worker = spawn(sh, "slopty-worker", &["--print-addr"], opts)?;
     let status = worker.wait().context("wait for slopty-worker")?;

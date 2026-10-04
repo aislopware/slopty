@@ -50,6 +50,7 @@ use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
 use slopty_platform::notify::{Notifier, Tap};
 use slopty_proto::WorkerMsg;
+use slopty_proto::server::Liveness;
 use slopty_proto::terminal::{Progress, ProgressState};
 use slopty_settings::{Loaded, Settings};
 use slopty_theme::{Density, Spacing, Theme, Typography};
@@ -64,11 +65,11 @@ use slopty_ui::workspace::{
     Finished, HostActions, KeyTarget, MenuEntry, MenuGroup, MenuRun, WorkerLink, WorkerStatus,
     WorkspaceEvent, WorkspaceView,
 };
-pub use ssh::actions::{InstallOverSsh, RegisterWithServer, UpdateAllWorkers, UpdateServer};
+pub use ssh::actions::{InstallOverSsh, UpdateAllWorkers, UpdateServer};
 pub use this_mac::actions::{RestartThisMacWorker, UseThisMac};
 pub use window::actions::{Minimize, OpenHelp, ShowWindow, Zoom};
 pub use window::{HELP_URL, show as show_main_window};
-pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant, DisconnectServer};
+pub use workers::actions::{AddWorker, ConnectServer, CopyTailnetGrant};
 use workers::{Hearing, Tick, WorkerSlot};
 
 /// A finger drives this build: the key bar the soft keyboard lacks (Esc, Tab, Control, arrows,
@@ -252,51 +253,42 @@ const SCREEN_BAR_KEYS: [(&str, &str, Option<&str>); 9] = [
     ("→", "right", None),
     ("/", "/", Some("/")),
 ];
-/// What the panel over the workspace connects to.
+/// What the panel over the workspace is for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Panel {
-    /// A server, whose directory lists the workers: the usual way in.
+    /// Connect to a server, whose directory lists the machines: the first run, and a move to
+    /// another server.
     Server,
-    /// One worker by address, for a setup without a server.
+    /// Add a machine to the server: this Mac, one over SSH, or one the tailnet found that the
+    /// server does not list.
     Worker,
 }
 
-impl Panel {
-    /// The address field's example: the kind of host this panel is for, by name or by its
-    /// tailnet IP. A server is usually a small always-on box, a worker a Mac someone works on.
-    const fn example(self) -> &'static str {
-        match self {
-            Self::Server => "home-server or 100.64.0.1",
-            Self::Worker => "mac-studio or 100.64.0.3",
-        }
-    }
+/// The server address field's example: a small always-on box, by name or by its tailnet IP.
+const SERVER_EXAMPLE: &str = "home-server or 100.64.0.1";
+/// What the server address field takes, as its label names it.
+const SERVER_FIELD: &str = "Server address";
 
-    /// What the address field takes, as its label names it.
-    const fn field(self) -> &'static str {
-        match self {
-            Self::Server => "Server address",
-            Self::Worker => "Machine address",
-        }
-    }
-
-    /// The address field's label: "Or type an address" only under rows to press, where "or"
-    /// has a first way to follow; else what the field takes.
-    fn address_label(self, search: Option<&Search>) -> &'static str {
-        if search.is_some_and(|s| !s.offers(self).is_empty()) {
-            "Or type an address"
-        } else {
-            self.field()
-        }
+/// The address field's label: "Or type an address" only under rows to press, where "or" has a
+/// first way to follow; else what the field takes.
+fn address_label(search: Option<&Search>) -> &'static str {
+    if search.is_some_and(|s| !s.offers(Panel::Server).is_empty()) {
+        "Or type an address"
+    } else {
+        SERVER_FIELD
     }
 }
 
-/// The panel that connects to a server or adds a worker by address: shown until this
-/// installation reaches some worker, and on "Connect to a server" or "Add a worker".
+/// The panel that connects to a server or adds a machine: the page of the first run, and a
+/// dialog on "Connect to another server" or "Add a machine".
 #[derive(Debug)]
 struct Adding {
     /// Which of the two.
     mode: Panel,
-    /// Where the address is typed or pasted.
+    /// The first run's page, the whole window, for as long as it is up: there is nothing to go
+    /// back to, so it has no Cancel.
+    page: bool,
+    /// Where the server's address is typed or pasted.
     address: Entity<InputState>,
     /// A connection attempt is in flight.
     busy: bool,
@@ -305,12 +297,39 @@ struct Adding {
     /// Where the look on the tailnet stands; `None` where none is made (iOS, where no app can
     /// read Tailscale, and a server's panel while a server is set).
     search: Option<Search>,
-    /// "Use this Mac" under way: its checklist stands in for the address.
+    /// "Use this Mac" under way: its checklist stands in for the rest.
     this_mac: Option<this_mac::Flow>,
+    /// "Use this Mac" asks which server first: several answered, or none could be looked for.
+    /// The address field then takes it, empty for one on this Mac.
+    asking: Option<Asking>,
     /// "Install on a machine over SSH": its form, then its steps, stand in for the address.
     ssh: Option<ssh::Sheet>,
-    /// Return in the address field adds what it holds; it goes with the panel.
+    /// The panel's own focus, where a machine's panel (no field to type in) keeps the
+    /// keyboard, so Esc and the palette reach it.
+    focus: gpui::FocusHandle,
+    /// Return in the address field acts on what it holds; it goes with the panel.
     _enter: gpui::Subscription,
+}
+
+/// Why "Use this Mac" asks for the server.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Asking {
+    /// Several servers answered on the tailnet.
+    Several,
+    /// No look was possible: Tailscale is not up here, or this device cannot read it.
+    Blind,
+}
+
+impl Asking {
+    /// What the panel says above the field.
+    const fn words(self) -> &'static str {
+        match self {
+            Self::Several => "Several servers answered. Pick one, or type its address.",
+            Self::Blind => {
+                "No tailnet to look for a server on. Type its address, or leave it empty to run one on this Mac."
+            }
+        }
+    }
 }
 
 impl Adding {
@@ -320,15 +339,15 @@ impl Adding {
     }
 }
 
-/// What the tailnet offers the panel: a server to connect to, or a worker to add.
+/// What the tailnet offers the panel: a server to connect to, or a worker to install over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Host {
     /// A server; pressing it connects to it.
     Server,
-    /// A worker; pressing it adds it.
+    /// A worker the server does not list; pressing it installs this build there, registered
+    /// with the server.
     Worker,
 }
-
 /// A node that answered on the tailnet, by name and tailnet IP, and what it said.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Offer {
@@ -375,7 +394,7 @@ enum Search {
     Answered {
         /// Nodes that answered as a server.
         servers: Vec<Offer>,
-        /// Nodes that answered as a worker not yet added.
+        /// Nodes that answered as a worker the server does not list.
         workers: Vec<Offer>,
         /// This Mac's Tailscale is up: an empty answer is the tailnet's, not a look never made.
         running: bool,
@@ -383,12 +402,28 @@ enum Search {
 }
 
 impl Search {
-    /// The rows a panel in `mode` offers, in order: the servers (a server's panel only), then
-    /// the workers, since a tailnet without a server still has its workers to add.
+    /// The rows a panel in `mode` offers: a server's panel the servers, a machine's the
+    /// workers the server does not list.
     fn offers(&self, mode: Panel) -> Vec<(Host, &Offer)> {
         let Self::Answered { servers, workers, .. } = self else { return Vec::new() };
-        let servers = servers.iter().filter(|_| mode == Panel::Server).map(|o| (Host::Server, o));
-        servers.chain(workers.iter().map(|o| (Host::Worker, o))).collect()
+        match mode {
+            Panel::Server => servers.iter().map(|o| (Host::Server, o)).collect(),
+            Panel::Worker => workers.iter().map(|o| (Host::Worker, o)).collect(),
+        }
+    }
+
+    /// The servers that answered ready, once the look is done; `None` while it looks or where
+    /// it could not look.
+    fn ready_servers(&self) -> Option<Vec<&Offer>> {
+        match self {
+            Self::Answered { servers, running: true, .. } => Some(
+                servers
+                    .iter()
+                    .filter(|o| o.answer == slopty_net::discover::Answer::Ready)
+                    .collect(),
+            ),
+            Self::Looking | Self::Answered { .. } => None,
+        }
     }
 
     /// What the panel in `mode` says while it has nothing to offer.
@@ -459,8 +494,6 @@ pub struct Workspace {
     theme: Theme,
     /// The user's `settings.toml` as last loaded (defaults when absent or broken).
     settings: Settings,
-    /// The server the offer to register earlier machines with was made for, once a server.
-    register_offered: Option<slopty_net::HostAddr>,
     /// A file has been read since launch, so a change can be told from the first read.
     settings_read: bool,
     /// The window's appearance is dark (`theme.appearance = "system"` follows it).
@@ -640,7 +673,6 @@ impl Workspace {
             theme: Theme::default(),
             settings: Settings::default(),
             settings_read: false,
-            register_offered: None,
             window_dark: true,
             subscriptions: vec![events, changes],
             window_subscriptions: Vec::new(),
@@ -944,6 +976,26 @@ impl Workspace {
         self.view.update(cx, |v, _| v.extend_palette(app_palette_items()));
         self.set_server(server, None, cx);
         self.refresh_menu(cx);
+        // A server taken out of the file by hand leaves nothing to show: the first run again.
+        if self.server.is_none() && self.adding.is_none() {
+            self.show_first_run(cx);
+        }
+    }
+
+    /// The first run's page, from where no window is at hand; nothing before the window is up,
+    /// whose launch shows it then.
+    fn show_first_run(&self, cx: &Context<Self>) {
+        let Some(window) = self.window else { return };
+        cx.spawn(async move |this, cx| {
+            let _shown = cx.update_window(window, |_root, window, cx| {
+                this.update(cx, |ws, cx| {
+                    if ws.server.is_none() && ws.adding.is_none() {
+                        ws.show_add_worker(Panel::Server, window, cx);
+                    }
+                })
+            });
+        })
+        .detach();
     }
 
     /// Bind `keymap` in place of the keys bound now, unless it binds the same, and show the
@@ -1077,18 +1129,16 @@ impl Workspace {
         }));
     }
 
-    /// Start (or refresh) a worker: its tiles wait in the workspace and a connect loop of its
-    /// own brings them to life. `added` marks one added by address, which stays without the
-    /// server.
-    fn add_worker(&mut self, id: WorkerId, name: String, added: bool, cx: &mut Context<Self>) {
+    /// Start (or refresh) a worker the directory lists: its tiles wait in the workspace and a
+    /// connect loop of its own brings them to life.
+    fn add_worker(&mut self, id: WorkerId, name: String, cx: &mut Context<Self>) {
         if let Some(slot) = self.slot_mut(id) {
             slot.name.clone_from(&name);
-            slot.added |= added;
             let key = slot.key;
             self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
             return;
         }
-        let slot = WorkerSlot::new(id, name.clone(), added);
+        let slot = WorkerSlot::new(id, name.clone());
         let key = slot.key;
         self.workers.push(slot);
         self.view.update(cx, |v, cx| v.add_worker(key, name, cx));
@@ -1096,29 +1146,33 @@ impl Workspace {
         self.refresh_menu(cx);
     }
 
-    /// Forget a worker added by address: its entry in the store, then the slot. With none
-    /// left the panel returns.
-    fn forget_worker(&mut self, id: WorkerId, window: &mut Window, cx: &mut Context<Self>) {
-        if let Err(e) = net::forget_worker(id) {
-            self.show_failure(format!("Could not forget the machine: {e:#}"), cx);
+    /// Ask the server to forget a worker that is not online (`Verb::ForgetWorker`; it refuses
+    /// one that is). It leaves when the directory unlists it, its pages with it.
+    fn forget_worker(&self, id: WorkerId, cx: &mut Context<Self>) {
+        let name = self.directory.get(id).map_or_else(|| id.to_string(), |w| w.name.clone());
+        let Some(caller) = self.server_caller() else {
+            self.show_failure(
+                format!("Could not forget {name}: the server does not answer yet"),
+                cx,
+            );
             return;
-        }
-        if self.directory.get(id).is_some() {
-            if let Some(slot) = self.slot_mut(id) {
-                slot.added = false;
-            }
-        } else {
-            let key = self.slot_mut(id).map(|slot| slot.key);
-            self.drop_slot(id, cx);
-            if let Some(key) = key {
-                Self::forget_pages(key, cx);
-            }
-        }
-        if self.workers.is_empty() && self.server.is_none() {
-            self.show_add_worker(Panel::Server, window, cx);
-        }
-        self.refresh_menu(cx);
-        cx.notify();
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.runtime.spawn(async move {
+            let _gone = tx.send(
+                caller.call(slopty_proto::orchestration::Verb::ForgetWorker { worker: id }).await,
+            );
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(outcome) = rx.await else { return };
+            let _gone = this.update(cx, |ws, cx| match outcome {
+                slopty_proto::orchestration::Outcome::Error { message, .. } => {
+                    ws.show_failure(format!("Could not forget {name}: {message}"), cx);
+                }
+                _forgotten => ws.show_notice(format!("Forgot {name}"), cx),
+            });
+        })
+        .detach();
     }
 
     /// A forgotten worker's pages lose their cookies and storage once the tiles that held them
@@ -1186,24 +1240,23 @@ impl Workspace {
         }
         {
             let this = this.clone();
-            let entry = match self.server_address() {
-                Some(address) => MenuEntry {
-                    group: MenuGroup::Connections,
-                    label: "Disconnect from the server".into(),
-                    detail: address.host().to_owned().into(),
-                    run: Rc::new(move |window, cx| {
-                        let _gone = this.update(cx, |ws, cx| ws.disconnect_server(window, cx));
-                    }),
-                },
-                None => MenuEntry {
-                    group: MenuGroup::Connections,
-                    label: "Connect to a server".into(),
-                    detail: SharedString::default(),
-                    run: Rc::new(move |window, cx| {
-                        let _gone =
-                            this.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
-                    }),
-                },
+            let label = if self.server.is_some() {
+                "Connect to another server"
+            } else {
+                "Connect to a server"
+            };
+            let entry = MenuEntry {
+                group: MenuGroup::Connections,
+                label: label.into(),
+                detail: self
+                    .server_address()
+                    .map(|a| a.host().to_owned())
+                    .unwrap_or_default()
+                    .into(),
+                run: Rc::new(move |window, cx| {
+                    let _gone =
+                        this.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+                }),
             };
             entries.push(entry);
         }
@@ -1220,8 +1273,8 @@ impl Workspace {
     }
 
     /// What the status bar's hosts popover can do to each worker: dial it now, wake one the
-    /// server can send a magic packet to (the palette offers that too), and forget one added
-    /// by address; and its way to add a worker.
+    /// server can send a magic packet to (the palette offers that too), and forget one the
+    /// server lists as not online; and its way to add a worker.
     fn refresh_hosts(&self, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         let hosts = self
@@ -1235,10 +1288,11 @@ impl Workspace {
                         let _gone = this.update(cx, |ws, _cx| ws.connect_now(id));
                     })
                 };
-                let forget = slot.added.then(|| {
+                let away = self.directory.get(id).is_some_and(|w| w.liveness != Liveness::Online);
+                let forget = away.then(|| {
                     let this = this.clone();
-                    let run: MenuRun = Rc::new(move |window, cx| {
-                        let _gone = this.update(cx, |ws, cx| ws.forget_worker(id, window, cx));
+                    let run: MenuRun = Rc::new(move |_window, cx| {
+                        let _gone = this.update(cx, |ws, cx| ws.forget_worker(id, cx));
                     });
                     run
                 });
@@ -1328,6 +1382,12 @@ impl Workspace {
                     continue;
                 }
                 held = false;
+                // Not listed yet: there is nowhere to dial until the directory says where.
+                let Some(address) = address else {
+                    view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::Connecting, cx));
+                    let _woken = wait_or_wake(cx, &wake, server::HOLD_RETRY).await;
+                    continue;
+                };
                 let Ok(dialing) =
                     this.update(cx, move |ws, cx| (ws.dial.clone().0)(id, address, cx))
                 else {
@@ -1537,49 +1597,65 @@ impl Workspace {
         .detach();
     }
 
-    /// Show the panel, connecting to a server or adding a worker; an open panel switches to
-    /// `mode` and keeps what was typed, leaving this Mac's checklist if it was up.
+    /// Show the panel, connecting to a server or adding a machine; an open panel switches to
+    /// `mode` and keeps what was typed, leaving this Mac's checklist if it was up. With no
+    /// server set there is nothing to add a machine to, so the panel connects to one first.
     fn show_add_worker(&mut self, mode: Panel, window: &mut Window, cx: &mut Context<Self>) {
+        let mode = if self.server.is_none() { Panel::Server } else { mode };
         if let Some(adding) = &mut self.adding {
-            let left = adding.this_mac.take().is_some() | adding.ssh.take().is_some();
+            let left = adding.this_mac.take().is_some()
+                | adding.ssh.take().is_some()
+                | adding.asking.take().is_some();
             if adding.mode != mode {
                 adding.mode = mode;
                 adding.error = None;
-                adding.address.update(cx, |input, cx| {
-                    input.set_placeholder(mode.example(), window, cx);
-                });
-            }
-            if left || adding.mode != mode {
+                cx.notify();
+            } else if left {
                 cx.notify();
             }
+            Self::focus_panel(adding, window, cx);
             return;
         }
-        let address = cx.new(|cx| InputState::new(window, cx).placeholder(mode.example()));
-        let enter = cx.subscribe(&address, |this, _input, event, cx| {
+        let address = cx.new(|cx| InputState::new(window, cx).placeholder(SERVER_EXAMPLE));
+        let enter = cx.subscribe_in(&address, window, |this, _input, event, window, cx| {
             if matches!(event, InputEvent::PressEnter { .. }) {
-                this.add_from_panel(cx);
+                this.enter_address(window, cx);
             }
         });
-        address.update(cx, |input, cx| input.focus(window, cx));
-        // A server's panel looks while no server is set; a worker's always, for the workers
-        // not yet added.
+        // A server's panel looks while no server is set; a machine's always, for the workers
+        // the server does not list.
         let search = (LISTS_TAILNET && (mode == Panel::Worker || self.server.is_none()))
             .then_some(Search::Looking);
         let looking = search.is_some();
         self.adding = Some(Adding {
             mode,
+            page: self.server.is_none(),
             address,
             busy: false,
             error: None,
             search,
             this_mac: None,
+            asking: None,
             ssh: None,
+            focus: cx.focus_handle(),
             _enter: enter,
         });
+        if let Some(adding) = &self.adding {
+            Self::focus_panel(adding, window, cx);
+        }
         if looking {
             self.look_on_tailnet(window, cx);
         }
         cx.notify();
+    }
+
+    /// Give the panel the keyboard: the server's address field, or a machine's panel itself.
+    fn focus_panel(adding: &Adding, window: &mut Window, cx: &mut Context<Self>) {
+        if adding.mode == Panel::Server {
+            adding.address.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            window.focus(&adding.focus, cx);
+        }
     }
 
     /// Look for servers and workers on the tailnet, saying so, and offer those that answer.
@@ -1596,9 +1672,10 @@ impl Workspace {
         .detach();
     }
 
-    /// The tailnet answered with `found`: each server and each worker not yet here is a row to
-    /// press, and the best one of the panel's own kind has its address in the field unless the
-    /// person has moved on (typed something, or connected). Nothing answering says so.
+    /// The tailnet answered with `found`: each server, and each worker the server does not
+    /// list, is a row to press, and on a server's panel the best server has its address in the
+    /// field unless the person has moved on (typed something, or connected). Nothing answering
+    /// says so. A "Use this Mac" that waited for the look goes on.
     fn offer_found(&mut self, found: net::Tailnet, window: &mut Window, cx: &mut Context<Self>) {
         // A worker the server lists is reached through it already.
         let listed: Vec<std::net::IpAddr> = self
@@ -1618,27 +1695,28 @@ impl Workspace {
             .filter(|w| !listed.contains(&w.addr.ip()))
             .map(Offer::from)
             .collect();
-        let ready = |offers: &[Offer]| -> Option<usize> {
-            offers.iter().position(|o| o.answer == slopty_net::discover::Answer::Ready)
-        };
-        let best = match adding.mode {
-            Panel::Server => ready(&servers).and_then(|i| servers.get(i)),
-            Panel::Worker => ready(&workers).and_then(|i| workers.get(i)),
-        };
+        let best = (adding.mode == Panel::Server)
+            .then(|| servers.iter().find(|o| o.answer == slopty_net::discover::Answer::Ready))
+            .flatten();
         let empty = adding.address.read(cx).value().trim().is_empty();
         if let Some(best) = best.filter(|_| empty && !adding.busy) {
             let at = best.at.clone();
             adding.address.update(cx, |input, cx| input.set_value(at, window, cx));
         }
         adding.search = Some(Search::Answered { servers, workers, running: found.running });
+        let waited =
+            adding.this_mac.as_ref().is_some_and(|f| f.server == this_mac::Server::Looking);
+        if waited {
+            self.use_this_mac(window, cx);
+        }
         cx.notify();
     }
 
     /// What pressing a node the tailnet found does, by what it answered: one that turns this
     /// device away puts the grant that lets it in on the clipboard; a server on another build
-    /// opens the server's SSH sheet on it, to put this build there; anything else is connected
-    /// to or added ([`Self::connect_found`]), where a worker on another build goes on to its
-    /// own sheet.
+    /// opens the server's SSH sheet on it, to put this build there; any other server is
+    /// connected to. A worker the server does not list opens the SSH sheet on its host, to put
+    /// this build there registered with the server.
     fn press_found(
         &mut self,
         host: Host,
@@ -1648,42 +1726,30 @@ impl Workspace {
     ) {
         use slopty_net::discover::Answer;
         match (&offer.answer, host) {
-            (Answer::NotGranted, _) => self.copy_grant_text(offer.grant(), cx),
+            (_, Host::Worker) => self.open_ssh_at(&offer.name, window, cx),
+            (Answer::NotGranted, Host::Server) => self.copy_grant_text(offer.grant(), cx),
             (Answer::OtherBuild(_), Host::Server) => {
                 self.show_add_worker(Panel::Server, window, cx);
                 self.open_ssh_at(&offer.name, window, cx);
             }
-            (Answer::Ready | Answer::OtherBuild(_), _) => {
-                self.connect_found(host, &offer.at, window, cx);
-            }
+            (Answer::Ready, Host::Server) => self.connect_found(&offer.at, window, cx),
         }
     }
 
-    /// Connect to a server the tailnet found, or add a worker it found, at `at`: a worker turns
-    /// the panel into the worker's, so a failure is reported there with its address.
-    fn connect_found(&mut self, host: Host, at: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Connect to a server the tailnet found at `at`, as typed into the field: a failure is
+    /// reported there with its address. Asked for by "Use this Mac", it joins that server.
+    fn connect_found(&mut self, at: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(adding) = &mut self.adding else { return };
         if adding.busy {
             return;
         }
-        let mode = match host {
-            Host::Server => Panel::Server,
-            Host::Worker => Panel::Worker,
-        };
-        if adding.mode != mode {
-            adding.mode = mode;
-            adding.error = None;
-            adding.address.update(cx, |input, cx| {
-                input.set_placeholder(mode.example(), window, cx);
-            });
-        }
         adding.address.update(cx, |input, cx| input.set_value(at.to_owned(), window, cx));
-        self.add_from_panel(cx);
+        self.enter_address(window, cx);
     }
 
     /// Close the panel (only offered while there is somewhere else to be).
     fn cancel_add_worker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.workers.is_empty() && self.server.is_none() {
+        if self.welcome() {
             return;
         }
         self.adding = None;
@@ -1696,7 +1762,7 @@ impl Workspace {
         let Some(adding) = &self.adding else { return };
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         adding.address.update(cx, |input, cx| input.set_value(text.trim().to_owned(), window, cx));
-        self.add_from_panel(cx);
+        self.enter_address(window, cx);
     }
 
     /// The panel's report: the attempt ended with `error`, or it is still going.
@@ -1708,65 +1774,37 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Connect to the address in the field on the runtime, as the panel's mode says; report
-    /// back to the panel.
-    fn add_from_panel(&mut self, cx: &mut Context<Self>) {
+    /// The address field's Return, or its button: connect to the server it names; while "Use
+    /// this Mac" asks, use this Mac with it, an empty field starting one here.
+    fn enter_address(&mut self, window: &Window, cx: &mut Context<Self>) {
         let Some(adding) = &mut self.adding else { return };
-        if adding.busy {
+        if adding.busy || adding.mode != Panel::Server {
             return;
         }
         let address = adding.address.read(cx).value().trim().to_owned();
+        if adding.asking.is_some() {
+            let serve = if address.is_empty() {
+                this_mac::Serve::Here
+            } else {
+                match slopty_net::HostAddr::parse_with_port(
+                    &address,
+                    slopty_net::endpoint::SERVER_PORT,
+                ) {
+                    Ok(address) => this_mac::Serve::Join(address),
+                    Err(e) => return self.panel_failed(e.to_string(), cx),
+                }
+            };
+            adding.asking = None;
+            adding.error = None;
+            return self.install_this_mac_with(serve, false, window, cx);
+        }
         if address.is_empty() {
             return;
         }
-        let mode = adding.mode;
         adding.busy = true;
         adding.error = None;
         cx.notify();
-        match mode {
-            Panel::Server => self.connect_from_panel(&address, cx),
-            Panel::Worker => self.add_worker_from_panel(address, cx),
-        }
-    }
-
-    fn add_worker_from_panel(&self, address: String, cx: &Context<Self>) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.runtime.spawn(async move {
-            let _sent = tx.send(net::add_worker(&address).await);
-        });
-        cx.spawn(async move |this, cx| {
-            let outcome = rx.await;
-            let _updated = this.update(cx, |ws, cx| match outcome {
-                Ok(Ok(net::Added { id, name })) => {
-                    ws.adding = None;
-                    ws.show_notice(format!("Added {name}"), cx);
-                    ws.add_worker(id, name, true, cx);
-                    cx.notify();
-                }
-                Ok(Err(e)) => match e.downcast_ref::<net::OtherBuild>() {
-                    // Not a dead end: the way on is installing this build there.
-                    Some(other) => ws.install_this_build_at(other.0.host.clone(), cx),
-                    None => ws.panel_failed(format!("{e:#}"), cx),
-                },
-                Err(_dropped) => ws.panel_failed("connection task died".to_owned(), cx),
-            });
-        })
-        .detach();
-    }
-
-    /// The panel's worker answered on another build: the SSH sheet opens with its host filled
-    /// in, to install this build over it.
-    fn install_this_build_at(&mut self, host: String, cx: &Context<Self>) {
-        if let Some(adding) = &mut self.adding {
-            adding.busy = false;
-        }
-        let Some(window) = self.window else { return };
-        cx.spawn(async move |this, cx| {
-            let _opened = cx.update_window(window, |_root, window, cx| {
-                this.update(cx, |ws, cx| ws.open_ssh_at(&host, window, cx))
-            });
-        })
-        .detach();
+        self.connect_from_panel(&address, cx);
     }
 
     /// Prove the server answers, then save it as `[client] server` and keep its link.
@@ -1790,6 +1828,9 @@ impl Workspace {
                         link.close();
                         return ws.panel_failed(e, cx);
                     }
+                    if let Some(deployer) = &ws.deployer {
+                        deployer.register_here(ws.server_address(), &address);
+                    }
                     ws.adding = None;
                     ws.show_notice(format!("Connected to {name}"), cx);
                     ws.set_server(Some(address), Some(link), cx);
@@ -1803,11 +1844,40 @@ impl Workspace {
         .detach();
     }
 
-    /// "Use this Mac", from the panel, the palette or a failed line's "Try again":
-    /// install the worker's services, then read its `doctor` as the panel's checklist. A run
-    /// already installing or adding is left to finish.
+    /// "Use this Mac", from the panel, the palette or a failed line's "Try again": decide the
+    /// server, install, then read the worker's `doctor` as the panel's checklist. A run already
+    /// looking, installing or waiting for the directory is left to finish.
     fn use_this_mac(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.install_this_mac(false, window, cx);
+    }
+
+    /// The server "Use this Mac" registers this Mac with, as far as it is decided: the one this
+    /// app or this Mac's worker is set to, else the one Ready server the tailnet answered with,
+    /// else one started here. `Err` while the tailnet is still being looked on, or when the
+    /// person must say: several answered, or no look could be made.
+    fn this_mac_serve(&self) -> Result<this_mac::Serve, Option<Asking>> {
+        let set = self.server_address().or(self.settings.worker.server.as_ref());
+        if let Some(server) = set {
+            return Ok(this_mac::Serve::Join(server.clone()));
+        }
+        let search = self.adding.as_ref().and_then(|a| a.search.as_ref());
+        match search {
+            Some(Search::Looking) => Err(None),
+            Some(search) => match search.ready_servers().as_deref() {
+                Some([]) => Ok(this_mac::Serve::Here),
+                // A tailnet IP always parses; were it not to, the person says which.
+                Some([one]) => slopty_net::HostAddr::parse_with_port(
+                    &one.at,
+                    slopty_net::endpoint::SERVER_PORT,
+                )
+                .ok()
+                .map(this_mac::Serve::Join)
+                .ok_or(Some(Asking::Several)),
+                Some(_) => Err(Some(Asking::Several)),
+                None => Err(Some(Asking::Blind)),
+            },
+            None => Err(Some(Asking::Blind)),
+        }
     }
 
     /// [`Self::use_this_mac`], going on where it ends sessions when `end_sessions`: the
@@ -1818,23 +1888,55 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(host) = self.this_mac.clone() else { return };
+        if self.this_mac.is_none() {
+            return;
+        }
         if self.adding.is_none() {
             self.show_add_worker(Panel::Worker, window, cx);
         }
+        let decided = self.this_mac_serve();
         let Some(adding) = &mut self.adding else { return };
-        if adding
-            .this_mac
-            .as_ref()
-            .is_some_and(|f| f.adding || f.worker == this_mac::Worker::Installing)
+        if adding.this_mac.as_ref().is_some_and(this_mac::Flow::busy)
+            && adding.this_mac.as_ref().is_none_or(|f| f.server != this_mac::Server::Looking)
         {
             return;
         }
+        adding.ssh = None;
+        match decided {
+            Ok(serve) => self.install_this_mac_with(serve, end_sessions, window, cx),
+            Err(None) => {
+                self.this_mac_runs = self.this_mac_runs.wrapping_add(1);
+                adding.asking = None;
+                adding.this_mac = Some(this_mac::Flow::looking(self.this_mac_runs));
+                cx.notify();
+            }
+            Err(Some(why)) => {
+                adding.this_mac = None;
+                adding.asking = Some(why);
+                adding.mode = Panel::Server;
+                adding.error = None;
+                adding.address.update(cx, |input, cx| input.focus(window, cx));
+                cx.notify();
+            }
+        }
+    }
+
+    /// Install this Mac against `serve`: the server first when it starts here, then the worker.
+    fn install_this_mac_with(
+        &mut self,
+        serve: this_mac::Serve,
+        end_sessions: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(host) = self.this_mac.clone() else { return };
+        let Some(adding) = &mut self.adding else { return };
         self.this_mac_runs = self.this_mac_runs.wrapping_add(1);
         let run = self.this_mac_runs;
+        let install = host.install(&serve, end_sessions);
         adding.ssh = None;
-        adding.this_mac = Some(this_mac::Flow::installing(run));
-        let install = host.install(end_sessions);
+        adding.asking = None;
+        adding.this_mac = Some(this_mac::Flow::installing(run, serve));
         cx.spawn_in(window, async move |this, cx| {
             let outcome = install.await;
             let _gone = this
@@ -1848,6 +1950,7 @@ impl Workspace {
     fn leave_this_mac(&mut self, cx: &mut Context<Self>) {
         if let Some(adding) = &mut self.adding {
             adding.this_mac = None;
+            adding.asking = None;
         }
         cx.notify();
     }
@@ -1857,18 +1960,26 @@ impl Workspace {
         self.adding.as_mut()?.this_mac.as_mut().filter(|flow| flow.run == run)
     }
 
-    /// The install ended: ask the worker how it stands, or say why it failed.
+    /// The install ended: this app follows the server the worker registers with, and the
+    /// worker is asked how it stands; or the checklist says why it failed.
     fn this_mac_installed(
         &mut self,
         run: u64,
-        outcome: Result<(), this_mac::Stopped>,
+        outcome: Result<slopty_net::HostAddr, this_mac::Stopped>,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
         let Some(flow) = self.this_mac_flow(run) else { return };
         match outcome {
-            Ok(()) => {
+            Ok(server) => {
                 flow.worker = this_mac::Worker::Starting;
+                if self.server_address() != Some(&server) {
+                    if let Err(e) = self.save_server(Some(&server)) {
+                        self.show_failure(format!("Settings: {e}"), cx);
+                    }
+                    self.set_server(Some(server), None, cx);
+                    self.refresh_menu(cx);
+                }
                 self.read_this_mac(run, false, window, cx);
             }
             Err(this_mac::Stopped::Failed(why)) => flow.worker = this_mac::Worker::Failed(why),
@@ -1876,6 +1987,7 @@ impl Workspace {
                 flow.worker = this_mac::Worker::EndsSessions(plan);
             }
             Err(this_mac::Stopped::Misplaced) => flow.worker = this_mac::Worker::Misplaced,
+            Err(this_mac::Stopped::Server(why)) => flow.server = this_mac::Server::Failed(why),
         }
         cx.notify();
     }
@@ -1906,8 +2018,8 @@ impl Workspace {
         .detach();
     }
 
-    /// The worker answered with `doctor` (or never did): the checklist shows it, and a worker
-    /// that may stream and take input is added.
+    /// The worker answered with `doctor` (or never did): the checklist shows it, and once it
+    /// may stream and take input the flow waits for the server to list it.
     fn this_mac_read(
         &mut self,
         run: u64,
@@ -1918,62 +2030,78 @@ impl Workspace {
         let Some(flow) = self.this_mac_flow(run) else { return };
         flow.reading = false;
         flow.worker = doctor.map_or(this_mac::Worker::Silent, this_mac::Worker::Up);
-        if flow.worker.ready() && !flow.adding {
-            self.add_this_mac(run, window, cx);
+        if flow.worker.ready() && !flow.listing {
+            self.wait_this_mac_listed(run, window, cx);
         }
         cx.notify();
     }
 
-    /// Add this Mac over loopback.
-    fn add_this_mac(&mut self, run: u64, window: &Window, cx: &Context<Self>) {
+    /// Look, at most [`this_mac::LISTED_TRIES`] times, for the server's directory to list this
+    /// Mac's worker; while it does not yet, the worker's own word on its link is read again, so
+    /// the Server line says why.
+    fn wait_this_mac_listed(&mut self, run: u64, window: &Window, cx: &Context<Self>) {
         let Some(host) = self.this_mac.clone() else { return };
         let Some(flow) = self.this_mac_flow(run) else { return };
-        flow.adding = true;
+        let this_mac::Worker::Up(doctor) = &flow.worker else { return };
+        let worker = doctor.worker;
+        flow.listing = true;
         flow.error = None;
-        let add = host.add(this_mac::LOOPBACK);
         cx.spawn_in(window, async move |this, cx| {
-            let outcome = add.await;
-            let _gone =
-                this.update_in(cx, |ws, window, cx| ws.this_mac_added(run, outcome, window, cx));
+            for attempt in 0..this_mac::LISTED_TRIES {
+                if attempt > 0 {
+                    cx.background_executor().timer(this_mac::RETRY).await;
+                    if let Some(doctor) = host.doctor().await {
+                        let _gone = this.update(cx, |ws, cx| {
+                            if let Some(flow) = ws.this_mac_flow(run) {
+                                flow.worker = this_mac::Worker::Up(doctor);
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+                match this.update(cx, |ws, _cx| ws.directory.get(worker).is_some()) {
+                    Ok(true) => {
+                        let _gone = this
+                            .update_in(cx, |ws, window, cx| ws.this_mac_listed(run, window, cx));
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(_gone) => return,
+                }
+            }
+            let _gone = this.update(cx, |ws, cx| ws.this_mac_unlisted(run, cx));
         })
         .detach();
     }
 
-    /// This Mac was added: the panel closes onto its workspace, with a word when the tailnet
-    /// does not reach it yet. A failure stays on the checklist.
-    fn this_mac_added(
-        &mut self,
-        run: u64,
-        outcome: Result<net::Added, String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// The directory never listed this Mac: the checklist says so, with the worker's log.
+    fn this_mac_unlisted(&mut self, run: u64, cx: &mut Context<Self>) {
+        let logs =
+            slopty_platform::service::Session::native().logs(slopty_platform::service::WORKER);
         let Some(flow) = self.this_mac_flow(run) else { return };
-        match outcome {
-            Ok(net::Added { id, name }) => {
-                let reached = match &flow.worker {
-                    this_mac::Worker::Up(d) => {
-                        matches!(d.tailnet, this_mac::Tailnet::Reachable(_))
-                    }
-                    _ => true,
-                };
-                self.adding = None;
-                self.show_notice(
-                    if reached {
-                        format!("Added {name}")
-                    } else {
-                        format!("Added {name}. Only this Mac reaches it until Tailscale is up.")
-                    },
-                    cx,
-                );
-                self.add_worker(id, name, true, cx);
-                self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
-            }
-            Err(why) => {
-                flow.adding = false;
-                flow.error = Some(why);
-            }
-        }
+        flow.listing = false;
+        flow.error = Some(format!("{} Its log is {logs}", this_mac::NOT_LISTED));
+        cx.notify();
+    }
+
+    /// The server lists this Mac: the panel closes onto its workspace, with a word when the
+    /// tailnet does not reach it yet.
+    fn this_mac_listed(&mut self, run: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(flow) = self.this_mac_flow(run) else { return };
+        let reached = match &flow.worker {
+            this_mac::Worker::Up(d) => matches!(d.tailnet, this_mac::Tailnet::Reachable(_)),
+            _ => true,
+        };
+        self.adding = None;
+        self.show_notice(
+            if reached {
+                "This Mac is ready".to_owned()
+            } else {
+                "This Mac is ready. Only this Mac reaches it until Tailscale is up.".to_owned()
+            },
+            cx,
+        );
+        self.view.update(cx, |view, cx| view.return_keyboard(window, cx));
         cx.notify();
     }
 
@@ -2052,8 +2180,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Write `[client] server` into `settings.toml`, the rest of the file untouched, and take
-    /// it as loaded so the watcher sees nothing new.
     /// Keep the person's word on sharing the clipboard with `worker` in the settings file, by
     /// its name; what could not be written is said, and the workspace keeps it until the app
     /// quits.
@@ -2071,6 +2197,8 @@ impl Workspace {
         }
     }
 
+    /// Write `[client] server` into `settings.toml`, the rest of the file untouched, and take
+    /// it as loaded so the watcher sees nothing new.
     fn save_server(&mut self, server: Option<&slopty_net::HostAddr>) -> Result<(), String> {
         let text = settings::editable_text(&self.settings_path);
         let text = slopty_settings::with_server(&text, slopty_settings::ServerOf::Client, server)?;
@@ -2079,28 +2207,10 @@ impl Workspace {
         Ok(())
     }
 
-    /// Stop using the server: the setting is cleared and its workers leave.
-    fn disconnect_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.server.is_none() {
-            return;
-        }
-        if let Err(e) = self.save_server(None) {
-            self.show_failure(format!("Settings: {e}"), cx);
-            return;
-        }
-        self.set_server(None, None, cx);
-        self.show_notice("Disconnected from the server".to_owned(), cx);
-        if self.workers.is_empty() {
-            self.show_add_worker(Panel::Server, window, cx);
-        }
-        self.refresh_menu(cx);
-        cx.notify();
-    }
-
-    /// Whether the panel is the whole window: nothing to go back to, so no workspace behind
-    /// it and no way to dismiss it. The first run, and after the last worker is forgotten.
-    const fn welcome(&self) -> bool {
-        self.adding.is_some() && self.workers.is_empty() && self.server.is_none()
+    /// Whether the panel is the whole window: the first run's page, with nothing to go back
+    /// to, so no workspace behind it and no way to dismiss it.
+    fn welcome(&self) -> bool {
+        self.adding.as_ref().is_some_and(|a| a.page)
     }
 
     /// The way in: the app's name, a heading and a line on what it is, what the tailnet
@@ -2125,35 +2235,26 @@ impl Workspace {
         let (spacing, radii, ty) = (theme.spacing, theme.radii, &theme.typography);
         let button = |id, text, kind| kit::button(theme, id, text, kind);
         // Each blurb fits one line of a 402 pt phone.
-        let field = adding.mode.field();
-        let (title, blurb, go, other, other_mode) = match adding.mode {
-            Panel::Server => (
-                "Connect to a server",
-                "A server on your tailnet or VPN lists your machines.",
-                "Connect",
-                "Add a machine by address instead",
-                Panel::Worker,
-            ),
-            Panel::Worker => (
-                "Add a machine",
-                "A Mac or Linux machine on your tailnet or VPN.",
-                "Add",
-                "Connect to a server instead",
-                Panel::Server,
-            ),
+        let (title, blurb) = match adding.mode {
+            Panel::Server => {
+                ("Connect to a server", "A server on your tailnet or VPN lists your machines.")
+            }
+            Panel::Worker => ("Add a machine", "A Mac or Linux machine on your tailnet or VPN."),
         };
         let flow = adding.this_mac.as_ref();
         let sheet = adding.ssh.as_ref();
-        // The checklist and the SSH sheet have headings of their own, and their link goes back
-        // to the panel they came from, named as that panel's own link names it.
+        let asking = adding.asking;
+        // The checklist, the SSH sheet and the question have headings of their own, and their
+        // link goes back to the panel they came from.
         let back = match adding.mode {
             Panel::Server => "Connect to a server instead",
-            Panel::Worker => "Add a machine by address instead",
+            Panel::Worker => "Add a machine another way",
         };
-        let (title, blurb, other) = match (flow, sheet) {
-            (Some(_), _) => (this_mac::TITLE, this_mac::BLURB, back),
-            (None, Some(sheet)) => (sheet.heading(), sheet.blurb(), back),
-            (None, None) => (title, blurb, other),
+        let (title, blurb) = match (flow, sheet, asking) {
+            (Some(_), ..) => (this_mac::TITLE, this_mac::BLURB),
+            (None, Some(sheet), _) => (sheet.heading(), sheet.blurb()),
+            (None, None, Some(asking)) => (this_mac::TITLE, asking.words()),
+            (None, None, None) => (title, blurb),
         };
         let welcome = self.welcome();
         // The page leads with the app's mark over its heading, as Raycast's and Linear's first
@@ -2177,7 +2278,7 @@ impl Workspace {
         );
         let tailnet =
             adding.search.as_ref().map(|search| self.tailnet_list(search, adding.mode, cx));
-        let field_label = adding.mode.address_label(adding.search.as_ref());
+        let field_label = address_label(adding.search.as_ref());
         let unlisted = (!LISTS_TAILNET).then(|| {
             kit::meta(div(), theme)
                 .debug_selector(|| "add-worker-unlisted".to_owned())
@@ -2191,10 +2292,11 @@ impl Workspace {
         let safe = window.insets().effective();
         let room = f32::from(self.frame_size(window).width - safe.left - safe.right);
         let stacked = room < FIELD_ROW_FROM;
+        let go = if asking.is_some() { "Continue" } else { "Connect" };
         let go = button("add", go, ButtonKind::Primary)
             .h(px(FIELD_H))
             .when(stacked, gpui::Styled::w_full)
-            .on_click(cx.listener(|this, _ev, _window, cx| this.add_from_panel(cx)));
+            .on_click(cx.listener(|this, _ev, window, cx| this.enter_address(window, cx)));
         let paste = TOUCH.then(|| {
             button("paste-address", "Paste", ButtonKind::Link)
                 .on_click(cx.listener(|this, _ev, window, cx| this.paste_address(window, cx)))
@@ -2217,7 +2319,7 @@ impl Workspace {
             .child(
                 Input::new(&adding.address)
                     .appearance(false)
-                    .aria_label(field)
+                    .aria_label(SERVER_FIELD)
                     .when_some(paste, Input::suffix),
             );
         let entry = if stacked {
@@ -2229,7 +2331,11 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap(px(spacing.sm))
-            .child(panel_label(theme, "add-worker-label", field_label))
+            .child(panel_label(
+                theme,
+                "add-worker-label",
+                if asking.is_some() { SERVER_FIELD } else { field_label },
+            ))
             .child(entry)
             .when_some(status, |el, (text, tone)| {
                 el.child(
@@ -2241,33 +2347,28 @@ impl Workspace {
                         .child(SharedString::from(text)),
                 )
             });
-        // At the body's size, as Cancel beside it is: one size for what can be pressed.
-        let in_flow = flow.is_some() || sheet.is_some();
-        let switch = button("panel-switch", other, ButtonKind::Link).on_click(cx.listener(
-            move |this, _ev, window, cx| {
-                if in_flow {
+        // At the body's size, as Cancel beside it is: one size for what can be pressed. Only a
+        // flow has somewhere to go back to.
+        let in_flow = flow.is_some() || sheet.is_some() || asking.is_some();
+        let switch = in_flow.then(|| {
+            button("panel-switch", back, ButtonKind::Link).on_click(cx.listener(
+                |this, _ev, _window, cx| {
                     this.leave_this_mac(cx);
                     this.leave_ssh(cx);
-                } else {
-                    this.show_add_worker(other_mode, window, cx);
-                }
-            },
-        ));
-        // This Mac and a machine over SSH are more places to add, so they are rows to press as
-        // the tailnet's are, in one frame, not links under the switch, where the likeliest first
-        // step for a single Mac sat at the page's foot dressed as a way aside.
-        // The server panel's rows set up a server, here or over SSH; the worker panel's add
-        // this Mac as a worker, or set one up over SSH.
-        // This Mac as a worker is the likeliest first step with nothing set up yet, so it leads
-        // both panels. The server panel then offers to set up a server, here or over SSH; the
-        // worker panel, a worker over SSH.
+                },
+            ))
+        });
+        // This Mac and a machine over SSH are rows to press as the tailnet's are, in one frame,
+        // not links under the field. This Mac is the likeliest first step with nothing set up
+        // yet, so it leads: on the server's panel it runs or joins the server too, which then
+        // offers the servers found, the address and a server over SSH; on a machine's panel it
+        // shares a worker over SSH beside it.
         let serving = adding.mode == Panel::Server;
         let this_mac_entry = (self.this_mac.is_some() && !in_flow).then(|| {
             this_mac_row(theme)
                 .on_click(cx.listener(|this, _ev, window, cx| this.use_this_mac(window, cx)))
         });
         let ssh_entry = (!in_flow).then(|| self.ssh_row(cx)).flatten();
-        let serve_entry = (serving && !in_flow).then(|| self.serve_here_row(cx)).flatten();
         let group =
             |id: &'static str, label_id: &'static str, label: &'static str, rows: Vec<_>| {
                 (!rows.is_empty()).then(|| {
@@ -2283,7 +2384,6 @@ impl Workspace {
                 })
             };
         let (use_this_mac, set_up_server) = if serving {
-            let server_rows = serve_entry.into_iter().chain(ssh_entry).collect();
             (
                 group(
                     "add-worker-this-mac",
@@ -2295,7 +2395,7 @@ impl Workspace {
                     "add-worker-server",
                     "add-worker-server-label",
                     SET_UP_SERVER_LABEL,
-                    server_rows,
+                    ssh_entry.into_iter().collect(),
                 ),
             )
         } else {
@@ -2307,13 +2407,28 @@ impl Workspace {
             button("cancel-add", "Cancel", ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _ev, window, cx| this.cancel_add_worker(window, cx)))
         });
-        let ways = div().flex().flex_col().items_start().gap(px(spacing.xs)).child(switch);
+        let ways = div().flex().flex_col().items_start().gap(px(spacing.xs)).children(switch);
         let aside = div().flex().items_start().child(ways).child(div().flex_1()).children(cancel);
+        // The question "Use this Mac" asks is the servers found and the address alone.
+        let mut sections: Vec<gpui::AnyElement> = Vec::new();
+        if asking.is_some() {
+            sections.extend(tailnet);
+            sections.push(entry.into_any_element());
+        } else if !in_flow {
+            sections.extend(use_this_mac.map(IntoElement::into_any_element));
+            sections.extend(tailnet);
+            sections.extend(unlisted.map(IntoElement::into_any_element));
+            if serving {
+                sections.push(entry.into_any_element());
+            }
+            sections.extend(set_up_server.map(IntoElement::into_any_element));
+        }
         let checklist = flow.map(|flow| self.this_mac_checklist(flow, cx));
         let ssh_sheet = sheet.map(|sheet| self.ssh_sheet(sheet, cx));
         let panel = div()
             .id("add-worker")
             .debug_selector(|| "add-worker".to_owned())
+            .track_focus(&adding.focus)
             .occlude()
             .flex_none()
             .flex()
@@ -2334,6 +2449,14 @@ impl Workspace {
                         this.cancel_add_worker(window, cx);
                         cx.stop_propagation();
                     }))
+                    // A machine's panel has no field whose Esc this hears: its own focus does.
+                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                        let own = this.adding.as_ref().is_some_and(|a| a.focus.is_focused(window));
+                        if own && ev.keystroke.key == "escape" {
+                            this.cancel_add_worker(window, cx);
+                            cx.stop_propagation();
+                        }
+                    }))
             })
             // The intro stands a step further from what follows than the sections do apart.
             .child(
@@ -2349,13 +2472,7 @@ impl Workspace {
             // this Mac's checklist stands in for both and the address.
             .when_some(checklist, gpui::ParentElement::child)
             .when_some(ssh_sheet, gpui::ParentElement::child)
-            .when(!in_flow, |el| {
-                el.children(tailnet)
-                    .children(unlisted)
-                    .children(use_this_mac)
-                    .children(set_up_server)
-                    .child(entry)
-            })
+            .children(sections)
             .child(aside);
         if !welcome {
             // The scrim dims in as the dialog fades in where it stands (the palette and the
@@ -2487,9 +2604,10 @@ impl Workspace {
     fn this_mac_checklist(&self, flow: &this_mac::Flow, cx: &Context<Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let (s, spacing) = (theme.surfaces, theme.spacing);
-        let logs =
-            slopty_platform::service::Session::native().logs(slopty_platform::service::WORKER);
-        let lines = this_mac::checklist(&flow.worker, &logs)
+        let session = slopty_platform::service::Session::native();
+        let logs = session.logs(slopty_platform::service::WORKER);
+        let server_logs = session.logs(slopty_platform::service::SERVER);
+        let lines = this_mac::checklist(flow, &logs, &server_logs)
             .into_iter()
             .map(|line| self.this_mac_line(line, cx));
         let frame = kit::card(theme)
@@ -2501,15 +2619,19 @@ impl Workspace {
             .flex_col()
             .p(px(spacing.xxs))
             .children(lines);
-        let status = match (&flow.error, flow.adding) {
+        let status = match (&flow.error, flow.listing) {
             (Some(why), _) => Some((why.clone(), s.error)),
-            (None, true) => Some(("Adding this Mac\u{2026}".to_owned(), s.text_muted)),
+            (None, true) => {
+                Some(("Waiting for the server to list this Mac\u{2026}".to_owned(), s.text_muted))
+            }
             (None, false) => None,
         };
         let again = flow.error.is_some().then(|| {
             let run = flow.run;
-            kit::button(theme, "this-mac-add-again", "Try again", ButtonKind::Link).on_click(
-                cx.listener(move |this, _ev, window, cx| this.add_this_mac(run, window, cx)),
+            kit::button(theme, "this-mac-list-again", "Try again", ButtonKind::Link).on_click(
+                cx.listener(move |this, _ev, window, cx| {
+                    this.wait_this_mac_listed(run, window, cx);
+                }),
             )
         });
         div()
@@ -2913,7 +3035,7 @@ struct Dialer(Rc<DialFn>);
 
 type DialFn = dyn Fn(
     WorkerId,
-    Option<slopty_net::HostAddr>,
+    slopty_net::HostAddr,
     &mut App,
 ) -> gpui::Task<Result<net::Connected, net::DialFailed>>;
 
@@ -3066,9 +3188,6 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ConnectServer, window, cx| {
                 this.show_add_worker(Panel::Server, window, cx);
             }))
-            .on_action(cx.listener(|this, _: &DisconnectServer, window, cx| {
-                this.disconnect_server(window, cx);
-            }))
             .on_action(cx.listener(|this, _: &CopyTailnetGrant, _window, cx| this.copy_grant(cx)))
             .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
                 this.use_this_mac(window, cx);
@@ -3083,9 +3202,6 @@ impl Render for Workspace {
                 cx.listener(|this, _: &UpdateAllWorkers, _window, cx| this.update_all_workers(cx)),
             )
             .on_action(cx.listener(|this, _: &UpdateServer, _window, cx| this.update_server(cx)))
-            .on_action(cx.listener(|this, _: &RegisterWithServer, _window, cx| {
-                this.register_with_server(cx);
-            }))
             .on_action(cx.listener(|this, _: &ShowWorkersInFinder, _window, cx| {
                 this.show_workers_in_finder(cx);
             }))
@@ -3430,11 +3546,9 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("about", OpenAbout, &[]),
         app_command("add_worker", AddWorker, &["cmd-shift-h"]),
         app_command("connect_server", ConnectServer, &[]),
-        app_command("disconnect_server", DisconnectServer, &[]),
         app_command("copy_tailnet_grant", CopyTailnetGrant, &[]),
         app_command("update_all_workers", UpdateAllWorkers, &[]),
         app_command("update_server", UpdateServer, &[]),
-        app_command("register_with_server", RegisterWithServer, &[]),
     ];
     if this_mac::OFFERED {
         commands.push(app_command("use_this_mac", UseThisMac, &[]));
@@ -3479,12 +3593,10 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item(KEYBOARD_SHORTCUTS, IconName::Keyboard, Box::new(OpenKeyboardShortcuts)),
         item(ABOUT, IconName::Info, Box::new(OpenAbout)),
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
-        item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
         item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
         item("Add a machine\u{2026}", IconName::Plus, Box::new(AddWorker)),
         item(ssh::UPDATE_ALL, IconName::Download, Box::new(UpdateAllWorkers)),
         item(server::UPDATE_SERVER, IconName::Download, Box::new(UpdateServer)),
-        item(ssh::REGISTER, IconName::Link, Box::new(RegisterWithServer)),
     ];
     if this_mac::OFFERED {
         items.push(item(this_mac::TITLE, IconName::Monitor, Box::new(UseThisMac)));
@@ -3719,22 +3831,12 @@ pub fn open_workspace(
         }
     })
     .detach();
-    // Every worker added by address gets a link now, and the server's (cached) directory has
-    // been read by the settings above; with neither, the panel.
-    let known = match net::known_workers() {
-        Ok(known) => known,
-        Err(e) => {
-            tracing::error!(error = %e, "known workers");
-            Vec::new()
-        }
-    };
+    // The server's (cached) directory has been read by the settings above; with no server set,
+    // the first run's page.
     window.update(cx, |_root, window, cx| {
         workspace.update(cx, |ws, cx| {
-            for worker in known {
-                ws.add_worker(worker.worker_id, worker.name, true, cx);
-            }
             ws.refresh_menu(cx);
-            if ws.workers.is_empty() && ws.server.is_none() {
+            if ws.server.is_none() {
                 ws.show_add_worker(Panel::Server, window, cx);
             }
         });
@@ -4020,19 +4122,22 @@ mod tests {
         assert!((gap(cx, "→", "~") - spacing.xs).abs() < 0.5, "in the given order");
     }
 
-    /// The shell in a headless window with the add-worker panel up, `worker` ones known so
-    /// it is a dialog over the workspace, else the first run. The runtime and the directory
+    /// The shell in a headless window with the panel up: with `set_up`, a server and one of
+    /// its workers, so it is the dialog that adds a machine over the workspace; else the first
+    /// run's page. The runtime and the directory
     /// hold what the shell's tasks and settings file need for the test's length.
     pub(crate) fn shell<'a>(
         cx: &'a mut TestAppContext,
         runtime: &tokio::runtime::Runtime,
         dir: &tempfile::TempDir,
-        worker: bool,
+        set_up: bool,
     ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
         let ws = workspace(cx, runtime, dir);
-        if worker {
+        if set_up {
             ws.update(cx, |ws, _cx| {
-                ws.workers.push(WorkerSlot::new(WorkerId::new(), "studio".to_owned(), true));
+                let hub = slopty_net::HostAddr::new("hub", slopty_net::endpoint::SERVER_PORT);
+                ws.server = Some(server::ServerSlot::stand_in(hub));
+                ws.workers.push(WorkerSlot::new(WorkerId::new(), "studio".to_owned()));
             });
         }
         let root = ws.clone();
@@ -4043,6 +4148,30 @@ mod tests {
         });
         cx.run_until_parked();
         (ws, cx)
+    }
+
+    /// The server's directory lists `worker` as `name`, as a server would send it.
+    pub(crate) fn list(
+        ws: &Entity<Workspace>,
+        cx: &mut TestAppContext,
+        worker: WorkerId,
+        name: &str,
+    ) {
+        use slopty_proto::server::{FromServer, Liveness, Os, WorkerCaps, WorkerInfo};
+        let info = WorkerInfo {
+            worker,
+            name: name.to_owned(),
+            address: "100.64.0.2:45550".to_owned(),
+            liveness: Liveness::Online,
+            caps: WorkerCaps::bare(Os::MacOs),
+            load: 0.0,
+            last_seen_ms: slopty_core::WallMs::ZERO,
+        };
+        let listing = FromServer::Worker(info);
+        ws.update(cx, |ws, cx| {
+            ws.server_event(slopty_client::server::ServerEvent::Message(Box::new(listing)), cx);
+        });
+        cx.run_until_parked();
     }
 
     /// Closing the main window leaves the workspace running; asking for the window again (the
@@ -4100,15 +4229,11 @@ mod tests {
         fn deploy(
             &self,
             _to: &ssh::Target,
-            _server: Option<slopty_deploy::Server>,
+            _server: slopty_deploy::Server,
             _said: ssh::Said,
             _events: tokio::sync::mpsc::UnboundedSender<slopty_deploy::Event>,
         ) -> this_mac::Pending<Result<slopty_deploy::Deployed, slopty_deploy::Failure>> {
             panic!("this test deploys nothing")
-        }
-
-        fn add(&self, _address: &str) -> this_mac::Pending<Result<net::Added, String>> {
-            panic!("this test adds nothing")
         }
 
         fn remember(&self, _worker: WorkerId, _to: &ssh::Target) {}
@@ -4118,57 +4243,40 @@ mod tests {
         }
     }
 
-    /// An address that answers as another build is no dead end in the panel: the add says so
-    /// as an [`net::OtherBuild`], which opens the SSH sheet on that host to install this build
-    /// there, the panel no longer busy (`ssh::tests` checks the sheet's host field).
+    /// A worker the tailnet found that the server does not list is a row on the machine's
+    /// panel; pressing it opens the SSH sheet on its host, to install this build there
+    /// registered with the server (`ssh::tests` checks the sheet's host field).
     #[gpui::test]
-    fn a_worker_on_another_build_opens_the_install_on_its_host(cx: &mut TestAppContext) {
+    fn a_worker_the_server_does_not_list_opens_the_install_on_its_host(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
-        let window = cx.update(|window, _cx| window.window_handle());
-        ws.update(cx, |ws, _cx| {
-            ws.window = Some(window);
-            ws.deployer = Some(Rc::new(NoDeploys));
-        });
-        let notice = slopty_client::update::UpdateNotice {
-            of: slopty_client::update::Of::Worker,
-            host: "mini.local".to_owned(),
-            peer: "0.0.1".to_owned(),
+        cx.simulate_resize(size(px(900.0), px(800.0)));
+        ws.update(cx, |ws, _cx| ws.deployer = Some(Rc::new(NoDeploys)));
+        let offer = Offer {
+            name: "mini.tail1234.ts.net".to_owned(),
+            at: "100.64.0.7".to_owned(),
+            tags: Vec::new(),
+            answer: slopty_net::discover::Answer::OtherBuild("0.0.1".to_owned()),
         };
-        let failed = anyhow::Error::new(net::OtherBuild(notice));
-        let other = failed.downcast_ref::<net::OtherBuild>().expect("typed through anyhow");
-        assert!(failed.to_string().contains(&other.0.detail()), "{failed}");
-        let host = other.0.host.clone();
-        ws.update(cx, |ws, cx| {
-            if let Some(adding) = &mut ws.adding {
-                adding.busy = true;
-            }
-            ws.install_this_build_at(host, cx);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.press_found(Host::Worker, &offer, window, cx));
         });
         cx.run_until_parked();
-        let (busy, sheet) = ws.read_with(cx, |ws, _cx| {
-            let adding = ws.adding.as_ref().expect("the panel is up");
-            (adding.busy, adding.ssh.is_some())
-        });
-        assert!(!busy, "no longer waiting on the add");
+        let sheet = ws.read_with(cx, |ws, _cx| ws.adding.as_ref().is_some_and(|a| a.ssh.is_some()));
         assert!(sheet && cx.debug_bounds("ssh-form").is_some(), "the sheet, drawn");
     }
 
-    /// Both panels lead with this Mac as a worker, the likeliest first step; the server panel
-    /// then offers to set up a server, here or over SSH, and the worker panel a worker over SSH.
+    /// Both panels lead with this Mac, the likeliest first step; the server's panel then takes
+    /// an address or sets up a server over SSH, and the machine's panel installs one over SSH,
+    /// with no address to type: a machine joins through the server, never by its address.
     #[gpui::test]
     fn the_server_panel_offers_this_mac_and_a_server_to_set_up(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
         cx.simulate_resize(size(px(900.0), px(800.0)));
-        let host = Rc::new(StandIn {
-            asked: std::cell::RefCell::default(),
-            doctor: std::cell::RefCell::new(None),
-            added: WorkerId::new(),
-            stops: std::cell::RefCell::default(),
-        });
+        let host: Rc<dyn this_mac::Host> = StandIn::answering(None);
         ws.update(cx, |ws, _cx| {
             ws.deployer = Some(Rc::new(NoDeploys));
             ws.this_mac = Some(host);
@@ -4176,11 +4284,11 @@ mod tests {
         let shown = |cx: &mut VisualTestContext, panel: Panel| {
             cx.update(|window, cx| ws.update(cx, |ws, cx| ws.show_add_worker(panel, window, cx)));
             cx.run_until_parked();
-            ["serve-here", "serve-over-ssh", "use-this-mac", "install-over-ssh"]
+            ["use-this-mac", "serve-over-ssh", "install-over-ssh", "add-worker-field"]
                 .map(|row| cx.debug_bounds(row).is_some())
         };
-        assert_eq!(shown(cx, Panel::Server), [true, true, true, false], "the server's rows");
-        assert_eq!(shown(cx, Panel::Worker), [false, false, true, true], "the worker's rows");
+        assert_eq!(shown(cx, Panel::Server), [true, true, false, true], "the server's rows");
+        assert_eq!(shown(cx, Panel::Worker), [true, false, true, false], "the worker's rows");
     }
 
     /// The shell with no window, no worker and no panel.
@@ -4239,6 +4347,9 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+        });
         cx.simulate_resize(size(px(900.0), px(600.0)));
         cx.run_until_parked();
         assert!(cx.debug_bounds("add-worker-foot").is_none(), "a dialog has no foot");
@@ -4250,8 +4361,14 @@ mod tests {
             (402.0, 874.0, true),
         ];
         for (w, h, welcome) in sizes {
-            if welcome {
-                ws.update(cx, |ws, _cx| ws.workers.clear());
+            if welcome && !ws.read_with(cx, |ws, _| ws.welcome()) {
+                cx.update(|window, cx| {
+                    ws.update(cx, |ws, cx| {
+                        ws.server = None;
+                        ws.adding = None;
+                        ws.show_add_worker(Panel::Server, window, cx);
+                    });
+                });
             }
             cx.simulate_resize(size(px(w), px(h)));
             cx.run_until_parked();
@@ -4410,6 +4527,10 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
+        });
+        cx.run_until_parked();
         let address = ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.address.clone()));
         let Some(address) = address else { panic!("the panel is open") };
         cx.update(|window, cx| {
@@ -4431,11 +4552,11 @@ mod tests {
         assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "Esc closed the panel");
     }
 
-    /// Each panel's field gives an example of its own kind of host, and switching panels
-    /// switches it. While it looks on the tailnet it says so; each server that answered is a row
-    /// to connect to under the blurb and over the field, the best one's address in the field;
-    /// when none did it says that, and with no tailnet here it says so. The first run carries
-    /// the app's name over its heading.
+    /// The first run is the server's panel whichever was asked for: with no server there is
+    /// nothing to add a machine to. While it looks on the tailnet it says so; each server that
+    /// answered is a row to connect to under the blurb and over the field, the best one's
+    /// address in the field; when none did it says that, and with no tailnet here it says so.
+    /// The first run carries the app's name over its heading.
     #[gpui::test]
     fn the_panel_names_its_host_and_the_server_the_tailnet_found(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
@@ -4448,13 +4569,11 @@ mod tests {
                     .map(|a| a.address.read(cx).presentation().placeholder().to_string())
             })
         };
-        assert_eq!(example(cx).as_deref(), Some(Panel::Worker.example()));
-        cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
-        });
-        cx.run_until_parked();
-        assert_eq!(example(cx).as_deref(), Some(Panel::Server.example()));
-        assert_ne!(Panel::Server.example(), Panel::Worker.example());
+        assert_eq!(example(cx).as_deref(), Some(SERVER_EXAMPLE));
+        assert_eq!(
+            ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| a.mode)),
+            Some(Panel::Server)
+        );
 
         // The look is on screen from the start, then each server that answered is a row.
         let words = |cx: &mut VisualTestContext| {
@@ -4502,9 +4621,8 @@ mod tests {
         assert!(mark.left() <= brand.left() + px(0.5), "its name beside it: {mark:?} {brand:?}");
         let label = cx.debug_bounds("add-worker-label").expect("the field's label");
         assert!(second.bottom() <= label.top(), "under the rows");
-        let named = ws.read_with(cx, |ws, _| {
-            ws.adding.as_ref().map(|a| a.mode.address_label(a.search.as_ref()))
-        });
+        let named =
+            ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| address_label(a.search.as_ref())));
         assert_eq!(named, Some("Or type an address"), "the other way, under the rows");
         let address = cx.debug_bounds("add-worker-field").expect("the field");
         assert!(second.bottom() <= address.top(), "the rows over the field");
@@ -4522,9 +4640,8 @@ mod tests {
             ws.update(cx, |ws, cx| ws.offer_found(empty, window, cx));
         });
         assert_eq!(words(cx).as_deref(), Some(NOTHING_ANSWERED));
-        let label = ws.read_with(cx, |ws, _| {
-            ws.adding.as_ref().map(|a| a.mode.address_label(a.search.as_ref()))
-        });
+        let label =
+            ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| address_label(a.search.as_ref())));
         assert_eq!(label, Some("Server address"), "no \"or\" with nothing before it");
         looking(&ws, cx);
         cx.update(|window, cx| {
@@ -4537,18 +4654,14 @@ mod tests {
         assert_eq!(typed.as_deref(), Some("100.64.0.1"));
     }
 
-    /// A tailnet with workers and no server still has a way in: the first run offers each
-    /// worker that answered as a row after the servers, the field keeping to servers, and a
-    /// worker's own panel offers only the workers. Pressing one adds it at once, the panel
-    /// turning into the worker's so a failure is told beside its address.
+    /// The server's panel offers only the servers the tailnet found, the field keeping to them;
+    /// a machine's panel offers only the workers its server does not list yet, each a way to
+    /// install this build there.
     #[gpui::test]
-    fn the_first_run_offers_the_workers_the_tailnet_found(cx: &mut TestAppContext) {
+    fn each_panel_offers_its_own_kind_of_node(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, false);
-        cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
-        });
         let found = |name: &str, last: u8| slopty_net::discover::Found {
             name: name.to_owned(),
             addr: std::net::SocketAddr::from(([100, 64, 0, last], 7_001)),
@@ -4566,39 +4679,29 @@ mod tests {
         };
         let tailnet = net::Tailnet {
             servers: vec![found("home-server", 1)],
-            workers: vec![found("mac-studio", 3), found("macbook", 4)],
+            workers: vec![found("mac-studio", 2), found("macbook", 3)],
             running: true,
         };
-        answer(&ws, tailnet.clone(), cx);
-        let rows = |cx: &mut VisualTestContext| {
-            ["add-worker-found-0", "add-worker-found-1", "add-worker-found-2", "add-worker-found-3"]
-                .into_iter()
-                .filter(|row| cx.debug_bounds(row).is_some())
-                .count()
+        let offers = |cx: &mut VisualTestContext| {
+            ws.read_with(cx, |ws, _| {
+                let adding = ws.adding.as_ref()?;
+                let search = adding.search.as_ref()?;
+                Some(
+                    search
+                        .offers(adding.mode)
+                        .iter()
+                        .map(|(h, o)| (*h, o.name.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            })
         };
-        assert_eq!(rows(cx), 3, "the server, then both workers");
-        let offers = ws.read_with(cx, |ws, _| {
-            let adding = ws.adding.as_ref().unwrap();
-            let search = adding.search.as_ref().unwrap();
-            search.offers(adding.mode).iter().map(|(h, o)| (*h, o.name.clone())).collect::<Vec<_>>()
-        });
-        assert_eq!(
-            offers,
-            [
-                (Host::Server, "home-server".to_owned()),
-                (Host::Worker, "mac-studio".to_owned()),
-                (Host::Worker, "macbook".to_owned()),
-            ]
-        );
+        answer(&ws, tailnet.clone(), cx);
+        assert_eq!(offers(cx), Some(vec![(Host::Server, "home-server".to_owned())]));
+        assert!(cx.debug_bounds("add-worker-found-1").is_none(), "one row");
 
         // Workers alone: nothing goes in a server's field, and no "nothing answered".
         let workers_only =
             net::Tailnet { servers: Vec::new(), workers: tailnet.workers.clone(), running: true };
-        let field = |cx: &mut VisualTestContext| {
-            ws.read_with(cx, |ws, cx| {
-                ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
-            })
-        };
         cx.update(|window, cx| {
             ws.update(cx, |ws, cx| {
                 if let Some(adding) = &ws.adding {
@@ -4607,29 +4710,29 @@ mod tests {
             });
         });
         answer(&ws, workers_only, cx);
-        assert_eq!(rows(cx), 2);
-        assert_eq!(field(cx).as_deref(), Some(""), "a server's field takes no worker");
-        assert!(cx.debug_bounds("add-worker-search").is_none(), "something did answer");
-
-        // A worker's panel offers the workers, the best one ready in its field.
-        cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Worker, window, cx));
+        let field = ws.read_with(cx, |ws, cx| {
+            ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
         });
+        assert_eq!(field.as_deref(), Some(""), "a server's field takes no worker");
+        assert_eq!(offers(cx), Some(Vec::new()));
+
+        // With a server, a machine's panel offers the workers it does not list.
+        let listed = WorkerId::new();
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.server = Some(server::ServerSlot::stand_in(slopty_net::HostAddr::new(
+                    "hub",
+                    slopty_net::endpoint::SERVER_PORT,
+                )));
+                ws.adding = None;
+                ws.show_add_worker(Panel::Worker, window, cx);
+            });
+        });
+        // `list` puts it at 100.64.0.2, where the tailnet found mac-studio.
+        list(&ws, cx, listed, "mac-studio");
         answer(&ws, tailnet, cx);
-        assert_eq!(rows(cx), 2, "no server in a worker's panel");
-        assert_eq!(field(cx).as_deref(), Some("100.64.0.3"));
-
-        // A press adds that worker straight away, from a server's panel too.
-        cx.update(|window, cx| {
-            ws.update(cx, |ws, cx| ws.show_add_worker(Panel::Server, window, cx));
-        });
-        cx.run_until_parked();
-        let second = cx.debug_bounds("add-worker-found-2").expect("the second worker's row");
-        cx.simulate_click(second.center(), gpui::Modifiers::none());
-        let (mode, busy) =
-            ws.read_with(cx, |ws, _| ws.adding.as_ref().map(|a| (a.mode, a.busy)).unwrap());
-        assert_eq!((mode, busy), (Panel::Worker, true), "adding it, in the worker's panel");
-        assert_eq!(field(cx).as_deref(), Some("100.64.0.4"));
+        assert_eq!(offers(cx), Some(vec![(Host::Worker, "macbook".to_owned())]), "unlisted only");
+        assert!(cx.debug_bounds("add-worker-found-0").is_some(), "a row to press");
     }
 
     /// A node that turned this device away, or answered on another build, is a row that says
@@ -4657,7 +4760,7 @@ mod tests {
                 found("old-hub", 2, &[], Answer::OtherBuild("0.0.9+wire.0badf00d".to_owned())),
                 found("home", 3, &[], Answer::Ready),
             ],
-            workers: vec![found("box", 4, &[], Answer::NotGranted)],
+            workers: Vec::new(),
             running: true,
         };
         cx.update(|window, cx| ws.update(cx, |ws, cx| ws.offer_found(tailnet, window, cx)));
@@ -4673,16 +4776,14 @@ mod tests {
             ("Copy the tailnet grant for hub", "Server, needs a tailnet grant"),
             ("Install this build on old-hub", "Server, runs a different build"),
             ("Connect to home", "Server, 100.64.0.3"),
-            ("Copy the tailnet grant for box", "Machine, needs a tailnet grant"),
         ] {
             let node = said.iter().find(|n| n.label.as_deref() == Some(label));
             let node = node.unwrap_or_else(|| panic!("no row {label:?} in {said:#?}"));
             assert_eq!(node.description.as_deref(), Some(description), "{label}");
         }
 
-        for (row, dst) in
-            [("add-worker-found-0", "tag:slopty-server"), ("add-worker-found-3", "100.64.0.4")]
         {
+            let (row, dst) = ("add-worker-found-0", "tag:slopty-server");
             let at = cx.debug_bounds(row).expect("the refused node's row");
             cx.simulate_click(at.center(), gpui::Modifiers::none());
             cx.run_until_parked();
@@ -4728,16 +4829,19 @@ mod tests {
 
     /// A stand-in for this Mac: it records what the flow asked of it and answers with the
     /// `doctor` it is given, so no test installs an agent, prompts or opens System Settings.
-    #[derive(Debug)]
+    #[derive(Debug, Default)]
     struct StandIn {
         asked: std::cell::RefCell<Vec<String>>,
         doctor: std::cell::RefCell<Option<this_mac::Doctor>>,
-        added: WorkerId,
         /// What the next installs stop on, first first; an install with none left is done.
         stops: std::cell::RefCell<std::collections::VecDeque<this_mac::Stopped>>,
     }
 
     impl StandIn {
+        fn answering(doctor: Option<this_mac::Doctor>) -> Rc<Self> {
+            Rc::new(Self { doctor: std::cell::RefCell::new(doctor), ..Self::default() })
+        }
+
         fn ask(&self, what: String) {
             self.asked.borrow_mut().push(what);
         }
@@ -4748,9 +4852,17 @@ mod tests {
     }
 
     impl this_mac::Host for StandIn {
-        fn install(&self, end_sessions: bool) -> this_mac::Pending<Result<(), this_mac::Stopped>> {
-            self.ask(if end_sessions { "install end_sessions" } else { "install" }.to_owned());
-            let done = self.stops.borrow_mut().pop_front().map_or(Ok(()), Err);
+        fn install(
+            &self,
+            serve: &this_mac::Serve,
+            end_sessions: bool,
+        ) -> this_mac::Pending<Result<slopty_net::HostAddr, this_mac::Stopped>> {
+            let ends = if end_sessions { " end_sessions" } else { "" };
+            match serve {
+                this_mac::Serve::Here => self.ask(format!("install here{ends}")),
+                this_mac::Serve::Join(at) => self.ask(format!("install join {at}{ends}")),
+            }
+            let done = self.stops.borrow_mut().pop_front().map_or_else(|| Ok(serve.address()), Err);
             Box::pin(async move { done })
         }
 
@@ -4763,12 +4875,6 @@ mod tests {
         fn restart(&self) -> this_mac::Pending<()> {
             self.ask("restart".to_owned());
             Box::pin(async {})
-        }
-
-        fn add(&self, address: &str) -> this_mac::Pending<Result<net::Added, String>> {
-            self.ask(format!("add {address}"));
-            let added = net::Added { id: self.added, name: "mac-studio".to_owned() };
-            Box::pin(async move { Ok(added) })
         }
 
         fn open(&self, pane: this_mac::Pane) {
@@ -4786,30 +4892,37 @@ mod tests {
         }
     }
 
-    /// "Use this Mac" on the first run installs through the host, then shows the
+    /// A worker's `doctor` with every grant made, linked to its server.
+    fn green() -> this_mac::Doctor {
+        this_mac::Doctor {
+            worker: WorkerId::new(),
+            server: Some(slopty_proto::ctl::LinkState::Linked),
+            version: "0.3.0".to_owned(),
+            screen_recording: true,
+            accessibility: true,
+            tailnet: this_mac::Tailnet::Reachable("mac-studio.tail1234.ts.net".to_owned()),
+        }
+    }
+
+    /// The flow on screen, if any.
+    fn flow(ws: &Entity<Workspace>, cx: &VisualTestContext) -> Option<this_mac::Flow> {
+        ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.this_mac.clone()))
+    }
+
+    /// "Use this Mac" on the first run waits for the look on the tailnet; with no server
+    /// answering it starts one here and installs the worker against it, then shows the
     /// worker's `doctor` as the checklist: the missing grant's button opens its own pane. Back
-    /// from System Settings the worker is started again and asked again, and once it may
-    /// stream and take input this Mac is added over loopback and the panel gives way to its
+    /// from System Settings the worker is started again and asked again; once it may stream
+    /// and take input the flow waits for the server to list it, and then gives way to its
     /// workspace.
     #[gpui::test]
-    fn this_mac_installs_then_is_added_once_its_doctor_is_green(cx: &mut TestAppContext) {
+    fn this_mac_runs_the_server_then_waits_for_it_to_list_the_worker(cx: &mut TestAppContext) {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, false);
         cx.simulate_resize(size(px(900.0), px(700.0)));
-        let studio = this_mac::Tailnet::Reachable("mac-studio.tail1234.ts.net".to_owned());
-        let lacking = this_mac::Doctor {
-            version: "0.3.0".to_owned(),
-            screen_recording: false,
-            accessibility: true,
-            tailnet: studio,
-        };
-        let host = Rc::new(StandIn {
-            asked: std::cell::RefCell::default(),
-            doctor: std::cell::RefCell::new(Some(lacking.clone())),
-            added: WorkerId::new(),
-            stops: std::cell::RefCell::default(),
-        });
+        let lacking = this_mac::Doctor { screen_recording: false, ..green() };
+        let host = StandIn::answering(Some(lacking.clone()));
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, cx| {
             ws.this_mac = Some(shared);
@@ -4820,13 +4933,19 @@ mod tests {
 
         let entry = cx.debug_bounds("use-this-mac").expect("the entry, a row to press");
         let field = cx.debug_bounds("add-worker-field").expect("the address");
-        let switch = cx.debug_bounds("panel-switch").expect("the other way in");
-        assert!(entry.bottom() <= field.top(), "a place to add, over the address to type");
-        assert!(entry.bottom() <= switch.top(), "not a second link under the way aside");
+        assert!(entry.bottom() <= field.top(), "a place to start, over the address to type");
         cx.simulate_click(entry.center(), gpui::Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(host.asked(), ["install", "doctor"], "installed, then asked");
+        assert!(host.asked().is_empty(), "nothing installed while the tailnet is looked on");
+        assert_eq!(flow(&ws, cx).map(|f| f.server), Some(this_mac::Server::Looking));
         assert!(cx.debug_bounds("this-mac-checklist").is_some(), "the checklist is up");
+
+        let none = net::Tailnet { running: true, ..net::Tailnet::default() };
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.offer_found(none, window, cx)));
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["install here", "doctor"], "a server here, then the worker");
+        let here = this_mac::Serve::Here.address();
+        assert_eq!(ws.read_with(cx, |ws, _| ws.server_address().cloned()), Some(here));
         assert!(cx.debug_bounds("add-worker-field").is_none(), "in the address's place");
         assert!(cx.debug_bounds("use-this-mac").is_none(), "the entry has done its part");
         assert!(cx.debug_bounds("this-mac-fix-accessibility").is_none(), "granted: no button");
@@ -4835,71 +4954,99 @@ mod tests {
         assert_eq!(host.asked(), ["open ScreenRecording"], "its own pane");
 
         // Granted in System Settings; the app comes back to the front.
+        let worker = lacking.worker;
         *host.doctor.borrow_mut() = Some(this_mac::Doctor { screen_recording: true, ..lacking });
         cx.update(|window, cx| ws.update(cx, |ws, cx| ws.this_mac_activated(window, cx)));
         cx.run_until_parked();
-        assert_eq!(
-            host.asked(),
-            ["restart", "doctor", "add 127.0.0.1"],
-            "started again to see the grant, then added over loopback"
-        );
-        let (adding, added) = ws.read_with(cx, |ws, _| {
-            (ws.adding.is_some(), ws.workers.iter().any(|w| w.id == host.added && w.added))
+        assert_eq!(host.asked(), ["restart", "doctor"], "started again to see the grant");
+        assert_eq!(flow(&ws, cx).map(|f| f.listing), Some(true), "waiting for the directory");
+
+        list(&ws, cx, worker, "mac-studio");
+        cx.executor().advance_clock(this_mac::RETRY);
+        cx.run_until_parked();
+        assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "the page gave way to this Mac");
+    }
+
+    /// With several servers answering, or none to look on, "Use this Mac" asks for the server
+    /// with the one address field; empty, it starts one here. A server set already is joined
+    /// with nothing asked.
+    #[gpui::test]
+    fn this_mac_asks_which_server_when_it_cannot_tell(cx: &mut TestAppContext) {
+        use slopty_net::discover::Found;
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, false);
+        cx.simulate_resize(size(px(900.0), px(700.0)));
+        let host = StandIn::answering(None);
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
+        let found = |name: &str, ip: &str| Found {
+            name: name.to_owned(),
+            addr: format!("{ip}:45560").parse().unwrap(),
+            tags: Vec::new(),
+            answer: None,
+        };
+        let two = net::Tailnet {
+            servers: vec![found("hub", "100.64.0.1"), found("box", "100.64.0.2")],
+            workers: Vec::new(),
+            running: true,
+        };
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.offer_found(two, window, cx);
+                ws.use_this_mac(window, cx);
+            });
         });
-        assert!(!adding && added, "the panel gave way to this Mac's workspace");
+        cx.run_until_parked();
+        let asking = ws.read_with(cx, |ws, _| ws.adding.as_ref().and_then(|a| a.asking));
+        assert_eq!(asking, Some(Asking::Several));
+        assert!(host.asked().is_empty(), "nothing installed before it is told");
+        assert!(cx.debug_bounds("add-worker-field").is_some(), "the address to say it in");
+        let typed = ws.read_with(cx, |ws, cx| {
+            ws.adding.as_ref().map(|a| a.address.read(cx).value().to_string())
+        });
+        let typed = typed.unwrap_or_default();
+        assert_eq!(typed, "100.64.0.1", "the best one offered");
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                if let Some(adding) = &ws.adding {
+                    adding.address.update(cx, |i, cx| i.set_value(String::new(), window, cx));
+                }
+                ws.enter_address(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert_eq!(host.asked(), ["install here", "doctor"], "empty starts one here");
+
+        cx.update(|window, cx| {
+            ws.update(cx, |ws, cx| {
+                ws.leave_this_mac(cx);
+                ws.use_this_mac(window, cx);
+            });
+        });
+        cx.run_until_parked();
+        let here = this_mac::Serve::Here.address();
+        assert_eq!(host.asked().first(), Some(&format!("install join {here}")), "its own server");
     }
 
     /// A failed install is the checklist's first line, red with a way to try again; back to
-    /// the panel leaves the checklist for the address.
+    /// the panel leaves the checklist for the panel's rows.
     #[gpui::test]
     fn a_failed_install_offers_another_try(cx: &mut TestAppContext) {
-        #[derive(Debug)]
-        struct Refusing;
-        impl this_mac::Host for Refusing {
-            fn install(
-                &self,
-                _end_sessions: bool,
-            ) -> this_mac::Pending<Result<(), this_mac::Stopped>> {
-                let failed = this_mac::Stopped::Failed("launchctl bootstrap failed".to_owned());
-                Box::pin(async { Err(failed) })
-            }
-
-            fn doctor(&self) -> this_mac::Pending<Option<this_mac::Doctor>> {
-                Box::pin(async { None })
-            }
-
-            fn restart(&self) -> this_mac::Pending<()> {
-                Box::pin(async {})
-            }
-
-            fn add(&self, _address: &str) -> this_mac::Pending<Result<net::Added, String>> {
-                Box::pin(async { Err("no".to_owned()) })
-            }
-
-            fn open(&self, _pane: this_mac::Pane) {}
-
-            fn move_to_applications(
-                &self,
-            ) -> this_mac::Pending<Result<std::path::PathBuf, String>> {
-                Box::pin(async { Err("no".to_owned()) })
-            }
-
-            fn repoint(&self) -> this_mac::Pending<Option<Result<(), String>>> {
-                Box::pin(async { None })
-            }
-        }
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
         cx.simulate_resize(size(px(900.0), px(700.0)));
-        ws.update(cx, |ws, _cx| ws.this_mac = Some(Rc::new(Refusing)));
+        let host = StandIn::answering(None);
+        let failed = this_mac::Stopped::Failed("launchctl bootstrap failed".to_owned());
+        host.stops.borrow_mut().push_back(failed);
+        let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
+        ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
         cx.dispatch_action(UseThisMac);
         cx.run_until_parked();
-        let worker = ws.read_with(cx, |ws, _| {
-            ws.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.worker.clone())
-        });
+        assert_eq!(host.asked(), ["install join hub:45560"], "the server set already");
         assert_eq!(
-            worker,
+            flow(&ws, cx).map(|f| f.worker),
             Some(this_mac::Worker::Failed("launchctl bootstrap failed".to_owned())),
             "the reason, kept"
         );
@@ -4907,7 +5054,7 @@ mod tests {
         let back = cx.debug_bounds("panel-switch").expect("the way back");
         cx.simulate_click(back.center(), gpui::Modifiers::none());
         assert!(cx.debug_bounds("this-mac-checklist").is_none(), "left");
-        assert!(cx.debug_bounds("add-worker-field").is_some(), "the address is back");
+        assert!(cx.debug_bounds("use-this-mac").is_some(), "the rows are back");
     }
 
     /// An install that would end this Mac's sessions stops before changing anything and
@@ -4920,35 +5067,26 @@ mod tests {
         let (ws, cx) = shell(cx, &runtime, &dir, true);
         cx.simulate_resize(size(px(900.0), px(700.0)));
         let plan = "slopty-ptyd restarts, ending the 2 sessions it holds".to_owned();
-        let host = Rc::new(StandIn {
-            asked: std::cell::RefCell::default(),
-            doctor: std::cell::RefCell::new(None),
-            added: WorkerId::new(),
-            stops: std::cell::RefCell::new(
-                [this_mac::Stopped::EndsSessions(plan.clone()), this_mac::Stopped::Misplaced]
-                    .into(),
-            ),
-        });
+        let host = StandIn::answering(None);
+        host.stops
+            .borrow_mut()
+            .extend([this_mac::Stopped::EndsSessions(plan.clone()), this_mac::Stopped::Misplaced]);
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
-        let worker = |cx: &mut VisualTestContext| {
-            ws.read_with(cx, |ws, _| {
-                ws.adding.as_ref().and_then(|a| a.this_mac.as_ref()).map(|f| f.worker.clone())
-            })
-        };
+        let worker = |cx: &mut VisualTestContext| flow(&ws, cx).map(|f| f.worker);
         cx.dispatch_action(UseThisMac);
         cx.run_until_parked();
-        assert_eq!(host.asked(), ["install"]);
-        assert_eq!(worker(cx), Some(this_mac::Worker::EndsSessions(plan.clone())));
-        let lines = this_mac::checklist(&this_mac::Worker::EndsSessions(plan), "");
+        assert_eq!(host.asked(), ["install join hub:45560"]);
+        assert_eq!(worker(cx), Some(this_mac::Worker::EndsSessions(plan)));
+        let lines = flow(&ws, cx).map(|f| this_mac::checklist(&f, "", "")).expect("the flow");
         assert_eq!(lines[0].fix, Some(this_mac::Fix::EndSessions));
         assert!(lines[0].detail.contains("ending the 2 sessions"), "{}", lines[0].detail);
         let anyway = cx.debug_bounds("this-mac-fix-running").expect("Update anyway");
         cx.simulate_click(anyway.center(), gpui::Modifiers::none());
         cx.run_until_parked();
-        assert_eq!(host.asked(), ["install end_sessions"], "the press is the yes");
+        assert_eq!(host.asked(), ["install join hub:45560 end_sessions"], "the press is the yes");
         assert_eq!(worker(cx), Some(this_mac::Worker::Misplaced));
-        let lines = this_mac::checklist(&this_mac::Worker::Misplaced, "");
+        let lines = flow(&ws, cx).map(|f| this_mac::checklist(&f, "", "")).expect("the flow");
         assert_eq!(lines[0].fix.map(this_mac::Fix::label), Some("Move to Applications"));
         let move_it = cx.debug_bounds("this-mac-fix-running").expect("the move");
         cx.simulate_click(move_it.center(), gpui::Modifiers::none());
@@ -4971,18 +5109,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let (ws, cx) = shell(cx, &runtime, &dir, true);
-        let up = this_mac::Doctor {
-            version: "0.3.0".to_owned(),
-            screen_recording: true,
-            accessibility: true,
-            tailnet: this_mac::Tailnet::Absent,
-        };
-        let host = Rc::new(StandIn {
-            asked: std::cell::RefCell::default(),
-            doctor: std::cell::RefCell::new(Some(up)),
-            added: WorkerId::new(),
-            stops: std::cell::RefCell::default(),
-        });
+        let host = StandIn::answering(Some(green()));
         let shared: Rc<dyn this_mac::Host> = Rc::<StandIn>::clone(&host);
         ws.update(cx, |ws, _cx| ws.this_mac = Some(shared));
         let toast =
@@ -5058,8 +5185,7 @@ mod tests {
             }));
         });
         let id = WorkerId::new();
-        ws.update(cx, |ws, cx| ws.add_worker(id, "mini".to_owned(), true, cx));
-        cx.run_until_parked();
+        list(&ws, cx, id, "mini");
         assert_eq!(dials.get(), 1);
         let status = ws.read_with(cx, |ws, cx| {
             ws.view.read(cx).workers().map(|(_, _, status)| status.clone()).next()
@@ -5083,7 +5209,7 @@ mod tests {
     /// but a resume (or any wake) dials it at once, once, rather than starting the hold over.
     #[gpui::test]
     fn a_wake_dials_a_held_worker_once_rather_than_holding_again(cx: &mut TestAppContext) {
-        use slopty_proto::server::{Liveness, WorkerInfo};
+        use slopty_proto::server::WorkerInfo;
         let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let ws = workspace(cx, &runtime, &dir);
@@ -5109,7 +5235,7 @@ mod tests {
                 link: 1,
             });
         });
-        ws.update(cx, |ws, cx| ws.add_worker(id, "box".to_owned(), false, cx));
+        ws.update(cx, |ws, cx| ws.add_worker(id, "box".to_owned(), cx));
         cx.run_until_parked();
         assert_eq!(dials.get(), 0, "held on the server's word");
 

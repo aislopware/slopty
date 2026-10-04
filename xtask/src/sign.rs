@@ -19,8 +19,11 @@ const IDENTIFIER_PREFIX: &str = "dev.aislopware.slopty";
 /// Environment variable naming the identity, for a machine with several certificates.
 pub const IDENTITY_ENV: &str = "SLOPTY_SIGN_IDENTITY";
 
-/// The binaries that hold TCC grants, as (file name, identifier suffix).
-const SIGNED: [(&str, &str); 2] = [("slopty-worker", "worker"), ("slopty-ptyd", "ptyd")];
+/// The binaries that hold a privacy grant, as (file name, identifier suffix): the worker's and
+/// ptyd's TCC grants, and the server's Local Network permission for the wake packets it sends on
+/// the LAN, each kept across builds only by a stable signing identity.
+const SIGNED: [(&str, &str); 3] =
+    [("slopty-worker", "worker"), ("slopty-ptyd", "ptyd"), ("slopty-server", "server")];
 
 /// `xtask sign` options.
 #[derive(Args, Debug, Clone, Default)]

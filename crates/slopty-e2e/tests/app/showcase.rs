@@ -1531,9 +1531,7 @@ async fn working_agent(stack: &mut Stack, home: &Path, repo: &Path) {
 /// done, and a pull left running. Its first shell.
 async fn devbox(stack: &mut Stack, second: &SecondWorker) -> String {
     std::fs::create_dir_all(second.path("home/srv/atlas")).unwrap();
-    let address = second.address().to_owned();
     let drv = &mut stack.driver;
-    drv.ok(&Command::AddWorker { address }).await.unwrap();
     let dump = wait(drv, "the dev box's first shell", |d| {
         d.items.iter().any(|i| i.worker == "devbox" && i.kind == "terminal")
     })
@@ -1604,9 +1602,7 @@ async fn devbox(stack: &mut Stack, second: &SecondWorker) -> String {
 /// The build box: a clean test run, and an agent asking which way to go.
 async fn build_box(stack: &mut Stack, third: &SecondWorker) {
     std::fs::create_dir_all(third.path("home/ci/atlas")).unwrap();
-    let address = third.address().to_owned();
     let drv = &mut stack.driver;
-    drv.ok(&Command::AddWorker { address }).await.unwrap();
     let dump = wait(drv, "the build box's first shell", |d| {
         d.items.iter().any(|i| i.worker == "build-01" && i.kind == "terminal")
     })
@@ -1808,14 +1804,16 @@ async fn showcase_three_workers() {
     // A drawn screen on the dev box, a mesh's round trip to the build box.
     let plain = [("PATH", day.path.as_str()), ("ZDOTDIR", day.zdotdir.as_str())];
     let drawn = [plain[0], plain[1], ("SLOPTY_SYNTHETIC_SCREEN", "1")];
-    let (devbox_worker, build_worker) = tokio::join!(
-        SecondWorker::launch_env("devbox", slopty_shape::Link::CLEAR, &drawn),
-        SecondWorker::launch_env("build-01", slopty_e2e::harness::TAILNET, &plain),
-    );
-    let (devbox_worker, build_worker) = (devbox_worker.unwrap(), build_worker.unwrap());
     let studio = studio(&mut day.stack, &day.home, None).await;
     let stack = &mut day.stack;
+    // Each registers with the stack's server as its turn comes, and the app connects to it.
+    let link = slopty_shape::Link::CLEAR;
+    let devbox_worker =
+        SecondWorker::launch_env("devbox", link, &stack.server, &drawn).await.unwrap();
     let devbox_shell = devbox(stack, &devbox_worker).await;
+    let link = slopty_e2e::harness::TAILNET;
+    let build_worker =
+        SecondWorker::launch_env("build-01", link, &stack.server, &plain).await.unwrap();
     build_box(stack, &build_worker).await;
     // The pull ends while the person is on the build box.
     tokio::time::sleep(SLOW).await;

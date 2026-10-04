@@ -119,15 +119,14 @@ mod tests {
             .await
             .unwrap();
 
-        // Worker B behind the shaped link. The app adds it by the relay's address.
+        // Worker B behind the shaped link, registered with A's server: the app finds it in
+        // the directory, at the relay's address.
         let launch_b = Instant::now();
-        let mut worker_b = SecondWorker::launch(B, TAILNET).await.unwrap();
+        let mut worker_b = SecondWorker::launch(B, TAILNET, &stack.server).await.unwrap();
         println!(
             "MEASURE workers: brought worker B up in {:.1} s",
             launch_b.elapsed().as_secs_f64()
         );
-        let address = worker_b.address().to_owned();
-        stack.driver.ok(&Command::AddWorker { address }).await.unwrap();
 
         // (1) Two connected workers, one workspace: no switcher, both are simply there.
         stack

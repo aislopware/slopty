@@ -257,6 +257,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `outside_a_bundle_the_agents_run_copies_and_uninstall_reverses_it` and
     `a_missing_binary_installs_nothing`; `this_mac`'s `the_doctor_maps_to_lines_and_buttons`;
     the app's `this_mac_installs_then_is_added_once_its_doctor_is_green`.
+  - Superseded in part 2026-10-04 by **The first Mac runs the server** (topology.md). The
+    install decides the server first and starts one here when none answers; the worker
+    registers with it, and `[client] server` follows the worker's (`slopty_settings::join_server`
+    replaced `join_clients_server`). The checklist has five lines, a Server line after Running,
+    read from the doctor's link to its server. The flow ends when the server's directory lists
+    this Mac, with no loopback add (`this_mac::Host::add` is gone). `this_mac::Host::repoint`
+    repoints the server's agent too. Tests: the app's
+    `this_mac_runs_the_server_then_waits_for_it_to_list_the_worker` and
+    `this_mac_asks_which_server_when_it_cannot_tell`; `this_mac`'s
+    `the_server_line_follows_the_server_then_the_workers_link`.
 
 - ✅ **A pocketed phone is told when an agent needs the human or a long command ends**
   (2026-09-28). A phone in a pocket saw nothing until it was opened again: GPUI's iOS platform
@@ -588,8 +598,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     files into Finder, the reason for the 2026-09-25 ruling, uses the roots above
     (`docs/decisions/audio.md`, "Worker files paste into Finder").
   - **Not yet.** A folder of more than 2000 entries shows its first 2000 (`FOLDER_ENTRIES`),
-    until the listing pages. The fetch's progress moves only at its end. Workers added by
-    address, without a server, are not shown.
+    until the listing pages. The fetch's progress moves only at its end.
   - Tests: `files::tests` (slopty-platform: the directory, the roots, one domain per worker and
     none for a forgotten one, and no container for a build the team did not sign),
     `finder::tests` (slopty-app: the switch before a worker's home, and each notice),

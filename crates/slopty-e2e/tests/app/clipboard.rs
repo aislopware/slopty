@@ -74,12 +74,11 @@ async fn text_copied_on_one_worker_is_ready_to_paste_in_another_workers_window()
     let a_name = pasteboard_name(stack.dir.path(), "worker");
     let app_name = pasteboard_name(stack.dir.path(), "app");
     watched(&mut stack.driver).await;
+    let link = slopty_shape::Link::CLEAR;
     let second =
-        SecondWorker::launch_env("remote", slopty_shape::Link::CLEAR, &[SYNTHETIC]).await.unwrap();
+        SecondWorker::launch_env("remote", link, &stack.server, &[SYNTHETIC]).await.unwrap();
     let b_name = second.pasteboard();
-    let address = second.address().to_owned();
     let drv = &mut stack.driver;
-    drv.ok(&Command::AddWorker { address }).await.unwrap();
     let d = drv
         .wait_for("both workers connected, a shell on each", STEP, |d| {
             d.workers.iter().filter(|w| w.status == "connected").count() == 2

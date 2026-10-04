@@ -39,7 +39,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{Workspace, net};
+use crate::Workspace;
 
 /// A command with the channel its reply goes back on.
 type Request = (Command, oneshot::Sender<Reply>);
@@ -95,24 +95,6 @@ pub(crate) fn serve(
                 #[cfg(not(target_os = "macos"))]
                 Command::KeepDragged { .. } => {
                     Reply::Error { message: "no drag out of the app here".into() }
-                }
-                Command::AddWorker { address } => {
-                    let (done_tx, done_rx) = oneshot::channel();
-                    handle.spawn(async move {
-                        let _sent = done_tx.send(net::add_worker(&address).await);
-                    });
-                    match done_rx.await {
-                        Ok(Ok(net::Added { id, name })) => {
-                            workspace.update(cx, |ws, cx| {
-                                ws.adding = None;
-                                ws.add_worker(id, name, true, cx);
-                                cx.notify();
-                            });
-                            Reply::Ok
-                        }
-                        Ok(Err(e)) => error(&e),
-                        Err(_dropped) => Reply::Error { message: "add task died".into() },
-                    }
                 }
                 Command::Render { path } => {
                     // The frame the app draws with everything dispatched so far, as it draws
@@ -753,7 +735,7 @@ fn apply(
             let Ok(id) = id.trim().parse::<WorkerId>() else {
                 return Reply::Error { message: format!("not a worker id: {id}") };
             };
-            workspace.update(cx, |ws, cx| ws.forget_worker(id, window, cx));
+            workspace.update(cx, |ws, cx| ws.forget_worker(id, cx));
             Reply::Ok
         }
         Command::AddDisplay => {
@@ -797,7 +779,6 @@ fn apply(
             Reply::Ok
         }
         Command::Dump
-        | Command::AddWorker { .. }
         | Command::KeepDragged { .. }
         | Command::DragOver { .. }
         | Command::DragDrop { .. }

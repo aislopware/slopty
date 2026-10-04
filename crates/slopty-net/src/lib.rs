@@ -12,7 +12,7 @@
 //! * [`worker`] — accept loop yielding clients that said `Hello`.
 //! * [`client`] — connect to a worker by address.
 //! * [`server`] — links to the server: its accept loop, and the dial to it.
-//! * [`known`] — the client's id and the workers it has added.
+//! * [`known`] — the client's installation id.
 //! * [`redial`] — when a dropped link is dialled again.
 //! * `udp` — the UDP socket under every endpoint, which finishes a send that went out in part.
 //! * `prefix` — the wire prefix each end opens the control stream with, and the check of the peer's
@@ -66,7 +66,7 @@ pub enum NetError {
         #[source]
         source: std::io::Error,
     },
-    /// Reading or writing a file failed: a transfer's, a save's or the known-workers store.
+    /// Reading or writing a file failed: a transfer's, a save's or the client's id.
     #[error("{context}: {source}")]
     Io {
         /// What was read or written.
@@ -103,7 +103,7 @@ pub enum NetError {
     /// The peer sent something we did not expect at this point.
     #[error("protocol violation: {0}")]
     Protocol(&'static str),
-    /// The known-workers store does not parse, or would not serialize.
+    /// The client's id file does not parse, or would not serialize.
     #[error("store: {0}")]
     Store(#[source] serde_json::Error),
     /// The worker closed the connection because the tailnet grants this device no role there

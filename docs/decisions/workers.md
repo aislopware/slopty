@@ -249,6 +249,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `tailscale status --json`) was written and then dropped before landing, and mDNS went with
   iroh; manual entry is the one way in until the server exists. `HostStatus::NeedsPairing`, the
   pairing CLI (`slopty pair`, `slopty host ticket|paired|revoke`) and `trust.json` are deleted.
+  Superseded in part 2026-10-04 by **The first Mac runs the server** (topology.md): workers
+  come from the server's directory alone. Adding by address, `slopty add` and `slopty forget`,
+  and the worker list went; the client keeps only its id, in `client.json`
+  (`slopty_net::known::client_id_in`). Workers stay keyed by their `WorkerId`.
 
 - ✅ **Admission by source address, once per connection** (2026-09-24). Superseded in part
   2026-09-26 by **Tailscale is the network, and its LocalAPI says who is calling** (`topology.md`):
@@ -770,6 +774,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `service::tests::an_update_keeps_the_previous_worker_and_its_port` (`--update` on an empty
     machine). App `ssh::tests`: the sheet keeps the target of the worker it added, and Update
     deploys through the kept user and port.
+  - Superseded in part 2026-10-04 by **The first Mac runs the server** (topology.md):
+    `Plan::server` is required, and a deploy with no address the far side can dial it at
+    fails before anything is sent (`DeployError::NoServerAddress`), so no install leaves a
+    worker on its own. `--no-server` is gone; the VM and Linux lanes deploy a server first.
+    The app's install ends when the server's directory lists the machine, not with an add at
+    the address `ssh` reached.
 
 - ✅ **The app installs Linux workers and sets up the server, and both outlive the login**
   (2026-10-01, readiness audit items 9 and 10). Installing a Linux worker from the app always
@@ -803,7 +813,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     as named, or at loopback for this Mac, and saves it as `[client] server` as the panel's
     Connect does. This Mac's worker, when installed with no server, registers with it and is
     restarted, since a worker reads its server only when it starts. The CLI has the same as
-    `slopty server deploy <ssh target>`.
+    `slopty server deploy <ssh target>`. Since 2026-10-04 running the server on this Mac is a
+    step of "Use this Mac" (`serve_here_row` is gone), and connecting to a server repoints
+    this Mac's worker when it was on the old one (`Deployer::register_here`).
   - Tests: `slopty-deploy` `the_build_for_the_machine_is_the_one_that_goes`,
     `an_app_lists_the_builds_it_carries` and
     `a_server_is_put_on_a_machine_and_named_where_it_is_reached`; `slopty-platform`
@@ -1032,8 +1044,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **In the panel.** A refused node is listed with "needs a tailnet grant", and pressing it
     copies the grant for this device's clients to that node (`grant_to`). One on another build
     is "runs a different build", and pressing it opens the SSH sheet on it. "Copy the tailnet
-    grant for Slopty's clients" names both tags, the server's and the machines'. An add by
-    address says "<host> needs a tailnet grant for this device" and where it goes.
+    grant for Slopty's clients" names both tags, the server's and the machines'.
   - Tests: `slopty-net` `discover`
     `a_node_that_refuses_this_device_or_runs_another_build_says_so`, `admission` and `listen`
     tests; `slopty-app` `a_node_that_needs_a_grant_shows_and_copies_its_grant`.
@@ -1054,6 +1065,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `slopty-app` `ssh::tests`
     `every_worker_on_another_build_is_updated_and_this_mac_s_unasked`,
     `machines_added_before_the_server_are_registered_with_it`.
+  - Superseded in part 2026-10-04 by **The first Mac runs the server** (topology.md): with no
+    machine added by address there is nothing to register, so "Register machines with the
+    server", its notice and its test are gone.
 
 - ✅ **The daemons follow `settings.toml` live where they can, and say what waits** (2026-10-04,
   readiness audit N10, A25). Each daemon read its table once at start, and nothing said so.

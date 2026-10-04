@@ -32,14 +32,13 @@ struct State {
 }
 
 impl Cut {
-    /// A proxy on loopback forwarding to `worker`.
+    /// A proxy that clients reach at `front`, forwarding to `worker` on IPv4 loopback.
     ///
     /// # Errors
     ///
     /// When a socket cannot be bound.
-    pub async fn bind(worker: SocketAddr) -> Result<Self> {
-        let front =
-            Arc::new(UdpSocket::bind(("127.0.0.1", 0)).await.context("bind the cut's front")?);
+    pub async fn bind(front: SocketAddr, worker: SocketAddr) -> Result<Self> {
+        let front = Arc::new(UdpSocket::bind(front).await.context("bind the cut's front")?);
         let back =
             Arc::new(UdpSocket::bind(("127.0.0.1", 0)).await.context("bind the cut's back")?);
         back.connect(worker).await.context("aim the cut at the worker")?;
@@ -134,7 +133,8 @@ mod tests {
     #[tokio::test]
     async fn a_cut_path_heals_at_a_new_dial() {
         let worker = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
-        let cut = Cut::bind(worker.local_addr().unwrap()).await.unwrap();
+        let front = SocketAddr::from(([127, 0, 0, 1], 0));
+        let cut = Cut::bind(front, worker.local_addr().unwrap()).await.unwrap();
         let client = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
         let mut buf = [0_u8; 16];
         client.send_to(&[0x40, 1], cut.addr()).await.unwrap();

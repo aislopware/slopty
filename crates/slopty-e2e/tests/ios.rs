@@ -75,6 +75,11 @@ mod tests {
 
     /// Render the frame and hold it against `golden/ios-<device>-<state>.png`; `crop` keeps
     /// only the top-left `(width, height)` points, the app's own area in a split view.
+    /// The palette's first line, the best match for what was typed.
+    fn first_line(d: &Dump) -> Option<&str> {
+        d.a11y.iter().find(|n| n.role == "ListBoxOption").and_then(|n| n.label.as_deref())
+    }
+
     async fn golden(
         drv: &mut Driver,
         dir: &std::path::Path,
@@ -109,7 +114,7 @@ mod tests {
         assert!(dump.a11y_node("Heading", Some("Connect to a server")).is_some(), "{dump:#?}");
         assert!(dump.a11y_node("Button", Some("More")).is_none(), "{:#?}", dump.a11y);
         golden(&mut stack.driver, &dir, dev, "first-run", None).await;
-        stack.add_worker().await.unwrap();
+        stack.connect_server().await.unwrap();
         let drv = &mut stack.driver;
 
         let dump = drv
@@ -146,8 +151,9 @@ mod tests {
         // prompt and zle taking the line: the command left the default block cursor, and only
         // zle's line-init sets the insert bar again.
         let dump = drv
-            .wait_for("the echo and the next prompt", STEP, |d| {
-                d.terminals.iter().any(|t| t.cursor_shape == "Bar")
+            .wait_for("the echo and the next prompt, the connect notice gone", STEP, |d| {
+                d.notice.is_none()
+                    && d.terminals.iter().any(|t| t.cursor_shape == "Bar")
                     && d.rows_containing("ios-42").iter().any(|r| r.trim() == "ios-42")
                     && d.a11y_node("Terminal", None).is_some_and(|g| {
                         g.value
@@ -182,8 +188,9 @@ mod tests {
         // types into its field, ↩ runs the line.
         open_palette(drv).await;
         drv.ui_insert_text("new note").await.unwrap();
-        drv.wait_for("one line", STEP, |d| {
-            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        // The best match leads; a looser one (a machine's clipboard line) may follow it.
+        drv.wait_for("the note's line first", STEP, |d| {
+            first_line(d).is_some_and(|l| l.starts_with("New note"))
         })
         .await
         .unwrap();
@@ -201,8 +208,9 @@ mod tests {
         // and a golden holds it or not by the phase.
         open_palette(drv).await;
         drv.ui_insert_text("open settings").await.unwrap();
-        drv.wait_for("one line", STEP, |d| {
-            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        // The best match leads; a looser one (a machine's clipboard line) may follow it.
+        drv.wait_for("the settings' line first", STEP, |d| {
+            first_line(d).is_some_and(|l| l.starts_with("Open settings"))
         })
         .await
         .unwrap();
@@ -222,7 +230,12 @@ mod tests {
         .await
         .unwrap();
         drv.keys("cmd-a").await.unwrap();
-        let settings = format!("{}alert = \"never\"\n", pinned_settings(APPEARANCE));
+        // The server the app follows stays in the file.
+        let settings = format!(
+            "{}alert = \"never\"\n\n[client]\nserver = \"{}\"\n",
+            pinned_settings(APPEARANCE),
+            stack.server.address()
+        );
         drv.ui_insert_text(&settings).await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {
@@ -238,8 +251,9 @@ mod tests {
         // field in the focused tile's header, the soft keyboard types into it, ↩ keeps it.
         open_palette(drv).await;
         drv.ui_insert_text("name this").await.unwrap();
-        drv.wait_for("one line", STEP, |d| {
-            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        // The best match leads; a looser one (a machine's clipboard line) may follow it.
+        drv.wait_for("the naming line first", STEP, |d| {
+            first_line(d).is_some_and(|l| l.starts_with("Name this tile"))
         })
         .await
         .unwrap();

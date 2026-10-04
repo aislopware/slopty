@@ -24,6 +24,7 @@ Button │ New workspace
 Heading │ Machines
 Button │ e2e-ios-worker
 Button │ New shell on e2e-ios-worker
+Button │ Machine actions, e2e-ios-worker
 Button │ Terminal
 Button │ Close tile
 Button │ scratch

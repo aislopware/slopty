@@ -48,6 +48,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Degraded mode.** Clients cache the worker directory (id, address, name, capabilities).
     When the server is down they connect to workers directly: terminals and video keep working,
     and only layout restore, notes and cross-worker orchestration pause.
+  - Superseded in part 2026-10-04 by **The first Mac runs the server**: a server always exists,
+    so one that does not answer is an outage and never a mode. The cached directory and the
+    direct dials are that outage's path; there is no client set up without a server.
 
 - ✅ **One verb set drives workers** (2026-09-24, its surfaces narrowed 2026-10-04). The verbs
   live in `slopty-proto::orchestration`, and item ids are explicit handles. The CLI names them:
@@ -219,7 +222,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **The worker's side of the link: registration, redial, and what the verbs mean** (2026-09-25).
   - **Joining.** `slopty-worker` registers with the server named by `--server`, else
     `SLOPTY_SERVER`, else `[worker] server` in `settings.toml` (port 45560 when none is given).
-    With none it runs on its own as before. The link is one task beside the rest of the
+    With none it still starts and serves its clients, though since 2026-10-04 no installer
+    leaves one so (**The first Mac runs the server**). The link is one task beside the rest of the
     daemon. It hears the daemon's events on its own broadcast subscription and forwards
     `SessionOpened`, `SessionClosed` and `Agent`. If it falls behind, it registers again,
     because a fresh registration carries the whole state. Every forwarded verb runs in a task
@@ -330,10 +334,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (2026-09-25).
   - **Setting.** `[client] server` in `settings.toml` names the server, `host[:port]` with
     port 45560 when none is given; it is typed (`slopty_settings::ClientSettings`, a
-    `HostAddr`), and empty means no server. The panel's "Connect to a server" dials the address
+    `HostAddr`); empty is the first run. The panel's "Connect to a server" dials the address
     once as a client, and only an address that answered is written into the file, with the
-    rest of the file and its comments left as they were. "Disconnect from the server" clears
-    it. A file that fails to parse keeps the server in use rather than dropping it.
+    rest of the file and its comments left as they were. A file that fails to parse keeps the
+    server in use rather than dropping it. ("Disconnect from the server" went 2026-10-04.)
   - **Link.** One `Role::Client` link (`slopty_client::server`), redialled 250 ms doubling to
     5 s, reset by a link that lived 10 s, the same rule as the worker's. `Directory`, `Worker`
     and `Event` feed a pure model (`slopty_client::directory::Directory`) that reports each
@@ -351,18 +355,17 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     directory, tagged with its server and written off the main thread. With the server down,
     at launch or later, every cached worker is dialled at its cached address, and the
     titlebar shows one quiet "server unreachable" line. The app never shows a modal for it.
-  - **Adding by address stays, as the fallback.** The panel opens on "Connect to a server"
-    and offers "Add a worker by address instead". Workers added that way stay without the
-    server. A worker only the directory listed leaves, tiles included, when the server is
-    disconnected or its directory stops listing it.
+  - **Adding by address stays, as the fallback.** Superseded 2026-10-04 by **The first Mac
+    runs the server**: adding by address is gone, and every worker comes from the directory.
+    A worker leaves, tiles and pages included, when the directory stops listing it.
   - **Agents.** `Event::Agent` relayed by the server counts toward the agents that need the
     human even where the worker's own link is down or no tile shows the session. ⌘⇧A walks
     the tiled ones in reading order, then the rest. For one without a tile it proposes a
     terminal item for that session on its worker, or says the worker is not reachable from
     here. The banner comes from the worker's link when there is one, from the server's
     otherwise.
-  - The palette gained "Connect to a server", "Disconnect from the server" and "List
-    workers". The list shows each worker with its state, and ↩ goes to its first tile or
+  - The palette gained "Connect to a server", "Disconnect from the server" (gone 2026-10-04)
+    and "List workers". The list shows each worker with its state, and ↩ goes to its first tile or
     opens a shell on it.
 
 - ✅ **The worker is called a worker everywhere** (2026-09-25). The code said "host" for the
@@ -556,7 +559,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     nothing, and the port and the lease ALPN are what mark a server. The app's "Connect to a
     server" panel, shown while no server is set, does the same and puts the first answer in the
     empty address field, naming it ("Found studio.tail1234.ts.net on your tailnet"); connecting
-    stays a click. Test: `the_server_is_found_through_the_local_tailscale`.
+    stays a click. Test: `the_server_is_found_through_the_local_tailscale`. Since 2026-10-04
+    "Use this Mac" joins the one Ready server the look finds, asks when several answer, and
+    starts one here when none does (**The first Mac runs the server**).
     - Rejected: `MagicDNS` SRV/TXT records (control pushes A/AAAA only), Tailscale Services
       (TCP only, tagged hosts, missing in Headscale), and control-plane APIs, which differ per
       control server.
@@ -824,3 +829,45 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   the two are gone. This supersedes that part of the entry above. `DisplayCap` went into
   `DisplayInfo` (see Platform, "No macOS names on the wire"). Goldens: `ctl_reply_doctor` and
   `ctl_health_without_tailscale`.
+- ✅ **The first Mac runs the server; a missing server is an outage, not a mode** (2026-10-04,
+  `.research/server-default-2026-10-04.md`). Two ways to reach a worker (the server's
+  directory, and an address stored on one client) meant two dial sources, workers that other
+  clients never listed, and fleet features (projects, routed notices, wake, Finder's domains)
+  that stayed dark wherever no server ran. So a server always exists.
+  - **"Use this Mac" decides the server before it installs anything.** The one this app or
+    this Mac's worker is set to; else the one server the tailnet look finds Ready; else none
+    answered, and it installs `slopty-server` here through launchd with the CLI's own
+    installer (`slopty_platform::service::install_server`) and waits up to 10 s for it to
+    answer on loopback. Several answering, or no look possible (no Tailscale here), and it
+    asks for one address in the panel's field, where empty means "start one here". Then the
+    worker's `[worker] server` is set (its own, if it had one, wins), `[client] server`
+    follows the worker's, and the flow ends when the directory lists this Mac
+    (`this_mac::LISTED_TRIES` looks, 20 s), not with a loopback add. The checklist gains a
+    Server line, read from the doctor's link state (`ctl::Health::server`).
+  - **Deleted:** adding a worker by address, in the panel and as `slopty add` and `slopty
+    forget`; the client's worker list (`workers.json` keeps only the client id, now
+    `client.json`); `WorkerSlot.added`; "Disconnect from the server"; "Register machines with
+    the server" and the notice that offered it; `--no-server` on `slopty worker deploy`;
+    `ServerState::Off` and `Directory::degraded`.
+  - **Every install names a server.** `slopty_deploy::Plan.server` is required, and a deploy
+    with no address for it fails before anything is sent (`DeployError::NoServerAddress`).
+    The app's SSH install waits for the directory to list the machine, and says what the
+    worker said of its link when it never does. `slopty worker install` with no server set
+    or found installs one beside the worker. The VM and Linux lanes deploy a server first.
+  - **Forgetting** a worker that is not online asks the server (`Verb::ForgetWorker`), and it
+    leaves every client when the directory unlists it.
+  - **Kept on purpose:** the outage (the cached directory, workers dialled directly, each
+    client posting its own notifications), and a worker daemon that starts with no server,
+    which the worker's own tests use.
+  - **Tests.** Every e2e stack runs its own `slopty-server`, the worker registered with it
+    and the app following it, so the suite dials through the directory as people do; a relay
+    or a cut in front of a worker is what the directory lists (the worker registers over IPv6
+    and the relay binds `[::1]` on its port). The extra process cost about 20 ms per stack
+    (MEASUREMENTS, "A stack with its own server"). App:
+    `this_mac_runs_the_server_then_waits_for_it_to_list_the_worker`,
+    `this_mac_asks_which_server_when_it_cannot_tell`,
+    `the_sheet_installs_step_by_step_until_the_server_lists_the_worker`; deploy:
+    `the_worker_registers_with_the_server_as_the_machine_reaches_it`; CLI:
+    `worker_install_with_no_server_installs_one_beside_it`,
+    `a_worker_name_resolves_through_the_server`; e2e: `the_first_run_offers_one_way_in`,
+    `this_mac_walks_its_checklist`.

@@ -118,12 +118,8 @@ pub enum Command {
         /// Increase Contrast is on.
         increased: bool,
     },
-    /// Add a worker by address and connect, as the add-worker panel would.
-    AddWorker {
-        /// `host[:port]`.
-        address: String,
-    },
-    /// Forget a worker added by address, as its menu in the navigator would.
+    /// Ask the server to forget a worker it lists as not online, as the hosts popover's Forget
+    /// does; it leaves the app when the directory unlists it.
     ForgetWorker {
         /// Its id, as the worker writes it.
         id: String,

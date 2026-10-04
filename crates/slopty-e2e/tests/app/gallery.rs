@@ -75,15 +75,19 @@ pub async fn first_shell(drv: &mut Driver) -> Dump {
     .unwrap()
 }
 
-/// The first run: one way forward, and nothing else on the screen to choose from.
+/// The first run: connecting to a server is the way forward, and nothing else on the screen
+/// is there to choose from. Once connected, its workers come, and "Add a machine" installs
+/// one rather than taking an address.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_first_run_offers_one_way_in() {
     // This Mac's entry is on the page as a user meets it: the stand-in behind it installs
     // nothing, and this case never presses it.
-    let report = this_mac_report(true);
-    let env = [(slopty_e2e::THIS_MAC_ENV, report.as_str())];
-    let mut stack = Stack::launch_first_run_with("e2e-worker", &env).await.unwrap();
+    let mut stack = Stack::launch_first_run_with("e2e-worker", |server, root| {
+        vec![(slopty_e2e::THIS_MAC_ENV.to_owned(), this_mac_report(true, server, root))]
+    })
+    .await
+    .unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -110,41 +114,48 @@ async fn the_first_run_offers_one_way_in() {
         assert!(!buttons.iter().any(|b| b == absent), "{absent} on the first run: {buttons:?}");
     }
     assert!(buttons.iter().any(|b| b == "Connect"), "{buttons:?}");
-    assert!(buttons.iter().any(|b| b == "Add a machine by address instead"), "{buttons:?}");
     assert!(buttons.iter().any(|b| b == THIS_MAC), "{buttons:?}");
+    assert!(!buttons.iter().any(|b| b.contains("by address")), "{buttons:?}");
 
-    let switch = dump
-        .a11y_node("Button", Some("Add a machine by address instead"))
-        .expect("the switch")
-        .bounds;
-    drv.click(switch[0] + switch[2] / 2.0, switch[1] + switch[3] / 2.0).await.unwrap();
+    stack.connect_server().await.unwrap();
+    let dump = first_shell(&mut stack.driver).await;
+    assert!(!dump.adding, "the page goes once the server's worker connects: {dump:#?}");
+
+    let drv = &mut stack.driver;
+    drv.keys("cmd-shift-h").await.unwrap();
     let dump = drv
-        .wait_for("the add-worker panel", STEP, |d| {
+        .wait_for("the add-a-machine dialog, done looking", STEP, |d| {
             d.a11y_node("Heading", Some("Add a machine")).is_some()
+                && d.a11y_node("Status", Some("Nothing answered on your tailnet")).is_some()
         })
         .await
         .unwrap();
-    assert!(labels(&dump, "Button").iter().any(|b| b == "Add"), "{:#?}", dump.a11y);
-    // The pointer leaves the link it clicked, so the golden holds the panel at rest and not
-    // the link's hover.
+    let buttons = labels(&dump, "Button");
+    assert!(!buttons.iter().any(|b| b == "Connect" || b == "Add"), "no address: {buttons:?}");
+    assert!(buttons.iter().any(|b| b == THIS_MAC), "{buttons:?}");
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "add-worker").await;
-
-    stack.add_worker().await.unwrap();
-    let dump = first_shell(&mut stack.driver).await;
-    assert!(!dump.adding, "the panel goes with the first worker: {dump:#?}");
     stack.shutdown().await;
 }
 
 /// The first run's way to make this Mac a worker, and its checklist's heading.
 const THIS_MAC: &str = "Use this Mac";
 
-/// This Mac's worker as the stand-in reports it: answering, with Accessibility granted, Screen
-/// Recording as `screen_recording` says, and on the tailnet.
-fn this_mac_report(screen_recording: bool) -> String {
+/// This Mac's worker as the stand-in reports it: the run's worker under `root`, answering,
+/// linked to `server`, with Accessibility granted, Screen Recording as `screen_recording`
+/// says, and on the tailnet. A server "started here" is `server`.
+fn this_mac_report(
+    screen_recording: bool,
+    server: &slopty_e2e::harness::ServerDaemon,
+    root: &std::path::Path,
+) -> String {
+    let worker = slopty_e2e::harness::worker_id(root).and_then(|id| id.parse().ok());
     let health = slopty_proto::ctl::Health {
-        worker: slopty_core::WorkerId::new(),
-        server: None,
+        worker: worker.unwrap_or_default(),
+        server: Some(slopty_proto::ctl::ServerHealth {
+            address: server.address().to_owned(),
+            link: slopty_proto::ctl::LinkState::Linked,
+        }),
         version: "0.1.0".to_owned(),
         exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
         caps: slopty_proto::server::WorkerCaps {
@@ -166,15 +177,18 @@ fn this_mac_report(screen_recording: bool) -> String {
     serde_json::to_string(&health).unwrap()
 }
 
-/// "Use this Mac as a worker" on the first run turns the page into the worker's own
-/// checklist: running, one grant missing with the button to its pane, the other granted, the
-/// tailnet reached. The stand-in behind it installs nothing and adds nothing.
+/// "Use this Mac" on the first run, with no server answering on the tailnet, starts one here
+/// and turns the page into the worker's own checklist: running, the server linked, one grant
+/// missing with the button to its pane, the other granted, the tailnet reached. The stand-in
+/// behind it installs nothing: the server "started here" is the run's own.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn this_mac_walks_its_checklist() {
-    let report = this_mac_report(false);
-    let env = [(slopty_e2e::THIS_MAC_ENV, report.as_str())];
-    let mut stack = Stack::launch_first_run_with("e2e-worker", &env).await.unwrap();
+    let mut stack = Stack::launch_first_run_with("e2e-worker", |server, root| {
+        vec![(slopty_e2e::THIS_MAC_ENV.to_owned(), this_mac_report(false, server, root))]
+    })
+    .await
+    .unwrap();
     let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
@@ -197,13 +211,13 @@ async fn this_mac_walks_its_checklist() {
     let items = labels(&dump, "ListItem");
     assert_eq!(
         items,
-        ["Running", "Screen Recording", "Accessibility", "Reachable on your tailnet"],
+        ["Running", "Server", "Screen Recording", "Accessibility", "Reachable on your tailnet"],
         "{:#?}",
         dump.a11y
     );
     let fixes = labels(&dump, "Button").into_iter().filter(|b| b == "Open settings").count();
     assert_eq!(fixes, 1, "one grant missing, one way to it: {:#?}", dump.a11y);
-    assert!(dump.adding && dump.workers.is_empty(), "nothing was added: {dump:#?}");
+    assert!(dump.adding, "the checklist waits on the grant: {dump:#?}");
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "this-mac").await;
     stack.shutdown().await;

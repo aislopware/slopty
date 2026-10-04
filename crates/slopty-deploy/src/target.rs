@@ -103,18 +103,27 @@ impl Server {
         } else {
             self.host.as_str()
         };
-        let plain = host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'));
-        if host.is_empty() || !plain {
-            return None;
-        }
-        Some(if host.contains(':') {
-            format!("[{host}]:{}", self.port)
-        } else {
-            format!("{host}:{}", self.port)
-        })
+        dialled(host, self.port)
     }
+
+    /// The address as it is, for a worker on the deploying machine itself; `None` when it
+    /// holds what a shell would read as more than an address.
+    #[must_use]
+    pub fn address(&self) -> Option<String> {
+        dialled(&self.host, self.port)
+    }
+}
+
+/// `host:port` as a worker's `--server` takes it, an IPv6 host in brackets; `None` for a host
+/// that is empty or holds what a shell would read as more than an address.
+fn dialled(host: &str, port: u16) -> Option<String> {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let plain =
+        host.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':' | '%'));
+    if host.is_empty() || !plain {
+        return None;
+    }
+    Some(if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") })
 }
 
 /// The SSH target each worker was installed through, by worker id, so its tile's "Update"

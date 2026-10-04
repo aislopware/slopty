@@ -14,10 +14,9 @@
 //! * `slopty ssh` is `ssh` with a terminal the far side knows; a Slopty shell's `ssh` runs it.
 //! * `slopty browse` and `slopty edit` hand a shell's web pages and files to the client in front of
 //!   it; a Slopty session's `BROWSER`, `EDITOR` and `open` are this binary under other names.
-//! * `slopty add <host[:port]>` remembers a worker (today's `slopty-worker`) by its address.
-//! * `slopty sessions|attach` are a real client over QUIC straight to a worker: a raw-mode terminal
-//!   that renders frames locally. It is the reference client for latency measurements and works
-//!   before (and without) the GPUI apps.
+//! * `slopty sessions|attach` are a real client over QUIC straight to a worker the server lists, or
+//!   any `host:port`: a raw-mode terminal that renders frames locally. It is the reference client
+//!   for latency measurements and works without the GPUI apps.
 
 #![allow(clippy::print_stdout, clippy::print_stderr, reason = "a CLI; stdout is its UI")]
 #![forbid(unsafe_code)]
@@ -134,27 +133,16 @@ enum Cmd {
         #[arg(long)]
         all_frames: bool,
     },
-    /// Add a worker by its address: a Tailscale `MagicDNS` name, a LAN name or an IP, with an
-    /// optional `:port`.
-    Add {
-        /// `host[:port]`.
-        address: String,
-    },
-    /// Forget a worker.
-    Forget {
-        /// Worker name, address or id prefix.
-        worker: String,
-    },
     /// List sessions on a worker.
     Sessions {
-        /// Worker name, address or id prefix, or any `host[:port]` (the only worker when
-        /// omitted).
+        /// Worker name or id prefix, as the server lists it, or any `host:port` (the only
+        /// worker online when omitted).
         #[arg(long)]
         worker: Option<String>,
     },
     /// Measure application round-trip time to a worker (control-stream ping).
     Ping {
-        /// Worker name, address or id prefix, or any `host[:port]`.
+        /// Worker name or id prefix, as the server lists it, or any `host:port`.
         #[arg(long)]
         worker: Option<String>,
         /// Number of probes.
@@ -169,7 +157,7 @@ enum Cmd {
     /// Attach to a session straight on its worker, or open one and attach when no session is
     /// given. Detach with `^]`.
     Attach {
-        /// Worker name, address or id prefix, or any `host[:port]`.
+        /// Worker name or id prefix, as the server lists it, or any `host:port`.
         #[arg(long)]
         worker: Option<String>,
         /// Session id prefix.
@@ -198,7 +186,7 @@ enum BenchCmd {
     /// Keystroke round trip: a byte to a `cat` session on the worker, timed to the first frame
     /// back.
     Echo {
-        /// Worker name, address or id prefix, or any `host[:port]`.
+        /// Worker name or id prefix, as the server lists it, or any `host:port`.
         #[arg(long)]
         worker: Option<String>,
         /// Samples.
@@ -209,7 +197,7 @@ enum BenchCmd {
     // Apple only: this side decodes with VideoToolbox (`docs/decisions/platform.md`).
     #[cfg(target_vendor = "apple")]
     Screen {
-        /// Worker name, address or id prefix, or any `host[:port]`.
+        /// Worker name or id prefix, as the server lists it, or any `host:port`.
         #[arg(long)]
         worker: Option<String>,
         /// Print the worker's windows and displays instead of streaming.
@@ -270,6 +258,7 @@ async fn run() -> Result<ExitCode> {
     }
     let cli = Cli::parse();
     let data_dir = cli.data_dir.unwrap_or_else(slopty_platform::dirs::data_dir);
+    let server = cli.server.as_deref();
     let done = match cli.cmd {
         Cmd::Worker { cmd } => {
             workerctl::run(cmd, cli.server.as_deref(), &data_dir, cli.json).await
@@ -311,22 +300,22 @@ async fn run() -> Result<ExitCode> {
         }
         Cmd::Mcp => Box::pin(mcp::run(cli.server.as_deref(), &data_dir)).await,
         Cmd::Server { cmd } => service::server(cmd, &data_dir).await,
-        Cmd::Add { address } => client::add(&data_dir, &address).await,
-        Cmd::Forget { worker } => client::forget(&data_dir, &worker),
-        Cmd::Sessions { worker } => client::sessions(&data_dir, worker.as_deref()).await,
+        Cmd::Sessions { worker } => client::sessions(&data_dir, server, worker.as_deref()).await,
         Cmd::Attach { worker, session: Some(session), .. } => {
-            return attach::attach(&data_dir, worker.as_deref(), &session).await;
+            return attach::attach(&data_dir, server, worker.as_deref(), &session).await;
         }
         Cmd::Attach { worker, session: None, cwd, command } => {
-            return attach::open(&data_dir, worker.as_deref(), cwd, command).await;
+            return attach::open(&data_dir, server, worker.as_deref(), cwd, command).await;
         }
-        Cmd::Ping { worker, count } => client::ping(&data_dir, worker.as_deref(), count).await,
+        Cmd::Ping { worker, count } => {
+            client::ping(&data_dir, server, worker.as_deref(), count).await
+        }
         Cmd::Bench { cmd: BenchCmd::Echo { worker, count } } => {
-            bench::echo(&data_dir, worker.as_deref(), count).await
+            bench::echo(&data_dir, server, worker.as_deref(), count).await
         }
         #[cfg(target_vendor = "apple")]
         Cmd::Bench { cmd: BenchCmd::Screen { worker, list, .. } } if list => {
-            bench::screen::list(&data_dir, worker.as_deref()).await
+            bench::screen::list(&data_dir, server, worker.as_deref()).await
         }
         #[cfg(target_vendor = "apple")]
         Cmd::Bench {
@@ -344,7 +333,7 @@ async fn run() -> Result<ExitCode> {
                 mbit,
                 max_stalls,
             };
-            bench::screen::screen(&data_dir, worker.as_deref(), spec).await
+            bench::screen::screen(&data_dir, server, worker.as_deref(), spec).await
         }
     };
     done.map(|()| ExitCode::SUCCESS)

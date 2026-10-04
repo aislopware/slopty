@@ -64,7 +64,6 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
         update: true,
         bin_dir: None,
         ssh,
-        no_server: false,
         end_sessions: false,
     };
     let data = tempfile::tempdir().unwrap();
@@ -82,7 +81,7 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     );
     assert!(scripts.contains(" --update --end-sessions'\n"), "{scripts}");
     assert_eq!(deployed.platform, Platform { os: Os::MacOs, arch: Arch::Arm64 });
-    assert_eq!(deployed.server.as_deref(), Some("hub.tail1234.ts.net:45560"));
+    assert_eq!(deployed.server, "hub.tail1234.ts.net:45560");
 
     let said = report("studio", &deployed);
     assert!(said.contains("is up on studio (macOS arm64)"), "{said}");
@@ -93,16 +92,6 @@ async fn the_options_reach_the_plan_and_the_report_says_what_is_next() {
     assert!(said.contains("slopty-ptyd restarts, ending the 2 sessions"), "{said}");
     assert!(said.contains("it stops when you log out"), "{said}");
 
-    let alone = DeployOpts { no_server: true, ..opts };
-    let deployed = deploy(&alone, Some("hub.tail1234.ts.net"), data.path(), source.path());
-    let deployed = deployed.await.unwrap();
-    let scripts = std::fs::read_to_string(&log).unwrap();
-    let last = scripts.lines().rfind(|l| l.contains("worker install")).unwrap_or_default();
-    assert!(!last.contains("--server"), "--no-server registers it nowhere: {last}");
-    assert_eq!(deployed.server, None);
-    let said = report("studio", &deployed);
-    assert!(said.contains("no server to register with"), "{said}");
-    assert!(said.contains("slopty add studio.tail1234.ts.net"), "{said}");
     assert!(!said.contains("nobody is logged in"), "the machine said nothing of it: {said}");
 
     let console = slopty_deploy::Console { logged_in: Some(false), filevault: Some(true) };

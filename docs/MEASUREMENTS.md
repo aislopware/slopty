@@ -14394,3 +14394,27 @@ cargo build --release -p slopty-ptyd -p slopty-cli
 cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_thread \
   -- --ignored --nocapture
 ```
+
+## 2026-10-04 — A stack with its own server
+
+Every e2e app stack now starts its own `slopty-server`; the worker registers with it, and the app
+follows it and dials the worker the directory lists (`docs/decisions/topology.md`, "The first Mac
+runs the server"). Before, the app added the worker by its address. Measured with
+`a_stack_comes_up_in_measured_time` (slopty-e2e app, debug, mac-studio (M1 Max), load average
+9–11 from other lanes' builds): seven stacks in a row, from the launch call to the app's link up
+and to its first shell's prompt; then seven servers started alone, to the line where they print
+their listeners. The "before" row is the same test on the add-by-address harness, earlier the
+same day on the same machine.
+
+| stack | linked, median | first prompt, median |
+| --- | --- | --- |
+| add by address (before) | 430 ms | 450 ms |
+| own server, through the directory | 449 ms | 465 ms |
+
+The server alone starts in 7 ms (median). A stack costs about 15–20 ms more: the server's start
+plus the app's link to it and the directory's first listing before the worker is dialled. That is
+under 5 % of a stack's start, and no test step waits on it beyond the launch.
+
+```sh
+cargo xtask e2e app --filter 'test(~a_stack_comes_up)'
+```

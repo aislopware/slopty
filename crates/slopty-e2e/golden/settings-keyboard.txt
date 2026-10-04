@@ -125,16 +125,12 @@ ListItem │ Add a machine… │ ⇧⌘H
 Button │ Keys for Add a machine… │ ⇧⌘H
 ListItem │ Connect to a server
 Button │ Keys for Connect to a server
-ListItem │ Disconnect from the server
-Button │ Keys for Disconnect from the server
 ListItem │ Copy the tailnet grant for Slopty's clients
 Button │ Keys for Copy the tailnet grant for Slopty's clients
 ListItem │ Update all machines
 Button │ Keys for Update all machines
 ListItem │ Update the server
 Button │ Keys for Update the server
-ListItem │ Register machines with the server
-Button │ Keys for Register machines with the server
 ListItem │ Use this Mac
 Button │ Keys for Use this Mac
 ListItem │ Restart slopty-worker on this Mac
@@ -365,12 +361,6 @@ ListItem │ Select next │ ↓, J
 Button │ Keys for Select next │ ↓, J
 ListItem │ Open │ ↩
 Button │ Keys for Open │ ↩
-ListItem │ Project tree │ 1
-Button │ Keys for Project tree │ 1
-ListItem │ Project board │ 2
-Button │ Keys for Project board │ 2
-ListItem │ Project timeline │ 3
-Button │ Keys for Project timeline │ 3
 ListItem │ Merge the task │ M
 Button │ Keys for Merge the task │ M
 ListItem │ Retry the task │ R
@@ -391,8 +381,6 @@ ListItem │ Show the orchestrator's terminal │ T
 Button │ Keys for Show the orchestrator's terminal │ T
 ListItem │ Tell the orchestrator… │ C
 Button │ Keys for Tell the orchestrator… │ C
-ListItem │ Show the machines │ 4
-Button │ Keys for Show the machines │ 4
 ListItem │ Run the task on… │ O
 Button │ Keys for Run the task on… │ O
 ListItem │ Push after each merge

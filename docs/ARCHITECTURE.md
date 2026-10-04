@@ -1629,24 +1629,27 @@ comes only after `redial::WRONG_BUILD` or a nudge). Its "…" in the navigator r
 Connect, Wake, the clipboard and Forget as the app allows (`workspace::machines`). The titlebar
 names only the workers that are down; the "…" menu adds a worker. The bell and the Dock badge count
 agents across every worker, and ⌘⇧A goes to the next one wherever it is. A banner names only
-a session, which the workspace finds on whichever worker runs it. The known workers are
-`workers.json` in the client's data dir (`slopty_net::known`): a list of `{ address, name,
-worker_id }` keyed by the id, so a worker that moves keeps its row and its tiles; a dial that
-reaches another id at a stored address says so instead of mixing tiles.
+a session, which the workspace finds on whichever worker runs it. The workers are the server's
+directory's, cached as `directory.json` for an outage; a worker is keyed by its id, so one that
+moves keeps its row and its tiles, and a dial that reaches another id at the listed address says
+so instead of mixing tiles. The client keeps only its own id, in `client.json`
+(`slopty_net::known`).
 
-**Adding a worker.** An installation with no worker and no server opens on the first-run
-page, which is the whole window: "Connect to a server", one line on what that is, the address
-field, "Connect", and "Add a worker by address instead" as a quiet link (no titlebar, no
-workspace behind it). Later, "Connect to a server" and "Add a worker" (⌘⇧H) show the same panel
-as a dialog over the workspace with a Cancel. The phone adds "Paste", since it has no ⌘V.
-On the Mac the server panel looks on the tailnet at once and says so ("Looking on your
-tailnet…"); every server that answers is a row to connect to, best first, and when none does
-it says "Nothing answered on your tailnet".
-`slopty_app::net::add_worker` connects, says `Hello`, and stores the worker under the id its
-`HelloAck` carries, the same as `slopty add` on the CLI.
+**The first run.** An installation with no server set opens on the first-run page, which is
+the whole window (no titlebar, no workspace behind it): "Connect to a server", one line on what
+that is, then "Use this Mac", the servers the tailnet answered with, the address field with
+"Connect", and "Set up the server over SSH". "Use this Mac" joins the server set or the one the
+tailnet found, else starts one here, then installs this Mac's worker against it, and is done when
+the directory lists this Mac (`docs/decisions/topology.md`, "The first Mac runs the server").
+Later, "Connect to another server" and "Add a machine" (⌘⇧H) show the panel as a dialog over the
+workspace with a Cancel; a machine's panel offers this Mac, a machine over SSH and the tailnet's
+workers the server does not list yet, and takes no address, since every machine joins through the
+server. The phone adds "Paste", since it has no ⌘V. On the Mac the panel looks on the tailnet at
+once and says so ("Looking on your tailnet…"); every server that answers is a row to connect to,
+best first, and when none does it says "Nothing answered on your tailnet".
 
-**Installing a worker over SSH.** On the Mac the panel's "Set up a worker" section has, beside
-"Use this Mac as a worker", "Install on a machine over SSH", and the palette offers it too. The
+**Installing a worker over SSH.** On the Mac the machine panel's "Set up" section has, beside
+"Use this Mac", "Install on a machine over SSH", and the palette offers it too. The
 form (host, optional user and port) gives way to five step lines while `slopty_deploy::deploy`
 runs on the networking runtime through the person's own `ssh`, unattended (`BatchMode`). This
 is the plan `slopty worker deploy` runs. A bar under the steps fills while the binaries go up.

@@ -2586,7 +2586,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     "Nothing answered on your tailnet". Workers the server lists or the store holds are left
     out. The e2e app reads a stand-in tailnet (`slopty_e2e::TAILNET_STATUS_ENV`, empty from the
     harness), so no golden shows what this Mac's own tailnet answers, and `first-run` is taken
-    once the look has ended.
+    once the look has ended. Superseded in part 2026-10-04 by **The first Mac runs the server**
+    (topology.md): the first run is the server's panel and offers only servers; the tailnet's
+    workers the server does not list are rows on "Add a machine", and pressing one opens the
+    SSH sheet on it, to install this build there registered with the server.
   - **A header's title keeps its width; the pill gives way.** On a phone the agent's pill
     ("Needs approval: $ touch …") took the header and squeezed the title. The title is now its
     own flex item at its text's width, the place gives way first (`PLACE_SHRINK`), the readout

@@ -4,6 +4,8 @@ Heading │ Use this Mac
 List │ Use this Mac
 ListItem │ Running
 Image │ Done
+ListItem │ Server
+Image │ Done
 ListItem │ Screen Recording
 Image │ Needs you
 Button │ Open settings

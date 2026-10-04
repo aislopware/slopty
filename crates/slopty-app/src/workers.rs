@@ -1,5 +1,5 @@
-//! The workers this app reaches, from the server's directory or added by address: one direct
-//! link each, all of them feeding one workspace.
+//! The workers this app reaches, as the server's directory lists them: one direct link each, all
+//! of them feeding one workspace.
 
 use std::time::{Duration, Instant};
 
@@ -20,12 +20,11 @@ pub mod actions {
     actions!(
         workers,
         [
-            /// Open the panel that adds a worker by address.
+            /// Open the panel that adds a machine: this Mac, one over SSH, or one the tailnet
+            /// finds.
             AddWorker,
             /// Open the panel that connects to a server, whose directory lists the workers.
             ConnectServer,
-            /// Stop using the server: its workers leave, the ones added by address stay.
-            DisconnectServer,
             /// Copy the tailnet policy grant that lets the tailnet's devices in as the server's
             /// clients.
             CopyTailnetGrant,
@@ -38,17 +37,15 @@ pub use slopty_ui::workspace::worker_key;
 
 /// One worker as the app keeps it, beside what the workspace keeps.
 pub struct WorkerSlot {
-    /// Its identity (the directory's and the known-workers store's key).
+    /// Its identity (the directory's key).
     pub id: WorkerId,
-    /// It was added by address, so it stays without the server.
-    pub added: bool,
     /// Wakes its connect loop out of a wait: it came back online, or the server went away and
     /// its cached address is worth a try. While a link is up it wakes the link's [`Hearing`]
     /// check instead, which gives up a silent link at once.
     pub wake: std::sync::Arc<tokio::sync::Notify>,
     /// The workspace's key for it.
     pub key: WorkerKey,
-    /// Display name (from the store, refreshed by each `HelloAck`).
+    /// Display name (from the directory, refreshed by each `HelloAck`).
     pub name: String,
     /// The live link, to abandon it when the worker is forgotten.
     pub link: Option<std::sync::Weak<WorkerLink>>,
@@ -68,9 +65,9 @@ impl std::fmt::Debug for WorkerSlot {
 impl WorkerSlot {
     /// A slot for a worker, before its first connection attempt.
     #[must_use]
-    pub fn new(id: WorkerId, name: String, added: bool) -> Self {
+    pub fn new(id: WorkerId, name: String) -> Self {
         let wake = std::sync::Arc::default();
-        Self { id, added, wake, key: worker_key(id), name, link: None, resume: None }
+        Self { id, wake, key: worker_key(id), name, link: None, resume: None }
     }
 
     /// Cut a wait short.
@@ -263,7 +260,7 @@ mod tests {
     #[test]
     fn a_resume_probes_a_live_link_and_dials_a_dead_one() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut slot = WorkerSlot::new(WorkerId::new(), "studio".to_owned(), true);
+        let mut slot = WorkerSlot::new(WorkerId::new(), "studio".to_owned());
         slot.resume = Some(tx);
         slot.resume(Resume::Woke);
         assert_eq!(rx.try_recv().ok(), Some(Resume::Woke), "the live link probes");
@@ -279,7 +276,7 @@ mod tests {
     #[test]
     fn a_link_is_adopted_only_by_a_slot_that_is_still_there() {
         let (kept, gone) = (WorkerId::new(), WorkerId::new());
-        let mut slots = vec![WorkerSlot::new(kept, "stored".to_owned(), true)];
+        let mut slots = vec![WorkerSlot::new(kept, "stored".to_owned())];
         assert_eq!(adopt(&mut slots, gone, std::sync::Weak::new(), "ghost".to_owned()), None);
         assert_eq!(slots.len(), 1);
         assert!(slots[0].link.is_none(), "the other slot is untouched");

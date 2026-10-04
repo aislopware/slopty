@@ -9,13 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{Modifiers, TestAppContext, VisualTestContext, px, size};
 use slopty_deploy::{Arch, Os, Platform};
-use slopty_proto::ctl::PasteboardAccess;
+use slopty_proto::ctl::{Health, PasteboardAccess, Tailscale};
 use slopty_proto::server::{Os as WorkerOs, WorkerCaps};
 use tokio::sync::oneshot;
 
-use super::actions::{RegisterWithServer, UpdateAllWorkers, UpdateServer};
+use super::actions::{UpdateAllWorkers, UpdateServer};
 use super::*;
-use crate::tests::{shell, workspace};
+use crate::tests::{list, shell, workspace};
 
 /// Set when the deploy it guards is dropped: a cancelled run's `ssh` is killed then.
 struct Dropped(Arc<AtomicBool>);
@@ -40,8 +40,7 @@ struct StandIn {
     trusted: RefCell<Vec<String>>,
     /// The last password a run was handed, as the deployer would hand it to `ssh`.
     password: RefCell<Option<String>>,
-    /// The one address that answers an add, and the worker it adds.
-    answers: String,
+    /// The worker its installs put there.
     worker: WorkerId,
     /// The servers' targets it was told to keep, by address.
     servers: RefCell<HashMap<String, Target>>,
@@ -50,8 +49,8 @@ struct StandIn {
 }
 
 impl StandIn {
-    fn new(answers: &str) -> Rc<Self> {
-        Rc::new(Self { answers: answers.to_owned(), worker: WorkerId::new(), ..Self::default() })
+    fn new() -> Rc<Self> {
+        Rc::new(Self { worker: WorkerId::new(), ..Self::default() })
     }
 
     fn asked(&self) -> Vec<String> {
@@ -77,12 +76,12 @@ impl Deployer for StandIn {
     fn deploy(
         &self,
         to: &Target,
-        server: Option<Server>,
+        server: Server,
         said: Said,
         events: mpsc::UnboundedSender<Event>,
     ) -> Pending<Result<Deployed, Failure>> {
         let Target { host, user, port } = to;
-        let server = server.map(|s| format!("{}:{}", s.host, s.port));
+        let server = format!("{}:{}", server.host, server.port);
         let ends = if said.end_sessions { " end_sessions" } else { "" };
         let signs = if said.password.is_some() { " password" } else { "" };
         let key = if said.add_key { " add_key" } else { "" };
@@ -92,7 +91,7 @@ impl Deployer for StandIn {
             .map(|p| slopty_deploy::ExposeSecret::expose_secret(p).to_owned());
         self.asked
             .borrow_mut()
-            .push(format!("deploy {host} {user:?} {port:?} server={server:?}{ends}{signs}{key}"));
+            .push(format!("deploy {host} {user:?} {port:?} server={server}{ends}{signs}{key}"));
         *self.events.borrow_mut() = Some(events);
         let (tx, rx) = oneshot::channel();
         *self.finish.borrow_mut() = Some(tx);
@@ -102,14 +101,6 @@ impl Deployer for StandIn {
             let _guard = guard;
             rx.await.unwrap_or_else(|_| Err(failure("the test let go")))
         })
-    }
-
-    fn add(&self, address: &str) -> Pending<Result<net::Added, String>> {
-        self.asked.borrow_mut().push(format!("add {address}"));
-        let added = (address == self.answers)
-            .then(|| net::Added { id: self.worker, name: "mini".to_owned() })
-            .ok_or_else(|| format!("nothing answered at {address}"));
-        Box::pin(std::future::ready(added))
     }
 
     fn remember(&self, worker: WorkerId, to: &Target) {
@@ -141,8 +132,9 @@ impl Deployer for StandIn {
         Box::pin(std::future::ready(Err(format!("nothing answered at {address}"))))
     }
 
-    fn register_here(&self, server: &HostAddr) {
-        self.asked.borrow_mut().push(format!("register {server}"));
+    fn register_here(&self, old: Option<&HostAddr>, server: &HostAddr) {
+        let old = old.map_or_else(String::new, |old| format!(" from {old}"));
+        self.asked.borrow_mut().push(format!("register {server}{old}"));
     }
 
     fn remember_server(&self, address: &HostAddr, to: &Target) {
@@ -188,7 +180,7 @@ fn deployed() -> Deployed {
             sessions: 0,
             uptime_secs: 1,
         },
-        server: None,
+        server: "hub:45560".to_owned(),
         ptyd: None,
         stops_at_logout: None,
         console: slopty_deploy::Console::default(),
@@ -231,18 +223,6 @@ fn the_fields_read_as_ssh_takes_them() {
     assert!(read("mini", "", "0").is_err() && read("mini", "", "ssh").is_err());
 }
 
-/// The worker is added at its tailnet name first, then the host `ssh` reached, each with the
-/// port it listens on when that is not the default.
-#[test]
-fn the_new_worker_is_reached_at_its_tailnet_name_first() {
-    let target = Target { host: "10.0.0.7".to_owned(), user: None, port: Some(2222) };
-    let mut health = deployed().health;
-    assert_eq!(addresses(&target, &health), ["mini.tail1234.ts.net", "10.0.0.7"]);
-    health.listen = "0.0.0.0:7000".to_owned();
-    health.tailscale = Tailscale::Absent;
-    assert_eq!(addresses(&target, &health), ["10.0.0.7:7000"]);
-}
-
 /// Each stage is a line: done ones ticked with what they found, the one under way with the
 /// bar (a share while the binaries go up), and a failure marks where it stopped.
 #[test]
@@ -283,31 +263,26 @@ fn the_steps_follow_the_deploy() {
     );
 }
 
-/// On the first run the SSH entry opens a form in the address's place; Install with no host
-/// says what is missing; with one, each step shows as the deploy says it, the bar filling while
-/// the binaries go up, and once the worker answers it is added at its tailnet name and the page
-/// gives way to the workspace.
+/// The panel's SSH entry opens a form; Install with no host says what is missing; with one,
+/// each step shows as the deploy says it, registered with the app's server, the bar filling
+/// while the binaries go up. Once the server's directory lists the worker the dialog gives way
+/// to the workspace; a worker it never lists stops the run with why.
 #[gpui::test]
-fn the_sheet_installs_step_by_step_then_adds_the_worker(cx: &mut TestAppContext) {
+fn the_sheet_installs_step_by_step_until_the_server_lists_the_worker(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let (ws, cx) = shell(cx, &runtime, &dir, false);
+    let (ws, cx) = shell(cx, &runtime, &dir, true);
     cx.simulate_resize(size(px(900.0), px(800.0)));
-    let deployer = StandIn::new("mini.tail1234.ts.net");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, cx| {
         ws.deployer = Some(shared);
         cx.notify();
     });
     cx.run_until_parked();
-    assert!(ws.read_with(cx, |ws, _| ws.welcome()), "the first run");
 
-    let entry = cx.debug_bounds("install-over-ssh").expect("the entry, a row to press");
-    let field = cx.debug_bounds("add-worker-field").expect("the address");
-    assert!(entry.bottom() <= field.top(), "a place to add, over the address to type");
     click(cx, "install-over-ssh");
     assert!(cx.debug_bounds("ssh-form").is_some(), "the form");
-    assert!(cx.debug_bounds("add-worker-field").is_none(), "in the address's place");
     assert!(cx.debug_bounds("install-over-ssh").is_none(), "the entry has done its part");
 
     click(cx, "ssh-install");
@@ -316,7 +291,7 @@ fn the_sheet_installs_step_by_step_then_adds_the_worker(cx: &mut TestAppContext)
 
     type_host(&ws, cx, "me@mini");
     click(cx, "ssh-install");
-    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None server=None"]);
+    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None server=hub:45560"]);
     assert!(cx.debug_bounds("install-steps").is_some(), "the steps");
     assert!(cx.debug_bounds("ssh-form").is_none(), "in the form's place");
     assert!(cx.debug_bounds("install-bar").is_some(), "a busy bar while it connects");
@@ -340,14 +315,35 @@ fn the_sheet_installs_step_by_step_then_adds_the_worker(cx: &mut TestAppContext)
         [Event::Step(Step::Install), Event::Line("up".to_owned()), Event::Step(Step::Check)],
     );
     assert_eq!(sheet_progress(&ws, cx).map(|p| p.stage()), Some(Stage::Check));
-    deployer.end(cx, Ok(deployed()));
-    assert_eq!(deployer.asked(), ["add mini.tail1234.ts.net"], "at its tailnet name");
-    let (adding, added) = ws.read_with(cx, |ws, _| {
-        (ws.adding.is_some(), ws.workers.iter().any(|w| w.id == deployer.worker && w.added))
-    });
-    assert!(!adding && added, "the page gave way to the new worker");
+    let mut mini = deployed();
+    mini.health.worker = deployer.worker;
+    deployer.end(cx, Ok(mini.clone()));
+    assert!(ws.read_with(cx, |ws, _| ws.adding.is_some()), "it waits for the directory");
+    list(&ws, cx, deployer.worker, "mini");
+    cx.executor().advance_clock(this_mac::RETRY);
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |ws, _| ws.adding.is_none()), "the dialog gave way to the worker");
     let kept = deployer.target_of(deployer.worker);
     assert_eq!(kept.and_then(|t| t.user).as_deref(), Some("me"), "how it was reached, kept");
+
+    cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_ssh_at("box", window, cx)));
+    cx.run_until_parked();
+    click(cx, "ssh-install");
+    let _asked = deployer.asked();
+    let mut unlisted = mini;
+    unlisted.health.worker = WorkerId::new();
+    unlisted.health.server = Some(slopty_proto::ctl::ServerHealth {
+        address: "hub:45560".to_owned(),
+        link: slopty_proto::ctl::LinkState::Refused { why: "not granted".to_owned() },
+    });
+    deployer.end(cx, Ok(unlisted));
+    for _ in 0..this_mac::LISTED_TRIES {
+        cx.executor().advance_clock(this_mac::RETRY);
+    }
+    cx.run_until_parked();
+    let failed = sheet_progress(&ws, cx).and_then(|p| p.failure().cloned()).expect("a failure");
+    assert_eq!(failed.title, "slopty-worker runs on box, and the server does not list it");
+    assert_eq!(failed.lines, ["not granted"], "what the worker said of its link");
 }
 
 /// A machine named already (an address that answered as another build) opens the sheet with
@@ -358,14 +354,14 @@ fn the_sheet_opens_on_a_named_host(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
     cx.simulate_resize(size(px(900.0), px(800.0)));
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_ssh_at("me@mini", window, cx)));
     cx.run_until_parked();
     assert!(cx.debug_bounds("ssh-form").is_some(), "the form");
     click(cx, "ssh-install");
-    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None server=None"]);
+    assert_eq!(deployer.asked(), ["deploy mini Some(\"me\") None server=hub:45560"]);
 }
 
 /// Cancel stops the run (its deploy is dropped, which kills `ssh`) and brings the form back;
@@ -377,7 +373,7 @@ fn a_run_can_be_cancelled_and_a_failure_says_why(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
     cx.simulate_resize(size(px(900.0), px(800.0)));
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     cx.dispatch_action(actions::InstallOverSsh);
@@ -421,14 +417,14 @@ fn a_new_machine_s_key_is_offered_and_trusted_from_the_sheet(cx: &mut TestAppCon
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
     cx.simulate_resize(size(px(900.0), px(800.0)));
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     cx.dispatch_action(actions::InstallOverSsh);
     cx.run_until_parked();
     type_host(&ws, cx, "mini");
     click(cx, "ssh-install");
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None"]);
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"]);
     let key = HostKey {
         target: "mini".to_owned(),
         keys: vec![slopty_deploy::Fingerprint {
@@ -457,7 +453,7 @@ fn a_new_machine_s_key_is_offered_and_trusted_from_the_sheet(cx: &mut TestAppCon
     assert_eq!(offered(&ws, cx).as_deref(), Some("mini"));
     click(cx, "ssh-install");
     assert_eq!(*deployer.trusted.borrow(), ["mini"], "trusted as offered");
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None"], "and run again");
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"], "and run again");
 }
 
 /// A tile has no fingerprint to show: a machine new to this Mac sends the person to the sheet.
@@ -505,18 +501,19 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
     };
     let dials = Rc::new(std::cell::Cell::new(0_u32));
     let (counted, said) = (Rc::clone(&dials), notice.clone());
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, cx| {
         ws.dial = crate::Dialer(Rc::new(move |_id, _address, _cx| {
             counted.set(counted.get().saturating_add(1));
-            gpui::Task::ready(Err(net::DialFailed::WrongBuild(said.clone())))
+            gpui::Task::ready(Err(crate::net::DialFailed::WrongBuild(said.clone())))
         }));
         ws.deployer = Some(shared);
+        ws.server = Some(crate::server::ServerSlot::stand_in(HostAddr::new("hub", SERVER_PORT)));
         ws.publish_updates(cx);
     });
     let id = WorkerId::new();
-    ws.update(cx, |ws, cx| ws.add_worker(id, "mini".to_owned(), true, cx));
+    list(&ws, cx, id, "mini");
     cx.run_until_parked();
     assert_eq!(dials.get(), 1);
 
@@ -581,7 +578,7 @@ fn update_deploys_to_the_worker_then_dials_it_again(cx: &mut TestAppContext) {
     click(cx, selector("update-worker"));
     assert_eq!(
         deployer.asked(),
-        ["deploy mini Some(\"admin\") Some(2222) server=None"],
+        ["deploy mini Some(\"admin\") Some(2222) server=hub:45560"],
         "through the user and port it was installed with"
     );
 
@@ -619,7 +616,7 @@ fn reopening_the_panel_and_the_sheet_keeps_no_subscription(cx: &mut TestAppConte
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
     let count = |cx: &mut VisualTestContext| ws.read_with(cx, |ws, _| ws.subscriptions.len());
-    let deployer: Rc<dyn Deployer> = StandIn::new("mini.tail1234.ts.net");
+    let deployer: Rc<dyn Deployer> = StandIn::new();
     ws.update(cx, |ws, _cx| ws.deployer = Some(deployer));
     let before = count(cx);
     for _ in 0..3 {
@@ -640,23 +637,21 @@ fn reopening_the_panel_and_the_sheet_keeps_no_subscription(cx: &mut TestAppConte
 
 /// On the server panel the SSH entry sets up the server: its steps have no doctor to read, and
 /// once it is up it is connected to at each address it was reached at in turn; when none
-/// answers, the sheet says so with what the last said. This Mac's row runs the same steps here,
-/// with nothing to type.
+/// answers, the sheet says so with what the last said.
 #[gpui::test]
 fn the_server_panel_sets_up_the_server(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
     cx.simulate_resize(size(px(900.0), px(800.0)));
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     cx.update(|window, cx| {
         ws.update(cx, |ws, cx| ws.show_add_worker(crate::Panel::Server, window, cx));
     });
     cx.run_until_parked();
-    let rows = ws.update(cx, |ws, cx| (ws.ssh_row(cx).is_some(), ws.serve_here_row(cx).is_some()));
-    assert_eq!(rows, (true, true), "both ways to set it up");
+    assert!(ws.update(cx, |ws, cx| ws.ssh_row(cx).is_some()), "a way to set it up");
     cx.update(|window, cx| ws.update(cx, |ws, cx| ws.open_ssh_at("mini", window, cx)));
     cx.run_until_parked();
     let heading = ws.read_with(cx, |ws, _| ws.adding.as_ref()?.ssh.as_ref().map(Sheet::heading));
@@ -679,13 +674,6 @@ fn the_server_panel_sets_up_the_server(cx: &mut TestAppContext) {
     let failed = sheet_progress(&ws, cx).and_then(|p| p.failure().cloned()).expect("none answered");
     assert_eq!(failed.title, "The server runs on mini, and Slopty could not connect to it");
     assert_eq!(failed.lines, ["nothing answered at mini:45560"]);
-
-    cx.update(|window, cx| ws.update(cx, |ws, cx| ws.serve_here(window, cx)));
-    cx.run_until_parked();
-    assert_eq!(deployer.asked(), ["serve 127.0.0.1"], "this Mac, with nothing typed");
-    let first =
-        sheet_progress(&ws, cx).and_then(|p| p.view().steps.first().map(|s| s.title.clone()));
-    assert_eq!(first.as_deref(), Some("Look at this Mac"));
 }
 
 /// A server on another build is brought to this one from the palette with no sheet: through the
@@ -698,7 +686,7 @@ fn the_palette_updates_a_server_on_another_build(cx: &mut TestAppContext) {
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     let address = HostAddr::new("hub", SERVER_PORT);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
@@ -708,6 +696,7 @@ fn the_palette_updates_a_server_on_another_build(cx: &mut TestAppContext) {
         ws.read_with(cx, |ws, cx| ws.view.read(cx).server_status().map(str::to_owned))
     };
 
+    ws.update(cx, |ws, _cx| ws.server = None);
     cx.dispatch_action(UpdateServer);
     assert_eq!(toast(cx).as_deref(), Some("No server is set"));
     ws.update(cx, |ws, _cx| ws.server = Some(crate::server::ServerSlot::stand_in(address.clone())));
@@ -782,7 +771,7 @@ fn every_worker_on_another_build_is_updated_and_this_mac_s_unasked(cx: &mut Test
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     let toast =
@@ -795,7 +784,7 @@ fn every_worker_on_another_build_is_updated_and_this_mac_s_unasked(cx: &mut Test
     let view = ws.read_with(cx, |ws, _| ws.view.clone());
     for host in ["mini", "box"] {
         let id = WorkerId::new();
-        ws.update(cx, |ws, cx| ws.add_worker(id, host.to_owned(), true, cx));
+        list(&ws, cx, id, host);
         let key = crate::workers::worker_key(id);
         view.update(cx, |v, cx| {
             v.set_worker_status(key, WorkerStatus::NeedsUpdate(notice(host)), cx);
@@ -806,7 +795,10 @@ fn every_worker_on_another_build_is_updated_and_this_mac_s_unasked(cx: &mut Test
     cx.dispatch_action(UpdateAllWorkers);
     let mut asked = deployer.asked();
     asked.sort();
-    assert_eq!(asked, ["deploy box None None server=None", "deploy mini None None server=None"]);
+    assert_eq!(
+        asked,
+        ["deploy box None None server=hub:45560", "deploy mini None None server=hub:45560"]
+    );
     assert_eq!(toast(cx).as_deref(), Some("Updating 2 machines"));
 
     let here = WorkerId::new();
@@ -815,7 +807,11 @@ fn every_worker_on_another_build_is_updated_and_this_mac_s_unasked(cx: &mut Test
     assert!(deployer.asked().is_empty(), "a build from a source tree leaves it alone");
     deployer.installed.set(true);
     ws.update(cx, |ws, cx| ws.heard_other_build(here, &local, cx));
-    assert_eq!(deployer.asked(), ["deploy 127.0.0.1 None None server=None"], "in place, unasked");
+    assert_eq!(
+        deployer.asked(),
+        ["deploy 127.0.0.1 None None server=hub:45560"],
+        "in place, unasked"
+    );
     ws.update(cx, |ws, cx| {
         if let Some(run) = ws.updates.get_mut("127.0.0.1") {
             run.task = None;
@@ -834,13 +830,13 @@ fn an_update_that_ends_sessions_goes_on_only_when_pressed_again(cx: &mut TestApp
     let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     let id = WorkerId::new();
     let notice = UpdateNotice { of: Of::Worker, host: "mini".to_owned(), peer: String::new() };
     let view = ws.read_with(cx, |ws, _| ws.view.clone());
-    ws.update(cx, |ws, cx| ws.add_worker(id, "mini".to_owned(), true, cx));
+    list(&ws, cx, id, "mini");
     let key = crate::workers::worker_key(id);
     view.update(cx, |v, cx| v.set_worker_status(key, WorkerStatus::NeedsUpdate(notice), cx));
     cx.run_until_parked();
@@ -852,78 +848,28 @@ fn an_update_that_ends_sessions_goes_on_only_when_pressed_again(cx: &mut TestApp
     };
 
     ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None"], "asked nothing yet");
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"], "asked nothing yet");
     deployer.end(cx, Err(ends()));
     let run = cx.update(|_, cx| cx.global::<Updates>().runs.get("mini").cloned()).expect("kept");
     assert_eq!(run.failed.map(|f| f.title).as_deref(), Some("Updating ends 3 sessions on mini"));
 
     cx.dispatch_action(UpdateAllWorkers);
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None"], "not a yes for this one");
+    assert_eq!(
+        deployer.asked(),
+        ["deploy mini None None server=hub:45560"],
+        "not a yes for this one"
+    );
     deployer.end(cx, Err(ends()));
 
     ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None end_sessions"]);
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560 end_sessions"]);
     deployer.end(cx, Err(failure("ssh: connect to host mini port 22: Connection refused")));
     ws.update(cx, |ws, cx| ws.update_worker("mini", cx));
     assert_eq!(
         deployer.asked(),
-        ["deploy mini None None server=None"],
+        ["deploy mini None None server=hub:45560"],
         "a yes holds for the press after the question, not every one after"
     );
-}
-
-/// Machines installed from here before there was a server are not in its directory, so its
-/// other clients never list them: once its directory comes, a notice says how many, and the
-/// palette's line installs this build on each again, registered with it. One the directory
-/// lists, or one not installed from here, is left alone.
-#[gpui::test]
-fn machines_added_before_the_server_are_registered_with_it(cx: &mut TestAppContext) {
-    use slopty_proto::server::{FromServer, Liveness, WorkerInfo};
-    let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let (ws, cx) = shell(cx, &runtime, &dir, true);
-    let deployer = StandIn::new("mini");
-    let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
-    ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
-    let toast =
-        |cx: &mut VisualTestContext| ws.read_with(cx, |ws, cx| ws.view.read(cx).toast_text());
-    let [mini, listed, typed] = [WorkerId::new(), WorkerId::new(), WorkerId::new()];
-    for (id, name) in [(mini, "mini"), (listed, "box"), (typed, "typed")] {
-        ws.update(cx, |ws, cx| ws.add_worker(id, name.to_owned(), true, cx));
-    }
-    deployer.remember(mini, &Target::host("mini"));
-    deployer.remember(listed, &Target::host("box"));
-    cx.run_until_parked();
-    let _dials = deployer.asked();
-
-    cx.dispatch_action(RegisterWithServer);
-    assert_eq!(toast(cx).as_deref(), Some("No server is set"));
-    let address = HostAddr::new("hub", SERVER_PORT);
-    ws.update(cx, |ws, _cx| ws.server = Some(crate::server::ServerSlot::stand_in(address)));
-    let info = WorkerInfo {
-        worker: listed,
-        name: "box".to_owned(),
-        address: "100.64.0.2:45550".to_owned(),
-        liveness: Liveness::Online,
-        caps: WorkerCaps::bare(WorkerOs::MacOs),
-        load: 0.0,
-        last_seen_ms: slopty_core::WallMs::ZERO,
-    };
-    let listing = FromServer::Directory(vec![info]);
-    ws.update(cx, |ws, cx| {
-        ws.server_event(slopty_client::server::ServerEvent::Message(Box::new(listing)), cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        toast(cx).as_deref(),
-        Some(
-            "1 machine added here is not on this server. Run \u{201c}Register machines with the server\u{201d} from the palette."
-        )
-    );
-
-    cx.dispatch_action(RegisterWithServer);
-    assert_eq!(deployer.asked(), ["deploy mini None None server=Some(\"hub:45560\")"]);
-    assert_eq!(toast(cx).as_deref(), Some("Registering 1 machine with the server"));
 }
 
 /// The toast on an add says what may keep the machine from running for good: nobody logged
@@ -963,14 +909,14 @@ fn a_password_only_machine_takes_the_password_once_and_the_key(cx: &mut TestAppC
     let dir = tempfile::tempdir().unwrap();
     let (ws, cx) = shell(cx, &runtime, &dir, true);
     cx.simulate_resize(size(px(900.0), px(800.0)));
-    let deployer = StandIn::new("mini");
+    let deployer = StandIn::new();
     let shared: Rc<dyn Deployer> = Rc::<StandIn>::clone(&deployer);
     ws.update(cx, |ws, _cx| ws.deployer = Some(shared));
     cx.dispatch_action(actions::InstallOverSsh);
     cx.run_until_parked();
     type_host(&ws, cx, "mini");
     click(cx, "ssh-install");
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None"]);
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560"]);
     assert!(cx.debug_bounds("ssh-password").is_none(), "no field before it asks");
     let mut asks = failure("mini asks for me's password");
     asks.password = Some(Box::new(slopty_deploy::PasswordAsk {
@@ -1012,7 +958,7 @@ fn a_password_only_machine_takes_the_password_once_and_the_key(cx: &mut TestAppC
     assert!(cx.debug_bounds("ssh-password").is_none(), "not for another machine");
     type_host(&ws, cx, "mini");
     click(cx, "ssh-install");
-    assert_eq!(deployer.asked(), ["deploy mini None None server=None password add_key"]);
+    assert_eq!(deployer.asked(), ["deploy mini None None server=hub:45560 password add_key"]);
     assert_eq!(deployer.password.borrow().as_deref(), Some("hunter2"), "handed to the run");
     let left = cx.update(|_, cx| field.read(cx).value().to_string());
     assert_eq!(left, "", "not kept in the field");
@@ -1034,7 +980,7 @@ fn a_password_only_machine_takes_the_password_once_and_the_key(cx: &mut TestAppC
     click(cx, "ssh-install");
     assert_eq!(
         deployer.asked(),
-        ["deploy mini None None server=None password"],
+        ["deploy mini None None server=hub:45560 password"],
         "no key this time"
     );
 }

@@ -35,5 +35,5 @@ MenuItem │ Command palette
 MenuItem │ Overview
 MenuItem │ Stream stats
 MenuItem │ Settings
-MenuItem │ Connect to a server
+MenuItem │ Connect to another server
 MenuItem │ Add a machine…

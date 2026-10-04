@@ -3,7 +3,8 @@
 //! [`slopty_platform::service`], which the app's "Use this Mac" runs too.
 //!
 //! What is the CLI's own: where the binaries come from (`--bin-dir`, else beside this one), the
-//! server a worker registers with (the global `--server`, saved before the daemon starts), and
+//! server a worker registers with (the global `--server`, else the one set, else the first that
+//! answers on the tailnet, else one installed beside it, saved before the daemon starts), and
 //! the wait until the daemon answers, with a word on how clients will find it. The worker's
 //! data dir, reach, port and log level are baked into its definitions at install time; its
 //! sockets live under `<data dir>/run/` so the CLI can find them without the manager's
@@ -89,8 +90,76 @@ fn install_error(e: std::io::Error) -> anyhow::Error {
     if e.kind() == std::io::ErrorKind::NotFound { anyhow!("{e}; pass --bin-dir") } else { e.into() }
 }
 
-/// Install and start both services, then wait for the daemon. `server` (the global
-/// `--server`) is saved as the server the worker registers with. With `--plan`, only say what
+/// The server a worker install registers with.
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum Registers {
+    /// This one (the global `--server`, or the one the tailnet answered with): saved first.
+    With(String),
+    /// The one `[worker] server` names already.
+    Kept,
+    /// None is set or answers: `slopty-server` is installed beside the worker first, and both
+    /// this machine's worker and its clients use it on loopback.
+    Beside,
+}
+
+/// Which server an install registers with ([`Registers`]): `server`, else the worker's own,
+/// else this machine's clients', else the first that answers on the tailnet, else one beside it.
+async fn registers(server: Option<&str>, data_dir: &Path) -> Result<Registers> {
+    if let Some(server) = server {
+        return Ok(Registers::With(server.to_owned()));
+    }
+    let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
+    if settings.worker.server.is_some() {
+        return Ok(Registers::Kept);
+    }
+    if let Some(client) = settings.client.server {
+        return Ok(Registers::With(client.to_string()));
+    }
+    let endpoint = slopty_net::client::bind_client()?;
+    let found = slopty_net::discover::find(&endpoint).await;
+    crate::client::close_endpoint(&endpoint).await;
+    Ok(match found {
+        Some(found) => {
+            println!("found the server {} on the tailnet", found.name);
+            Registers::With(found.host_addr().to_string())
+        }
+        None => Registers::Beside,
+    })
+}
+
+/// Install `slopty-server` from `source` beside the worker, keeping its state in `data_dir`, and
+/// point this machine's worker, and its clients unless they name one, at it on loopback.
+async fn install_beside(
+    session: &Session,
+    source: &Path,
+    log: &str,
+    data_dir: &Path,
+) -> Result<HostAddr> {
+    let path =
+        platform::install_server(session, None, log, source, data_dir).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow!(
+                    "{e}: no server answers and none is beside this one to install; pass --server, \
+                 or put slopty-server in --bin-dir"
+                )
+            } else {
+                e.into()
+            }
+        })?;
+    println!("no server answered; installed slopty-server beside it  ({})", path.display());
+    let here = HostAddr::new("127.0.0.1", SERVER_PORT);
+    slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Worker, Some(&here))
+        .map_err(|e| anyhow!(e))?;
+    let settings = slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings;
+    if settings.client.server.is_none() {
+        slopty_settings::save_server(data_dir, slopty_settings::ServerOf::Client, Some(&here))
+            .map_err(|e| anyhow!(e))?;
+    }
+    Ok(here)
+}
+
+/// Install and start both services, then wait for the daemon. The worker registers with
+/// `server` (the global `--server`), else as [`registers`] finds. With `--plan`, only say what
 /// that would do, as JSON with `json`.
 pub async fn install(
     opts: &InstallOpts,
@@ -109,7 +178,8 @@ pub async fn install(
         }
         return Ok(());
     }
-    install_in(&session, opts, server, data_dir, START_TIMEOUT).await
+    let registers = registers(server, data_dir).await?;
+    install_in(&session, opts, &registers, data_dir, START_TIMEOUT).await
 }
 
 /// Why an install that would end `ptyd`'s sessions stopped, before it changed anything.
@@ -121,7 +191,7 @@ fn ends_sessions(ptyd: Ptyd) -> anyhow::Error {
 async fn install_in(
     session: &Session,
     opts: &InstallOpts,
-    server: Option<&str>,
+    registers: &Registers,
     data_dir: &Path,
     within: Duration,
 ) -> Result<()> {
@@ -140,8 +210,14 @@ async fn install_in(
     } else {
         None
     };
-    if let Some(server) = server {
-        save_worker_server(data_dir, server)?;
+    match registers {
+        Registers::With(server) => {
+            save_worker_server(data_dir, server)?;
+        }
+        Registers::Kept => {}
+        Registers::Beside => {
+            install_beside(session, &source, &opts.log, data_dir).await?;
+        }
     }
     let registers_with =
         slopty_settings::Settings::load(&slopty_settings::path_in(data_dir)).settings.worker.server;
@@ -182,10 +258,7 @@ async fn install_in(
         Some(server) => println!(
             "\n{name} is up and registers with {server}; every client of that server lists it"
         ),
-        None => println!(
-            "\n{name} is up on its own (pass --server to register it); add it from a client \
-             with `slopty add <this machine's tailnet name or IP>` or the app's \"Add a machine\""
-        ),
+        None => println!("\n{name} is up and registers with no server; pass --server"),
     }
     if let Some(note) = session.keep_running() {
         println!("{note}");
@@ -659,8 +732,16 @@ mod tests {
         }
 
         async fn install(&self, opts: &InstallOpts) -> Result<()> {
+            self.install_registering(opts, &Registers::With("studio".to_owned())).await
+        }
+
+        async fn install_registering(
+            &self,
+            opts: &InstallOpts,
+            registers: &Registers,
+        ) -> Result<()> {
             let within = Duration::from_secs(2);
-            install_in(&self.session, opts, None, &self.data(), within).await
+            install_in(&self.session, opts, registers, &self.data(), within).await
         }
 
         fn installed(&self, name: &str) -> String {
@@ -722,6 +803,50 @@ mod tests {
         let stale = stage.install(&Stage::opts(&new, true, false)).await.unwrap_err();
         assert!(format!("{stale:#}").contains("up since before the install"), "{stale:#}");
         assert_eq!(stage.installed("slopty-worker"), "slopty-worker old");
+    }
+
+    /// With no server named, set or answering, the server is installed beside the worker and
+    /// started before it, and both the worker and this machine's clients use it on loopback; a
+    /// client that names a server of its own keeps it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn worker_install_with_no_server_installs_one_beside_it() {
+        let stage = Stage::new();
+        stage.answer_as_installed();
+        let from = stage.binaries("new");
+        std::fs::write(from.join(SERVER.program), "slopty-server new").unwrap();
+        stage
+            .install_registering(&Stage::opts(&from, false, true), &Registers::Beside)
+            .await
+            .unwrap();
+        let started: Vec<String> =
+            stage.commands.try_iter().filter(|c| c.starts_with("launchctl bootstrap")).collect();
+        assert_eq!(started.len(), 3, "the server, ptyd and the worker: {started:?}");
+        assert!(started[0].contains(SERVER.label), "the server first: {started:?}");
+        assert_eq!(stage.installed(SERVER.program), "slopty-server new");
+        let path = slopty_settings::path_in(&stage.data());
+        let settings = slopty_settings::Settings::load(&path).settings;
+        let here = HostAddr::new("127.0.0.1", SERVER_PORT);
+        assert_eq!(settings.worker.server, Some(here.clone()), "the worker registers with it");
+        assert_eq!(settings.client.server, Some(here), "and this machine's clients use it");
+
+        let other = Stage::new();
+        other.answer_as_installed();
+        let studio = HostAddr::new("studio", SERVER_PORT);
+        slopty_settings::save_server(
+            &other.data(),
+            slopty_settings::ServerOf::Client,
+            Some(&studio),
+        )
+        .unwrap();
+        let from = other.binaries("new");
+        std::fs::write(from.join(SERVER.program), "slopty-server new").unwrap();
+        other
+            .install_registering(&Stage::opts(&from, false, true), &Registers::Beside)
+            .await
+            .unwrap();
+        let path = slopty_settings::path_in(&other.data());
+        let settings = slopty_settings::Settings::load(&path).settings;
+        assert_eq!(settings.client.server, Some(studio), "a client's own server is kept");
     }
 
     /// A new build that must restart ptyd, which holds two sessions, refuses before changing

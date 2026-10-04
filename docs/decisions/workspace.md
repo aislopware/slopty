@@ -1409,7 +1409,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     read-only: its system and load, then each coding agent installed there with its version
     (the number from what the agent prints, so "codex-cli 0.48.0" reads "Codex 0.48.0"). Then
     Update while it runs another build, Connect while its link is down, Wake while it can be
-    woken, the clipboard shared or not, and Forget for one added by address. Update also stays
+    woken, the clipboard shared or not, and Forget for one added by address (since 2026-10-04,
+    for one that is not online, through the server's `ForgetWorker`). Update also stays
     on the row at rest, since a machine on another build links only once updated.
   - Nothing there signs in, installs or probes an agent: what it printed is all it shows.
   - The hosts popover, the status bar's machine count, the "…" menu's Machines row and "List

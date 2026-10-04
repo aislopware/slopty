@@ -156,7 +156,7 @@ fn plan(source: &tempfile::TempDir, update: bool) -> Plan {
     Plan {
         sources: vec![source.path().to_path_buf()],
         update,
-        server: None,
+        server: Server { host: "studio.tail1234.ts.net".to_owned(), port: 45560 },
         end_sessions: false,
         password: None,
         add_key: false,
@@ -197,13 +197,14 @@ async fn a_deploy_uploads_the_matching_binaries_installs_and_reads_the_doctor() 
     );
     assert!(
         scripts.contains(&format!(
-            "studio sh -c '{STAGE}/slopty worker install --bin-dir {STAGE} --fresh'"
+            "studio sh -c '{STAGE}/slopty --server studio.tail1234.ts.net:45560 worker install \
+             --bin-dir {STAGE} --fresh'"
         )),
         "{scripts:#?}"
     );
     assert_eq!(deployed.platform, Platform { os: Os::MacOs, arch: Arch::Arm64 });
     assert_eq!(deployed.health, health());
-    assert_eq!(deployed.server, None, "no server named, none saved");
+    assert_eq!(deployed.server, "studio.tail1234.ts.net:45560", "the server named, saved");
     let total: u64 = WORKER_BINARIES.iter().map(|n| mac_arm64(n).len() as u64).sum();
     assert_eq!(events.last(), Some(&Event::Step(Step::Check)));
     assert!(events.contains(&Event::Sent { sent: total, total }), "every byte: {events:?}");
@@ -510,17 +511,17 @@ fn install_script(ran: &[String]) -> String {
 
 /// The install saves the server the worker registers with, as the far side reaches it: a
 /// named server as it is, and one this machine runs at loopback at the address `ssh` came
-/// from there. One the far side cannot be told of installs a worker on its own, and says so.
+/// from there. One the far side cannot be told of stops the deploy before anything is sent.
 #[tokio::test]
 async fn the_worker_registers_with_the_server_as_the_machine_reaches_it() {
     let source = binaries(mac_arm64);
     let with = |host: &str| Plan {
-        server: Some(Server { host: host.to_owned(), port: 45560 }),
+        server: Server { host: host.to_owned(), port: 45560 },
         ..plan(&source, true)
     };
     let runner = Scripted::new(healthy);
     let (done, _) = run(&runner, &with("studio.tail1234.ts.net")).await;
-    assert_eq!(done.unwrap().server.as_deref(), Some("studio.tail1234.ts.net:45560"));
+    assert_eq!(done.unwrap().server, "studio.tail1234.ts.net:45560");
     assert_eq!(
         install_script(&runner.ran()),
         format!(
@@ -531,14 +532,19 @@ async fn the_worker_registers_with_the_server_as_the_machine_reaches_it() {
 
     let runner = Scripted::new(healthy);
     let (done, _) = run(&runner, &with("127.0.0.1")).await;
-    assert_eq!(done.unwrap().server.as_deref(), Some("100.64.0.2:45560"), "where ssh came from");
+    assert_eq!(done.unwrap().server, "100.64.0.2:45560", "where ssh came from");
     assert!(install_script(&runner.ran()).contains(" --server 100.64.0.2:45560 "));
 
     for unreachable in ["localhost", "studio;reboot"] {
         let runner = Scripted::new(no_client);
         let (done, _) = run(&runner, &with(unreachable)).await;
-        assert_eq!(done.unwrap().server, None, "{unreachable}");
-        assert!(!install_script(&runner.ran()).contains("--server"), "{unreachable}");
+        let refused = done.unwrap_err();
+        assert!(
+            matches!(&refused, DeployError::NoServerAddress { server, .. } if server.starts_with(unreachable)),
+            "{unreachable}: {refused}"
+        );
+        assert_eq!(install_script(&runner.ran()), "", "nothing installed: {unreachable}");
+        assert!(!runner.ran().iter().any(|s| s.contains("cat >")), "nothing sent: {unreachable}");
     }
 }
 
@@ -557,6 +563,9 @@ fn a_server_is_named_as_the_far_side_dials_it() {
         "the far side is this machine"
     );
     assert_eq!(at("$(id)").seen_from(None), None, "nothing a shell would run");
+    assert_eq!(at("::1").address().as_deref(), Some("[::1]:45560"), "this machine's own");
+    assert_eq!(at("127.0.0.1").address().as_deref(), Some("127.0.0.1:45560"));
+    assert_eq!(at("$(id)").address(), None);
 }
 
 /// A target names this machine when it is loopback or one of its own addresses, with the
@@ -608,19 +617,21 @@ async fn a_local_deploy_installs_in_place() {
     let source = binaries(mac_arm64);
     let runner = Scripted { local: true, ..Scripted::new(healthy) };
     let plan = Plan {
-        server: Some(Server { host: "127.0.0.1".to_owned(), port: 45560 }),
+        server: Server { host: "127.0.0.1".to_owned(), port: 45560 },
         ..plan(&source, true)
     };
     let (done, events) = run(&runner, &plan).await;
     let deployed = done.unwrap();
-    assert_eq!(deployed.server.as_deref(), None, "loopback stays this machine's own");
+    assert_eq!(deployed.server, "127.0.0.1:45560", "loopback stays this machine's own");
     let bin = format!("\"{}\"", source.path().display());
     assert_eq!(
         runner.ran(),
         [
             REACH.to_owned(),
             format!("{bin}/slopty --json worker install --bin-dir {bin} --update --plan"),
-            format!("{bin}/slopty worker install --bin-dir {bin} --update"),
+            format!(
+                "{bin}/slopty --server 127.0.0.1:45560 worker install --bin-dir {bin} --update"
+            ),
             format!("{bin}/slopty --json worker doctor"),
             format!("{bin}/slopty --json worker service"),
         ]

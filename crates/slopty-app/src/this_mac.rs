@@ -1,24 +1,30 @@
-//! "Use this Mac": the worker's services installed from this app, its `doctor` read
-//! as a checklist until it may stream and take input, then this Mac added over loopback.
+//! "Use this Mac": a server joined or started here, then this Mac's worker installed.
 //!
-//! The install is `slopty worker install`'s own ([`slopty_platform::service::install_worker`]),
-//! from the binaries beside the app: in place inside `Slopty.app`, copied out of a dev tree.
-//! The worker registers with the server this app reads, so the server's other clients see
-//! this Mac too ([`slopty_settings::join_clients_server`]).
-//! The checklist is the worker's own `doctor` ([`slopty_proto::ctl::Health`]), so it says what
-//! `slopty worker doctor` says. Everything that touches the machine goes through a [`Host`]:
-//! [`native`] on the Mac, and a stand-in under test, so no test installs an agent, raises a
-//! permission prompt or opens System Settings (`docs/decisions/platform.md`, "This Mac as a
-//! worker").
+//! The worker's services are installed from this app, its `doctor` read as a checklist until
+//! it may stream and take input, and the flow is done once the server's directory lists this
+//! Mac.
+//!
+//! Which server ([`Serve`]) is the app's to decide before anything is installed: the one set,
+//! else the one Ready server the tailnet answered with, else one started here. Several, or no
+//! look possible, and the person is asked. The installs are the CLI's own
+//! ([`slopty_platform::service::install_server`] and
+//! [`slopty_platform::service::install_worker`]), from the binaries beside the app: in place
+//! inside `Slopty.app`, copied out of a dev tree. The worker registers with that server
+//! ([`slopty_settings::join_server`]), so every client of it lists this Mac. The checklist is the
+//! worker's own `doctor` ([`slopty_proto::ctl::Health`]), so it says what `slopty worker doctor`
+//! says. Everything that touches the machine goes through a [`Host`]: [`native`] on the Mac, and a
+//! stand-in under test, so no test installs an agent, raises a permission prompt or opens System
+//! Settings (`docs/decisions/platform.md`, "This Mac as a worker").
 
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 
+use slopty_core::WorkerId;
+use slopty_net::HostAddr;
 pub use slopty_platform::privacy::Pane;
+use slopty_proto::ctl::LinkState;
 use slopty_proto::tailnet::BackendState;
-
-use crate::net;
 
 pub mod actions {
     //! The palette's way to this Mac's checklist after the first run.
@@ -31,7 +37,8 @@ pub mod actions {
     actions!(
         workers,
         [
-            /// Install the worker on this Mac and walk its permissions until it is added.
+            /// Install the worker on this Mac and walk its permissions until the server lists
+            /// it.
             UseThisMac,
             /// Start this Mac's worker again, so it reads what only its start reads.
             RestartThisMacWorker,
@@ -45,16 +52,52 @@ pub const TITLE: &str = "Use this Mac";
 /// the worker in Finder, since a background worker's request may leave it out of that list.
 pub const TURN_ON: &str = "Turn on slopty-worker there, or drag it in from Finder.";
 /// What the entry's row says under its words: what pressing it does.
-pub const ROW_META: &str = "Shares its shells and windows, and adds it here";
+pub const ROW_META: &str = "Shares its shells and windows through your server";
 /// The checklist's line under its heading.
-pub const BLURB: &str = "Slopty shares this Mac's shells and windows, then adds it here.";
+pub const BLURB: &str = "Slopty shares this Mac's shells and windows through your server.";
 /// Why Slopty moves before it installs: where it runs now is gone after a restart.
 pub const MISPLACED: &str =
     "Slopty runs from outside Applications, so this Mac would stop sharing after a restart.";
 /// The palette's line that starts this Mac's worker again; its sessions stay with ptyd.
 pub const RESTART: &str = "Restart slopty-worker on this Mac";
-/// The address this Mac is added at: loopback, which every worker admits.
+/// This Mac as an SSH target and as the host of a server started here: loopback.
 pub const LOOPBACK: &str = "127.0.0.1";
+/// How many times, [`RETRY`] apart (20 s in all), a new worker's listing is looked for in the
+/// server's directory: counted, not timed, so a test's clock drives it.
+pub const LISTED_TRIES: u32 = 80;
+/// What the flow says when the directory never listed this Mac.
+pub const NOT_LISTED: &str = "This Mac's worker has not registered with the server.";
+
+/// Which server this Mac's worker registers with, decided before anything is installed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Serve {
+    /// Start one here, which this app and the worker reach on loopback.
+    Here,
+    /// The server at this address.
+    Join(HostAddr),
+}
+
+impl Serve {
+    /// Where the worker and this app reach the server: loopback for one started here.
+    #[must_use]
+    pub fn address(&self) -> HostAddr {
+        match self {
+            Self::Here => HostAddr::new(LOOPBACK, slopty_net::endpoint::SERVER_PORT),
+            Self::Join(address) => address.clone(),
+        }
+    }
+}
+
+/// How the flow stands on the server, for the checklist's Server line.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Server {
+    /// The tailnet is being looked on for one.
+    Looking,
+    /// Decided.
+    Chosen(Serve),
+    /// Starting it here failed, for this reason.
+    Failed(String),
+}
 /// How many times the worker's control socket is asked before it counts as not answering.
 pub const ATTEMPTS: u32 = 40;
 /// How long apart: [`ATTEMPTS`] of these is the CLI's ten seconds.
@@ -75,19 +118,21 @@ pub enum Stopped {
     Misplaced,
     /// It failed, for this reason.
     Failed(String),
+    /// Starting the server here failed, for this reason; the worker was not touched.
+    Server(String),
 }
 
 /// What the flow does to this machine.
 pub trait Host: std::fmt::Debug {
-    /// Install and start the worker's services; with `end_sessions`, even where that restarts
-    /// `slopty-ptyd` and ends its sessions.
-    fn install(&self, end_sessions: bool) -> Pending<Result<(), Stopped>>;
+    /// Start the server here when `serve` says so, have the worker register with the server it
+    /// names, then install and start the worker's services; with `end_sessions`, even where
+    /// that restarts `slopty-ptyd` and ends its sessions. The server the worker registers
+    /// with.
+    fn install(&self, serve: &Serve, end_sessions: bool) -> Pending<Result<HostAddr, Stopped>>;
     /// The worker's `doctor`; `None` while nothing answers on its control socket.
     fn doctor(&self) -> Pending<Option<Doctor>>;
     /// Start the worker again, so it reads a Screen Recording grant made while it ran.
     fn restart(&self) -> Pending<()>;
-    /// Add the worker at `address` to this app's workers.
-    fn add(&self, address: &str) -> Pending<Result<net::Added, String>>;
     /// Open `pane` in System Settings, with the worker shown in Finder to drag into its list.
     fn open(&self, pane: Pane);
     /// Copy Slopty into Applications ([`applications`]), the copy there before it to the
@@ -138,6 +183,10 @@ pub fn repoints(program: &Path, macos_dir: &Path) -> bool {
 /// What the checklist reads from the worker's `doctor`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Doctor {
+    /// The worker, as the server's directory lists it.
+    pub worker: WorkerId,
+    /// How its link to its server stands; `None` while it has no server set.
+    pub server: Option<LinkState>,
     /// The daemon's version.
     pub version: String,
     /// It may record the screen.
@@ -178,6 +227,8 @@ impl From<slopty_proto::ctl::Health> for Doctor {
             Tailscale::Absent => Tailnet::Absent,
         };
         Self {
+            worker: health.worker,
+            server: health.server.map(|s| s.link),
             version: health.version,
             screen_recording: health.caps.can_capture,
             accessibility: health.caps.can_inject,
@@ -217,27 +268,41 @@ impl Worker {
 pub struct Flow {
     /// Which run of the flow this is; an answer for an older one is dropped.
     pub run: u64,
+    /// Where the server stands.
+    pub server: Server,
     /// Where the worker stands.
     pub worker: Worker,
     /// The worker's `doctor` is being asked.
     pub reading: bool,
-    /// This Mac is being added.
-    pub adding: bool,
-    /// Why adding it failed.
+    /// Ready: the server's directory is awaited to list this Mac.
+    pub listing: bool,
+    /// Why the flow did not end once ready: the directory never listed this Mac.
     pub error: Option<String>,
 }
 
 impl Flow {
-    /// A run that has just started its install.
-    pub const fn installing(run: u64) -> Self {
-        Self { run, worker: Worker::Installing, reading: false, adding: false, error: None }
+    /// A run whose server is still being decided.
+    pub const fn looking(run: u64) -> Self {
+        Self {
+            run,
+            server: Server::Looking,
+            worker: Worker::Installing,
+            reading: false,
+            listing: false,
+            error: None,
+        }
+    }
+
+    /// A run that has just started its install against `serve`.
+    pub fn installing(run: u64, serve: Serve) -> Self {
+        Self { server: Server::Chosen(serve), ..Self::looking(run) }
     }
 
     /// Whether the app coming back to the front should ask the worker again: it answered
     /// short of ready, or never answered.
     pub const fn rereads(&self) -> bool {
         !self.reading
-            && !self.adding
+            && !self.listing
             && matches!(&self.worker, Worker::Up(_) | Worker::Silent)
             && !self.worker.ready()
     }
@@ -247,6 +312,13 @@ impl Flow {
     pub const fn restarts(&self) -> bool {
         matches!(&self.worker, Worker::Up(d) if !d.screen_recording)
     }
+
+    /// An install or a read is under way: pressing the entry again waits for it.
+    pub const fn busy(&self) -> bool {
+        self.listing
+            || matches!(self.server, Server::Looking)
+            || matches!(self.worker, Worker::Installing)
+    }
 }
 
 /// One line of the checklist.
@@ -254,6 +326,8 @@ impl Flow {
 pub enum Check {
     /// The worker's daemon answers.
     Running,
+    /// The worker registers with a server: this Mac's own, or the one it joined.
+    Server,
     /// It may record the screen.
     ScreenRecording,
     /// It may post input.
@@ -267,6 +341,7 @@ impl Check {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Running => "Running",
+            Self::Server => "Server",
             Self::ScreenRecording => "Screen Recording",
             Self::Accessibility => "Accessibility",
             Self::Tailnet => "Reachable on your tailnet",
@@ -277,6 +352,7 @@ impl Check {
     pub const fn slug(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Server => "server",
             Self::ScreenRecording => "screen",
             Self::Accessibility => "accessibility",
             Self::Tailnet => "tailnet",
@@ -287,6 +363,7 @@ impl Check {
     pub const fn fix_id(self) -> &'static str {
         match self {
             Self::Running => "this-mac-fix-running",
+            Self::Server => "this-mac-fix-server",
             Self::ScreenRecording => "this-mac-fix-screen",
             Self::Accessibility => "this-mac-fix-accessibility",
             Self::Tailnet => "this-mac-fix-tailnet",
@@ -364,11 +441,16 @@ impl Line {
     }
 }
 
-/// The checklist for `worker`, in order; `logs` is where its output goes.
-pub fn checklist(worker: &Worker, logs: &str) -> [Line; 4] {
+/// The checklist for `flow`, in order; `logs` is where the worker's output goes and
+/// `server_logs` the server's.
+pub fn checklist(flow: &Flow, logs: &str, server_logs: &str) -> [Line; 5] {
+    let worker = &flow.worker;
     let line =
         |check, mark, detail: &str, fix| Line { check, mark, detail: detail.to_owned(), fix };
     let running = match worker {
+        _ if matches!(flow.server, Server::Looking | Server::Failed(_)) => {
+            line(Check::Running, Mark::Unknown, "Waits for the server.", None)
+        }
         Worker::Installing => line(Check::Running, Mark::Busy, "Installing\u{2026}", None),
         Worker::Starting => line(Check::Running, Mark::Busy, "Starting\u{2026}", None),
         Worker::Up(d) => {
@@ -443,7 +525,53 @@ pub fn checklist(worker: &Worker, logs: &str) -> [Line; 4] {
         ),
         None => line(Check::Tailnet, Mark::Unknown, "Your other devices reach it there.", None),
     };
-    [running, screen, accessibility, tailnet]
+    let server = server_line(&flow.server, doctor, server_logs);
+    [running, server, screen, accessibility, tailnet]
+}
+
+/// The Server line: where the server comes from, then how the worker's link to it stands.
+fn server_line(server: &Server, doctor: Option<&Doctor>, server_logs: &str) -> Line {
+    let line = |mark, detail: String, fix| Line { check: Check::Server, mark, detail, fix };
+    let serve = match server {
+        Server::Looking => {
+            return line(Mark::Busy, "Looking for one on your tailnet\u{2026}".to_owned(), None);
+        }
+        Server::Failed(why) => {
+            let detail = format!("{why}. Its log is {server_logs}");
+            return line(Mark::Missing, detail, Some(Fix::Retry));
+        }
+        Server::Chosen(serve) => serve,
+    };
+    let (here, host) = match serve {
+        Serve::Here => (true, LOOPBACK.to_owned()),
+        Serve::Join(address) => (false, address.host().to_owned()),
+    };
+    let Some(doctor) = doctor else {
+        let doing = if here {
+            "Starts on this Mac.".to_owned()
+        } else {
+            format!("Joins the server on {host}.")
+        };
+        return line(Mark::Busy, doing, None);
+    };
+    match &doctor.server {
+        Some(LinkState::Linked) if here => line(
+            Mark::Ok,
+            "Runs on this Mac. Your other devices connect to it here.".to_owned(),
+            None,
+        ),
+        Some(LinkState::Linked) => line(Mark::Ok, format!("Registered with {host}."), None),
+        Some(LinkState::Dialling) => {
+            line(Mark::Busy, format!("Registering with {host}\u{2026}"), None)
+        }
+        Some(LinkState::Redialling { why }) => {
+            line(Mark::Busy, format!("Not reached yet: {why}"), None)
+        }
+        Some(LinkState::Refused { why }) => line(Mark::Missing, why.clone(), Some(Fix::Retry)),
+        None => {
+            line(Mark::Missing, "Its worker registers with no server.".to_owned(), Some(Fix::Retry))
+        }
+    }
 }
 
 /// A Tailscale that is not up, in words: its own for the common states, else not up.
@@ -477,16 +605,17 @@ pub fn native(runtime: &tokio::runtime::Handle) -> Option<Rc<dyn Host>> {
 }
 
 /// The self-test's host when the harness put a `doctor` report in
-/// [`slopty_e2e::THIS_MAC_ENV`]: it installs nothing, restarts nothing, opens no pane, adds
-/// nothing, and answers every read with that report, so the checklist can be drawn in any
-/// state with the machine untouched.
+/// [`slopty_e2e::THIS_MAC_ENV`]: it installs nothing, restarts nothing and opens no pane, and
+/// answers every read with that report, so the checklist can be drawn in any state with the
+/// machine untouched. A server the report names stands in for one started here.
 #[cfg(all(target_os = "macos", feature = "e2e"))]
 fn stand_in() -> Option<Rc<dyn Host>> {
     let report = std::env::var(slopty_e2e::THIS_MAC_ENV).ok()?;
     let health: slopty_proto::ctl::Health = serde_json::from_str(&report)
         .inspect_err(|e| tracing::warn!(error = %e, "this Mac's stand-in report"))
         .ok()?;
-    Some(Rc::new(StandIn { doctor: Doctor::from(health) }))
+    let here = health.server.as_ref().and_then(|s| s.address.parse().ok());
+    Some(Rc::new(StandIn { doctor: Doctor::from(health), here }))
 }
 
 /// The self-test's host outside the e2e build: none, so there is no entry to press.
@@ -500,12 +629,21 @@ const fn stand_in() -> Option<Rc<dyn Host>> {
 #[derive(Debug)]
 struct StandIn {
     doctor: Doctor,
+    /// The server the report names, which a [`Serve::Here`] reaches.
+    here: Option<HostAddr>,
 }
 
 #[cfg(all(target_os = "macos", feature = "e2e"))]
 impl Host for StandIn {
-    fn install(&self, _end_sessions: bool) -> Pending<Result<(), Stopped>> {
-        Box::pin(std::future::ready(Ok(())))
+    fn install(&self, serve: &Serve, _end_sessions: bool) -> Pending<Result<HostAddr, Stopped>> {
+        let reached = match serve {
+            Serve::Here => self
+                .here
+                .clone()
+                .ok_or_else(|| Stopped::Server("the self-test starts no server".to_owned())),
+            Serve::Join(address) => Ok(address.clone()),
+        };
+        Box::pin(std::future::ready(reached))
     }
 
     fn doctor(&self) -> Pending<Option<Doctor>> {
@@ -514,10 +652,6 @@ impl Host for StandIn {
 
     fn restart(&self) -> Pending<()> {
         Box::pin(std::future::ready(()))
-    }
-
-    fn add(&self, _address: &str) -> Pending<Result<net::Added, String>> {
-        Box::pin(std::future::ready(Err("the self-test adds nothing".to_owned())))
     }
 
     fn open(&self, _pane: Pane) {}
@@ -543,11 +677,43 @@ mod mac {
 
     use std::path::{Path, PathBuf};
 
-    use slopty_platform::service::{self, Layout, Session, WORKER, WorkerOpts};
+    use slopty_net::HostAddr;
+    use slopty_platform::service::{self, Layout, SERVER, Session, WORKER, WorkerOpts};
     use slopty_proto::ctl::{CtlReply, CtlRequest};
 
-    use super::{Doctor, Host, Pane, Pending, Stopped};
+    use super::{Doctor, Host, Pane, Pending, Serve, Stopped};
     use crate::net;
+
+    /// How long a server started here has to answer on loopback, as the CLI waits.
+    const SERVER_START: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Install and start `slopty-server` from `source`, keeping its state in `data`, and wait
+    /// until it answers at `address`.
+    async fn start_server(source: &Path, data: &Path, address: &HostAddr) -> Result<(), String> {
+        let session = Session::native();
+        service::install_server(&session, None, "info", source, data)
+            .await
+            .map_err(|e| format!("Could not start the server: {e}"))?;
+        let started = std::time::Instant::now();
+        loop {
+            match net::link_server(address).await {
+                Ok(link) => {
+                    link.close();
+                    return Ok(());
+                }
+                Err(e) if started.elapsed() < SERVER_START => {
+                    tracing::debug!(error = %e, "waiting for the server started here");
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "The server did not answer ({e:#}); its log is {}",
+                        session.logs(SERVER)
+                    ));
+                }
+            }
+        }
+    }
 
     /// This Mac, its networking runtime and the data directory the worker keeps.
     #[derive(Debug)]
@@ -571,8 +737,9 @@ mod mac {
     }
 
     impl Host for Native {
-        fn install(&self, end_sessions: bool) -> Pending<Result<(), Stopped>> {
+        fn install(&self, serve: &Serve, end_sessions: bool) -> Pending<Result<HostAddr, Stopped>> {
             let data = self.data.clone();
+            let serve = serve.clone();
             self.run(
                 async move {
                     let source =
@@ -580,17 +747,22 @@ mod mac {
                     if super::misplaced(&source, &slopty_platform::dirs::home()) {
                         return Err(Stopped::Misplaced);
                     }
-                    slopty_settings::join_clients_server(&data).map_err(Stopped::Failed)?;
                     let session = Session::native();
                     let ptyd = session.ptyd_plan(&source, &data);
                     if ptyd.ends_sessions() && !end_sessions {
                         return Err(Stopped::EndsSessions(ptyd.to_string()));
                     }
+                    let address = serve.address();
+                    if serve == Serve::Here {
+                        start_server(&source, &data, &address).await.map_err(Stopped::Server)?;
+                    }
+                    let joined =
+                        slopty_settings::join_server(&data, &address).map_err(Stopped::Failed)?;
                     let opts = WorkerOpts::default();
                     service::install_worker(&session, &opts, &source, &data, ptyd)
                         .await
-                        .map(drop)
-                        .map_err(|e| Stopped::Failed(e.to_string()))
+                        .map_err(|e| Stopped::Failed(e.to_string()))?;
+                    Ok(joined)
                 },
                 Err(Stopped::Failed("the install stopped".to_owned())),
             )
@@ -626,14 +798,6 @@ mod mac {
             )
         }
 
-        fn add(&self, address: &str) -> Pending<Result<net::Added, String>> {
-            let address = address.to_owned();
-            self.run(
-                async move { net::add_worker(&address).await.map_err(|e| format!("{e:#}")) },
-                Err("adding it stopped".to_owned()),
-            )
-        }
-
         fn open(&self, pane: Pane) {
             slopty_platform::privacy::open(pane);
             // A `LaunchAgent`'s request often raises no prompt, so the worker is not in the
@@ -663,14 +827,32 @@ mod mac {
                 async move {
                     let source = service::sibling_dir().ok()?;
                     super::bundle(&source)?;
-                    let session = Session::native();
-                    let installed = service::installed_args(session.manager, &session.file(WORKER))?;
-                    let program = PathBuf::from(installed.first()?);
-                    if !super::repoints(&program, &source)
-                        || super::misplaced(&source, &slopty_platform::dirs::home())
-                    {
+                    if super::misplaced(&source, &slopty_platform::dirs::home()) {
                         return None;
                     }
+                    let session = Session::native();
+                    let gone = |job| {
+                        let installed = service::installed_args(session.manager, &session.file(job))?;
+                        let program = PathBuf::from(installed.first()?);
+                        super::repoints(&program, &source).then_some((program, installed))
+                    };
+                    let server = gone(SERVER);
+                    let worker = gone(WORKER);
+                    if server.is_none() && worker.is_none() {
+                        return None;
+                    }
+                    if let Some((program, args)) = server {
+                        tracing::info!(was = %program.display(), now = %source.display(), "repoint the server");
+                        let port = args
+                            .iter()
+                            .position(|a| a == "--port")
+                            .and_then(|i| args.get(i.saturating_add(1)))
+                            .and_then(|p| p.parse().ok());
+                        if let Err(e) = service::install_server(&session, port, "info", &source, &data).await {
+                            return Some(Err(format!("The server was not moved to this copy of Slopty: {e}")));
+                        }
+                    }
+                    let Some((program, _args)) = worker else { return Some(Ok(())) };
                     tracing::info!(was = %program.display(), now = %source.display(), "repoint the worker");
                     // Its ptyd ran the binary gone too: kept if it still runs, else started.
                     let ptyd = session.ptyd_plan(&source, &data);
@@ -741,40 +923,102 @@ mod tests {
     use super::*;
 
     fn doctor(screen_recording: bool, accessibility: bool, tailnet: Tailnet) -> Doctor {
-        Doctor { version: "0.3.0".to_owned(), screen_recording, accessibility, tailnet }
+        Doctor {
+            worker: WorkerId::nil(),
+            server: Some(LinkState::Linked),
+            version: "0.3.0".to_owned(),
+            screen_recording,
+            accessibility,
+            tailnet,
+        }
     }
 
-    fn marks(lines: &[Line; 4]) -> [Mark; 4] {
+    /// The checklist of a run starting a server here, its worker at `worker`.
+    fn checklist_of(worker: Worker, logs: &str) -> [Line; 5] {
+        checklist(&Flow { worker, ..Flow::installing(1, Serve::Here) }, logs, "server.log")
+    }
+
+    fn marks(lines: &[Line; 5]) -> [Mark; 5] {
         lines.each_ref().map(|l| l.mark)
     }
 
-    fn fixes(lines: &[Line; 4]) -> [Option<Fix>; 4] {
+    fn fixes(lines: &[Line; 5]) -> [Option<Fix>; 5] {
         lines.each_ref().map(|l| l.fix)
     }
 
-    /// Before the worker answers only its own line moves; a failed install or a silent worker
-    /// is red with a way to try again, and says why.
+    /// Before the worker answers only its own line and the server's move; a failed install or a
+    /// silent worker is red with a way to try again, and says why.
     #[test]
     fn the_running_line_follows_the_install() {
         use Mark::{Busy, Missing, Unknown};
         let logs = "/Users/me/Library/Logs/Slopty/slopty-worker.log";
         for worker in [Worker::Installing, Worker::Starting] {
-            let lines = checklist(&worker, logs);
-            assert_eq!(marks(&lines), [Busy, Unknown, Unknown, Unknown], "{worker:?}");
-            assert_eq!(fixes(&lines), [None; 4], "nothing to press yet");
+            let lines = checklist_of(worker.clone(), logs);
+            assert_eq!(marks(&lines), [Busy, Busy, Unknown, Unknown, Unknown], "{worker:?}");
+            assert_eq!(fixes(&lines), [None; 5], "nothing to press yet");
         }
-        let silent = checklist(&Worker::Silent, logs);
-        assert_eq!(marks(&silent), [Missing, Unknown, Unknown, Unknown]);
+        let silent = checklist_of(Worker::Silent, logs);
+        assert_eq!(marks(&silent), [Missing, Busy, Unknown, Unknown, Unknown]);
         assert_eq!(silent[0].fix, Some(Fix::Retry));
         assert!(silent[0].detail.contains(logs), "names its log: {}", silent[0].detail);
-        let failed = checklist(&Worker::Failed("launchctl bootstrap failed".to_owned()), logs);
+        let failed = checklist_of(Worker::Failed("launchctl bootstrap failed".to_owned()), logs);
         assert_eq!((failed[0].mark, failed[0].fix), (Missing, Some(Fix::Retry)));
         assert_eq!(failed[0].detail, "launchctl bootstrap failed", "the reason, as it came");
-        let titles = checklist(&Worker::Silent, logs).map(|l| l.check.title());
+        let titles = checklist_of(Worker::Silent, logs).map(|l| l.check.title());
         assert_eq!(
             titles,
-            ["Running", "Screen Recording", "Accessibility", "Reachable on your tailnet"]
+            ["Running", "Server", "Screen Recording", "Accessibility", "Reachable on your tailnet"]
         );
+    }
+
+    /// The Server line says where the server comes from while it is looked for and installed,
+    /// then how the worker's link to it stands; a server that could not start is red with its
+    /// log and a way to try again, and the worker waits for it.
+    #[test]
+    fn the_server_line_follows_the_server_then_the_workers_link() {
+        use Mark::{Busy, Missing, Ok, Unknown};
+        let looking = checklist(&Flow::looking(1), "", "server.log");
+        assert_eq!((looking[0].mark, looking[1].mark), (Unknown, Busy));
+        assert_eq!(looking[1].detail, "Looking for one on your tailnet\u{2026}");
+
+        let studio = HostAddr::new("studio.tail1234.ts.net", 45560);
+        let joining = Flow { worker: Worker::Starting, ..Flow::installing(1, Serve::Join(studio)) };
+        let lines = checklist(&joining, "", "");
+        assert_eq!(
+            (lines[1].mark, lines[1].detail.as_str()),
+            (Busy, "Joins the server on studio.tail1234.ts.net.")
+        );
+        let joined = Flow { worker: Worker::Up(doctor(true, true, Tailnet::Absent)), ..joining };
+        let lines = checklist(&joined, "", "");
+        assert_eq!(
+            (lines[1].mark, lines[1].detail.as_str()),
+            (Ok, "Registered with studio.tail1234.ts.net.")
+        );
+
+        let here = checklist_of(Worker::Up(doctor(true, true, Tailnet::Absent)), "");
+        assert_eq!(here[1].mark, Ok);
+        assert!(here[1].detail.starts_with("Runs on this Mac"), "{}", here[1].detail);
+        let refused = Doctor {
+            server: Some(LinkState::Refused { why: "a worker with this id is linked".to_owned() }),
+            ..doctor(true, true, Tailnet::Absent)
+        };
+        let lines = checklist_of(Worker::Up(refused), "");
+        assert_eq!((lines[1].mark, lines[1].fix), (Missing, Some(Fix::Retry)));
+        let unset = Doctor { server: None, ..doctor(true, true, Tailnet::Absent) };
+        assert_eq!(checklist_of(Worker::Up(unset), "")[1].mark, Missing, "registered nowhere");
+
+        let failed = Flow {
+            server: Server::Failed("Could not start the server".to_owned()),
+            ..Flow::looking(1)
+        };
+        let lines = checklist(&failed, "", "/Users/me/Library/Logs/Slopty/slopty-server.log");
+        assert_eq!((lines[1].mark, lines[1].fix), (Missing, Some(Fix::Retry)));
+        assert!(
+            lines[1].detail.ends_with("slopty-server.log"),
+            "names its log: {}",
+            lines[1].detail
+        );
+        assert_eq!(lines[0].mark, Unknown, "the worker waits for it");
     }
 
     /// Each permission the worker lacks is red with the button that opens its own pane, and
@@ -785,37 +1029,38 @@ mod tests {
         use Mark::{Advisory, Missing, Ok};
         use slopty_ui::icons::Status::{Done, Failed, Idle, NeedsYou};
         let down = Tailnet::Down(BackendState::Stopped);
-        let lines = checklist(&Worker::Up(doctor(false, false, down)), "");
-        assert_eq!(marks(&lines), [Ok, Missing, Missing, Advisory]);
+        let lines = checklist_of(Worker::Up(doctor(false, false, down)), "");
+        assert_eq!(marks(&lines), [Ok, Ok, Missing, Missing, Advisory]);
         assert_eq!(
             fixes(&lines),
             [
+                None,
                 None,
                 Some(Fix::Open(Pane::ScreenRecording)),
                 Some(Fix::Open(Pane::Accessibility)),
                 None
             ]
         );
-        assert_eq!(lines[1].detail, TURN_ON, "one line; the button opens the list");
-        assert_eq!(lines[2].detail, TURN_ON);
+        assert_eq!(lines[2].detail, TURN_ON, "one line; the button opens the list");
+        assert_eq!(lines[3].detail, TURN_ON);
         let statuses = lines.each_ref().map(Line::status);
         assert_eq!(
             statuses,
-            [Done, NeedsYou, NeedsYou, Idle],
+            [Done, Done, NeedsYou, NeedsYou, Idle],
             "a grant to give waits on the human; a tailnet out of the way is quiet"
         );
-        let failed = checklist(&Worker::Failed("bootstrap failed".to_owned()), "");
+        let failed = checklist_of(Worker::Failed("bootstrap failed".to_owned()), "");
         assert_eq!(failed[0].status(), Failed, "red is for what went wrong");
-        assert_eq!(lines[3].detail, "Tailscale is stopped, so only this Mac reaches it.");
+        assert_eq!(lines[4].detail, "Tailscale is stopped, so only this Mac reaches it.");
         assert_eq!(lines[0].detail, "slopty-worker 0.3.0", "the daemon that answered");
 
         let studio = Tailnet::Reachable("studio.tail1234.ts.net".to_owned());
-        let lines = checklist(&Worker::Up(doctor(true, false, studio)), "");
-        assert_eq!(marks(&lines), [Ok, Ok, Missing, Ok]);
-        assert_eq!(fixes(&lines), [None, None, Some(Fix::Open(Pane::Accessibility)), None]);
-        assert_eq!(lines[3].detail, "Your devices reach it as studio.tail1234.ts.net.");
-        let lines = checklist(&Worker::Up(doctor(true, true, Tailnet::Absent)), "");
-        assert_eq!(marks(&lines), [Ok, Ok, Ok, Advisory], "no Tailscale is no stop either");
+        let lines = checklist_of(Worker::Up(doctor(true, false, studio)), "");
+        assert_eq!(marks(&lines), [Ok, Ok, Ok, Missing, Ok]);
+        assert_eq!(fixes(&lines), [None, None, None, Some(Fix::Open(Pane::Accessibility)), None]);
+        assert_eq!(lines[4].detail, "Your devices reach it as studio.tail1234.ts.net.");
+        let lines = checklist_of(Worker::Up(doctor(true, true, Tailnet::Absent)), "");
+        assert_eq!(marks(&lines), [Ok, Ok, Ok, Ok, Advisory], "no Tailscale is no stop either");
     }
 
     /// Ready is both grants, whatever the tailnet says; the app coming back rereads a worker
@@ -827,7 +1072,7 @@ mod tests {
         assert!(!up(true, false).ready() && !up(false, true).ready(), "one missing");
         assert!(!Worker::Silent.ready() && !Worker::Starting.ready(), "not answering");
 
-        let flow = |worker| Flow { worker, ..Flow::installing(1) };
+        let flow = |worker| Flow { worker, ..Flow::installing(1, Serve::Here) };
         assert!(flow(up(false, true)).rereads() && flow(up(false, true)).restarts());
         assert!(flow(up(true, false)).rereads() && !flow(up(true, false)).restarts());
         assert!(flow(Worker::Silent).rereads(), "a silent worker is asked again");
@@ -835,6 +1080,9 @@ mod tests {
         assert!(!flow(Worker::Installing).rereads(), "an install under way is left alone");
         let reading = Flow { reading: true, ..flow(up(true, false)) };
         assert!(!reading.rereads(), "one read at a time");
+        let listing = Flow { listing: true, ..flow(up(true, true)) };
+        assert!(listing.busy() && !listing.rereads(), "waiting for the server to list it");
+        assert!(Flow::looking(1).busy(), "looking for a server");
     }
 
     #[cfg(target_os = "macos")]
@@ -842,7 +1090,7 @@ mod tests {
     fn a_health_report_reads_as_the_checklists_doctor() {
         use slopty_proto::ctl::Tailscale;
         let health = slopty_proto::ctl::Health {
-            worker: slopty_core::WorkerId::nil(),
+            worker: WorkerId::nil(),
             server: None,
             version: "0.3.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
@@ -863,7 +1111,8 @@ mod tests {
             uptime_secs: 1,
         };
         let studio = Tailnet::Reachable("studio.tail1234.ts.net".to_owned());
-        assert_eq!(Doctor::from(health.clone()), doctor(true, false, studio));
+        let unregistered = Doctor { server: None, ..doctor(true, false, studio) };
+        assert_eq!(Doctor::from(health.clone()), unregistered);
         let bare = Tailscale::Up { node: String::new(), ip: Some([100, 64, 0, 3].into()) };
         let health = slopty_proto::ctl::Health { tailscale: bare, ..health };
         let by_address = Tailnet::Reachable("100.64.0.3".to_owned());
@@ -871,14 +1120,14 @@ mod tests {
         let signed_out = Tailscale::Down { backend: BackendState::NeedsLogin };
         let health = slopty_proto::ctl::Health { tailscale: signed_out, ..health };
         assert_eq!(Doctor::from(health.clone()).tailnet, Tailnet::Down(BackendState::NeedsLogin));
-        let lines = checklist(&Worker::Up(Doctor::from(health.clone())), "");
-        assert_eq!(lines[3].detail, "Tailscale is signed out, so only this Mac reaches it.");
+        let lines = checklist_of(Worker::Up(Doctor::from(health.clone())), "");
+        assert_eq!(lines[4].detail, "Tailscale is signed out, so only this Mac reaches it.");
         let silent = Tailscale::Unreachable { error: "timed out".to_owned() };
         let health = slopty_proto::ctl::Health { tailscale: silent, ..health };
         assert_eq!(Doctor::from(health.clone()).tailnet, Tailnet::Unreachable);
-        let lines = checklist(&Worker::Up(Doctor::from(health.clone())), "");
-        assert_eq!(lines[3].detail, "Tailscale is not answering, so only this Mac reaches it.");
-        assert_eq!(marks(&lines)[3], Mark::Advisory, "a warning, not a stop");
+        let lines = checklist_of(Worker::Up(Doctor::from(health.clone())), "");
+        assert_eq!(lines[4].detail, "Tailscale is not answering, so only this Mac reaches it.");
+        assert_eq!(marks(&lines)[4], Mark::Advisory, "a warning, not a stop");
         let health = slopty_proto::ctl::Health { tailscale: Tailscale::Absent, ..health };
         assert_eq!(Doctor::from(health).tailnet, Tailnet::Absent);
     }

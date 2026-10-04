@@ -179,7 +179,9 @@ What a person installs, and how this tree makes it.
   `slopty worker install` or `slopty server install` from the Mac tarball, or from a Linux
   tarball on Linux (systemd user units; lingering is turned on so they outlive the login).
   `slopty worker deploy <ssh target>` does the same from this Mac, and registers the worker
-  with the server every verb reaches (`--server`, `--no-server`).
+  with the server every verb reaches (`--server`); with none to reach, the deploy says so and
+  sends nothing. `slopty worker install` with no server set or found installs one beside the
+  worker.
 
 ## Gate
 The full gate is fmt, clippy `-D warnings` on all targets and all three Apple triples, clippy for

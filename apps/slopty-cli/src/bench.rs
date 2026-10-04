@@ -29,8 +29,13 @@ async fn drain(events: &mut tokio::sync::mpsc::Receiver<LinkEvent>, quiet: Durat
 
 /// Send `count` single bytes to a fresh `cat` session and time each one to the first frame
 /// that comes back. Includes the worker's frame coalescing window and one round trip.
-pub async fn echo(data_dir: &Path, needle: Option<&str>, count: u32) -> Result<()> {
-    let mut session = connect_to(data_dir, needle).await?;
+pub async fn echo(
+    data_dir: &Path,
+    server: Option<&str>,
+    needle: Option<&str>,
+    count: u32,
+) -> Result<()> {
+    let mut session = connect_to(data_dir, server, needle).await?;
     let size = TermSize { cols: 60, rows: 12, ..TermSize::default() };
     let id = session
         .open(OpenSession {

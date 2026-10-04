@@ -6,7 +6,6 @@ use slopty_client::{LinkEvent, WorkerLink};
 use slopty_core::{ClientId, WorkerId};
 use slopty_net::HostAddr;
 use slopty_net::client::{bind_client, connect};
-use slopty_net::known::{KnownWorker, KnownWorkers};
 use slopty_net::server::{DialError, ServerLink};
 use slopty_proto::ClientMsg;
 use slopty_proto::handshake::{Hello, HelloAck};
@@ -28,8 +27,9 @@ pub struct Connected {
     pub link: WorkerLink,
 }
 
-fn known() -> Result<KnownWorkers> {
-    Ok(KnownWorkers::open_in(&slopty_platform::dirs::data_dir())?)
+/// This installation's id on the wire, kept in the data directory.
+fn client_id() -> Result<ClientId> {
+    Ok(slopty_net::known::client_id_in(&slopty_platform::dirs::data_dir())?)
 }
 
 /// The app's one endpoint, bound on first use.
@@ -72,8 +72,7 @@ pub struct Tailnet {
 /// The servers and workers this machine's Tailscale finds on the tailnet, for the panel.
 ///
 /// Both are looked for at once. Nothing is found while Tailscale is not up here, nor on iOS,
-/// where no app can read it. A worker already added at the address it answered from is left
-/// out: it has its link.
+/// where no app can read it.
 pub async fn find_on_tailnet() -> Tailnet {
     let Some(status) = tailnet_status().await.filter(slopty_tailnet::Status::running) else {
         return Tailnet::default();
@@ -81,16 +80,10 @@ pub async fn find_on_tailnet() -> Tailnet {
     let Ok(endpoint) = endpoint() else {
         return Tailnet { running: true, ..Tailnet::default() };
     };
-    let (servers, mut workers) = tokio::join!(
+    let (servers, workers) = tokio::join!(
         slopty_net::discover::servers(&endpoint, &status),
         slopty_net::discover::workers(&endpoint, &status),
     );
-    let added: Vec<String> = known_workers()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|w| w.address.host().to_owned())
-        .collect();
-    workers.retain(|w| !added.contains(&w.addr.ip().to_string()));
     Tailnet { servers, workers, running: true }
 }
 
@@ -116,83 +109,6 @@ fn hello(client: ClientId) -> Hello {
     Hello { client, name: NAME.to_owned() }
 }
 
-/// The workers this installation has added, by name.
-///
-/// # Errors
-///
-/// When the store cannot be read or created.
-pub fn known_workers() -> Result<Vec<KnownWorker>> {
-    let mut workers = known()?.workers().to_vec();
-    workers.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(workers)
-}
-
-/// Drop a worker from the store.
-///
-/// # Errors
-///
-/// When the store cannot be read or written.
-pub fn forget_worker(id: WorkerId) -> Result<bool> {
-    Ok(known()?.forget(id)?)
-}
-
-/// A worker just added.
-#[derive(Clone, Debug)]
-pub struct Added {
-    /// Its identity (the key of the store and of its slot).
-    pub id: WorkerId,
-    /// Its display name.
-    pub name: String,
-}
-
-/// The worker at an address being added runs another build: nothing is remembered, and the
-/// way on is to install this build on its host ([`UpdateNotice::host`]).
-///
-/// [`UpdateNotice::host`]: slopty_client::update::UpdateNotice::host
-#[derive(Debug, Clone)]
-pub struct OtherBuild(pub slopty_client::update::UpdateNotice);
-
-impl std::fmt::Display for OtherBuild {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}. {}", self.0.title(), self.0.detail())
-    }
-}
-
-impl std::error::Error for OtherBuild {}
-
-/// Connect to `address` (`host[:port]`) and remember the worker under the id it answers with.
-///
-/// # Errors
-///
-/// When the address does not parse, nothing answers there, or the worker turns it away; a
-/// worker on another build is an [`OtherBuild`].
-pub async fn add_worker(address: &str) -> Result<Added> {
-    let address: HostAddr = address.trim().parse()?;
-    let mut me = known()?;
-    let endpoint = endpoint().map_err(anyhow::Error::msg)?;
-    let conn = connect(&endpoint, &address, hello(me.client())).await.map_err(|e| {
-        if matches!(e, slopty_net::NetError::NotGranted) {
-            anyhow!(not_granted(address.host()))
-        } else if let Some(notice) =
-            slopty_client::update::UpdateNotice::for_worker_dial(address.host(), &e)
-        {
-            anyhow::Error::new(OtherBuild(notice))
-        } else {
-            anyhow::Error::new(e).context(format!("connect to {address}"))
-        }
-    })?;
-    let added = Added { id: conn.ack.worker, name: conn.ack.name.clone() };
-    me.remember(KnownWorker { address, name: added.name.clone(), worker_id: added.id })?;
-    conn.close();
-    Ok(added)
-}
-
-/// What adding the worker at `host` says when it turns this device away: the tailnet grants
-/// it no client role there, and where the grant that does is copied from.
-pub fn not_granted(host: &str) -> String {
-    format!("{host} needs a tailnet grant for this device. {}", crate::server::GRANT_WHERE)
-}
-
 /// Why a dial to a worker failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialFailed {
@@ -204,20 +120,13 @@ pub enum DialFailed {
     Other(String),
 }
 
-/// Connect to worker `id` on the shared endpoint: at `address` (the directory's), else at the
-/// address it was added with.
-pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Connected, DialFailed> {
+/// Connect to worker `id` at `address` (the directory's) on the shared endpoint.
+pub async fn connect_to(id: WorkerId, address: HostAddr) -> Result<Connected, DialFailed> {
     let other = |e: &dyn std::fmt::Display| DialFailed::Other(format!("{e:#}"));
-    let mut me = known().map_err(|e| other(&e))?;
-    let added = me.get(id).cloned();
-    let address = match (address, &added) {
-        (Some(address), _) => address,
-        (None, Some(added)) => added.address.clone(),
-        (None, None) => return Err(DialFailed::Other("machine forgotten".to_owned())),
-    };
+    let me = client_id().map_err(|e| other(&e))?;
     let endpoint = endpoint().map_err(DialFailed::Other)?;
     tracing::debug!(worker = %id, %address, "dialing");
-    let conn = connect(&endpoint, &address, hello(me.client())).await.map_err(|e| {
+    let conn = connect(&endpoint, &address, hello(me)).await.map_err(|e| {
         if matches!(e, slopty_net::NetError::NotGranted) {
             DialFailed::NotGranted
         } else if let Some(notice) =
@@ -234,17 +143,10 @@ pub async fn connect_to(id: WorkerId, address: Option<HostAddr>) -> Result<Conne
         return Err(DialFailed::Other(format!("{address} now answers as another machine")));
     }
     tracing::debug!(worker = %id, name = %ack.name, sessions = ack.sessions.len(), "connected");
-    // A worker added by address shows the stored name until the link is up; keep it current.
-    if let Some(added) = added
-        && ack.name != added.name
-        && let Err(e) = me.remember(KnownWorker { name: ack.name.clone(), ..added })
-    {
-        tracing::warn!(error = %e, "refresh worker name");
-    }
     let mut link = WorkerLink::start_forwarding(conn);
     let events = link.events().ok_or_else(|| DialFailed::Other("events".to_owned()))?;
     let sender = link.sender();
-    Ok(Connected { me: me.client(), ack, sender, events, link })
+    Ok(Connected { me, ack, sender, events, link })
 }
 
 /// Who this app is to the server.

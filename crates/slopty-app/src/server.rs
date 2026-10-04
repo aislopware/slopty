@@ -94,7 +94,7 @@ pub(crate) struct Plan {
     pub key: WorkerKey,
     /// Wakes the loop out of a wait.
     pub wake: Arc<tokio::sync::Notify>,
-    /// Where to dial: the directory's address, or `None` for the one it was added with.
+    /// Where to dial: the directory's address, `None` while it lists none.
     pub address: Option<HostAddr>,
     /// The server says it is away: show this and wait before dialling.
     pub hold: Option<WorkerStatus>,
@@ -142,7 +142,7 @@ pub(crate) fn cache_path() -> std::path::PathBuf {
 pub(crate) enum Cache {
     /// This server's directory.
     Keep(HostAddr, Directory),
-    /// Nothing: the server was disconnected, so the file goes.
+    /// Nothing: the server was taken out of the settings, so the file goes.
     Remove,
 }
 
@@ -228,7 +228,7 @@ impl Workspace {
             self.directory.workers().map(|w| (w.worker, w.name.clone())).collect();
         self.drop_unlisted(&unlisted, cx);
         for (id, name) in cached {
-            self.add_worker(id, name, false, cx);
+            self.add_worker(id, name, cx);
         }
         tracing::info!(server = %address, cached = self.directory.workers().count(), "server");
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -276,7 +276,7 @@ impl Workspace {
     /// Workers that only a dropped directory listed leave with their tiles.
     fn drop_unlisted(&mut self, unlisted: &[WorkerId], cx: &mut Context<Self>) {
         for id in unlisted {
-            if self.directory.get(*id).is_none() && self.slot(*id).is_some_and(|s| !s.added) {
+            if self.directory.get(*id).is_none() && self.slot(*id).is_some() {
                 self.drop_slot(*id, cx);
             }
         }
@@ -333,7 +333,6 @@ impl Workspace {
                 if listing {
                     self.directory_caps(cx);
                     self.save_directory();
-                    self.offer_register(cx);
                 }
             }
         }
@@ -398,8 +397,10 @@ impl Workspace {
         match change {
             Change::Listed(id) | Change::Moved(id) => {
                 let name = self.directory.get(id).map(|w| w.name.clone()).unwrap_or_default();
-                self.add_worker(id, name, false, cx);
-                if let Some(slot) = self.slot(id) {
+                // A slot new here dials as its loop starts; one waiting dials the new address.
+                let waiting = self.slot(id).is_some();
+                self.add_worker(id, name, cx);
+                if let Some(slot) = self.slot(id).filter(|_| waiting) {
                     slot.wake();
                 }
             }
@@ -420,9 +421,11 @@ impl Workspace {
                     self.view.update(cx, |v, cx| v.forget_server_agents(Some(key), cx));
                 }
             }
+            // The server forgot it: it goes with its tiles, and its pages with their store.
             Change::Unlisted(id) => {
-                if self.slot(id).is_some_and(|s| !s.added) {
+                if let Some(key) = self.slot(id).map(|slot| slot.key) {
                     self.drop_slot(id, cx);
+                    Self::forget_pages(key, cx);
                 }
             }
             Change::Load(id) => {
@@ -496,7 +499,6 @@ impl Workspace {
         let (address, hold) = match self.directory.dial(id) {
             Dial::At(address) => (Some(address), None),
             Dial::Hold(liveness) => (self.directory_address(id), away(liveness)),
-            Dial::Unlisted if slot.added => (None, None),
             Dial::Unlisted => (None, Some(WorkerStatus::Connecting)),
         };
         Some(Plan { key: slot.key, wake: Arc::clone(&slot.wake), address, hold })
@@ -525,7 +527,7 @@ impl Workspace {
         let Some(caller) =
             self.server.as_ref().and_then(|s| s.task.as_ref()).map(ServerTask::caller)
         else {
-            self.show_notice(format!("Could not wake {name}: no server to send it"), cx);
+            self.show_notice(format!("Could not wake {name}: the server does not answer yet"), cx);
             return;
         };
         let (tx, rx) = tokio::sync::oneshot::channel();

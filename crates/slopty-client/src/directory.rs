@@ -3,8 +3,9 @@
 //!
 //! The server lists the workers; the client dials each one directly, so the directory decides
 //! *whom* to dial and *where*, never what goes over the link. With the server unreachable the
-//! last directory stands (degraded mode): every cached worker is dialled at its cached
-//! address, so terminals and streams keep going while only the list stops changing.
+//! last directory stands (an outage): every cached worker is dialled at its cached address, so
+//! terminals and streams keep going while only the list stops changing. There is no directory
+//! without a server: a client with none set is not set up yet.
 //!
 //! Pure: [`Directory::apply`] takes what the server said and returns what changed; the link
 //! that feeds it is [`crate::server`].
@@ -27,10 +28,8 @@ pub const CACHE_FILE: &str = "directory.json";
 /// Where the link to the server stands.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum ServerState {
-    /// No server is configured.
-    #[default]
-    Off,
     /// Dialling, before the first answer.
+    #[default]
     Linking,
     /// Welcomed.
     Linked {
@@ -89,7 +88,7 @@ pub enum Dial {
     At(HostAddr),
     /// The server says the worker is not there; wait until it comes back online.
     Hold(Liveness),
-    /// The directory does not list it (a worker added by address, or none at all).
+    /// The directory does not list it (yet).
     Unlisted,
 }
 
@@ -125,12 +124,6 @@ impl Directory {
     #[must_use]
     pub const fn linked(&self) -> bool {
         matches!(self.server, ServerState::Linked { .. })
-    }
-
-    /// A server is configured but not answering: the cached directory stands.
-    #[must_use]
-    pub const fn degraded(&self) -> bool {
-        matches!(self.server, ServerState::Linking | ServerState::Unreachable { .. })
     }
 
     /// Every listed worker, by id.
@@ -426,7 +419,7 @@ mod tests {
             info(up, "10.0.0.1:45550", Liveness::Online),
             info(away, "[fd7a:115c:a1e0::2]:45550", Liveness::Gone),
         ]);
-        assert!(d.degraded() && !d.linked());
+        assert!(!d.linked());
         assert_eq!(d.dial(up), Dial::At(HostAddr::new("10.0.0.1", 45550)));
         assert_eq!(
             d.dial(away),
@@ -436,7 +429,7 @@ mod tests {
         d.set_server(ServerState::Linked { name: "s".to_owned(), link: 1 });
         assert_eq!(d.dial(away), Dial::Hold(Liveness::Gone), "once it answers, it holds");
         d.set_server(ServerState::Unreachable { why: "timed out".to_owned() });
-        assert!(d.degraded());
+        assert!(!d.linked());
         assert_eq!(d.dial(away), Dial::At(HostAddr::new("fd7a:115c:a1e0::2", 45550)));
     }
 

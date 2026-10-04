@@ -685,11 +685,12 @@ pub struct WorkerSettings {
     /// peer as soon as the file changes.
     #[schemars(title = "Allowed addresses", example = ["100.64.0.0/10", "fd00::/8"])]
     pub allow: Vec<String>,
-    /// The server it lists itself with; empty runs it on its own.
+    /// The server it lists itself with; installing it sets one.
     ///
     /// The server to register with, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
-    /// empty string in the file) runs the worker on its own. `--server` and `SLOPTY_SERVER`
+    /// empty string in the file) leaves it registered nowhere, serving only the clients that reach
+    /// it already, which no installer leaves it doing. `--server` and `SLOPTY_SERVER`
     /// take precedence. A change registers it with the new one at once.
     #[serde(with = "server_address")]
     #[schemars(title = "Register with", with = "String", example = "studio.local")]
@@ -845,11 +846,11 @@ impl Default for ProjectBounds {
 #[serde(default)]
 #[schemars(title = "This app")]
 pub struct ClientSettings {
-    /// Lists your machines; empty reaches only those added by address.
+    /// Lists your machines; empty until this app is set up.
     ///
     /// The server whose directory lists the workers, `host[:port]` with
     /// [`SERVER_PORT`](slopty_net::endpoint::SERVER_PORT) when the port is absent; `None` (an
-    /// empty string in the file) reaches only the workers added by address.
+    /// empty string in the file) is an app not set up yet, which opens on its first run.
     #[serde(with = "server_address")]
     #[schemars(title = "Server", with = "String", example = "studio.local")]
     pub server: Option<HostAddr>,
@@ -1108,7 +1109,7 @@ ansi = []
 # tailnet is the boundary.
 allow = []
 # The server this Mac registers with as a worker, \"host\" or \"host:port\"
-# (port 45560 when absent). Empty runs it on its own. --server and
+# (port 45560 when absent). Installing the worker sets it. --server and
 # SLOPTY_SERVER override it.
 server = \"\"
 # What this Mac is, for a project's placement rules to read as labels.<name>:
@@ -1133,8 +1134,8 @@ server = \"\"
 
 [client]
 # The server whose directory lists the machines this app and the slopty CLI
-# reach, \"host\" or \"host:port\" (port 45560 when absent). Empty reaches only
-# the machines added by address.
+# reach, \"host\" or \"host:port\" (port 45560 when absent). Empty until the
+# app is set up.
 server = \"\"
 ",
             mono_family = toml_string(&d.font.mono_family),
@@ -1243,24 +1244,19 @@ pub fn save_server(data_dir: &Path, of: ServerOf, server: Option<&HostAddr>) -> 
     slopty_platform::fs::replace(&path, text.as_bytes()).map_err(shown)
 }
 
-/// Have the worker under `data_dir` register with its client's server, unless it names one.
-///
-/// The Mac an app makes a worker joins the directory that app reads. Returns the server it now
-/// registers with.
+/// Have the worker under `data_dir` register with `server`, unless it names one of its own;
+/// the server it registers with now.
 ///
 /// # Errors
 ///
 /// As [`save_server`].
-pub fn join_clients_server(data_dir: &Path) -> Result<Option<HostAddr>, String> {
+pub fn join_server(data_dir: &Path, server: &HostAddr) -> Result<HostAddr, String> {
     let settings = Settings::load(&path_in(data_dir)).settings;
-    match (settings.worker.server, settings.client.server) {
-        (Some(own), _) => Ok(Some(own)),
-        (None, Some(client)) => {
-            save_server(data_dir, ServerOf::Worker, Some(&client))?;
-            Ok(Some(client))
-        }
-        (None, None) => Ok(None),
+    if let Some(own) = settings.worker.server {
+        return Ok(own);
     }
+    save_server(data_dir, ServerOf::Worker, Some(server))?;
+    Ok(server.clone())
 }
 
 impl Loaded {
@@ -1674,22 +1670,19 @@ mod tests {
         assert_eq!(loaded.settings, Settings::default());
     }
 
-    /// A worker made from the app joins the app's server, and keeps a server of its own.
+    /// A worker made from the app joins the server it is given, and keeps a server of its own.
     #[test]
-    fn a_worker_joins_its_clients_server_unless_it_has_its_own() {
+    fn a_worker_joins_the_server_it_is_given_unless_it_has_its_own() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(join_clients_server(dir.path()), Ok(None), "no server anywhere");
-        assert!(!path_in(dir.path()).exists(), "and nothing written");
-
         let studio: HostAddr = "studio:7000".parse().unwrap();
-        save_server(dir.path(), ServerOf::Client, Some(&studio)).unwrap();
-        assert_eq!(join_clients_server(dir.path()), Ok(Some(studio.clone())));
+        assert_eq!(join_server(dir.path(), &studio), Ok(studio.clone()));
         let saved = Settings::load(&path_in(dir.path())).settings;
-        assert_eq!(saved.worker.server, Some(studio));
+        assert_eq!(saved.worker.server, Some(studio.clone()));
+        assert_eq!(saved.client.server, None, "the app's own key is the app's to write");
 
         let own: HostAddr = "100.64.0.9:7000".parse().unwrap();
         save_server(dir.path(), ServerOf::Worker, Some(&own)).unwrap();
-        assert_eq!(join_clients_server(dir.path()), Ok(Some(own)), "its own wins");
+        assert_eq!(join_server(dir.path(), &studio), Ok(own), "its own wins");
     }
 
     #[test]

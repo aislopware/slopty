@@ -66,7 +66,8 @@ mod tests {
         let plan = Plan {
             sources: vec![bins.clone()],
             update: true,
-            server: None,
+            // This Mac, as the guest reaches it: the worker registers with a server here.
+            server: slopty_deploy::Server { host: "127.0.0.1".to_owned(), port: 45_560 },
             end_sessions: false,
             password: None,
             add_key: false,

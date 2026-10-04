@@ -76,9 +76,8 @@ pub struct Plan {
     /// and address and putting it back if the new one does not come up, or install one where
     /// there is none. Without it a machine with a worker is refused.
     pub update: bool,
-    /// The server the worker registers with, so every client of it lists the machine; as it
-    /// was there before when `None`.
-    pub server: Option<Server>,
+    /// The server the worker registers with, so every client of it lists the machine.
+    pub server: Server,
     /// The person said to go on when the update restarts `slopty-ptyd`, ending every session
     /// it holds there. Without it such an update stops before changing anything
     /// ([`DeployError::EndsSessions`]).
@@ -136,9 +135,8 @@ pub struct Deployed {
     /// The worker's own account of itself.
     pub health: Health,
     /// The server address the install saved for it to register with: [`Plan::server`] as the
-    /// machine reaches it. `None` when the plan named none, or named this machine at loopback
-    /// and the machine did not say where it was reached from.
-    pub server: Option<String>,
+    /// machine reaches it.
+    pub server: String,
     /// What an update did to `slopty-ptyd` there; `None` for a fresh install.
     pub ptyd: Option<Ptyd>,
     /// What the person must do there so the worker outlives their last logout, when it does
@@ -312,6 +310,18 @@ pub enum DeployError {
         /// Why that is not a plan.
         error: serde_json::Error,
     },
+    /// The machine has no address for the server the plan names: it is this machine at
+    /// loopback and the machine did not say where it was reached from, or the name holds what
+    /// a shell would read as more than an address. Nothing was installed.
+    #[error(
+        "{target} has no address for the server at {server}; pass --server with one it reaches"
+    )]
+    NoServerAddress {
+        /// The machine.
+        target: String,
+        /// The server as the plan named it.
+        server: String,
+    },
     /// The doctor there answered with something other than a health report.
     #[error("the worker's doctor said {said:?}: {error}")]
     Doctor {
@@ -437,6 +447,11 @@ impl DeployError {
                     format!("Could not copy {name} to {target}")
                 })
             }
+            Self::NoServerAddress { target, server } => Failure::new(
+                format!("{target} has no address for the server"),
+                Some("Connect to the server by an address other machines reach.".to_owned()),
+                vec![server.clone()],
+            ),
             Self::Machine { target, source } => Failure::new(
                 format!("No worker runs on {target}"),
                 Some("Workers run on macOS and Linux, on arm64 or x86_64.".to_owned()),
@@ -642,17 +657,18 @@ pub async fn deploy(
     };
     let runner = signed.as_deref().unwrap_or(runner);
     let reached = reach(runner, on).await?;
+    let server = if runner.is_local() {
+        plan.server.address()
+    } else {
+        plan.server.seen_from(reached.client.as_deref())
+    }
+    .ok_or_else(|| DeployError::NoServerAddress {
+        target: runner.target().to_owned(),
+        server: format!("{}:{}", plan.server.host, plan.server.port),
+    })?;
     let bin = send(runner, &plan.sources, &WORKER_BINARIES, reached.platform, on).await?;
     let mode = if plan.update { "--update" } else { "--fresh" };
-    let client = reached.client.as_deref();
-    let server = plan.server.as_ref().and_then(|server| {
-        let seen = server.seen_from(client);
-        if seen.is_none() {
-            tracing::warn!(?server, ?client, "no address the worker there reaches the server at");
-        }
-        seen
-    });
-    let register = server.as_ref().map(|s| format!(" --server {s}")).unwrap_or_default();
+    let register = format!(" --server {server}");
     let ptyd = if plan.update { Some(ptyd_plan(runner, &bin, plan, on).await?) } else { None };
     let end = if plan.update && plan.end_sessions { " --end-sessions" } else { "" };
     on(Event::Step(Step::Install));

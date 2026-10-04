@@ -27,10 +27,6 @@ pub struct DeployOpts {
     /// The `ssh` to run.
     #[arg(long, default_value = "ssh")]
     ssh: PathBuf,
-    /// Register it with no server: it runs on its own, and each client adds it by address. By
-    /// default it registers with the server every verb reaches (`--server` names another).
-    #[arg(long)]
-    no_server: bool,
     /// Go on when the update restarts `slopty-ptyd` there, ending every shell and agent turn
     /// it holds. Without it such an update stops before changing anything, and says so.
     #[arg(long)]
@@ -56,15 +52,15 @@ impl DeployOpts {
 ///
 /// # Errors
 ///
-/// When the machine or the binaries do not fit, a step there fails, or the new worker did not
-/// come up (after an update, the previous one is back then).
+/// When no server is named or answers, the machine or the binaries do not fit, a step there
+/// fails, or the new worker did not come up (after an update, the previous one is back then).
 pub async fn deploy(
     opts: &DeployOpts,
     server: Option<&str>,
     data_dir: &Path,
     source: &Path,
 ) -> Result<Deployed> {
-    let server = if opts.no_server { None } else { register_with(server, data_dir).await? };
+    let server = register_with(server, data_dir).await?;
     let ssh = Ssh::new(opts.ssh.clone(), opts.target.clone());
     let plan = Plan {
         sources: sources(opts.bin_dir(), source),
@@ -84,16 +80,19 @@ pub async fn deploy(
 }
 
 /// The server a deployed worker registers with: `--server`, `$SLOPTY_SERVER` or `[client]
-/// server`, else the first that answers on the tailnet; none when nothing names or answers one.
-async fn register_with(flag: Option<&str>, data_dir: &Path) -> Result<Option<Server>> {
-    let server = |a: &slopty_net::HostAddr| Server { host: a.host().to_owned(), port: a.port() };
-    if let Some(address) = crate::link::configured(flag, data_dir)? {
-        return Ok(Some(server(&address)));
-    }
+/// server`, else the first that answers on the tailnet ([`crate::link::locate`]). With none, the
+/// deploy stops before it starts: a worker registered nowhere is listed by no client.
+async fn register_with(flag: Option<&str>, data_dir: &Path) -> Result<Server> {
     let endpoint = slopty_net::client::bind_client()?;
-    let found = slopty_net::discover::find(&endpoint).await;
+    let located = crate::link::locate(flag, data_dir, &endpoint).await;
     crate::client::close_endpoint(&endpoint).await;
-    Ok(found.map(|found| server(&found.host_addr())))
+    let address = located.map_err(|e| {
+        e.context(
+            "a worker registers with a server: start one with `slopty server install` here or \
+             `slopty server deploy <ssh target>`",
+        )
+    })?;
+    Ok(Server { host: address.host().to_owned(), port: address.port() })
 }
 
 /// `slopty server deploy` options.
@@ -185,15 +184,9 @@ pub fn report(target: &str, deployed: &Deployed) -> String {
         Tailscale::Up { node, .. } => node.as_str(),
         Tailscale::Down { .. } | Tailscale::Unreachable { .. } | Tailscale::Absent => target,
     };
-    match server {
-        Some(server) => out.push(format!(
-            "it registers with the server at {server}, so every client of it lists {address}"
-        )),
-        None => out.push(format!(
-            "no server to register with (pass --server); add it from a client with `slopty add \
-             {address}`"
-        )),
-    }
+    out.push(format!(
+        "it registers with the server at {server}, so every client of it lists {address}"
+    ));
     out.extend(ptyd.map(|ptyd| ptyd.to_string()));
     out.extend(stops_at_logout.clone());
     if console.logged_in == Some(false) {

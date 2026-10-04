@@ -42,6 +42,10 @@ mod settings;
 mod showcase;
 
 #[cfg(test)]
+#[path = "app/start.rs"]
+mod start;
+
+#[cfg(test)]
 #[path = "app/stream.rs"]
 mod stream;
 
@@ -279,7 +283,10 @@ mod tests {
         let before = dump.terminals[0].face.as_ref().map_or(0.0, |f| f.size);
         assert!(before > 0.0, "{dump:#?}");
         let settings = stack.dir.path().join("app").join("settings.toml");
-        std::fs::write(&settings, "[font]\nmono_size = 20\n").unwrap();
+        // The server the app follows stays in the file.
+        let server = stack.server.address();
+        let file = format!("[font]\nmono_size = 20\n\n[client]\nserver = \"{server}\"\n");
+        std::fs::write(&settings, file).unwrap();
         let dump = drv
             .wait_for("the grid to take the new font size", STEP + Duration::from_secs(2), |d| {
                 d.terminals.iter().any(|t| t.face.as_ref().is_some_and(|f| f.size > before * 1.4))
