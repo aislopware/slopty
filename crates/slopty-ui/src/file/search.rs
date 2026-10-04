@@ -415,19 +415,39 @@ impl FileView {
                 div()
                     .flex()
                     .items_center()
-                    .child(toggle("file-search-case", IconName::CaseSensitive, MATCH_CASE, q.match_case, |q| &mut q.match_case))
-                    .child(toggle("file-search-word", IconName::WholeWord, WHOLE_WORD, q.whole_word, |q| &mut q.whole_word))
-                    .child(toggle("file-search-regex", IconName::Regex, REGEX, q.regex, |q| &mut q.regex)),
+                    .child(toggle(
+                        "file-search-case",
+                        IconName::CaseSensitive,
+                        MATCH_CASE,
+                        q.match_case,
+                        |q| &mut q.match_case,
+                    ))
+                    .child(toggle(
+                        "file-search-word",
+                        IconName::WholeWord,
+                        WHOLE_WORD,
+                        q.whole_word,
+                        |q| &mut q.whole_word,
+                    ))
+                    .child(toggle("file-search-regex", IconName::Regex, REGEX, q.regex, |q| {
+                        &mut q.regex
+                    })),
             )
             .child(
                 div()
                     .id("file-search-count")
                     .min_w(px(40.0))
-                    .text_color(hsla(if search.error.is_some() { s.error } else { s.text_secondary }))
+                    .text_color(hsla(if search.error.is_some() {
+                        s.error
+                    } else {
+                        s.text_secondary
+                    }))
                     .role(Role::Label)
                     .aria_label("Matches")
                     // A screen reader hears the pattern's own word on what is wrong.
-                    .aria_value(search.error.clone().map_or_else(|| count.clone(), SharedString::from))
+                    .aria_value(
+                        search.error.clone().map_or_else(|| count.clone(), SharedString::from),
+                    )
                     .child(count),
             )
             .child(

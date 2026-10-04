@@ -573,23 +573,35 @@ impl Render for WindowPicker {
             .children(self.input.as_ref().map(|input| {
                 // Glass has no Esc: the field ends in Cancel, as iOS search does.
                 let cancel = (!self.chords).then(|| {
-                    crate::kit::button(&theme, "picker-cancel", "Cancel", crate::kit::ButtonKind::Link)
-                        .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(PickerEvent::Dismiss)))
+                    crate::kit::button(
+                        &theme,
+                        "picker-cancel",
+                        "Cancel",
+                        crate::kit::ButtonKind::Link,
+                    )
+                    .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(PickerEvent::Dismiss)))
                 });
                 field_row(&theme, input, "Filter").gap(px(theme.spacing.md)).children(cancel)
             }))
             .child(
-                div().relative().flex_1().min_h_0().flex().flex_col().child(self.plate.under(&theme)).child(
-                    div()
-                        .id("picker-list")
-                        .debug_selector(|| "picker-list".to_owned())
-                        .track_scroll(&self.scroll)
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .py(px(list_pad(&theme)))
-                        .children(rows)
-                        .when(empty, |el| el.child(self.empty_state())),
-                ),
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .child(self.plate.under(&theme))
+                    .child(
+                        div()
+                            .id("picker-list")
+                            .debug_selector(|| "picker-list".to_owned())
+                            .track_scroll(&self.scroll)
+                            .flex_1()
+                            .overflow_y_scroll()
+                            .py(px(list_pad(&theme)))
+                            .children(rows)
+                            .when(empty, |el| el.child(self.empty_state())),
+                    ),
             );
         // On glass the dim is what a finger taps to close it, where a desktop's Esc would.
         let scrim = (!self.chords).then(|| {

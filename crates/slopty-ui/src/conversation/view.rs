@@ -1459,59 +1459,97 @@ impl Render for ConversationView {
             .track_focus(&self.focus)
             .role(gpui::accesskit::Role::Group)
             .aria_label("Conversation")
-            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _ev, _w, cx| this.end_quote_drag(cx)))
-            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|this, _ev, _w, cx| this.end_quote_drag(cx)))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| this.end_quote_drag(cx)),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|this, _ev, _w, cx| this.end_quote_drag(cx)),
+            )
             .on_action(cx.listener(Self::on_cycle_density))
             .on_action(cx.listener(Self::on_interrupt))
-            .on_action(cx.listener(|this, _: &crate::terminal::PrevPrompt, _w, cx| this.step_prompt(-1, cx)))
-            .on_action(cx.listener(|this, _: &crate::terminal::NextPrompt, _w, cx| this.step_prompt(1, cx)))
-            .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| this.open_find(window, cx)))
-            .on_action(cx.listener(|this, _: &crate::terminal::FindNext, _w, cx| this.step_find(1, cx)))
-            .on_action(cx.listener(|this, _: &crate::terminal::FindPrev, _w, cx| this.step_find(-1, cx)))
+            .on_action(cx.listener(|this, _: &crate::terminal::PrevPrompt, _w, cx| {
+                this.step_prompt(-1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::terminal::NextPrompt, _w, cx| {
+                this.step_prompt(1, cx);
+            }))
+            .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| {
+                this.open_find(window, cx);
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::terminal::FindNext, _w, cx| this.step_find(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::terminal::FindPrev, _w, cx| this.step_find(-1, cx)),
+            )
             // Esc in the composer stops the agent's turn while it has one; otherwise it is the
             // field's own. While an input method composes, these keys are all its own.
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
-                if this.composing(cx) {
-                    return;
-                }
-                if this.viewing.is_some() {
-                    this.view_picture(None, cx);
-                    cx.stop_propagation();
-                } else if this.clear_quote(cx) {
-                    cx.stop_propagation();
-                } else if this.find.as_ref().is_some_and(|f| f.field.focus_handle(cx).is_focused(window)) {
-                    this.close_find(window, cx);
-                    cx.stop_propagation();
-                } else if this.composer_focused(window, cx) && this.menu_close(cx) {
-                    cx.stop_propagation();
-                } else if this.turn_running() && this.approvals.prompt().is_none() {
-                    this.interrupt(cx);
-                    cx.stop_propagation();
-                }
-            }))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Escape, window, cx| {
+                    if this.composing(cx) {
+                        return;
+                    }
+                    if this.viewing.is_some() {
+                        this.view_picture(None, cx);
+                        cx.stop_propagation();
+                    } else if this.clear_quote(cx) {
+                        cx.stop_propagation();
+                    } else if this
+                        .find
+                        .as_ref()
+                        .is_some_and(|f| f.field.focus_handle(cx).is_focused(window))
+                    {
+                        this.close_find(window, cx);
+                        cx.stop_propagation();
+                    } else if this.composer_focused(window, cx) && this.menu_close(cx) {
+                        cx.stop_propagation();
+                    } else if this.turn_running() && this.approvals.prompt().is_none() {
+                        this.interrupt(cx);
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             // The composer's menu, prompt recall and a question's options take the arrows,
             // Enter and Tab before the field does.
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveUp, window, cx| {
-                if !this.composing(cx) {
-                    this.arrow(-1, window, cx);
-                }
-            }))
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::MoveDown, window, cx| {
-                if !this.composing(cx) {
-                    this.arrow(1, window, cx);
-                }
-            }))
-            .capture_action(cx.listener(|this, enter: &gpui_kit::component::input::Enter, window, cx| {
-                // With the worker away, Enter leaves the draft as it is: nothing goes.
-                if !enter.shift && !enter.secondary && !this.composing(cx) && this.composer_focused(window, cx) && (this.away.is_some() || this.menu_enter(window, cx)) {
-                    cx.stop_propagation();
-                }
-            }))
-            .capture_action(cx.listener(|this, _: &gpui_kit::component::input::IndentInline, window, cx| {
-                if !this.composing(cx) && this.composer_focused(window, cx) && this.menu_enter(window, cx) {
-                    cx.stop_propagation();
-                }
-            }))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                    if !this.composing(cx) {
+                        this.arrow(-1, window, cx);
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                    if !this.composing(cx) {
+                        this.arrow(1, window, cx);
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, enter: &gpui_kit::component::input::Enter, window, cx| {
+                    // With the worker away, Enter leaves the draft as it is: nothing goes.
+                    if !enter.shift
+                        && !enter.secondary
+                        && !this.composing(cx)
+                        && this.composer_focused(window, cx)
+                        && (this.away.is_some() || this.menu_enter(window, cx))
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::IndentInline, window, cx| {
+                    if !this.composing(cx)
+                        && this.composer_focused(window, cx)
+                        && this.menu_enter(window, cx)
+                    {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .size_full()
             .flex()
             .flex_col()

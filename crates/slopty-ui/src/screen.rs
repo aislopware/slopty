@@ -3279,7 +3279,8 @@ impl Render for ScreenView {
                 let text = waiting_text(self.source);
                 div()
                     // A status, not a picture: it is the only thing a screen reader can be told
-                    // while the surface is empty, and it changes when the worker reports the source.
+                    // while the surface is empty, and it changes when the worker reports the
+                    // source.
                     .id("screen-waiting")
                     .role(gpui::accesskit::Role::Status)
                     .aria_label(text)
@@ -3378,7 +3379,9 @@ impl Render for ScreenView {
             // The system's drag is the pointer while one is over the tile.
             .children(self.cursor_overlay(drawn.filter(|_| self.drop.is_none())))
             .children(self.drop_ring())
-            .children(self.taking_icons(self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0))))
+            .children(
+                self.taking_icons(self.frame_to_body(self.zoom.to_frame(self.pointer_spot(now).0))),
+            )
             .children(console)
             .children(readout)
             .children(hud)

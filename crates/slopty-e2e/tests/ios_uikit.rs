@@ -209,11 +209,8 @@ mod tests {
             // At rest: the columns abut. An iPad's lone column sits centred and slides left as
             // the second opens beside it, and a dump taken in that slide is no starting point.
             .wait_for("a second shell, focused, beside the first", STEP, |d| {
-                let first_right = d
-                    .items
-                    .iter()
-                    .find(|i| i.id == first.id)
-                    .map(|i| i.bounds[0] + i.bounds[2]);
+                let first_right =
+                    d.items.iter().find(|i| i.id == first.id).map(|i| i.bounds[0] + i.bounds[2]);
                 d.items.len() == 2
                     && d.items.iter().any(|i| {
                         i.id != first.id

@@ -164,7 +164,11 @@ impl ThreadView {
                 })
                 .child(line)
                 .children(body.map(|b| {
-                    div().w_full().border_t(kit::hair(theme)).border_color(hsla(s.border_subtle)).child(b)
+                    div()
+                        .w_full()
+                        .border_t(kit::hair(theme))
+                        .border_color(hsla(s.border_subtle))
+                        .child(b)
                 }))
                 .children(pictures.map(|p| div().p(self.z(theme.spacing.xs)).child(p)))
                 .children(answers)

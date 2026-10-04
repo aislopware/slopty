@@ -410,7 +410,12 @@ impl WorkspaceView {
             .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
             .children(icon.map(|icon| {
-                crate::icons::glyph(theme, icon, px(theme.typography.icon()), hsla(s.text_secondary))
+                crate::icons::glyph(
+                    theme,
+                    icon,
+                    px(theme.typography.icon()),
+                    hsla(s.text_secondary),
+                )
             }))
             .children(mark)
             .child(body.unwrap_or_else(|| {

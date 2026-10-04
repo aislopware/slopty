@@ -2318,7 +2318,8 @@ impl WorkspaceView {
             .aria_label("Navigator")
             .occlude()
             .on_hover({
-                let (hovered, rows) = (Rc::clone(&self.nav.hovered), self.chrome.nav_rows.downgrade());
+                let (hovered, rows) =
+                    (Rc::clone(&self.nav.hovered), self.chrome.nav_rows.downgrade());
                 move |over: &bool, _window, cx| {
                     if hovered.replace(*over) != *over {
                         let _gone = rows.update(cx, |_, cx| cx.notify());
@@ -2340,7 +2341,9 @@ impl WorkspaceView {
             .font_family(theme.typography.ui_family.clone())
             // Over the frame it floats, as every floating layer does. It meets the window's
             // top, left and bottom edges, so only its trailing edge carries the hairline.
-            .when(mode != Mode::Docked, |panel| kit::elevate(panel, theme).border_0().border_r(kit::hair(theme)))
+            .when(mode != Mode::Docked, |panel| {
+                kit::elevate(panel, theme).border_0().border_r(kit::hair(theme))
+            })
             // Esc in the filter empties it and hands the keyboard back; with it empty, Esc lets
             // go of the scope.
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
@@ -3270,14 +3273,14 @@ impl WorkspaceView {
         let bar =
             t.progress.and_then(|p| progress_line(theme, p)).map(|(tone, strength, share)| {
                 div()
-                .debug_selector(move || format!("nav-progress-bar-{id}"))
-                .absolute()
-                // Just under the second line, clear of its descenders.
-                .bottom(px(-theme.spacing.xxs))
-                .left_0()
-                .h(px(theme.spacing.xxs))
-                .w(gpui::relative(share))
-                .bg(crate::colors::hsla_alpha(tone, strength))
+                    .debug_selector(move || format!("nav-progress-bar-{id}"))
+                    .absolute()
+                    // Just under the second line, clear of its descenders.
+                    .bottom(px(-theme.spacing.xxs))
+                    .left_0()
+                    .h(px(theme.spacing.xxs))
+                    .w(gpui::relative(share))
+                    .bg(crate::colors::hsla_alpha(tone, strength))
             });
         let line2 = t.two_lines().then(|| {
             meta(div(), theme)

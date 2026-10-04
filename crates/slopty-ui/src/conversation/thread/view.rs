@@ -1722,9 +1722,9 @@ impl Render for ThreadView {
                 }
             }))
             .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
-            // The composer's menu, recall and a change to a waiting message take the arrows, ↵, ⇥ and
-            // Esc before the field does; Esc otherwise stops the turn under way. While an input
-            // method composes, these keys are all its own.
+            // The composer's menu, recall and a change to a waiting message take the arrows, ↵, ⇥
+            // and Esc before the field does; Esc otherwise stops the turn under way.
+            // While an input method composes, these keys are all its own.
             .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
                 this.menu_key(window, cx, |this, w, cx| {
                     this.menu_step(-1, cx) || this.recall(-1, w, cx)

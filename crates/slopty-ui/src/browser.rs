@@ -1143,9 +1143,9 @@ impl Render for BrowserView {
                 .on_action(cx.listener(|this, _: &UndoClose, _, _| this.native.perform(Edit::Undo)))
                 .on_action(cx.listener(|this, _: &PageRedo, _, _| this.native.perform(Edit::Redo)))
                 .on_action(cx.listener(|this, _: &PageCut, _, _| this.native.perform(Edit::Cut)))
-                .on_action(
-                    cx.listener(|this, _: &PageSelectAll, _, _| this.native.perform(Edit::SelectAll)),
-                )
+                .on_action(cx.listener(|this, _: &PageSelectAll, _, _| {
+                    this.native.perform(Edit::SelectAll);
+                }))
                 .into_any_element(),
             (None, Some(why), _) => {
                 notice(format!("Can't open {}: {why}", short_url(&self.url))).into_any_element()
