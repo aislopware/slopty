@@ -546,19 +546,18 @@ async fn booted_now() -> Vec<Device> {
 }
 
 /// The process that owns each of `windows`.
+#[cfg(target_os = "macos")]
 fn owners(windows: &[WindowInfo]) -> HashMap<WindowId, i32> {
-    #[cfg(target_os = "macos")]
-    {
-        windows
-            .iter()
-            .filter_map(|w| slopty_capture::window_owner_pid(w.id).map(|pid| (w.id, pid)))
-            .collect()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = windows;
-        HashMap::new()
-    }
+    windows
+        .iter()
+        .filter_map(|w| slopty_capture::window_owner_pid(w.id).map(|pid| (w.id, pid)))
+        .collect()
+}
+
+/// No owner is known: only macOS says which process owns a window.
+#[cfg(not(target_os = "macos"))]
+fn owners(_windows: &[WindowInfo]) -> HashMap<WindowId, i32> {
+    HashMap::new()
 }
 
 #[cfg(test)]
