@@ -592,7 +592,7 @@ impl WorkspaceView {
                 Some((id, WorkerSeen { name: worker.name.clone(), os }))
             })
             .collect();
-        let now = WallMs::now();
+        let now = crate::clock::now(cx);
         // Only the boards on show: a hidden one is handed everything as it shows again.
         let views: Vec<(ProjectId, Entity<ProjectView>)> = wanted
             .iter()

@@ -1113,3 +1113,20 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   for one agent. A held `PermissionRequest` landing before its status then began a thread under
   the file's name and ended it when the status named the other, so the through-server golden
   showed "Claude exited" in some runs and the message box in others.
+
+- ✅ **A golden that shows a time pins the readouts' clock** (2026-10-05). The `agent-screen`
+  golden drifted between 0.191 % and 0.207 % against its 0.200 % tolerance. Its working row
+  shows how long the turn has run, counted from the transcript's fixed 2026-10-04 stamps to the
+  wall clock, so it read "6h 38m" when the golden was taken and "11h 26m" a few hours later,
+  with digits of other widths each hour. Every readout of a time (a turn's elapsed time, a
+  record's stamp, a limit's reset, an author's age, a project's time at work, an agent's age in
+  the navigator) now reads `slopty_ui::clock::now`. That is the system clock unless
+  `Command::PinClock` pins it, and the test pins it a minute after its transcript's first record.
+  What is kept or sent (a backup's time, a visit counted) still reads the system clock. The
+  same pin holds the working marks still: under Reduce Motion a working mark and companion
+  breathe in opacity by the spin clock, which left 130 pixels varying with the moment the frame
+  was taken. Pinned, every mark shows the moment it stands upright and whole
+  (`icons::PINNED_STEPS`) and wakes nothing, so `agent-screen` matches its golden to the pixel
+  run after run. The same drift hid a real change: the composer's help button is gone, and every
+  composer golden still drew it under the tolerance. They are taken again.
+

@@ -604,7 +604,7 @@ impl WorkspaceView {
         let tile = self.focused();
         let worker = tile.map(|t| t.worker).or_else(|| self.status_worker())?;
         let agent = tile.and_then(|t| self.item(t)).and_then(|i| self.item_agent(i));
-        let now = slopty_core::WallMs::now();
+        let now = crate::clock::now(cx);
         let (_, reading) = self.faces.threads.meters().shown(worker, agent, now)?;
         let (text, warn) = plan_words(reading, now);
         let label = SharedString::from(format!("{PLAN_USAGE} {text}"));
@@ -719,7 +719,8 @@ impl WorkspaceView {
         let stop = tab_stop(stop, s.accent)
             .invisible()
             .group_hover(group.clone(), gpui::Styled::visible)
-            .in_focus(gpui::Styled::visible)
+            // Its own focus, as the navigator's row actions: not any focused ancestor's.
+            .focus(gpui::Styled::visible)
             .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).visible())
             .on_click(cx.listener(move |this, _ev, _window, cx| {
                 cx.stop_propagation();
@@ -795,7 +796,7 @@ impl WorkspaceView {
         let s = &theme.surfaces;
         let spacing = theme.spacing;
         let safe = window.insets().effective();
-        let now = slopty_core::WallMs::now();
+        let now = crate::clock::now(cx);
         let rows: Vec<gpui::AnyElement> = self
             .faces
             .threads

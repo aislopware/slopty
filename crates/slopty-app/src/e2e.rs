@@ -692,6 +692,12 @@ fn apply(
             );
             Reply::Ok
         }
+        Command::PinClock { at_ms } => {
+            slopty_ui::clock::pin(at_ms.map(slopty_core::WallMs::from_millis), cx);
+            // Nothing that showed a time was told: every view is built again.
+            window.refresh();
+            Reply::Ok
+        }
         Command::Scroll { x, y, dx, dy } => {
             let _scrolled = window.dispatch_event(
                 PlatformInput::ScrollWheel(ScrollWheelEvent {
@@ -807,6 +813,19 @@ const fn mouse_button(button: Button) -> MouseButton {
     }
 }
 
+/// Where the frame shown differs from the same state drawn from scratch
+/// ([`slopty_ui::retained::stale`]), with where the pointer was and whether the keyboard was
+/// the last input: what a hover reads, and so what a stale hover is judged by.
+#[cfg(feature = "e2e")]
+fn stale(window: &mut Window, cx: &mut App) -> Option<String> {
+    let pointer = window.mouse_position();
+    let keyboard = window.last_input_was_keyboard();
+    slopty_ui::retained::stale(window, cx, STALE_LINES).map(|stale| {
+        let (x, y) = (f32::from(pointer.x), f32::from(pointer.y));
+        format!("{stale}\n(pointer at {x},{y}, last input from the keyboard: {keyboard})")
+    })
+}
+
 /// How many lines of a stale frame's difference a reply quotes, each way.
 #[cfg(feature = "e2e")]
 const STALE_LINES: usize = 12;
@@ -822,7 +841,7 @@ fn render(window: &mut Window, cx: &mut App, path: &str) -> Reply {
         Ok(image) => image,
         Err(e) => return Reply::Error { message: format!("render: {e:#}") },
     };
-    let stale = slopty_ui::retained::stale(window, cx, STALE_LINES);
+    let stale = stale(window, cx);
     let (width, height) = image.dimensions();
     if let Err(e) = image.save(path) {
         return Reply::Error { message: format!("write {path}: {e}") };
@@ -867,12 +886,12 @@ fn render(_window: &mut Window, _cx: &mut App, _path: &str) -> Reply {
 fn dump(workspace: &Entity<Workspace>, window: &mut Window, cx: &mut App) -> Dump {
     let frames = frame_info(slopty_ui::frames::stats(cx));
     window.draw(cx).clear(cx);
-    let stale = slopty_ui::retained::stale(window, cx, STALE_LINES);
+    let stale = stale(window, cx);
     window.set_a11y_active(true);
     window.draw(cx).clear(cx);
     let mut dump = workspace.read(cx).dump(window, cx);
     dump.frames = frames;
-    dump.stale = stale;
+    dump.stale = stale.map(|stale| format!("{stale} (focus {:?}, {})", dump.focus, dump.focused));
     window.set_a11y_active(false);
     dump
 }

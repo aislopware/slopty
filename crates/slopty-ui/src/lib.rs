@@ -42,6 +42,7 @@ pub mod browser;
 
 pub mod chrome_text;
 pub mod clipboard;
+pub mod clock;
 pub mod colors;
 pub mod companions;
 pub mod conversation;

@@ -43,14 +43,16 @@ pub(super) struct Whereabouts {
 /// The fact that names how far a thread's sandbox reaches (Codex's), as the worker sets it.
 const SANDBOX: &str = "sandbox";
 
-/// The context and each of the plan's rate windows, one line each: "Context 34% of 200k",
-/// "Five hour 41%".
-pub(super) fn meter_words(meters: &slopty_proto::thread::Meters) -> Vec<String> {
+/// The context and each of the plan's rate windows, one line each, at `now`: "Context 34% of
+/// 200k", "Five hour 41%".
+pub(super) fn meter_words(
+    meters: &slopty_proto::thread::Meters,
+    now: slopty_core::WallMs,
+) -> Vec<String> {
     let context = super::context_used(meters).map(|u| match meters.context_window {
         Some(window) => format!("Context {} of {}", share(u), super::tokens(window)),
         None => format!("Context {}", share(u)),
     });
-    let now = slopty_core::WallMs::now();
     let limits = meters.limits.iter().map(move |l| {
         let used = f64::from(l.used_bp) / 100.0;
         let resets = l
@@ -583,7 +585,7 @@ impl ThreadView {
         if used.is_none() && meters.limits.is_empty() {
             return None;
         }
-        let hint = meter_words(meters).join("\n");
+        let hint = meter_words(meters, crate::clock::now(cx)).join("\n");
         let hint_theme = theme.clone();
         Some(
             crate::a11y::tab_stop(
@@ -913,7 +915,10 @@ mod tests {
             }],
             ..slopty_proto::thread::Meters::default()
         };
-        assert_eq!(meter_words(&meters), ["Context 34% of 200k", "Five hour 41%"]);
+        assert_eq!(
+            meter_words(&meters, slopty_core::WallMs::now()),
+            ["Context 34% of 200k", "Five hour 41%"]
+        );
     }
 
     /// A mode reads as words in sentence case, however the agent spells it.

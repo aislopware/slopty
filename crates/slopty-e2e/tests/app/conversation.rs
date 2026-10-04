@@ -1083,6 +1083,11 @@ async fn private_ref(repo: &Path, end: &str) -> String {
     }
 }
 
+/// A minute after the first [`record`] (2026-10-04T09:01:00Z), in Unix milliseconds: where a
+/// golden of a transcript's turn pins the readouts ([`Command::PinClock`]), so its elapsed
+/// times and stamps never move with the hour it is taken at.
+const A_MINUTE_IN: u64 = 1_791_104_460_000;
+
 /// One record of the session's transcript, as Claude Code writes it.
 fn record(uuid: &str, parent: Option<&str>, at: &str, body: Value) -> String {
     record_at(uuid, parent, &format!("2026-10-04T09:{at}.000Z"), body)
@@ -1504,6 +1509,7 @@ async fn the_screen_an_agent_drives_opens_beside_its_thread() {
     );
 
     let drv = &mut stack.driver;
+    drv.ok(&Command::PinClock { at_ms: Some(A_MINUTE_IN) }).await.unwrap();
     drv.wait_for("the screen offered", STEP, |d| {
         thread_shows(d) && has(d, "Button", "Watch Synthetic editor")
     })

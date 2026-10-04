@@ -6599,3 +6599,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   readout. No migration: a worker whose `items.json` still holds a note drops that one item
   with a warning on its next start and keeps every other ("A worker starts over any item store"
   in `workers.md`).
+- ✅ **A row's hidden actions show for their own focus** (2026-10-05). A machine row's "+" and
+  "…" in the navigator, and a transfer's Cancel in the status bar, stay hidden until the
+  pointer is over their row, their menu is up, or they have the focus. They were revealed with
+  gpui's `in_focus`, which holds inside any focused ancestor too, so while the workspace itself
+  held the keyboard (at launch, before a tile takes it) every row brought out its actions. They
+  now use `focus`, the element's own focus, which also covers a screen reader moving to one.
+  The self-test's stale-frame check found it in about one full app run in two: the "+" drawn in
+  its first frame clear, and the same state drawn from scratch with it shown. The cause was
+  in gpui-fast, which answered "inside the focused element" from the last frame drawn. An
+  element drawn for the first time was therefore never inside it in that frame, and since the
+  focus had not moved, no later frame came to correct it. gpui-fast now answers from the frame
+  being painted, whose dispatch tree is whole once prepaint is done (branch
+  `fix/focus-contains-this-frame`, test
+  `an_element_drawn_first_inside_the_focused_one_is_within_it_at_once`). The stale-frame
+  report now says where the pointer was, whether the keyboard was the last input, and what
+  held the focus, which is what told this apart from a hover.
+

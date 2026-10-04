@@ -15,7 +15,6 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
 use slopty_client::threads::Stamp;
-use slopty_core::WallMs;
 use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::wire::Authors;
 
@@ -137,7 +136,7 @@ impl ReviewView {
         let own = Some(self.thread);
         let opens = Opens { thread: run.thread, turn: run.turn };
         let id = SharedString::from(format!("review-author-{at}-{hunk}-{ix}"));
-        let tag = authorship::tag(&self.theme, id, run, writer, own, WallMs::now())
+        let tag = authorship::tag(&self.theme, id, run, writer, own, crate::clock::now(cx))
             .bg(crate::colors::hsla(self.theme.content()))
             // A press on the tag is the tag's: it starts no comment on the line under it.
             .on_mouse_down(gpui::MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())

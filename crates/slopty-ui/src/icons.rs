@@ -693,6 +693,8 @@ struct SpinClock {
     hold_until: Option<Instant>,
     /// A step fell due during the hold and waits to be drawn.
     held: bool,
+    /// The moment every mark shows while the clock is pinned ([`pin_steps`]): wakes leave it.
+    pinned: Option<Duration>,
 }
 
 /// What an armed timer is for.
@@ -718,6 +720,7 @@ impl SpinClock {
                 timers: 0,
                 hold_until: None,
                 held: false,
+                pinned: None,
             };
             cx.set_global(clock);
         }
@@ -776,7 +779,7 @@ impl SpinClock {
     fn wake(cx: &mut App) {
         let now = cx.background_executor().now();
         let clock = Self::get(cx);
-        clock.shown = now.saturating_duration_since(clock.epoch);
+        clock.shown = clock.pinned.unwrap_or_else(|| now.saturating_duration_since(clock.epoch));
         for view in std::mem::take(&mut clock.wake) {
             cx.notify(view);
         }
@@ -805,6 +808,17 @@ pub fn release_steps(cx: &mut App) {
         clock.timers = clock.timers.wrapping_add(1);
         SpinClock::wake(cx);
     }
+}
+
+/// A moment the working mark stands upright at the top of its breath: six turns, two and a half
+/// breaths. The marks are pinned to it while the readouts' clock is ([`crate::clock::pin`]).
+pub const PINNED_STEPS: Duration = Duration::from_secs(6);
+
+/// Every mark shows the step and breath of `at` (time since the spin clock's start) from now on,
+/// whenever it is drawn, and no step falls due; `None` lets the clock run again.
+pub fn pin_steps(at: Option<Duration>, cx: &mut App) {
+    SpinClock::get(cx).pinned = at;
+    SpinClock::wake(cx);
 }
 
 /// GPUI's Reduce Motion flag changed: every view showing a mark draws again.
@@ -924,7 +938,7 @@ pub(crate) fn wake_at_next_step(window: &Window, cx: &mut App) {
     if !clock.wake.contains(&view) {
         clock.wake.push(view);
     }
-    if clock.armed.is_some() {
+    if clock.armed.is_some() || clock.pinned.is_some() {
         return;
     }
     let step = if reduce { BREATH_STEP } else { SPIN_STEP };
@@ -1125,6 +1139,26 @@ mod tests {
         cx.run_until_parked();
         assert!(view.read_with(cx, |v, _| v.renders) > before, "the echo's frame moves it");
         assert_ne!(cx.update(|_w, cx| SpinClock::drawn(cx)), drawn, "a breath further on");
+    }
+
+    /// Pinned, every mark stands upright at the top of its breath whenever it is drawn, and
+    /// wakes nothing; let go, it breathes again.
+    #[gpui::test]
+    fn a_pinned_mark_holds_still_until_let_go(cx: &mut gpui::TestAppContext) {
+        assert_eq!(spin_step(PINNED_STEPS, false), 0, "upright");
+        assert!((breath(PINNED_STEPS) - 1.0).abs() < f32::EPSILON, "whole");
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let (view, cx) =
+            cx.add_window_view(|_, _| Turning { shown: true, status: Status::Working, renders: 0 });
+        cx.run_until_parked();
+        cx.update(|_w, cx| pin_steps(Some(PINNED_STEPS), cx));
+        cx.run_until_parked();
+        assert_eq!(cx.update(|_w, cx| SpinClock::drawn(cx)), (0, 1.0), "the pinned moment");
+        assert!(renders_over(&view, cx, Duration::from_secs(1)) <= 1, "the step already due");
+        assert_eq!(renders_over(&view, cx, Duration::from_secs(1)), 0, "pinned, nothing wakes");
+        cx.update(|_w, cx| pin_steps(None, cx));
+        cx.run_until_parked();
+        assert!(renders_over(&view, cx, Duration::from_secs(1)) >= 4, "let go, it breathes");
     }
 
     /// The mark wakes the view it was painted in once a step while it shows, and not once it

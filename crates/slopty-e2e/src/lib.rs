@@ -229,6 +229,13 @@ pub enum Command {
         /// Window y in points.
         y: f32,
     },
+    /// Draw every time readout (a turn's elapsed time, a record's stamp, an author's age) as at
+    /// `at_ms`, Unix milliseconds, from now on, or by the system's clock again for `None`: a
+    /// golden that shows a time then holds the same one whenever it is taken.
+    PinClock {
+        /// The moment, or `None` to let the clock run.
+        at_ms: Option<u64>,
+    },
     /// Scroll at a window point, in lines.
     Scroll {
         /// Window x in points.

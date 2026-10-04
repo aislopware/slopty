@@ -504,9 +504,9 @@ const fn at_rest(agent: &AgentEvent) -> bool {
     )
 }
 
-/// The wall clock in Unix milliseconds, as the workers stamp an agent's change.
-fn now_ms() -> u64 {
-    WallMs::now().as_millis()
+/// The readouts' clock in Unix milliseconds, as the workers stamp an agent's change.
+fn now_ms(cx: &gpui::App) -> u64 {
+    crate::clock::now(cx).as_millis()
 }
 
 /// The unseen dot: something ended there while the human was elsewhere. It sits centred in a
@@ -2203,7 +2203,7 @@ impl WorkspaceView {
         let rows = self.nav.list.rows.borrow();
         // A command's running time is the readouts' clock's to move
         // ([`WorkspaceView::keep_time`]); an age changes on its own schedule.
-        let now = now_ms();
+        let now = now_ms(cx);
         let waited = rows.iter().filter_map(|r| match r {
             NavRow::Agent(a) if a.since_ms > 0 => {
                 Some(until_age_changes(Duration::from_millis(now.saturating_sub(a.since_ms))))
@@ -2578,7 +2578,7 @@ impl WorkspaceView {
             .join(", ");
         // An age by the wall, the navigator's own tick drawing it again as it changes.
         let time = (agent.since_ms > 0)
-            .then(|| Duration::from_millis(now_ms().saturating_sub(agent.since_ms)))
+            .then(|| Duration::from_millis(now_ms(cx).saturating_sub(agent.since_ms)))
             .and_then(age_shown)
             .map(|text| {
                 let key = key.clone();
@@ -2899,11 +2899,13 @@ impl WorkspaceView {
         // whatever their own focus says.
         let menu_up = self.menu == Some(super::titlebar::MenuKind::Machine(key));
         // Clear rather than invisible while hidden: an invisible element is not painted, so it
-        // never joins the keyboard's ring.
+        // never joins the keyboard's ring. Its own focus shows it, not `in_focus`, which is
+        // true inside any focused ancestor: the workspace holding the keyboard would bring out
+        // every row's actions.
         let revealed = |el: Stateful<Div>, shown: bool| {
             el.when(!shown, |el| el.opacity(0.0))
                 .group_hover(group.clone(), |st| st.opacity(1.0))
-                .in_focus(|st| st.opacity(1.0))
+                .focus(|st| st.opacity(1.0))
                 .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).opacity(1.0))
         };
         let chevron = lead_slot(theme, icon(theme, chevron, IconSize::Inline, hsla(s.text_muted)))

@@ -936,7 +936,7 @@ impl ThreadView {
                 Some("Stopping the turn to send".to_owned())
             }
             (None, false, ..) if !queued.delivery.is_kept() => Some("Sending".to_owned()),
-            (None, ..) => super::later::when_words(queued.delivery, slopty_core::WallMs::now()),
+            (None, ..) => super::later::when_words(queued.delivery, crate::clock::now(cx)),
         };
         let scheduled = queued.delivery.is_kept();
         let open = can_change && queued.on_worker && !queued.withdrawing;
@@ -1079,7 +1079,7 @@ impl ThreadView {
     ) -> AnyElement {
         let s = self.theme.surfaces;
         let meters = &state.meters;
-        let lines = super::composer::meter_words(meters);
+        let lines = super::composer::meter_words(meters, crate::clock::now(cx));
         let compact = super::composing::compacts(state).then(|| {
             self.button("thread-compact", "Compact context", ButtonKind::Ghost).on_click(
                 cx.listener(|this, _ev, _w, cx| {

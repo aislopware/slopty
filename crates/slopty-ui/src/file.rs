@@ -572,7 +572,7 @@ impl FileView {
         let theme = &self.theme;
         let opens = Opens { thread: run.thread, turn: run.turn };
         let id = SharedString::from(format!("file-author-{}", self.id.as_uuid()));
-        let mut tag = authorship::tag(theme, id, run, writer, None, WallMs::now());
+        let mut tag = authorship::tag(theme, id, run, writer, None, crate::clock::now(cx));
         if writer.is_some() {
             tag = tag.on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.emit(FileViewEvent::OpenThread(opens));

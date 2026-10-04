@@ -655,7 +655,8 @@ impl ThreadView {
     /// How long until the turn under way has run another whole second.
     fn until_tick(&self, cx: &App) -> Duration {
         let started = self.state(cx).and_then(rows::under_way).map(|t| t.started_ms);
-        let ran = started.filter(|t| !t.is_zero()).map_or(0, |t| WallMs::now().millis_since(t));
+        let now = crate::clock::now(cx);
+        let ran = started.filter(|t| !t.is_zero()).map_or(0, |t| now.millis_since(t));
         crate::icons::until_next_second(Duration::from_millis(ran))
     }
 
@@ -1257,7 +1258,7 @@ impl ThreadView {
         .on_click(cx.listener(move |this, _ev, _w, cx| {
             this.copy(item.clone(), words.clone(), cx);
         }));
-        let stamp = crate::conversation::figures::stamp(at_ms, WallMs::now());
+        let stamp = crate::conversation::figures::stamp(at_ms, crate::clock::now(cx));
         div()
             .w_full()
             .flex()
@@ -1650,7 +1651,8 @@ impl ThreadView {
         let hub = self.hub.read(cx);
         let stopping = hub.threads().stopping(self.thread);
         let since = self.state(cx).and_then(|s| s.turn(turn)).map(|t| t.started_ms);
-        let elapsed = since.filter(|t| !t.is_zero()).map(|t| kit::clock(WallMs::now().since(t)));
+        let now = crate::clock::now(cx);
+        let elapsed = since.filter(|t| !t.is_zero()).map(|t| kit::clock(now.since(t)));
         let s = self.theme.surfaces;
         let asks = self.state(cx).is_some_and(|st| st.status.phase == Phase::NeedsYou);
         // The agent trying a failed request again says so, rather than looking hung.

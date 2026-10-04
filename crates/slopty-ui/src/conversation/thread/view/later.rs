@@ -61,7 +61,7 @@ impl ThreadView {
         if !state.meta.can(Cap::SCHEDULE) || self.composing.editing() {
             return None;
         }
-        let now = WallMs::now();
+        let now = crate::clock::now(cx);
         let at = limit_lifts(state, now)?;
         // One waiting already says when the thread goes on.
         if state.pending.iter().any(|p| matches!(p.delivery, Delivery::At { .. })) {

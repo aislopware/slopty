@@ -349,7 +349,7 @@ impl ProjectView {
             loop {
                 cx.background_executor().timer(AT_WORK_TICK).await;
                 let ticked = this.update(cx, |v, cx| {
-                    v.seen.now = WallMs::now();
+                    v.seen.now = crate::clock::now(cx);
                     cx.notify();
                 });
                 if ticked.is_err() {
