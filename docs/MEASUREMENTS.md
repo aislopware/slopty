@@ -14424,6 +14424,32 @@ under 5 % of a stack's start, and no test step waits on it beyond the launch.
 cargo xtask e2e app --filter 'test(~a_stack_comes_up)'
 ```
 
+## 2026-10-05 — ghostty #14536 taken into the fork: the engine's cost series (M4)
+
+Release, mac-studio, the 1-minute load 6.0 to 6.9. The same engine and binding code (libghostty-rs
+695e7f7, whose bindings the merge left unchanged) built against two ghostty trees: the fork before
+the merge (72c13dd) and after it (5b92fd2, upstream #14536 at 5617b8ad7 with our drag effect).
+Four interleaved rounds of every `*_cost` series and `encode_cost`; instructions per operation,
+median of four, with each tree's range.
+
+```sh
+git -C .research/ghostty archive <commit> | tar -x -C /tmp/ghostty-<commit>
+GHOSTTY_SOURCE_DIR=/tmp/ghostty-<commit> CARGO_TARGET_DIR=target/bench-<commit> cargo test --release -p slopty-engine --tests --no-run
+cd crates/slopty-engine && SLOPTY_BENCH_OUT=<out>.jsonl <lib test binary> --ignored _cost --test-threads=1
+```
+
+**The write path still pays one flag check.** `frame_cost.write` is 821 on both trees, as are
+`take_frame` (19 453 at 60×12, 44 910 at 200×60), `take_frame_unchanged` (913, 1 009),
+`encode_cost.echo` (4 169) and `unicode_write_cost` (3 144, 4 987, 32 952). A write the program did
+no drag and drop in still reads one flag (`after_dnd`): the drop now reaches the engine through
+the `drop` trampoline, which only a program's OSC 72 calls.
+
+**Two series moved, in code the merge does not run.** `search_after_output_cost.plain` went from
+1 224 555 to 1 195 198 (−2.4 %; old 1 223 986 to 1 224 717, new 1 194 418 to 1 196 992), and
+`memory_cost.plain.compress_step` from 784 090 to 790 230 (+0.8 %, the ranges touching). Neither
+calls drag and drop code, so they are the library's layout moving under a 130-line change. Every
+other series is within 0.15 %.
+
 ## 2026-10-05 — the workspace measurements without notes
 
 Notes became Markdown files (`docs/decisions/ui.md`, "A note is a Markdown file"), so the
@@ -14434,3 +14460,63 @@ file's preview draws its rows from a gpui `list` the way the notes did. In
 `measure_a_frame_over_a_large_registry` (120 notes × 4 KiB) and
 `measure_a_stream_frame_beside_the_chrome` (60 notes), folder tiles now stand where the notes
 did. Figures from either before this entry do not compare with a run after it.
+
+## 2026-10-05 — drops read lazily: the hybrid wire (M1–M3)
+
+A drop on a program that asks for drops (Kitty drag and drop) now sends at once what the program
+accepted during the hover, uploads its files from that moment, and fetches anything else when
+the program asks (`docs/decisions/terminal.md`, "Drops are read lazily"). These are the plan's
+M1–M3; M4 is the entry above.
+
+```sh
+cargo xtask e2e app --filter 'test(files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_copies)'
+cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint --no-capture
+cargo test -p slopty-client --lib only_what_the_program_accepts_goes_up -- --nocapture
+```
+
+**M1, drop to data, files.** The e2e drags a 20-byte text file and a 24 MiB file over a bash
+stand-in that asks for drops, through a link shaped as a tailnet's (`harness::TAILNET`: 4 ms
+each way, up to 2 ms jitter, 3 % loss). The stand-in answers a move, so the step that reads
+move is the one that heard its acceptance. It asks for the file list on the drop and copies
+every file it names. Six runs:
+
+| | median | range |
+|---|---|---|
+| first step → acceptance heard | 47 ms | 45–49 ms |
+| upload of the 24 MiB, begun on the acceptance | 770 ms | 692–840 ms |
+| drop → program has the files, after that upload | 43 ms | 42–45 ms |
+| drop → program has the files, dropped at once | 5.5 s | 0.71–10.2 s |
+
+Dropped once the hover has carried the upload, the program has its copies in 43 ms: the drop,
+its request, the list and the copy of 24 MiB on the worker. Dropped at once, it waits for the
+upload, which the pre-upload takes off the drop, up to the whole upload. The at-once drop is
+always the connection's second 24 MiB transfer here, and that second transfer took 4.4 to 10.2 s
+in four of six runs, against 0.7 to 0.8 s for every first one. That spread is the transport's
+under this shape (QUIC under 3 % loss after a long transfer), not the drop's, and is noted for
+its own look. Before this change the upload began only at the drop, so every drop paid the
+at-once figure.
+
+Not measured end to end: a small text fetched lazily. The e2e's drag carries files only. A
+type the program accepted is pushed during the hover and waits on the worker, so it costs
+nothing at the drop. One it did not accept costs one round trip after its request (8 to 12 ms
+on this shape), the fetch and its answer. The worker test
+`a_dropped_text_is_fetched_when_the_program_asks` shows the one fetch and the pushed text
+answered with none.
+
+**M2, bytes sent up.** A drag of a 1 KiB text, its 10 KiB HTML and a 1 MiB PNG onto a program
+that accepts only `text/plain` sends 1 024 bytes, against 1 059 840 for sending every type.
+This is the push policy counted (`TermDrag::accepted`), not a capture of the wire; the types
+the program reads later go up only when fetched, one at a time.
+
+**M3, the worker's peak footprint for an 8 MiB type** (the cap), through a real session into
+a stand-in that hands its input straight to a file. Three runs each, in a process of its own:
+
+| | peak footprint growth |
+|---|---|
+| given whole, as the worker held a type before | +64.4 MiB (64.4, 64.4, 64.4) |
+| streamed in 64 KiB chunks into the program's answer | +39.1 MiB (38.7, 39.1, 39.2) |
+
+Streaming takes 25 MiB off: the whole copy, and the engine's copy for the answer. What is left
+is the program's input queue holding the answer in base64 while the program reads it, which
+`INPUT_MAX_BYTES` (16 MiB) bounds. Pacing a stream by that queue would take most of the rest,
+and is the next step if drops past 8 MiB are wanted.

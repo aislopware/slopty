@@ -3191,30 +3191,29 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     files from a terminal on another machine (a machine id beside the URLs). libghostty
     leaves that out, so every client is local to it. Here that is right: the engine runs where
     the program runs, so the URLs it gives are of files on that machine.
-  - **Files go as the uploaded copies.** A drop on a tile already uploads its files to the
-    worker. When the program asks for drops, the drop no longer types the paths: the program
-    is told of it, with `text/uri-list` still coming. Its request for the list waits until
-    the upload lands. The client then gives the `file://` URLs of the copies on the worker
-    (`SessionHandle::drop_data`), never of its own files. An upload that fails answers the
-    request with EIO, and a type the drop did not offer with ENOENT.
+  - **Files go as the uploaded copies.** When the program asks for drops, a drop no longer
+    types the paths. The program is told of it, and its request for `text/uri-list` waits until
+    the files have landed on the worker. The worker then gives the `file://` URLs of those
+    copies, never of the client's own files. A fetch or upload that fails answers the request
+    with EIO, and a type the drop did not offer with ENOENT. How the bytes travel is the next
+    entry.
   - **One viewer at a time.** The drag's feedback (accepted, the types, concluded) goes to the
     viewer dragging. A drag by another viewer replaces it, and a drop still open is concluded
     as nothing.
   - **Not yet.** A drag the program starts (dragging out of yazi) is not carried to the
     clients. The registration is the program's state in the engine, so a worker restart loses
     it until the program registers again.
-  - **On the wire.** The client sends `TermRequest::DragOver`, `DragLeave`, `Drop` and
-    `DropData`, which the connection hands to the session like any request that types
-    nothing. The session tells every viewer `TermEvent::DropTarget` when the program starts or
-    stops asking, and a viewer attaching while it asks. `DropAccepted` and `DropConcluded` go
-    to the dragging viewer only. A drop that reaches a program that has stopped asking is told
-    back as `DropTarget { accepts: false }`, so the client can fall back to typing the paths.
-    The client keeps both in its terminal state (`TermState::drop_target`,
-    `TermState::drag_answer`) and forgets them on a relink, since the new stream says them
-    again. A representation over 8 MiB is listed to the program and answered as not coming,
-    the bound a paste's copy has.
-  - Tests: engine `a_drag_over_a_program_that_did_not_ask_tells_nothing`,
-    `a_drop_waits_for_its_files_and_answers_the_program`, `a_failed_upload_fails_the_request`;
+  - **On the wire.** The client sends `TermRequest::DragEnter`, `DragOver`, `DragLeave`,
+    `Drop` and `DropFiles`. The connection hands them to the session like any request that
+    types nothing. The session tells every viewer `TermEvent::DropTarget` when the program
+    starts or stops asking, and a viewer attaching while it asks. `DropAccepted` and
+    `DropConcluded` go to the dragging viewer only. A drop that reaches a program that has
+    stopped asking is told back as `DropTarget { accepts: false }`, so the client can fall back
+    to typing the paths. The client keeps both in its terminal state
+    (`TermState::drop_target`, `TermState::drag_answer`) and forgets them on a relink, since
+    the new stream says them again. A type over 8 MiB is listed to the program and answered as
+    not coming, the bound a paste's copy has.
+  - Tests: engine `a_drag_over_a_program_that_did_not_ask_tells_nothing`;
     client `the_programs_drop_answers_are_kept_until_a_relink`; worker
     `a_drop_on_a_program_not_asking_is_told_back` and
     `a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy`. That last one
@@ -3222,6 +3221,49 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     the list on the drop, and is shown to wait for the upload before it opens the worker's copy
     and concludes. It checks a second viewer is told the program asks and hears none of the
     first viewer's answers.
+
+- ✅ **Drops are read lazily** (2026-10-05). Upstream ghostty #14536 has the embedder read a
+  drop's data only when the program asks for it, and refuse a drop the program never accepted,
+  as kitty does. The fork takes it (aislopware/ghostty main, with our drag source kept as its
+  own `drag` effect beside upstream's `drop` effect, and the C ABI unchanged). Slopty carries
+  the same laziness over its wire, with a push for what the program says it wants:
+  - **Every type a drag carries is offered.** On a Mac the window's drop sink takes a drag
+    over a terminal whose program asks for drops (`workspace/remote/drop_in.rs`), as it does
+    for remote windows, so texts, HTML and pictures are offered as well as files. The drag's
+    pasteboard is read once, as it enters, and kept on the tile for the drag's life
+    (`slopty_client::dnd::term::TermDrag`): it is not to be read once the drag is over, and the
+    program may ask well after the drop. The worker hears what the items are and none of their
+    bytes (`DragEnter`), and offers them in one order both ends compute
+    (`slopty_proto::terminal::drop_offer`): `text/uri-list` first when there are files, then
+    each item's types, text both as `text/plain;charset=utf-8` and as kitty's `text/plain`.
+  - **What the program accepts goes up during the hover.** Its acceptance lists the types it
+    wants. The client sends those at once, inline up to 64 KiB and as a bulk stream past that,
+    and starts the files' upload into the drag's landing on the worker, so the files are often
+    there by the drop. A drag with a promised file waits for the drop, which writes it, and
+    then sends every file together, so the program gets one list. A drag that leaves stops its
+    upload, and the worker deletes its landing.
+  - **The rest is fetched when the program asks.** The engine says which type a request wants
+    (`EngineEvent::DropWants`). The session asks the dragging viewer's connection for it with
+    the clipboard's own fetch (`ClipMsg::Fetch` under `Source::Drag`), capped at 8 MiB. The
+    client answers from the tile's copy. A big answer streams, and the engine passes each chunk
+    to the program as it arrives (`drop_chunk`, `drop_end`), so the worker never holds it
+    whole. A type wanted under two names is fetched once.
+  - **A drop the program never accepted is refused.** The program hears the drag leave and is
+    not given the drop, and the viewer hears it concluded as nothing at once.
+  - **Why not eager.** Sending every type on every drop costs a picture's bytes for a program
+    that reads only text. Sending nothing ahead costs a round trip after the drop for what the
+    program said it wants, and the whole upload for files. The hybrid pays neither.
+  - Tests: engine `a_drop_answers_what_is_here_and_wants_the_rest`,
+    `a_streamed_type_answers_as_it_arrives`, `a_failed_fetch_fails_the_request`,
+    `a_request_past_the_list_is_not_found`, `an_unaccepted_drop_is_refused`; proto
+    `a_drop_offers_each_type_once_files_first`; client
+    `what_the_program_accepts_goes_up_once`, `unaccepted_files_stay_here`,
+    `a_drag_with_a_promise_waits_for_the_drop`; worker
+    `a_drop_the_program_never_accepted_is_refused` and
+    `a_dropped_text_is_fetched_when_the_program_asks` (a bash stand-in reads a text it asked
+    for, fetched and streamed, then one pushed during the hover, with nothing fetched); e2e
+    `files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_copies`, over a link
+    shaped as a tailnet's. Numbers in MEASUREMENTS.md, 2026-10-05.
 
 - ✅ **Grapheme clustering is on by default** (2026-10-02). Mode 2027 starts on and comes
   back on after a full reset, as in Ghostty, Kitty and WezTerm. An emoji sequence (a ZWJ
