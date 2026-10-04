@@ -530,6 +530,78 @@ mod threads {
         a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
     }
 
+    /// A review by the agent, on the person's word, goes to Claude Code as their turn: its own
+    /// `/code-review` over the change's range, typed as any command of theirs is. The thread
+    /// can review because Claude Code lists `code-review`, here a project command of the
+    /// folder's; the range is two commits the worker made of the trees the review showed.
+    #[tokio::test]
+    async fn a_review_by_claude_code_is_its_own_code_review_over_the_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let git = |args: &[&str]| {
+            let out =
+                std::process::Command::new("git").arg("-C").arg(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        std::fs::create_dir_all(repo.join(".claude/commands")).unwrap();
+        std::fs::write(repo.join(".claude/commands/code-review.md"), "Review the diff\n").unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        let from = git(&["write-tree"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        git(&["add", "-A"]);
+        let to = git(&["write-tree"]);
+
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let record = dir.path().join("record");
+        let script = r#"stty raw -echo; printf ready >"$0"; exec cat >>"$0""#;
+        let command = ["/bin/sh", "-c", script, &record.to_string_lossy()].map(str::to_owned);
+        let session = open(&mut a, &repo, command.to_vec()).await;
+        let read = || std::fs::read_to_string(&record).unwrap_or_default();
+        while read() != "ready" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        std::fs::write(&record, "").unwrap();
+        let main = dir.path().join("s3.jsonl");
+        std::fs::write(&main, "").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s3",
+            "transcript_path": main, "cwd": repo,
+        });
+        assert_eq!(printed(relay(dir.path(), session, &start)).await, "");
+        let thread = slopty_agent::observed::thread_of("s3");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.as_ref().is_some_and(|t| t.meta.can(Cap::REVIEW))).await;
+
+        let review = Intent::Review {
+            from: slopty_proto::thread::TreeRef(from.clone()),
+            to: slopty_proto::thread::TreeRef(to.clone()),
+        };
+        assert_eq!(a.intent(IntentId::new(), thread, review).await, Outcome::Accepted);
+        let (base, head) = (
+            git(&["rev-parse", &format!("refs/slopty/threads/{thread}/review-base")]),
+            git(&["rev-parse", &format!("refs/slopty/threads/{thread}/review-head")]),
+        );
+        let typed = format!("/code-review {base}...{head}\r");
+        while read() != typed {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            (
+                git(&["rev-parse", &format!("{base}^{{tree}}")]),
+                git(&["rev-parse", &format!("{head}^{{tree}}")])
+            ),
+            (from, to)
+        );
+        a.until(|c| c.state().pending.is_empty()).await;
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
     /// The first `PermissionRequest` of the `permission` capture, as Claude Code session
     /// `native` would send it with its transcript at `transcript`.
     fn first_ask(native: &str, transcript: &Path) -> serde_json::Value {

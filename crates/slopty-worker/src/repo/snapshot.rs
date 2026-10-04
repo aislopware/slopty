@@ -6,7 +6,10 @@
 //! and stash are never touched. The index stays between snapshots, so each one hashes only
 //! what changed since the last (git's stat cache); the first starts from `HEAD`. Each tree is
 //! kept alive by a commit under `refs/slopty/threads/<thread>/<turn>-{before,after}`, and what
-//! the person kept under `refs/slopty/threads/<thread>/kept`.
+//! the person kept under `refs/slopty/threads/<thread>/kept`. The change an agent was last asked
+//! to review is one commit on a base of its own, under `review-base` and `review-head`, which
+//! the next review overwrites. A push names the person's branches, never `refs/slopty`, and none
+//! of these commits is an ancestor of a branch, so none leaves the machine.
 //!
 //! Hunks are cut here, with three lines of context, the same way every time: a hunk named by
 //! its place ([`Pick::hunks`]) is the hunk the review showed, as long as both of its sides are
@@ -166,6 +169,48 @@ impl Repo {
         let reference = format!("{}/{name}", refs(thread));
         self.run(&["update-ref", &reference, &commit], None, None).await?;
         Ok(())
+    }
+
+    /// The change from `from` to `to` as one commit, for an agent's own review of it: `from`
+    /// as a base commit of its own and `to` as a commit on it, kept under `thread`'s
+    /// `review-base` and `review-head`, which each review overwrites. Their ids, base first, so
+    /// `base...head` and the head commit alone both say exactly the change.
+    ///
+    /// # Errors
+    ///
+    /// When git fails, or either side is no tree here.
+    pub async fn review_pair(
+        &self,
+        thread: ThreadId,
+        from: &TreeRef,
+        to: &TreeRef,
+    ) -> Result<(String, String), Failed> {
+        let base_message = format!("slopty: thread {thread} review base");
+        let base = self.line(&["commit-tree", &from.0, "-m", &base_message], None).await?;
+        let message = format!("slopty: thread {thread} review");
+        let head = self.line(&["commit-tree", &to.0, "-p", &base, "-m", &message], None).await?;
+        let refs = refs(thread);
+        let updates = format!(
+            "start\nupdate {refs}/review-base {base}\nupdate {refs}/review-head {head}\n\
+             prepare\ncommit\n"
+        );
+        self.run(&["update-ref", "--stdin"], None, Some(updates.as_bytes())).await?;
+        Ok((base, head))
+    }
+
+    /// Let every ref of `thread` go, its snapshots and its review alike: the thread is gone.
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn forget(&self, thread: ThreadId) -> Result<(), Failed> {
+        let prefix = format!("{}/", refs(thread));
+        let listed = self.line(&["for-each-ref", "--format=%(refname)", &prefix], None).await?;
+        let deletes: String = listed.lines().flat_map(|name| ["delete ", name, "\n"]).collect();
+        if deletes.is_empty() {
+            return Ok(());
+        }
+        self.run(&["update-ref", "--stdin"], None, Some(deletes.as_bytes())).await.map(|_| ())
     }
 
     /// Put the working tree back to `tree`, as a snapshot sees it, keeping what it held first

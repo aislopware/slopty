@@ -182,6 +182,13 @@ enum Ask {
         limit: u32,
         reply: oneshot::Sender<Result<Vec<PastSession>, String>>,
     },
+    /// Codex's own reviewer over the changes of commit `sha`, in the thread.
+    Review {
+        thread: ThreadId,
+        sha: String,
+        title: String,
+        reply: oneshot::Sender<Outcome>,
+    },
     /// Someone follows the thread: Codex loads it again if it was let go.
     Wake {
         thread: ThreadId,
@@ -211,6 +218,7 @@ impl Ask {
             | Self::Interrupt { thread }
             | Self::Release { thread, .. }
             | Self::Fork { thread, .. }
+            | Self::Review { thread, .. }
             | Self::Set { thread, .. }
             | Self::Wake { thread } => Some(*thread),
             // A thread let go is not taken up again to be closed.
@@ -366,6 +374,16 @@ impl Codex {
     async fn cut(&self, thread: ThreadId, id: IntentId, cut: Cut) -> Outcome {
         let (reply, outcome) = oneshot::channel();
         if self.0.send(Ask::Fork { thread, id, cut, reply }).is_err() {
+            return refused("Codex threads are not served here".to_owned());
+        }
+        outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
+    }
+
+    /// Ask Codex's own reviewer for the changes commit `sha` makes, in `thread`, as the
+    /// person's turn (`review/start`, inline), named `title`: done once Codex has begun it.
+    pub async fn review(&self, thread: ThreadId, sha: String, title: String) -> Outcome {
+        let (reply, outcome) = oneshot::channel();
+        if self.0.send(Ask::Review { thread, sha, title, reply }).is_err() {
             return refused("Codex threads are not served here".to_owned());
         }
         outcome.await.unwrap_or_else(|_| refused("the Codex threads stopped".to_owned()))
@@ -724,6 +742,10 @@ enum Waiting {
         id: IntentId,
         from: ThreadId,
         turn: Option<TurnId>,
+    },
+    /// A review begun, for whoever asked.
+    Review {
+        reply: oneshot::Sender<Outcome>,
     },
     /// The threads of a folder, for whoever asked.
     List {
@@ -1197,6 +1219,12 @@ impl Session {
             (Waiting::Fork { id, .. }, Err(e)) => {
                 self.answer_fork(id, refused(format!("Codex did not fork the thread: {e}")));
             }
+            (Waiting::Review { reply }, Ok(_)) => {
+                let _gone = reply.send(Outcome::Done);
+            }
+            (Waiting::Review { reply }, Err(e)) => {
+                let _gone = reply.send(refused(format!("Codex did not begin the review: {e}")));
+            }
             (Waiting::List { reply }, Ok(result)) => {
                 let listed = rpc::response::<p::ThreadListParams>(result)
                     .map(|listed| {
@@ -1516,6 +1544,21 @@ impl Session {
                     }),
                 };
                 self.request(&params, Waiting::Fork { id, from: thread, turn }).await
+            }
+            Ask::Review { thread, sha, title, reply } => {
+                let params = match self.followed(thread).map(|f| f.shared.review(&sha, &title)) {
+                    Some(Ok(params)) => params,
+                    Some(Err(why)) => {
+                        let _gone = reply.send(refused(why));
+                        return Ok(());
+                    }
+                    None => {
+                        let _gone =
+                            reply.send(refused("Codex does not hold this thread".to_owned()));
+                        return Ok(());
+                    }
+                };
+                self.request(&params, Waiting::Review { reply }).await
             }
             Ask::Sessions { cwd, limit, reply } => {
                 let params = slopty_agent::codex::shared::list(&cwd, limit);

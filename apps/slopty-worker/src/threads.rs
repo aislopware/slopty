@@ -23,7 +23,7 @@ use slopty_proto::thread::wire::{
 };
 use slopty_proto::thread::{
     Action, AgentId, Answerer, AskId, Cap, ContentRef, Cursor, Delivery, IntentId, Liveness,
-    ThreadId, ThreadState, TurnId,
+    ThreadId, ThreadState, TreeRef, TurnId,
 };
 use slopty_worker::conversation::{ORCHESTRATION, Seen};
 use slopty_worker::manager::Worker;
@@ -418,6 +418,17 @@ impl Following {
                     }
                 });
             }
+            // An agent's own review names the change as commits first: on a task of its own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Review { from, to } } => {
+                tracing::info!(client = %at.client, %id, %thread, "review by the agent");
+                let (daemon, link, client, out) =
+                    (at.daemon.clone(), at.link, at.client, at.out.clone());
+                at.tasks.spawn(async move {
+                    let who = Who { daemon: &daemon, link, client };
+                    let outcome = review(&who, &threads, thread, id, &from, &to).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             // Codex's own TUI is found and opened on the thread: on a task of its own.
             ThreadRequest::Intent { id, thread, intent: Intent::Release { .. } }
                 if threads
@@ -606,12 +617,56 @@ async fn discard(threads: &Threads, thread: ThreadId, id: IntentId) -> Outcome {
         if let Err(e) = threads.end(&state).await {
             tracing::warn!(%thread, "an aside's agent did not end: {e}");
         }
+        threads.snapshots.forget(&state).await;
         if let Err(e) = threads.host.remove(thread) {
             tracing::warn!(%thread, "an aside's log stayed: {e}");
         }
         Outcome::Done
     };
     threads.host.record_start(id, outcome)
+}
+
+/// What Codex calls the change it reviews ([`Codex::review`]).
+const REVIEW_TITLE: &str = "The changes on show in Slopty's review";
+
+/// Ask `thread`'s agent for its own review of the change from `from` to `to`, for intent `id`,
+/// once: the change is kept as two commits ([`Snapshots::review_range`]), then Codex's reviewer
+/// takes the head commit, and Claude Code's `/code-review` the range, sent as the person's turn
+/// through its composer as any command of theirs is.
+async fn review(
+    who: &Who<'_>,
+    threads: &Threads,
+    thread: ThreadId,
+    id: IntentId,
+    from: &TreeRef,
+    to: &TreeRef,
+) -> Outcome {
+    if let Some(first) = threads.host.outcome(thread, id) {
+        return first;
+    }
+    let once = |outcome: Outcome| {
+        threads
+            .host
+            .intent(thread, id, |_state| (outcome, Vec::new()))
+            .unwrap_or_else(|| refused("no such thread".to_owned()))
+    };
+    let Some((state, _)) = threads.host.state(thread) else {
+        return refused("no such thread".to_owned());
+    };
+    if !state.meta.can(Cap::REVIEW) {
+        return once(Outcome::Unsupported { cap: Cap::named(Cap::REVIEW) });
+    }
+    let range = match threads.snapshots.review_range(thread, from, to).await {
+        Ok(range) => range,
+        Err(why) => return once(refused(why)),
+    };
+    if codex::is_shared(&state) {
+        let outcome = threads.codex.review(thread, range.head, REVIEW_TITLE.to_owned()).await;
+        return once(outcome);
+    }
+    let text = format!("/{} {}", slopty_agent::observed::REVIEW_COMMAND, range.dots());
+    let delivery = if state.meta.can(Cap::QUEUE) { Delivery::Queue } else { Delivery::Steer };
+    act_as(who, threads, thread, id, &Intent::Send { text, delivery, attachments: Vec::new() })
 }
 
 /// Keep aside `thread` for intent `id`, once, as an ordinary thread of its own.

@@ -85,7 +85,8 @@ impl Sent {
             | Intent::SetEffort { .. }
             | Intent::Aside
             | Intent::Discard
-            | Intent::KeepAside => self.outcome.is_some(),
+            | Intent::KeepAside
+            | Intent::Review { .. } => self.outcome.is_some(),
         }
     }
 

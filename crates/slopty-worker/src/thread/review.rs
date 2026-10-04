@@ -10,6 +10,10 @@
 //! A review is a diff between two snapshots, "now" being one taken for it. Keeping and putting
 //! back act once per intent, each checked against the blobs the review showed. An edit from a
 //! turn puts the folder back to its before-snapshot ([`Snapshots::restore`]).
+//!
+//! An agent's own review ([`Intent::Review`]) takes the change a review showed as commits it can
+//! name ([`Snapshots::review_range`]): Claude Code's `/code-review` takes `base...head`, Codex's
+//! reviewer the head commit.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -92,6 +96,11 @@ impl Snapshots {
                     continue;
                 }
                 Moment::Began(turn) => {
+                    // An adapter tells a turn again as it goes (its usage, its models); its
+                    // start was the first time.
+                    if self.host.update(thread, |s| (vec![], begun(s, turn))) != Some(false) {
+                        continue;
+                    }
                     let tree = match armed.take() {
                         Some(tree) => Some(tree),
                         None => self.take(thread, &repo).await,
@@ -272,6 +281,58 @@ impl Snapshots {
     }
 }
 
+/// A change as an agent's own review names it: two commits whose difference it is, the head on
+/// the base.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Range {
+    /// The old side's commit.
+    pub base: String,
+    /// The new side's, whose parent is the base.
+    pub head: String,
+}
+
+impl Range {
+    /// How a ref range names it: `base...head`.
+    #[must_use]
+    pub fn dots(&self) -> String {
+        format!("{}...{}", self.base, self.head)
+    }
+}
+
+impl Snapshots {
+    /// The change from `from` to `to` in `thread`'s repository as commits an agent's review
+    /// takes, overwriting the last review's; why not, in words.
+    ///
+    /// # Errors
+    ///
+    /// Outside git, or when git refuses the trees.
+    pub async fn review_range(
+        &self,
+        thread: ThreadId,
+        from: &TreeRef,
+        to: &TreeRef,
+    ) -> Result<Range, String> {
+        let repo = self.repo(thread).ok_or_else(|| NOT_IN_GIT.to_owned())?;
+        let lock = self.lock(thread);
+        let _held = lock.lock().await;
+        let (base, head) = repo.review_pair(thread, from, to).await.map_err(|e| e.0)?;
+        Ok(Range { base, head })
+    }
+
+    /// Let every ref `state`'s thread keeps in its repository go, before the thread is.
+    pub async fn forget(&self, state: &ThreadState) {
+        let thread = state.meta.id;
+        let Some(repo) = self.repo(thread) else { return };
+        let lock = self.lock(thread);
+        let held = lock.lock().await;
+        if let Err(e) = repo.forget(thread).await {
+            tracing::warn!(%thread, "a gone thread's snapshots stayed: {e}");
+        }
+        drop(held);
+        self.locks.lock().remove(&thread);
+    }
+}
+
 /// The two snapshots `scope` compares in `state`; `None` on the new side for now.
 fn sides(state: &ThreadState, scope: ReviewScope) -> (Option<TreeRef>, Option<TreeRef>) {
     let turn = |id: TurnId| state.turns.iter().find(|t| t.id == id);
@@ -283,6 +344,11 @@ fn sides(state: &ThreadState, scope: ReviewScope) -> (Option<TreeRef>, Option<Tr
         ReviewScope::Since(id) => (turn(id).and_then(|t| t.before.clone()), None),
         ReviewScope::Kept => (base(state), None),
     }
+}
+
+/// Whether `turn` already has its before-snapshot.
+fn begun(state: &ThreadState, turn: TurnId) -> bool {
+    state.turns.iter().any(|t| t.id == turn && t.before.is_some())
 }
 
 /// Where what is kept starts: the first snapshot the thread took.

@@ -12,8 +12,8 @@ mod review {
     use slopty_core::WallMs;
     use slopty_proto::thread::wire::{Intent, Outcome, Pick, Review, ReviewScope};
     use slopty_proto::thread::{
-        Action, Changed, IntentId, Liveness, Phase, Status, ThreadId, ThreadState, Turn, TurnId,
-        TurnState, Usage,
+        Action, Changed, IntentId, Liveness, Phase, Status, ThreadId, ThreadState, TreeRef, Turn,
+        TurnId, TurnState, Usage,
     };
     use slopty_worker::repo::snapshot::Repo;
     use slopty_worker::thread::Host;
@@ -136,7 +136,8 @@ mod review {
     }
 
     /// A turn's start is snapshotted when the agent starts working, its end when it ends, both
-    /// kept in the thread's refs; the person's index is left alone. Its review has every file
+    /// kept in the thread's refs, and the turn told again mid-way keeps its start; the person's
+    /// index is left alone. Its review has every file
     /// it touched (a change, a new file, a removed one), the change in two hunks.
     #[tokio::test]
     async fn a_turn_is_snapshotted_at_its_edges_and_reviewed() {
@@ -153,9 +154,11 @@ mod review {
         std::fs::write(repo.join("a.txt"), &changed).unwrap();
         std::fs::write(repo.join("new.txt"), "new\n").unwrap();
         std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        rig.begin(1);
         rig.end(1);
         let state = rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
         let after = state.turns.first().unwrap().after.clone().unwrap();
+        assert_eq!(state.turns.first().unwrap().before, Some(before.clone()), "told again");
         let thread = rig.thread;
         let pinned = |edge: &str| {
             run(&repo, &["rev-parse", &format!("refs/slopty/threads/{thread}/1-{edge}^{{tree}}")])
@@ -236,6 +239,60 @@ mod review {
         let rig = Rig::new(dir.path(), &plain);
         let review = rig.snapshots.review(rig.thread, ReviewScope::Kept).await;
         assert_eq!(review.absent.as_deref(), Some(NOT_IN_GIT));
+    }
+
+    /// The change a review showed is kept for the agent's own review as one commit on a base
+    /// of its own, so `base...head` and the head commit both say exactly it. Each review
+    /// overwrites the one pair; a push of the person's branch carries none of it, refs or
+    /// commits; and a thread forgotten takes every ref of its own with it.
+    #[tokio::test]
+    async fn an_agents_review_names_the_change_as_one_pair_that_never_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = repository(dir.path());
+        let remote = dir.path().join("remote.git");
+        run(dir.path(), &["init", "-q", "--bare", remote.to_str().unwrap()]);
+        run(&repo, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        let rig = Rig::new(dir.path(), &repo);
+        rig.status(Phase::Working);
+        rig.begin(1);
+        rig.until(|s| s.turns.first().is_some_and(|t| t.before.is_some())).await;
+        std::fs::write(repo.join("a.txt"), A.replace("two\n", "TWO\n")).unwrap();
+        rig.end(1);
+        let state = rig.until(|s| s.turns.first().is_some_and(|t| t.after.is_some())).await;
+        let turn = state.turns.first().unwrap();
+        let (from, to) = (turn.before.clone().unwrap(), turn.after.clone().unwrap());
+
+        let first = rig.snapshots.review_range(rig.thread, &from, &to).await.unwrap();
+        let tree = |rev: &str| run(&repo, &["rev-parse", &format!("{rev}^{{tree}}")]);
+        assert_eq!((tree(&first.base), tree(&first.head)), (from.0.clone(), to.0.clone()));
+        assert_eq!(run(&repo, &["rev-parse", &format!("{}^", first.head)]), first.base);
+        assert_eq!(run(&repo, &["diff", "--name-only", &first.dots()]), "a.txt");
+        assert_eq!(first.dots(), format!("{}...{}", first.base, first.head));
+        let again = rig.snapshots.review_range(rig.thread, &to, &to).await.unwrap();
+        let thread = rig.thread;
+        let pair = |name: &str| {
+            run(&repo, &["rev-parse", &format!("refs/slopty/threads/{thread}/review-{name}")])
+        };
+        assert_eq!((pair("base"), pair("head")), (again.base, again.head), "overwritten");
+        assert!(
+            rig.snapshots.review_range(rig.thread, &from, &TreeRef("0".repeat(40))).await.is_err(),
+            "no such tree"
+        );
+
+        run(&repo, &["push", "-q", "origin", "main"]);
+        assert_eq!(run(&remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main");
+        let carried = Command::new(git())
+            .arg("-C")
+            .arg(&remote)
+            .args(["cat-file", "-e", &first.head])
+            .output()
+            .unwrap();
+        assert!(!carried.status.success(), "the review's commit stays home");
+
+        let state = rig.host.state(rig.thread).unwrap().0;
+        rig.snapshots.forget(&state).await;
+        let left = run(&repo, &["for-each-ref", "--format=%(refname)", "refs/slopty/"]);
+        assert_eq!(left, "", "every ref of the thread goes with it");
     }
 
     /// What a snapshot costs on this repository, cloned: the first (every file hashed), one

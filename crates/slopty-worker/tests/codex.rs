@@ -989,6 +989,78 @@ mod codex {
         }
     }
 
+    /// A stand-in daemon that has the recording's thread loaded and begins Codex's reviewer on
+    /// the first `review/start`, refusing a second as Codex refuses one while a review runs.
+    /// Every frame the worker sent goes to `heard`.
+    async fn reviewer(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let lines = starter();
+        let resumed = resumed();
+        let native = resumed["result"]["thread"]["id"].clone();
+        let mut reviewing = false;
+        while let Some(msg) = next(&mut ws, &heard).await {
+            let id = msg["id"].clone();
+            let answer = match msg["method"].as_str() {
+                Some("initialize") => lines[recorded(&lines, "initialize").1].msg.clone(),
+                Some("thread/loaded/list") => {
+                    json!({ "result": { "data": [native], "nextCursor": null } })
+                }
+                Some("thread/resume") => resumed.clone(),
+                Some("review/start") if reviewing => {
+                    json!({ "error": { "code": -32600, "message": "a review is already running" } })
+                }
+                Some("review/start") => {
+                    reviewing = true;
+                    json!({ "result": { "reviewThreadId": native, "turn": {
+                        "id": "review-turn", "items": [], "itemsView": "notLoaded",
+                        "status": "inProgress", "error": null, "startedAt": 0,
+                        "completedAt": null, "durationMs": null } } })
+                }
+                _ => continue,
+            };
+            let mut answer = answer;
+            answer["id"] = id;
+            say(&mut ws, &answer).await;
+        }
+    }
+
+    /// A review goes to Codex's own reviewer over the head commit of the change, in the thread
+    /// (`review/start`, inline), and is done once Codex has begun it; one Codex refuses says so
+    /// in Codex's words.
+    #[tokio::test]
+    async fn a_review_goes_to_codexs_reviewer_over_the_head_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let _server = tokio::spawn(reviewer(listener, tx));
+        let host = host(dir.path());
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let thread = shared::thread_of(&native);
+        let state = until(&host, thread, |s| !s.turns.is_empty()).await;
+        assert!(state.meta.can(slopty_proto::thread::Cap::REVIEW));
+
+        let title = "The changes on show".to_owned();
+        let outcome =
+            tokio::time::timeout(BOUND, handle.review(thread, "9d1e7aa".to_owned(), title.clone()))
+                .await
+                .unwrap();
+        assert_eq!(outcome, Outcome::Done);
+        let sent = until_sent(&mut heard, "review/start").await;
+        assert_eq!(
+            sent.last().unwrap()["params"],
+            json!({ "threadId": native, "delivery": "inline",
+                "target": { "type": "commit", "sha": "9d1e7aa", "title": title } })
+        );
+        let again = handle.review(thread, "9d1e7aa".to_owned(), "again".to_owned()).await;
+        let Outcome::Refused { reason } = again else { panic!("{again:?}") };
+        assert!(reason.contains("a review is already running"), "{reason}");
+    }
+
     /// A stand-in daemon whose one loaded thread was archived outside Slopty: it refuses the
     /// first resume as Codex does, takes it up again once unarchived, and holds a goal for it.
     async fn archivist(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
