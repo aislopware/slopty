@@ -8,8 +8,9 @@ use slopty_core::WallMs;
 
 use super::wire::{Page, RequestCard, TableFrame, ThreadRow};
 use super::{
-    Action, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Goal, Item, ItemBody, ItemId,
-    Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta, ToolState, Turn, TurnId,
+    Action, AgentScreen, BackgroundTask, Changed, Clipped, Command, Cursor, Edge, Goal, Item,
+    ItemBody, ItemId, Meters, PartKey, Pending, Plan, Request, Status, ThreadId, ThreadMeta,
+    ToolState, Turn, TurnId,
 };
 
 /// Settled requests a thread keeps, newest last, so a client that comes back still sees who
@@ -48,6 +49,8 @@ pub struct ThreadState {
     pub to_review: bool,
     /// The goal its agent works toward ([`Action::GoalSet`]).
     pub goal: Option<Goal>,
+    /// The windows and displays its agent drives ([`Action::ScreensSet`]).
+    pub screens: Vec<AgentScreen>,
 }
 
 impl ThreadState {
@@ -68,6 +71,7 @@ impl ThreadState {
             commands: Vec::new(),
             to_review: false,
             goal: None,
+            screens: Vec::new(),
         }
     }
 
@@ -139,6 +143,7 @@ impl ThreadState {
             }
             Action::ToReview(to_review) => self.to_review = *to_review,
             Action::GoalSet(goal) => self.goal.clone_from(goal),
+            Action::ScreensSet(screens) => self.screens.clone_from(screens),
         }
     }
 

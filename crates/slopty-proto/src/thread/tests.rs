@@ -450,3 +450,20 @@ fn what_a_resting_thread_left_ranks_it_above_rest() {
     }
     assert_eq!((counts.on(Rung::Idle), counts.total()), (1, 6));
 }
+
+/// The screens an agent drives are what the worker last said, and none once it says none.
+#[test]
+fn the_screens_are_the_last_said() {
+    let screen = |id: u32| AgentScreen {
+        target: crate::screen::CaptureTarget::Window(slopty_core::WindowId(id)),
+        kind: AgentScreen::BROWSER.to_owned(),
+        label: format!("Chromium {id}"),
+        used_ms: WallMs::ZERO,
+    };
+    let mut state = run(&[Action::ScreensSet(vec![screen(1)])]);
+    state.apply(&Action::ScreensSet(vec![screen(2), screen(1)]));
+    assert_eq!(state.screens, [screen(2), screen(1)]);
+    assert_eq!(state.window(0).screens, state.screens, "a snapshot carries them");
+    state.apply(&Action::ScreensSet(Vec::new()));
+    assert_eq!(state.screens, []);
+}

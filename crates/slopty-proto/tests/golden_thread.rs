@@ -6,8 +6,9 @@
 mod golden_thread {
     use std::collections::BTreeMap;
 
-    use slopty_core::{ClientId, SessionId, WallMs};
+    use slopty_core::{ClientId, DisplayId, SessionId, WallMs, WindowId};
     use slopty_proto::codec;
+    use slopty_proto::screen::CaptureTarget;
     use slopty_proto::search::Span;
     use slopty_proto::thread::detail::{
         AgentDetail, Answer, EditDetail, ExecDetail, ExecStatus, FetchDetail, Hunk, McpDetail,
@@ -20,12 +21,12 @@ mod golden_thread {
         ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
-        Action, AgentId, Answerer, AskId, BackgroundTask, Cap, Changed, Choice, Clipped, Command,
-        Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Effort, Fork, Goal, Image,
-        IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode, Model, Notice,
-        PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState, Retry, Status,
-        Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState, TreeRef, Turn,
-        TurnId, TurnState, Usage, UserMessage, Wait, kind,
+        Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
+        Clipped, Command, Compaction, ContentRef, Cursor, Delivery, Drive, Edge, Effect, Effort,
+        Fork, Goal, Image, IntentId, Item, ItemBody, ItemId, Limit, Link, Liveness, Meters, Mode,
+        Model, Notice, PartKey, Patch, Pending, PendingState, Phase, Plan, Request, RequestState,
+        Retry, Status, Step, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolDetail, ToolState,
+        TreeRef, Turn, TurnId, TurnState, Usage, UserMessage, Wait, kind,
     };
     use uuid::Uuid;
 
@@ -254,6 +255,15 @@ mod golden_thread {
         }
     }
 
+    fn screen() -> AgentScreen {
+        AgentScreen {
+            target: CaptureTarget::Window(WindowId(4_242)),
+            kind: AgentScreen::SIMULATOR.to_owned(),
+            label: "Simulator — iPhone 17 Pro".to_owned(),
+            used_ms: ms(1_727_000_000_000),
+        }
+    }
+
     fn state() -> ThreadState {
         let mut state = ThreadState::new(meta());
         for action in [
@@ -275,6 +285,7 @@ mod golden_thread {
             Action::MetersSet(meters()),
             Action::ToReview(true),
             Action::GoalSet(Some(goal())),
+            Action::ScreensSet(vec![screen()]),
         ] {
             state.apply(&action);
         }
@@ -618,6 +629,16 @@ mod golden_thread {
             Action::ToReview(true),
             Action::GoalSet(Some(goal())),
             Action::GoalSet(None),
+            Action::ScreensSet(vec![
+                screen(),
+                AgentScreen {
+                    target: CaptureTarget::Display(DisplayId(1)),
+                    kind: AgentScreen::DESKTOP.to_owned(),
+                    label: "Display 1".to_owned(),
+                    used_ms: ms(1_727_000_000_500),
+                },
+            ]),
+            Action::ScreensSet(Vec::new()),
         ];
         snap("frame_actions", &ThreadFrame::Actions { epoch: 1, first: 8, next: 40, actions });
     }

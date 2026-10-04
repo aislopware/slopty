@@ -1212,6 +1212,38 @@ pub enum Action {
     ToReview(bool),
     /// The goal the agent works toward, as it holds it; `None` once it has none.
     GoalSet(Option<Goal>),
+    /// The windows and displays on the worker its agent drives, the latest first; empty once
+    /// it drives none.
+    ScreensSet(Vec<AgentScreen>),
+}
+
+/// A window or display on the thread's worker that its agent drives.
+///
+/// A browser its tools opened, a simulator, the desktop it works through computer use. The
+/// worker names it from the agent's own tool calls, so the person can watch it beside the
+/// thread and take it over.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AgentScreen {
+    /// What a stream of it opens.
+    pub target: crate::screen::CaptureTarget,
+    /// What it is. Open: [`AgentScreen::BROWSER`], [`AgentScreen::SIMULATOR`],
+    /// [`AgentScreen::DESKTOP`], [`AgentScreen::APP`].
+    pub kind: String,
+    /// Its name for people: the window's app and title, or the display's.
+    pub label: String,
+    /// When the agent last drove it.
+    pub used_ms: WallMs,
+}
+
+impl AgentScreen {
+    /// Another application's window the agent drives.
+    pub const APP: &'static str = "app";
+    /// A web browser's window.
+    pub const BROWSER: &'static str = "browser";
+    /// A whole display, driven through computer use.
+    pub const DESKTOP: &'static str = "desktop";
+    /// A simulated device's window.
+    pub const SIMULATOR: &'static str = "simulator";
 }
 
 /// A goal an agent works toward across turns, starting turns of its own until it is met
