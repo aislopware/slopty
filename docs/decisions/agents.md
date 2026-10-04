@@ -554,6 +554,56 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
       and `the_screen_the_agent_drives_is_offered_beside_it` (`thread/tests/doors.rs`).
     - `the_screen_an_agent_drives_opens_beside_its_thread` (app e2e, over the drawn screen;
       goldens `agent-screen`, `agent-screen-dark`).
+
+- ✅ **A line names the thread and turn that wrote it** (2026-10-04, frontier must-have M3).
+  From a line of a file tile or a review, the person reaches the agent's thread at the turn
+  that brought the line in.
+  - **Blame over the turns' own snapshots.** The worker keeps the tree as each turn begins and
+    ends (`thread::review`). Those snapshots, for every thread in one working tree and in the
+    order the turns ended, make a history (`thread::authors`). Each turn becomes a commit of
+    its after-tree. Where the tree changed between turns (the person's edits, another agent's),
+    a commit of the next turn's before-tree comes first. `git blame --contents` of the file as
+    it is now, against that history, gives each line the turn that brought it in.
+    - The commits are made with fixed authors at the turn's own time (`Repo::commit_at`), so
+      they are the same objects on every ask. No ref names them and the person's history never
+      sees them. The history is kept per tree and grows a turn at a time. Asks are made one
+      at a time per tree, since a review asks for many files at once.
+    - A line from before the first snapshot, or from between turns, is blamed against the
+      person's own `HEAD`. When that commit carries a `Slopty-Thread` trailer (a project merged
+      it), the line is that thread's, with the commit and no turn. That holds on every machine
+      with the commit, after the snapshots are gone. The thread may be another worker's; it is
+      named when a worker here knows it.
+    - A line changed since the last snapshot, and every line of a file larger than 4 MiB, is
+      no one's.
+  - **One answer per file, kept by the client.** `ThreadRequest::Authors` names a file,
+    absolute or in a thread's repository. The answer (`Authors`) carries runs of lines, each
+    with its thread, turn or commit, and when it was written. It also carries the file's
+    modification time and blob, as the worker read it. The client keeps the last 64 answers
+    (`slopty_client::threads::Authorships`) and draws from them on every frame. A file tile
+    asks once per read (`FileView::stamp`, its modification time). A review asks for the file
+    as its diff ends (its blob): the first 16 files listed as the review comes, the rest when
+    the pointer first crosses one of their lines. No hover asks anything.
+  - **Quiet until looked at.** A file tile names the caret line's author in a small pill in
+    the corner of the text: the thread's title (its agent while untitled), the turn, and how
+    long ago. The pill hides while the edit differs from the file as read, since its lines no
+    longer match the answer. A review names a line's author at the line's end while the
+    pointer is on it, as "Turn N" within the thread's own review. A press on either opens the
+    thread where its agent's tile shows it, else in its own tile, and scrolls to the turn's
+    first message (`ThreadView::go_to_turn`). A turn older than those held is reached by
+    paging back.
+  - Tests:
+    - `every_line_is_the_turn_that_wrote_it` and `a_file_with_no_history_says_why`
+      (`slopty-worker/tests/authors.rs`, on a real repository with two threads, the person's
+      edits and a trailer's commit).
+    - `blame_gives_each_line_its_commit` and `trailers_name_the_thread_that_made_a_commit`
+      (`repo/snapshot.rs`).
+    - `a_file_is_asked_once_per_change` (`slopty-client`).
+    - `the_carets_line_names_the_turn_that_wrote_it` (file tile),
+      `a_line_names_the_turn_that_wrote_it_under_the_pointer` (review) and
+      `a_turn_gone_to_shows_from_its_message_paging_back_to_it` (thread view), all in
+      `slopty-ui`.
+    - The app e2e `a_line_names_the_turn_that_wrote_it_and_opens_it`, with goldens
+      `file-author` and `file-author-dark`.
 - ✅ **The thread composer's menus never blank, and a waiting message is changed in place**
   (2026-10-02, `crates/slopty-ui/src/conversation/thread/view/composing.rs`;
   `thread/tests/composing.rs`). `/` lists the commands the thread says its agent takes, ranked

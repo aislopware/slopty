@@ -60,6 +60,7 @@ use slopty_proto::handoff::{EditOutcome, HandoffId};
 use slopty_theme::{Theme, alpha};
 pub use symbols::SYMBOLS_CTX;
 
+use crate::authorship::{self, Authored, Opens};
 use crate::colors::{hsla, hsla_alpha};
 use crate::highlight::Syntax;
 use crate::icons::{IconName, IconSize};
@@ -168,6 +169,11 @@ pub enum FileViewEvent {
     },
     /// "Reload": the edit is dropped; the file is to be read again.
     Reload,
+    /// The person pressed who wrote a line: open the thread that did, at its turn.
+    OpenThread(Opens),
+    /// The editor holds the file as read anew ([`FileView::stamp`]): who wrote its lines is
+    /// to be asked.
+    Stamped,
     /// A file too large to edit here: run this shell line in a terminal on the file's worker
     /// ([`terminal_command`] makes the program to run it).
     Run(String),
@@ -465,6 +471,11 @@ pub struct FileView {
     goto: Option<editing::GoTo>,
     /// The symbol list, while open.
     symbols: Option<symbols::Symbols>,
+    /// Who wrote the file's lines as last read, while the worker has said
+    /// ([`Self::set_authored`]).
+    authored: Option<Authored>,
+    /// [`Self::stamp`] as the host was last told it.
+    stamped: Option<WallMs>,
     /// The editor's events, and its every change marking this view dirty: the tile draws
     /// this view from GPUI's view cache, which a change inside the editor would not otherwise
     /// invalidate.
@@ -543,8 +554,65 @@ impl FileView {
             bracket_at: None,
             goto: None,
             symbols: None,
+            authored: None,
+            stamped: None,
             _editor_events: [events, redraw],
         }
+    }
+
+    /// When the file the editor holds was last changed on disk, while the editor holds just
+    /// that: who wrote its lines is asked of the file as it was then.
+    #[must_use]
+    pub fn stamp(&self) -> Option<WallMs> {
+        let base = self.base.as_ref().filter(|_| !self.dirty && self.comparing.is_none())?;
+        (!base.modified_ms.is_zero()).then_some(base.modified_ms)
+    }
+
+    /// Who wrote the file's lines as [`Self::stamp`] read it; `None` while not known.
+    pub fn set_authored(&mut self, authored: Option<Authored>, cx: &mut Context<Self>) {
+        if self.authored != authored {
+            self.authored = authored;
+            cx.notify();
+        }
+    }
+
+    /// Who wrote the file's lines, as last set.
+    #[must_use]
+    pub const fn authored(&self) -> Option<&Authored> {
+        self.authored.as_ref()
+    }
+
+    /// In the corner of the text: who wrote the caret's line, when a thread did and the editor
+    /// holds the file as it was read. A press opens that thread at the turn.
+    fn render_author(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let authored = self.authored.as_ref()?;
+        let stamp = self.stamp()?;
+        if authored.authors.modified_ms != Some(stamp) || !self.shows_text() {
+            return None;
+        }
+        let run = authored.at(self.reading_line(cx)?)?;
+        let writer = authored.writers.get(&run.thread);
+        let theme = &self.theme;
+        let opens = Opens { thread: run.thread, turn: run.turn };
+        let id = SharedString::from(format!("file-author-{}", self.id.as_uuid()));
+        let mut tag = authorship::tag(theme, id, run, writer, None, WallMs::now());
+        if writer.is_some() {
+            tag = tag.on_click(cx.listener(move |_this, _ev, _w, cx| {
+                cx.emit(FileViewEvent::OpenThread(opens));
+            }));
+        }
+        let pill = crate::kit::elevate(crate::kit::pill_frame(theme, 1.0), theme)
+            .debug_selector(|| "file-author".to_owned())
+            .px(px(theme.spacing.xxs))
+            .child(tag);
+        Some(
+            div()
+                .absolute()
+                .bottom(px(theme.spacing.md))
+                .right(px(theme.spacing.lg))
+                .child(pill)
+                .into_any_element(),
+        )
     }
 
     /// Item this tile belongs to.
@@ -708,6 +776,23 @@ impl FileView {
 
     /// The worker read the file (the first time, after a change on disk, or on "Reload").
     pub fn set_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
+        self.take_read(read, cx);
+        self.restamp(cx);
+    }
+
+    /// Tell the host when the file the editor holds is another than it was
+    /// ([`FileViewEvent::Stamped`]): who wrote its lines is asked again.
+    fn restamp(&mut self, cx: &mut Context<Self>) {
+        let stamp = self.stamp();
+        if stamp != self.stamped {
+            self.stamped = stamp;
+            if stamp.is_some() {
+                cx.emit(FileViewEvent::Stamped);
+            }
+        }
+    }
+
+    fn take_read(&mut self, read: FileRead, cx: &mut Context<Self>) {
         self.away = false;
         if !matches!(read, FileRead::Streamed { .. })
             && let Some(kept) = self.restoring.take()
@@ -1099,6 +1184,11 @@ impl FileView {
 
     /// The worker answered a save.
     pub fn written(&mut self, result: WriteResult, cx: &mut Context<Self>) {
+        self.take_written(result, cx);
+        self.restamp(cx);
+    }
+
+    fn take_written(&mut self, result: WriteResult, cx: &mut Context<Self>) {
         let Some(sent) = self.saving.take() else { return };
         match result {
             WriteResult::Saved { modified_ms, .. } => {
@@ -1566,6 +1656,7 @@ impl Render for FileView {
         let symbols = self.symbols.as_ref().map(|l| self.render_symbols(l, cx));
         let bar = self.render_bar(cx);
         let waiting = self.render_waiting(cx);
+        let author = self.render_author(cx);
         let theme = &self.theme;
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
         let text_size = self.text_size * self.zoom;
@@ -1633,6 +1724,7 @@ impl Render for FileView {
             .children(bar)
             .children(waiting)
             .child(body)
+            .children(author)
             .children(search)
             .children(goto)
             .children(symbols)

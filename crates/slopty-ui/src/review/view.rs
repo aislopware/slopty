@@ -38,6 +38,7 @@ use slopty_theme::{Theme, Typography};
 
 use super::findings::{self, Finding};
 use super::model::{self, Comment, Model, Note, Scope, Side};
+use crate::authorship::{Authored, Opens};
 use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::lines::{self, Ink};
@@ -57,6 +58,8 @@ const LIST_FROM: f32 = 720.0;
 const LIST_WIDTH: f32 = 240.0;
 
 /// The most the band of the agent's findings above the diff takes before it scrolls.
+mod authors;
+
 const FINDINGS_HEIGHT: f32 = 240.0;
 
 /// How far past the viewport the diff lays rows out.
@@ -78,6 +81,8 @@ pub enum ReviewEvent {
         /// The comments as one message.
         text: String,
     },
+    /// The person pressed who wrote a line: open the thread that did, at its turn.
+    OpenThread(Opens),
 }
 
 /// One row of the diff.
@@ -194,6 +199,10 @@ pub struct ReviewView {
     /// findings are here, though the thread moves on.
     pinned: Option<ReviewScope>,
     focus: FocusHandle,
+    /// Who wrote the lines of each file, by its place in the review, once the worker has said.
+    authored: HashMap<usize, Authored>,
+    /// The files whose authors were asked for this review.
+    authors_asked: HashSet<usize>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -234,6 +243,7 @@ impl ReviewView {
             HubEvent::Review(t) if *t == this.thread => this.reviewed(cx),
             HubEvent::Thread(t) if *t == this.thread => this.thread_moved(cx),
             HubEvent::Git(repo) if this.repo(cx).as_ref() == Some(repo) => cx.notify(),
+            HubEvent::Authors => this.authors_came(cx),
             _ => {}
         });
         let watching = cx.observe(&draft, |_, _, cx| cx.notify());
@@ -263,6 +273,8 @@ impl ReviewView {
             came: None,
             pinned: None,
             focus: cx.focus_handle(),
+            authored: HashMap::new(),
+            authors_asked: HashSet::new(),
             _subscriptions: vec![writing, hearing, watching],
         };
         view.hub.update(cx, |hub, cx| hub.open(thread, cx));
@@ -428,6 +440,7 @@ impl ReviewView {
     fn reviewed(&mut self, cx: &mut Context<Self>) {
         let Some(review) = self.hub.read(cx).review(self.thread).cloned() else { return };
         self.show(review);
+        self.author_review(cx);
         cx.notify();
     }
 
@@ -1450,12 +1463,10 @@ impl ReviewView {
             return div().into_any_element();
         };
         let ink = self.ink(at);
-        self.pickable(
-            format!("review-line-{at}-{hunk}-{ix}"),
-            (at, hunk, ix),
-            ink.unified(line),
-            cx,
-        )
+        let id = format!("review-line-{at}-{hunk}-{ix}");
+        let new = line.new.filter(|_| line.kind != Kind::Removed);
+        let tag = self.author_tag(at, new, &id, cx);
+        self.pickable(id, (at, hunk, ix), ink.unified(line), tag, cx)
     }
 
     fn pair_row(&self, at: usize, hunk: usize, ix: usize, cx: &Context<Self>) -> AnyElement {
@@ -1465,16 +1476,20 @@ impl ReviewView {
         let pairs = diff::pairs(block);
         let Some(pair) = pairs.get(ix).copied() else { return div().into_any_element() };
         let ink = self.ink(at);
-        self.pickable(format!("review-pair-{at}-{hunk}-{ix}"), (at, hunk, ix), ink.split(pair), cx)
+        let id = format!("review-pair-{at}-{hunk}-{ix}");
+        let tag = self.author_tag(at, pair.1.and_then(|l| l.new), &id, cx);
+        self.pickable(id, (at, hunk, ix), ink.split(pair), tag, cx)
     }
 
     /// Row `ix` of hunk `hunk` of the file at `at`, drawn as `lines`, as a press and a drag
-    /// pick it for a comment, washed while it is picked.
+    /// pick it for a comment, washed while it is picked; who wrote it, `tag`, shows while the
+    /// pointer is on it.
     fn pickable(
         &self,
         id: String,
         (at, hunk, ix): (usize, usize, usize),
         lines: Div,
+        tag: Option<AnyElement>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let picked = self
@@ -1483,9 +1498,11 @@ impl ReviewView {
             .is_some_and(|span| span.holds(at, hunk, ix));
         let wash = hsla_alpha(self.theme.surfaces.accent, slopty_theme::alpha::FAINT);
         let selector = id.clone();
+        let group = authors::line_group(&id);
         div()
             .id(ElementId::Name(id.into()))
             .debug_selector(move || selector)
+            .group(group)
             .relative()
             .w_full()
             .cursor_pointer()
@@ -1493,6 +1510,12 @@ impl ReviewView {
             .text_size(self.z(self.theme.typography.small()))
             .child(lines)
             .when(picked, |el| el.child(div().absolute().inset_0().bg(wash)))
+            .children(tag)
+            .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
+                if *hovered && !this.authors_asked.contains(&at) {
+                    this.author_file(at, cx);
+                }
+            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _w, cx| {

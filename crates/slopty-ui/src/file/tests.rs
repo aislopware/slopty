@@ -40,8 +40,11 @@ fn tile<'a>(
     let events: Events = Rc::default();
     let sink = Rc::clone(&events);
     cx.update(|_window, cx| {
+        // Who wrote the lines is asked on every read: the tests of it read the stamp itself.
         cx.subscribe(&view, move |_view, event: &FileViewEvent, _cx| {
-            sink.borrow_mut().push(event.clone());
+            if *event != FileViewEvent::Stamped {
+                sink.borrow_mut().push(event.clone());
+            }
         })
         .detach();
     });
@@ -1052,4 +1055,61 @@ fn a_file_deleted_under_the_tile_keeps_its_text_and_a_save_makes_it_again(cx: &m
         }],
         "made again as it was, final newline and all"
     );
+}
+
+/// The caret's line names the thread and turn that wrote it, in the corner of the text, and a
+/// press opens that thread there; a line no thread wrote says nothing, and neither does an
+/// edit, whose lines the answer no longer numbers.
+#[gpui::test]
+fn the_carets_line_names_the_turn_that_wrote_it(cx: &mut TestAppContext) {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use slopty_proto::thread::wire::{AuthorRun, Authors};
+    use slopty_proto::thread::{AgentId, ThreadId, TurnId};
+
+    use crate::authorship::{Authored, Opens, Writer};
+
+    let (view, events, cx) = tile(cx, "/w/src/lib.rs");
+    arrives(&view, cx, text_read("one\ntwo\nthree", true, 1_000));
+    assert_eq!(view.read_with(cx, |v, _| v.stamp()), Some(WallMs::from_millis(1_000)));
+    let thread = ThreadId::new();
+    let authors = Authors {
+        thread: None,
+        path: "/w/src/lib.rs".to_owned(),
+        modified_ms: Some(WallMs::from_millis(1_000)),
+        blob: None,
+        runs: vec![AuthorRun {
+            start: 2,
+            lines: 2,
+            thread,
+            turn: Some(TurnId(3)),
+            commit: None,
+            at_ms: WallMs::now(),
+        }],
+        absent: None,
+    };
+    let writer =
+        Writer { agent: AgentId(AgentId::CLAUDE_CODE.to_owned()), title: "Tidy".to_owned() };
+    let authored =
+        Authored { authors: Arc::new(authors), writers: HashMap::from([(thread, writer)]) };
+    view.update(cx, |v, cx| v.set_authored(Some(authored), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("file-author").is_none(), "the first line is no thread's");
+
+    view.update_in(cx, |v, window, cx| {
+        v.focus(window, cx);
+        v.editor().update(cx, |e, cx| e.set_selected_range(5..5, cx));
+    });
+    cx.run_until_parked();
+    click(cx, "file-author".to_owned());
+    assert_eq!(
+        events.borrow().as_slice(),
+        [FileViewEvent::OpenThread(Opens { thread, turn: Some(TurnId(3)) })]
+    );
+
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.stamp()), None);
+    assert!(cx.debug_bounds("file-author").is_none(), "an edit numbers the lines anew");
 }

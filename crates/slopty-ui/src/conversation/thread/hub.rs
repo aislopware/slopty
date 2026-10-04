@@ -21,11 +21,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{Context, EventEmitter, Task};
-use slopty_client::threads::{Cache, Cached, Changed, Outbox, Threads};
+use slopty_client::threads::{Cache, Cached, Changed, Outbox, Stamp, Threads};
 use slopty_proto::git::{GitOp, GitOutcome};
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, Review, ReviewScope, SEARCH_THREADS, Start, TableFrame,
-    ThreadFrame, ThreadHits, ThreadRequest,
+    Authors, Expanded, Intent, IntentDone, Outcome, Review, ReviewScope, SEARCH_THREADS, Start,
+    TableFrame, ThreadFrame, ThreadHits, ThreadRequest,
 };
 use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId};
 use slopty_proto::{ClientMsg, RequestId};
@@ -74,6 +74,8 @@ pub enum HubEvent {
     /// What the worker found in its threads for the words last asked
     /// ([`ThreadHub::search`]).
     Hits,
+    /// The worker said who wrote the lines of a file ([`ThreadHub::authors`]).
+    Authors,
     /// An intent on `from` started `thread`: a fork, a go in another agent, an edit from a
     /// turn. The workspace opens it, unless it is an aside, which its view shows.
     Started {
@@ -213,6 +215,32 @@ impl ThreadHub {
         }
         *found = Some(hits);
         cx.emit(HubEvent::Hits);
+        cx.notify();
+    }
+
+    /// Who wrote the lines of `path` (absolute, or in `thread`'s repository) as `stamp` read it,
+    /// once the worker has said; until then it is asked, once, and [`HubEvent::Authors`] says
+    /// when it came.
+    pub fn authors(
+        &mut self,
+        thread: Option<ThreadId>,
+        path: &str,
+        stamp: &Stamp,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<Authors>> {
+        let held = self.threads.authors(thread, path, stamp);
+        if held.is_none()
+            && let Some(msg) = self.threads.ask_authors(thread, path, stamp)
+        {
+            cx.emit(HubEvent::Send(vec![msg]));
+        }
+        held
+    }
+
+    /// The worker said who wrote the lines of a file.
+    pub fn heard_authors(&mut self, authors: Authors, cx: &mut Context<Self>) {
+        self.threads.heard_authors(authors);
+        cx.emit(HubEvent::Authors);
         cx.notify();
     }
 

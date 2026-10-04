@@ -36,6 +36,7 @@ mod agent_start;
 mod agents;
 mod approvals;
 pub mod attention;
+mod authors;
 mod breadcrumb;
 mod browsers;
 mod commands;
@@ -1859,6 +1860,7 @@ impl gpui::Render for WorkspaceView {
         }
         self.settle_reviews(cx);
         self.settle_agent_screens(cx);
+        self.settle_going(cx);
         self.sync_projects(window, cx);
         self.give_pending_focus(window, cx);
         self.follow_secure_input(cx);

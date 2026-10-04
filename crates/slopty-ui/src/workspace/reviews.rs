@@ -98,7 +98,7 @@ impl WorkspaceView {
     }
 
     /// The agent tile whose thread view shows `thread`.
-    fn thread_session(&self, thread: ThreadId, cx: &gpui::App) -> Option<SessionId> {
+    pub(super) fn thread_session(&self, thread: ThreadId, cx: &gpui::App) -> Option<SessionId> {
         self.workers
             .values()
             .flat_map(|w| w.sessions.keys())
@@ -125,6 +125,7 @@ impl WorkspaceView {
                     this.show_notice("Open the agent's tile to add to its message".to_owned(), cx);
                 }
             },
+            ReviewEvent::OpenThread(opens) => this.open_thread_at(*opens, cx),
         });
         self.reviews.hearing.insert(thread, hearing);
     }

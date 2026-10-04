@@ -112,6 +112,7 @@ mod composing;
 pub mod denying;
 mod finding;
 mod goal;
+mod going;
 #[cfg(test)]
 pub(crate) use finding::ASK_AFTER as FIND_ASK_AFTER;
 pub mod exited;
@@ -249,6 +250,9 @@ pub struct ThreadView {
     branching: Option<branch::Branching>,
     /// The find bar, while it is open.
     finder: Option<finding::Finder>,
+    /// The turn being gone to ([`Self::go_to_turn`]), and the first turn held when a page
+    /// back to it was last asked.
+    going: Option<(TurnId, Option<TurnId>)>,
     /// The aside asked from here, in its sheet.
     aside: Option<aside::Aside>,
     /// What the aside's own view asks of the workspace, passed on.
@@ -305,6 +309,7 @@ impl ThreadView {
             HubEvent::Thread(t) if *t == this.thread => {
                 this.rebuild(cx);
                 this.chase(cx);
+                this.go_on(cx);
             }
             HubEvent::Hits => this.refind(cx),
             HubEvent::Started { from, thread, intent, aside: true } if *from == this.thread => {
@@ -378,6 +383,7 @@ impl ThreadView {
             commit: None,
             branching: None,
             finder: None,
+            going: None,
             aside: None,
             asides_heard: None,
             renders: 0,

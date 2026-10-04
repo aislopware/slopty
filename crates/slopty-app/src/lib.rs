@@ -3320,6 +3320,9 @@ fn apply_link_event(
         LinkEvent::Control(WorkerMsg::ThreadHits(hits)) => {
             view.update(cx, |v, cx| v.thread_hits(key, hits, cx));
         }
+        LinkEvent::Control(WorkerMsg::Authors(authors)) => {
+            view.update(cx, |v, cx| v.thread_authors(key, authors, cx));
+        }
         LinkEvent::Control(WorkerMsg::GitDone { request, outcome }) => {
             view.update(cx, |v, cx| v.git_done(key, request, outcome, cx));
         }

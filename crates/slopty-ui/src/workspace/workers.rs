@@ -1435,6 +1435,8 @@ impl WorkspaceView {
                     this.open_session_on(worker, dir.filter(|d| !d.is_empty()), command, None, cx);
                 }
                 FileViewEvent::Edited { id, outcome } => this.file_edited(worker, *id, *outcome),
+                FileViewEvent::OpenThread(opens) => this.open_thread_at(*opens, cx),
+                FileViewEvent::Stamped => this.author_file(&view, cx),
             }
             cx.notify();
         })

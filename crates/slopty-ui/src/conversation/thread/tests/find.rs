@@ -222,3 +222,49 @@ fn a_command_says_itself_before_its_words() {
     assert_eq!(said(Some("!"), "ls"), "! ls");
     assert_eq!(said(None, "Look at the parser"), "Look at the parser");
 }
+
+/// Going to a turn shows it from the person's message; a turn older than those held pages the
+/// thread back, once per page, and is shown once its page comes.
+#[gpui::test]
+fn a_turn_gone_to_shows_from_its_message_paging_back_to_it(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = two_turns();
+    state.turns = vec![turn(4), turn(5)];
+    for (ix, item) in state.items.iter_mut().enumerate() {
+        item.turn = TurnId(if ix < 3 { 4 } else { 5 });
+    }
+    state.older = true;
+    // Taller than the window, so where it scrolls to shows.
+    state.items[2] = answer("a1", 4, &"A long answer.\n\n".repeat(120));
+    state.items[5] = answer("a2", 5, &"A long answer.\n\n".repeat(120));
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+
+    let top = |view: &gpui::Entity<ThreadView>, cx: &mut gpui::VisualTestContext| {
+        view.read_with(cx, |v, _| v.rows().get(v.top_row()).cloned())
+    };
+    view.update(cx, |v, cx| v.go_to_turn(TurnId(5), cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.going()), None, "held: gone to at once");
+    assert_eq!(top(&view, cx), Some(Row::User { item: ItemId("u2".to_owned()) }));
+    assert!(pages(&sent).is_empty(), "not asked");
+
+    view.update(cx, |v, cx| v.go_to_turn(TurnId(2), cx));
+    cx.run_until_parked();
+    assert_eq!(pages(&sent), [TurnId(4)], "paged back from the first turn held");
+    assert_eq!(view.read_with(cx, |v, _| v.going()), Some(TurnId(2)));
+
+    let mut paged = state;
+    paged.turns.insert(0, turn(2));
+    paged.items.insert(0, answer("a0", 2, "Older work."));
+    paged.items.insert(0, user("u0", 2, "Start"));
+    paged.older = false;
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(paged, 2), cx));
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.going()), None, "its page came");
+    assert_eq!(top(&view, cx), Some(Row::User { item: ItemId("u0".to_owned()) }));
+    assert_eq!(pages(&sent), [TurnId(4)], "asked once");
+}

@@ -507,3 +507,67 @@ fn said(cx: &mut VisualTestContext) -> Vec<String> {
     cx.run_until_parked();
     cx.update(|window, _cx| crate::a11y::tree(window)).into_iter().filter_map(|n| n.label).collect()
 }
+
+/// The review asks who wrote its files' lines as the diff ends, once each; the answer names a
+/// line's turn at its end while the pointer is on it, and a press on that opens the thread at
+/// the turn, commenting on nothing. A line no thread wrote names none.
+#[gpui::test]
+fn a_line_names_the_turn_that_wrote_it_under_the_pointer(cx: &mut TestAppContext) {
+    use slopty_proto::thread::wire::{AuthorRun, Authors};
+
+    use crate::authorship::Opens;
+
+    let (view, hub, sent, cx) = tile(cx, 800.0);
+    let thread = view.read_with(cx, |v, _| v.thread());
+    let asked: Vec<String> = sent
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Thread(ThreadRequest::Authors { thread: Some(t), path }) if *t == thread => {
+                Some(path.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(asked.len(), 3, "each file once: {asked:?}");
+    assert!(asked.contains(&"src/lib.rs".to_owned()));
+
+    let heard: Rc<RefCell<Vec<ReviewEvent>>> = Rc::default();
+    let into = Rc::clone(&heard);
+    cx.update(|_w, cx| {
+        cx.subscribe(&view, move |_view, event: &ReviewEvent, _cx| {
+            into.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    let authors = Authors {
+        thread: Some(thread),
+        path: "src/lib.rs".to_owned(),
+        modified_ms: None,
+        blob: Some("src/lib.rs@new".to_owned()),
+        runs: vec![AuthorRun {
+            start: 11,
+            lines: 1,
+            thread,
+            turn: Some(TurnId(1)),
+            commit: None,
+            at_ms: WallMs::now(),
+        }],
+        absent: None,
+    };
+    hub.update(cx, |hub, cx| hub.heard_authors(authors, cx));
+    cx.run_until_parked();
+    let center = |cx: &mut VisualTestContext, s: &'static str| cx.debug_bounds(s).unwrap().center();
+    // The first line, `fn main() {`, is no thread's.
+    let first = center(cx, "review-line-1-0-0");
+    cx.simulate_mouse_move(first, None, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("review-line-1-0-0-author").is_none());
+    let written = center(cx, "review-line-1-0-2");
+    cx.simulate_mouse_move(written, None, Modifiers::none());
+    cx.run_until_parked();
+    click(cx, "review-line-1-0-2-author");
+    assert_eq!(*heard.borrow(), [ReviewEvent::OpenThread(Opens { thread, turn: Some(TurnId(1)) })]);
+    assert!(cx.debug_bounds("review-draft").is_none(), "no comment started");
+    assert!(intents(&sent).is_empty(), "nothing sent");
+}

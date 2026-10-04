@@ -39,6 +39,7 @@
 
 pub mod a11y;
 pub mod add_worker;
+pub mod authorship;
 pub mod browser;
 
 pub mod chrome_text;

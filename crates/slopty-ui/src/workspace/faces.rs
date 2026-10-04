@@ -29,10 +29,10 @@ use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::thread::attention::{Ladder, Rung};
 use slopty_proto::thread::wire::{
-    IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadHits, ThreadRequest,
-    ThreadRow,
+    Authors, IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadHits,
+    ThreadRequest, ThreadRow,
 };
-use slopty_proto::thread::{AgentId, IntentId, ThreadId};
+use slopty_proto::thread::{AgentId, IntentId, ThreadId, TurnId};
 use slopty_proto::{ClientMsg, RequestId};
 
 use super::WorkspaceView;
@@ -118,6 +118,8 @@ pub(super) struct ThreadFaces {
     starts: HashMap<IntentId, (WorkerKey, AgentId, ItemId)>,
     /// The thread tile whose view takes the keyboard once it is made.
     focus_item: Option<ItemId>,
+    /// Threads opened at a turn, and the turn, until a view of each shows it.
+    going: HashMap<ThreadId, TurnId>,
 }
 
 impl ThreadFaces {
@@ -335,6 +337,56 @@ impl WorkspaceView {
         self.faces.threads.hubs.get(&key)
     }
 
+    /// `thread` as the person sees it here: its agent, and the title of the tile its agent's
+    /// terminal shows in, else its title as its worker's table last said.
+    pub(super) fn writer_of(&self, thread: ThreadId) -> Option<crate::authorship::Writer> {
+        let agent = self.faces.threads.agents.get(&thread)?.clone();
+        let tile = self.thread_terminal(thread).and_then(|session| {
+            self.items().find_map(|(_, item)| match item.kind {
+                ItemKind::Terminal { session: s } if s == session => Some(self.tile_title(item)),
+                _ => None,
+            })
+        });
+        let title = tile.or_else(|| self.thread_named(thread)).unwrap_or_default();
+        Some(crate::authorship::Writer { agent, title })
+    }
+
+    /// The worker whose table holds `thread`.
+    pub(super) fn worker_of_thread(&self, thread: ThreadId, cx: &App) -> Option<WorkerKey> {
+        self.faces
+            .threads
+            .hubs
+            .iter()
+            .find(|(_, hub)| hub.read(cx).threads().rows().rows.contains_key(&thread))
+            .map(|(key, _)| *key)
+    }
+
+    /// Show `thread` at `turn` once a view of it is there.
+    pub(super) fn go_to_turn_when_shown(&mut self, thread: ThreadId, turn: TurnId) {
+        self.faces.threads.going.insert(thread, turn);
+    }
+
+    /// Each view of a thread opened at a turn goes to it; the thread is let go of once one has.
+    pub(super) fn settle_going(&mut self, cx: &mut Context<Self>) {
+        if self.faces.threads.going.is_empty() {
+            return;
+        }
+        let views: Vec<Entity<ThreadView>> = self
+            .faces
+            .threads
+            .items
+            .values()
+            .chain(self.faces.threads.views.values())
+            .cloned()
+            .collect();
+        for view in views {
+            let thread = view.read(cx).thread();
+            if let Some(turn) = self.faces.threads.going.remove(&thread) {
+                view.update(cx, |v, cx| v.go_to_turn(turn, cx));
+            }
+        }
+    }
+
     /// `key`'s threads, made the first time they are asked for.
     pub(super) fn thread_hub(
         &mut self,
@@ -359,6 +411,7 @@ impl WorkspaceView {
                 }
             }
             HubEvent::Table => this.threads_of_sessions(key, cx),
+            HubEvent::Authors => this.author_files(key, cx),
             // An aside's fork stays in the sheet of the view that asked it.
             HubEvent::Started { thread, aside: false, .. } => this.open_thread(key, *thread, cx),
             _ => {}
@@ -373,6 +426,12 @@ impl WorkspaceView {
     pub fn thread_hits(&mut self, key: WorkerKey, hits: ThreadHits, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, |hub, cx| hub.thread_hits(hits, cx));
+    }
+
+    /// `key` said who wrote the lines of a file a tile shows.
+    pub fn thread_authors(&mut self, key: WorkerKey, authors: Authors, cx: &mut Context<Self>) {
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, |hub, cx| hub.heard_authors(authors, cx));
     }
 
     /// `key`'s answer to a git op its hub asked (the commit sheet, the pull request view).
