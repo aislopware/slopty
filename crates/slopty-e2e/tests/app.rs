@@ -130,7 +130,7 @@ mod tests {
         assert!(grid.bounds[2] > 100.0 && grid.bounds[3] > 100.0, "{grid:?}");
         // The breadcrumb names the workspace.
         assert!(dump.a11y_node("Button", Some("e2e-worker")).is_some(), "{:#?}", dump.a11y);
-        for label in ["Navigator", "New", "Inbox", "More"] {
+        for label in ["Navigator", "New", "Needs you", "More"] {
             assert!(dump.a11y_node("Button", Some(label)).is_some(), "{label}: {:#?}", dump.a11y);
         }
 
@@ -304,7 +304,7 @@ mod tests {
         drv.keys("enter").await.unwrap();
         drv.type_text("[terminal]").await.unwrap();
         drv.keys("enter").await.unwrap();
-        drv.type_text("bell_alert = false").await.unwrap();
+        drv.type_text("alert = \"never\"").await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {
             d.a11y_node("Dialog", Some("Settings")).is_none()
@@ -312,10 +312,7 @@ mod tests {
         .await
         .unwrap();
         let saved = std::fs::read_to_string(&settings).unwrap();
-        assert!(
-            saved.contains("mono_size = 20") && saved.contains("bell_alert = false"),
-            "{saved}"
-        );
+        assert!(saved.contains("mono_size = 20") && saved.contains("alert = \"never\""), "{saved}");
 
         // ⌘W closes the active one; the worker tears its session down and one shell remains.
         drv.keys("cmd-w").await.unwrap();
@@ -565,7 +562,7 @@ mod tests {
         assert_eq!(note.pos[1], shell.pos[1] + 1, "{dump:#?}");
         let before = note.bounds;
 
-        // ⌘R: the next preset width (two thirds); ⌘⇧R back to half.
+        // ⌘R: the next preset width (two thirds); twice more, a third and back to half.
         drv.keys("cmd-r").await.unwrap();
         let dump = drv
             .wait_for("a wider note", STEP, |d| {
@@ -575,7 +572,8 @@ mod tests {
             .unwrap();
         let after = dump.item("note").unwrap().bounds;
         assert!((after[3] - before[3]).abs() < 1.0, "only the width moved: {before:?} → {after:?}");
-        drv.keys("cmd-shift-r").await.unwrap();
+        drv.keys("cmd-r").await.unwrap();
+        drv.keys("cmd-r").await.unwrap();
         let dump = drv
             .wait_for("the note back at half", STEP, |d| {
                 d.item("note").is_some_and(|n| (n.bounds[2] - before[2]).abs() < 1.0)

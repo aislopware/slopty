@@ -57,7 +57,6 @@ pub mod ptyd;
 pub mod screen;
 pub mod search;
 pub mod server;
-pub mod snooze;
 pub mod tailnet;
 pub mod terminal;
 pub mod thread;
@@ -116,13 +115,6 @@ pub enum ClientMsg {
         root: String,
         /// What was typed.
         query: String,
-    },
-    /// Point the other clients at one item: the worker fans it out as `ItemSync::Pointed`
-    /// and each of them offers a jump to it. Nothing is said about the item itself; a
-    /// client that does not know it ignores the pointing.
-    Point {
-        /// The item.
-        item: slopty_core::ItemId,
     },
     /// The files this client's file tiles show, the whole set each time it changes: the worker
     /// follows each one on the kernel's events and answers with `WorkerMsg::File` again when one
@@ -211,7 +203,6 @@ impl ClientMsg {
             Self::Screen(_) => "Screen",
             Self::Ping { .. } => "Ping",
             Self::InstallHooks => "InstallHooks",
-            Self::Point { .. } => "Point",
             Self::ReadFile { .. } => "ReadFile",
             Self::FindFiles { .. } => "FindFiles",
             Self::WatchFiles { .. } => "WatchFiles",
@@ -382,6 +373,8 @@ pub enum WorkerMsg {
         /// How it went.
         outcome: git::GitOutcome,
     },
+    /// What was said in the worker's threads (`ClientMsg::Thread`'s `Search`).
+    ThreadHits(thread::wire::ThreadHits),
 }
 
 impl WorkerMsg {
@@ -420,6 +413,7 @@ impl WorkerMsg {
             Self::FolderPage { .. } => "FolderPage",
             Self::FsDone { .. } => "FsDone",
             Self::GitDone { .. } => "GitDone",
+            Self::ThreadHits(_) => "ThreadHits",
         }
     }
 }

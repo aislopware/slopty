@@ -95,8 +95,8 @@ impl Line {
     }
 }
 
-/// Which list a row belongs to; the headings sit between them.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Which list a row belongs to, in the order the lists show; the headings sit between them.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Section {
     Sessions,
     Displays,
@@ -332,14 +332,25 @@ impl WindowPicker {
 
     /// The rows the field lets through: every word typed is in the row's text.
     fn visible(&self) -> Vec<Row> {
-        self.rows()
+        let mut fuzzy = crate::fuzzy::Fuzzy::new(&self.query);
+        let mut kept: Vec<(crate::fuzzy::Rank, Row)> = self
+            .rows()
             .into_iter()
-            .filter(|row| {
+            .filter_map(|row| {
                 let line = &row.line;
                 let worker = line.worker.as_deref().unwrap_or_default();
-                matches(&self.query, &format!("{} {} {worker}", line.primary, line.secondary))
+                let place = format!("{} {worker}", line.secondary);
+                Some((fuzzy.rank(&line.primary, &place)?, row))
             })
-            .collect()
+            .collect();
+        // A query ranks each section's rows, best first; with none they keep the workspace's
+        // order (what needs you first).
+        if !fuzzy.is_empty() {
+            kept.sort_by(|a, b| {
+                a.1.section.cmp(&b.1.section).then_with(|| crate::fuzzy::best_first(&a.0, &b.0))
+            });
+        }
+        kept.into_iter().map(|(_, row)| row).collect()
     }
 
     /// The chosen row's index, clamped to the visible rows.
@@ -618,9 +629,10 @@ impl Render for WindowPicker {
             let root = crate::kit::presence(root.children(scrim).child(panel), "picker", false);
             return gpui::deferred(root).with_priority(layer);
         }
-        let root = crate::kit::anchor(&theme, window)
-            .id("picker-backdrop")
-            .track_focus(&self.focus)
+        let home = self.focus_handle(cx);
+        crate::a11y::hold(&self.focus, &home, cx);
+        let root = crate::kit::anchor(&theme, window).id("picker-backdrop");
+        let root = crate::a11y::trap(root, &self.focus)
             .on_key_down(cx.listener(Self::key_down))
             // While an input method composes in the field, the arrows and Esc are its own.
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {

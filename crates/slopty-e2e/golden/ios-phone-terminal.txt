@@ -2,7 +2,7 @@ Window
 Group │ Workspace
 Button │ Navigator
 Heading │ e2e-ios-worker, 1 tile
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal

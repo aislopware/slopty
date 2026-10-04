@@ -1120,13 +1120,17 @@ impl WorkspaceView {
                 .child(kit::inset_x(div(), theme).text_color(muted).child(NO_WORKERS_NEXT))
                 .children(add)
         } else {
-            let [terminal, window] = &begin_keys();
-            // The question leads; a shell and a window are the quieter ways in under it.
+            let [agent, terminal, window] = &begin_keys();
+            // An agent leads, as ↵ runs it; a shell and a window are the quieter ways in.
             let begin = div()
                 .w_full()
                 .pt(px(spacing.sm))
                 .flex()
                 .flex_col()
+                .child(
+                    self.begin_row("empty-agent", IconName::Sparkles, NEW_AGENT, agent, true)
+                        .on_click(cx.listener(|this, _ev, window, cx| this.start_here(window, cx))),
+                )
                 .child(
                     self.begin_row(
                         "empty-terminal",
@@ -1217,7 +1221,6 @@ impl WorkspaceView {
             let recent =
                 (!places.is_empty()).then(|| section("empty-recent", RECENT).children(places));
             column
-                .children(self.render_ask(cx))
                 .child(begin)
                 .children(recent)
                 .child(section("empty-workers", "Machines").children(workers))
@@ -1244,6 +1247,12 @@ impl WorkspaceView {
             .child(div().flex_none().pb(px(spacing.xl)).child(self.empty_mark.clone()))
             .child(column.pb(px(spacing.xl)))
             .into_any_element()
+    }
+
+    /// Whether the active workspace has nothing on it: the start page shows.
+    pub(super) fn bare(&self) -> bool {
+        let active = self.layout.active_workspace();
+        self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty())
     }
 
     /// Where shells stand across the workers that are up, one entry per directory on each: the
@@ -1464,16 +1473,19 @@ pub(crate) const NO_WORKERS: &str = "No machines yet";
 pub(crate) const NO_WORKERS_NEXT: &str = "A machine runs your shells, agents and windows.";
 /// The empty workspace's way to a first worker, as the "…" menu words it.
 pub(crate) const ADD_WORKER: &str = "Add a machine";
+/// The empty workspace's first way to begin: an agent, asked its task in its own tile.
+pub(crate) const NEW_AGENT: &str = "New agent";
 const NEW_TERMINAL: &str = "New terminal";
 const ADD_WINDOW: &str = "Add a window or display";
 /// The overview's place for a new workspace.
 pub(crate) const NEW_WORKSPACE: &str = "New workspace";
 
-/// The keys of the two quieter ways to begin, read from the keymap in effect so a rebinding
-/// shows at once. The keymap words its chords as it is installed, so a frame only looks them up.
-pub(super) fn begin_keys() -> [String; 2] {
+/// The keys of the three ways to begin, read from the keymap in effect so a rebinding shows at
+/// once. The keymap words its chords as it is installed, so a frame only looks them up.
+pub(super) fn begin_keys() -> [String; 3] {
     let keymap = crate::keymap::current();
     [
+        keymap.label_of(&super::actions::NewAgent).to_owned(),
         keymap.label_of(&super::actions::NewTerminal).to_owned(),
         keymap.label_of(&super::actions::AddWindow).to_owned(),
     ]

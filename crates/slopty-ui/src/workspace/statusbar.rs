@@ -10,20 +10,19 @@
 //! machine's agents last published (`5h 23% · 7d 41%`, in `warn` from 80 %, which list every
 //! machine's when clicked), the ports forwarded here (which list them when clicked), the transfers
 //! in flight both ways while one is not the focused tile's own upload (whose header says it; they
-//! list every transfer with its rate, time left and stop when clicked), the count of workers
-//! only while one of them is not up (which opens the hosts popover: each worker's link, connect and
-//! forget), and each worker's agents: working, waiting, blocked and to review (a turn that ended
-//! unseen), each a faint "·" from the next. Who waits on the human is counted once, on the bell.
+//! list every transfer with its rate, time left and stop when clicked), each a faint "·" from the
+//! next. No agent is counted here, nor a machine: the tiles mark what is at work, the bell counts
+//! what needs the person, and the navigator's machine rows say how each machine is and what can
+//! be done to it.
 //! The frame time shows only with the stream stats (⌘⇧I). Each readout is meta text with no icon,
 //! its figures tabular, and a state is a small dot of its fill beside quiet words: the tile and the
 //! bell carry the loud marks. The bar sits on the navigator's tone with no rule over it. A phone
-//! keeps the worker, a slow round trip and the agents.
+//! keeps the worker and a slow round trip.
 //!
 //! It is a view of its own, drawn cached: an echo in a terminal does not draw it again, nor
 //! does a round trip nobody would read.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -41,13 +40,13 @@ use slopty_core::ItemId;
 use slopty_proto::items::{Item, ItemKind};
 use slopty_theme::Theme;
 
-use super::navigator::{Mode, RTT_SHOWN_FROM, host_line, path_label, rtt_label, worker_health};
+use super::WorkspaceView;
+use super::navigator::{Mode, RTT_SHOWN_FROM, path_label, rtt_label, worker_health};
 use super::rollup::{META_SEPARATOR, meta_line};
-use super::{MenuRun, WorkspaceView};
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
-use crate::icons::{IconName, IconSize, Status, icon, status_icon};
+use crate::icons::{IconName, IconSize, icon};
 use crate::kit::{self, meta, separator, tabular};
 use crate::palette::section_heading;
 use crate::screen::fps_label;
@@ -60,8 +59,8 @@ pub(super) const STATUSBAR_H: f32 = 24.0;
 /// this client last had for them, and none it has not met.
 const SERVER_DOWN_MEANS: &str = "direct links only";
 
-/// The hosts popover's width, in points.
-const HOSTS_W: f32 = 300.0;
+/// The bar's popovers' width, in points.
+const POPOVER_W: f32 = 300.0;
 
 /// How old a plan reading grows before the bar says its age: the Claude Code status line runs
 /// only while a session is live, so a reading after a long idle is a past one.
@@ -74,39 +73,11 @@ const PLAN_WARN_FROM_BP: u32 = 8_000;
 /// the probe's ring, which is not work for every frame.
 const FRAME_READOUT_EVERY: Duration = Duration::from_secs(1);
 
-/// What the app lets the hosts popover do to one worker.
-#[derive(Clone, Default)]
-pub struct HostActions {
-    /// Dial it now rather than at the end of the backoff; offered while its link is down.
-    pub connect: Option<MenuRun>,
-    /// Forget it: offered for a worker added by address, which the server does not list.
-    pub forget: Option<MenuRun>,
-    /// Wake it from sleep: offered while the server can send it a magic packet
-    /// (`slopty_client::directory::Directory::can_wake`). The palette offers it too.
-    pub wake: Option<MenuRun>,
-}
-
-impl std::fmt::Debug for HostActions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HostActions")
-            .field("connect", &self.connect.is_some())
-            .field("forget", &self.forget.is_some())
-            .field("wake", &self.wake.is_some())
-            .finish()
-    }
-}
-
 /// The status bar's own state.
 #[derive(Default)]
 pub(super) struct Bar {
     /// The frame time's readout, and when it was worked out.
     frame_text: RefCell<Option<(Instant, Option<SharedString>)>>,
-    /// The hosts popover is up.
-    hosts_open: bool,
-    /// What the popover can do to each worker, as the app says.
-    hosts: HashMap<WorkerKey, HostActions>,
-    /// The way to add a worker, as the app says: the popover's, and the empty workspace's.
-    add: Option<MenuRun>,
     /// Draws the bar again when the frame time's readout is due, while the stats show.
     tick: RefCell<Option<Task<()>>>,
     /// [`Self::tick`] waits to fire. A draw while it waits leaves it be: one that set it going
@@ -127,7 +98,6 @@ pub(super) struct Bar {
 /// One of the bar's popovers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Popover {
-    Hosts,
     Plans,
     Transfers,
 }
@@ -136,7 +106,6 @@ impl Popover {
     /// The layer round it that a click closes it from, and its fades' names.
     const fn ids(self) -> (&'static str, &'static str) {
         match self {
-            Self::Hosts => ("hosts-away", "hosts-presence"),
             Self::Plans => ("plans-away", "plans-presence"),
             Self::Transfers => ("transfers-away", "transfers-presence"),
         }
@@ -147,7 +116,6 @@ impl Bar {
     /// Whether `which` is up.
     const fn open(&self, which: Popover) -> bool {
         match which {
-            Popover::Hosts => self.hosts_open,
             Popover::Plans => self.plans_open,
             Popover::Transfers => self.transfers_open,
         }
@@ -155,7 +123,6 @@ impl Bar {
 
     const fn set_open(&mut self, which: Popover, open: bool) {
         match which {
-            Popover::Hosts => self.hosts_open = open,
             Popover::Plans => self.plans_open = open,
             Popover::Transfers => self.transfers_open = open,
         }
@@ -169,86 +136,8 @@ impl Bar {
 
 impl std::fmt::Debug for Bar {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Bar")
-            .field("hosts_open", &self.hosts_open)
-            .field("hosts", &self.hosts)
-            .field("add", &self.add.is_some())
-            .field("hovered", &self.hovered)
-            .finish_non_exhaustive()
+        f.debug_struct("Bar").field("hovered", &self.hovered).finish_non_exhaustive()
     }
-}
-
-/// How one worker's agents stand, in Claude Code's own three words (busy on a turn, waiting on
-/// work in the background, blocked on the person), and how many ended a turn nobody has looked
-/// at yet. An agent at rest and seen is not counted.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct AgentCounts {
-    working: usize,
-    waiting: usize,
-    blocked: usize,
-    review: usize,
-}
-
-impl AgentCounts {
-    /// Count an agent its tile marks `status`.
-    const fn add(&mut self, status: Status) {
-        let n = match status {
-            Status::Working => &mut self.working,
-            Status::Running => &mut self.waiting,
-            Status::NeedsYou => &mut self.blocked,
-            Status::Idle | Status::Done | Status::Failed | Status::Away => return,
-        };
-        *n = n.saturating_add(1);
-    }
-
-    /// Count an agent whose turn ended unseen.
-    const fn add_review(&mut self) {
-        self.review = self.review.saturating_add(1);
-    }
-
-    const fn is_empty(self) -> bool {
-        self.working == 0 && self.waiting == 0 && self.blocked == 0 && self.review == 0
-    }
-
-    /// Each count there is, with its word and the mark's tone.
-    fn parts(self, theme: &Theme) -> impl Iterator<Item = (String, slopty_theme::Rgb)> {
-        let s = theme.surfaces;
-        [
-            (self.working, "working", s.text_muted),
-            (self.waiting, "waiting", s.text_muted),
-            (self.blocked, "blocked", s.warn_fill),
-            (self.review, "to review", s.accent_fill),
-        ]
-        .into_iter()
-        .filter(|(n, ..)| *n > 0)
-        .map(|(n, word, tone)| (format!("{n} {word}"), tone))
-    }
-}
-
-#[cfg(test)]
-impl AgentCounts {
-    /// How many agents it counts, whatever their state.
-    pub(super) const fn total(self) -> usize {
-        self.working
-            .saturating_add(self.waiting)
-            .saturating_add(self.blocked)
-            .saturating_add(self.review)
-    }
-}
-
-/// The agents' line in words, as a screen reader hears it: `2 working, 1 blocked`, each worker
-/// named when there are more than one (`studio: 2 working; mini: 1 waiting`).
-#[must_use]
-fn agents_label(theme: &Theme, counts: &[(String, AgentCounts)]) -> String {
-    let named = counts.len() > 1;
-    counts
-        .iter()
-        .map(|(name, c)| {
-            let said = c.parts(theme).map(|(text, _)| text).collect::<Vec<_>>().join(", ");
-            if named { format!("{name}: {said}") } else { said }
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 /// Transfers in flight at a glance, `ups` up and `downs` down: `1 upload · 42%`,
@@ -264,12 +153,6 @@ fn transfers_label(ups: usize, downs: usize, done: u64, total: u64) -> String {
     let percent = done.saturating_mul(100).checked_div(total).unwrap_or(0).min(100);
     format!("{}{META_SEPARATOR}{percent}%", counted(count, one, many))
 }
-
-/// A host row's way to stop sharing the clipboard with its machine.
-const STOP_SHARING_CLIPBOARD: &str = "Unshare clipboard";
-
-/// A host row's way to share the clipboard with its machine again.
-const SHARE_CLIPBOARD: &str = "Share clipboard";
 
 /// What the transfers popover is called.
 const TRANSFERS: &str = "Transfers";
@@ -291,98 +174,9 @@ impl WorkspaceView {
         self.focused().map(|t| t.worker).or_else(|| self.context_worker())
     }
 
-    /// Each worker's agents, as their tiles mark them, in the workers' order: the ones this
-    /// client follows, the ones only the server reports, and the threads no terminal speaks
-    /// for. A worker with none at work is left out. Under a scope, only the agents whose tile
-    /// is in its project.
-    pub(super) fn agent_counts(&self) -> Vec<(String, AgentCounts)> {
-        let scoped = self.scoped_tiles();
-        let kept = |tile: Option<slopty_client::layout::TileRef>| {
-            scoped.as_ref().is_none_or(|s| tile.is_some_and(|t| s.contains(&t)))
-        };
-        let mut by_worker: BTreeMap<WorkerKey, AgentCounts> = BTreeMap::new();
-        let followed = self.agents.keys().filter_map(|s| Some((*s, self.worker_of_session(*s)?)));
-        let reported = self
-            .server_agents
-            .iter()
-            .filter(|(s, _)| !self.agents.contains_key(s))
-            .map(|(s, (worker, _))| (*s, *worker));
-        for (session, worker) in followed.chain(reported) {
-            if !kept(self.tile_of_session(session)) {
-                continue;
-            }
-            if let Some(status) = self.agent_mark(session) {
-                by_worker.entry(worker).or_default().add(status);
-            }
-        }
-        for ended in self.to_review().into_iter().filter(|e| kept(e.tile)) {
-            by_worker.entry(ended.worker).or_default().add_review();
-        }
-        // Threads no terminal speaks for (Codex, pi, an ACP agent), as their rows say.
-        for (thread, stand) in self.thread_stands() {
-            let tile = stand
-                .terminal
-                .and_then(|s| self.tile_of_session(s))
-                .or_else(|| self.tile_of_thread(thread));
-            if !kept(tile) {
-                continue;
-            }
-            let counts = by_worker.entry(stand.worker).or_default();
-            match stand.rung {
-                slopty_proto::thread::attention::Rung::ToReview => counts.add_review(),
-                _ => {
-                    if let Some(status) = stand.status() {
-                        counts.add(status);
-                    }
-                }
-            }
-        }
-        by_worker
-            .into_iter()
-            .filter(|(_, c)| !c.is_empty())
-            .map(|(worker, c)| {
-                (self.workers.get(&worker).map(|w| w.name.clone()).unwrap_or_default(), c)
-            })
-            .collect()
-    }
-
     /// Ports forwarded here, across every shell.
     fn forwarded_count(&self) -> usize {
         self.ports.values().flatten().filter(|f| f.local.is_some()).count()
-    }
-
-    /// What the hosts popover can do to each worker, and its way to add one. The app says,
-    /// since connecting and forgetting are its: the workspace only shows workers.
-    pub fn set_host_actions(
-        &mut self,
-        hosts: HashMap<WorkerKey, HostActions>,
-        add: Option<MenuRun>,
-        cx: &mut Context<Self>,
-    ) {
-        self.bar.hosts = hosts;
-        self.bar.add = add;
-        cx.notify();
-    }
-
-    /// The app's way to add a worker, if it gave one.
-    pub(super) fn add_worker_run(&self) -> Option<MenuRun> {
-        self.bar.add.clone()
-    }
-
-    /// What the app lets this client do to `key`.
-    pub(super) fn host_actions(&self, key: WorkerKey) -> Option<&HostActions> {
-        self.bar.hosts.get(&key)
-    }
-
-    /// Whether the hosts popover is up.
-    #[must_use]
-    pub const fn hosts_open(&self) -> bool {
-        self.bar.hosts_open
-    }
-
-    /// Open or close the hosts popover.
-    pub fn toggle_hosts(&mut self, cx: &mut Context<Self>) {
-        self.toggle_popover(Popover::Hosts, cx);
     }
 
     /// Open `which`, or close it if it is up.
@@ -618,39 +412,6 @@ impl WorkspaceView {
             readout("status-link", word.clone()).text_color(hsla(mark.tone(theme))).child(word)
         });
         let frame = frame.map(|text| tabular(readout("status-frame", text.clone())).child(text));
-        let workers = (!phone).then(|| self.workers_button(cx)).flatten();
-        // Every worker's agents on one quiet line: a mark in its state's tone and a count, the
-        // worker named when there are more than one.
-        let counts = self.agent_counts();
-        let agents = (!counts.is_empty()).then(|| {
-            let named = counts.len() > 1;
-            let label: SharedString = agents_label(theme, &counts).into();
-            let mut parts: Vec<gpui::AnyElement> = Vec::new();
-            for (name, c) in &counts {
-                if !parts.is_empty() {
-                    parts.push(separator(theme).into_any_element());
-                }
-                if named {
-                    parts.push(div().child(SharedString::from(name.clone())).into_any_element());
-                }
-                for (text, tone) in c.parts(theme) {
-                    parts.push(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(spacing.xs))
-                            .child(state_dot(theme, tone))
-                            .child(tabular(div()).child(SharedString::from(text)))
-                            .into_any_element(),
-                    );
-                }
-            }
-            readout("status-agents", label)
-                .flex()
-                .items_center()
-                .gap(px(spacing.sm))
-                .children(parts)
-        });
         let facts = focused_item.and_then(|item| self.focus_facts(item, cx)).map(|text| {
             let text = SharedString::from(text);
             spaced(tabular(readout("status-facts", text.clone())), &text, theme)
@@ -667,8 +428,7 @@ impl WorkspaceView {
             ports.map(gpui::IntoElement::into_any_element),
             transfers.map(gpui::IntoElement::into_any_element),
             frame.map(gpui::IntoElement::into_any_element),
-            workers.map(gpui::IntoElement::into_any_element),
-            agents.map(gpui::IntoElement::into_any_element),
+            (!phone).then(|| self.render_yard(window, cx)).flatten(),
         ];
         let mut right_parts: Vec<gpui::AnyElement> = Vec::new();
         for part in readouts.into_iter().flatten() {
@@ -684,8 +444,6 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.sm))
             .children(right_parts);
-        let hosts =
-            (self.bar.shown(Popover::Hosts) && !phone).then(|| self.render_hosts(window, cx));
         let plans =
             (self.bar.shown(Popover::Plans) && !phone).then(|| self.render_plans(window, cx));
         let shows_transfers = self.bar.shown(Popover::Transfers);
@@ -717,7 +475,6 @@ impl WorkspaceView {
             .child(left)
             .children(notices)
             .child(right)
-            .children(hosts)
             .children(plans)
             .children(transfer_list)
             .into_any_element()
@@ -818,33 +575,6 @@ impl WorkspaceView {
         self.status_worker() == Some(key) && (self.bar.hovered || slow(was) || slow(now))
     }
 
-    /// "N workers" with a dot in the worst link's tone, only while any is not up (all up, the
-    /// count says nothing worth the bar); opens the hosts, as the "…" menu's Workers does.
-    fn workers_button(&self, cx: &Draw<'_, Self>) -> Option<Stateful<Div>> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let count = self.workers.len();
-        let down: Vec<Status> = self
-            .workers
-            .values()
-            .filter_map(|w| worker_health(&w.status))
-            .map(|(m, _)| m)
-            .collect();
-        let worst = *down.first()?;
-        let text = counted(count, "machine", "machines");
-        let label = format!("{text}, {} not connected", down.len());
-        let dot = state_dot(theme, state_fill(theme, worst))
-            .debug_selector(|| "status-workers-dot".to_owned());
-        let el = button("status-workers", label.into(), theme)
-            .child(dot)
-            .child(tabular(div()).child(SharedString::from(text)))
-            .when(self.bar.hosts_open, |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)));
-        Some(
-            tab_stop(el, s.accent)
-                .on_click(cx.listener(|this, _ev, _window, cx| this.toggle_hosts(cx))),
-        )
-    }
-
     /// The plan's windows on the focused tile's machine, as its agent last published them (else
     /// the freshest reading there): `5h 23% · 7d 41%`, in `warn` from 80 %, with when a spent
     /// window comes back, and its age once it is past [`PLAN_AGED_FROM`]. None where no agent
@@ -921,7 +651,7 @@ impl WorkspaceView {
             .absolute()
             .bottom(px(STATUSBAR_H + spacing.xs) + safe.bottom)
             .right(px(spacing.md) + safe.right)
-            .w(px(HOSTS_W))
+            .w(px(POPOVER_W))
             .flex()
             .flex_col()
             .pb(px(spacing.xs))
@@ -1102,7 +832,7 @@ impl WorkspaceView {
             .absolute()
             .bottom(px(STATUSBAR_H + spacing.xs) + safe.bottom)
             .right(px(spacing.md) + safe.right)
-            .w(px(HOSTS_W))
+            .w(px(POPOVER_W))
             .flex()
             .flex_col()
             .pb(px(spacing.xs))
@@ -1113,72 +843,6 @@ impl WorkspaceView {
             .child(section_heading(theme, "plans-heading".into(), PLAN_USAGE))
             .children(rows);
         self.popover(Popover::Plans, panel, window, cx)
-    }
-
-    /// The hosts popover over the bar's right end: each worker with its link, and what can be
-    /// done to it. A click anywhere else closes it.
-    fn render_hosts(&self, window: &Window, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let spacing = theme.spacing;
-        let safe = window.insets().effective();
-        let rows: Vec<gpui::AnyElement> =
-            self.workers.keys().map(|key| self.host_row(*key, cx)).collect();
-        let add = self.bar.add.clone().map(|run| {
-            let el = div()
-                .id("hosts-add")
-                .debug_selector(|| "hosts-add".to_owned())
-                .role(Role::Button)
-                .aria_label("Add a machine")
-                .flex()
-                .items_center()
-                .gap(px(spacing.sm))
-                .mx(px(spacing.xs))
-                .px(px(spacing.xs))
-                .py(px(spacing.xs))
-                .rounded(px(theme.radii.sm))
-                .cursor_pointer()
-                .text_color(hsla(s.text_secondary))
-                .map(kit::eased)
-                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(theme.typography.icon_large()))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icon(theme, IconName::Plus, IconSize::Inline, hsla(s.text_muted))),
-                )
-                .child("Add a machine");
-            tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, window, cx| {
-                this.close_popover(Popover::Hosts, cx);
-                let run = Rc::clone(&run);
-                cx.defer_in(window, move |_this, window, cx| run(window, cx));
-            }))
-        });
-        let panel = kit::elevate(div(), theme)
-            .id("hosts")
-            .debug_selector(|| "hosts".to_owned())
-            .role(Role::Dialog)
-            .aria_label("Machines")
-            .occlude()
-            .absolute()
-            .bottom(px(STATUSBAR_H + spacing.xs) + safe.bottom)
-            .right(px(spacing.md) + safe.right)
-            .w(px(HOSTS_W))
-            .flex()
-            .flex_col()
-            .pb(px(spacing.xs))
-            .rounded(px(theme.radii.lg))
-            .text_size(px(theme.typography.ui_size))
-            .font_family(theme.typography.ui_family.clone())
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .child(section_heading(theme, "hosts-heading".into(), "Machines"))
-            .children(rows)
-            .when(add.is_some(), |el| el.child(kit::list_rule(theme)))
-            .children(add);
-        self.popover(Popover::Hosts, panel, window, cx)
     }
 
     /// `panel` over the window as the bar's popover `which`: a click anywhere else closes it,
@@ -1211,193 +875,12 @@ impl WorkspaceView {
             .with_priority(crate::palette::Layer::Popover.priority())
             .into_any_element()
     }
-
-    /// One worker in the hosts popover: its mark, its name, its round trip or what is wrong,
-    /// and what can be done to it, under the pointer or while the row or the action holds the
-    /// keyboard (a screen reader finds them in the tree either way). Clicked, it goes to the
-    /// worker's tiles.
-    fn host_row(&self, key: WorkerKey, cx: &Draw<'_, Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let spacing = theme.spacing;
-        let Some(w) = self.workers.get(&key) else { return div().into_any_element() };
-        let health = worker_health(&w.status);
-        let group = SharedString::from(format!("hosts-row-{key}"));
-        let mark = match health {
-            Some((mark, _)) => {
-                status_icon(theme, mark, px(theme.typography.icon()), hsla(mark.tone(theme)))
-            }
-            None => icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_muted))
-                .into_any_element(),
-        };
-        let path = w.relay.path().filter(|_| health.is_none()).map(path_label);
-        // The machine under the name, once the worker has said what it is.
-        let machine =
-            w.caps.as_ref().filter(|c| !c.os_version.is_empty()).map(|c| host_line(c, w.load));
-        let machine_known = machine.is_some();
-        let detail = match health {
-            Some((mark, word)) => div().text_color(hsla(mark.tone(theme))).child(word),
-            None => div()
-                .flex()
-                .items_center()
-                .gap(px(spacing.sm))
-                .children(path.clone().map(|(text, slow)| {
-                    div()
-                        .debug_selector(move || format!("hosts-path-{key}"))
-                        .text_color(hsla(if slow { s.warn } else { s.text_muted }))
-                        .child(SharedString::from(text))
-                }))
-                .child(
-                    tabular(div().text_color(hsla(s.text_muted)))
-                        .children(self.shown_rtt(w).map(|rtt| SharedString::from(rtt_label(rtt)))),
-                ),
-        };
-        let actions = self.bar.hosts.get(&key).cloned().unwrap_or_default();
-        let action = |id: String, label: &'static str, run: MenuRun| {
-            let selector = id.clone();
-            let group = group.clone();
-            let el = div()
-                .id(ElementId::Name(id.into()))
-                .debug_selector(move || selector)
-                .role(Role::Button)
-                .aria_label(label)
-                .flex_none()
-                .px(px(spacing.xs))
-                .rounded(px(theme.radii.xs))
-                .cursor_pointer()
-                .text_size(px(theme.typography.small()))
-                .text_color(hsla(s.text_secondary))
-                .map(kit::eased)
-                .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
-                .child(label);
-            // Hidden one by one, not by the strip that holds them: a hidden parent hides its
-            // children whatever their own focus says.
-            let el = tab_stop(el, s.accent)
-                .invisible()
-                .group_hover(group, gpui::Styled::visible)
-                .in_focus(gpui::Styled::visible)
-                // In place of the stop's own, which this replaces: its ring, and in view.
-                .focus_visible(move |st| st.outline_ring(crate::a11y::ring(s.accent)).visible());
-            el.on_click(cx.listener(move |this, _ev, window, cx| {
-                cx.stop_propagation();
-                this.close_popover(Popover::Hosts, cx);
-                let run = Rc::clone(&run);
-                cx.defer_in(window, move |_this, window, cx| run(window, cx));
-            }))
-        };
-        let connect = actions
-            .connect
-            .filter(|_| !w.status.is_up())
-            .map(|run| action(format!("hosts-connect-{key}"), "Connect", run));
-        // A worker on another build links again only once updated: its one way back.
-        let update = self.update_run(key, cx).map(|run| {
-            action(format!("hosts-update-{key}"), crate::add_worker::UPDATE, run).visible()
-        });
-        let wake = actions.wake.map(|run| action(format!("hosts-wake-{key}"), "Wake", run));
-        let forget = actions.forget.map(|run| action(format!("hosts-forget-{key}"), "Forget", run));
-        // The clipboard, shared with every machine unless the settings stop it, per machine.
-        let shared = self.clipboard_shared(key);
-        let share = super::actions::ShareClipboard { worker: key, share: !shared };
-        let share_run: MenuRun =
-            Rc::new(move |window, cx| window.dispatch_action(Box::new(share), cx));
-        let clip_label = if shared { STOP_SHARING_CLIPBOARD } else { SHARE_CLIPBOARD };
-        let clipboard = action(format!("hosts-clipboard-{key}"), clip_label, share_run);
-        let hover_actions = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(px(spacing.xxs))
-            .children(update)
-            .children(wake)
-            .children(connect)
-            .child(clipboard)
-            .children(forget);
-        let label = SharedString::from(match health {
-            Some((_, word)) => format!("{}, {word}", w.name),
-            None => {
-                [Some(w.name.clone()), path.map(|(text, _)| text), self.shown_rtt(w).map(rtt_label)]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        });
-        let el = div()
-            .id(ElementId::Name(format!("hosts-row-{key}").into()))
-            .debug_selector(move || format!("hosts-row-{key}"))
-            .group(group)
-            .role(Role::Button)
-            .aria_label(label)
-            .flex_none()
-            .h(px(if machine_known { kit::Row::Two } else { kit::Row::One }.height(theme)))
-            .mx(px(spacing.xs))
-            .px(px(spacing.xs))
-            .flex()
-            .items_center()
-            .gap(px(spacing.sm))
-            .rounded(px(theme.radii.sm))
-            .cursor_pointer()
-            .map(kit::eased)
-            .hover(move |el| el.bg(hsla(s.hover)))
-            .child(
-                div()
-                    .flex_none()
-                    .size(px(theme.typography.icon_large()))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(mark),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(hsla(s.text))
-                            .child(SharedString::from(w.name.clone())),
-                    )
-                    .children(machine.map(|line| {
-                        meta(div(), theme)
-                            .debug_selector(move || format!("hosts-machine-{key}"))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(line)
-                    })),
-            )
-            .child(hover_actions)
-            .child(div().flex_none().text_size(px(theme.typography.small())).child(detail));
-        tab_stop(el, s.accent)
-            .on_click(cx.listener(move |this, _ev, _w, cx| {
-                this.close_popover(Popover::Hosts, cx);
-                this.go_to_worker(key, cx);
-            }))
-            .into_any_element()
-    }
 }
 
 /// `text` in sentence case: the app and the link words come lowercase.
 fn sentence(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
-}
-
-/// The fill a state's dot wears: the brighter hue meant for marks, where its tone is meant
-/// for text.
-const fn state_fill(theme: &Theme, status: Status) -> slopty_theme::Rgb {
-    let s = &theme.surfaces;
-    match status {
-        Status::Idle | Status::Working | Status::Running | Status::Away => s.text_muted,
-        Status::NeedsYou => s.warn_fill,
-        Status::Done => s.accent_fill,
-        Status::Failed => s.error_fill,
-    }
 }
 
 /// What the plan popover is called.
@@ -1510,24 +993,6 @@ mod tests {
 
     #[test]
     fn the_readouts_say_what_they_count() {
-        let theme = Theme::default();
-        let mut one = AgentCounts::default();
-        for status in [Status::Working, Status::Working, Status::NeedsYou, Status::Idle] {
-            one.add(status);
-        }
-        assert_eq!(agents_label(&theme, &[("studio".into(), one)]), "2 working, 1 blocked");
-        let mut other = AgentCounts::default();
-        other.add(Status::Running);
-        other.add_review();
-        assert_eq!(
-            agents_label(&theme, &[("studio".into(), one), ("mini".into(), other)]),
-            "studio: 2 working, 1 blocked; mini: 1 waiting, 1 to review",
-            "each worker named once there are two"
-        );
-        let mut rest = AgentCounts::default();
-        rest.add(Status::Idle);
-        rest.add(Status::Done);
-        assert!(rest.is_empty(), "an agent at rest is not counted");
         assert_eq!(transfers_label(1, 0, 42, 100), "1 upload \u{b7} 42%");
         assert_eq!(transfers_label(2, 0, 0, 0), "2 uploads \u{b7} 0%");
         assert_eq!(transfers_label(0, 2, 1, 10), "2 downloads \u{b7} 10%");

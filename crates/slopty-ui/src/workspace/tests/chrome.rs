@@ -457,11 +457,10 @@ fn an_agent_at_rest_shows_its_age_with_no_clock_running(cx: &mut TestAppContext)
     );
 }
 
-/// While agents are at their turn out of sight (their worker folded), *Working* lists the first
-/// four under a heading that counts them all, with "Show N more" for the rest. Its turn times tick
-/// once a second by the navigator's own clock, which draws the navigator alone.
+/// Agents at their turn are marked on their tiles' rows and nowhere else: no section lists them,
+/// folded away or not, and no clock ticks for them, so a second passing draws nothing.
 #[gpui::test]
-fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppContext) {
+fn agents_at_their_turn_draw_no_section_and_no_clock(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     let studio = connect(&view, cx, 1, "studio");
@@ -472,7 +471,6 @@ fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppC
             session
         })
         .collect();
-    assert!(cx.debug_bounds("nav-working").is_none(), "nobody works yet");
     let since_ms = ms_ago(Duration::from_secs(65));
     view.update_in(cx, |v, _w, cx| {
         for session in &sessions {
@@ -485,25 +483,19 @@ fn working_lists_the_agents_at_their_turn_and_ticks_their_time(cx: &mut TestAppC
         }
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("nav-working").is_none(), "their rows say it while in view");
+    assert!(cx.debug_bounds("nav-working").is_none(), "their rows say it");
     click_at(cx, leak(format!("nav-worker-{}", studio.key)));
-    assert!(cx.debug_bounds("nav-working").is_some(), "the heading");
-    assert!(cx.debug_bounds("nav-workers").is_some(), "the workers' own heading under it");
-    assert_eq!(view.read_with(cx, |v, _| v.navigator_working().len()), 4, "the first four");
-    let first = sessions.first().copied().expect("five");
-    assert!(cx.debug_bounds(leak(format!("nav-working-time-{first}"))).is_some(), "its time");
-    click_at(cx, "nav-working-more");
-    assert_eq!(view.read_with(cx, |v, _| v.navigator_working()), sessions, "all, in order");
+    assert!(cx.debug_bounds("nav-working").is_none(), "folded away too");
 
-    let before = renders(&view, cx);
+    // What the fold's click set going settles first; then the seconds tick nothing.
     cx.executor().advance_clock(Duration::from_secs(1));
     cx.run_until_parked();
-    let after = renders(&view, cx);
-    assert!(after[0] > before[0], "the turn's time ticked: {before:?} → {after:?}");
-    assert_eq!(after[1..], before[1..], "the bars did not draw for it");
-
-    click_at(cx, leak(format!("nav-working-{first}")));
-    assert_eq!(focused(&view, cx), view.read_with(cx, |v, _| v.tile_of_session(first)));
+    let before = renders(&view, cx);
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+    }
+    assert_eq!(renders(&view, cx), before, "the seconds passing draw nothing");
 }
 
 /// With the navigator hidden where it docks, a worker is on the rail only while something of
@@ -731,8 +723,8 @@ fn plus_lists_what_to_open_and_runs_it_as_its_keys_do(cx: &mut TestAppContext) {
 }
 
 /// The "…" menu reads in sections, a hairline between each: where to go, the settings, then
-/// the connections, whatever order the app handed its rows in. Its Workers row opens the
-/// hosts popover, which the status bar no longer offers while every worker is up.
+/// the connections, whatever order the app handed its rows in. The machines are the
+/// navigator's, so it has no row for them.
 #[gpui::test]
 fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -761,7 +753,6 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
     let order = ["Command palette", "Overview", "Stream stats", "Settings", "Add a machine"];
     let tops: Vec<f32> = order.iter().map(|label| top(cx, label)).collect();
     assert!(tops.windows(2).all(|w| w[0] < w[1]), "{order:?} at {tops:?}");
-    assert!(top(cx, "Add a machine") < top(cx, "Machines"), "the hosts close the connections");
     let hairlines = (0..8).filter(|i| {
         let selector = Box::leak(format!("menu-separator-{i}").into_boxed_str());
         cx.debug_bounds(selector).is_some()
@@ -776,12 +767,7 @@ fn the_more_menu_groups_its_rows_into_sections(cx: &mut TestAppContext) {
         .expect("a hairline");
     assert!(f32::from(separator.top()) < settings, "the settings open a section");
 
-    let workers = Box::leak("menu-Machines".to_owned().into_boxed_str());
-    let at = cx.debug_bounds(workers).expect("Machines").center();
-    cx.simulate_click(at, Modifiers::none());
-    cx.run_until_parked();
-    assert!(view.read_with(cx, |v, _| v.hosts_open()), "Machines opens the hosts");
-    assert!(cx.debug_bounds("status-workers").is_none(), "with every worker up");
+    assert!(cx.debug_bounds("menu-Machines").is_none(), "the machines are the navigator's");
 }
 
 /// What a frame costs while the pointer moves over a shell and the strip is built for

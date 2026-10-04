@@ -4,7 +4,7 @@ Button │ Navigator
 Group │ Where
 Button │ drop-here
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ drop-here
 Heading │ terminal drop-here
@@ -16,8 +16,6 @@ Terminal │ shell │ ~/drop-here %
 Group │ nc -l 47310
 Heading │ terminal nc -l 47310
 Label │ ~/drop-here
-Link │ Open port 47310 in a tile
-Link │ Open port 47310 in the browser
 Button │ Fullscreen tile
 Button │ Close tile
 Group

@@ -212,6 +212,7 @@ impl WorkspaceView {
         for id in files {
             self.request_file(id);
         }
+        self.hub_agents(key, cx);
         cx.notify();
     }
 
@@ -274,8 +275,10 @@ impl WorkspaceView {
         self.items_dirty = true;
         if self.picker.as_ref().is_some_and(|(k, _)| *k == key) {
             self.let_picker_leave(cx);
-            self.pending_focus_self = true;
+            self.pending_return = true;
         }
+        // A machine out of reach starts nothing.
+        self.hub_agents(key, cx);
         self.update_awake(cx);
         self.agents_moved(cx);
         cx.notify();
@@ -479,6 +482,7 @@ impl WorkspaceView {
             // agents at once.
             if agents_moved {
                 self.refresh_palette(cx);
+                self.hub_agents(key, cx);
             }
             cx.notify();
         }
@@ -507,20 +511,10 @@ impl WorkspaceView {
         self.workers.get(&key)?.relay.path()
     }
 
-    /// A registry snapshot, delta or pointing from `key`.
+    /// A registry snapshot or delta from `key`.
     pub fn apply_sync(&mut self, key: WorkerKey, sync: ItemSync, cx: &mut Context<Self>) {
         let Some(w) = self.workers.get_mut(&key) else { return };
         let Some(me) = w.link.as_ref().map(|l| l.me) else { return };
-        // A pointing carries the pointer's name only on the wire: taken before the registry
-        // reduces it to the item. One at an item this client does not have is nothing.
-        if let ItemSync::Pointed { client, name, item } = &sync
-            && *client != me
-            && w.doc.get(*item).is_some()
-        {
-            let tile = TileRef { worker: key, item: *item };
-            self.show_toast(super::toast::ToastKind::Pointed { name: name.clone(), tile }, cx);
-            return;
-        }
         let snapshot = matches!(sync, ItemSync::Snapshot { .. });
         let change = w.doc.apply_sync(sync, me);
         tracing::debug!(?change, version = w.doc.version(), "item sync");
@@ -621,9 +615,9 @@ impl WorkspaceView {
                 self.drop_item_views(id, cx);
                 self.after_focus_moved(cx);
             }
-            ItemChange::Changed(_) | ItemChange::Echo | ItemChange::Pointed(_) => {}
+            ItemChange::Changed(_) | ItemChange::Echo => {}
         }
-        if !matches!(change, ItemChange::Echo | ItemChange::Pointed(_)) {
+        if change != ItemChange::Echo {
             self.keep_items(key, cx);
         }
         self.layout_touched(cx);
@@ -651,7 +645,7 @@ impl WorkspaceView {
             ItemChange::Removed(id) => {
                 self.note_facts.remove(&id);
             }
-            ItemChange::Echo | ItemChange::Pointed(_) => {}
+            ItemChange::Echo => {}
         }
     }
 

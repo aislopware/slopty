@@ -4,7 +4,7 @@ Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
@@ -37,4 +37,3 @@ MenuItem │ Stream stats
 MenuItem │ Settings
 MenuItem │ Connect to a server
 MenuItem │ Add a machine…
-MenuItem │ Machines

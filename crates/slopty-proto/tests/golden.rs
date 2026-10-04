@@ -55,20 +55,6 @@ mod golden {
     }
 
     #[test]
-    fn point_and_pointed() {
-        let item = slopty_core::ItemId::from_uuid(Uuid::from_u128(0x77));
-        snap("client_point", &ClientMsg::Point { item });
-        snap(
-            "worker_pointed",
-            &WorkerMsg::Items(slopty_proto::items::ItemSync::Pointed {
-                client: ClientId::from_uuid(Uuid::from_u128(0x42)),
-                name: "iPhone".to_owned(),
-                item,
-            }),
-        );
-    }
-
-    #[test]
     fn colors() {
         let mut ansi = [[0_u8; 3]; 16];
         for (i, c) in (0_u8..).zip(ansi.iter_mut()) {
@@ -2240,7 +2226,6 @@ mod orchestration {
         let rename = Verb::RenameItem { item, name: Some("docs".to_owned()) };
         snap("server_request_rename_item", &request(rename));
         snap("server_request_remove_item", &request(Verb::RemoveItem { item }));
-        snap("server_request_point_at", &request(Verb::PointAt { item }));
         snap("server_request_list_windows", &request(Verb::ListWindows { worker }));
         let window = WindowInfo {
             id: WindowId(4242),
@@ -2562,7 +2547,6 @@ mod conversation {
     fn permissions() {
         let session = session();
         let prompt = PermissionPrompt {
-            editable: Vec::new(),
             session,
             ask: 3,
             tool: "Edit".to_owned(),

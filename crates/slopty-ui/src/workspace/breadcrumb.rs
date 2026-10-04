@@ -251,7 +251,7 @@ impl WorkspaceView {
         let anchors = std::rc::Rc::clone(&self.anchors.at);
         let measure = canvas(
             move |bounds, _window, _cx| {
-                anchors.borrow_mut().insert(which, f32::from(bounds.origin.x));
+                anchors.borrow_mut().insert(which, bounds);
             },
             |_bounds, (), _window, _cx| {},
         )

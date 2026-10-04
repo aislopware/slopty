@@ -399,7 +399,7 @@ mod tests {
     }
 
     /// Items an orchestrator puts on the workspace reach a client as they happen: a page appears
-    /// with its name, is renamed, is pointed at and goes. A terminal's item is refused both ways,
+    /// with its name, is renamed and goes. A terminal's item is refused both ways,
     /// since its session owns it.
     #[tokio::test]
     async fn an_orchestrated_item_reaches_a_client_and_leaves_it() {
@@ -419,9 +419,7 @@ mod tests {
             tokio::time::timeout(STEP, connect_addr(&endpoint, at, hello)).await.unwrap().unwrap();
         let mut next_items = async move || loop {
             let msg = tokio::time::timeout(STEP, client.rx.recv()).await.unwrap().unwrap();
-            if let WorkerMsg::Items(sync @ (ItemSync::Delta { .. } | ItemSync::Pointed { .. })) =
-                msg
-            {
+            if let WorkerMsg::Items(sync @ ItemSync::Delta { .. }) = msg {
                 return sync;
             }
         };
@@ -444,15 +442,11 @@ mod tests {
         };
         assert_eq!((id, name.as_deref()), (item.item, Some("docs")), "trimmed as a person's is");
 
-        assert_eq!(peer.ask(Verb::PointAt { item }).await, Outcome::Done);
-        let ItemSync::Pointed { item: at, .. } = next_items().await else { panic!("pointed") };
-        assert_eq!(at, item.item);
-
         assert_eq!(peer.ask(Verb::RemoveItem { item }).await, Outcome::Done);
         assert!(
             matches!(next_items().await, ItemSync::Delta { op: ItemOp::Remove(id), .. } if id == item.item)
         );
-        let gone = peer.ask(Verb::PointAt { item }).await;
+        let gone = peer.ask(Verb::RemoveItem { item }).await;
         assert!(matches!(gone, Outcome::Error { code: ErrorCode::UnknownItem, .. }), "{gone:?}");
 
         let Outcome::Opened(term) = peer.ask(open(worker, dir.path())).await else { panic!() };

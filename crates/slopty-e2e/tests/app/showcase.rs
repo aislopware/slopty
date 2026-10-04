@@ -2,7 +2,7 @@
 //! review rather than held as goldens: three workers with shells that have run real-looking work
 //! (a history graph, a build with warnings, a failed test run, a coloured listing, a chart in the
 //! terminal's history), a file, a folder, a page, a note and a remote window; agents that need
-//! the person, work, or are done; the navigator, the inbox, the palette, the menus, the settings
+//! the person, work, or are done; the navigator, the palette, the menus, the settings
 //! and a toast; a Claude Code thread mid-turn with every kind of step, a request and a
 //! questionnaire; and a project's board with tasks in every state and a merge queue.
 //!
@@ -1746,7 +1746,7 @@ async fn showcase_the_studio_workspace() {
 
     let drv = &mut stack.driver;
     drv.reveal(&studio.history).await.unwrap();
-    drv.keys("cmd-alt-home").await.unwrap();
+    drv.keys("cmd-1").await.unwrap();
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     both(stack, "workspace-studio").await;
 
@@ -1775,7 +1775,7 @@ async fn showcase_the_studio_workspace() {
     let drv = &mut stack.driver;
     drv.keys("cmd-alt-right").await.unwrap();
     shot(drv, "workspace-agent-at-work-light").await;
-    drv.keys("cmd-alt-end").await.unwrap();
+    drv.keys("cmd-9").await.unwrap();
     shot(drv, "workspace-note-light").await;
 
     drv.reveal(&studio.history).await.unwrap();
@@ -1786,7 +1786,7 @@ async fn showcase_the_studio_workspace() {
     drv.keys("cmd-alt-o").await.unwrap();
     wait(drv, "the overview closed", |d| !d.overview).await;
 
-    drv.keys("cmd-alt-end").await.unwrap();
+    drv.keys("cmd-9").await.unwrap();
     wait(drv, "the note focused", |d| d.items.iter().any(|i| i.kind == "note" && i.active)).await;
     drv.keys("cmd-w").await.unwrap();
     wait(drv, "the take-back offer", |d| d.notice.is_some()).await;
@@ -1800,10 +1800,10 @@ async fn showcase_the_studio_workspace() {
 
 /// Three workers: the studio with its agents, the dev box with its containers, a remote window,
 /// an agent done and a pull left running, the build box with a clean run and an agent asking;
-/// the navigator over all of them, and the inbox.
+/// the navigator over all of them.
 #[tokio::test]
 #[ignore = "showcase: cargo xtask e2e showcase"]
-async fn showcase_three_workers_and_the_inbox() {
+async fn showcase_three_workers() {
     let mut day = Day::begin().await;
     // A drawn screen on the dev box, a mesh's round trip to the build box.
     let plain = [("PATH", day.path.as_str()), ("ZDOTDIR", day.zdotdir.as_str())];
@@ -1832,17 +1832,6 @@ async fn showcase_three_workers_and_the_inbox() {
     drv.reveal(&studio.history).await.unwrap();
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     shot(drv, "navigator-three-workers-light").await;
-    if click(drv, "Button", "Inbox").await {
-        wait(drv, "the inbox", |d| d.a11y_node("Dialog", Some("Inbox")).is_some()).await;
-        drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-        both(stack, "inbox").await;
-        let drv = &mut stack.driver;
-        if click(drv, "Tab", "All").await {
-            drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-            shot(drv, "inbox-all-light").await;
-        }
-        drv.keys("escape").await.unwrap();
-    }
 
     day.stack.shutdown().await;
     devbox_worker.shutdown().await;

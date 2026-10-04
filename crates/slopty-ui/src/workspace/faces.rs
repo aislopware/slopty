@@ -376,6 +376,7 @@ impl WorkspaceView {
         });
         self.faces.threads.hearing.insert(key, hearing);
         self.faces.threads.hubs.insert(key, hub.clone());
+        self.hub_agents(key, cx);
         hub
     }
 
@@ -383,6 +384,21 @@ impl WorkspaceView {
     pub fn threads_linked(&mut self, key: WorkerKey, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
         hub.update(cx, ThreadHub::connected);
+    }
+
+    /// Tell `key`'s thread hub what that machine can start now ("Continue in…"), if it has
+    /// one: when the hub is made, and when the machine's caps or link move.
+    pub(super) fn hub_agents(&self, key: WorkerKey, cx: &mut Context<Self>) {
+        if let Some(hub) = self.faces.threads.hubs.get(&key).cloned() {
+            let agents = self.startable_on(key);
+            hub.update(cx, |hub, cx| hub.set_agents(agents, cx));
+        }
+    }
+
+    /// What `key`'s thread hub was told it can start.
+    #[cfg(test)]
+    pub(super) fn hub_agents_of(&self, key: WorkerKey, cx: &App) -> Option<Vec<AgentId>> {
+        Some(self.faces.threads.hubs.get(&key)?.read(cx).agents().to_vec())
     }
 
     /// The link to `key` went: its thread views show what they last knew.
@@ -528,6 +544,15 @@ impl WorkspaceView {
         let old = &self.faces.threads.stands;
         let moved = old.values().filter(|s| s.worker == key).count() != stands.len()
             || stands.iter().any(|(id, stand)| old.get(id) != Some(stand));
+        // A thread heard before that comes to need the person: the corner may point at it.
+        let came_to_need: Vec<ThreadId> = stands
+            .iter()
+            .filter(|(id, stand)| {
+                stand.rung == Rung::NeedsYou
+                    && old.get(*id).is_some_and(|was| was.rung != Rung::NeedsYou)
+            })
+            .map(|(id, _)| *id)
+            .collect();
         self.faces.threads.stands.retain(|_, stand| stand.worker != key);
         self.faces.threads.stands.extend(stands);
         let meters_before = self.faces.threads.meters.clone();
@@ -546,6 +571,14 @@ impl WorkspaceView {
                 Some(session) => self.faces.threads.terminals.insert(row.id, session),
                 None => self.faces.threads.terminals.remove(&row.id),
             };
+        }
+        for thread in came_to_need {
+            let Some(word) = self.thread_stand(thread).and_then(ThreadStand::word) else {
+                continue;
+            };
+            if let Some(tile) = self.tile_of_thread(thread) {
+                self.attention_toast(tile, Status::NeedsYou, &word.to_lowercase(), cx);
+            }
         }
         if moved {
             self.agents_moved(cx);
@@ -1147,7 +1180,7 @@ impl WorkspaceView {
     }
 
     /// A permission prompt this client may answer was asked or settled: the face of a followed
-    /// session, and the inbox and notes for a yes or no.
+    /// session, and *Needs you* and the notes for a yes or no.
     pub fn permission_event(&mut self, event: PermissionEvent, cx: &mut Context<Self>) {
         self.approval_event(&event, cx);
         cx.notify();
@@ -1284,7 +1317,7 @@ impl ThreadStand {
             Rung::Working => Some(Status::Working),
             Rung::Waiting => Some(Status::Running),
             Rung::ToReview => Some(Status::Done),
-            Rung::Idle | Rung::Sleeping => None,
+            Rung::Idle => None,
         }
     }
 
@@ -1303,7 +1336,7 @@ impl ThreadStand {
     }
 }
 
-/// A thread that waits on the person, for the bell, the inbox and the Dock's count.
+/// A thread that waits on the person, for the bell, *Needs you* and the Dock's count.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) struct ThreadWait {
     /// The worker whose agent runs it.

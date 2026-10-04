@@ -23,6 +23,7 @@
 //! * [`keymap`] — every command a key runs, its default chords, and `[keys]` laid over them.
 //! * [`keys`] — GPUI keystrokes → protocol key events.
 //! * [`colors`] — theme tokens → GPUI colours.
+//! * [`companions`] — a small pixel character for each agent, in its mark's place.
 //! * [`kit`] — gpui-kit's theme kept on the same tokens.
 //! * [`frames`] — the UI frame-time probe (draw percentiles, cadence, drops).
 //! * `draw` — a view's elements built from another entity's state, read and never written.
@@ -43,6 +44,7 @@ pub mod browser;
 pub mod chrome_text;
 pub mod clipboard;
 pub mod colors;
+pub mod companions;
 pub mod conversation;
 mod draw;
 pub mod file;
@@ -50,6 +52,7 @@ pub mod file_types;
 pub mod folder;
 pub mod fonts;
 pub mod frames;
+pub mod fuzzy;
 pub mod highlight;
 pub mod icons;
 pub mod keymap;

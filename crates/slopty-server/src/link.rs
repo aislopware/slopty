@@ -270,7 +270,7 @@ async fn tell(tx: &mut FramedSend<FromServer>, msgs: Vec<FromServer>) -> Result<
 }
 
 /// The fleet's state: the directory, then every terminal and the agent in it, then every
-/// project, the attention ladder, where the person is, and the person's snoozes.
+/// project, the attention ladder, and where the person is.
 fn state(hub: &Hub) -> Vec<FromServer> {
     let mut snapshot = hub.state();
     let parts = Hub::project_parts(&mut snapshot);
@@ -279,7 +279,6 @@ fn state(hub: &Hub) -> Vec<FromServer> {
     msgs.extend(parts.into_iter().map(|part| FromServer::Projects(Box::new(part))));
     msgs.push(FromServer::Ladder(Box::new(hub.ladder())));
     msgs.push(FromServer::Present(hub.present()));
-    msgs.push(FromServer::Snoozes(hub.snoozes()));
     msgs
 }
 

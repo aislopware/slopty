@@ -40,11 +40,11 @@ fn setup(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Setup {
         (SessionId::new(), SessionId::new(), SessionId::new());
     let orchestrator_tile = opens(view, cx, &fake, orchestrator, fake.me, 1);
     let agent_tile = opens(view, cx, &fake, agent, fake.me, 2);
-    let mut after = card(3, "Golden files", TaskState::Planned, Some(1));
+    let mut after = card(3, "Golden files", TaskState::Planned);
     after.depends_on = vec![TaskId(1)];
     let tasks = vec![
-        on(card(1, "Wire the board", TaskState::Running, None), worker, agent),
-        on(card(2, "Read the store", TaskState::Blocked, None), worker, blocked_session),
+        on(card(1, "Wire the board", TaskState::Running), worker, agent),
+        on(card(2, "Read the store", TaskState::Blocked), worker, blocked_session),
         after,
     ];
     let timeline = vec![
@@ -217,9 +217,8 @@ fn a_board_taller_than_its_tile_says_more_lies_below(cx: &mut TestAppContext) {
     let fake = connect_as(&view, cx, worker, "studio");
     let orchestrator = SessionId::new();
     let _tile = opens(&view, cx, &fake, orchestrator, fake.me, 1);
-    let mut tasks: Vec<_> =
-        (1..=24).map(|n| card(n, "Planned work", TaskState::Planned, None)).collect();
-    tasks.push(card(25, "Ship it", TaskState::Done, None));
+    let mut tasks: Vec<_> = (1..=24).map(|n| card(n, "Planned work", TaskState::Planned)).collect();
+    tasks.push(card(25, "Ship it", TaskState::Done));
     let term = TermRef { worker, session: orchestrator };
     view.update_in(cx, |v, _w, cx| {
         v.projects_part(
@@ -328,7 +327,7 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
 
     let old = task_changed(
         "board",
-        on(card(1, "Wire the board", TaskState::Merged, None), worker, agent),
+        on(card(1, "Wire the board", TaskState::Merged), worker, agent),
         None,
     );
     view.update_in(cx, |v, _w, cx| v.project_update(9, old, cx));
@@ -341,7 +340,7 @@ fn the_board_follows_the_servers_changes(cx: &mut TestAppContext) {
 
     let now_blocked = task_changed(
         "board",
-        on(card(1, "Wire the board", TaskState::Blocked, None), worker, agent),
+        on(card(1, "Wire the board", TaskState::Blocked), worker, agent),
         Some(entry(4, Some(1), Moment::State { from: TaskState::Running, to: TaskState::Blocked })),
     );
     view.update_in(cx, |v, _w, cx| v.project_update(11, now_blocked, cx));
@@ -473,17 +472,17 @@ fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) 
     let kept_tile = opens(&view, cx, &setup.fake, kept, setup.fake.me, 3);
     let closed = SessionId::new();
 
-    let mut failed = card(4, "Read the snapshot", TaskState::Waiting, None);
+    let mut failed = card(4, "Read the snapshot", TaskState::Waiting);
     failed.verified = Some(run(false, "4a7aa6d0"));
     let why = StepState::Failed { why: "exit 101".into() };
     failed.step =
         Some(step(StepKind::Verify, worker, why, Some(TermRef { worker, session: kept })));
-    let mut running = card(5, "Draw the lanes", TaskState::Verifying, None);
+    let mut running = card(5, "Draw the lanes", TaskState::Verifying);
     let line = StepState::Running { phase: "Compiling slopty-ui".into(), percent: None };
     running.step =
         Some(step(StepKind::Verify, worker, line, Some(TermRef { worker, session: closed })));
-    let later = queued(card(6, "Hold it to goldens", TaskState::Done, None), 20, "6666666");
-    let sooner = queued(card(7, "Write the decision", TaskState::Done, None), 10, "7777777");
+    let later = queued(card(6, "Hold it to goldens", TaskState::Done), 20, "6666666");
+    let sooner = queued(card(7, "Write the decision", TaskState::Done), 10, "7777777");
     view.update_in(cx, |v, _w, cx| {
         for (seq, c) in [(11, failed), (12, running), (13, later), (14, sooner)] {
             v.project_update(seq, task_changed("board", c, None), cx);
@@ -555,16 +554,16 @@ fn a_reviewer_shows_on_its_task_and_opens_its_session(cx: &mut TestAppContext) {
     let closed = SessionId::new();
     let reviewer = TermRef { worker, session: kept };
 
-    let mut asked = card(4, "Read the snapshot", TaskState::Waiting, None);
+    let mut asked = card(4, "Read the snapshot", TaskState::Waiting);
     asked.verified = Some(run(true, "4a7aa6d0"));
     asked.reviewed = Some(review(false, "4a7aa6d0", Some(reviewer)));
     let why = StepState::Failed { why: "Project.review has no golden".into() };
     asked.step = Some(step(StepKind::Review, worker, why, Some(reviewer)));
-    let mut reading = card(5, "Draw the lanes", TaskState::Verifying, None);
+    let mut reading = card(5, "Draw the lanes", TaskState::Verifying);
     let line = StepState::Running { phase: "Reading 5555555 over c08d4c1".into(), percent: None };
     reading.step =
         Some(step(StepKind::Review, worker, line, Some(TermRef { worker, session: closed })));
-    let mut approved = queued(card(6, "Hold it to goldens", TaskState::Done, None), 20, "6666666");
+    let mut approved = queued(card(6, "Hold it to goldens", TaskState::Done), 20, "6666666");
     approved.reviewed = Some(review(true, "6666666", Some(reviewer)));
     view.update_in(cx, |v, _w, cx| {
         for (seq, c) in [(11, asked), (12, reading), (13, approved)] {
@@ -705,16 +704,12 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut asked = card(4, "Read the snapshot", TaskState::Waiting, None);
+    let mut asked = card(4, "Read the snapshot", TaskState::Waiting);
     asked.verified = Some(run(true, "4a7aa6d0"));
     asked.reviewed = Some(review(false, "4a7aa6d0", None));
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
-        v.project_update(
-            11,
-            task_changed("board", card(5, "Land it", TaskState::Done, None), None),
-            cx,
-        );
+        v.project_update(11, task_changed("board", card(5, "Land it", TaskState::Done), None), cx);
         v.project_update(12, task_changed("board", asked, None), cx);
         v.show_board(orchestrator, true, cx);
     });
@@ -732,7 +727,7 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
         "a task at work has nothing to merge"
     );
 
-    let mut unpushed = card(6, "Pushed late", TaskState::Merged, None);
+    let mut unpushed = card(6, "Pushed late", TaskState::Merged);
     unpushed.merge = Some(slopty_proto::project::Merge::Merged {
         target: "main".into(),
         head: "abcdef0123".into(),
@@ -1148,7 +1143,7 @@ fn a_plan_waits_for_the_person_who_starts_one_or_all(cx: &mut TestAppContext) {
     let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
     let proposed = |n, title| {
-        let mut c = card(n, title, TaskState::Planned, None);
+        let mut c = card(n, title, TaskState::Planned);
         c.proposed = Some(Proposed {
             since_ms: fixtures::AT,
             runs: "claude".to_owned(),
@@ -1250,9 +1245,9 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
         [(id.clone(), 3)]
     );
 
-    let merged = card(1, "Wire the board", TaskState::Merged, None);
+    let merged = card(1, "Wire the board", TaskState::Merged);
     let to_merged = Moment::State { from: TaskState::Done, to: TaskState::Merged };
-    let failed = card(3, "Golden files", TaskState::Waiting, Some(1));
+    let failed = card(3, "Golden files", TaskState::Waiting);
     view.update_in(cx, |v, _w, cx| {
         v.project_update(11, task_changed("board", merged, Some(entry(4, Some(1), to_merged))), cx);
         let verified = Moment::Verified(run(false, "9c1e2f3"));
@@ -1291,7 +1286,7 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
     let term = TermRef { worker, session: orchestrator };
     let newest = vec![entry(50, Some(2), Moment::Note { text: "later".into() })];
-    let tasks = vec![card(2, "Read the store", TaskState::Merged, None)];
+    let tasks = vec![card(2, "Read the store", TaskState::Merged)];
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
         let record = project("board", Some(term));
@@ -1329,9 +1324,9 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
 }
 
 /// The board says what the project spent: its time at work in the header with the
-/// orchestrator's share apart on hover, each row's time with its subtree's, and, once the
-/// agents' threads hand their meters over, the cost, a context nearly full, and the plan's
-/// rate windows. A thread that goes takes its meters with it.
+/// orchestrator's share apart on hover, each row's time, and, once the agents' threads hand
+/// their meters over, a row's cost, a context nearly full, and the plan's rate windows. A
+/// thread that goes takes its meters with it.
 #[gpui::test]
 fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     use slopty_proto::project::Spent;
@@ -1343,9 +1338,9 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     let (_, agent) = setup.agent;
     let worker = fixtures_worker(&view, cx, orchestrator);
     let minutes = |m: u64| Spent { active_ms: m.saturating_mul(60_000), since_ms: None };
-    let mut first = on(card(1, "Wire the board", TaskState::Running, None), worker, agent);
+    let mut first = on(card(1, "Wire the board", TaskState::Running), worker, agent);
     first.spent = minutes(12);
-    let mut after = card(3, "Golden files", TaskState::Planned, Some(1));
+    let mut after = card(3, "Golden files", TaskState::Planned);
     after.spent = minutes(30);
     view.update_in(cx, |v, _w, cx| {
         v.project_update(11, task_changed("board", first, None), cx);
@@ -1358,12 +1353,12 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     {
         assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
     }
-    for unheard in ["project-cost", "project-limit-0", "project-row-project-node-1-context"] {
+    for unheard in ["project-limit-0", "project-row-project-node-1-context"] {
         assert!(cx.debug_bounds(unheard).is_none(), "{unheard} waits for the threads");
     }
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l == "42m of work: tasks 42m, orchestrator under 1m"), "{said:?}");
-    assert!(said.iter().any(|l| l.ends_with("worked 42m, 12m itself")), "{said:?}");
+    assert!(said.iter().any(|l| l.ends_with("worked 12m")), "{said:?}");
 
     let meters = Meters {
         cost_micro_usd: Some(1_250_000),
@@ -1374,23 +1369,18 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     };
     view.update_in(cx, |v, _w, cx| v.thread_meters(agent, Some(meters), cx));
     cx.run_until_parked();
-    for part in ["project-cost", "project-limit-0", "project-row-project-node-1-context"] {
+    for part in ["project-limit-0", "project-row-project-node-1-context"] {
         assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
     }
+    assert!(cx.debug_bounds("project-cost").is_none(), "no dollar meter");
     let said = labels(&view, cx);
-    assert!(
-        said.iter().any(|l| l == "An estimated $1.25 spent: tasks $1.25, orchestrator not heard"),
-        "{said:?}"
-    );
     assert!(said.iter().any(|l| l == "5-hour 81%"), "{said:?}");
-    assert!(
-        said.iter().any(|l| l.ends_with("worked 42m, 12m itself, $1.25, context 85%")),
-        "{said:?}"
-    );
+    assert!(said.iter().any(|l| l.ends_with("worked 12m, $1.25, context 85%")), "{said:?}");
 
     view.update_in(cx, |v, _w, cx| v.thread_meters(agent, None, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("project-cost").is_none(), "gone with its thread");
+    let context = cx.debug_bounds("project-row-project-node-1-context");
+    assert!(context.is_none(), "gone with its thread");
 }
 
 /// A next step on a task's row is the person's word to its agent: "Fix CI" sends `TaskTell`
@@ -1407,7 +1397,7 @@ fn a_next_step_is_said_to_the_task_s_agent(cx: &mut TestAppContext) {
     let (_, agent) = setup.agent;
     let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut failed = on(card(1, "Wire the board", TaskState::Waiting, None), worker, agent);
+    let mut failed = on(card(1, "Wire the board", TaskState::Waiting), worker, agent);
     failed.verified = Some(run(false, "9c1e2f3"));
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
@@ -1453,7 +1443,7 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
     let (_, agent) = setup.agent;
     let worker = fixtures_worker(&view, cx, orchestrator);
     let mut done =
-        on(queued(card(1, "Wire the board", TaskState::Done, None), 10, "1111111"), worker, agent);
+        on(queued(card(1, "Wire the board", TaskState::Done), 10, "1111111"), worker, agent);
     done.pr = Some(PullRequest {
         number: 42,
         url: "https://github.com/o/r/pull/42".into(),
@@ -1471,7 +1461,7 @@ fn a_card_draws_its_pipeline_once_its_work_is_on_its_way(cx: &mut TestAppContext
         at_ms: fixtures::AT,
     });
     done.natives = NativeCounts { agents: 0, running: 0, todos: 1, done: 0 };
-    let working = card(2, "Golden files", TaskState::Running, None);
+    let working = card(2, "Golden files", TaskState::Running);
     view.update_in(cx, |v, _w, cx| {
         v.project_update(11, task_changed("board", done, None), cx);
         v.project_update(12, task_changed("board", working, None), cx);
@@ -1507,7 +1497,7 @@ fn the_board_talks_to_its_orchestrator(cx: &mut TestAppContext) {
     let (_, agent) = setup.agent;
     let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let finished = on(card(1, "Wire the board", TaskState::Done, None), worker, agent);
+    let finished = on(card(1, "Wire the board", TaskState::Done), worker, agent);
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
         v.project_update(11, task_changed("board", finished, None), cx);
@@ -1561,11 +1551,11 @@ fn every_node_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut Tes
     let (_, agent) = setup.agent;
     let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut running = on(card(1, "Wire the board", TaskState::Running, None), worker, agent);
+    let mut running = on(card(1, "Wire the board", TaskState::Running), worker, agent);
     if let Some(a) = running.assignment.as_mut() {
         a.placed = Some(Placed { pinned: false, score: 0, why: "Apple work".into() });
     }
-    let mut pinned = card(3, "Golden files", TaskState::Planned, Some(1));
+    let mut pinned = card(3, "Golden files", TaskState::Planned);
     pinned.pin = Some(worker);
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
@@ -1771,7 +1761,7 @@ fn a_project_s_failure_is_said_as_it_lands(cx: &mut TestAppContext) {
     let (agent_tile, _) = setup.agent;
     let failed = |seq: u64, passed: bool| {
         let entry = entry(seq, Some(1), Moment::Verified(run(passed, "abc1234")));
-        task_changed("board", card(1, "Wire the board", TaskState::Running, None), Some(entry))
+        task_changed("board", card(1, "Wire the board", TaskState::Running), Some(entry))
     };
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
     let heard = Rc::clone(&events);
@@ -1819,57 +1809,4 @@ fn a_project_s_failure_is_said_as_it_lands(cx: &mut TestAppContext) {
     assert_eq!((note.title.as_str(), note.project.as_str()), ("Ship the project board", "board"));
     assert_eq!(note.body, "#1 Wire the board: its verifier failed");
     assert_eq!(view.update(cx, |v, _| v.take_project_news()), [], "taken once");
-}
-
-/// A task tried by several attempts says "Trying" until one is picked. Each attempt that has
-/// not failed offers Pick, which sends `TaskPick`, and no attempt merges before it is picked;
-/// once one is, only it offers Merge and none offers Pick.
-#[gpui::test]
-fn an_attempt_is_picked_from_its_row(cx: &mut TestAppContext) {
-    use slopty_proto::project::{ATTEMPT_KIND, Attempts};
-    let (view, cx) = workspace(cx);
-    let setup = setup(&view, cx);
-    let (_, orchestrator) = setup.orchestrator;
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut tried = card(7, "Split the parser", TaskState::Running, None);
-    tried.attempts = Some(Attempts { tried: vec![TaskId(8), TaskId(9)], picked: None });
-    let attempt = |n: u32, state: TaskState| {
-        let mut a = card(n, "One attempt", state, Some(7));
-        a.kind = ATTEMPT_KIND.to_owned();
-        a
-    };
-    view.update_in(cx, |v, _w, cx| {
-        v.set_server_caller(Some(caller));
-        v.project_update(11, task_changed("board", tried.clone(), None), cx);
-        v.project_update(12, task_changed("board", attempt(8, TaskState::Done), None), cx);
-        v.project_update(13, task_changed("board", attempt(9, TaskState::Failed), None), cx);
-        v.show_board(orchestrator, true, cx);
-    });
-    cx.run_until_parked();
-    let project = fixtures::id("board");
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    let row = tree
-        .iter()
-        .filter_map(|n| n.label.as_deref())
-        .find(|l| l.starts_with("Split the parser"))
-        .expect("the task's row");
-    assert!(row.contains("Trying"), "{row}");
-    assert!(cx.debug_bounds("project-row-merge-8").is_none(), "not picked, not merged");
-    assert!(cx.debug_bounds("project-row-pick-9").is_none(), "a failed attempt is not picked");
-
-    click(cx, "project-row-pick-8");
-    assert_eq!(sent(&mut queue, cx, done), [Verb::TaskPick { project, attempt: TaskId(8) }]);
-    assert_eq!(
-        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("Picked #8 to land; the other attempts stop")
-    );
-
-    tried.attempts = Some(Attempts { tried: vec![TaskId(8), TaskId(9)], picked: Some(TaskId(8)) });
-    view.update_in(cx, |v, _w, cx| v.project_update(14, task_changed("board", tried, None), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("project-row-pick-8").is_none(), "picked once");
-    assert!(cx.debug_bounds("project-row-merge-8").is_some(), "the one picked lands");
 }

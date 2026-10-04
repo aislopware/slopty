@@ -365,6 +365,7 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     let header = cx.debug_bounds(selector("title", waiting.item)).expect("drawn");
     let hooks = cx.debug_bounds(selector("hooks", waiting.item)).expect("the hooks offered");
     let chip = cx.debug_bounds(selector("agent", waiting.item)).expect("the state chip");
+    let slot = cx.debug_bounds(selector("status", waiting.item)).expect("the slot");
     let (scale, quads) = cx.update(|window, _| (window.scale_factor(), window.painted_quads()));
     let inside = |q: &gpui::Quad, b: Bounds<Pixels>| {
         let (x, y) = (q.bounds.origin.x.0 / scale, q.bounds.origin.y.0 / scale);
@@ -383,11 +384,12 @@ fn a_header_holds_one_filled_chip_and_its_slot_does_not_repeat_it(cx: &mut TestA
     let fills: Vec<&gpui::Quad> = quads
         .iter()
         .filter(|q| inside(q, header) && !q.background.is_transparent() && !surface(q))
+        // The slot's companion is the agent's mark drawn in cells, not a chip.
+        .filter(|q| !inside(q, slot))
         .collect();
     assert_eq!(fills.len(), 1, "one fill in the header: {fills:#?}");
     assert!(inside(fills[0], chip), "and it is the state's chip");
     assert!(quads.iter().filter(|q| inside(q, hooks)).all(|q| q.background.is_transparent()));
-    let slot = cx.debug_bounds(selector("status", waiting.item)).expect("the slot");
     let nodes = tree(cx);
     let offer = nodes
         .iter()

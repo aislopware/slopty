@@ -49,7 +49,7 @@ fn an_agent_that_starts_to_wait_notifies_only_while_the_app_is_away() {
         unread: 1,
         projects: HashMap::new(),
     });
-    assert!(memory.posted().is_empty(), "in front, the inbox says it");
+    assert!(memory.posted().is_empty(), "in front, the navigator says it");
 
     attention.set_active(false);
     attention.look(&Look {
@@ -175,7 +175,7 @@ fn led_by_the_server_only_its_notices_post_for_agents() {
 
     attention.set_active(true);
     attention.notice(&heard);
-    assert_eq!(memory.posted().len(), 3, "in front, the inbox says it");
+    assert_eq!(memory.posted().len(), 3, "in front, the navigator says it");
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn a_tile_has_one_note_that_goes_when_it_is_answered_or_the_app_returns() {
     assert!(memory.withdrawn().is_empty(), "the answer does not take back the command's note");
 
     attention.set_active(true);
-    assert_eq!(memory.withdrawn(), vec![id], "back in front, the inbox has it all");
+    assert_eq!(memory.withdrawn(), vec![id], "back in front, the navigator has it all");
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn a_command_notifies_when_it_ran_long_and_ended_with_the_app_away() {
 }
 
 #[test]
-fn the_badge_is_the_inboxs_unread_count() {
+fn the_badge_is_the_bells_count() {
     let (mut attention, memory) = attention();
     assert_eq!(memory.badge(), None, "nothing set before the first look");
     attention.look(&Look {
@@ -250,10 +250,10 @@ fn the_badge_is_the_inboxs_unread_count() {
         unread: 3,
         projects: HashMap::new(),
     });
-    assert_eq!(memory.badge(), Some(3), "the unread count");
+    assert_eq!(memory.badge(), Some(3), "the bell's count");
     attention.set_active(false);
     attention.look(&Look::default());
-    assert_eq!(memory.badge(), Some(0), "cleared with the inbox");
+    assert_eq!(memory.badge(), Some(0), "cleared with the bell");
 }
 
 /// A focused workspace, drawn once.
@@ -366,7 +366,7 @@ fn the_look_names_the_tile_and_says_what_the_agent_asks(cx: &mut TestAppContext)
     view.update(cx, |v, _| {
         let look = v.attention_look();
         let title = v.item(tiles[0]).map(|i| v.tile_title(i));
-        assert_eq!(look.unread, v.inbox_count(), "the badge is the inbox's count");
+        assert_eq!(look.unread, v.bell_count(), "the badge is the bell's count");
         assert_eq!(look.unread, 1, "one agent waits");
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
         assert_eq!(
@@ -544,7 +544,6 @@ fn conversation(link: &mut mpsc::Receiver<ClientMsg>) -> Vec<ConversationRequest
 
 fn asked(session: SessionId, ask: u64, tool: &str) -> PermissionEvent {
     PermissionEvent::Asked(Box::new(PermissionPrompt {
-        editable: Vec::new(),
         session,
         ask,
         tool: tool.to_owned(),
@@ -560,10 +559,10 @@ fn asked(session: SessionId, ask: u64, tool: &str) -> PermissionEvent {
 
 /// The workspace asks its worker for approvals as it links. A yes or no held for it rides the
 /// agent's note: "Allow" on the note answers it once and moves nothing, a second press says it
-/// no longer waits, and the inbox's "Deny" and "Allow" answer the next ones without going to
-/// the agent. A question never gets the buttons.
+/// no longer waits, and its row's "Deny" and "Allow" under *Needs you* answer the next ones
+/// without going to the agent. A question never gets the buttons.
 #[gpui::test]
-fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut TestAppContext) {
+fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (session, other) = (SessionId::new(), SessionId::new());
     let key = WorkerKey::new(7);
@@ -613,11 +612,11 @@ fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut T
 
     view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 9, "Bash"), cx));
     cx.update(|_w, cx| cx.set_reduce_motion(true));
-    press(cx, "bell");
-    press(cx, leak(format!("inbox-deny-{session}")));
+    cx.run_until_parked();
+    press(cx, leak(format!("nav-deny-{session}")));
     let deny = Verdict::Deny { message: String::new(), interrupt: false };
     let answer = ConversationRequest::Answer { session, ask: 9, verdict: deny };
-    assert_eq!(conversation(&mut link), [answer], "denied from the inbox");
+    assert_eq!(conversation(&mut link), [answer], "denied from its row");
     view.update(cx, |v, _cx| {
         assert_eq!(v.focused(), Some(tiles[1]), "without going to the agent");
         assert!(v.approval(session).is_none(), "answered");
@@ -625,11 +624,11 @@ fn an_approval_is_answered_from_the_note_and_the_inbox_where_they_are(cx: &mut T
 
     view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 10, "Bash"), cx));
     cx.run_until_parked();
-    press(cx, leak(format!("inbox-allow-{session}")));
+    press(cx, leak(format!("nav-allow-{session}")));
     let answer = ConversationRequest::Answer { session, ask: 10, verdict: Verdict::Allow };
-    assert_eq!(conversation(&mut link), [answer], "allowed from the inbox");
+    assert_eq!(conversation(&mut link), [answer], "allowed from its row");
     assert!(
-        cx.debug_bounds(leak(format!("inbox-allow-{session}"))).is_none(),
+        cx.debug_bounds(leak(format!("nav-allow-{session}"))).is_none(),
         "answered, the row has no buttons"
     );
 }
@@ -670,7 +669,7 @@ fn a_prompt_whose_terminal_is_in_front_goes_back_to_it(cx: &mut TestAppContext) 
 /// a while.
 #[gpui::test]
 fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
-    use crate::workspace::inbox::approvals::{HOLD_VERDICT, NOT_REACHED, SYNCED};
+    use crate::workspace::approvals::{HOLD_VERDICT, NOT_REACHED, SYNCED};
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
     let key = WorkerKey::new(7);
@@ -747,7 +746,7 @@ fn leak(text: String) -> &'static str {
 }
 
 /// An agent's turn that finished unwatched notifies once, while the app is away, with what it
-/// said and how long it ran; in front, the inbox has it.
+/// said and how long it ran; in front, the navigator has it.
 #[test]
 fn a_finished_turn_notifies_once_while_the_app_is_away() {
     let (mut attention, memory) = attention();
@@ -756,7 +755,7 @@ fn a_finished_turn_notifies_once_while_the_app_is_away() {
     let look =
         Look { asking: Vec::new(), turns: vec![turn.clone()], unread: 1, projects: HashMap::new() };
     attention.look(&look);
-    assert!(memory.posted().is_empty(), "in front, the inbox says it");
+    assert!(memory.posted().is_empty(), "in front, the navigator says it");
 
     attention.look(&Look::default());
     attention.set_active(false);
@@ -787,11 +786,11 @@ fn agent(
     }
 }
 
-/// A turn that ran long and finished on a tile not in focus earns a badge, an inbox row under
-/// Finished with the agent's words, and a turn in the look; focusing the tile reads it. A turn
-/// on the focused tile, a short one, and one that went idle without finishing earn nothing.
+/// A turn that ran long and finished on a tile not in focus earns a badge, a count on the bell,
+/// a row under *To review* and a turn in the look; focusing the tile reads it. A turn on the
+/// focused tile, a short one, and one that went idle without finishing earn nothing.
 #[gpui::test]
-fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
+fn an_agent_finishing_out_of_sight_is_left_to_review(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (away, here) = (SessionId::new(), SessionId::new());
     let (tiles, _link) = worker(&view, cx, WorkerKey::new(7), "mini", &[away, here]);
@@ -806,17 +805,13 @@ fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     view.update(cx, |v, _| {
-        assert_eq!(v.inbox_count(), 1, "the one out of sight");
+        assert_eq!(v.bell_count(), 1, "the one out of sight");
         let look = v.attention_look();
         let [turn] = look.turns.as_slice() else { panic!("one turn: {look:?}") };
         assert_eq!(turn.route.about, About::Session(away));
         assert_eq!(turn.body, "Fixed the test \u{b7} Done \u{b7} 2m 0s");
     });
-    let bell = cx.debug_bounds("bell").expect("the bell").center();
-    cx.simulate_click(bell, gpui::Modifiers::none());
-    cx.run_until_parked();
-    let row = format!("inbox-finished-{away}");
-    assert!(cx.debug_bounds(Box::leak(row.into_boxed_str())).is_some(), "its row");
+    assert!(cx.debug_bounds(leak(format!("nav-review-{away}"))).is_some(), "its row");
 
     let short = SessionId::new();
     let idle = SessionId::new();
@@ -830,14 +825,14 @@ fn an_agent_finishing_out_of_sight_lands_in_the_inbox(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     view.update(cx, |v, _| {
-        assert_eq!(v.inbox_count(), 0, "read by its focus; nothing else earned a row");
+        assert_eq!(v.bell_count(), 0, "read by its focus; nothing else earned a row");
         assert_eq!(v.attention_look().turns, Vec::<Turn>::new());
     });
 }
 
-/// An agent whose turn ended unseen, with its own row out of sight (its worker folded), is
-/// listed under *To review* in the navigator, saying what it did; a press goes to it, which
-/// reads it, and the section goes.
+/// An agent whose turn ended unseen is listed under *To review* in the navigator, its own tile's
+/// row in view or not, saying what it did; a press goes to it, which reads it, and the section
+/// goes.
 #[gpui::test]
 fn an_agent_that_ended_unseen_is_listed_to_review(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -850,9 +845,7 @@ fn an_agent_that_ended_unseen_is_listed_to_review(cx: &mut TestAppContext) {
         v.agent_event(agent(away, AgentStatus::Done, 220, Some("Fixed the test")), cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("nav-to-review").is_none(), "its own row says it");
-    press(cx, leak(format!("nav-worker-{key}")));
-    assert!(cx.debug_bounds("nav-to-review").is_some(), "folded away, the section lists it");
+    assert!(cx.debug_bounds("nav-to-review").is_some(), "the section lists it");
     let words = view.read_with(cx, |v, _| v.to_review());
     assert_eq!(words.iter().map(|w| w.session).collect::<Vec<_>>(), [away]);
     press(cx, leak(format!("nav-review-{away}")));

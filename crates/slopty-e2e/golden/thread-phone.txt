@@ -2,7 +2,7 @@ Window │ Slopty
 Group │ Workspace
 Button │ Navigator
 Heading │ e2e-worker, 1 tile, 1 needs you
-Button │ Inbox
+Button │ Needs you
 Status │ 1 new
 Button │ More
 Group │ Do these steps in order with the named tools, t…
@@ -37,4 +37,3 @@ Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker
-Status │ 1 blocked

@@ -62,7 +62,7 @@ fn the_breadcrumb_goes_between_workspaces(cx: &mut TestAppContext) {
     // A column moved down makes a second workspace with something in it.
     view.update_in(cx, |v, _w, cx| {
         v.tick();
-        v.layout.move_column_to_workspace_down();
+        v.layout.move_window_down_or_to_workspace_down();
         v.after_focus_moved(cx);
         cx.notify();
     });

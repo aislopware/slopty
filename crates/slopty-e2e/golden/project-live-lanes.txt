@@ -20,7 +20,7 @@ Button │ Navigator
 Group │ Where
 Button │ Ship the project board
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
@@ -76,4 +76,3 @@ Button │ Send later
 Button │ Send
 Group │ Status
 Status │ studio
-Status │ 1 working

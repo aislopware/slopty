@@ -192,7 +192,7 @@ fn local_tiles_open_right_of_the_focus_and_the_view_moves_the_least() {
     near(rect(&l, t(3)).right(), 1280.0);
 
     // Local opens next to the focus, not at the end.
-    l.focus_column_first();
+    l.focus_column(0);
     l.open(t(4), Placement::Local);
     assert_eq!(shape(&l)[0], vec![vec![t(1)], vec![t(4)], vec![t(2)], vec![t(3)]]);
     assert_eq!(l.focused(), Some(t(4)));
@@ -218,7 +218,7 @@ fn remote_tiles_join_the_workspace_that_last_held_their_worker() {
 
     // More of worker 1: appended at the end of its workspace, not focused.
     l.open(tile(1, 2), Placement::Local);
-    l.focus_column_first();
+    l.focus_column(0);
     l.open(tile(1, 3), from_its_machine(tile(1, 3)));
     assert_eq!(shape(&l)[0], vec![vec![tile(1, 1)], vec![tile(1, 2)], vec![tile(1, 3)]]);
     assert_eq!(l.focused(), Some(tile(1, 1)));
@@ -226,7 +226,7 @@ fn remote_tiles_join_the_workspace_that_last_held_their_worker() {
     // Worker 1's tile moved to worker 2's workspace, which is then visited: that one is now
     // the most recent holder of worker 1.
     l.focus(tile(1, 3));
-    l.move_column_to_workspace_down();
+    l.move_window_down_or_to_workspace_down();
     assert_eq!(l.active_workspace(), 1);
     l.focus_workspace_up();
     l.focus_workspace_down();
@@ -389,7 +389,7 @@ fn closing_after_the_focus_moved_takes_the_next_column_in_place() {
     l.remove(t(3));
     assert_eq!(l.focused(), Some(t(2)));
     near(view_pos(&l), 0.0);
-    l.focus_column_first();
+    l.focus_column(0);
     l.remove(t(1));
     assert_eq!(l.focused(), Some(t(2)), "the column that slid into its place");
     let alone = rect(&l, t(2));
@@ -442,7 +442,7 @@ fn focus_moves_stop_at_the_ends() {
     let mut l = columns(3);
     l.focus_column_right();
     assert_eq!(active_col(&l), 2);
-    l.focus_column_first();
+    l.focus_column(0);
     l.focus_column_left();
     assert_eq!(active_col(&l), 0);
     l.focus_column(1);
@@ -451,7 +451,7 @@ fn focus_moves_stop_at_the_ends() {
     assert_eq!(active_col(&l), 2, "clamped to the last");
     l.focus_column(0);
     assert_eq!(active_col(&l), 0);
-    l.focus_column_last();
+    l.focus_column(usize::MAX);
     assert_eq!(active_col(&l), 2);
     // Nothing to do on an empty workspace.
     let mut e = still();
@@ -493,10 +493,6 @@ fn focusing_a_tile_brings_its_workspace_and_column() {
     l.focus(t(1));
     assert_eq!((l.active_workspace(), active_col(&l)), (0, 0));
     near(view_pos(&l), 0.0);
-    l.focus_workspace_previous();
-    assert_eq!(l.active_workspace(), 1);
-    l.focus_workspace_previous();
-    assert_eq!(l.active_workspace(), 0);
     l.focus(tile(9, 9));
     assert_eq!(l.focused(), Some(t(1)), "an unknown tile changes nothing");
 }
@@ -545,55 +541,6 @@ fn moving_a_window_within_its_column_and_out_to_the_next_workspace() {
     assert_eq!(shape(&l), vec![vec![vec![t(1)], vec![t(2)]], vec![]], "no workspace above");
 }
 
-#[test]
-fn moving_a_column_to_another_workspace_keeps_its_width_and_tiles() {
-    let mut l = columns(2);
-    l.consume_or_expel_window_left();
-    l.switch_preset_width(false);
-    l.move_column_to_workspace_down();
-    // Workspace 0 emptied and was dropped once left.
-    assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]]);
-    assert_eq!(l.focused(), Some(t(2)));
-    near(stored_width_of(&l, t(1)), THIRD);
-    l.move_column_to_workspace_up();
-    assert_eq!(shape(&l), vec![vec![vec![t(1), t(2)]], vec![]], "nothing above");
-}
-
-#[test]
-fn moving_a_column_to_a_numbered_workspace_clamps_to_the_trailing_one() {
-    let mut l = columns(3);
-    l.move_column_to_workspace(9);
-    assert_eq!(shape(&l), vec![vec![vec![t(1)], vec![t(2)]], vec![vec![t(3)]], vec![]]);
-    assert_eq!((l.active_workspace(), l.focused()), (1, Some(t(3))));
-    l.focus(t(1));
-    l.move_column_to_workspace(1);
-    assert_eq!((l.active_workspace(), l.focused()), (1, Some(t(1))));
-    assert_eq!(shape(&l)[0], vec![vec![t(2)]]);
-    assert_eq!(shape(&l)[1].len(), 2, "joined workspace 1: {:?}", shape(&l));
-    let before = shape(&l);
-    l.move_column_to_workspace(1);
-    assert_eq!(shape(&l), before, "already there");
-}
-
-#[test]
-fn moving_a_workspace_swaps_it_with_its_neighbour() {
-    let mut l = columns(1);
-    l.open(tile(2, 1), from_its_machine(tile(2, 1)));
-    l.move_workspace_down();
-    assert_eq!(shape(&l), vec![vec![vec![tile(2, 1)]], vec![vec![t(1)]], vec![]]);
-    assert_eq!(l.active_workspace(), 1);
-    assert_eq!(l.focused(), Some(t(1)));
-    // Past the trailing one: a new trailing one, and the empty one left behind goes (niri).
-    l.move_workspace_down();
-    assert_eq!(shape(&l), vec![vec![vec![tile(2, 1)]], vec![vec![t(1)]], vec![]]);
-    assert_eq!(l.active_workspace(), 1);
-    l.move_workspace_up();
-    assert_eq!(shape(&l), vec![vec![vec![t(1)]], vec![vec![tile(2, 1)]], vec![]]);
-    assert_eq!(l.active_workspace(), 0);
-    l.move_workspace_up();
-    assert_eq!(l.active_workspace(), 0, "nothing above the first");
-}
-
 // ----- consume and expel --------------------------------------------------------------------
 
 #[test]
@@ -623,7 +570,7 @@ fn consume_or_expel_joins_a_lone_tile_to_its_neighbour_and_splits_a_stacked_one(
     // At the ends nothing happens.
     l.consume_or_expel_window_right();
     assert_eq!(shape(&l)[0], vec![vec![t(1)], vec![t(2)], vec![t(3)]]);
-    l.focus_column_first();
+    l.focus_column(0);
     l.consume_or_expel_window_left();
     assert_eq!(shape(&l)[0], vec![vec![t(1)], vec![t(2)], vec![t(3)]]);
 }
@@ -631,7 +578,7 @@ fn consume_or_expel_joins_a_lone_tile_to_its_neighbour_and_splits_a_stacked_one(
 #[test]
 fn consume_into_and_expel_from_the_focused_column() {
     let mut l = columns(3);
-    l.focus_column_first();
+    l.focus_column(0);
     l.consume_into_column();
     assert_eq!(shape(&l)[0], vec![vec![t(1), t(2)], vec![t(3)]]);
     assert_eq!(l.focused(), Some(t(1)), "the focus stays");
@@ -662,43 +609,28 @@ fn presets_cycle_both_ways_from_a_preset_and_from_any_width() {
     near(stored_width_of(&l, t(1)), THIRD);
     l.switch_preset_width(false);
     near(stored_width_of(&l, t(1)), TWO_THIRDS);
-    // From a width between presets.
-    l.set_width_delta(-10.0);
+    // From a width between presets, as a drag leaves it.
+    drag(&mut l, -128.0);
     let w = stored_width_of(&l, t(1));
     assert!(w > HALF && w < TWO_THIRDS, "{w}");
     l.switch_preset_width(false);
     near(stored_width_of(&l, t(1)), HALF);
-    l.set_width_delta(10.0);
+    drag(&mut l, 128.0);
     l.switch_preset_width(true);
     near(stored_width_of(&l, t(1)), TWO_THIRDS);
     // Backward from narrower than every preset: round to the widest.
     let mut l = columns(1);
-    l.set_width_delta(-100.0);
+    drag(&mut l, -5000.0);
     l.switch_preset_width(false);
     near(stored_width_of(&l, t(1)), TWO_THIRDS);
     assert_eq!(l.workspaces()[0].columns()[0].preset(), Some(2));
 }
 
-#[test]
-fn width_steps_clamp_and_turn_a_fixed_width_proportional() {
-    let mut l = columns(1);
-    l.set_width_delta(10.0);
-    near(stored_width_of(&l, t(1)), 1280.0 * 0.6);
-    l.set_width_delta(100.0);
-    near(stored_width_of(&l, t(1)), 1280.0);
-    l.set_width_delta(-200.0);
-    near(stored_width_of(&l, t(1)), 128.0);
-    assert_eq!(l.workspaces()[0].columns()[0].preset(), None);
-    // A fixed width (an interactive resize) steps from its proportion.
+/// Drag the divider right of the first column `dx` points.
+fn drag(l: &mut Layout, dx: f32) {
     l.resize_begin(0);
-    l.resize_update(372.0);
+    l.resize_update(dx);
     l.resize_end();
-    near(stored_width_of(&l, t(1)), 500.0);
-    assert_eq!(l.workspaces()[0].columns()[0].width(), ColumnWidth::Fixed(500.0));
-    l.set_width_delta(10.0);
-    let ColumnWidth::Proportion(p) = l.workspaces()[0].columns()[0].width() else { panic!() };
-    near(p, 500.0 / 1280.0 + 0.1);
-    near(stored_width_of(&l, t(1)), 500.0 + 128.0);
 }
 
 #[test]
@@ -732,7 +664,7 @@ fn fullscreen_fills_the_viewport_and_restores_the_view() {
     let mut l = columns(2);
     l.consume_or_expel_window_left();
     l.open(t(3), Placement::Local);
-    l.focus_column_first();
+    l.focus_column(0);
     l.focus_window_up();
     // [1, 2], [3]; focus on 1. Fullscreen takes it out of its column first.
     l.toggle_fullscreen();
@@ -747,7 +679,7 @@ fn fullscreen_fills_the_viewport_and_restores_the_view() {
     assert!(p.rect.x >= 0.0 && p.rect.right() <= 1280.0, "back in view: {p:?}");
     // A tile joining a fullscreen column ends its fullscreen.
     l.toggle_fullscreen();
-    l.focus_column_last();
+    l.focus_column(usize::MAX);
     l.consume_or_expel_window_left();
     assert!(!l.workspaces()[0].columns()[1].is_fullscreen());
     near(width_of(&l, t(3)), HALF);
@@ -765,39 +697,13 @@ fn fullscreen_on_and_off_puts_the_view_back_exactly() {
 }
 
 #[test]
-fn expand_and_centre_fill_and_balance_the_visible_space() {
-    let mut l = columns(2);
-    l.switch_preset_width(false);
-    // [640][427] visible; the active 427 takes what is free.
-    l.focus_column_first();
-    l.focus_column_right();
-    l.expand_to_available_width();
-    let (a, b) = (rect(&l, t(1)), rect(&l, t(2)));
-    near(a.x, 0.0);
-    near(b.right(), 1280.0);
-    near(b.x, a.right());
-    // Alone on screen: full width.
-    let mut l = columns(1);
-    l.expand_to_available_width();
-    near(width_of(&l, t(1)), 1280.0);
-    // Centre one column, then the visible pair.
+fn centring_puts_the_active_column_mid_view() {
     let mut l = columns(2);
     l.switch_preset_width(true);
     l.switch_preset_width(true);
     l.center_column();
     let r = rect(&l, t(2));
     near(r.x, (1280.0 - r.w) / 2.0);
-    let mut l = columns(2);
-    l.switch_preset_width(true);
-    l.switch_preset_width(true);
-    l.focus_column_left();
-    l.switch_preset_width(true);
-    l.switch_preset_width(true);
-    // Two thirds side by side: two thirds of the window, touching, centred.
-    l.center_visible_columns();
-    near(rect(&l, t(1)).x, (1280.0 - TWO_THIRDS) / 2.0);
-    near(rect(&l, t(2)).x, rect(&l, t(1)).right());
-    near(rect(&l, t(2)).right(), 1280.0 - (1280.0 - TWO_THIRDS) / 2.0);
 }
 
 #[test]
@@ -838,7 +744,7 @@ fn a_peeking_neighbour_is_cut_by_the_window_edge() {
 fn a_tabbed_column_shows_one_tile_at_full_height() {
     let mut l = columns(3);
     l.consume_or_expel_window_left();
-    l.focus_column_first();
+    l.focus_column(0);
     l.consume_into_column();
     l.consume_into_column();
     l.toggle_tabbed();
@@ -1045,7 +951,7 @@ fn a_lone_column_fills_the_width_and_keeps_its_own_for_a_neighbour() {
     l.open(t(2), Placement::Local);
     near(width_of(&l, t(1)), TWO_THIRDS);
     near(rect(&l, t(2)).right(), 1280.0);
-    l.focus_column_first();
+    l.focus_column(0);
     l.remove(t(2));
     fills(&l);
     // A second workspace's lone column fills its own strip.
@@ -1168,7 +1074,7 @@ fn the_overview_centres_a_strip_that_fits() {
 #[test]
 fn the_overview_fills_the_window_with_a_strip_wider_than_it() {
     let mut l = columns(9);
-    l.focus_column_first();
+    l.focus_column(0);
     let before = view_pos(&l);
     l.set_overview(true);
     let panel = l.frame().workspaces[0].1;
@@ -1180,7 +1086,7 @@ fn the_overview_fills_the_window_with_a_strip_wider_than_it() {
     near(view_pos(&l), before);
 
     l.set_overview(false);
-    l.focus_column_last();
+    l.focus_column(usize::MAX);
     l.set_overview(true);
     let (first, last) = (rect(&l, t(1)), rect(&l, t(9)));
     assert!(last.right() <= 1280.0 && last.right() > 0.95 * 1280.0, "{last:?}");
@@ -1279,7 +1185,7 @@ fn moving_a_tile_to_a_drop_target() {
 #[test]
 fn dragging_to_the_edge_scrolls_the_strip_after_a_delay() {
     let mut l = columns(4);
-    l.focus_column_first();
+    l.focus_column(0);
     near(view_pos(&l), 0.0);
     l.set_clock(MS(1000));
     assert!(!l.dnd_edge_scroll(640.0), "the middle does not scroll");
@@ -1330,14 +1236,14 @@ fn swipe(l: &mut Layout, start: u64, total: f32, steps: u16, every: u64, release
 #[test]
 fn a_slow_drag_snaps_to_the_nearest_column_edge() {
     let mut l = columns(3);
-    l.focus_column_first();
+    l.focus_column(0);
     // Not far enough: the view goes back, and the focus goes the way of the drag to the
     // furthest column fully in view (niri).
     swipe(&mut l, 0, 200.0, 10, 100, 1300);
     l.set_clock(MS(5000));
     near(view_pos(&l), 0.0);
     assert_eq!(active_col(&l), 1);
-    l.focus_column_first();
+    l.focus_column(0);
     // Most of the way to the end snap: there, the last column focused.
     swipe(&mut l, 6000, 400.0, 10, 100, 7300);
     l.set_clock(MS(10_000));
@@ -1353,7 +1259,7 @@ fn a_fling_carries_further_than_the_fingers_went() {
         l.open(t(i), Placement::Local);
     }
     l.set_clock(MS(1000));
-    l.focus_column_first();
+    l.focus_column(0);
     l.set_clock(MS(3000));
     near(view_pos(&l), 0.0);
     // 100 pt in 50 ms: 2500 pt/s, about 830 pt more.
@@ -1465,11 +1371,11 @@ fn a_retargeted_view_keeps_its_place_and_its_speed() {
     }
     l.set_clock(MS(2000));
     near(view_pos(&l), 640.0);
-    l.focus_column_first();
+    l.focus_column(0);
     l.set_clock(MS(2050));
     let before = view_pos(&l);
     assert!(before < 640.0 && before > 0.0, "{before}");
-    l.focus_column_last();
+    l.focus_column(usize::MAX);
     near(view_pos(&l), before);
     // Still heading left for a moment: the speed carried over.
     l.set_clock(MS(2055));
@@ -1485,7 +1391,7 @@ fn view_springs_run_niris_critically_damped_curve() {
         l.open(t(i), Placement::Local);
     }
     l.set_clock(MS(2000));
-    l.focus_column_first();
+    l.focus_column(0);
     let spring = Spring { from: 640.0, to: 0.0, initial_velocity: 0.0, params: view_spring() };
     for ms in [0_u64, 16, 50, 100, 200, 300] {
         l.set_clock(MS(2000 + ms));
@@ -1552,7 +1458,7 @@ fn opening_fades_in_and_closing_fades_out() {
 #[test]
 fn without_animation_everything_lands_at_once() {
     let mut l = columns(3);
-    l.focus_column_first();
+    l.focus_column(0);
     l.move_column_right();
     l.set_overview(true);
     near(l.frame().zoom, OVERVIEW_TWO);
@@ -1582,7 +1488,7 @@ fn the_target_rect_is_where_a_springing_tile_comes_to_rest() {
     l.open(t(1), Placement::Local);
     l.open(t(2), Placement::Local);
     l.set_clock(MS(1000));
-    l.focus_column_first();
+    l.focus_column(0);
     l.switch_preset_width(true);
     l.set_clock(MS(1050));
     let p = placed(&l, t(1));
@@ -1715,7 +1621,7 @@ fn save_and_restore_round_trip_through_json() {
     l.consume_or_expel_window_left();
     l.toggle_tabbed();
     l.switch_preset_width(true);
-    l.focus_column_first();
+    l.focus_column(0);
     l.toggle_full_width();
     l.open(tile(2, 1), from_its_machine(tile(2, 1)));
     l.set_workspace_name(1, Some("remote".to_owned()));
@@ -1828,15 +1734,14 @@ fn every_action_is_safe_on_an_empty_layout() {
     let mut l = moving();
     l.focus_column_left();
     l.focus_column_right();
-    l.focus_column_first();
-    l.focus_column_last();
+    l.focus_column(0);
+    l.focus_column(usize::MAX);
     l.focus_window_up();
     l.focus_window_down();
     l.focus_window_or_workspace_up();
     l.focus_window_or_workspace_down();
     l.focus_workspace_up();
     l.focus_workspace_down();
-    l.focus_workspace_previous();
     l.move_column_left();
     l.move_column_right();
     l.move_column_to_first();
@@ -1845,23 +1750,15 @@ fn every_action_is_safe_on_an_empty_layout() {
     l.move_window_down();
     l.move_window_up_or_to_workspace_up();
     l.move_window_down_or_to_workspace_down();
-    l.move_column_to_workspace_up();
-    l.move_column_to_workspace_down();
-    l.move_column_to_workspace(3);
     l.focus_workspace(3);
-    l.move_workspace_up();
-    l.move_workspace_down();
     l.consume_or_expel_window_left();
     l.consume_or_expel_window_right();
     l.consume_into_column();
     l.expel_from_column();
     l.switch_preset_width(true);
-    l.set_width_delta(10.0);
     l.toggle_full_width();
     l.toggle_fullscreen();
-    l.expand_to_available_width();
     l.center_column();
-    l.center_visible_columns();
     l.toggle_tabbed();
     l.view_gesture_begin();
     l.view_gesture_update(10.0, MS(1));
@@ -1913,8 +1810,8 @@ fn the_view_never_rests_past_the_last_column() {
     l.set_viewport(2000.0, 800.0);
     near(strip_right(&l), 2000.0);
     l.set_viewport(1280.0, 800.0);
-    l.focus_column_first();
-    l.focus_column_last();
+    l.focus_column(0);
+    l.focus_column(usize::MAX);
     l.open(t(4), Placement::Local);
     l.focus_column_left();
     l.remove(t(4));

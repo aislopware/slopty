@@ -299,16 +299,15 @@ impl WorkspaceView {
         }
     }
 
-    /// Now, as a running readout counts it (a command's time, an agent's turn): the last tick,
+    /// Now, as a running readout counts it (a command's time): the last tick,
     /// a second at most behind the clock. Built from the clock itself, a readout drawn from
     /// the last frame would show the second it was built in, and one built again another.
     pub(super) const fn ticked(&self) -> Option<(Instant, u64)> {
         self.facts.ticked
     }
 
-    /// Keep the readouts' clock moving, once a second, while a command runs or an agent works,
-    /// each tick news for the views that count: the strip's headers, the navigator's rows and
-    /// the status bar.
+    /// Keep the readouts' clock moving, once a second, while a command runs, each tick news for
+    /// the views that count: the strip's headers, the navigator's rows and the status bar.
     pub(super) fn keep_time(&mut self, cx: &Context<Self>) {
         if self.facts.ticking || !self.readouts_run() {
             return;
@@ -335,8 +334,7 @@ impl WorkspaceView {
     }
 
     /// Move the readouts' clock to now, and tell the views that show a count: the navigator for
-    /// an agent's turn or a command's time, the strip for a header's, the status bar for the
-    /// focused shell's.
+    /// a command's time, the strip for a header's, the status bar for the focused shell's.
     pub(super) fn tick_readouts(&mut self, cx: &mut Context<Self>) {
         self.facts.ticked = Some(Self::readout_now());
         let counting = |session: &SessionId| self.running_for(*session).is_some();
@@ -344,10 +342,8 @@ impl WorkspaceView {
         let focused = self.focused().and_then(|tile| self.item(tile)).is_some_and(|item| {
             matches!(&item.kind, slopty_proto::items::ItemKind::Terminal { session } if counting(session))
         });
-        if shells || self.agents_work() {
-            App::notify(cx, self.chrome.nav_rows.entity_id());
-        }
         if shells {
+            App::notify(cx, self.chrome.nav_rows.entity_id());
             App::notify(cx, self.strip_host.entity_id());
         }
         if focused {
@@ -360,20 +356,9 @@ impl WorkspaceView {
         (Instant::now(), slopty_core::WallMs::now().as_millis())
     }
 
-    /// Whether an agent works, which its navigator row counts.
-    fn agents_work(&self) -> bool {
-        self.agents.values().any(|agent| {
-            matches!(
-                agent.status,
-                slopty_proto::agent::AgentStatus::Working
-                    | slopty_proto::agent::AgentStatus::Tool { .. }
-            )
-        })
-    }
-
-    /// Whether a readout counts: a command runs, or an agent works.
+    /// Whether a readout counts: a command runs.
     fn readouts_run(&self) -> bool {
-        self.facts.shells.values().any(|shell| shell.running.is_some()) || self.agents_work()
+        self.facts.shells.values().any(|shell| shell.running.is_some())
     }
 
     /// Forget the facts of bodies no longer kept.

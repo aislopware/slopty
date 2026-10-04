@@ -527,6 +527,8 @@ now being a tile.
   only that shell's commands are offered, since the line runs there, and a canvas without a
   shell lists none. Tests: `recent_commands` in the prompt-navigation unit test and
   headless `the_palette_reruns_a_recent_command`.
+  (Superseded 2026-10-04: the "Rerun <command>" lines are gone, see workspace.md "The
+  palette no longer reruns commands".)
 
 - ✅ **A directory typed into the palette opens a shell or a conversation there**
   (2026-09-13). A new terminal inherits the active card's directory and, with none, the

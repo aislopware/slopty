@@ -28,7 +28,7 @@ use slopty_settings::KeySettings;
 
 use self::chord::Chord;
 pub use self::chord::ChordError;
-use crate::workspace::{actions as ws, inbox_actions as ib};
+use crate::workspace::actions as ws;
 
 mod chord;
 
@@ -53,18 +53,15 @@ pub enum Scope {
     Search,
     /// A project's board.
     Project,
-    /// The inbox, while it is up.
-    Inbox,
 }
 
 impl Scope {
     /// Every scope, in the order the Keyboard page lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 9] = [
         Self::App,
         Self::Workspace,
         Self::Terminal,
         Self::Conversation,
-        Self::Inbox,
         Self::Project,
         Self::File,
         Self::Folder,
@@ -85,16 +82,15 @@ impl Scope {
             Self::Folder => "folder",
             Self::Search => "search",
             Self::Project => "project",
-            Self::Inbox => "inbox",
         }
     }
 
-    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows, a board's and the
-    /// inbox's hold no text, so bare keys walk them. Elsewhere a key alone is typed into the
+    /// Whether a key alone (an arrow, ↩) is a chord here: a folder's rows and a board's hold no
+    /// text, so bare keys walk them. Elsewhere a key alone is typed into the
     /// terminal or a field, and a chord carries ⌘ or ⌃ (or is an F key).
     #[must_use]
     pub const fn takes_bare_keys(self) -> bool {
-        matches!(self, Self::Folder | Self::Project | Self::Inbox)
+        matches!(self, Self::Folder | Self::Project)
     }
 
     fn named(name: &str) -> Option<Self> {
@@ -225,7 +221,7 @@ const FILE_SYMBOLS: Option<&str> = Some(crate::file::SYMBOLS_CTX);
 /// A file tile showing a PDF's pages: they hold no text to type into, so bare keys scroll them.
 const FILE_PAGES: Option<&str> = Some("FileEditor && FilePages");
 /// Contexts with no text field in them, where a key alone cannot be wanted for typing.
-const TEXTLESS: [Option<&str>; 4] = [FILE_PAGES, FOLDER, BOARD, INBOX];
+const TEXTLESS: [Option<&str>; 3] = [FILE_PAGES, FOLDER, BOARD];
 /// A conversation face, and its composer, where the keyboard sits in a face.
 const FACE: Option<&str> = Some(crate::conversation::CTX);
 const FACE_INPUT: Option<&str> = Some("Conversation > Input");
@@ -235,8 +231,6 @@ const THREAD_INPUT: Option<&str> = Some("ThreadComposer > Input");
 const FOLDER: Option<&str> = Some(crate::folder::CTX);
 /// A project's board: its rows hold no text, so bare keys walk them.
 const BOARD: Option<&str> = Some(crate::project::CTX);
-/// The inbox's list, as a board's: bare keys work its rows.
-const INBOX: Option<&str> = Some(crate::workspace::INBOX_CTX);
 /// Search in files, its fields holding the keyboard.
 const SEARCH: Option<&str> = Some(crate::search::CTX);
 /// A tile's window of its own: its picture takes every chord but the one that puts it back.
@@ -245,7 +239,7 @@ const POP_OUT: Option<&str> = Some(ws::POP_OUT_CTX);
 /// own fields.
 const PAGE: Option<&str> = Some("Workspace && Page && !Screen");
 /// A page that holds the keyboard: its edit keys are the page's, before the workspace's
-/// (⌘Z is "Undo close" there).
+/// (⌘Z is "Undo close" there while a closed tile's notice is up).
 const PAGE_HELD: Option<&str> = Some("PageBody > NativeView");
 /// A page's find bar (Esc is the bar's own).
 const PAGE_SEARCH: Option<&str> = Some("PageSearch");
@@ -254,6 +248,8 @@ const TERMINAL: Option<&str> = Some("Terminal");
 const TERMINAL_SEARCH: Option<&str> = Some("TerminalSearch");
 
 const W: &[Option<&str>] = &[CTX];
+/// The workspace while a closed tile's notice is up ([`ws::CLOSING_CTX`]).
+const CLOSING: Option<&str> = Some("Workspace && ClosingOffered && !Screen");
 const APP: &[Option<&str>] = &[None];
 
 /// Every command of the table, in the order they bind.
@@ -263,9 +259,9 @@ const APP: &[Option<&str>] = &[None];
 #[must_use]
 #[expect(clippy::too_many_lines, reason = "the one table of every default chord")]
 pub fn defaults() -> Vec<Command> {
-    use Scope::{Conversation, File, Folder, Inbox, Page, Project, Search, Terminal, Workspace};
+    use Scope::{Conversation, File, Folder, Page, Project, Search, Terminal, Workspace};
 
-    use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage, SendLater};
+    use crate::conversation::{CycleDensity, CycleEffort, EditLastQueued, Interrupt, QueueMessage};
     use crate::terminal as t;
 
     fn c(
@@ -287,12 +283,11 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "open_url", ws::OpenUrl, &[], W),
         c(Workspace, "open_last_offer", ws::OpenLastOffer, &[], W),
         c(Workspace, "discard_old_unsaved", ws::DiscardOldUnsaved, &[], W),
-        c(Workspace, "about", ws::About, &[], W),
         c(Workspace, "save_copy", ws::SaveCopy, &[], W),
         c(Workspace, "close_tile", ws::CloseItem, &["cmd-w"], W),
-        c(Workspace, "undo_close", ws::UndoClose, &["cmd-z"], W),
+        c(Workspace, "undo_close", ws::UndoClose, &["cmd-z"], &[CLOSING]),
         c(Workspace, "next_attention", ws::NextAttention, &["cmd-shift-a"], W),
-        c(Workspace, "toggle_inbox", ws::ToggleInbox, &["cmd-shift-u"], W),
+        c(Workspace, "show_needs_you", ws::ShowNeedsYou, &["cmd-shift-u"], W),
         c(Workspace, "filter_navigator", ws::FilterNavigator, &["cmd-shift-e"], W),
         c(Workspace, "toggle_mute", ws::ToggleMute, &["cmd-shift-m"], W),
         c(Workspace, "toggle_stats", ws::ToggleStats, &["cmd-shift-i"], W),
@@ -329,10 +324,8 @@ pub fn defaults() -> Vec<Command> {
             &["ctrl-cmd-shift-i"],
             &[REMOTE],
         ),
-        c(Workspace, "list_workers", ws::ListWorkers, &[], W),
         c(Workspace, "list_ports", ws::ListPorts, &[], W),
         c(Workspace, "rename_tile", ws::RenameItem, &["cmd-e"], W),
-        c(Workspace, "point_others", ws::PointOthers, &["cmd-shift-o"], W),
         c(Workspace, "find_everywhere", ws::FindEverywhere, &["cmd-shift-f"], &[CTX, INPUT]),
         c(Workspace, "search_in_files", ws::SearchInFiles, &["cmd-alt-f"], &[CTX, FILE_INPUT]),
         c(Workspace, "focus_column_left", ws::FocusColumnLeft, &["cmd-alt-left"], W),
@@ -343,43 +336,18 @@ pub fn defaults() -> Vec<Command> {
         c(Workspace, "move_column_right", ws::MoveColumnRight, &["cmd-alt-shift-right"], W),
         c(Workspace, "move_up", ws::MoveUp, &["cmd-alt-shift-up"], W),
         c(Workspace, "move_down", ws::MoveDown, &["cmd-alt-shift-down"], W),
-        // niri's Mod+Home/End and Mod+Ctrl+Home/End; ⇧ stands for niri's Ctrl, as on the arrows.
-        c(Workspace, "focus_column_first", ws::FocusColumnFirst, &["cmd-alt-home"], W),
-        c(Workspace, "focus_column_last", ws::FocusColumnLast, &["cmd-alt-end"], W),
+        // niri's Mod+Ctrl+Home/End; ⇧ stands for niri's Ctrl, as on the arrows.
         c(Workspace, "move_column_to_first", ws::MoveColumnToFirst, &["cmd-alt-shift-home"], W),
         c(Workspace, "move_column_to_last", ws::MoveColumnToLast, &["cmd-alt-shift-end"], W),
-        // The page keys are the workspace level: ⇧ moves the workspace itself, ⌃ carries the
-        // column to the next one (niri's Mod+Shift and Mod+Ctrl on Page Up/Down).
+        // The page keys are the workspace level (niri's Mod on Page Up/Down).
         c(Workspace, "focus_workspace_up", ws::FocusWorkspaceUp, &["cmd-alt-pageup"], W),
         c(Workspace, "focus_workspace_down", ws::FocusWorkspaceDown, &["cmd-alt-pagedown"], W),
-        c(Workspace, "move_workspace_up", ws::MoveWorkspaceUp, &["cmd-alt-shift-pageup"], W),
-        c(Workspace, "move_workspace_down", ws::MoveWorkspaceDown, &["cmd-alt-shift-pagedown"], W),
-        c(
-            Workspace,
-            "move_column_to_workspace_up",
-            ws::MoveColumnToWorkspaceUp,
-            &["ctrl-cmd-alt-pageup"],
-            W,
-        ),
-        c(
-            Workspace,
-            "move_column_to_workspace_down",
-            ws::MoveColumnToWorkspaceDown,
-            &["ctrl-cmd-alt-pagedown"],
-            W,
-        ),
-        c(Workspace, "focus_workspace_previous", ws::FocusWorkspacePrevious, &["cmd-alt-`"], W),
         c(Workspace, "consume_or_expel_left", ws::ConsumeOrExpelLeft, &["cmd-["], W),
         c(Workspace, "consume_or_expel_right", ws::ConsumeOrExpelRight, &["cmd-]"], W),
         c(Workspace, "cycle_width", ws::CycleWidth, &["cmd-r"], W),
-        c(Workspace, "cycle_width_back", ws::CycleWidthBack, &["cmd-shift-r"], W),
-        c(Workspace, "narrow_column", ws::NarrowColumn, &["cmd-alt--"], W),
-        c(Workspace, "widen_column", ws::WidenColumn, &["cmd-alt-="], W),
         c(Workspace, "maximize_column", ws::MaximizeColumn, &["cmd-shift-enter"], W),
         c(Workspace, "fullscreen_tile", ws::FullscreenTile, &["ctrl-cmd-f"], W),
         c(Workspace, "center_column", ws::CenterColumn, &["cmd-alt-c"], W),
-        c(Workspace, "center_visible_columns", ws::CenterVisibleColumns, &["cmd-alt-shift-c"], W),
-        c(Workspace, "expand_column", ws::ExpandColumn, &["cmd-alt-shift-f"], W),
         c(Workspace, "toggle_tabbed", ws::ToggleTabbed, &["cmd-alt-t"], W),
         c(Workspace, "toggle_overview", ws::ToggleOverview, &["cmd-alt-o"], W),
         c(Workspace, "font_larger", ws::FontLarger, &["cmd-=", "cmd-shift-="], W),
@@ -400,23 +368,13 @@ pub fn defaults() -> Vec<Command> {
             W,
         ));
     }
-    // niri's Mod+N and Mod+Ctrl+N. ⌘N is the column here, and ⇧ on a digit reaches the app as
-    // its symbol on most layouts, so the column's carry takes ⌃.
+    // niri's Mod+N: ⌘N is the column here.
     for (index, key) in ('1'..='9').enumerate() {
         out.push(Command::new(
             Workspace,
             format!("focus_workspace_{key}"),
             ws::FocusWorkspace { index },
             &[format!("cmd-alt-{key}").as_str()],
-            W,
-        ));
-    }
-    for (index, key) in ('1'..='9').enumerate() {
-        out.push(Command::new(
-            Workspace,
-            format!("move_column_to_workspace_{key}"),
-            ws::MoveColumnToWorkspace { index },
-            &[format!("ctrl-cmd-alt-{key}").as_str()],
             W,
         ));
     }
@@ -431,7 +389,7 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "interrupt", Interrupt, &["escape"], &[FACE]),
         c(Conversation, "queue_message", QueueMessage, &["cmd-enter"], &[THREAD_INPUT]),
         c(Conversation, "edit_last_queued", EditLastQueued, &["alt-up"], &[THREAD_INPUT]),
-        c(Conversation, "send_later", SendLater, &[], &[THREAD_INPUT]),
+        c(Conversation, "cycle_effort", CycleEffort, &[], &[FACE]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
         c(Conversation, "find", t::Find, &["cmd-f"], &[FACE, FACE_INPUT]),
@@ -474,7 +432,7 @@ pub fn defaults() -> Vec<Command> {
             &[FILE_SEARCH],
         ),
         c(File, "toggle_regex", crate::search::ToggleRegex, &["cmd-alt-r"], &[FILE_SEARCH]),
-        // Zed's and VS Code's outline key; in the editor it is over "Point other devices".
+        // Zed's and VS Code's outline key.
         c(File, "go_to_symbol", crate::file::GoToSymbol, &["cmd-shift-o"], &[FILE_TEXT]),
         // Sublime's, Zed's and VS Code's keys for more selections from the selected text.
         c(
@@ -518,17 +476,6 @@ pub fn defaults() -> Vec<Command> {
         c(Folder, "select_last", crate::folder::SelectLast, &["end"], &[FOLDER]),
         c(Folder, "open", crate::folder::OpenSelected, &["enter"], &[FOLDER]),
         c(Folder, "open_parent", crate::folder::OpenParent, &["backspace", "cmd-up"], &[FOLDER]),
-        // The inbox, worked as Linear's is: the arrows or J/K walk it, ↩ goes, E is done, H
-        // snoozes, U is unread again, ⌘↵ and ⌘⌫ answer a held prompt.
-        c(Inbox, "select_next", ib::SelectNext, &["down", "j"], &[INBOX]),
-        c(Inbox, "select_previous", ib::SelectPrevious, &["up", "k"], &[INBOX]),
-        c(Inbox, "open", ib::Open, &["enter"], &[INBOX]),
-        c(Inbox, "mark_done", ib::MarkDone, &["e"], &[INBOX]),
-        c(Inbox, "snooze", ib::Snooze, &["h"], &[INBOX]),
-        c(Inbox, "mark_unread", ib::MarkUnread, &["u"], &[INBOX]),
-        c(Inbox, "allow", ib::Allow, &["cmd-enter"], &[INBOX]),
-        c(Inbox, "deny", ib::Deny, &["cmd-backspace"], &[INBOX]),
-        c(Inbox, "close", ib::Close, &["escape"], &[INBOX]),
         // A board: the arrows walk its rows, ↩ opens one's agent, the digits pick a lens.
         c(Project, "select_previous", crate::project::SelectPrevious, &["up", "k"], &[BOARD]),
         c(Project, "select_next", crate::project::SelectNext, &["down", "j"], &[BOARD]),

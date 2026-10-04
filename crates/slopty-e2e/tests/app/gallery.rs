@@ -2,8 +2,8 @@
 //! golden: the first run, the panels that add a worker, a workspace of columns in both themes,
 //! the overview, the palette, the settings, the "…" menu, the empty workspace, an agent that
 //! needs the human (on its tile and in the navigator), a remote tile, an upload and a forwarded
-//! port, the inbox, and a failed command block; the first run, the navigator, the inbox and the
-//! failed block dark as well, and the navigator once under Increase Contrast.
+//! port, and a failed command block; the first run, the navigator and the failed block dark as
+//! well, and the navigator once under Increase Contrast.
 //!
 //! A golden passes or fails on its numbers. The tolerance is blind to a word of chrome text
 //! (`docs/decisions/ui.md`), so each scenario also asserts the chrome it shows through the
@@ -588,11 +588,11 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
     stack.shutdown().await;
 }
 
-/// A port a shell listens on, and a file on its way up: the chip and the upload on the
-/// tiles they belong to.
+/// A port a shell listens on, and a file on its way up: the port counted in the status bar,
+/// the upload on the tile it belongs to.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
+async fn a_forwarded_port_and_an_upload_show_where_they_belong() {
     // A home of the run's own: the shells name the directory under it from `~`, so no
     // temporary path of the machine's is in the render.
     let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
@@ -647,12 +647,7 @@ async fn a_forwarded_port_and_an_upload_show_on_their_tiles() {
         })
         .await
         .unwrap();
-    assert!(
-        dump.a11y.iter().any(|n| n.role == "Link"
-            && n.label.as_deref() == Some(&*format!("Open port {port} in the browser"))),
-        "{:#?}",
-        dump.a11y
-    );
+    assert!(dump.a11y_node("Button", Some("1 port")).is_some(), "{:#?}", dump.a11y);
     let frame = drv.render(&dir.join("transfers.png")).await.unwrap();
     assert_matches("transfers", &frame, TOLERANCE, &artifacts_dir()).unwrap();
     let cancel = drv.dump().await.unwrap();
@@ -694,70 +689,6 @@ async fn a_remote_window_waits_in_its_chrome() {
         .unwrap();
     assert!(dump.a11y_node("Heading", Some("window Safari")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "remote-window").await;
-    stack.shutdown().await;
-}
-
-/// The bell's inbox as a mailbox: an agent waiting on a permission and a long command that
-/// finished while the human was in another column, each a two-line row naming its worker and
-/// directory, under the Unread and All views.
-#[tokio::test]
-#[ignore = "live: cargo xtask e2e app"]
-async fn the_inbox_lists_what_waits_and_what_finished() {
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
-    let dir = stack.dir.path().to_path_buf();
-    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
-    let first = first_shell(&mut stack.driver).await.terminals[0].session.clone();
-    let drv = &mut stack.driver;
-    drv.type_text("sleep 6").await.unwrap();
-    drv.keys("enter").await.unwrap();
-    drv.keys("cmd-n").await.unwrap();
-    let dump = drv.wait_for("a second shell", STEP, |d| d.terminals.len() == 2).await.unwrap();
-    let second = dump.terminals.iter().find(|t| t.session != first).unwrap().session.clone();
-    drv.wait_for("the sleep to finish unwatched", STEP + Duration::from_secs(8), |d| {
-        d.a11y.iter().any(|n| {
-            n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Done · "))
-        })
-    })
-    .await
-    .unwrap();
-    stack.play_hook(&second, "PermissionRequest", r#","tool_name":"Bash""#).await.unwrap();
-    let drv = &mut stack.driver;
-    let dump = drv
-        .wait_for("the agent blocked", STEP, |d| {
-            d.workers.iter().map(|w| w.needs_you).sum::<usize>() == 1 && asked_in_its_thread(d)
-        })
-        .await
-        .unwrap();
-    let [x, y, w, h] = dump.a11y_node("Button", Some("Inbox")).expect("the bell").bounds;
-    drv.click(x + w / 2.0, y + h / 2.0).await.unwrap();
-    let dump = drv
-        .wait_for("the inbox", STEP, |d| d.a11y_node("Dialog", Some("Inbox")).is_some())
-        .await
-        .unwrap();
-    for heading in ["Needs you", "Finished"] {
-        assert!(dump.a11y_node("Heading", Some(heading)).is_some(), "{heading}: {:#?}", dump.a11y);
-    }
-    for tab in ["Unread", "All"] {
-        assert!(dump.a11y_node("Tab", Some(tab)).is_some(), "{tab}: {:#?}", dump.a11y);
-    }
-    assert!(
-        dump.a11y
-            .iter()
-            .any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("sleep 6 · Done"))),
-        "{:#?}",
-        dump.a11y
-    );
-    // The pointer leaves the bell, so the golden holds the inbox at rest.
-    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-    golden(drv, &dir, "inbox").await;
-    stack.set_appearance("dark").unwrap();
-    let drv = &mut stack.driver;
-    drv.wait_for("the dark inbox", STEP, |d| {
-        d.dark && d.a11y_node("Dialog", Some("Inbox")).is_some()
-    })
-    .await
-    .unwrap();
-    golden(drv, &dir, "inbox-dark").await;
     stack.shutdown().await;
 }
 

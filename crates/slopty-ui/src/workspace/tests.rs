@@ -1071,7 +1071,8 @@ fn a_busy_shell_closes_only_when_confirmed(cx: &mut TestAppContext) {
 }
 
 /// ⌘W on an idle shell takes its tile off but keeps the session for the undo window; ⌘Z puts
-/// it back where it was, the same view, focused. After the window the session goes.
+/// it back where it was, the same view, focused, but only while the notice is up. After the
+/// window the session goes.
 #[gpui::test]
 fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1118,6 +1119,9 @@ fn a_closed_shell_can_be_taken_back(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!closed(&fake.drain()), "an idle shell runs on past its notice");
     assert!(cx.debug_bounds("closed").is_none(), "the notice is gone");
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.layout().contains(second)), "and ⌘Z with it");
     cx.executor().advance_clock(IDLE_SHELL_KEPT);
     cx.run_until_parked();
     assert!(closed(&fake.drain()), "then the worker closes it");
@@ -1564,24 +1568,15 @@ fn the_servers_word_leads_the_status_bar(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("server-status").is_none(), "gone once the server answers");
 }
 
-/// "List workers" lists each worker with its state, and going to one without a tile asks it
-/// for a shell.
+/// The palette's line for each worker says its state, and going to one without a tile asks
+/// it for a shell.
 #[gpui::test]
-fn the_worker_list_goes_to_a_worker(cx: &mut TestAppContext) {
+fn the_worker_line_goes_to_a_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
-    view.update_in(cx, |v, window, cx| v.list_workers(&ListWorkers, window, cx));
-    cx.run_until_parked();
-    let lines = view.read_with(cx, |v, cx| {
-        v.palette.as_ref().map(|p| {
-            p.read(cx)
-                .matches()
-                .iter()
-                .map(|l| (l.label.clone(), l.keys.clone()))
-                .collect::<Vec<_>>()
-        })
-    });
-    assert_eq!(lines, Some(vec![("studio".to_owned(), String::new())]), "up: no word");
+    let lines =
+        view.read_with(cx, |v, _| v.worker_lines().map(|l| (l.label, l.keys)).collect::<Vec<_>>());
+    assert_eq!(lines, [("studio".to_owned(), String::new())], "up: no word");
     studio.drain();
     view.update_in(cx, |v, _w, cx| v.go_to_worker(studio.key, cx));
     cx.run_until_parked();
@@ -1627,6 +1622,7 @@ mod attach_block;
 mod away;
 mod bars;
 mod bodies;
+mod companions;
 mod cwd;
 mod desktop;
 mod faces;
@@ -1640,9 +1636,11 @@ mod leaks;
 mod measure;
 mod menus;
 mod miniatures;
+mod modal_focus;
 mod nav_list;
 mod nav_projects;
 mod nav_rows;
+mod needs_you;
 mod niri_keys;
 mod no_workers;
 mod overlays;
@@ -1669,7 +1667,6 @@ mod thread_waits;
 mod tiles;
 mod toasts;
 mod touch;
-mod triage;
 mod unsaved;
 
 /// A worker that comes up with nothing on it is given a shell beside the rest, and the focus

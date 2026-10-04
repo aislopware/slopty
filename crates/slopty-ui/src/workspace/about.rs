@@ -1,4 +1,4 @@
-//! Slopty's mark, live, and the About panel it leads.
+//! Slopty's mark, live, over the empty workspace.
 //!
 //! The mark is a prompt on the aislopware grid: nine circles of one size, the chevron `>` lit
 //! at (column, row) (0,0), (1,1) and (0,2), the cursor at (2,2), the rest unlit (set back to
@@ -10,14 +10,12 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Task, Window, div, px,
+    Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, Styled as _, Task,
+    Window, div, px,
 };
-use slopty_theme::{Motion, Theme, Typography};
+use slopty_theme::{Motion, Theme};
 
 use super::WorkspaceView;
-use super::actions::About;
 use crate::colors::{hsla, hsla_alpha};
 use crate::kit;
 
@@ -26,34 +24,15 @@ const CHEVRON: [(usize, usize); 3] = [(0, 0), (1, 1), (0, 2)];
 /// The cursor's dot, on the baseline after the chevron.
 const CURSOR: (usize, usize) = (2, 2);
 
-/// The widest the About panel grows.
-const ABOUT_W: f32 = 320.0;
-
-/// How large a mark is drawn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MarkSize {
-    /// Above the empty workspace's hint: 8 pt dots.
-    Page,
-    /// Leading the About panel: 16 pt dots.
-    Panel,
-}
-
-impl MarkSize {
-    /// A dot's side and the gap between two, from the spacing scale: a dot twice its gap, as the
-    /// mark's art has them.
-    const fn dot_and_gap(self, theme: &Theme) -> (f32, f32) {
-        let s = theme.spacing;
-        match self {
-            Self::Page => (s.sm, s.xs),
-            Self::Panel => (s.lg, s.sm),
-        }
-    }
+/// A dot's side and the gap between two, from the spacing scale: a dot twice its gap, as the
+/// mark's art has them.
+const fn dot_and_gap(theme: &Theme) -> (f32, f32) {
+    (theme.spacing.sm, theme.spacing.xs)
 }
 
 /// The mark as a view: nine dots and a cursor with a clock.
 pub struct Mark {
     theme: Theme,
-    size: MarkSize,
     /// The prefix of its debug selectors: `<name>-mark`, `<name>-cursor`.
     name: &'static str,
     /// A worker is reachable: the cursor is lit (and blinks).
@@ -63,13 +42,15 @@ pub struct Mark {
     /// Drawn since the clock last ticked: a mark no longer drawn stops its clock.
     drawn: bool,
     blink: Option<Task<()>>,
+    /// How often Dot, beside the page's mark, was clicked: each is one hop.
+    pets: u32,
 }
 
 impl Mark {
-    /// A mark of `size`, lit while `lit`.
+    /// A mark, lit while `lit`.
     #[must_use]
-    pub const fn new(theme: Theme, size: MarkSize, name: &'static str, lit: bool) -> Self {
-        Self { theme, size, name, lit, on: true, drawn: false, blink: None }
+    pub const fn new(theme: Theme, name: &'static str, lit: bool) -> Self {
+        Self { theme, name, lit, on: true, drawn: false, blink: None, pets: 0 }
     }
 
     /// Whether a worker is reachable.
@@ -140,7 +121,7 @@ impl Render for Mark {
         self.blink_if_due(cx);
         let brand = self.theme.surfaces.brand;
         let (lit, unlit) = (hsla(brand), hsla_alpha(brand, self.theme.brand_unlit()));
-        let (side, gap) = self.size.dot_and_gap(&self.theme);
+        let (side, gap) = dot_and_gap(&self.theme);
         let cursor = self.cursor_lit();
         let name = self.name;
         let rows = (0..3).map(|row| {
@@ -155,158 +136,40 @@ impl Render for Mark {
                     .when(at == CURSOR, |el| el.debug_selector(move || format!("{name}-cursor")))
             }))
         });
+        let pet = cx.listener(|this: &mut Self, _ev: &gpui::ClickEvent, _w, cx| {
+            this.pets = this.pets.wrapping_add(1);
+            cx.notify();
+        });
+        let dot = crate::companions::beside_mark(&self.theme, cursor, self.pets, pet);
         div()
             .debug_selector(move || format!("{name}-mark"))
+            .relative()
             .flex_none()
             .flex()
             .flex_col()
             .gap(px(gap))
             .children(rows)
-    }
-}
-
-/// The About panel while it is open.
-#[derive(Clone, PartialEq)]
-pub(super) struct AboutPanel {
-    mark: Entity<Mark>,
-    focus: FocusHandle,
-}
-
-impl AboutPanel {
-    /// The panel's mark.
-    #[cfg(test)]
-    pub(super) const fn mark(&self) -> &Entity<Mark> {
-        &self.mark
+            .children(dot)
     }
 }
 
 impl WorkspaceView {
-    /// A worker's link is up: the marks' cursors are lit.
+    /// A worker's link is up: the mark's cursor is lit.
     pub(super) fn reachable(&self) -> bool {
         self.workers.values().any(|w| w.link.is_some())
     }
 
-    /// The marks follow whether a worker is reachable.
+    /// The mark follows whether a worker is reachable.
     pub(super) fn light_marks(&self, cx: &mut Context<Self>) {
         let lit = self.reachable();
-        let marks = std::iter::once(&self.empty_mark).chain(self.about.as_ref().map(|a| &a.mark));
-        for mark in marks {
-            if mark.read(cx).lit != lit {
-                mark.update(cx, |m, cx| m.set_lit(lit, cx));
-            }
+        if self.empty_mark.read(cx).lit != lit {
+            self.empty_mark.update(cx, |m, cx| m.set_lit(lit, cx));
         }
     }
 
-    /// The marks take a new theme.
+    /// The mark takes a new theme.
     pub(super) fn theme_marks(&self, cx: &mut Context<Self>) {
         let theme = self.theme.clone();
-        let marks = std::iter::once(&self.empty_mark).chain(self.about.as_ref().map(|a| &a.mark));
-        for mark in marks {
-            mark.update(cx, |m, cx| m.set_theme(theme.clone(), cx));
-        }
-    }
-
-    /// The palette's "About Slopty": the panel, with the keyboard in it.
-    pub fn about(&mut self, _: &About, window: &mut Window, cx: &mut Context<Self>) {
-        let (theme, lit) = (self.theme.clone(), self.reachable());
-        let mark = cx.new(|_| Mark::new(theme, MarkSize::Panel, "about", lit));
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        self.about = Some(AboutPanel { mark, focus });
-        cx.notify();
-    }
-
-    /// Close the About panel and give the keyboard back to the workspace.
-    pub(super) fn close_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(gone) = self.about.take() {
-            if self.chrome_moves(cx) {
-                self.keep_leaving(
-                    gone,
-                    kit::Pace::Exit.duration(),
-                    |this| &mut this.about_leaving,
-                    cx,
-                );
-            }
-            window.focus(&self.focus, cx);
-            cx.notify();
-        }
-    }
-
-    /// Whether the About panel is open.
-    #[must_use]
-    pub const fn about_open(&self) -> bool {
-        self.about.is_some()
-    }
-
-    /// The About panel over the window: the mark, the name, and the version and build on one
-    /// quiet line. Esc or a click beside it closes it, and it fades out where it stands.
-    ///
-    /// The palette summons it, so it arrives by fading in where it stands, with no travel.
-    pub(super) fn render_about(
-        &self,
-        window: &Window,
-        cx: &Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let (about, leaving) = match (&self.about, &self.about_leaving) {
-            (Some(open), _) => (open, false),
-            (None, Some(gone)) => (gone, true),
-            (None, None) => return None,
-        };
-        let theme = &self.theme;
-        let (s, spacing) = (theme.surfaces, theme.spacing);
-        let (version, build) = crate::settings_form::schema::about();
-        let said = format!("Version {version}");
-        let panel = kit::dialog(theme, kit::Overlay::List)
-            .id("about")
-            .debug_selector(|| "about".to_owned())
-            .track_focus(&about.focus)
-            .role(gpui::accesskit::Role::Dialog)
-            .aria_label("About Slopty")
-            .aria_description(SharedString::from(format!("{said}, {build}")))
-            .max_w(px(ABOUT_W))
-            .items_center()
-            .p(px(spacing.xl))
-            .gap(px(spacing.md))
-            .on_mouse_down(MouseButton::Left, |_ev, _window, cx| cx.stop_propagation())
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
-                if ev.keystroke.key == "escape" {
-                    this.close_about(window, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .child(about.mark.clone())
-            .child(
-                div()
-                    .pt(px(spacing.xs))
-                    .text_size(px(theme.typography.title()))
-                    .font_weight(gpui::FontWeight(Typography::STRONG_WEIGHT))
-                    .text_color(hsla(s.text))
-                    .child(kit::APP_NAME),
-            )
-            .child(
-                kit::tabular(kit::meta(div(), theme))
-                    .flex()
-                    .items_center()
-                    .gap(px(spacing.xs))
-                    .child(said)
-                    .child(kit::separator(theme))
-                    .child(build),
-            );
-        // The dim comes and goes with it ([`kit::Presence`]); leaving, for its moment it still
-        // holds the pointer, as it did.
-        let root = kit::backdrop(theme, window).id("about-backdrop").occlude();
-        let root = if leaving {
-            root.child(panel.debug_selector(|| "about-leaving".to_owned()))
-        } else {
-            root.on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _ev, window, cx| {
-                    this.close_about(window, cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(panel)
-        };
-        Some(kit::presence(root, "about-presence", !leaving).into_any_element())
+        self.empty_mark.update(cx, |m, cx| m.set_theme(theme, cx));
     }
 }

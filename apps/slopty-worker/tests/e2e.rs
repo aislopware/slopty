@@ -757,9 +757,10 @@ mod tests {
         let (b_send, b_tasks) = split(b);
         // As in `a_client_that_falls_behind_gets_the_items_again`: several times what the
         // client's stream window, the worker's queue and its broadcast hold together.
-        let item = ItemId::new();
+        let (note, rename) = churned_note();
+        b_send.send(note).await.unwrap();
         for _ in 0..300_000 {
-            b_send.send(ClientMsg::Point { item }).await.unwrap();
+            b_send.send(rename.clone()).await.unwrap();
         }
 
         let took = exact_echoes(&send, &mut events, session, 30).await;
@@ -831,28 +832,6 @@ mod tests {
         }
     }
 
-    /// The terminal lives in ptyd; the screen lives in the worker's engine. When the worker dies
-    /// and comes Two clients on one worker: one pointing at an item reaches the other in its
-    /// name, as is (the worker keeps nothing and checks nothing: an item the other lacks is its
-    /// to ignore).
-    #[tokio::test]
-    async fn a_pointing_reaches_the_others() {
-        use ItemSync;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut guard, addr) = daemons(dir.path()).await;
-        let (endpoint_a, mut a) = dial(addr).await;
-        guard.1 = Some(endpoint_a);
-        let (endpoint_b, mut b) = dial(addr).await;
-        let item = ItemId::new();
-        a.tx.send(&ClientMsg::Point { item }).await.unwrap();
-        let mine = next_items(&mut a, |s| matches!(s, ItemSync::Pointed { .. })).await;
-        let ItemSync::Pointed { client: a_client, .. } = mine else { panic!("{mine:?}") };
-        let heard = next_items(&mut b, |s| matches!(s, ItemSync::Pointed { .. })).await;
-        assert_eq!(heard, ItemSync::Pointed { client: a_client, name: "e2e".to_owned(), item });
-        drop(endpoint_b);
-    }
-
     /// A terminal one client watches and another closes: the watcher's session stream finishes
     /// once the session's last events are through, rather than staying open for the life of
     /// the connection (each one held a stream the worker could not open again).
@@ -878,7 +857,7 @@ mod tests {
         assert!(matches!(ended, slopty_net::NetError::Closed), "a clean end: {ended}");
     }
 
-    /// A client that stops reading while another floods the worker with pointings falls behind
+    /// A client that stops reading while another floods the worker with renames falls behind
     /// the worker's events; once it reads again it gets the item registry whole, not a silent
     /// gap.
     #[tokio::test(flavor = "multi_thread")]
@@ -895,11 +874,12 @@ mod tests {
         let reader = tokio::spawn(async move { while b_rx.recv().await.is_ok() {} });
 
         // Several times what the client's stream window, the worker's queue and its broadcast
-        // hold together (about 30 000 pointings), well past what the worker's own receive window
+        // hold together (about 30 000 renames), well past what the worker's own receive window
         // lets this loop buffer ahead of it.
-        let item = ItemId::new();
+        let (note, rename) = churned_note();
+        b_tx.send(&note).await.unwrap();
         for _ in 0..300_000 {
-            b_tx.send(&ClientMsg::Point { item }).await.unwrap();
+            b_tx.send(&rename).await.unwrap();
         }
         // Only a resync sends a snapshot after the first.
         next_items(&mut a, |s| matches!(s, ItemSync::Snapshot { .. })).await;
@@ -1071,6 +1051,19 @@ mod tests {
     }
 
     /// The next item sync `wanted` on `worker`'s control stream, skipping everything else.
+    /// A note to add, and a rename of it to send over and over: each rename is a delta the
+    /// worker hands every client, the cheapest way to flood their events.
+    fn churned_note() -> (ClientMsg, ClientMsg) {
+        let note = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Note { text: String::new() },
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
+        let rename = ClientMsg::Items(ItemOp::Rename { id: note.id, name: None });
+        (ClientMsg::Items(ItemOp::Add(note)), rename)
+    }
+
     async fn next_items(worker: &mut WorkerConn, wanted: impl Fn(&ItemSync) -> bool) -> ItemSync {
         loop {
             match tokio::time::timeout(STEP, worker.rx.recv()).await.unwrap().unwrap() {

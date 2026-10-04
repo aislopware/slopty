@@ -45,9 +45,6 @@ pub enum ItemChange {
     Removed(ItemId),
     /// The worker echoed our own op, or an op on an item already gone: nothing to do.
     Echo,
-    /// Another client pointed at this item. Ephemeral: nothing in the registry changed, and
-    /// the item may be one this registry does not have.
-    Pointed(ItemId),
 }
 
 impl ItemDoc {
@@ -113,8 +110,6 @@ impl ItemDoc {
                 }
                 self.apply_op(&op, by == me)
             }
-            ItemSync::Pointed { client, .. } if client == me => ItemChange::Echo,
-            ItemSync::Pointed { item, .. } => ItemChange::Pointed(item),
         }
     }
 
@@ -232,20 +227,6 @@ mod tests {
             name: None,
             facts: BTreeMap::new(),
         }
-    }
-
-    #[test]
-    fn a_pointing_names_its_item_and_my_own_is_an_echo() {
-        let me = ClientId::new();
-        let other = ClientId::new();
-        let mut doc = ItemDoc::default();
-        let item = ItemId::new();
-        let mine = ItemSync::Pointed { client: me, name: "me".to_owned(), item };
-        assert_eq!(doc.apply_sync(mine, me), ItemChange::Echo);
-        let theirs = ItemSync::Pointed { client: other, name: "phone".to_owned(), item };
-        assert_eq!(doc.apply_sync(theirs, me), ItemChange::Pointed(item), "even unknown");
-        assert_eq!(doc.version(), 0, "a pointing never touches the registry version");
-        assert!(doc.is_empty());
     }
 
     /// A snapshot replaces everything; another client's addition is not by me; my own

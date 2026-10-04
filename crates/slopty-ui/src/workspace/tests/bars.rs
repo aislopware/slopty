@@ -1,5 +1,5 @@
-//! The status bar's facts and its hosts popover, the inbox as a mailbox, and the palette's
-//! rows with their context, in the headless workspace.
+//! The status bar's facts, a machine's menu, a finish's badge, and the palette's rows with
+//! their context, in the headless workspace.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -67,13 +67,6 @@ fn shell_in_repo(
     });
     cx.run_until_parked();
     (session, tile)
-}
-
-/// Open or close the hosts popover as the "…" menu's Workers does, the count being absent
-/// while every worker is up.
-fn toggle_hosts(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) {
-    view.update(cx, WorkspaceView::toggle_hosts);
-    cx.run_until_parked();
 }
 
 fn finished(command: &str, exit: u8) -> Finished {
@@ -303,7 +296,7 @@ fn the_header_chip_shows_only_where_the_workspace_spans_machines(cx: &mut TestAp
     assert!(cx.debug_bounds(selector("worker", there.item)).is_none(), "nor in its own");
     view.update_in(cx, |v, _w, cx| {
         v.tick();
-        v.layout.move_column_to_workspace_up();
+        v.layout.move_window_up_or_to_workspace_up();
         v.after_focus_moved(cx);
         cx.notify();
     });
@@ -312,52 +305,34 @@ fn the_header_chip_shows_only_where_the_workspace_spans_machines(cx: &mut TestAp
     assert!(cx.debug_bounds(selector("worker", here.item)).is_some(), "both say theirs");
 }
 
-/// A worker's actions in the hosts popover wait for the pointer, and the keyboard brings
-/// them too: an action that holds the focus is drawn with its ring. A screen reader finds
-/// them in the tree either way, buttons with their names.
+/// A machine's "…" waits for the pointer, and the keyboard brings it too: drawn with its ring
+/// while it holds the focus. A screen reader finds it in the tree either way, a button named
+/// for the machine.
 #[gpui::test]
-fn the_keyboard_reaches_a_workers_actions(cx: &mut TestAppContext) {
+fn the_keyboard_reaches_a_machines_menu(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
-    // The popover lands at once, so a ring is drawn at its full strength.
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     let laptop = connect(&view, cx, 1, "laptop");
     let laptop_key = laptop.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.disconnect_worker(laptop_key, WorkerStatus::Reconnecting("lost".into()), cx);
-        let none: MenuRun = Rc::new(|_w, _cx| {});
-        let actions = HostActions {
-            connect: Some(Rc::clone(&none)),
-            forget: Some(Rc::clone(&none)),
-            wake: None,
-        };
-        v.set_host_actions(std::iter::once((laptop_key, actions)).collect(), None, cx);
-    });
-    cx.run_until_parked();
-    click(cx, "status-workers");
     let nodes = tree(cx);
-    for name in ["Connect", "Forget"] {
-        assert!(nodes.iter().any(|n| n.is("Button", Some(name))), "{name}: {nodes:#?}");
-    }
-    let actions = ["connect", "forget"]
-        .map(|part| cx.debug_bounds(leak(format!("hosts-{part}-{laptop_key}"))).expect("laid out"));
+    assert!(nodes.iter().any(|n| n.is("Button", Some("Machine actions, laptop"))), "{nodes:#?}");
+    let button = cx.debug_bounds(leak(format!("nav-machine-menu-{laptop_key}"))).expect("laid out");
     let ring =
         crate::colors::hsla_alpha(Theme::default().surfaces.accent, slopty_theme::alpha::STRONG);
     let ringed = |cx: &mut VisualTestContext| {
         cx.run_until_parked();
         let (scale, quads) = cx.update(|w, _| (w.scale_factor(), w.painted_quads()));
         // A stop's ring stands two of its widths clear all round, as `a11y::tab_stop` draws it.
-        let around =
-            |b: &Bounds<Pixels>| 4.0_f32.mul_add(crate::a11y::RING, f32::from(b.size.width));
+        let around = 4.0_f32.mul_add(crate::a11y::RING, f32::from(button.size.width));
         quads.iter().any(|q| {
             let at = point(px(q.bounds.center().x.0 / scale), px(q.bounds.center().y.0 / scale));
             let wide = q.bounds.size.width.0 / scale;
-            q.border_color == ring
-                && actions.iter().any(|b| b.contains(&at) && (wide - around(b)).abs() < 0.5)
+            q.border_color == ring && button.contains(&at) && (wide - around).abs() < 0.5
         })
     };
-    assert!(!ringed(cx), "at rest, nothing of them is drawn");
+    assert!(!ringed(cx), "at rest, nothing of it is drawn");
     // Along the ring a stop at a time, the keyboard the last input (a key that moves
-    // nothing), until an action holds the focus.
+    // nothing), until the menu's button holds the focus.
     for _ in 0..16 {
         if ringed(cx) {
             break;
@@ -365,23 +340,45 @@ fn the_keyboard_reaches_a_workers_actions(cx: &mut TestAppContext) {
         cx.update(Window::focus_next);
         cx.simulate_keystrokes("f19");
     }
-    assert!(ringed(cx), "an action focused from the keyboard is drawn, with its ring");
+    assert!(ringed(cx), "focused from the keyboard, it is drawn with its ring");
 }
 
-/// "N workers" shows, with a dot, once a worker is not up, and opens the hosts popover: each worker
-/// with its round trip or what is wrong, the app's connect and forget under the pointer, and
-/// a way to add one. A row goes to its worker; a click elsewhere closes it.
+/// Open `key`'s menu from its row in the navigator, as the pointer does.
+fn machine_menu(cx: &mut VisualTestContext, key: WorkerKey) {
+    hover(cx, leak(format!("nav-worker-{key}")));
+    click(cx, leak(format!("nav-machine-menu-{key}")));
+}
+
+/// A machine's "…" in the navigator says what it runs and does what the app lets it: its
+/// system, then each agent installed there with its version, then Connect only while its link
+/// is down, and Forget. Each runs the app's own and closes the menu. The status bar no longer
+/// counts machines.
 #[gpui::test]
-fn the_workers_count_opens_the_hosts_and_their_actions(cx: &mut TestAppContext) {
+fn a_machines_menu_says_what_it_runs_and_does_what_the_app_lets_it(cx: &mut TestAppContext) {
+    use slopty_proto::server::{InstalledAgent, Os, WorkerCaps};
+    use slopty_proto::thread::AgentId;
+
     let (view, cx) = workspace(cx);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
     let (studio_key, laptop_key) = (studio.key, laptop.key);
-    let (connected, forgot, added) =
-        (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+    let (connected, forgot) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
     view.update_in(cx, |v, _w, cx| {
-        v.set_rtt(studio_key, Some(Duration::from_micros(4_240)), cx);
+        let agent = |id: &str, version: &str| InstalledAgent {
+            agent: AgentId(id.to_owned()),
+            version: version.to_owned(),
+        };
+        let caps = WorkerCaps {
+            os_version: "26.5".to_owned(),
+            agents: vec![
+                agent(AgentId::CLAUDE_CODE, "2.1.3 (Claude Code)"),
+                agent(AgentId::CODEX, "codex-cli 0.48.0"),
+            ],
+            ..WorkerCaps::bare(Os::MacOs)
+        };
+        v.set_worker_caps(studio_key, caps, cx);
         v.disconnect_worker(laptop_key, WorkerStatus::Reconnecting("lost".into()), cx);
         let run = |flag: &Rc<Cell<bool>>| -> MenuRun {
             let flag = Rc::clone(flag);
@@ -398,48 +395,33 @@ fn the_workers_count_opens_the_hosts_and_their_actions(cx: &mut TestAppContext) 
                 (k, actions)
             })
             .collect();
-        v.set_host_actions(hosts, Some(run(&added)), cx);
+        v.set_host_actions(hosts, None, cx);
     });
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-workers-dot").is_some(), "the lost one shows");
-    assert!(labels(&view, cx).iter().any(|l| l == "2 machines, 1 not connected"));
+    assert!(cx.debug_bounds("status-workers").is_none(), "the bar counts no machines");
 
-    click(cx, "status-workers");
-    assert!(view.read_with(cx, |v, _| v.hosts_open()));
+    machine_menu(cx, studio_key);
+    let facts = view.read_with(cx, |v, _| v.machine_facts(studio_key));
+    assert_eq!(facts, ["macOS 26.5 · load 2.1", "Claude Code 2.1.3", "Codex 0.48.0"]);
     let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l == "studio, 4.2 ms"), "its round trip: {names:#?}");
-    assert!(names.iter().any(|l| l == "laptop, reconnecting"), "what is wrong: {names:#?}");
-
-    // Connect is offered only where the link is down.
-    hover(cx, leak(format!("hosts-row-{studio_key}")));
-    assert!(cx.debug_bounds(leak(format!("hosts-connect-{studio_key}"))).is_none());
-    hover(cx, leak(format!("hosts-row-{laptop_key}")));
-    click(cx, leak(format!("hosts-connect-{laptop_key}")));
-    assert!(connected.get(), "the app dials it");
-    assert!(!view.read_with(cx, |v, _| v.hosts_open()), "and the popover goes");
-
-    click(cx, "status-workers");
-    hover(cx, leak(format!("hosts-row-{laptop_key}")));
-    click(cx, leak(format!("hosts-forget-{laptop_key}")));
-    assert!(forgot.get());
-    click(cx, "status-workers");
-    click(cx, "hosts-add");
-    assert!(added.get());
-
-    click(cx, "status-workers");
-    let bar = cx.debug_bounds("statusbar").expect("the bar");
-    cx.simulate_mouse_down(bar.origin, MouseButton::Left, Modifiers::default());
-    cx.simulate_mouse_up(bar.origin, MouseButton::Left, Modifiers::default());
+    assert!(names.iter().any(|l| l == "Claude Code 2.1.3"), "read-only lines: {names:#?}");
+    assert!(cx.debug_bounds("menu-Connect").is_none(), "connected: no Connect");
+    assert!(cx.debug_bounds("menu-Forget").is_some());
+    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!view.read_with(cx, |v, _| v.hosts_open()), "a click elsewhere closes it");
-    click(cx, "status-workers");
-    click(cx, leak(format!("hosts-row-{studio_key}")));
-    assert!(!view.read_with(cx, |v, _| v.hosts_open()), "a row goes to its worker");
+
+    machine_menu(cx, laptop_key);
+    click(cx, "menu-Connect");
+    assert!(connected.get(), "the app dials it");
+    assert!(cx.debug_bounds("menu").is_none(), "and the menu goes");
+    machine_menu(cx, laptop_key);
+    click(cx, "menu-Forget");
+    assert!(forgot.get());
 }
 
 /// How the tailnet carries a link shows beside its round trip: in the status bar for the
-/// focused worker, in the hosts popover for each, and in the navigator only for a DERP relay,
-/// the slow path. It goes with the link, and a link the worker has said nothing of shows none.
+/// focused worker, and in the navigator only for a DERP relay, the slow path. It goes with the
+/// link, and a link the worker has said nothing of shows none.
 #[gpui::test]
 fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -447,7 +429,8 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
     let laptop = connect(&view, cx, 2, "laptop");
     let lan = connect(&view, cx, 3, "lan");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let (studio_key, laptop_key, lan_key) = (studio.key, laptop.key, lan.key);
+    let (studio_key, laptop_key) = (studio.key, laptop.key);
+    let _lan = lan;
     view.update_in(cx, |v, _w, cx| {
         v.set_rtt(studio_key, Some(Duration::from_micros(4_240)), cx);
         v.set_link_path(studio_key, LinkPath::Direct, cx);
@@ -465,14 +448,6 @@ fn the_link_path_shows_beside_the_round_trip_and_goes_with_the_link(cx: &mut Tes
     assert!(names.iter().any(|l| l == "Direct"), "the focused worker's path: {names:#?}");
     assert!(cx.debug_bounds(leak(format!("nav-path-{studio_key}"))).is_none(), "direct is quiet");
     assert!(cx.debug_bounds(leak(format!("nav-path-{laptop_key}"))).is_none());
-
-    toggle_hosts(&view, cx);
-    let names = labels(&view, cx);
-    for row in ["studio, Direct, 4.2 ms", "laptop, DERP · fra", "lan"] {
-        assert!(names.iter().any(|l| l == row), "{row}: {names:#?}");
-    }
-    assert!(cx.debug_bounds(leak(format!("hosts-path-{lan_key}"))).is_none(), "nothing said");
-    toggle_hosts(&view, cx);
 
     view.update_in(cx, |v, _w, cx| {
         v.disconnect_worker(laptop_key, WorkerStatus::Reconnecting("lost".into()), cx);
@@ -536,10 +511,11 @@ fn a_link_that_stays_on_derp_is_said_once_it_has_held(cx: &mut TestAppContext) {
 }
 
 /// A worker the app can wake gets "Wake <name>" among the palette's commands and a Wake in its
-/// hosts row, and either runs the app's wake; a worker the app cannot wake gets neither.
+/// row's menu, and either runs the app's wake; a worker the app cannot wake gets neither.
 #[gpui::test]
-fn a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row(cx: &mut TestAppContext) {
+fn a_sleeping_worker_is_woken_from_the_palette_and_its_row(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
+    cx.update(|_w, cx| cx.set_reduce_motion(true));
     let studio = connect(&view, cx, 1, "studio");
     let laptop = connect(&view, cx, 2, "laptop");
     let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
@@ -577,15 +553,16 @@ fn a_sleeping_worker_is_woken_from_the_palette_and_its_hosts_row(cx: &mut TestAp
     assert!(!view.read_with(cx, |v, _| v.palette_open()));
     assert_eq!(woke.get(), 1, "the palette ran the app's wake");
 
-    toggle_hosts(&view, cx);
-    hover(cx, leak(format!("hosts-row-{studio_key}")));
-    assert!(cx.debug_bounds(leak(format!("hosts-wake-{studio_key}"))).is_none());
-    hover(cx, leak(format!("hosts-row-{laptop_key}")));
-    click(cx, leak(format!("hosts-wake-{laptop_key}")));
-    assert_eq!(woke.get(), 2, "and so did the row");
+    machine_menu(cx, studio_key);
+    assert!(cx.debug_bounds("menu-Wake").is_none());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    machine_menu(cx, laptop_key);
+    click(cx, "menu-Wake");
+    assert_eq!(woke.get(), 2, "and so did the row's menu");
 }
 
-/// The palette, or the machine's row in the hosts popover, stops sharing the clipboard with
+/// The palette, or the machine's menu on its row, stops sharing the clipboard with
 /// one machine and shares it again, by its name: the navigator marks the machine it is not
 /// shared with, the app is told to keep the choice, and the other machine is left as it was.
 #[gpui::test]
@@ -658,20 +635,17 @@ fn the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_
     assert!(view.read_with(cx, |v, _| v.clipboard_shared(laptop_key)));
     assert!(!off(cx, laptop_key), "shared again, unmarked");
 
-    // The hosts popover's row says the same under the pointer.
-    let from_row = |cx: &mut VisualTestContext| {
-        toggle_hosts(&view, cx);
-        hover(cx, leak(format!("hosts-row-{studio_key}")));
-        click(cx, leak(format!("hosts-clipboard-{studio_key}")));
-    };
-    from_row(cx);
+    // The machine's menu says the same.
+    machine_menu(cx, studio_key);
+    click(cx, "menu-Unshare clipboard");
     assert!(!view.read_with(cx, |v, _| v.clipboard_shared(studio_key)));
-    assert!(!view.read_with(cx, |v, _| v.hosts_open()), "and the popover goes");
+    assert!(cx.debug_bounds("menu").is_none(), "and the menu goes");
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
         Some("The clipboard is no longer shared with studio")
     );
-    from_row(cx);
+    machine_menu(cx, studio_key);
+    click(cx, "menu-Share clipboard");
     assert!(view.read_with(cx, |v, _| v.clipboard_shared(studio_key)));
     assert_eq!(
         events.borrow().as_slice(),
@@ -699,56 +673,6 @@ fn a_worker_the_tailnet_policy_closes_says_not_granted(cx: &mut TestAppContext) 
     assert!(names.iter().any(|l| l == "Not granted"), "the status bar: {names:#?}");
     assert!(names.iter().any(|l| l == "studio, not granted"), "the navigator: {names:#?}");
     assert_eq!(WorkerStatus::NotGranted.text(), "closed to this device by the tailnet policy");
-}
-
-/// The inbox keeps what it was told: *Unread* lists what is still badged, *All* the history,
-/// newest first. A row's age swaps for mark-read under the pointer; "Mark all read" reads the
-/// rest; with nothing unread it says so.
-#[gpui::test]
-fn the_inbox_reads_like_a_mailbox(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let (built, lint) = (SessionId::new(), SessionId::new());
-    let _built = opens_in(&view, cx, &studio, built, studio.me, 1, Some("/w/oss/slopty"));
-    let _lint = opens(&view, cx, &studio, lint, studio.me, 2);
-    let _here = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
-    view.update_in(cx, |v, _w, cx| {
-        v.command_finished(built, finished("cargo build", 0), cx);
-        v.command_finished(lint, finished("cargo clippy", 101), cx);
-    });
-    cx.run_until_parked();
-    click(cx, "bell");
-    assert!(cx.debug_bounds("inbox-unread").is_some() && cx.debug_bounds("inbox-all").is_some());
-    let names = labels(&view, cx);
-    assert!(
-        names.iter().any(|l| l == "cargo build · Done · 40 s · oss/slopty"),
-        "two lines: the command, then its outcome and directory, the lone worker unsaid: {names:#?}"
-    );
-    let (newest, older) = (
-        cx.debug_bounds(leak(format!("inbox-finished-{lint}"))).expect("the lint's row"),
-        cx.debug_bounds(leak(format!("inbox-finished-{built}"))).expect("the build's row"),
-    );
-    assert!(newest.top() < older.top(), "newest first");
-
-    let read = leak(format!("inbox-finished-{built}-read"));
-    hover(cx, leak(format!("inbox-finished-{built}")));
-    click(cx, read);
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 1, "marked read");
-    assert!(view.read_with(cx, |v, _| v.finished(built).is_none()), "its badge went with it");
-    assert!(cx.debug_bounds(leak(format!("inbox-finished-{built}"))).is_none(), "not unread");
-
-    click(cx, "inbox-mark-all");
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 0);
-    assert!(cx.debug_bounds("inbox-empty").is_some(), "nothing unread says so");
-    assert!(labels(&view, cx).iter().any(|l| l == inbox::ALL_CAUGHT_UP));
-    assert!(cx.debug_bounds("inbox-mark-all").is_none(), "nothing left to mark");
-
-    click(cx, "inbox-all");
-    assert!(view.read_with(cx, |v, _| v.inbox_shows_all()));
-    assert!(cx.debug_bounds("inbox-empty").is_none(), "the history keeps both");
-    let names = labels(&view, cx);
-    assert!(names.iter().any(|l| l.starts_with("cargo build · Done")), "{names:#?}");
-    assert!(names.iter().any(|l| l.starts_with("cargo clippy · Exit 101")), "{names:#?}");
 }
 
 /// A tile's line says its name alone, where it is in a muted second column (the worker once
@@ -789,10 +713,11 @@ fn a_palette_row_says_where_the_tile_is(cx: &mut TestAppContext) {
 }
 
 /// A long command that ends on the focused tile while the app is away was not watched: it
-/// enters the inbox and counts in the badge, as the note that went out for it says. With the
-/// app in front, the same end on the focused tile is seen as it happens and leaves no row.
+/// earns its tile's badge, as the note that went out for it says, but no count on the bell,
+/// which speaks for agents. With the app in front, the same end on the focused tile is seen as
+/// it happens and leaves nothing.
 #[gpui::test]
-fn a_command_ending_on_the_focused_tile_while_away_enters_the_inbox(cx: &mut TestAppContext) {
+fn a_command_ending_on_the_focused_tile_while_away_is_badged(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let (seen, missed) = (SessionId::new(), SessionId::new());
@@ -807,9 +732,9 @@ fn a_command_ending_on_the_focused_tile_while_away_enters_the_inbox(cx: &mut Tes
     });
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
-        assert!(v.finished(seen).is_none(), "watched in front: no row");
+        assert!(v.finished(seen).is_none(), "watched in front: no badge");
         assert!(v.finished(missed).is_some(), "on the focused tile, but the app was away");
-        assert_eq!(v.inbox_count(), 1);
+        assert_eq!(v.bell_count(), 0, "a shell's finish is not the bell's");
     });
 }
 
@@ -862,8 +787,8 @@ fn the_status_bar_shows_the_focused_machines_plan_windows(cx: &mut TestAppContex
 }
 
 /// A worker on another build shows Update where it is named, not only on its tiles: on its
-/// navigator row, at rest, and in the hosts popover. Each runs the app's update against the
-/// host the notice names; with one under way, neither offers it again.
+/// navigator row, at rest. It runs the app's update against the host the notice names; with one
+/// under way, it is not offered again.
 #[gpui::test]
 fn a_worker_on_another_build_offers_update_where_it_is_named(cx: &mut TestAppContext) {
     use slopty_client::update::{Of, UpdateNotice};
@@ -888,13 +813,6 @@ fn a_worker_on_another_build_offers_update_where_it_is_named(cx: &mut TestAppCon
     cx.run_until_parked();
     assert_eq!(*asked.borrow(), ["studio.ts.net"], "the navigator's Update");
 
-    click(cx, "status-workers");
-    let update = leak(format!("hosts-update-{key}"));
-    assert!(cx.debug_bounds(update).is_some(), "shown at rest in the popover");
-    click(cx, update);
-    cx.run_until_parked();
-    assert_eq!(asked.borrow().len(), 2, "the popover's Update");
-
     cx.update(|_w, cx| {
         let install = crate::add_worker::Install {
             steps: Vec::new(),
@@ -906,4 +824,54 @@ fn a_worker_on_another_build_offers_update_where_it_is_named(cx: &mut TestAppCon
     view.update(cx, |_v, cx| cx.notify());
     cx.run_until_parked();
     assert!(cx.debug_bounds(leak(format!("nav-update-{key}"))).is_none(), "not while it runs");
+}
+
+/// The title bar's empty span moves the window as a native title bar does: pressed and moved,
+/// it asks the system to drag the window; a double-click asks for the system's title-bar
+/// action (zoom or minimise, as the person set it). A press on one of its buttons does neither.
+#[gpui::test]
+fn the_title_bars_empty_span_moves_and_zooms_the_window(cx: &mut TestAppContext) {
+    use crate::workspace::titlebar::WindowAsk;
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    let studio = connect(&view, cx, 1, "studio");
+    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
+    let bar = cx.debug_bounds("titlebar").expect("the bar");
+    let left = MouseButton::Left;
+    let asks = |cx: &mut VisualTestContext| view.update(cx, |v, _| v.take_window_asks());
+    let empty = point(bar.center().x, bar.center().y);
+
+    cx.simulate_mouse_down(empty, left, Modifiers::default());
+    cx.simulate_mouse_move(point(empty.x + px(4.0), empty.y), Some(left), Modifiers::default());
+    cx.simulate_mouse_up(point(empty.x + px(4.0), empty.y), left, Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(asks(cx), [WindowAsk::Move], "pressed and moved, the window follows");
+
+    cx.simulate_mouse_move(empty, None, Modifiers::default());
+    cx.run_until_parked();
+    assert!(asks(cx).is_empty(), "a move with no press does nothing");
+
+    let modifiers = Modifiers::default();
+    cx.simulate_event(gpui::MouseDownEvent {
+        button: left,
+        position: empty,
+        modifiers,
+        click_count: 2,
+        first_mouse: false,
+    });
+    cx.simulate_event(gpui::MouseUpEvent {
+        button: left,
+        position: empty,
+        modifiers,
+        click_count: 2,
+    });
+    cx.run_until_parked();
+    assert_eq!(asks(cx), [WindowAsk::TitleBarDoubleClick], "a double-click zooms it");
+
+    let more = cx.debug_bounds("more").expect("the menu button").center();
+    cx.simulate_mouse_down(more, left, Modifiers::default());
+    cx.simulate_mouse_move(point(more.x - px(6.0), more.y), Some(left), Modifiers::default());
+    cx.simulate_mouse_up(point(more.x - px(6.0), more.y), left, Modifiers::default());
+    cx.run_until_parked();
+    assert!(asks(cx).is_empty(), "a button's press is its own");
 }

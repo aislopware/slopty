@@ -123,7 +123,6 @@ mod tests {
         assert!(part.first && part.last && part.projects.is_empty(), "in one part: {part:?}");
         assert_eq!(next(&mut client).await, FromServer::Ladder(Box::default()), "then the ladder");
         assert_eq!(next(&mut client).await, FromServer::Present(Vec::new()), "and the people");
-        assert_eq!(next(&mut client).await, FromServer::Snoozes(Vec::new()), "and the snoozes");
 
         client
             .tx
@@ -200,37 +199,6 @@ mod tests {
         server.shutdown().await;
     }
 
-    /// A snooze outlives the server: kept on disk as it is set, taken up again on start, and
-    /// sent to a client connecting then. One that ended while the server was down is let go.
-    #[tokio::test]
-    async fn a_snooze_outlives_a_restart() {
-        use slopty_core::WallMs;
-        use slopty_proto::snooze::{SnoozeOf, Until};
-
-        let dir = tempfile::tempdir().unwrap();
-        let server = start(dir.path()).await;
-        let in_ms = |ms: u64| WallMs::from_millis(WallMs::now().as_millis() + ms);
-        let tile =
-            || SnoozeOf::Tile(TermRef { worker: WorkerId::new(), session: SessionId::new() });
-        let verb = Verb::Snooze { of: tile(), until: Until::At(in_ms(3_600_000)), zone: None };
-        let Outcome::Snoozed(snooze) = server.hub().dispatch(verb).await else { panic!("snoozed") };
-        let verb = Verb::Snooze { of: tile(), until: Until::At(in_ms(300)), zone: None };
-        assert!(matches!(server.hub().dispatch(verb).await, Outcome::Snoozed(_)));
-        server.shutdown().await;
-        tokio::time::sleep(Duration::from_millis(400)).await;
-
-        let again = start(dir.path()).await;
-        assert_eq!(again.hub().snoozes(), [snooze]);
-        let mut client = dial(&again, client_role()).await.unwrap();
-        let told = loop {
-            if let FromServer::Snoozes(list) = next(&mut client).await {
-                break list;
-            }
-        };
-        assert_eq!(told, [snooze]);
-        again.shutdown().await;
-    }
-
     #[tokio::test]
     async fn a_worker_that_goes_silent_turns_unreachable_after_the_idle_timeout() {
         let dir = tempfile::tempdir().unwrap();
@@ -273,7 +241,6 @@ mod tests {
         let _projects = next(&mut client).await;
         let _ladder = next(&mut client).await;
         let _present = next(&mut client).await;
-        let _snoozes = next(&mut client).await;
 
         cut.store(true, std::sync::atomic::Ordering::Relaxed);
         let started = std::time::Instant::now();

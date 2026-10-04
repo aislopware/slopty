@@ -54,6 +54,8 @@ objc2-pdf-kit = { workspace = true, features = [
 ] }
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true
+# The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).
+nucleo-matcher.workspace = true
 rustc-hash.workspace = true
 regex.workspace = true
 # The native view under the window, where a browser tile's page goes (`browser`).

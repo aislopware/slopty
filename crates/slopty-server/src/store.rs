@@ -14,15 +14,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use slopty_proto::server::WorkerInfo;
-use slopty_proto::snooze::Snooze;
 use tokio::sync::{mpsc, watch};
 
 use crate::project::{Keep, ProjectsFile};
 
 /// The file's name in the server's data directory.
 pub const FILE: &str = "workers.json";
-/// The snoozes' file, beside [`FILE`].
-pub const SNOOZES_FILE: &str = "snoozes.json";
 /// The projects snapshot's name, beside [`FILE`].
 pub const PROJECTS_FILE: &str = "projects.json";
 /// The log of project changes past the snapshot, beside it.
@@ -87,56 +84,6 @@ impl Store {
             let workers = changes.borrow_and_update().clone();
             if let Err(e) = self.save(&workers).await {
                 tracing::warn!(path = %self.path.display(), error = %e, "state not saved");
-            }
-        }
-    }
-}
-
-/// The person's snoozes of one data directory ([`SNOOZES_FILE`]), replaced whole on every
-/// change, as the workers' file is.
-#[derive(Clone, Debug)]
-pub struct SnoozeStore {
-    path: PathBuf,
-}
-
-impl SnoozeStore {
-    /// The store in `dir` (created on the first save).
-    #[must_use]
-    pub fn in_dir(dir: &Path) -> Self {
-        Self { path: dir.join(SNOOZES_FILE) }
-    }
-
-    /// Its path.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// The snoozes it holds: none when there is no file, or when it does not parse (set
-    /// aside as for the workers' file).
-    ///
-    /// # Errors
-    /// The file is there and cannot be read, or cannot be set aside.
-    pub async fn load(&self) -> io::Result<Vec<Snooze>> {
-        load(&self.path).await
-    }
-
-    /// Replace the file with `snoozes`.
-    ///
-    /// # Errors
-    /// It cannot be written.
-    pub async fn save(&self, snoozes: &[Snooze]) -> io::Result<()> {
-        let json = serde_json::to_vec_pretty(&snoozes).map_err(io::Error::other)?;
-        write(&self.path, json).await
-    }
-
-    /// Save every list `changes` publishes until its sender goes away; lists that arrive
-    /// during a write collapse into the latest.
-    pub async fn keep(self, mut changes: watch::Receiver<Vec<Snooze>>) {
-        while changes.changed().await.is_ok() {
-            let snoozes = changes.borrow_and_update().clone();
-            if let Err(e) = self.save(&snoozes).await {
-                tracing::warn!(path = %self.path.display(), error = %e, "snoozes not saved");
             }
         }
     }

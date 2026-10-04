@@ -48,18 +48,15 @@ pub(super) struct Symbols {
     _subscription: Subscription,
 }
 
-/// The indices of the symbols every word of `query` is found in, any case, in file order.
+/// The indices of the symbols whose names every word of `query` finds, fuzzily
+/// ([`crate::fuzzy`]): best first, ties in file order; all of them in file order for no query.
 #[must_use]
 fn narrowed(all: &[Symbol], query: &str) -> Vec<usize> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
-    all.iter()
-        .enumerate()
-        .filter(|(_, s)| {
-            let name = s.name.to_lowercase();
-            words.iter().all(|w| name.contains(w.as_str()))
-        })
-        .map(|(ix, _)| ix)
-        .collect()
+    let mut fuzzy = crate::fuzzy::Fuzzy::new(query);
+    let mut kept: Vec<(crate::fuzzy::Rank, usize)> =
+        all.iter().enumerate().filter_map(|(ix, s)| Some((fuzzy.rank(&s.name, "")?, ix))).collect();
+    kept.sort_by(|a, b| crate::fuzzy::best_first(&a.0, &b.0).then(a.1.cmp(&b.1)));
+    kept.into_iter().map(|(_, ix)| ix).collect()
 }
 
 impl FileView {

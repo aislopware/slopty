@@ -4,7 +4,7 @@ Button │ Navigator
 Group │ Where
 Button │ e2e-ios-worker
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal

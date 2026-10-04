@@ -4,7 +4,7 @@ Button │ Navigator
 Group │ Where
 Button │ e2e-worker
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal
@@ -45,8 +45,6 @@ ListItem │ Open last offered page
 Button │ Keys for Open last offered page
 ListItem │ Discard unsaved edits over a week old
 Button │ Keys for Discard unsaved edits over a week old
-ListItem │ About Slopty
-Button │ Keys for About Slopty
 ListItem │ Save a copy…
 Button │ Keys for Save a copy…
 ListItem │ Close tile │ ⌘W
@@ -55,8 +53,8 @@ ListItem │ Undo close │ ⌘Z
 Button │ Keys for Undo close │ ⌘Z
 ListItem │ Next thing that needs you │ ⇧⌘A
 Button │ Keys for Next thing that needs you │ ⇧⌘A
-ListItem │ Inbox │ ⇧⌘U
-Button │ Keys for Inbox │ ⇧⌘U
+ListItem │ Show what needs you │ ⇧⌘U
+Button │ Keys for Show what needs you │ ⇧⌘U
 ListItem │ Filter the navigator │ ⇧⌘E
 Button │ Keys for Filter the navigator │ ⇧⌘E
 ListItem │ Mute sound │ ⇧⌘M
@@ -89,14 +87,10 @@ ListItem │ Mute sound in remote window │ ⌃⇧⌘M
 Button │ Keys for Mute sound in remote window │ ⌃⇧⌘M
 ListItem │ Stream stats in remote window │ ⌃⇧⌘I
 Button │ Keys for Stream stats in remote window │ ⌃⇧⌘I
-ListItem │ List machines
-Button │ Keys for List machines
 ListItem │ Forwarded ports
 Button │ Keys for Forwarded ports
 ListItem │ Name this tile │ ⌘E
 Button │ Keys for Name this tile │ ⌘E
-ListItem │ Point other devices at this tile │ ⇧⌘O
-Button │ Keys for Point other devices at this tile │ ⇧⌘O
 ListItem │ Find in every tile │ ⇧⌘F
 Button │ Keys for Find in every tile │ ⇧⌘F
 ListItem │ Search in files │ ⌥⌘F
@@ -125,6 +119,8 @@ ListItem │ Start a project here
 Button │ Keys for Start a project here
 ListItem │ Open settings │ ⌘,
 Button │ Keys for Open settings │ ⌘,
+ListItem │ About Slopty
+Button │ Keys for About Slopty
 ListItem │ Add a machine… │ ⇧⌘H
 Button │ Keys for Add a machine… │ ⇧⌘H
 ListItem │ Connect to a server
@@ -164,10 +160,6 @@ ListItem │ Move tile up │ ⌥⇧⌘↑
 Button │ Keys for Move tile up │ ⌥⇧⌘↑
 ListItem │ Move tile down │ ⌥⇧⌘↓
 Button │ Keys for Move tile down │ ⌥⇧⌘↓
-ListItem │ Focus column first │ ⌥⌘↖
-Button │ Keys for Focus column first │ ⌥⌘↖
-ListItem │ Last column │ ⌥⌘↘
-Button │ Keys for Last column │ ⌥⌘↘
 ListItem │ Move column to the start │ ⌥⇧⌘↖
 Button │ Keys for Move column to the start │ ⌥⇧⌘↖
 ListItem │ Move column to the end │ ⌥⇧⌘↘
@@ -176,40 +168,20 @@ ListItem │ Workspace above │ ⌥⌘⇞
 Button │ Keys for Workspace above │ ⌥⌘⇞
 ListItem │ Workspace below │ ⌥⌘⇟
 Button │ Keys for Workspace below │ ⌥⌘⇟
-ListItem │ Move workspace up │ ⌥⇧⌘⇞
-Button │ Keys for Move workspace up │ ⌥⇧⌘⇞
-ListItem │ Move workspace down │ ⌥⇧⌘⇟
-Button │ Keys for Move workspace down │ ⌥⇧⌘⇟
-ListItem │ Move column to the workspace above │ ⌃⌥⌘⇞
-Button │ Keys for Move column to the workspace above │ ⌃⌥⌘⇞
-ListItem │ Move column to the workspace below │ ⌃⌥⌘⇟
-Button │ Keys for Move column to the workspace below │ ⌃⌥⌘⇟
-ListItem │ Previous workspace │ ⌥⌘`
-Button │ Keys for Previous workspace │ ⌥⌘`
 ListItem │ Next column width │ ⌘R
 Button │ Keys for Next column width │ ⌘R
-ListItem │ Previous column width │ ⇧⌘R
-Button │ Keys for Previous column width │ ⇧⌘R
-ListItem │ Narrower column │ ⌥⌘-
-Button │ Keys for Narrower column │ ⌥⌘-
-ListItem │ Wider column │ ⌥⌘=
-Button │ Keys for Wider column │ ⌥⌘=
 ListItem │ Maximize column │ ⇧⌘↩
 Button │ Keys for Maximize column │ ⇧⌘↩
 ListItem │ Fullscreen tile │ ⌃⌘F
 Button │ Keys for Fullscreen tile │ ⌃⌘F
 ListItem │ Center column │ ⌥⌘C
 Button │ Keys for Center column │ ⌥⌘C
-ListItem │ Center the visible columns │ ⌥⇧⌘C
-Button │ Keys for Center the visible columns │ ⌥⇧⌘C
-ListItem │ Fill the free width │ ⌥⇧⌘F
-Button │ Keys for Fill the free width │ ⌥⇧⌘F
 ListItem │ Tabbed column │ ⌥⌘T
 Button │ Keys for Tabbed column │ ⌥⌘T
 ListItem │ Overview │ ⌥⌘O
 Button │ Keys for Overview │ ⌥⌘O
-ListItem │ First column │ ⌘1
-Button │ Keys for First column │ ⌘1
+ListItem │ Focus column 1 │ ⌘1
+Button │ Keys for Focus column 1 │ ⌘1
 ListItem │ Focus column 2 │ ⌘2
 Button │ Keys for Focus column 2 │ ⌘2
 ListItem │ Focus column 3 │ ⌘3
@@ -244,24 +216,6 @@ ListItem │ Focus workspace 8 │ ⌥⌘8
 Button │ Keys for Focus workspace 8 │ ⌥⌘8
 ListItem │ Focus workspace 9 │ ⌥⌘9
 Button │ Keys for Focus workspace 9 │ ⌥⌘9
-ListItem │ Move column to the first workspace │ ⌃⌥⌘1
-Button │ Keys for Move column to the first workspace │ ⌃⌥⌘1
-ListItem │ Move column to workspace 2 │ ⌃⌥⌘2
-Button │ Keys for Move column to workspace 2 │ ⌃⌥⌘2
-ListItem │ Move column to workspace 3 │ ⌃⌥⌘3
-Button │ Keys for Move column to workspace 3 │ ⌃⌥⌘3
-ListItem │ Move column to workspace 4 │ ⌃⌥⌘4
-Button │ Keys for Move column to workspace 4 │ ⌃⌥⌘4
-ListItem │ Move column to workspace 5 │ ⌃⌥⌘5
-Button │ Keys for Move column to workspace 5 │ ⌃⌥⌘5
-ListItem │ Move column to workspace 6 │ ⌃⌥⌘6
-Button │ Keys for Move column to workspace 6 │ ⌃⌥⌘6
-ListItem │ Move column to workspace 7 │ ⌃⌥⌘7
-Button │ Keys for Move column to workspace 7 │ ⌃⌥⌘7
-ListItem │ Move column to workspace 8 │ ⌃⌥⌘8
-Button │ Keys for Move column to workspace 8 │ ⌃⌥⌘8
-ListItem │ Move column to workspace 9 │ ⌃⌥⌘9
-Button │ Keys for Move column to workspace 9 │ ⌃⌥⌘9
 Heading │ Terminal
 ListItem │ Copy │ ⌘C
 Button │ Keys for Copy │ ⌘C
@@ -318,25 +272,6 @@ ListItem │ Next prompt │ ⌘↓
 Button │ Keys for Next prompt │ ⌘↓
 ListItem │ Find │ ⌘F
 Button │ Keys for Find │ ⌘F
-Heading │ Inbox
-ListItem │ Select next │ ↓, J
-Button │ Keys for Select next │ ↓, J
-ListItem │ Select previous │ ↑, K
-Button │ Keys for Select previous │ ↑, K
-ListItem │ Open │ ↩
-Button │ Keys for Open │ ↩
-ListItem │ Mark done │ E
-Button │ Keys for Mark done │ E
-ListItem │ Snooze │ H
-Button │ Keys for Snooze │ H
-ListItem │ Mark unread │ U
-Button │ Keys for Mark unread │ U
-ListItem │ Allow │ ⌘↩
-Button │ Keys for Allow │ ⌘↩
-ListItem │ Deny │ ⌘⌫
-Button │ Keys for Deny │ ⌘⌫
-ListItem │ Close │ ⎋
-Button │ Keys for Close │ ⎋
 Heading │ Files
 ListItem │ Save file │ ⌘S
 Button │ Keys for Save file │ ⌘S

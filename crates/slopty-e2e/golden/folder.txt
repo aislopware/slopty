@@ -4,7 +4,7 @@ Button │ Navigator
 Group │ Where
 Button │ project
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ project
 Heading │ terminal project

@@ -137,11 +137,11 @@ fn dragging_the_handle_resizes_the_navigator_within_its_clamps(cx: &mut TestAppC
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// *Needs you* shows only while an agent waits out of sight, above *Workers*, whose heading
-/// shows only then: alone it would head nothing. A waiting tile in view says so in its own row,
-/// so the section is for one folded away. Each worker lists its tiles beneath it, with an
-/// accessible name, until its row folds them. The workspaces are no section of the navigator:
-/// they are the title bar's, named with their count.
+/// *Needs you* shows while an agent waits, in view or not, above *Workers*, whose heading
+/// shows only then: alone it would head nothing. The waiting tile's own row says so too, and
+/// folding its worker away leaves the section as it was. Each worker lists its tiles beneath it,
+/// with an accessible name, until its row folds them. The workspaces are no section of the
+/// navigator: they are the title bar's, named with their count.
 #[gpui::test]
 fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -161,8 +161,8 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
     view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
     cx.run_until_parked();
     let waiting_row = leak(format!("nav-waiting-{session}"));
-    assert!(cx.debug_bounds("nav-needs-you").is_none(), "its own row, in view, says so");
-    assert!(cx.debug_bounds(waiting_row).is_none());
+    assert!(top(cx, "nav-needs-you") < top(cx, "nav-workers"), "it leads");
+    assert!(cx.debug_bounds(waiting_row).is_some(), "in view or not");
     let names = labels(&view, cx);
     assert!(names.iter().any(|l| l == "studio"), "a worker that is fine is its name: {names:#?}");
     assert!(
@@ -171,10 +171,8 @@ fn the_navigator_lists_what_needs_you_then_the_workers(cx: &mut TestAppContext) 
     );
 
     click(cx, leak(format!("nav-worker-{}", laptop.key)));
-    assert!(top(cx, "nav-needs-you") < top(cx, "nav-workers"), "folded away, it leads");
-    assert!(cx.debug_bounds(waiting_row).is_some());
+    assert!(cx.debug_bounds(waiting_row).is_some(), "folded away, it stays");
     click(cx, leak(format!("nav-worker-{}", laptop.key)));
-    assert!(cx.debug_bounds("nav-needs-you").is_none(), "unfolded, the row says it again");
 
     click(cx, "nav-worker-00000000000000000000000000000001");
     assert!(cx.debug_bounds(selector("nav-tile", mine.item)).is_none(), "folded away");
@@ -248,10 +246,10 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let names = labels(&view, cx);
     // Outside a repository the checkout is the directory's own name.
-    let agents = "studio: 1 working; laptop: 1 blocked";
-    for readout in ["studio", "slopty", "Round trip 42 ms", agents] {
+    for readout in ["studio", "slopty", "Round trip 42 ms"] {
         assert!(names.iter().any(|l| l == readout), "{readout}: {names:#?}");
     }
+    assert!(!names.iter().any(|l| l.contains("1 working")), "no agent counts: {names:#?}");
     assert!(cx.debug_bounds("rtt").is_none(), "the round trip left the title bar");
     assert!(cx.debug_bounds("bell-count").is_some(), "the bell counts the one waiting");
     cx.simulate_keystrokes("cmd-shift-a");
@@ -259,20 +257,28 @@ fn the_status_bar_reads_the_focused_tile_and_its_link(cx: &mut TestAppContext) {
     assert_eq!(focused(&view, cx), Some(waiting), "⌘⇧A still goes to the one waiting");
 }
 
-/// The bell counts what waits and what finished unwatched, and its inbox lists both; a row
-/// goes to its tile, which clears what it said.
+/// The bell counts what waits and an agent's turn that ended unseen, never a shell's finish;
+/// the turn's row under *To review* goes to its tile, which clears what it said.
 #[gpui::test]
-fn the_bell_counts_the_inbox_and_its_rows_go_there(cx: &mut TestAppContext) {
+fn the_bell_counts_what_needs_you_and_a_rows_tile_clears_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let asking = SessionId::new();
     let _asking = opens(&view, cx, &studio, asking, studio.me, 1);
+    let turned = SessionId::new();
+    let turned_tile = opens(&view, cx, &studio, turned, studio.me, 2);
     let built = SessionId::new();
-    let built_tile = opens(&view, cx, &studio, built, studio.me, 2);
-    let _last = opens(&view, cx, &studio, SessionId::new(), studio.me, 3);
+    let _built = opens(&view, cx, &studio, built, studio.me, 3);
+    let _last = opens(&view, cx, &studio, SessionId::new(), studio.me, 4);
     assert!(cx.debug_bounds("bell-count").is_none(), "nothing to count");
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(blocked(asking), cx);
+        let at = |s: u64| WallMs::from_millis(s.saturating_mul(1000));
+        let working =
+            AgentEvent { status: AgentStatus::Working, since_ms: at(100), ..blocked(turned) };
+        v.agent_event(working, cx);
+        let done = AgentEvent { status: AgentStatus::Done, since_ms: at(220), ..blocked(turned) };
+        v.agent_event(done, cx);
         let done = Finished {
             command: "cargo build".into(),
             exit: Some(0),
@@ -281,18 +287,15 @@ fn the_bell_counts_the_inbox_and_its_rows_go_there(cx: &mut TestAppContext) {
         v.command_finished(built, done, cx);
     });
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 2);
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 2);
     assert!(labels(&view, cx).iter().any(|l| l == "2 new"), "the badge says how many");
 
-    click(cx, "bell");
-    assert!(cx.debug_bounds("inbox").is_some(), "the bell opens the inbox");
     assert!(
-        cx.debug_bounds("inbox-needs-you").is_some() && cx.debug_bounds("inbox-finished").is_some()
+        cx.debug_bounds("nav-needs-you").is_some() && cx.debug_bounds("nav-to-review").is_some()
     );
-    click(cx, leak(format!("inbox-finished-{built}")));
-    assert!(cx.debug_bounds("inbox").is_none(), "a row closes it");
-    assert_eq!(focused(&view, cx), Some(built_tile));
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 1, "looked at, it is cleared");
+    click(cx, leak(format!("nav-review-{turned}")));
+    assert_eq!(focused(&view, cx), Some(turned_tile));
+    assert_eq!(view.read_with(cx, |v, _| v.bell_count()), 1, "looked at, it is cleared");
 }
 
 /// The bar runs from the docked navigator's right edge: the toggle, the breadcrumb and "+",
@@ -497,7 +500,7 @@ fn an_unseen_dot_marks_a_finished_tile_until_it_is_looked_at(cx: &mut TestAppCon
     assert!(cx.debug_bounds(dot).is_none(), "nothing unseen yet");
     view.update_in(cx, |v, _w, cx| {
         let done =
-            Finished { command: "make".into(), exit: Some(2), elapsed: Duration::from_secs(9) };
+            Finished { command: "make".into(), exit: Some(2), elapsed: Duration::from_secs(40) };
         v.command_finished(built, done, cx);
     });
     cx.run_until_parked();

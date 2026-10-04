@@ -198,8 +198,8 @@ all three through one callback; OSC 99's chunks are put together in the ghostty 
 the workspace posts them as a notification-centre banner when no window is active, tagged by the
 session so a click reveals the tile, and bounces the Dock like an agent's attention. BEL tints
 the tile's grid for a flash (`TerminalView::bell_flashing`, `alpha::FAINT`) and, when no window
-is active and `[terminal] bell_alert` holds (the default), plays the alert sound and bounces
-the Dock.
+is active and `[terminal] alert` is "hidden" (the default), or always when it is "always",
+plays the alert sound and bounces the Dock.
 
 **Kitty graphics.** libghostty keeps the images (`KITTY_STORAGE_BYTES` per screen; PNG
 decoded through the `png` crate by `slopty_engine::graphics::PngDecoder`) and lays the
@@ -805,9 +805,8 @@ sent at −1: above files, below video.
     with a notice), so origins, cookies and OAuth redirects keep working.
   - Each accepted connection becomes a tunnel, which the worker joins to `127.0.0.1` (then `::1`)
     with a half-close.
-  - The tile shows each port as two quiet pills: the number ("5173", or "8080 → 8081" when
-    served on another port here) opens a browser tile, and "↗" opens the default browser. The
-    palette's port list offers both.
+  - The status bar counts the forwarded ports, and the count opens the palette's port list:
+    each port opens in a browser tile or in the default browser. The shell's header shows none.
   - A browser tile names the worker's port, and a client serves any port it names on demand
     (`Remote::forward`, a pin in `tunnel::Forwards` kept while the link lives), so a page opens
     on every client even when no session lists its port there any more (§4).
@@ -1007,9 +1006,7 @@ of the app (macOS, `WorkspaceView::file_proxy`); its dump entry is `ItemInfo.fil
 lines, edited, trouble, read-only). The way in is the palette: a path typed in opens as an
 `Open <path>` line against the active shell's directory, and a word asked of the worker's
 files does the same for its hits; either opens the tile with the keyboard in the editor. The
-palette lists every tile as "Go to <title>" after the sessions (`PaletteRun::Item`) and the last
-five distinct commands of the shell a "run" would go to as "Rerun <command>"
-(`TermState::recent_commands`, `PaletteRun::Rerun`, typed through `run_text`). ⌘F with the
+palette lists every tile as "Go to <title>" after the sessions (`PaletteRun::Item`). ⌘F with the
 tile active opens a find bar like the terminal's (`FileView::find`, key context `FileSearch`):
 a hit is a line holding the text, smart-case (`file::hit_lines`), tinted in the warn tone,
 stepped with ⌘G/↩ and wrapped; Esc closes it and the editor takes the keyboard back. Inside
@@ -1086,8 +1083,8 @@ the page from the local port it got (`browser::local_url`), asking again when th
 back; what the header and the dump show is put back on the worker's port
 (`browser::worker_url`). The header shows the page's title and its
 address as text, "←" while there is history and "↻"; the title and address are read after
-each navigation and every second while the page is open. The ways in: a port chip's number
-opens the worker's port in a tile (its "↗" opens the default browser, as before), "Open URL…" in the
+each navigation and every second while the page is open. The ways in: the port list (the
+status bar's count) opens the worker's port in a tile or the default browser, "Open URL…" in the
 palette starts at `http://localhost:`, and an address typed into the palette is an "Open
 <address> in a tile" line. Only http and https open (`browser::is_web_url`). The picker (⌘O, a field at
 the top filtering by every word typed, ↑/↓/↩ choosing) lists the workspace's sessions first — agents waiting on the human, then other agents with their status
@@ -1116,12 +1113,8 @@ to every action. The palette remembers where the keyboard was (`window.focused`)
 back when it closes and dispatches the choice on the next frame from there, so a terminal's
 own actions (find, the prompts) reach the terminal that had the focus.
 
-**Pointing.** ⌘⇧O points the other clients of the focused tile's worker at it
-(`ClientMsg::Point`, relayed as `ItemSync::Pointed`): they get a toast naming the pointer and
-the tile that goes there on a click and leaves by itself after 8 s; on a phone the palette's
-"Point other devices at this tile" does the same (the header's "point" pill went in the
-2026-09-25 de-slop pass). Nothing tells a client where another one is looking any more: each
-device's layout is its own.
+Nothing tells a client where another one is looking: each device's layout is its own, and
+pointing other devices at a tile is gone (`docs/decisions/workspace.md`, "Pointing is gone").
 
 ## 5. Agents
 
@@ -1202,7 +1195,7 @@ to the followers on the control stream (`WorkerMsg::Permission`): the relay's
 `CtlRequest::Permission` is held while someone follows the session
 (`slopty_worker::conversation::Holds`), or, for a plain yes-or-no tool call, while a client has
 asked for approvals (`ConversationRequest::Approvals`, at most `APPROVAL_HOLD`), which is what
-lets a notification's or the inbox's Allow and Deny answer it. The first answer is the decision
+lets a notification's Allow and Deny, or a row's under the navigator's *Needs you*, answer it. The first answer is the decision
 the relay prints. The last follower or approver leaving, the wait running out, the relay going
 away or a client's `ConversationRequest::Release` (sent when the session's TUI is the tile in
 front) hands it back undecided, so the TUI shows its own dialog. Where Claude Code runs Slopty's mod (a plugin
@@ -1287,7 +1280,8 @@ and focuses the terminal so the human answers Claude Code's own prompt there; Sl
 answers for them. Finding them: ⌘⇧A (the "Next Thing Needing You" menu item) reveals and focuses the
 next rung of the attention ladder on any worker, cycling from the active item: a waiting agent,
 then a finish not yet looked at, failed ones first; the bell's badge counts
-what is new and its inbox lists the waiting agents under "Needs you" (the phone's way in).
+the agents that wait and the turns left to review, and the bell (⌘⇧U) shows the navigator at
+them, under *Needs you* and *To review* (the phone's way in).
 `slopty hook install|uninstall|status` manage the registration in `~/.claude/settings.json`;
 `slopty hook report working|blocked|done|idle|gone [message]`, run from inside a session by any
 program (a wrapper around another agent), is the same relay with the agent's own word, and
@@ -1563,19 +1557,18 @@ before the workspace replaced the canvas).
 **Settings.** `<data dir>/settings.toml` (`slopty settings path|init`; the "Settings…" menu
 item, ⌘, and the palette's "Open settings" open it in the in-app editor, `SettingsEditor`
 in slopty-ui: a dialog with the text in a monospace field, ⌘↩ parses then writes and
-applies it, a parse error stays under the field; the Mac's dialog also offers the default
-`.toml` editor, writing the commented defaults first when the file is missing).
+applies it, a parse error stays under the field).
 `slopty-settings` owns the schema: `[font] mono_family | mono_size | mono_line_height |
 ligatures | ui_size` (the line height is `Typography::mono_line_height`, ghostty's
 `adjust-cell-height`; ligatures toggle `calt`), `[theme] appearance = dark | light | system`,
-`[terminal] minimum_contrast | copy_on_select | bell_alert | cursor_blink = program | always |
+`[terminal] minimum_contrast | copy_on_select | alert = never | hidden | always | cursor_blink = program | always |
 never | cursor_style = program | block | bar | underline | paste_protection | bold_is_bright |
 hide_pointer_while_typing | scroll_multiplier | option_as_alt = false | true | left | right |
 confirm_close | natural_editing` (the ratio and bold-is-bright ride on `TerminalPalette`,
 copy-on-select, the blink override, paste protection, the pointer hide, the multiplier,
 option-as-alt, the close confirmation and the natural editing keys on `Theme::behaviour`,
-the last travelling on every `KeyEvent` to the worker's encoder, the bell flag is
-read by the app's bell handler, see decisions/terminal.md), `[remote] fps | max_bitrate_mbps | muted` (`Theme::behaviour.stream`;
+the last travelling on every `KeyEvent` to the worker's encoder, the alert is
+read by the app's bell and agent handlers, see decisions/terminal.md), `[remote] max_bitrate_mbps | muted | sharp_text` (`Theme::behaviour.stream`;
 a live stream re-asks its quality on change and takes a changed `muted`, see
 decisions/video.md and decisions/settings.md), `[colors] foreground |
 background | cursor | cursor_text | selection | ansi` (`"#rrggbb"` strings laid over
@@ -1632,9 +1625,10 @@ navigator header adds a warn line only when something is wrong (Screen Recording
 Accessibility off on a Mac); a worker on another build never links, and says so instead
 (`WorkerStatus::NeedsUpdate`: both builds, an "Update" on its tiles' pill that deploys the new
 build over SSH and dials it again at once, and the command to copy; otherwise the next dial
-comes only after `redial::WRONG_BUILD` or a nudge), and the hosts list reads its machine
-("macOS 26.5 · load 2.1"). The titlebar names only the workers that are down;
-the "…" menu adds a worker and opens the workers list. The bell's inbox and the Dock badge count
+comes only after `redial::WRONG_BUILD` or a nudge). Its "…" in the navigator reads its machine
+("macOS 26.5 · load 2.1") and each agent installed there with its version, and offers Update,
+Connect, Wake, the clipboard and Forget as the app allows (`workspace::machines`). The titlebar
+names only the workers that are down; the "…" menu adds a worker. The bell and the Dock badge count
 agents across every worker, and ⌘⇧A goes to the next one wherever it is. A banner names only
 a session, which the workspace finds on whichever worker runs it. The known workers are
 `workers.json` in the client's data dir (`slopty_net::known`): a list of `{ address, name,

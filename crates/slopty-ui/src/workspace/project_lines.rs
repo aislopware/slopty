@@ -261,14 +261,6 @@ impl WorkspaceView {
         Some(grouping.group(scope).map_or_else(|| scope.value().to_owned(), |g| self.group_name(g)))
     }
 
-    /// The tiles in the scope, while there is one: what the inbox and the status bar's counts
-    /// keep.
-    pub(super) fn scoped_tiles(&self) -> Option<std::collections::HashSet<TileRef>> {
-        let scope = self.nav.scope.as_ref()?;
-        let grouping = self.project_groups();
-        Some(grouping.group(scope).map(|g| grouping.members(g).collect()).unwrap_or_default())
-    }
-
     /// Go to `group`: the workspace that last held a tile of it, and its first tile there in
     /// reading order. A project with no tile in the layout says so.
     pub(super) fn go_to_group(&mut self, group: &GroupKey, cx: &mut Context<Self>) {

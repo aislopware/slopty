@@ -14,15 +14,12 @@ use slopty_proto::server::Os;
 use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
 
 use super::actions::{
-    AddWindow, Applies, CenterColumn, CenterVisibleColumns, CloseItem, ConsumeOrExpelLeft,
-    ConsumeOrExpelRight, CycleWidth, CycleWidthBack, ExpandColumn, FocusColumn, FocusColumnFirst,
-    FocusColumnLast, FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FocusWorkspace,
-    FocusWorkspaceDown, FocusWorkspacePrevious, FocusWorkspaceUp, FontLarger, FontReset,
-    FontSmaller, FullscreenTile, MaximizeColumn, MoveColumnLeft, MoveColumnRight,
-    MoveColumnToFirst, MoveColumnToLast, MoveColumnToWorkspace, MoveColumnToWorkspaceDown,
-    MoveColumnToWorkspaceUp, MoveDown, MoveUp, MoveWorkspaceDown, MoveWorkspaceUp, NarrowColumn,
-    NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats, ToggleTabbed,
-    UndoClose, WidenColumn,
+    AddWindow, Applies, CenterColumn, CloseItem, ConsumeOrExpelLeft, ConsumeOrExpelRight,
+    CycleWidth, FocusColumn, FocusColumnLeft, FocusColumnRight, FocusDown, FocusUp, FocusWorkspace,
+    FocusWorkspaceDown, FocusWorkspaceUp, FontLarger, FontReset, FontSmaller, FullscreenTile,
+    MaximizeColumn, MoveColumnLeft, MoveColumnRight, MoveColumnToFirst, MoveColumnToLast, MoveDown,
+    MoveUp, NewNote, NewTerminal, RenameItem, ToggleMute, ToggleOverview, ToggleStats,
+    ToggleTabbed, UndoClose,
 };
 use super::toast::ToastKind;
 use super::{
@@ -177,20 +174,11 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &FocusDown, _w, cx| {
             this.layout_action(cx, Layout::focus_window_or_workspace_down);
         }))
-        .on_action(cx.listener(|this, _: &MoveWorkspaceUp, _w, cx| {
-            this.layout_action(cx, Layout::move_workspace_up);
-        }))
-        .on_action(cx.listener(|this, _: &MoveWorkspaceDown, _w, cx| {
-            this.layout_action(cx, Layout::move_workspace_down);
-        }))
         .on_action(cx.listener(|this, _: &FocusWorkspaceUp, _w, cx| {
             this.layout_action(cx, Layout::focus_workspace_up);
         }))
         .on_action(cx.listener(|this, _: &FocusWorkspaceDown, _w, cx| {
             this.layout_action(cx, Layout::focus_workspace_down);
-        }))
-        .on_action(cx.listener(|this, _: &FocusWorkspacePrevious, _w, cx| {
-            this.layout_action(cx, Layout::focus_workspace_previous);
         }))
         .on_action(cx.listener(|this, a: &FocusWorkspace, _w, cx| {
             let index = a.index;
@@ -234,12 +222,6 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &FocusColumnRight, _w, cx| {
             this.layout_action(cx, Layout::focus_column_right);
         }))
-        .on_action(cx.listener(|this, _: &FocusColumnFirst, _w, cx| {
-            this.layout_action(cx, Layout::focus_column_first);
-        }))
-        .on_action(cx.listener(|this, _: &FocusColumnLast, _w, cx| {
-            this.layout_action(cx, Layout::focus_column_last);
-        }))
         .on_action(cx.listener(|this, a: &FocusColumn, _w, cx| {
             let index = a.index;
             this.layout_action(cx, |l| l.focus_column(index));
@@ -265,15 +247,6 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &CycleWidth, _w, cx| {
             this.width_action(cx, |l| l.switch_preset_width(true));
         }))
-        .on_action(cx.listener(|this, _: &CycleWidthBack, _w, cx| {
-            this.width_action(cx, |l| l.switch_preset_width(false));
-        }))
-        .on_action(cx.listener(|this, _: &NarrowColumn, _w, cx| {
-            this.width_action(cx, |l| l.set_width_delta(-10.0));
-        }))
-        .on_action(cx.listener(|this, _: &WidenColumn, _w, cx| {
-            this.width_action(cx, |l| l.set_width_delta(10.0));
-        }))
         .on_action(cx.listener(|this, _: &MaximizeColumn, _w, cx| {
             this.width_action(cx, Layout::toggle_full_width);
         }))
@@ -283,27 +256,11 @@ impl WorkspaceView {
         .on_action(cx.listener(|this, _: &CenterColumn, _w, cx| {
             this.layout_action(cx, Layout::center_column);
         }))
-        .on_action(cx.listener(|this, _: &CenterVisibleColumns, _w, cx| {
-            this.layout_action(cx, Layout::center_visible_columns);
-        }))
-        .on_action(cx.listener(|this, _: &ExpandColumn, _w, cx| {
-            this.width_action(cx, Layout::expand_to_available_width);
-        }))
         .on_action(cx.listener(|this, _: &MoveColumnToFirst, _w, cx| {
             this.layout_action(cx, Layout::move_column_to_first);
         }))
         .on_action(cx.listener(|this, _: &MoveColumnToLast, _w, cx| {
             this.layout_action(cx, Layout::move_column_to_last);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceUp, _w, cx| {
-            this.layout_action(cx, Layout::move_column_to_workspace_up);
-        }))
-        .on_action(cx.listener(|this, _: &MoveColumnToWorkspaceDown, _w, cx| {
-            this.layout_action(cx, Layout::move_column_to_workspace_down);
-        }))
-        .on_action(cx.listener(|this, a: &MoveColumnToWorkspace, _w, cx| {
-            let index = a.index;
-            this.layout_action(cx, |l| l.move_column_to_workspace(index));
         }))
         .on_action(cx.listener(|this, _: &ToggleTabbed, _w, cx| {
             this.layout_action(cx, Layout::toggle_tabbed);

@@ -222,7 +222,7 @@ mod tests {
         .await
         .unwrap();
         drv.keys("cmd-a").await.unwrap();
-        let settings = format!("{}bell_alert = false\n", pinned_settings(APPEARANCE));
+        let settings = format!("{}alert = \"never\"\n", pinned_settings(APPEARANCE));
         drv.ui_insert_text(&settings).await.unwrap();
         drv.keys("cmd-enter").await.unwrap();
         drv.wait_for("the settings editor to close", STEP, |d| {

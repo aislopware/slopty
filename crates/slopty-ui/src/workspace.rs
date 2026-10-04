@@ -12,15 +12,17 @@
 //! * `browsers` — web pages in tiles: opening them, and serving their ports here.
 //! * `folders` — folders in tiles, and a path opened as whatever it turns out to be.
 //! * `overlays` — the command palette, find in every tile, the window picker.
-//! * `toast` — the one-line notices, undo close, pointing.
+//! * `toast` — the one-line notices: undo close, what needs the person off screen.
 //! * [`remote`] — the clipboard shared with the workers, files dropped on tiles, forwarded ports.
 //! * `strip` — the tiles laid out from the layout's frame, and the pointer and gestures.
 //! * `tile` — one tile's chrome and body.
 //! * `titlebar` — the bar across the top, with the workspaces as tabs.
 //! * `navigator` — the workers and their tiles, down the left, and the filter over them.
+//! * `machines` — what each machine says of itself and what can be done to it, from its row.
 //! * `rollup` — what a folded worker or a workspace tab adds up to; the navigator's second line.
-//! * `statusbar` — the bar along the bottom: where the focused tile runs, the link, the agents.
-//! * `inbox` — the bell's list of what needs the human and what finished.
+//! * `statusbar` — the bar along the bottom: where the focused tile runs, the link.
+//! * `approvals` — "Allow" and "Deny" for an agent that waits, from its row or its note.
+//! * `turns` — agents' turns that ended unread, which the bell counts.
 //! * `projects` — the server's projects, each board shown in its orchestrator's tile.
 //!
 //! The navigator, the title bar and the status bar are views of their own (`ChromeView`),
@@ -31,7 +33,7 @@ mod about;
 pub mod actions;
 mod agent_start;
 mod agents;
-mod ask;
+mod approvals;
 pub mod attention;
 mod breadcrumb;
 mod browsers;
@@ -42,8 +44,8 @@ mod facts;
 mod folders;
 mod grouping;
 mod handoffs;
-mod inbox;
 mod kept_items;
+mod machines;
 mod marks;
 mod miniature;
 mod navigator;
@@ -64,8 +66,10 @@ mod strip;
 mod tile;
 mod titlebar;
 mod toast;
+mod turns;
 mod unsaved;
 mod workers;
+mod yard;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -73,16 +77,11 @@ use std::time::{Duration, Instant};
 
 pub use actions::*;
 pub use agents::{agent_status_text, banner_title, program_banner};
-#[cfg(test)]
-pub(crate) use ask::ASK;
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, SharedString,
     StyleRefinement, Subscription, Task, WeakEntity, Window,
 };
-/// The inbox's keyboard verbs, bound by [`crate::keymap`].
-pub(crate) use inbox::triage as inbox_actions;
-/// The key context of the inbox's list.
-pub(crate) use inbox::triage::CTX as INBOX_CTX;
+pub use machines::HostActions;
 pub use projects::worker_key;
 use slopty_client::ItemDoc;
 use slopty_client::layout::{Layout, LayoutConfig, Saved, TileRef, WorkerKey};
@@ -95,9 +94,8 @@ use slopty_proto::screen::CaptureTarget;
 use slopty_proto::server::WorkerCaps;
 use slopty_proto::terminal::SessionSummary;
 use slopty_theme::Theme;
-pub use statusbar::HostActions;
 #[cfg(test)]
-pub(crate) use strip::{ADD_WORKER, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
+pub(crate) use strip::{ADD_WORKER, NEW_AGENT, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
     ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, NOTE, OPENING, PAUSED,
@@ -122,9 +120,9 @@ use crate::picker::WindowPicker;
 use crate::screen::{ScreenFactory, ScreenView};
 use crate::terminal::TerminalView;
 
-/// How long a shell command has to run before its end, unwatched, is worth a badge: shorter
-/// commands end before the human has looked away.
-pub const SLOW_COMMAND: Duration = Duration::from_secs(5);
+/// How long a shell command or an agent's turn has to run before its end, unwatched, is worth a
+/// mark: shorter ones end before the person has looked away.
+pub const SLOW_COMMAND: Duration = Duration::from_secs(30);
 
 /// How long a shell command runs before its tile marks it running: a quick one ends before the
 /// mark would be read, and a mark that flickers on for it is noise.
@@ -564,8 +562,10 @@ pub enum MenuGroup {
     Navigation,
     /// The settings.
     Settings,
-    /// The server and the workers: connecting, adding, the hosts.
+    /// The server and the workers: connecting, adding, updating, waking.
     Connections,
+    /// Taking something away for good: forgetting a machine.
+    Removal,
 }
 
 /// An entry of the titlebar's "…" menu the app adds (settings, the server, adding a worker).
@@ -696,8 +696,6 @@ pub struct WorkspaceView {
     drawn_thread_waits: Vec<faces::ThreadWait>,
     /// Where ⌘⇧A's last step stood on the attention ladder.
     attention_at: Option<usize>,
-    /// The empty workspace's question.
-    ask: ask::Ask,
     /// The last agent started, where and in which folder: what "New agent…" lists first.
     last_start: Option<agent_start::LastStart>,
     /// The tiles of threads on their way.
@@ -818,8 +816,12 @@ pub struct WorkspaceView {
     nav: navigator::NavState,
     /// The status bar's own state: its readouts and the hosts popover.
     bar: statusbar::Bar,
-    /// The inbox's history and which of its views is up.
-    inbox: inbox::Inbox,
+    /// What the app lets the person do to each machine, and how one is added.
+    machines: machines::Machines,
+    /// The permission prompts this client may answer from a row or a note.
+    approvals: approvals::Approvals,
+    /// Agents' turns under way, and the ones that ended unread.
+    turns: turns::Turns,
     /// The app's rows in the "…" menu.
     more_entries: Vec<MenuEntry>,
     show_stats: bool,
@@ -857,6 +859,17 @@ pub struct WorkspaceView {
     reviews: reviews::Reviews,
     pending_focus_picker: bool,
     pending_focus_self: bool,
+    /// What held the keyboard a moment is gone: it goes back where the focused tile keeps it
+    /// ([`Self::return_keyboard`]) in the next frame.
+    pending_return: bool,
+    /// The title bar's empty span is pressed: a move drags the window.
+    title_press: bool,
+    /// What the title bar asked of the window, kept by a test.
+    #[cfg(test)]
+    window_asks: Vec<titlebar::WindowAsk>,
+    /// The keyboard lost (what held it left the frame) comes back to an open modal, else to
+    /// where the focused tile keeps it.
+    focus_lost: Option<Subscription>,
     /// Where the layout is saved (`layout.json` in the client's data directory), if anywhere.
     layout_path: Option<std::path::PathBuf>,
     /// What was last written there.
@@ -890,10 +903,6 @@ pub struct WorkspaceView {
     kept: Option<unsaved::Kept>,
     /// Slopty's mark over the empty workspace.
     empty_mark: Entity<about::Mark>,
-    /// The About panel, while it is open.
-    about: Option<about::AboutPanel>,
-    /// The About panel just closed, drawn for the moment it takes to fade away.
-    about_leaving: Option<about::AboutPanel>,
     /// Uploads in flight.
     uploads: HashMap<slopty_core::XferId, remote::Upload>,
     /// Downloads in flight, and the ledger that keeps transfers across a relaunch.
@@ -953,9 +962,8 @@ impl WorkspaceView {
                 crate::icons::hold_steps(cx, until);
             }
         });
-        let empty_mark = gpui::AppContext::new(cx, |_| {
-            about::Mark::new(theme.clone(), about::MarkSize::Page, "empty", false)
-        });
+        let empty_mark =
+            gpui::AppContext::new(cx, |_| about::Mark::new(theme.clone(), "empty", false));
         Self {
             base_theme: theme.clone(),
             font_delta: 0.0,
@@ -981,7 +989,6 @@ impl WorkspaceView {
             drawn_waiting: Vec::new(),
             drawn_thread_waits: Vec::new(),
             attention_at: None,
-            ask: ask::Ask::default(),
             last_start: None,
             starting: starting::Starts::default(),
             kept_items: kept_items::KeptItems::default(),
@@ -1051,7 +1058,9 @@ impl WorkspaceView {
             anchors: titlebar::Anchors::default(),
             nav: navigator::NavState::default(),
             bar: statusbar::Bar::default(),
-            inbox: inbox::Inbox::default(),
+            machines: machines::Machines::default(),
+            approvals: approvals::Approvals::default(),
+            turns: turns::Turns::default(),
             more_entries: Vec::new(),
             show_stats: false,
             desktop: desktop::Desktop::default(),
@@ -1083,6 +1092,11 @@ impl WorkspaceView {
             reviews: reviews::Reviews::default(),
             pending_focus_picker: false,
             pending_focus_self: false,
+            pending_return: false,
+            title_press: false,
+            #[cfg(test)]
+            window_asks: Vec::new(),
+            focus_lost: None,
             layout_path: None,
             restore: restore::Restore::of(saved.as_ref()),
             layout_saved: saved,
@@ -1098,8 +1112,6 @@ impl WorkspaceView {
             handoff: handoffs::HandoffState::default(),
             kept: None,
             empty_mark,
-            about: None,
-            about_leaving: None,
             uploads: HashMap::new(),
             transfers: remote::transfers::Transfers::default(),
             drop_landing: None,
@@ -1654,10 +1666,21 @@ impl WorkspaceView {
 
 impl WorkspaceView {
     /// Tab from the workspace itself (nothing else focused) enters the keyboard ring; inside
-    /// a terminal or a text field Tab is theirs.
+    /// a terminal or a text field Tab is theirs. ↵ there on an empty workspace runs its first
+    /// way to begin, as the palette's selected row would.
     fn key_down(&mut self, ev: &gpui::KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.focus.is_focused(window) && crate::a11y::cycle(ev, window, cx) {
+        if !self.focus.is_focused(window) {
+            return;
+        }
+        if crate::a11y::cycle(ev, window, cx) {
             cx.stop_propagation();
+        } else if ev.keystroke.key == "enter"
+            && !ev.keystroke.modifiers.modified()
+            && self.bare()
+            && !self.workers.is_empty()
+        {
+            cx.stop_propagation();
+            self.start_here(window, cx);
         }
     }
 
@@ -1725,6 +1748,9 @@ impl WorkspaceView {
         {
             let handle = picker.read(cx).focus_handle(cx);
             window.focus(&handle, cx);
+        }
+        if std::mem::take(&mut self.pending_return) {
+            self.return_keyboard(window, cx);
         }
         // A page's next dialog may have taken the keyboard since its last one gave it back.
         if std::mem::take(&mut self.pending_focus_self)
@@ -1808,6 +1834,18 @@ impl gpui::Render for WorkspaceView {
             Styled as _,
         };
 
+        if self.focus_lost.is_none() {
+            // Once the frame that lost it is done: a focus moved inside the draw's focus phase
+            // schedules no frame, so the new holder would not be drawn as holding it.
+            self.focus_lost = Some(cx.on_focus_lost(window, |_this, window, cx| {
+                cx.defer_in(window, |this, window, cx| {
+                    if window.focused(cx).is_none() && !crate::a11y::reclaim(window, cx) {
+                        this.return_keyboard(window, cx);
+                    }
+                });
+            }));
+        }
+
         #[cfg(test)]
         {
             self.renders = self.renders.saturating_add(1);
@@ -1851,9 +1889,6 @@ impl gpui::Render for WorkspaceView {
             self.ensure_navigator_filter(window, cx);
             self.settle_navigator_filter(window, cx);
         }
-        let active = self.layout.active_workspace();
-        let bare = self.layout.workspaces().get(active).is_none_or(|w| w.columns().is_empty());
-        self.settle_ask(bare, window, cx);
         self.serve_browsers(cx);
         let strip = gpui::IntoElement::into_any_element(self.strip_host.clone());
         let menu = self.render_menu(window, cx);
@@ -1864,6 +1899,9 @@ impl gpui::Render for WorkspaceView {
         key_context.add("Workspace");
         if self.page_keys(window, cx) {
             key_context.add("Page");
+        }
+        if self.closing_offered() {
+            key_context.add(CLOSING_CTX);
         }
         let root = gpui::div()
             .id("workspace")
@@ -1891,11 +1929,9 @@ impl gpui::Render for WorkspaceView {
             .on_action(cx.listener(Self::open_file_palette))
             .on_action(cx.listener(Self::open_folder_palette))
             .on_action(cx.listener(Self::open_url_palette))
-            .on_action(cx.listener(Self::about))
-            .on_action(cx.listener(Self::list_workers))
             .on_action(cx.listener(Self::list_ports))
             .on_action(cx.listener(Self::next_attention))
-            .on_action(cx.listener(Self::toggle_inbox))
+            .on_action(cx.listener(Self::show_needs_you))
             .on_action(cx.listener(Self::filter_navigator))
             .on_action(cx.listener(Self::open_palette))
             .on_action(cx.listener(Self::edit_address))
@@ -1914,7 +1950,6 @@ impl gpui::Render for WorkspaceView {
             .when(applies.tile, |el| {
                 el.on_action(cx.listener(Self::close_item))
                     .on_action(cx.listener(Self::rename_item))
-                    .on_action(cx.listener(Self::point_others))
             })
             .when(applies.terminal, |el| el.on_action(cx.listener(Self::start_project)))
             .when(applies.agent, |el| {
@@ -1957,11 +1992,11 @@ impl gpui::Render for WorkspaceView {
                 },
             ))
             .on_action(cx.listener(|this, _: &FocusNext, window, cx| {
-                window.focus_next(cx);
+                crate::a11y::step(true, window, cx);
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, window, cx| {
-                window.focus_prev(cx);
+                crate::a11y::step(false, window, cx);
                 this.leave_screen(window, cx);
             }))
             .on_action(cx.listener(Self::toggle_navigator))
@@ -1973,7 +2008,6 @@ impl gpui::Render for WorkspaceView {
             .when_some(palette, gpui::ParentElement::child)
             .children(self.search_drawn())
             .children(self.render_project_sheet(window, cx))
-            .children(self.render_about(window, cx))
     }
 }
 

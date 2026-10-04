@@ -7,13 +7,13 @@
 //! away from the machine a while, which only the app can measure.
 
 use gpui::Window;
-use slopty_client::layout::{TileRef, WorkerKey};
-use slopty_core::WorkerId;
+use slopty_client::layout::TileRef;
 use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::thread::attention::{Presence, Seat};
 
 use super::WorkspaceView;
+use super::projects::worker_id;
 
 impl WorkspaceView {
     /// Where the person is on this client, as the server is to be told.
@@ -57,10 +57,4 @@ impl WorkspaceView {
         let ItemKind::Terminal { session } = self.item(tile)?.kind else { return None };
         Some(TermRef { worker: worker_id(tile.worker)?, session })
     }
-}
-
-/// The server's id for the worker `key` stands for: a key is the id's 128 bits
-/// (`projects::worker_key`), and a UUID's simple form is them in hex.
-fn worker_id(key: WorkerKey) -> Option<WorkerId> {
-    format!("{:032x}", key.value()).parse().ok()
 }

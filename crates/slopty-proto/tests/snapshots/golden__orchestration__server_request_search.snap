@@ -1,7 +1,8 @@
 ---
 source: crates/slopty-proto/tests/golden.rs
+assertion_line: 2047
 expression: hex(&bytes)
 ---
-2a 00 00 00 02 08 00 1f 10 00 00 00 00 00 00 00
+2a 00 00 00 02 08 00 1e 10 00 00 00 00 00 00 00
 00 00 00 00 00 00 00 00 77 03 7e 2f 77 04 74 6f
 64 6f 00 00 01 01 04 2a 2e 72 73 01 c8 01

@@ -405,11 +405,6 @@ pub enum ItemCmd {
         #[arg(help = ITEM_HELP)]
         item: String,
     },
-    /// Point every client at an item: each offers a jump to it.
-    Point {
-        #[arg(help = ITEM_HELP)]
-        item: String,
-    },
 }
 
 /// What a new item shows: exactly one.
@@ -867,10 +862,6 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
         }
         VerbCmd::Item { cmd: ItemCmd::Remove { item } } => {
             ops::remove_item(&mut res, &item, key).await?;
-            print_done(json)?;
-        }
-        VerbCmd::Item { cmd: ItemCmd::Point { item } } => {
-            ops::point_at(&mut res, &item, key).await?;
             print_done(json)?;
         }
         VerbCmd::Windows { worker } => {

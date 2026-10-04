@@ -41,6 +41,8 @@ pub fn menus(app_items: Vec<MenuItem>, ios: bool) -> Vec<Menu> {
     let (upload, download) =
         if ios { (UPLOAD_FROM_FILES, SAVE_TO_FILES) } else { ("Upload…", "Download…") };
     let app = [
+        MenuItem::action("About Slopty", crate::OpenAbout),
+        MenuItem::separator(),
         MenuItem::action("Settings…", crate::OpenSettings),
         MenuItem::separator(),
         MenuItem::action("Add Machine…", crate::AddWorker),

@@ -19,7 +19,7 @@ Button │ Navigator
 Group │ Where
 Button │ Ship the project board
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
 Group │ Terminal
 Heading │ terminal Terminal

@@ -195,28 +195,31 @@ fn a_save_is_never_left_waiting_on_a_worker_that_went_away(cx: &mut TestAppConte
     );
 }
 
-/// The bell counts a finished command only while its session and its worker are there: a
-/// session that ends, or a worker forgotten, takes its badge with it.
+/// A finished command's badge stays only while its session and its worker are there: a
+/// session that ends, or a worker forgotten, takes it with it.
 #[gpui::test]
 fn a_finished_badge_goes_with_its_session_and_its_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let [(s1, _), (s2, _), _] = three_shells(&view, cx, &studio);
     let done =
-        || Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
+        || Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
     view.update_in(cx, |v, _w, cx| {
         v.command_finished(s1, done(), cx);
         v.command_finished(s2, done(), cx);
     });
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 2);
+    let badged = |cx: &mut VisualTestContext| {
+        view.read_with(cx, |v, _| [s1, s2].map(|s| v.finished(s).is_some()))
+    };
+    assert_eq!(badged(cx), [true, true]);
     view.update_in(cx, |v, _w, cx| v.session_closed(s1, cx));
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 1, "the ended session's went");
+    assert_eq!(badged(cx), [false, true], "the ended session's went");
     let key = studio.key;
     view.update_in(cx, |v, _w, cx| v.remove_worker(key, cx));
     cx.run_until_parked();
-    assert_eq!(view.read_with(cx, |v, _| v.inbox_count()), 0, "the forgotten worker's went");
+    assert_eq!(badged(cx), [false, false], "the forgotten worker's went");
 }
 
 /// Two tiles closed, the second taken back: the first one's offer stays up.

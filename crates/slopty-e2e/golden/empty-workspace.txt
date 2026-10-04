@@ -4,11 +4,9 @@ Button │ Navigator
 Group │ Where
 Button │ New workspace
 Button │ New
-Button │ Inbox
+Button │ Needs you
 Button │ More
-TextInput │ What should an agent do?
-Button │ On e2e-worker
-Button │ In ~
+Button │ New agent
 Button │ New terminal
 Button │ Add a window or display
 Button │ New terminal in ~

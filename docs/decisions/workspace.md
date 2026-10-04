@@ -88,23 +88,15 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   | ⌘⌥↑ / ⌘⌥↓ | focus the tile above / below, else the workspace above / below |
   | ⌘⌥⇧← / ⌘⌥⇧→ | move the column left / right |
   | ⌘⌥⇧↑ / ⌘⌥⇧↓ | move the tile up / down, else to the workspace above / below |
-  | ⌘⌥Home / ⌘⌥End | focus the first / last column |
   | ⌘⌥⇧Home / ⌘⌥⇧End | move the column to the start / end of the strip |
   | ⌘1 … ⌘9 | focus column N |
   | ⌘⌥⇞ / ⌘⌥⇟ | focus the workspace above / below |
-  | ⌘⌥⇧⇞ / ⌘⌥⇧⇟ | move the workspace up / down |
-  | ⌃⌘⌥⇞ / ⌃⌘⌥⇟ | carry the column to the workspace above / below |
   | ⌘⌥1 … ⌘⌥9 | focus workspace N (past the last, the trailing empty one) |
-  | ⌃⌘⌥1 … ⌃⌘⌥9 | carry the column to workspace N |
-  | ⌘⌥` | back to the workspace focused before |
   | ⌘[ / ⌘] | consume into, or expel from, the column left / right |
-  | ⌘R / ⌘⇧R | next / previous preset width |
-  | ⌘⌥- / ⌘⌥= | column 10 % narrower / wider |
+  | ⌘R | next preset width |
   | ⌘⇧↩ | maximize the column (full width, again to restore) |
   | ⌃⌘F | fullscreen tile |
   | ⌘⌥C | centre the column |
-  | ⌘⌥⇧C | centre the fully visible columns as a group |
-  | ⌘⌥⇧F | widen the column over the room the visible columns leave |
   | ⌘⌥T | tabbed column |
   | ⌘⌥O (or a pinch in) | overview |
   | ⌘T, ⌘N | new shell |
@@ -119,7 +111,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   | ⌘← / ⌘→ | page back / forward, while the page itself does not hold the keyboard |
   | ⌘S | save the file tile |
   | ⌘⇧A | next agent that needs you |
-  | ⌘⇧O | point the others at the tile |
+  | ⌘⇧U | the navigator at what needs you (the bell) |
   | ⌘⇧M / ⌘⇧I | mute a window / stream stats |
   | ⌘= / ⌘- / ⌘0 | terminal text larger / smaller / default |
   | ⌃Tab / ⌃⇧Tab | the keyboard ring (the way out of a remote window) |
@@ -221,7 +213,7 @@ notes, file cards, the palette, naming and agents still hold, read with "tile" f
   on IPv4. A link that comes back is asked again, and an open page moves to the new port if
   it changed. The header, the dump and the address the page reports are put back on the
   worker's port (`browser::worker_url`), so every client names the page alike. Any other
-  host loads as it is. The port chip and the port list make items with the worker's port.
+  host loads as it is. The port list makes items with the worker's port.
   Tests: two links on one machine asking for the same worker port get two local ports that
   both reach it (`slopty-client` `remote_link`); two headless workspaces show one item at
   their own ports; the app e2e opens a page whose port the test's own server already holds
@@ -450,6 +442,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   ⌘⌥⇧↑/↓ already does it from the top or bottom tile.
   Tests: client `moving_a_column_to_a_numbered_workspace_clamps_to_the_trailing_one`, ui
   `workspace::tests::niri_keys` (a key per family, and a palette line with its key per op).
+  (Narrowed 2026-10-04: the rare ones are gone, see "The rare niri ops are gone".)
 
 - ✅ **A file tile edits any file up to 16 MiB** (2026-09-28). The tile turned into a viewer
   past 2 000 lines or 512 KiB, and most source files in a mature repository are past the line
@@ -1204,7 +1197,7 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - The app holds a background grace from the tap until every answer tapped is settled (sent,
     or given up as unreachable), plus two seconds for the bytes to leave. Then iOS may suspend
     it again.
-  - Tests: `a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note`
+  - Tests: `a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note`
     (`tests/thread_waits.rs`), `a_notes_answer_waits_for_its_prompt` (`tests/attention.rs`).
 
 - ✅ **Every transfer is on one list in the status bar, and survives a relaunch** (2026-10-04,
@@ -1255,3 +1248,207 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     body, as every tile of an away machine does.
   - Tests: `a_drag_out_that_fails_says_why`,
     `a_file_whose_machine_went_away_unread_says_it_waits_for_it`.
+
+- ✅ **Snooze is gone** (2026-10-04, the orchestrator's cuts after the feature audit
+  `.research/feature-audit-2026-10-04.md`). Supersedes ui.md's "Snooze, honestly" and "Snooze
+  is the server's, with presets".
+  - Before: a finish could be put off from the inbox, first for an hour in one client's
+    memory, then (the server's version) until a preset time in the person's zone, kept in
+    `snoozes.json` and sent to every client.
+  - Why it goes: the person directs and reviews agents and reads what finished when they get
+    to it, and failures and finishes are already quiet (an inbox row, a dot, the bell's count).
+    A way to hide a quiet row for a while was one more thing to learn and keep, and nobody
+    used it. A feature not worth its place is deleted, not hidden.
+  - Deleted, with no shim: the client's `SNOOZE_FOR` and local wake, the inbox's H key and its
+    presets, `slopty_proto::snooze`, `Verb::{Snooze, Unsnooze}`, `Outcome::Snoozed`,
+    `FromServer::Snoozes` and the client's `Change::Snoozes`, the server's snooze list, its
+    `snoozes.json` store and its loopback test, and the goldens of all of them.
+  - A `snoozes.json` left in a server's data directory is not read; it can be removed.
+
+- ✅ **The corner points only at what needs you** (2026-10-04, building ui.md's "The corner
+  points at what needs you, and only that").
+  - A shell's or an agent's failure or finish no longer says anything in the corner. It is a
+    dot on its tile, and for an agent's turn a row under *To review* and the bell's count.
+  - The corner speaks when a terminal's agent, or a thread its worker's table says waits,
+    comes to need the person. The app must be in front and the tile off screen. A thread is pointed at only on a change its client saw, never on the table it
+    first hears.
+  - Its one action is "Go". Each time the agents move, any word whose tile no longer needs
+    the person goes: it was answered in the tile, its row, a note or another client.
+  - Tests: `workspace::tests::needs_you::an_agent_off_screen_that_needs_you_says_so_in_the_corner`,
+    `workspace::tests::thread_waits::a_thread_off_screen_that_comes_to_need_you_is_pointed_at`.
+
+- ✅ **A key under a resting pointer keeps a notice held** (2026-10-04, the Ely study
+  `.research/ely-gpui-components-2026-10-04.md` §6.1).
+  - A notice under the pointer stays until the pointer leaves. GPUI's default hover listener
+    treats a key press as the pointer leaving until the mouse moves again, so typing under a
+    resting pointer started the countdown of the notice being read.
+  - The notice's hover listener now runs in `HoverListenerMode::InputModalityIndependent`, as
+    Ely's toast does. The status bar's and the navigator's hovers keep the default: a key
+    should hand those back to their readouts.
+  - Test: `workspace::tests::toasts::typing_under_a_resting_pointer_keeps_the_hold`.
+
+- ✅ **A modal keeps the keyboard, and gives it back on every way out** (2026-10-04, the Ely
+  study `.research/ely-gpui-components-2026-10-04.md` §5 #1 and §6.2).
+  - Before: Tab ran `window.focus_next` across the whole window, so from a button in the
+    palette, the settings, the "New project" sheet, a picker or project search it walked out
+    into the tiles behind. The About panel and a picker gave the keyboard to the workspace's
+    own handle when they closed, which left a shell's cursor hollow. A keyboard whose holder
+    left the frame stayed nowhere.
+  - One contract, after Ely's `FocusScope::trap`, `take_focus` and `give_back`
+    (`a11y::trap`, `a11y::hold`, `a11y::step`, `a11y::reclaim`):
+    - Each modal's surface tracks a scope handle and registers it with the handle its keyboard
+      lives at (the field, the form).
+    - Tab and ⇧Tab, everywhere they are handled (each stop, the workspace, the settings'
+      chord recorder, ⌃Tab), take one `step`. Inside a drawn trap the step walks its stops and
+      wraps there. A trap with no stop keeps the keyboard where it is.
+    - A trap is only one while it is drawn: a marker action on its element says so, so a
+      closed modal's handle traps nothing.
+  - **Every way out gives it back.** The About panel and a picker now give the keyboard back
+    where the focused tile keeps it (`return_keyboard`), as the palette, the settings and the
+    sheet already did. The palette's chosen action still runs after that, from there.
+  - **Lost, it comes back.** The workspace listens for a keyboard that has gone nowhere
+    (`on_focus_lost`). With a modal open, the modal takes it at its home; otherwise it goes
+    where the focused tile keeps it.
+  - Tests: `a11y::tests::{tab_walks_inside_an_open_trap, a_trap_with_no_stop_keeps_the_keyboard,
+    a_closed_trap_lets_tab_walk_the_window, a_lost_keyboard_comes_back_to_the_open_trap}`
+    (after Ely's overlay tests), and
+    `workspace::tests::modal_focus::{the_palette_holds_the_keyboard_and_hands_it_back_to_the_shell,
+    a_lost_keyboard_comes_back_where_it_belongs}`.
+
+- ✅ **The title bar's empty span moves the window** (2026-10-04, the Ely study §6.3).
+  - Before: the window is `appears_transparent`, so our bar is drawn where macOS's title bar
+    was, and nothing in Slopty asked the system to move or zoom the window from it.
+  - A press on the bar's empty span that moves calls `start_window_move`, and a double-click
+    calls `titlebar_double_click`, which follows the person's "double-click a window's title
+    bar to" setting. A press on any of the bar's buttons stops before it reaches the bar.
+  - Test: `workspace::tests::bars::the_title_bars_empty_span_moves_and_zooms_the_window` (the
+    test platform keeps the asks rather than performing them).
+
+- ✅ **The palette, the picker and a file's symbols rank fuzzily** (2026-10-04, the Ely study
+  §6.4).
+  - Before: a line matched when each word of the query was a substring of it, in list order,
+    so "nwt" found nothing and the line wanted sat under a dozen that only named the folder.
+  - Now `fuzzy::Fuzzy` scores with `nucleo-matcher` (fzf's scorer, as Helix runs it). Every
+    word must match, in any order and any case. A word matches a line's name fuzzily but its
+    place (worker, folder, what its agent was asked) only as spelled, since scattered letters
+    find something in any long text. A name spelled whole leads, then a word in the name beats
+    one only in the place, then nucleo's score. The palette orders its groups by their best
+    line, and highlights only the name's matched characters.
+  - Tests: `fuzzy::tests::*` (five), and the palette's
+    `a_query_ranks_each_section_and_shows_what_it_matched`.
+
+- ✅ **A worker's thread hub knows which agents it can start** (2026-10-04, from the thread
+  view's lane). The hub is told when it is made, and again when the worker connects, goes, or
+  reports other agents in its caps, so its start menu never offers an agent the machine lacks.
+  Test: `workspace::tests::thread_start::a_workers_hub_knows_the_agents_it_can_start`.
+
+- ✅ **Pointing is gone** (2026-10-04, the feature audit's cuts).
+  - ⌘⇧O and the palette's "Point other devices at this tile" sent `ClientMsg::Point`, which the
+    worker relayed as `ItemSync::Pointed` so every other client showed a toast with Go. The
+    orchestration verb `PointAt`, the `point_at` tool and `slopty item point` did the same for
+    an agent. The person works alone across their devices and never used it, so it carried a
+    wire message, a toast kind, a chord and a tool for nothing.
+  - All of it is deleted, with its goldens and tests. The worker's flood tests now flood with
+    renames of one note, which reach every client the same way. ⌘⇧O stays the editor's symbol
+    list.
+
+- ✅ **The inbox is the navigator's attention sections** (2026-10-04, the feature audit's cuts).
+  - Before: the bell opened a popover of its own, with *Unread* and *All* views, a history of
+    the last 200 finishes, mark read, mark all read and a keyboard of its own (J/K, E, U, ⌘↵,
+    ⌘⌫). The navigator listed the same agents again under *Needs you*, *To review* and
+    *Working*, but only those whose own row was out of sight, and the status bar counted every
+    worker's agents a third time. The person reads one list, so two of the three went.
+  - Now the bell (and ⌘⇧U, "Show what needs you") shows the navigator, docked where it docks,
+    with its list at the top and any filter emptied; a scope stays. *Needs you* and *To review*
+    list every wait and every turn left to review, its tile's row in view or not, since they are
+    what the bell counts. A waiting row carries "Deny" and "Allow" for a yes or no held here.
+  - The popover, its views and history, mark read, mark unread, "Mark all read", its key scope
+    and its notices' Undo are deleted. A turn to review is read by looking at its tile.
+  - *Working* and its once-a-second clock are gone: an agent at work is marked on its tile's
+    row and header, and nothing ticks for it. The status bar's per-worker agent counts are gone.
+  - A shell's finish is its tile's dot alone. It no longer counts on the bell or the Dock, and
+    `SLOW_COMMAND` (a finish worth a mark, a turn worth a review) went from 5 s to 30 s, past a
+    test run's or a build's usual wait.
+  - Tests: `workspace::tests::needs_you::the_bell_counts_what_needs_you_and_shows_the_navigator_at_it`,
+    `workspace::tests::frame::the_bell_counts_what_needs_you_and_a_rows_tile_clears_it`,
+    `workspace::tests::attention::an_approval_is_answered_from_the_note_and_its_row_where_they_are`,
+    `workspace::tests::thread_waits::a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note`,
+    `workspace::tests::chrome::agents_at_their_turn_draw_no_section_and_no_clock`.
+
+- ✅ **A machine's actions are on its row** (2026-10-04, the feature audit's cuts and the T3
+  Code study's §13).
+  - Before: what could be done to a machine lived in a popover over the status bar's right end
+    (opened by "N machines" while one was down, or the "…" menu's Machines), and the palette
+    had "List machines" as well, beside the navigator that already listed every machine.
+  - Now a machine's row in the navigator has "…" beside its chevron and "+", reachable by the
+    keyboard, which hangs a menu from it. The menu leads with the machine as it reports itself,
+    read-only: its system and load, then each coding agent installed there with its version
+    (the number from what the agent prints, so "codex-cli 0.48.0" reads "Codex 0.48.0"). Then
+    Update while it runs another build, Connect while its link is down, Wake while it can be
+    woken, the clipboard shared or not, and Forget for one added by address. Update also stays
+    on the row at rest, since a machine on another build links only once updated.
+  - Nothing there signs in, installs or probes an agent: what it printed is all it shows.
+  - The hosts popover, the status bar's machine count, the "…" menu's Machines row and "List
+    machines" are deleted. The palette's Workers section still lists each machine.
+  - Tests: `workspace::tests::bars::{the_keyboard_reaches_a_machines_menu,
+    a_machines_menu_says_what_it_runs_and_does_what_the_app_lets_it,
+    a_sleeping_worker_is_woken_from_the_palette_and_its_row,
+    the_clipboard_is_stopped_and_shared_with_one_machine_from_the_palette_or_its_row}`.
+
+- ✅ **The rare niri ops are gone** (2026-10-04, the feature audit's cuts). The person wants
+  nothing kept that is not used or not worth its place. Of the niri ops bound on 2026-09-28,
+  these were judged rare here, with no usage count behind it since Slopty keeps none: the
+  first and last column (⌘1 and the arrows reach them), back to the previous workspace,
+  carrying a column to the workspace above, below or N, moving a workspace up or down, the
+  previous preset width (⌘R cycles all three), a column 10 % narrower or wider (a drag on the
+  gap sizes it), and centring or filling the visible columns. Their actions, keys and palette
+  lines are deleted, and so are the layout model's operations nothing else called
+  (`set_width_delta`, `expand_to_available_width`, `center_visible_columns`,
+  `move_workspace_up`/`down`, `move_column_to_workspace*`, `focus_column_first`/`last`,
+  `focus_workspace_previous` and the previous workspace it remembered). A tile still reaches
+  another workspace: moved past the top or bottom of its column (⌘⌥⇧↑/↓), or dragged by its
+  header. The palette keeps column left and right, the workspace steps, the first workspace
+  and the column's ends.
+  Tests: ui `workspace::tests::niri_keys`, client `centring_puts_the_active_column_mid_view`
+  and `presets_cycle_both_ways_from_a_preset_and_from_any_width`.
+
+- ✅ **One way to ask an agent its task** (2026-10-04, the feature audit's cuts, §1.7). The
+  empty workspace's question (a composer-shaped field with a machine chip and a directory
+  chip, `workspace/ask.rs`) and the starting tile's first-message field did the same job: a
+  first message, and where to run it. The person wants one of each thing, so the question is
+  gone. The empty page now leads with a "New agent" row, wearing the selected fill as the row
+  ↵ runs, with ⇧⌘T printed beside it. It, or ↵ while the workspace holds the keyboard there,
+  opens the starting tile at once: the machine "+" chose, else the one in context, its usual
+  agent, in its latest place, the field there asking the task. Choosing another agent, machine
+  or folder is ⇧⌘T's steps. Tests: `workspace::tests::palette::{
+  the_empty_workspace_leads_with_a_new_agent,
+  the_empty_workspaces_agent_starts_in_the_machines_latest_place}`.
+
+- ✅ **One About, in the settings** (2026-10-04, the feature audit's cuts, §1.8). The About
+  panel (the mark, the name, the version and the build) said again what Settings › About says.
+  "About Slopty" is now an app command, in the app menu's first place, the palette and the
+  keyboard settings, and it opens the settings on their About page. The panel, its action and
+  its golden are deleted; the mark stays over the empty workspace. Tests: app
+  `about_slopty_opens_the_settings_on_their_about_page`, ui
+  `workspace::tests::modal_focus` (the palette now stands for a modal there).
+
+- ✅ **A shell's header shows no ports** (2026-10-04, the feature audit's cuts). Each listening
+  port was two pills on its shell's header, beside the status bar's count of the same ports
+  and the palette's list of them. The header's pills are deleted; the count opens the list,
+  where each port opens in a browser tile or the default browser, and the notice still says
+  when a port is served on another number here. Test:
+  `workspace::tests::remote::forwarded_ports_are_counted_and_listed_off_the_tile`.
+
+- ✅ **The palette no longer reruns commands** (2026-10-04, the feature audit's cuts). The
+  palette listed the last five commands of the shell a run would go to as "Rerun <command>".
+  A rerun from there was judged rare against the shell's own history and the block menu's
+  Rerun, which stay with ⌘⇧↩'s "Rerun last command". The lines, `PaletteRun::Rerun` and
+  `TermState::recent_commands` are deleted. Test:
+  `palette::tests::an_empty_field_lists_the_tiles_and_the_recent_commands`.
+
+- ✅ **⌘Z takes a tile back only while its notice is up** (2026-10-04, the feature audit's
+  cuts). ⌘Z was the workspace's "Undo close" all the time, so wherever no view took it first
+  it brought back a tile closed long ago. It now binds in `Workspace && ClosingOffered`, a
+  context the workspace adds only while a closed tile's notice stands (`CLOSING_CTX`). After
+  that the palette's "Reopen" lines still bring a closed tile back. Test:
+  `workspace::tests::a_closed_shell_can_be_taken_back`.

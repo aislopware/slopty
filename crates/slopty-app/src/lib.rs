@@ -44,7 +44,7 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
-pub use settings::actions::{OpenKeyboardShortcuts, OpenSettings};
+pub use settings::actions::{OpenAbout, OpenKeyboardShortcuts, OpenSettings};
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
 use slopty_core::{SessionId, WorkerId};
@@ -582,20 +582,20 @@ impl Workspace {
             // its notice sounds it instead, so a moment never sounds twice.
             WorkspaceEvent::Attention(_session) => {
                 let active = cx.active_window().is_some();
-                if !ws.attention.server_led() && settings::agent_alerts(&ws.settings, active) {
+                if !ws.attention.server_led() && settings::alerts(&ws.settings, active) {
                     alert();
                 }
             }
             // A program's own notification is this client's, server or not.
             WorkspaceEvent::Program(_session) => {
-                if settings::agent_alerts(&ws.settings, cx.active_window().is_some()) {
+                if settings::alerts(&ws.settings, cx.active_window().is_some()) {
                     alert();
                 }
             }
             // A bell while the human is elsewhere is an alert; in front of the window the
             // view's own flash is enough.
             WorkspaceEvent::Bell(_session) => {
-                if settings::bell_alerts(&ws.settings, cx.active_window().is_some()) {
+                if settings::alerts(&ws.settings, cx.active_window().is_some()) {
                     alert();
                 }
             }
@@ -790,9 +790,7 @@ impl Workspace {
         let text = settings::editable_text(&self.settings_path);
         let path = self.settings_path.display().to_string();
         let theme = self.theme.clone();
-        let editor = cx.new(|cx| {
-            SettingsEditor::new(&text, &path, cfg!(target_os = "macos"), theme, window, cx)
-        });
+        let editor = cx.new(|cx| SettingsEditor::new(&text, &path, theme, window, cx));
         editor.update(cx, |e, cx| e.set_palette_words(app_palette_items(), cx));
         self.settings_editor_events =
             Some(cx.subscribe_in(&editor, window, |this, editor, event, window, cx| match event {
@@ -804,14 +802,23 @@ impl Workspace {
                         this.close_settings(window, cx);
                     }
                 }
-                SettingsEditorEvent::OpenExternally => {
-                    open_settings_file(cx);
-                    this.close_settings(window, cx);
-                }
                 SettingsEditorEvent::Dismiss => this.close_settings(window, cx),
             }));
         self.settings_editor = Some(editor);
         cx.notify();
+    }
+
+    /// The settings, open on `section`'s page.
+    fn open_settings_at(
+        &mut self,
+        section: slopty_ui::settings_form::schema::Section,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings(window, cx);
+        if let Some(editor) = &self.settings_editor {
+            editor.update(cx, |e, cx| e.show_section(section, window, cx));
+        }
     }
 
     /// A change from the settings form, or the file's face saved: a text that parses is written
@@ -3096,11 +3103,12 @@ impl Render for Workspace {
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
             .on_action(cx.listener(|this, _: &OpenKeyboardShortcuts, window, cx| {
-                this.open_settings(window, cx);
-                if let Some(editor) = &this.settings_editor {
-                    let keyboard = slopty_ui::settings_form::schema::Section::Keyboard;
-                    editor.update(cx, |e, cx| e.show_section(keyboard, window, cx));
-                }
+                let keyboard = slopty_ui::settings_form::schema::Section::Keyboard;
+                this.open_settings_at(keyboard, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &OpenAbout, window, cx| {
+                let about = slopty_ui::settings_form::schema::Section::About;
+                this.open_settings_at(about, window, cx);
             }))
             .when(!welcome, |el| {
                 el.child(div().flex_1().w_full().min_h_0().child(self.view.clone()))
@@ -3237,6 +3245,7 @@ fn apply_link_event(
             | WorkerMsg::Ports { .. }
             | WorkerMsg::Handoff(_)
             | WorkerMsg::Sessions(_)
+            | WorkerMsg::ThreadHits(_)
             | WorkerMsg::FolderPage { .. }
             | WorkerMsg::FsDone { .. }
             | WorkerMsg::GitDone { .. },
@@ -3431,6 +3440,7 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
     use slopty_ui::keymap::app_command;
     let mut commands = vec![
         app_command("open_settings", OpenSettings, &["cmd-,"]),
+        app_command("about", OpenAbout, &[]),
         app_command("add_worker", AddWorker, &["cmd-shift-h"]),
         app_command("connect_server", ConnectServer, &[]),
         app_command("disconnect_server", DisconnectServer, &[]),
@@ -3466,6 +3476,9 @@ fn app_key_bindings() -> Vec<gpui::KeyBinding> {
 /// keyboard its menus, and a phone or a closed menu bar only this.
 const KEYBOARD_SHORTCUTS: &str = "Keyboard shortcuts";
 
+/// The palette's way to the version and the build: Settings › About.
+const ABOUT: &str = "About Slopty";
+
 /// The app's lines for the command palette, after the workspace's.
 fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     use slopty_ui::icons::IconName;
@@ -3477,6 +3490,7 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
     let mut items = vec![
         item("Open settings", IconName::Settings, Box::new(OpenSettings)),
         item(KEYBOARD_SHORTCUTS, IconName::Keyboard, Box::new(OpenKeyboardShortcuts)),
+        item(ABOUT, IconName::Info, Box::new(OpenAbout)),
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
         item("Disconnect from the server", IconName::Unplug, Box::new(DisconnectServer)),
         item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
@@ -3883,18 +3897,6 @@ fn watch_settings(workspace: Entity<Workspace>, cx: &App) {
         }
     })
     .detach();
-}
-
-/// The editor's "Open in editor" button: the file in the default `.toml` editor, written with
-/// the commented defaults first when there is none.
-fn open_settings_file(cx: &App) {
-    let path = slopty_settings::path();
-    match Settings::init(&path) {
-        Ok(true) => tracing::info!(path = %path.display(), "wrote default settings"),
-        Ok(false) => {}
-        Err(e) => tracing::warn!(path = %path.display(), error = %e, "write default settings"),
-    }
-    cx.open_with_system(&path);
 }
 
 #[cfg(test)]
@@ -4374,6 +4376,25 @@ mod tests {
         });
         let only_shown: Vec<&String> = shown.iter().filter(|l| !scratch.contains(l)).collect();
         assert!(only_shown.is_empty(), "painted with the old focus: {only_shown:#?}");
+    }
+
+    /// "About Slopty", in the app menu and the palette, opens the settings on their About page,
+    /// where the version and the build are: no panel of its own says them again.
+    #[gpui::test]
+    fn about_slopty_opens_the_settings_on_their_about_page(cx: &mut TestAppContext) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let (ws, cx) = shell(cx, &runtime, &dir, true);
+        cx.update(|window, cx| ws.update(cx, |ws, cx| ws.cancel_add_worker(window, cx)));
+        cx.run_until_parked();
+        cx.dispatch_action(OpenAbout);
+        cx.update(|window, _cx| window.set_a11y_active(true));
+        cx.run_until_parked();
+        let tree = cx.update(|window, _cx| slopty_ui::a11y::tree(window));
+        let about = tree.iter().find(|n| n.is("Group", Some("About"))).expect("the About page");
+        let said = about.description.as_deref().unwrap_or_default();
+        assert!(said.contains(env!("CARGO_PKG_VERSION")), "{said}");
+        assert!(app_palette_items().iter().any(|item| item.label == ABOUT), "the palette's line");
     }
 
     /// The Keyboard page names the app's own commands as its palette does ("Update all

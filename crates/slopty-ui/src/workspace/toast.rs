@@ -16,14 +16,11 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::{
     Animation, AnimationExt as _, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
 use slopty_client::layout::TileRef;
-use slopty_proto::ClientMsg;
 
 use super::WorkspaceView;
-use super::actions::PointOthers;
 use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
@@ -63,13 +60,6 @@ struct Shown {
 
 /// What a toast is.
 pub(super) enum ToastKind {
-    /// Another client's pointing: a button that goes to the tile.
-    Pointed {
-        /// Who pointed, as they are named.
-        name: String,
-        /// At what.
-        tile: TileRef,
-    },
     /// A tile just closed: a button that takes it back until the offer lapses.
     Closed {
         /// Which closing (`ClosedTile::seq`).
@@ -84,10 +74,8 @@ pub(super) enum ToastKind {
     Failed(String),
     /// A page a program in a shell asked to open, held back: "Open" opens it.
     Offered(Box<super::handoffs::Offer>),
-    /// What an inbox verb did by key: "Undo" puts it back.
-    Triaged(super::inbox::triage::Undo),
-    /// A tile off screen needs the person, failed or finished while the app is in front: "Go"
-    /// goes to it.
+    /// A tile off screen came to need the person while the app is in front: "Go" goes to it. A
+    /// pointer, never an answer: it carries no Allow, Deny or choice.
     Attention {
         /// Which.
         tile: TileRef,
@@ -239,26 +227,11 @@ impl WorkspaceView {
         self.show_toast(ToastKind::Failed(text), cx);
     }
 
-    /// What a notice says.
-    fn toast_line(&self, what: &ToastKind) -> Option<String> {
-        Some(match what {
-            ToastKind::Pointed { name, tile } => {
-                let item = self.item(*tile)?;
-                format!("{name} points at {}", self.tile_title(item))
-            }
-            ToastKind::Closed { title, .. } => format!("Closed {title}"),
-            ToastKind::Said(text) | ToastKind::Failed(text) => text.clone(),
-            ToastKind::Offered(offer) => offer.line(),
-            ToastKind::Attention { line, .. } => line.clone(),
-            ToastKind::Triaged(undo) => undo.line().to_owned(),
-        })
-    }
-
     /// The text of the newest notice up now, for tests and the self-test dump.
     #[must_use]
     pub fn toast_text(&self) -> Option<String> {
         let shown = self.toast.as_ref()?.shown.iter().rev().find(|shown| !shown.leaving)?;
-        self.toast_line(&shown.what)
+        Some(toast_line(&shown.what))
     }
 
     /// The "closed" toast goes with its offer: `seq` for one closing, `None` for any.
@@ -269,27 +242,13 @@ impl WorkspaceView {
         });
     }
 
-    /// ⌘⇧O: point the other clients of the focused tile's worker at it. The worker relays it;
-    /// this client's own echo is nothing.
-    pub fn point_others(&mut self, _: &PointOthers, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(tile) = self.focused() {
-            self.point_at(tile, cx);
-        }
-    }
-
-    pub(super) fn point_at(&mut self, tile: TileRef, cx: &mut Context<Self>) {
-        let Some(title) = self.item(tile).map(|i| self.tile_title(i)) else { return };
-        self.send(tile.worker, ClientMsg::Point { item: tile.item });
-        self.show_toast(ToastKind::Said(format!("Pointed the others at {title}")), cx);
-    }
-
     /// One notice: a mark for what it is about, its line, and its one action. The action is a
     /// ghost in the medium weight, not the accent: a notice is not a primary action, only a
     /// way to one, and the green means live or done.
-    fn render_one(&self, shown: &Shown, cx: &Draw<'_, Self>) -> Option<gpui::AnyElement> {
+    fn render_one(&self, shown: &Shown, cx: &Draw<'_, Self>) -> gpui::AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
-        let line = self.toast_line(&shown.what)?;
+        let line = toast_line(&shown.what);
         let action = |id: &'static str, label: &'static str| {
             let el = div()
                 .id(id)
@@ -309,15 +268,6 @@ impl WorkspaceView {
         let mut body = None;
         let mut mark = None;
         let (part, icon, actions) = match &shown.what {
-            ToastKind::Pointed { tile, .. } => {
-                let tile = *tile;
-                let go =
-                    action("toast-go", "Go").on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.dismiss_pointed(tile);
-                        this.focus_tile(tile, cx);
-                    }));
-                ("pointed", Some(Glyph::Icon(IconName::MousePointer2)), vec![go])
-            }
             ToastKind::Closed { seq, .. } => {
                 let seq = *seq;
                 // The closed tile's kind, so the notice names what went as the header did.
@@ -365,15 +315,6 @@ impl WorkspaceView {
                 body = Some(self.offer_body(offer));
                 ("offered", Some(Glyph::Icon(IconName::Globe)), vec![open, dismiss])
             }
-            ToastKind::Triaged(undo) => {
-                let (undo, seq) = (undo.clone(), shown.seq);
-                let back =
-                    action("toast-undo", "Undo").on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.drop_toasts(|shown| shown.seq == seq);
-                        this.undo_triage(undo.clone(), cx);
-                    }));
-                ("triaged", None, vec![back])
-            }
             ToastKind::Attention { tile, status, .. } => {
                 let tile = *tile;
                 let go =
@@ -392,9 +333,12 @@ impl WorkspaceView {
             .role(Role::Status)
             .aria_label(line.clone())
             // Each notice hears the pointer: it occludes what is under it, the stack included.
+            // A key pressed under a resting pointer is not the pointer leaving: the default
+            // mode reads it so, and a notice being read would start its countdown.
             .on_hover(cx.listener(|this, hovered: &bool, _window, cx| {
                 this.toast_hovered(*hovered, cx);
             }))
+            .hover_listener_mode(gpui::HoverListenerMode::InputModalityIndependent)
             .occlude()
             .max_w(px(TOAST_MAX_W))
             .min_w_0()
@@ -430,25 +374,17 @@ impl WorkspaceView {
             }))
             .children(actions);
         if !self.chrome_moves(cx) {
-            return Some(notice.into_any_element());
+            return notice.into_any_element();
         }
         if shown.leaving {
             let out = Animation::new(crate::kit::Pace::Fade.duration())
                 .with_easing(crate::kit::ease_out());
-            return Some(
-                notice
-                    .with_animation(("toast-out", shown.seq), out, |el, t| el.opacity(1.0 - t))
-                    .into_any_element(),
-            );
+            return notice
+                .with_animation(("toast-out", shown.seq), out, |el, t| el.opacity(1.0 - t))
+                .into_any_element();
         }
         let rise = theme.spacing.xxs;
-        Some(crate::kit::slide_fade(
-            notice,
-            ("toast-in", shown.seq),
-            rise,
-            crate::kit::Pace::Fade,
-            cx,
-        ))
+        crate::kit::slide_fade(notice, ("toast-in", shown.seq), rise, crate::kit::Pace::Fade, cx)
     }
 
     /// Take down the held-back pages `which` picks.
@@ -456,9 +392,10 @@ impl WorkspaceView {
         self.drop_toasts(|shown| matches!(&shown.what, ToastKind::Offered(offer) if which(offer)));
     }
 
-    /// A word about `tile` that needs, failed or finished, when the app is in front and the
+    /// A word about `tile`, which came to need the person, when the app is in front and the
     /// tile is off screen: in view it says it itself, and away the system's note does. It
-    /// replaces the one about the same tile; the stack holds two at most.
+    /// replaces the one about the same tile; the stack holds two at most. Failures and finishes
+    /// never come here: the tiles' marks and the bell hold them.
     pub(super) fn attention_toast(
         &mut self,
         tile: TileRef,
@@ -482,11 +419,25 @@ impl WorkspaceView {
         );
     }
 
-    /// A pointing at `tile` has been followed.
-    fn dismiss_pointed(&mut self, tile: TileRef) {
+    /// Take down the words about tiles that no longer need the person: answered anywhere, in
+    /// the tile, the inbox, a note or another client. `true` when one went.
+    pub(super) fn drop_answered_attention(&mut self) -> bool {
+        let up = self
+            .toast
+            .as_ref()
+            .is_some_and(|t| t.shown.iter().any(|s| matches!(s.what, ToastKind::Attention { .. })));
+        if !up {
+            return false;
+        }
+        let needing: std::collections::HashSet<TileRef> = self
+            .needs_you()
+            .into_iter()
+            .filter_map(|w| w.tile)
+            .chain(self.threads_waiting().into_iter().filter_map(|w| w.tile))
+            .collect();
         self.drop_toasts(
-            |shown| matches!(shown.what, ToastKind::Pointed { tile: t, .. } if t == tile),
-        );
+            |shown| matches!(shown.what, ToastKind::Attention { tile, .. } if !needing.contains(&tile)),
+        )
     }
 
     /// Whether a notice is up, which keeps the status bar up to hold it.
@@ -499,7 +450,7 @@ impl WorkspaceView {
         let theme = &self.theme;
         let toast = self.toast.as_ref()?;
         let notices: Vec<gpui::AnyElement> =
-            toast.shown.iter().filter_map(|shown| self.render_one(shown, cx)).collect();
+            toast.shown.iter().map(|shown| self.render_one(shown, cx)).collect();
         if notices.is_empty() {
             return None;
         }
@@ -542,7 +493,17 @@ impl WorkspaceView {
     #[must_use]
     pub(super) fn toast_texts(&self) -> Vec<String> {
         self.toast.as_ref().map_or_else(Vec::new, |t| {
-            t.shown.iter().filter(|s| !s.leaving).filter_map(|s| self.toast_line(&s.what)).collect()
+            t.shown.iter().filter(|s| !s.leaving).map(|s| toast_line(&s.what)).collect()
         })
+    }
+}
+
+/// What a notice says.
+fn toast_line(what: &ToastKind) -> String {
+    match what {
+        ToastKind::Closed { title, .. } => format!("Closed {title}"),
+        ToastKind::Said(text) | ToastKind::Failed(text) => text.clone(),
+        ToastKind::Offered(offer) => offer.line(),
+        ToastKind::Attention { line, .. } => line.clone(),
     }
 }

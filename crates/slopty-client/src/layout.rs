@@ -1455,23 +1455,6 @@ impl Workspace {
         self.animate_view_to_column(ctx, None, self.active);
     }
 
-    fn set_width_delta(&mut self, ctx: &Ctx, percent: f32) {
-        let g = self.geom(&ctx.g);
-        let Some(col) = self.columns.get_mut(self.active) else { return };
-        let current = if col.full_width { ColumnWidth::Proportion(1.0) } else { col.width };
-        let proportion = match current {
-            ColumnWidth::Proportion(p) => p,
-            ColumnWidth::Fixed(_) => g.resolve(current) / g.working_w(),
-        };
-        let min = g.min_width() / g.working_w();
-        let proportion = (proportion + percent / 100.0).clamp(min.min(1.0), 1.0);
-        col.width = ColumnWidth::Proportion(proportion);
-        col.preset = None;
-        col.full_width = false;
-        self.resize = None;
-        self.animate_view_to_column(ctx, None, self.active);
-    }
-
     fn toggle_full_width(&mut self, ctx: &Ctx) {
         let Some(col) = self.columns.get_mut(self.active) else { return };
         col.full_width = !col.full_width;
@@ -1528,77 +1511,6 @@ impl Workspace {
         let offset = self.centred_offset(&ctx.g, self.active);
         self.animate_view(ctx, self.active, offset);
         self.resize = None;
-    }
-
-    /// The columns fully inside the working area as the view will be: `(width taken, leftmost
-    /// x, the active column's x, whether another column counted)`.
-    fn fully_visible(&self, g: &Geom) -> (f32, Option<f32>, Option<f32>, bool) {
-        let g = &self.geom(g);
-        let view_x = self.target_view_pos(g);
-        let (wx, ww) = (g.working_x(), g.working_w());
-        let mut taken = 0.0;
-        let mut leftmost = None;
-        let mut active_x = None;
-        let mut other = false;
-        let mut x = 0.0;
-        for (idx, col) in self.columns.iter().enumerate() {
-            let w = col.resolved_width(g);
-            let col_x = x;
-            x += w;
-            if col_x < view_x + wx {
-                continue;
-            }
-            leftmost.get_or_insert(col_x);
-            if view_x + wx + ww < col_x + w {
-                break;
-            }
-            if idx == self.active {
-                active_x = Some(col_x);
-            } else {
-                other = true;
-            }
-            taken += w;
-        }
-        (taken, leftmost, active_x, other)
-    }
-
-    fn center_visible_columns(&mut self, ctx: &Ctx) {
-        let g = self.geom(&ctx.g);
-        let (taken, leftmost, active_x, _) = self.fully_visible(&g);
-        let (Some(leftmost), Some(active_x)) = (leftmost, active_x) else { return };
-        let free = g.working_w() - taken;
-        let new_view_x = leftmost - free / 2.0 - g.working_x();
-        self.resize = None;
-        self.animate_view(ctx, self.active, new_view_x - active_x);
-        self.animate_view_to_column(ctx, None, self.active);
-    }
-
-    fn expand_to_available_width(&mut self, ctx: &Ctx) {
-        let g = self.geom(&ctx.g);
-        let Some(col) = self.columns.get(self.active) else { return };
-        if col.fullscreen || col.full_width {
-            return;
-        }
-        let (taken, leftmost, active_x, other) = self.fully_visible(&g);
-        let (Some(leftmost), Some(active_x)) = (leftmost, active_x) else { return };
-        let available = g.working_w() - taken;
-        if available <= 0.0 {
-            return;
-        }
-        self.resize = None;
-        let active_w = self.columns.get(self.active).map_or(0.0, |c| c.resolved_width(&g));
-        let Some(col) = self.columns.get_mut(self.active) else { return };
-        if !other {
-            col.full_width = true;
-            self.animate_view_to_column(ctx, None, self.active);
-            return;
-        }
-        col.width = ColumnWidth::Fixed(active_w + available);
-        col.preset = None;
-        col.full_width = false;
-        let new_view_x = leftmost - g.working_x();
-        self.animate_view(ctx, self.active, new_view_x - active_x);
-        self.animate_view_to_column(ctx, None, self.active);
     }
 
     fn gesture_begin(&mut self, ctx: &Ctx) {
@@ -1997,7 +1909,6 @@ pub struct Layout {
     now: Duration,
     workspaces: Vec<Workspace>,
     active: usize,
-    previous: Option<u64>,
     switch: Option<Switch>,
     overview_open: bool,
     overview: Option<Animation>,
@@ -2027,7 +1938,6 @@ impl Layout {
             now: Duration::ZERO,
             workspaces: vec![first],
             active: 0,
-            previous: None,
             switch: None,
             overview_open: false,
             overview: None,
@@ -2307,9 +2217,6 @@ impl Layout {
             _ => 0.0,
         };
         let prev = self.active;
-        if prev != idx {
-            self.previous = self.workspaces.get(prev).map(Workspace::id);
-        }
         self.active = idx;
         self.stamp(idx);
         if prev == idx && !matches!(self.switch, Some(Switch::Gesture(_))) {
@@ -2485,16 +2392,6 @@ impl Layout {
         self.in_active(Workspace::focus_right);
     }
 
-    /// Focus the first column.
-    pub fn focus_column_first(&mut self) {
-        self.in_active(|ws, ctx| ws.focus_column(ctx, 0));
-    }
-
-    /// Focus the last column.
-    pub fn focus_column_last(&mut self) {
-        self.in_active(|ws, ctx| ws.focus_column(ctx, usize::MAX));
-    }
-
     /// Focus column `n` (0-based, clamped to the last): ⌘1…⌘9.
     pub fn focus_column(&mut self, n: usize) {
         self.in_active(|ws, ctx| ws.focus_column(ctx, n));
@@ -2537,14 +2434,6 @@ impl Layout {
     /// Switch to workspace `n` (0-based, clamped).
     pub fn focus_workspace(&mut self, n: usize) {
         self.activate_workspace(n);
-    }
-
-    /// Switch back to the workspace active before this one.
-    pub fn focus_workspace_previous(&mut self) {
-        let idx = self.previous.and_then(|id| self.workspaces.iter().position(|w| w.id == id));
-        if let Some(idx) = idx {
-            self.activate_workspace(idx);
-        }
     }
 
     /// Swap the active column with its left neighbour; the camera stays.
@@ -2630,65 +2519,6 @@ impl Layout {
         self.activate_workspace(target);
     }
 
-    /// Move the active column to the workspace above, focused there.
-    pub fn move_column_to_workspace_up(&mut self) {
-        if let Some(target) = self.neighbour_workspace(false) {
-            self.move_column_to_workspace(target);
-        }
-    }
-
-    /// Move the active column to the workspace below, focused there.
-    pub fn move_column_to_workspace_down(&mut self) {
-        if let Some(target) = self.neighbour_workspace(true) {
-            self.move_column_to_workspace(target);
-        }
-    }
-
-    /// Move the active column to workspace `n` (0-based, clamped to the trailing empty one),
-    /// focused there.
-    pub fn move_column_to_workspace(&mut self, n: usize) {
-        let target = n.min(self.workspaces.len().saturating_sub(1));
-        if target == self.active {
-            return;
-        }
-        let ctx = self.ctx();
-        let Some(Some(column)) = self.in_active(|ws, ctx| ws.remove_column_by_idx(ctx, ws.active))
-        else {
-            return;
-        };
-        if let Some(ws) = self.workspaces.get_mut(target) {
-            let before = ws.view_rects(&ctx);
-            ws.add_column(&ctx, None, column, true);
-            ws.flip(&ctx, &before);
-        }
-        self.ensure_trailing();
-        self.activate_workspace(target);
-    }
-
-    /// Swap the active workspace with the one above.
-    pub fn move_workspace_up(&mut self) {
-        let Some(new) = self.neighbour_workspace(false) else { return };
-        self.workspaces.swap(self.active, new);
-        self.moved_workspace(new);
-    }
-
-    /// Swap the active workspace with the one below.
-    pub fn move_workspace_down(&mut self) {
-        let Some(new) = self.neighbour_workspace(true) else { return };
-        self.workspaces.swap(self.active, new);
-        self.moved_workspace(new);
-    }
-
-    fn moved_workspace(&mut self, new: usize) {
-        self.ensure_trailing();
-        let previous = self.previous;
-        self.switch = None;
-        self.active = new;
-        self.stamp(new);
-        self.previous = previous;
-        self.clean_up();
-    }
-
     /// Alone in its column: join the column to the left at the bottom. Otherwise: leave the
     /// column for a new one on its left.
     pub fn consume_or_expel_window_left(&mut self) {
@@ -2716,11 +2546,6 @@ impl Layout {
         self.in_active(|ws, ctx| ws.toggle_width(ctx, forward));
     }
 
-    /// Widen (or narrow) the active column by `percent` of the working width.
-    pub fn set_width_delta(&mut self, percent: f32) {
-        self.in_active(|ws, ctx| ws.set_width_delta(ctx, percent));
-    }
-
     /// Maximise the active column to the working width, or back.
     pub fn toggle_full_width(&mut self) {
         self.in_active(Workspace::toggle_full_width);
@@ -2731,19 +2556,9 @@ impl Layout {
         self.in_active(Workspace::toggle_fullscreen);
     }
 
-    /// Widen the active column over the free space of the fully visible columns.
-    pub fn expand_to_available_width(&mut self) {
-        self.in_active(Workspace::expand_to_available_width);
-    }
-
     /// Centre the active column in the view.
     pub fn center_column(&mut self) {
         self.in_active(Workspace::center_column);
-    }
-
-    /// Centre the fully visible columns as a group.
-    pub fn center_visible_columns(&mut self) {
-        self.in_active(Workspace::center_visible_columns);
     }
 
     /// Stack or tab the active column.
@@ -2940,9 +2755,6 @@ impl Layout {
             (end, velocity)
         };
         let target = target.min(self.workspaces.len().saturating_sub(1));
-        if self.active != target {
-            self.previous = self.workspaces.get(self.active).map(Workspace::id);
-        }
         self.active = target;
         self.stamp(target);
         self.switch =

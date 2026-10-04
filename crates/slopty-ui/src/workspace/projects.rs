@@ -59,6 +59,8 @@ pub(super) struct Sheet {
     view: Entity<ProjectSheet>,
     /// The terminal whose agent orchestrates the project made.
     term: TermRef,
+    /// What the dim and the sheet track: Tab stays inside ([`crate::a11y::trap`]).
+    scope: gpui::FocusHandle,
     _events: gpui::Subscription,
 }
 
@@ -157,7 +159,7 @@ fn set_checks(project: &ProjectId, verifier: String, review: String) -> Verb {
 
 /// The worker id behind `key`: [`worker_key`] the other way. A UUID's simple form is its
 /// 128 bits in hex, which is all a key holds.
-fn worker_id(key: WorkerKey) -> Option<WorkerId> {
+pub(super) fn worker_id(key: WorkerKey) -> Option<WorkerId> {
     format!("{:032x}", key.value()).parse().ok()
 }
 
@@ -879,11 +881,6 @@ impl WorkspaceView {
             },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
             TaskAction::Start => Verb::TaskStart { project, task, pin: None },
-            TaskAction::Pick => {
-                let said = format!("Picked #{task} to land; the other attempts stop");
-                let verb = Verb::TaskPick { project, attempt: task };
-                return self.send_to_server(verb, move |this, cx| this.show_notice(said, cx), cx);
-            }
             TaskAction::Cancel => {
                 let change = TaskChange {
                     state: Some(TaskState::Failed),
@@ -1121,7 +1118,10 @@ impl WorkspaceView {
             SheetEvent::Cancel => this.close_project_sheet(cx),
         });
         let term = TermRef { worker, session };
-        self.projects.sheet = Some(Sheet { view, term, _events: events });
+        let scope = cx.focus_handle();
+        let home = gpui::Focusable::focus_handle(view.read(cx), cx);
+        crate::a11y::hold(&scope, &home, cx);
+        self.projects.sheet = Some(Sheet { view, term, scope, _events: events });
         cx.notify();
     }
 
@@ -1189,9 +1189,9 @@ impl WorkspaceView {
     ) -> Option<gpui::AnyElement> {
         use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _};
         let sheet = self.projects.sheet.as_ref()?;
+        let backdrop = crate::kit::backdrop(&self.theme, window).id("project-sheet-backdrop");
         Some(
-            crate::kit::backdrop(&self.theme, window)
-                .id("project-sheet-backdrop")
+            crate::a11y::trap(backdrop, &sheet.scope)
                 .occlude()
                 .on_mouse_down(
                     gpui::MouseButton::Left,

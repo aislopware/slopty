@@ -452,8 +452,6 @@ impl Workspace {
             },
             Change::Present(present) => self.heard_present(&present),
             Change::Notice(notice) => self.heard_notice(&notice, cx),
-            // The inbox takes the server's snoozes in place of its own (lane D).
-            Change::Snoozes(_) => {}
             // What speaks for the threads of the workers this client reaches only through the
             // server, as `Terminals` does for their agents.
             Change::Ladder(ladder) => self.view.update(cx, |v, cx| v.server_ladder(&ladder, cx)),

@@ -297,9 +297,9 @@ fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext
 }
 
 /// While the face shows the agent mid-turn (a block still streaming, a call in flight), its
-/// tile is marked and the navigator lists it as working though the worker's hook still says
-/// idle, and neither of its lines says "Idle"; once the block settles the mark follows the hook
-/// again. The face projects the transcript; it drives nothing.
+/// tile is marked working though the worker's hook still says idle, and its row's second line
+/// does not say "Idle"; once the block settles the mark follows the hook again. The face projects
+/// the transcript; it drives nothing.
 #[gpui::test]
 fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppContext) {
     use std::time::SystemTime;
@@ -322,9 +322,6 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
     let mark = |cx: &mut VisualTestContext| {
         view.read_with(cx, |v, _| v.item(tile).and_then(|item| v.tile_status(tile, item)))
     };
-    let listed = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, _| v.working().iter().any(|w| w.session == session))
-    };
     assert_eq!(mark(cx), Some(Status::Idle), "the hook's word");
 
     let id = LiveId { turn: "t1".into(), step: 0, block: 0 };
@@ -334,28 +331,20 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
     });
     cx.run_until_parked();
     assert_eq!(mark(cx), Some(Status::Working), "the face knows better");
-    assert!(listed(cx), "and the navigator lists it under Working");
-    // The row and its agent line under Working: what the face says, never the hook's "Idle".
-    let lines = |cx: &mut VisualTestContext| {
+    // The row's second line: what the face says, never the hook's "Idle".
+    let meta = |cx: &mut VisualTestContext| {
         view.read_with(cx, |v, cx| {
-            let meta = v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0);
-            let words = v
-                .working()
-                .into_iter()
-                .find(|w| w.session == session)
-                .map(|at| v.working_words(at));
-            (meta.unwrap_or_default(), words.unwrap_or_default())
+            v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0).unwrap_or_default()
         })
     };
-    let (meta, words) = lines(cx);
-    assert!(!meta.contains("Idle") && !words.contains("Idle"), "{meta:?} / {words:?}");
+    let said = meta(cx);
+    assert!(!said.contains("Idle"), "{said:?}");
 
     view.update_in(cx, |v, _w, cx| {
         v.conversation_event(session, ConversationEvent::Live(vec![Live::Clear { id }]), cx);
     });
     cx.run_until_parked();
     assert_eq!(mark(cx), Some(Status::Idle), "settled: the hook's word again");
-    assert!(!listed(cx), "and no longer working");
 
     // A call whose input is still streaming has no entry yet: the lines name it as its live
     // row does.
@@ -369,8 +358,8 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
         v.conversation_event(session, ConversationEvent::Live(events), cx);
     });
     cx.run_until_parked();
-    let (meta, words) = lines(cx);
-    assert!(meta.contains("echo hi") && words.contains("echo hi"), "{meta:?} / {words:?}");
+    let said = meta(cx);
+    assert!(said.contains("echo hi"), "{said:?}");
     view.update_in(cx, |v, _w, cx| {
         let clear = Live::Clear { id: streaming };
         v.conversation_event(session, ConversationEvent::Live(vec![clear]), cx);
@@ -402,9 +391,8 @@ fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppCo
     });
     cx.run_until_parked();
     assert_eq!(mark(cx), Some(Status::Working), "a call in flight");
-    let (meta, words) = lines(cx);
-    assert!(!meta.contains("Idle") && !words.contains("Idle"), "{meta:?} / {words:?}");
-    assert!(meta.contains("echo hi") && words.contains("echo hi"), "{meta:?} / {words:?}");
+    let said = meta(cx);
+    assert!(!said.contains("Idle") && said.contains("echo hi"), "{said:?}");
 }
 
 /// While the face shows an approval, the card is the tile's statement: the header wears no
@@ -429,54 +417,6 @@ fn the_approval_card_is_said_once(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("agent", tile.item)).is_some(), "the TUI's header says it");
-}
-
-/// The status bar says how every agent stands, on screen or not, in one quiet line: busy,
-/// waiting on work in the background, blocked on the person. Each worker is named once there
-/// are two with agents, and an agent at rest is not counted.
-#[gpui::test]
-fn the_status_bar_counts_every_workers_agents(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (_tile, working) = agent_tile(&view, cx, &mut studio);
-    let label = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
-        view.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        cx.update(|window, _cx| window.set_a11y_active(true));
-        view.update(cx, |_, cx| cx.notify());
-        cx.run_until_parked();
-        cx.update(|window, _cx| crate::a11y::tree(window))
-            .into_iter()
-            .find(|n| {
-                n.role == "Status"
-                    && n.label.as_deref().is_some_and(|l| {
-                        l.contains("working") || l.contains("blocked") || l.contains("waiting")
-                    })
-            })
-            .and_then(|n| n.label)
-    };
-    assert!(cx.debug_bounds("status-agents").is_some(), "counted though its tile is on screen");
-    assert_eq!(label(&view, cx).as_deref(), Some("1 working"));
-
-    let asking = SessionId::new();
-    let _asking = opens(&view, cx, &studio, asking, studio.me, 2);
-    let mut mini = connect(&view, cx, 2, "mini");
-    let resting = SessionId::new();
-    let _resting = opens(&view, cx, &mini, resting, mini.me, 1);
-    let background = SessionId::new();
-    let _background = opens(&view, cx, &mini, background, mini.me, 2);
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(blocked(asking), cx);
-        v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(resting) }, cx);
-        let waiting = AgentStatus::Waiting { tasks: 1, crons: 0 };
-        v.agent_event(AgentEvent { status: waiting, ..blocked(background) }, cx);
-    });
-    mini.drain();
-    assert_eq!(
-        label(&view, cx).as_deref(),
-        Some("studio: 1 working, 1 blocked; mini: 1 waiting"),
-        "{working:?}"
-    );
 }
 
 /// An agent that has not titled itself is named by its session's first prompt once its face

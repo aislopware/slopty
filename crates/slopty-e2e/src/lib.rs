@@ -123,7 +123,7 @@ pub enum Command {
         /// `host[:port]`.
         address: String,
     },
-    /// Forget a worker added by address, as the hosts popover would.
+    /// Forget a worker added by address, as its menu in the navigator would.
     ForgetWorker {
         /// Its id, as the worker writes it.
         id: String,

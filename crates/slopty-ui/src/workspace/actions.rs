@@ -5,7 +5,7 @@
 
 use gpui::{Action, KeyBinding, actions};
 
-use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage, SendLater};
+use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
 use crate::icons::IconName;
 use crate::keymap::Scope;
 use crate::palette::PaletteItem;
@@ -33,8 +33,6 @@ actions!(
         /// Let go of the unsaved edits kept on this device for over a week without a tile to
         /// take them (their worker has not come back).
         DiscardOldUnsaved,
-        /// The About panel: the mark, the version and the build.
-        About,
         /// Bring the focused file tile's file down whole, onto this device: the save panel
         /// on the Mac, the Files export sheet on iPhone and iPad.
         SaveCopy,
@@ -45,8 +43,8 @@ actions!(
         /// Reveal the next thing on the attention ladder: an agent that needs the human, then
         /// a finish not yet looked at, failed first.
         NextAttention,
-        /// Open the inbox, or close it.
-        ToggleInbox,
+        /// Show the navigator at what needs the person: *Needs you*, then *To review*.
+        ShowNeedsYou,
         /// Show the navigator and type into its filter.
         FilterNavigator,
         /// Silence or resume the focused remote window's audio on this client.
@@ -75,16 +73,12 @@ actions!(
         FocusPrev,
         /// Open the command palette: every action by name, run by ↩.
         OpenPalette,
-        /// The palette as a list of every worker and whether it is reachable; ↩ goes to one.
-        ListWorkers,
         /// The palette as a list of the ports forwarded from the workers; ↩ opens one in a
         /// tile or in the browser.
         ListPorts,
         /// Name the focused tile: a field in its header, ↩ keeps the name (blank clears
         /// it), Esc leaves it as it was.
         RenameItem,
-        /// Point the other clients at the focused tile: each of them is offered a jump to it.
-        PointOthers,
         /// Find text in every tile: the palette lists the tiles it is in with their hit
         /// counts, and ↩ opens that tile's find bar on it.
         FindEverywhere,
@@ -95,16 +89,10 @@ actions!(
         FocusColumnLeft,
         /// Focus the column to the right.
         FocusColumnRight,
-        /// Focus the first column.
-        FocusColumnFirst,
-        /// Focus the last column.
-        FocusColumnLast,
         /// Focus the workspace above.
         FocusWorkspaceUp,
         /// Focus the workspace below.
         FocusWorkspaceDown,
-        /// Go back to the workspace focused before this one.
-        FocusWorkspacePrevious,
         /// Focus the tile above, or the workspace above from the top tile.
         FocusUp,
         /// Focus the tile below, or the workspace below from the bottom tile.
@@ -117,14 +105,6 @@ actions!(
         MoveColumnToFirst,
         /// Move the focused column to the end of the strip.
         MoveColumnToLast,
-        /// Carry the focused column to the workspace above, and follow it.
-        MoveColumnToWorkspaceUp,
-        /// Carry the focused column to the workspace below, and follow it.
-        MoveColumnToWorkspaceDown,
-        /// Swap the focused workspace with the one above.
-        MoveWorkspaceUp,
-        /// Swap the focused workspace with the one below.
-        MoveWorkspaceDown,
         /// Move the focused tile up its column, or to the workspace above from the top.
         MoveUp,
         /// Move the focused tile down its column, or to the workspace below from the bottom.
@@ -135,22 +115,12 @@ actions!(
         ConsumeOrExpelRight,
         /// Give the focused column the next preset width.
         CycleWidth,
-        /// Give the focused column the previous preset width.
-        CycleWidthBack,
-        /// Narrow the focused column by a tenth of the workspace.
-        NarrowColumn,
-        /// Widen the focused column by a tenth of the workspace.
-        WidenColumn,
         /// Toggle the focused column between its width and the whole workspace.
         MaximizeColumn,
         /// Toggle the focused tile filling the whole view, without gaps or chrome around it.
         FullscreenTile,
         /// Scroll the strip so the focused column is in the middle.
         CenterColumn,
-        /// Scroll the strip so the fully visible columns sit in the middle as a group.
-        CenterVisibleColumns,
-        /// Widen the focused column over the room the fully visible columns leave free.
-        ExpandColumn,
         /// Toggle the focused column between stacked tiles and tabs.
         ToggleTabbed,
         /// Toggle the overview: every workspace at half size.
@@ -290,18 +260,13 @@ pub struct FocusWorkspace {
     pub index: usize,
 }
 
-/// ⌃⌘⌥1…⌃⌘⌥9: carry the focused column to workspace `index` (0-based; past the last, the
-/// trailing empty one), and follow it.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, gpui::Action)]
-#[action(namespace = workspace, no_json)]
-pub struct MoveColumnToWorkspace {
-    /// 0-based.
-    pub index: usize,
-}
-
 /// A tile's window of its own ([`super::popout`]): its picture takes every chord but the one
 /// that puts it back; the keymap binds that one there.
 pub(crate) const POP_OUT_CTX: &str = super::popout::CTX;
+
+/// What the workspace's key context holds while a closed tile's notice is up: ⌘Z takes it back
+/// then, and only then, so the chord is free for whatever else wants it the rest of the time.
+pub(crate) const CLOSING_CTX: &str = "ClosingOffered";
 
 /// The workspace's key bindings in effect: every scope of the keymap but the terminal's and the
 /// app's ([`crate::keymap`], where the table is).
@@ -339,7 +304,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Open URL…", IconName::Globe, Box::new(OpenUrl)),
         w("Open last offered page", IconName::ExternalLink, Box::new(OpenLastOffer)),
         w("Discard unsaved edits over a week old", IconName::Eraser, Box::new(DiscardOldUnsaved)),
-        w("About Slopty", IconName::Info, Box::new(About)),
         w("Edit page address", IconName::Link, Box::new(EditAddress)),
         w("Page back", IconName::ArrowLeft, Box::new(PageBack)),
         w("Page forward", IconName::ArrowRight, Box::new(PageForward)),
@@ -347,7 +311,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Close tile", IconName::X, Box::new(CloseItem)),
         w("Undo close", IconName::Undo2, Box::new(UndoClose)),
         w("Next thing that needs you", IconName::BellRing, Box::new(NextAttention)),
-        w("Inbox", IconName::Bell, Box::new(ToggleInbox)),
+        w("Show what needs you", IconName::Bell, Box::new(ShowNeedsYou)),
         w("Filter the navigator", IconName::ListFilter, Box::new(FilterNavigator)),
         w("Mute sound", IconName::VolumeX, Box::new(ToggleMute)),
         w("Stream stats", IconName::Activity, Box::new(ToggleStats)),
@@ -363,42 +327,20 @@ pub fn palette_items() -> Vec<PaletteItem> {
         ),
         w("Show or hide the navigator", IconName::PanelLeft, Box::new(ToggleNavigator)),
         w("Name this tile", IconName::Pencil, Box::new(RenameItem)),
-        w("Point other devices at this tile", IconName::Cast, Box::new(PointOthers)),
         w("Find in every tile", IconName::Search, Box::new(FindEverywhere)),
         w(super::project_search::SEARCH_IN_FILES, IconName::FolderSearch, Box::new(SearchInFiles)),
-        w("List machines", IconName::Server, Box::new(ListWorkers)),
         w("Forwarded ports", IconName::Cable, Box::new(ListPorts)),
         w("Column to the left", IconName::ArrowLeft, Box::new(FocusColumnLeft)),
         w("Column to the right", IconName::ArrowRight, Box::new(FocusColumnRight)),
-        w("First column", IconName::ArrowLeftToLine, Box::new(FocusColumn { index: 0 })),
-        w("Last column", IconName::ArrowRightToLine, Box::new(FocusColumnLast)),
         w("Tile or workspace above", IconName::ArrowUp, Box::new(FocusUp)),
         w("Tile or workspace below", IconName::ArrowDown, Box::new(FocusDown)),
         w("Workspace above", IconName::ChevronUp, Box::new(FocusWorkspaceUp)),
         w("Workspace below", IconName::ChevronDown, Box::new(FocusWorkspaceDown)),
-        w("Previous workspace", IconName::ArrowUpDown, Box::new(FocusWorkspacePrevious)),
         w("First workspace", IconName::LayoutDashboard, Box::new(FocusWorkspace { index: 0 })),
         w("Move column left", IconName::MoveLeft, Box::new(MoveColumnLeft)),
         w("Move column right", IconName::MoveRight, Box::new(MoveColumnRight)),
         w("Move column to the start", IconName::ArrowLeftToLine, Box::new(MoveColumnToFirst)),
         w("Move column to the end", IconName::ArrowRightToLine, Box::new(MoveColumnToLast)),
-        w(
-            "Move column to the workspace above",
-            IconName::MoveUp,
-            Box::new(MoveColumnToWorkspaceUp),
-        ),
-        w(
-            "Move column to the workspace below",
-            IconName::MoveDown,
-            Box::new(MoveColumnToWorkspaceDown),
-        ),
-        w(
-            "Move column to the first workspace",
-            IconName::MoveUp,
-            Box::new(MoveColumnToWorkspace { index: 0 }),
-        ),
-        w("Move workspace up", IconName::MoveVertical, Box::new(MoveWorkspaceUp)),
-        w("Move workspace down", IconName::MoveVertical, Box::new(MoveWorkspaceDown)),
         w("Move tile up", IconName::MoveUp, Box::new(MoveUp)),
         w("Move tile down", IconName::MoveDown, Box::new(MoveDown)),
         w(
@@ -412,18 +354,9 @@ pub fn palette_items() -> Vec<PaletteItem> {
             Box::new(ConsumeOrExpelRight),
         ),
         w("Next column width", IconName::ChevronsRight, Box::new(CycleWidth)),
-        w("Previous column width", IconName::ChevronsLeft, Box::new(CycleWidthBack)),
-        w("Narrower column", IconName::FoldHorizontal, Box::new(NarrowColumn)),
-        w("Wider column", IconName::UnfoldHorizontal, Box::new(WidenColumn)),
         w("Maximize column", IconName::Maximize2, Box::new(MaximizeColumn)),
         w("Fullscreen tile", IconName::Expand, Box::new(FullscreenTile)),
         w("Center column", IconName::AlignCenterHorizontal, Box::new(CenterColumn)),
-        w(
-            "Center the visible columns",
-            IconName::AlignCenterHorizontal,
-            Box::new(CenterVisibleColumns),
-        ),
-        w("Fill the free width", IconName::UnfoldHorizontal, Box::new(ExpandColumn)),
         w("Tabbed column", IconName::PanelsTopLeft, Box::new(ToggleTabbed)),
         w("Overview", IconName::LayoutGrid, Box::new(ToggleOverview)),
         w("Show conversation or terminal", IconName::MessageSquare, Box::new(ToggleConversation)),
@@ -435,7 +368,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Stop the agent", IconName::Square, Box::new(Interrupt)),
         w("Queue message", IconName::Clock, Box::new(QueueMessage)),
         w("Edit the last queued message", IconName::Pencil, Box::new(EditLastQueued)),
-        w("Send later\u{2026}", IconName::Clock, Box::new(SendLater)),
         w("Larger text", IconName::AArrowUp, Box::new(FontLarger)),
         w("Smaller text", IconName::AArrowDown, Box::new(FontSmaller)),
         w("Default text size", IconName::Type, Box::new(FontReset)),

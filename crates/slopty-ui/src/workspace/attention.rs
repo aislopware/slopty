@@ -4,13 +4,13 @@
 //! Three moments notify. An agent starts to need the human (a permission, a question, input it
 //! asks for), an agent's turn that ran at least the slow-command time ends, or a shell command
 //! that ran that long ends. Nothing notifies
-//! while the app is in front, since the inbox says it there. A tile has at most one
-//! notification up: the note's identifier is its session's, so a newer one replaces the older,
-//! and an agent answered anywhere takes its own back. Coming back to the app takes back every
-//! note it posted, because the inbox now shows the same things. The icon badge is the inbox's
-//! unread count.
+//! while the app is in front, since the bell and the navigator say it there. A tile has at most
+//! one notification up: the note's identifier is its session's, so a newer one replaces the
+//! older, and an agent answered anywhere takes its own back. Coming back to the app takes back
+//! every note it posted, because the navigator now shows the same things. The icon badge is the
+//! bell's count.
 //!
-//! An agent that waits on a yes or no held for this client (`inbox::approvals`) is posted with
+//! An agent that waits on a yes or no held for this client (`approvals`) is posted with
 //! the approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
 //! "Show" opens its tile as a tap does. The prompt is held a moment after the agent's status
 //! says it waits, so the note already up is replaced, silently, once the prompt comes, and
@@ -46,7 +46,7 @@ use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::{Notice, NoticeKind};
 
 use super::agents::{agent_ask_line, agent_status_word};
-use super::inbox::approvals::answerable;
+use super::approvals::answerable;
 use super::{Finished, WorkspaceView};
 use crate::terminal::TerminalView;
 
@@ -195,7 +195,7 @@ pub struct Look {
     pub asking: Vec<Asking>,
     /// The agents whose turn finished unwatched and is unread.
     pub turns: Vec<Turn>,
-    /// The inbox's unread count: the icon badge.
+    /// The bell's count: the icon badge.
     pub unread: usize,
     /// The project each terminal and thread is in, by its group's key: the thread its notes
     /// stack in, so one project's notes sit together.
@@ -331,7 +331,7 @@ impl Attention {
     }
 
     /// The server picked this client to say `heard`: posted while the app is not in front,
-    /// where the inbox already says it. A wait's note gets its approval buttons from the next
+    /// where the navigator already says it. A wait's note gets its approval buttons from the next
     /// [`Self::look`].
     pub fn notice(&mut self, heard: &Heard) {
         if self.active {
@@ -372,7 +372,7 @@ impl Attention {
     }
 
     /// The workspace changed: an agent that has just started to wait notifies while the app is
-    /// away, one that stopped takes its note back, and the badge follows the inbox.
+    /// away, one that stopped takes its note back, and the badge follows the bell.
     pub fn look(&mut self, look: &Look) {
         self.projects.clone_from(&look.projects);
         let now: HashSet<About> = look.asking.iter().map(|a| a.route.about).collect();
@@ -509,7 +509,7 @@ impl Attention {
 
 impl WorkspaceView {
     /// What notifications follow now: the agents waiting on the human, with their tile's name
-    /// and what they ask, and the inbox's unread count.
+    /// and what they ask, and the bell's count.
     #[must_use]
     pub fn attention_look(&self) -> Look {
         let asking = self
@@ -551,7 +551,7 @@ impl WorkspaceView {
                 Some(Turn { route, title, body })
             })
             .collect();
-        Look { asking, turns, unread: self.inbox_count(), projects: self.note_projects() }
+        Look { asking, turns, unread: self.bell_count(), projects: self.note_projects() }
     }
 
     /// The project each terminal and thread is in, by its group's key: a tile's group (its

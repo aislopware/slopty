@@ -39,20 +39,9 @@ fn table(
     cx.run_until_parked();
 }
 
-/// The status bar's agents line, as a screen reader hears it.
-fn agents_said(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext) -> Option<String> {
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    cx.update(|window, _cx| crate::a11y::tree(window))
-        .into_iter()
-        .find(|n| n.role == "Status" && n.label.as_deref().is_some_and(|l| l.contains("blocked")))
-        .and_then(|n| n.label)
-}
-
 /// A Codex thread waiting on an approval marks its navigator row, wears the header's pill,
-/// counts on the bell, the Dock and the status bar, lists in the inbox with what it asks, and
-/// its row there opens its tile. Answered, every one of them lets go.
+/// counts on the bell and the Dock, lists under *Needs you* with what it asks, and its row there
+/// opens its tile. Answered, every one of them lets go.
 #[gpui::test]
 fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -69,7 +58,7 @@ fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestA
         let item = v.item(tile).cloned().expect("the tile");
         assert_eq!(v.tile_status(tile, &item), Some(Status::NeedsYou), "the navigator's glyph");
         assert_eq!((v.needs_you_count(), v.needs_you_on(key)), (1, 1), "the Dock's count");
-        assert_eq!(v.inbox_count(), 1, "the bell's");
+        assert_eq!(v.bell_count(), 1, "the bell's");
         let look = v.attention_look();
         let [asks] = look.asking.as_slice() else { panic!("one asks: {look:?}") };
         assert_eq!(asks.route.about, attention::About::Thread(thread), "a note of its own");
@@ -78,17 +67,12 @@ fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestA
     });
     let pill = leak(format!("agent-{}", tile.item.as_uuid()));
     assert!(cx.debug_bounds(pill).is_some(), "the header's pill");
-    assert_eq!(agents_said(&view, cx).as_deref(), Some("1 blocked"), "the status bar");
 
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    let bell = cx.debug_bounds("bell").expect("the bell");
-    cx.simulate_click(bell.center(), Modifiers::none());
-    cx.run_until_parked();
-    let line = leak(format!("inbox-thread-{thread}"));
-    let at = cx.debug_bounds(line).expect("an inbox row of its own");
     view.update_in(cx, |v, _w, cx| v.focus_tile(file, cx));
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(file));
+    let line = leak(format!("nav-waiting-{thread}"));
+    let at = cx.debug_bounds(line).expect("a row of its own under Needs you");
     cx.simulate_click(at.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(tile), "its row goes to its tile");
@@ -100,7 +84,7 @@ fn a_thread_with_no_terminal_that_waits_says_so_across_the_chrome(cx: &mut TestA
     view.update(cx, |v, _| {
         let item = v.item(tile).cloned().expect("the tile");
         assert_eq!(v.tile_status(tile, &item), Some(Status::Working));
-        assert_eq!((v.needs_you_count(), v.inbox_count()), (0, 0), "answered, it lets go");
+        assert_eq!((v.needs_you_count(), v.bell_count()), (0, 0), "answered, it lets go");
     });
 }
 
@@ -186,9 +170,9 @@ fn the_ladder_and_needs_you_list_a_waiting_thread_by_its_rung(cx: &mut TestAppCo
         "the waiting terminal and thread in reading order, the untiled one, then the failed"
     );
 
-    // *Needs you* lists what waits out of sight: the thread with no tile, not the one in view.
+    // *Needs you* lists every thread that waits: the one in view and the one with no tile.
     assert!(cx.debug_bounds("nav-needs-you").is_some(), "the section");
-    assert!(cx.debug_bounds(leak(format!("nav-waiting-{}", tiled.id))).is_none(), "in view");
+    assert!(cx.debug_bounds(leak(format!("nav-waiting-{}", tiled.id))).is_some(), "in view");
     let row = leak(format!("nav-waiting-{}", untiled.id));
     let words = leak(format!("nav-waiting-words-{}", untiled.id));
     assert!(cx.debug_bounds(words).is_some(), "what it asks under the heading");
@@ -223,7 +207,7 @@ fn the_ladder_and_needs_you_list_a_waiting_thread_by_its_rung(cx: &mut TestAppCo
 }
 
 /// The server's ladder speaks for the threads of a worker this client has no link to, as its
-/// terminals' agents do: a waiting thread counts there and lists in the inbox. A thread its
+/// terminals' agents do: a waiting thread counts there and lists under *Needs you*. A thread its
 /// terminal's agent already speaks for counts once, by the terminal; a worker reached both
 /// ways counts its threads once, by its own link while that is up and by the server's word
 /// once it drops; and forgetting the server forgets its word.
@@ -281,16 +265,11 @@ fn a_thread_the_server_ranks_counts_once_however_its_worker_is_reached(cx: &mut 
     view.update(cx, |v, _| {
         assert_eq!(v.needs_you_on(key), 1, "the studio's thread once, though both say it");
         assert_eq!(v.needs_you_on(laptop), 2, "the laptop's thread, and its terminal once");
-        assert_eq!(v.inbox_count(), 3, "the bell's");
+        assert_eq!(v.bell_count(), 3, "the bell's");
     });
-    let said = agents_said(&view, cx);
-    assert_eq!(said.as_deref(), Some("studio: 1 blocked; laptop: 2 blocked"), "the status bar");
-    let bell = cx.debug_bounds("bell").expect("the bell");
-    cx.simulate_click(bell.center(), Modifiers::none());
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(leak(format!("inbox-thread-{alone}"))).is_some(), "an inbox row");
+    assert!(cx.debug_bounds(leak(format!("nav-waiting-{alone}"))).is_some(), "a row of its own");
     for on_it in [on_terminal, also_on_terminal] {
-        assert!(cx.debug_bounds(leak(format!("inbox-thread-{on_it}"))).is_none(), "its terminal's");
+        assert!(cx.debug_bounds(leak(format!("nav-waiting-{on_it}"))).is_none(), "its terminal's");
     }
 
     view.update_in(cx, |v, _w, cx| v.disconnect_worker(key, WorkerStatus::Connecting, cx));
@@ -326,13 +305,13 @@ fn answer_sent(drained: &[ClientMsg]) -> Vec<slopty_proto::thread::wire::Intent>
         .collect()
 }
 
-/// A thread with no terminal that waits on a yes or no it offers plainly is answered from the
-/// inbox's "Allow" and "Deny", and its note carries the request for the note's buttons. The
-/// answer is the request's own plain allow, never its standing grant, sent through the
+/// A thread with no terminal that waits on a yes or no it offers plainly is answered from its
+/// row's "Allow" and "Deny" under *Needs you*, and its note carries the request for the note's
+/// buttons. The answer is the request's own plain allow, never its standing grant, sent through the
 /// worker's thread hub once: the row takes its buttons back until the table moves. A request
 /// with no plain answer offers none.
 #[gpui::test]
-fn a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note(cx: &mut TestAppContext) {
+fn a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note(cx: &mut TestAppContext) {
     use slopty_proto::thread::wire::Intent;
     use slopty_proto::thread::{Choice, Effect};
     let choice = |id: &str, effect, scope: Option<&str>| Choice {
@@ -359,12 +338,9 @@ fn a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note(cx: &mut TestApp
     let approval = view.update(cx, |v, _| v.attention_look().asking[0].approval.clone());
     assert_eq!(approval.as_deref(), Some("ask-1"), "its note answers the request");
 
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    let bell = cx.debug_bounds("bell").expect("the bell");
-    cx.simulate_click(bell.center(), Modifiers::none());
     cx.run_until_parked();
     studio.drain();
-    let allow = cx.debug_bounds(leak(format!("inbox-allow-{thread}"))).expect("Allow on its row");
+    let allow = cx.debug_bounds(leak(format!("nav-allow-{thread}"))).expect("Allow on its row");
     cx.simulate_click(allow.center(), Modifiers::none());
     cx.run_until_parked();
     let sent = answer_sent(&studio.drain());
@@ -378,7 +354,7 @@ fn a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note(cx: &mut TestApp
         "the plain allow, once"
     );
     assert!(
-        cx.debug_bounds(leak(format!("inbox-allow-{thread}"))).is_none(),
+        cx.debug_bounds(leak(format!("nav-allow-{thread}"))).is_none(),
         "answered here, the row waits for its worker"
     );
     let again = view.update_in(cx, |v, _w, cx| {
@@ -422,4 +398,45 @@ fn a_thread_s_yes_or_no_is_answered_from_the_inbox_and_its_note(cx: &mut TestApp
     table(&view, cx, key, vec![bare]);
     let look = view.update(cx, |v, _| v.attention_look());
     assert_eq!(look.asking[0].approval, None, "no plain answer, no buttons");
+}
+
+/// A thread off screen that comes to need the person points the corner at it, with "Go", once
+/// its worker's table says so; answered, the word goes.
+#[gpui::test]
+fn a_thread_off_screen_that_comes_to_need_you_is_pointed_at(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(600.0), px(500.0)));
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let asks = asking(None);
+    let thread = asks.id;
+    let mut calm = asks.clone();
+    calm.requests.clear();
+    calm.status.phase = slopty_proto::thread::Phase::Working;
+    let tile = arrives(&view, cx, &studio, ItemKind::Thread { thread }, 1);
+    let _shells = three_shells_from(&view, cx, &studio, 2);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.drawn.on_screen.borrow().contains(&tile.item)));
+    let said = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_text());
+
+    table(&view, cx, key, vec![calm.clone()]);
+    table(&view, cx, key, vec![asks]);
+    let line = said(cx).expect("the corner points at it");
+    assert!(line.ends_with("needs approval"), "{line}");
+    table(&view, cx, key, vec![calm]);
+    assert_eq!(said(cx), None, "answered, it goes");
+}
+
+/// Three shells opened after `first` on `fake`, each a column of its own.
+fn three_shells_from(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    fake: &Fake,
+    first: u64,
+) -> Vec<TileRef> {
+    (first..first.saturating_add(3))
+        .map(|v| opens(view, cx, fake, SessionId::new(), fake.me, v))
+        .collect()
 }

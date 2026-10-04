@@ -125,6 +125,28 @@ impl WorkspaceView {
         self.starting.focus = Some(item);
     }
 
+    /// The empty workspace's way to begin, and ↵ there: a thread of the machine's usual agent
+    /// in the machine's latest place, its first message asked in its own tile. The machine is
+    /// the one "+" chose, else the one in context.
+    pub(super) fn start_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let known = |k: &WorkerKey| self.workers.contains_key(k);
+        let Some(key) = self.new_on.filter(known).or_else(|| self.context_worker()) else {
+            return;
+        };
+        if let Some(w) = self.workers.get(&key).filter(|w| w.link.is_none()) {
+            let text = format!("{} is {}", w.name, w.status.text());
+            self.show_notice(text, cx);
+            return;
+        }
+        let Some(agent) = self.agent_for(key) else {
+            self.show_notice(super::agent_start::NO_AGENT.to_owned(), cx);
+            return;
+        };
+        let latest = self.recent_places().into_iter().find(|p| p.worker == key);
+        let cwd = latest.map_or_else(|| "~".to_owned(), |p| p.cwd);
+        self.begin_start(key, agent, cwd, window, cx);
+    }
+
     /// Open the tile of `starting`, focused.
     pub(super) fn open_starting(
         &mut self,

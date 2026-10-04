@@ -82,7 +82,7 @@ mod tests {
             .iter()
             .filter(|n| n.role == "Status")
             .find_map(|n| n.label.clone().filter(|l| l.ends_with(" new")))?;
-        Some((count, centre(d, "Button", |l| l == "Inbox")?))
+        Some((count, centre(d, "Button", |l| l == "Needs you")?))
     }
 
     /// Focus worker `name`'s terminal (and its keyboard), wherever the layout has it.
@@ -203,19 +203,21 @@ mod tests {
         // The count is the sum across workers: worker A contributes nothing.
         assert_eq!(worker(&d, A).unwrap().needs_you, 0, "{d:#?}");
 
-        // The bell's inbox lists B's waiting session, and its row focuses it, in the same layout.
+        // The bell shows the navigator at *Needs you*, which lists B's waiting session, and its
+        // row focuses it, in the same layout.
         let (_, (px, py)) = pill(&d).unwrap();
         stack.driver.click(px, py).await.unwrap();
-        let inbox = stack
+        let waiting = |l: &str| l != "Needs you" && l.ends_with("Needs you");
+        let listed = stack
             .driver
-            .wait_for("the inbox", STEP, |d| d.a11y_node("Dialog", Some("Inbox")).is_some())
+            .wait_for("Needs you", STEP, |d| centre(d, "Button", waiting).is_some())
             .await
             .unwrap();
-        let (rx, ry) = centre(&inbox, "Button", |l| l.contains("Needs you")).unwrap();
+        let (rx, ry) = centre(&listed, "Button", waiting).unwrap();
         stack.driver.click(rx, ry).await.unwrap();
         stack
             .driver
-            .wait_for("the inbox row to reveal B's session", STEP, |d| {
+            .wait_for("the row to reveal B's session", STEP, |d| {
                 focused_worker(d) == Some(B) && d.focused == format!("terminal:{session_b}")
             })
             .await

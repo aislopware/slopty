@@ -1,6 +1,5 @@
-//! Slopty's mark on the empty workspace and in the About panel: lit while a worker is
-//! reachable, its cursor blinking at the caret's cadence without drawing anything round it,
-//! steady under Reduce Motion.
+//! Slopty's mark on the empty workspace: lit while a worker is reachable, its cursor blinking
+//! at the caret's cadence without drawing anything round it, steady under Reduce Motion.
 
 use slopty_theme::Motion;
 
@@ -63,25 +62,4 @@ fn the_cursor_blinks_without_building_the_strip_and_holds_under_reduce_motion(
     assert!(cursor_lit(&view, cx), "steady, and lit");
     let running = view.read_with(cx, |v, cx| v.empty_mark.read(cx).blinking());
     assert!(!running, "no clock runs for a steady cursor");
-}
-
-/// "About Slopty" in the palette opens the panel: the mark, the name, the version. Esc closes
-/// it and gives the keyboard back.
-#[gpui::test]
-fn about_slopty_shows_the_mark_and_the_version(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    cx.update(|_w, cx| cx.set_reduce_motion(true));
-    let _studio = connect(&view, cx, 1, "studio");
-    cx.dispatch_action(About);
-    cx.run_until_parked();
-    assert!(view.read_with(cx, |v, _| v.about_open()), "the panel is open");
-    let panel = cx.debug_bounds("about").expect("the panel is drawn");
-    let mark = cx.debug_bounds("about-mark").expect("led by the mark");
-    assert!(panel.contains(&mark.origin), "{mark:?} in {panel:?}");
-    let lit = view.read_with(cx, |v, cx| v.about.as_ref().map(|a| a.mark().read(cx).cursor_lit()));
-    assert_eq!(lit, Some(true), "a worker is reachable");
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    assert!(!view.read_with(cx, |v, _| v.about_open()), "Esc closes it");
-    assert!(cx.debug_bounds("about").is_none());
 }

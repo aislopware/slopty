@@ -380,3 +380,28 @@ fn a_start_on_its_way_closes_and_goes_with_its_link(cx: &mut TestAppContext) {
     let said = view.read_with(cx, |v, _| v.toast_text()).unwrap_or_default();
     assert!(said.starts_with("studio went out of reach before Codex started"), "{said}");
 }
+
+/// A worker's thread hub knows what that machine can start ("Continue in…"): from its link's
+/// caps when the hub is made, again when the caps change, and nothing once the link drops.
+#[gpui::test]
+fn a_workers_hub_knows_the_agents_it_can_start(cx: &mut TestAppContext) {
+    use slopty_proto::server::InstalledAgent;
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let agents = |cx: &mut VisualTestContext| view.read_with(cx, |v, cx| v.hub_agents_of(key, cx));
+    let claude = AgentId::named(AgentId::CLAUDE_CODE);
+    assert_eq!(agents(cx), Some(vec![claude.clone()]), "from the link's caps");
+
+    let mut caps = healthy();
+    caps.agents
+        .push(InstalledAgent { agent: AgentId::named(AgentId::CODEX), version: "0.50".into() });
+    view.update_in(cx, |v, _w, cx| v.set_worker_caps(key, caps, cx));
+    assert_eq!(agents(cx), Some(vec![claude, AgentId::named(AgentId::CODEX)]), "caps moved");
+
+    view.update_in(cx, |v, _w, cx| {
+        v.disconnect_worker(key, WorkerStatus::Reconnecting("lost".into()), cx);
+    });
+    assert_eq!(agents(cx), Some(Vec::new()), "out of reach, it starts nothing");
+}

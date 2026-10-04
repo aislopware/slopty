@@ -45,8 +45,8 @@ fn declare(
 ) {
     let term = TermRef { worker, session: orchestrator };
     let tasks = vec![
-        on(card(1, "Read the store", TaskState::Blocked, None), worker, SessionId::new()),
-        card(2, "Wire the board", TaskState::Merged, None),
+        on(card(1, "Read the store", TaskState::Blocked), worker, SessionId::new()),
+        card(2, "Wire the board", TaskState::Merged),
     ];
     view.update_in(cx, |v, _w, cx| {
         v.projects_part(snapshot(1, vec![status(project("board", Some(term)), tasks, vec![])]), cx);

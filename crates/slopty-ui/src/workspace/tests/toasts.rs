@@ -29,6 +29,28 @@ fn a_notice_under_the_pointer_stays_until_the_pointer_leaves(cx: &mut TestAppCon
     assert!(up(cx).is_empty(), "then it goes");
 }
 
+/// Typing under a resting pointer keeps the hold: a key is not the pointer leaving, so the
+/// notice being read does not start its countdown. (Ely's
+/// `typing_under_a_resting_pointer_keeps_the_hold`, as ours.)
+#[gpui::test]
+fn typing_under_a_resting_pointer_keeps_the_hold(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    cx.simulate_resize(size(px(1280.0), px(800.0)));
+    view.update_in(cx, |v, _w, cx| v.show_notice("Copied the address".to_owned(), cx));
+    cx.run_until_parked();
+    let notice = cx.debug_bounds("said").expect("the notice");
+    cx.simulate_mouse_move(notice.center(), None, Modifiers::default());
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("a");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    cx.executor().advance_clock(SAY_FOR.saturating_add(SAY_FOR));
+    cx.run_until_parked();
+    let up = view.read_with(cx, |v, _| v.toast_texts());
+    assert_eq!(up, ["Copied the address"], "a key leaves the pointer where it is");
+}
+
 /// A notice sits in the status bar, over no tile: with a shell open it lies inside the bar,
 /// clear of the strip; with no worker yet the bar comes up to hold it.
 #[gpui::test]

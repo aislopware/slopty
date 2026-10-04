@@ -2,9 +2,10 @@
 //! traffic lights when the navigator is hidden): the navigator's toggle, the breadcrumb of
 //! where the focused work is (`workspace ▾ / checkout ▾ / branch`, `breadcrumb.rs`, whose
 //! workspace menu is how the bar goes between workspaces) and "+" after it (a menu of what to
-//! open: a terminal, an agent, a window, a note, or a workspace); the inbox's bell and "…" on
-//! the right. Where the view is along the strip is the strip's own thumb (`marks`), not the
-//! bar's. Nothing else: every other action is a key, the palette, or a tile's own header, and
+//! open: a terminal, an agent, a window, a note, or a workspace); the bell and "…" on the
+//! right. The bell counts what needs the person and the agents' turns left to review, and opens
+//! the navigator at them. Where the view is along the strip is the strip's own thumb (`marks`), not
+//! the bar's. Nothing else: every other action is a key, the palette, or a tile's own header, and
 //! the readouts (the server's state among them) live in the status bar.
 //!
 //! It takes the navigator's tone with no rule under it, so the two read as one frame round the
@@ -85,18 +86,55 @@ pub(super) enum MenuKind {
     New,
     /// "…": everything else, the app's entries included.
     More,
-    /// The bell: what needs the human and what finished.
-    Inbox,
+    /// A machine's "…" in the navigator: what it says of itself, and what can be done to it.
+    Machine(WorkerKey),
 }
 
-/// Where the bar's buttons that hang a menu were last laid out: each one's left edge in the
-/// window, by the menu it opens.
+/// What the title bar's empty span asks of the window, as a native title bar does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum WindowAsk {
+    /// Pressed and moved: the system drags the window after the pointer.
+    Move,
+    /// Double-clicked: the system's title-bar action, zoom or minimise as the person set it.
+    TitleBarDoubleClick,
+}
+
+/// Where the buttons that hang a menu were last laid out, in the window, by the menu each
+/// opens.
 #[derive(Default, Debug)]
 pub(super) struct Anchors {
-    pub at: Rc<RefCell<HashMap<MenuKind, f32>>>,
+    pub at: Rc<RefCell<HashMap<MenuKind, gpui::Bounds<gpui::Pixels>>>>,
 }
 
 impl WorkspaceView {
+    /// Ask the window for `ask`; a test keeps it instead, as the test platform drags nothing.
+    #[cfg(test)]
+    fn window_ask(&mut self, ask: WindowAsk, _window: &Window) {
+        self.window_asks.push(ask);
+    }
+
+    /// Ask the window for `ask`.
+    #[expect(
+        clippy::cfg_not_test,
+        clippy::unused_self,
+        clippy::needless_pass_by_ref_mut,
+        reason = "the test platform panics on a window move, so the test build's twin keeps the \
+                  ask on the view instead, with this signature"
+    )]
+    #[cfg(not(test))]
+    fn window_ask(&mut self, ask: WindowAsk, window: &Window) {
+        match ask {
+            WindowAsk::Move => window.start_window_move(),
+            WindowAsk::TitleBarDoubleClick => window.titlebar_double_click(),
+        }
+    }
+
+    /// What the title bar asked of the window since the last call.
+    #[cfg(test)]
+    pub(super) fn take_window_asks(&mut self) -> Vec<WindowAsk> {
+        std::mem::take(&mut self.window_asks)
+    }
+
     /// Whether chrome moves now: not under Reduce Motion, nor under the self-test, where a
     /// frame is a step and a dump must see where things land.
     pub(super) fn chrome_moves(&self, cx: &gpui::App) -> bool {
@@ -109,8 +147,8 @@ impl WorkspaceView {
     }
 
     /// Whether `key`'s round trip, going from `was` to `now`, is on screen: the status bar
-    /// prints the focused tile's worker's while it is slow or under the pointer, the hosts
-    /// popover every worker's, and the navigator those slow enough to name. A quick link's
+    /// prints the focused tile's worker's while it is slow or under the pointer, and the
+    /// navigator those slow enough to name. A quick link's
     /// samples then draw nothing.
     pub(super) fn rtt_shown(
         &self,
@@ -121,7 +159,6 @@ impl WorkspaceView {
         let slow =
             |rtt: Option<Duration>| rtt.is_some_and(|rtt| rtt >= super::navigator::RTT_SHOWN_FROM);
         self.status_prints_rtt(key, was, now)
-            || self.hosts_open()
             || (self.nav.drawn.is_some() && (slow(was) || slow(now)))
     }
 
@@ -197,23 +234,8 @@ impl WorkspaceView {
         } else {
             self.menu = Some(which);
             self.menu_keyed = window.last_input_was_keyboard();
-            // The inbox takes the keyboard, so its rows are worked by key at once.
-            if which == MenuKind::Inbox {
-                let focus = self.inbox_focus(cx);
-                window.focus(&focus, cx);
-            }
             cx.notify();
         }
-    }
-
-    /// ⌘⇧U: the bell's inbox, opened or closed by key.
-    pub(super) fn toggle_inbox(
-        &mut self,
-        _: &super::actions::ToggleInbox,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.toggle_menu(MenuKind::Inbox, window, cx);
     }
 
     /// Close the bar's menu and hand the keyboard back to the focused tile at once.
@@ -272,7 +294,7 @@ impl WorkspaceView {
             let at = Rc::clone(&self.anchors.at);
             let measure = canvas(
                 move |bounds, _window, _cx| {
-                    at.borrow_mut().insert(MenuKind::New, f32::from(bounds.origin.x));
+                    at.borrow_mut().insert(MenuKind::New, bounds);
                 },
                 |_bounds, (), _window, _cx| {},
             )
@@ -287,10 +309,10 @@ impl WorkspaceView {
                 }))
         });
 
-        // Right: the inbox and "…". Who needs you is counted once, on the bell; its rows go to
-        // them.
+        // Right: the bell and "…". Who needs you is counted once, on the bell, with the turns
+        // left to review; it opens the navigator at them.
         let total = self.drawn_waiting.len().saturating_add(self.drawn_thread_waits.len());
-        let unread = total.saturating_add(self.unread_finishes());
+        let unread = total.saturating_add(self.to_review().len());
         let bell = has_workers.then(|| {
             // Each fill with its own ink: a near-black on the green and on a state's fill.
             let (fill, ink) =
@@ -325,13 +347,11 @@ impl WorkspaceView {
                     .text_size(px(theme.typography.caption()))
                     .child(count)
             });
-            kit::icon_button(theme, "bell", IconName::Bell, "Inbox")
+            kit::icon_button(theme, "bell", IconName::Bell, super::navigator::NEEDS_YOU)
                 .group(BELL)
                 .relative()
                 .children(badge)
-                .on_click(cx.listener(|this, _ev, window, cx| {
-                    this.toggle_menu(MenuKind::Inbox, window, cx);
-                }))
+                .on_click(cx.listener(|this, _ev, window, cx| this.needs_you_shown(window, cx)))
         });
         let more = kit::icon_button(theme, "more", IconName::Ellipsis, "More")
             .aria_expanded(self.menu == Some(MenuKind::More))
@@ -340,9 +360,34 @@ impl WorkspaceView {
             );
         let buttons =
             div().flex_none().flex().items_center().gap(px(spacing.xxs)).children(bell).child(more);
+        // Its empty span is a native title bar: pressed and moved it drags the window, and a
+        // double-click is the system's zoom. A button's press stops before it gets here.
         div()
             .id("titlebar")
             .debug_selector(|| "titlebar".to_owned())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, ev: &gpui::MouseDownEvent, window, _cx| {
+                    this.title_press = ev.click_count < 2;
+                    if ev.click_count == 2 {
+                        this.window_ask(WindowAsk::TitleBarDoubleClick, window);
+                    }
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, _cx| {
+                if this.title_press && ev.pressed_button == Some(MouseButton::Left) {
+                    this.title_press = false;
+                    this.window_ask(WindowAsk::Move, window);
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, _cx| this.title_press = false),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _ev, _window, _cx| this.title_press = false),
+            )
             .relative()
             .size_full()
             .pt(safe.top)
@@ -507,7 +552,7 @@ impl WorkspaceView {
             entry(MenuGroup::Navigation, label, Some(bound), run)
         };
         let entries: Vec<MenuEntry> = match which {
-            MenuKind::Inbox => Vec::new(),
+            MenuKind::Machine(key) => self.machine_entries(key, &entity, cx),
             MenuKind::Workspaces => self.workspace_entries(&entity),
             MenuKind::Checkouts => self.checkout_entries(&entity),
             // The palette's names for the same actions, which the rows run as the keys do.
@@ -533,24 +578,14 @@ impl WorkspaceView {
                     }),
                 ]);
                 entries.extend(self.more_entries.iter().cloned());
-                // The hosts popover, which the status bar's count opens only while a worker is
-                // down. A phone's bar has no room for the popover, nor this row.
-                if !self.workers.is_empty() && !phone {
-                    let entity = entity.clone();
-                    entries.push(MenuEntry {
-                        group: MenuGroup::Connections,
-                        label: "Machines".into(),
-                        detail: SharedString::default(),
-                        run: Rc::new(move |_window, cx| {
-                            let _gone = entity.update(cx, Self::toggle_hosts);
-                        }),
-                    });
-                }
                 entries.sort_by_key(|entry| entry.group);
                 entries
             }
         };
         let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(entries.len());
+        if let MenuKind::Machine(key) = which {
+            rows.extend(self.machine_facts_rows(key));
+        }
         let mut group = entries.first().map(|entry| entry.group);
         for (i, entry) in entries.into_iter().enumerate() {
             if group != Some(entry.group) {
@@ -602,20 +637,11 @@ impl WorkspaceView {
                     .into_any_element()
             });
         }
-        // A base unit below the bar (the inbox keeps that gap itself), the right edge on the
-        // window's inset, where the tiles' headers end: a popover lined up with what it covers
-        // rather than hung off its button a few points in.
-        let gap = match which {
-            MenuKind::Inbox => 0.0,
-            MenuKind::New | MenuKind::More | MenuKind::Workspaces | MenuKind::Checkouts => {
-                spacing.xs
-            }
-        };
-        let panel = if which == MenuKind::Inbox {
-            self.render_inbox(leaving, cx)
-        } else {
-            self.menu_panel(rows, which, leaving, cx)
-        };
+        // A base unit below the bar, the right edge on the window's inset, where the tiles'
+        // headers end: a popover lined up with what it covers rather than hung off its button a
+        // few points in.
+        let gap = spacing.xs;
+        let panel = self.menu_panel(rows, which, leaving, cx);
         // A click anywhere else closes it and goes no further, so a press on the button that
         // opened it closes it rather than opening it again. A popover, it paints over the frame
         // and the navigator laid over it, under a dialog. Leaving, it lets the window have the
@@ -633,16 +659,24 @@ impl WorkspaceView {
             .child(
                 div()
                     .absolute()
-                    .top(px(titlebar_height(theme) + gap) + safe.top)
                     // "+" and the breadcrumb hang their menus from their own left edges, as a
-                    // menu bar's menus do.
-                    .map(|el| match which {
-                        MenuKind::New | MenuKind::Workspaces | MenuKind::Checkouts => {
-                            let at = self.anchors.at.borrow().get(&which).copied();
-                            el.left(px(at.unwrap_or_else(|| spacing.inset())))
-                        }
-                        MenuKind::Inbox | MenuKind::More => {
-                            el.right(px(spacing.inset()) + safe.right)
+                    // menu bar's menus do; a machine's from its "…", under its row.
+                    .map(|el| {
+                        let at = self.anchors.at.borrow().get(&which).copied();
+                        let under_bar = px(titlebar_height(theme) + gap) + safe.top;
+                        let left = |el: gpui::Div| {
+                            el.left(at.map_or_else(|| px(spacing.inset()), |b| b.origin.x))
+                        };
+                        match which {
+                            MenuKind::New | MenuKind::Workspaces | MenuKind::Checkouts => {
+                                left(el.top(under_bar))
+                            }
+                            MenuKind::Machine(_) => {
+                                left(el.top(at.map_or(under_bar, |b| b.bottom() + px(gap))))
+                            }
+                            MenuKind::More => {
+                                el.top(under_bar).right(px(spacing.inset()) + safe.right)
+                            }
                         }
                     })
                     .child(panel),

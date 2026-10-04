@@ -255,16 +255,6 @@ pub enum ItemSync {
         /// The op.
         op: ItemOp,
     },
-    /// One client pointed the others at an item (`ClientMsg::Point`): ephemeral, not part of
-    /// the registry. Every connected client hears it, the pointer included.
-    Pointed {
-        /// Who.
-        client: ClientId,
-        /// Its name from `Hello`.
-        name: String,
-        /// The item.
-        item: ItemId,
-    },
 }
 
 #[cfg(test)]

@@ -127,7 +127,7 @@ pub fn agent_status_text(agent: &AgentEvent) -> String {
 
 /// The agent's state in a word or two, without the detail: the one word for it wherever a
 /// state is said beside something else, a header's pill, a navigator row's trailing word, an
-/// inbox row with nothing asked.
+/// *Needs you* row with nothing asked.
 ///
 /// A tool call is "Working": the word names the state, and which tool is the line's to say.
 /// "Needs you" is not among them; it heads the section that groups the three waiting words.
@@ -300,7 +300,6 @@ impl WorkspaceView {
             }
         }
         self.update_awake(cx);
-        self.keep_time(cx);
         self.agents_moved(cx);
         self.update_run_targets(cx);
         cx.notify();
@@ -346,7 +345,6 @@ impl WorkspaceView {
         }
         if seeded {
             self.update_awake(cx);
-            self.keep_time(cx);
             self.agents_moved(cx);
             self.update_run_targets(cx);
         }
@@ -406,44 +404,11 @@ impl WorkspaceView {
         shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
     }
 
-    /// Sessions whose agent is at its turn, in the order of [`Self::needs_you`]: those with a
-    /// tile in reading order, then those only the server reported. At its turn as its tile
-    /// marks it ([`Self::agent_mark`]), so a face mid-call lists it though the hook lags.
-    pub(super) fn working(&self) -> Vec<Waiting> {
-        let at_work = |session: SessionId| self.agent_mark(session) == Some(Status::Working);
-        let mut shown: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
-            .items()
-            .filter_map(|(worker, i)| match i.kind {
-                ItemKind::Terminal { session } if at_work(session) => {
-                    Some(Waiting { worker, tile: Some(TileRef { worker, item: i.id }), session })
-                }
-                _ => None,
-            })
-            .map(|w| (w.tile.and_then(|t| self.layout.position(t)), w))
-            .collect();
-        shown.sort_by_key(|(pos, w)| {
-            (pos.map(|p| (p.workspace, p.column, p.tile)), w.tile.map(|t| t.item))
-        });
-        let mut unshown: Vec<Waiting> = self
-            .server_agents
-            .iter()
-            .filter(|(session, _)| at_work(**session) && self.tile_of_session(**session).is_none())
-            .map(|(session, (worker, _))| Waiting {
-                worker: *worker,
-                tile: None,
-                session: *session,
-            })
-            .collect();
-        unshown.sort_by_key(|w| (w.worker, w.session));
-        shown.into_iter().map(|(_, w)| w).chain(unshown).collect()
-    }
-
-    /// The agents whose turn ended while nobody looked, left to review: unread and not snoozed,
+    /// The agents whose turn ended while nobody looked, left to review: unread,
     /// in reading order.
     pub(super) fn to_review(&self) -> Vec<Waiting> {
         let mut ended: Vec<(Option<slopty_client::layout::Pos>, Waiting)> = self
             .agent_turns()
-            .filter(|session| !self.snoozed(*session))
             .filter_map(|session| {
                 let tile = self.tile_of_session(session)?;
                 let at = Waiting { worker: tile.worker, tile: Some(tile), session };
@@ -533,10 +498,14 @@ impl WorkspaceView {
         sessions.saturating_add(threads)
     }
 
-    /// What some agent is doing changed: tell the app the count (the Dock badge), and hand the
-    /// boards on show their agents' word in the next frame.
+    /// What some agent is doing changed: tell the app the count (the Dock badge), hand the
+    /// boards on show their agents' word in the next frame, and take down the corner's word
+    /// about any that was answered.
     pub(super) fn agents_moved(&mut self, cx: &mut Context<Self>) {
         self.projects.dirty = true;
+        if self.drop_answered_attention() {
+            cx.notify();
+        }
         cx.emit(WorkspaceEvent::NeedsYou(self.needs_you_count()));
     }
 
@@ -548,9 +517,7 @@ impl WorkspaceView {
         let finished = |failed: bool| {
             self.finished
                 .iter()
-                .filter(|(session, done)| {
-                    !self.snoozed(**session) && done.exit.is_some_and(|e| e != 0) == failed
-                })
+                .filter(|(_, done)| done.exit.is_some_and(|e| e != 0) == failed)
                 .filter_map(|(session, _)| {
                     let tile = self.tile_of_session(*session)?;
                     let at = Waiting { worker: tile.worker, tile: Some(tile), session: *session };
@@ -653,8 +620,8 @@ impl WorkspaceView {
     }
 
     /// A shell command ended in `session`. Long enough, and not watched (on a tile other than
-    /// the focused one, or with the app away), it earns a header badge and an inbox row, cleared
-    /// when the tile is focused; off screen with the app in front, a word in the corner too.
+    /// the focused one, or with the app away), it earns its tile's unseen dot, cleared when the
+    /// tile is focused. Neither the corner nor the bell says it: they speak for agents.
     pub fn command_finished(&mut self, session: SessionId, done: Finished, cx: &mut Context<Self>) {
         let tile = self.tile_of_session(session);
         let watched = self.app_active && tile.is_some_and(|t| self.focused() == Some(t));
@@ -663,16 +630,8 @@ impl WorkspaceView {
         if watched || !slow {
             return;
         }
-        let (status, what) = match done.exit {
-            Some(exit) if exit != 0 => (Status::Failed, "failed"),
-            _ => (Status::Done, "finished"),
-        };
-        self.log_finished(session, &done);
+        self.turns.command_ended(session);
         self.finished.insert(session, done);
-        self.wake_snoozed(session);
-        if let Some(tile) = tile {
-            self.attention_toast(tile, status, what, cx);
-        }
         cx.notify();
     }
 

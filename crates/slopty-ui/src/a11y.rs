@@ -13,7 +13,10 @@
 //! lives in `gpui_ios`). `tree` (under `cfg(test)` or the `e2e` feature) is what a test reads
 //! instead of a screen reader.
 
-use gpui::{KeyDownEvent, Outline, StatefulInteractiveElement, Styled, Window, px};
+use gpui::{
+    FocusHandle, InteractiveElement, KeyDownEvent, Outline, StatefulInteractiveElement, Styled,
+    WeakFocusHandle, Window, px,
+};
 use slopty_theme::{Rgb, alpha};
 
 use crate::colors::hsla_alpha;
@@ -42,17 +45,129 @@ pub fn tab_stop<E: StatefulInteractiveElement + Styled>(el: E, ring_color: Rgb) 
         })
 }
 
-/// Tab and ⇧Tab move the focus along the ring; `true` when the key was one of them.
+/// Tab and ⇧Tab move the focus along the ring ([`step`]); `true` when the key was one of them.
 pub fn cycle(event: &KeyDownEvent, window: &mut Window, cx: &mut gpui::App) -> bool {
     let stroke = &event.keystroke;
     if stroke.key != "tab" || stroke.modifiers.control || stroke.modifiers.platform {
         return false;
     }
-    if stroke.modifiers.shift {
-        window.focus_prev(cx);
-    } else {
-        window.focus_next(cx);
+    step(!stroke.modifiers.shift, window, cx);
+    true
+}
+
+mod marker {
+    #![expect(
+        clippy::derive_partial_eq_without_eq,
+        reason = "gpui::actions! derives PartialEq only"
+    )]
+    gpui::actions!(
+        a11y,
+        [
+            /// Never dispatched: a trap answers it, so the frame says whether a trap is in it.
+            Trapped
+        ]
+    );
+}
+use marker::Trapped;
+
+/// The traps registered so far, in the order they first drew: each a modal's scope and the
+/// handle its keyboard lives at. One closed is not in the frame, so it holds nothing.
+#[derive(Default)]
+struct Traps(Vec<(WeakFocusHandle, WeakFocusHandle)>);
+
+impl gpui::Global for Traps {}
+
+/// Make `el` a modal's focus trap, tracking `scope`.
+///
+/// While it is drawn and [`hold`]s, Tab and ⇧Tab walk the stops inside it and wrap there,
+/// never out to the tiles behind. A trap opened inside another is the one that holds.
+///
+/// After Ely's `FocusScope::trap` (`primitives/focus.rs`, Copyright (c) 2026 Ely GPUI
+/// Component contributors, MIT OR Apache-2.0), registered rather than wrapped, since our Tab
+/// is each stop's own key handler ([`tab_stop`]).
+pub fn trap<E: InteractiveElement>(el: E, scope: &FocusHandle) -> E {
+    el.track_focus(scope).on_action(|_: &Trapped, _window, _cx| {})
+}
+
+/// Register the trap `scope` ([`trap`]), whose keyboard lives at `home`.
+///
+/// A keyboard lost while it is drawn comes back there ([`reclaim`]). Held until either handle
+/// is dropped; one that is not drawn holds nothing meanwhile.
+pub fn hold(scope: &FocusHandle, home: &FocusHandle, cx: &mut gpui::App) {
+    let traps = cx.default_global::<Traps>();
+    traps.0.retain(|(scope, home)| scope.upgrade().is_some() && home.upgrade().is_some());
+    let weak = scope.downgrade();
+    match traps.0.iter_mut().find(|(s, _)| *s == weak) {
+        Some(found) => found.1 = home.downgrade(),
+        None => traps.0.push((weak, home.downgrade())),
     }
+}
+
+/// The innermost trap drawn in the last frame that `holds`, as (scope, home).
+fn innermost(
+    window: &Window,
+    cx: &gpui::App,
+    holds: impl Fn(&FocusHandle) -> bool,
+) -> Option<(FocusHandle, FocusHandle)> {
+    let traps = cx.try_global::<Traps>()?;
+    let mut best: Option<(FocusHandle, FocusHandle)> = None;
+    for (scope, home) in &traps.0 {
+        let (Some(scope), Some(home)) = (scope.upgrade(), home.upgrade()) else { continue };
+        if !holds(&scope) {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(outer, _)| outer.contains(&scope, window)) {
+            best = Some((scope, home));
+        }
+    }
+    best
+}
+
+/// Move the keyboard one stop along the ring, `forward` or back. Inside a trap it stays
+/// there, wrapping at its ends; a trap with no stop keeps the focus where it is.
+///
+/// The walk is Ely's `step` (`primitives/focus.rs`, Copyright (c) 2026 Ely GPUI Component
+/// contributors, MIT OR Apache-2.0).
+pub fn step(forward: bool, window: &mut Window, cx: &mut gpui::App) {
+    let advance = |window: &mut Window, cx: &mut gpui::App| {
+        if forward {
+            window.focus_next(cx);
+        } else {
+            window.focus_prev(cx);
+        }
+    };
+    let Some((scope, _)) = innermost(window, cx, |scope| scope.contains_focused(window, cx)) else {
+        advance(window, cx);
+        return;
+    };
+    let origin = window.focused(cx);
+    let mut first = None;
+    loop {
+        advance(window, cx);
+        let focused = window.focused(cx);
+        if scope.contains_focused(window, cx) && focused.as_ref() != Some(&scope) {
+            return;
+        }
+        if focused.is_none() || focused == origin || (first.is_some() && focused == first) {
+            break;
+        }
+        if first.is_none() {
+            first = focused;
+        }
+    }
+    if let Some(origin) = origin {
+        window.focus(&origin, cx);
+    }
+}
+
+/// The keyboard was lost (what held it left the frame): an open trap takes it back at its
+/// home. `false` when no trap is open, for the owner to put it where it belongs.
+pub fn reclaim(window: &mut Window, cx: &mut gpui::App) -> bool {
+    let drawn = |scope: &FocusHandle| window.is_action_available_in(&Trapped, scope);
+    let Some((_, home)) = innermost(window, cx, drawn) else {
+        return false;
+    };
+    window.focus(&home, cx);
     true
 }
 
@@ -189,5 +304,136 @@ mod tests {
         );
         cx.simulate_click(save.center(), gpui::Modifiers::default());
         assert!(rings(cx).is_empty(), "a click shows no ring");
+    }
+
+    /// A stage after Ely's overlay tests (`overlays/tests/mod.rs`, Copyright (c) 2026 Ely GPUI
+    /// Component contributors, MIT OR Apache-2.0): a button before, a modal with two buttons and
+    /// a home its keyboard lives at, and a button after.
+    struct Stage {
+        theme: Theme,
+        scope: gpui::FocusHandle,
+        home: gpui::FocusHandle,
+        open: bool,
+        /// The modal has no stop of its own.
+        bare: bool,
+    }
+
+    impl Render for Stage {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut Context<Self>,
+        ) -> impl IntoElement {
+            use gpui::InteractiveElement as _;
+            use gpui::prelude::FluentBuilder as _;
+            let theme = &self.theme;
+            let stop = |id: &'static str| button(theme, id, id, ButtonKind::Ghost);
+            let modal = self.open.then(|| {
+                crate::a11y::hold(&self.scope, &self.home, cx);
+                let home = div().track_focus(&self.home).child("home");
+                let modal = super::trap(div(), &self.scope).child(home);
+                if self.bare { modal } else { modal.child(stop("one")).child(stop("two")) }
+            });
+            div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(stop("before"))
+                .children(modal)
+                .child(stop("after"))
+                .when(false, |el| el)
+        }
+    }
+
+    fn stage(
+        cx: &mut TestAppContext,
+        bare: bool,
+    ) -> (gpui::Entity<Stage>, &mut gpui::VisualTestContext) {
+        cx.add_window_view(|_window, cx| Stage {
+            theme: Theme::default(),
+            scope: cx.focus_handle(),
+            home: cx.focus_handle(),
+            open: false,
+            bare,
+        })
+    }
+
+    /// The label of the stop that has the keyboard, as a screen reader hears it.
+    fn on(cx: &mut gpui::VisualTestContext) -> Option<String> {
+        cx.update(|window, _| window.set_a11y_active(true));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        let tree = cx.update(|window, _| super::tree(window));
+        tree.into_iter().find(|n| n.focused).and_then(|n| n.label)
+    }
+
+    fn open(view: &gpui::Entity<Stage>, cx: &mut gpui::VisualTestContext) {
+        view.update_in(cx, |stage, window, cx| {
+            stage.open = true;
+            window.focus(&stage.home, cx);
+            cx.notify();
+        });
+        cx.run_until_parked();
+    }
+
+    /// Tab and ⇧Tab walk the open modal's stops and wrap there, never out to the buttons
+    /// around it (Ely's `tab_walks_inside_an_open_popover`).
+    #[gpui::test]
+    fn tab_walks_inside_an_open_trap(cx: &mut TestAppContext) {
+        let (view, cx) = stage(cx, false);
+        open(&view, cx);
+        // From its home, a field with no stop of its own, the ring's step enters the modal.
+        cx.update(|window, cx| super::step(true, window, cx));
+        assert_eq!(on(cx).as_deref(), Some("one"), "into the modal, not to the button before");
+        let mut walked = Vec::new();
+        for _ in 0..4 {
+            cx.simulate_keystrokes("tab");
+            walked.extend(on(cx));
+        }
+        assert_eq!(walked, ["two", "one", "two", "one"]);
+        cx.simulate_keystrokes("shift-tab");
+        assert_eq!(on(cx).as_deref(), Some("two"), "back, wrapping");
+    }
+
+    /// A modal with no stop keeps the keyboard where it is.
+    #[gpui::test]
+    fn a_trap_with_no_stop_keeps_the_keyboard(cx: &mut TestAppContext) {
+        let (view, cx) = stage(cx, true);
+        open(&view, cx);
+        cx.simulate_keystrokes("tab");
+        let home = view.read_with(cx, |stage, _| stage.home.clone());
+        assert!(cx.update(|window, _| home.is_focused(window)), "still at home");
+    }
+
+    /// Closed, the trap holds nothing: Tab walks the whole window again.
+    #[gpui::test]
+    fn a_closed_trap_lets_tab_walk_the_window(cx: &mut TestAppContext) {
+        let (view, cx) = stage(cx, false);
+        open(&view, cx);
+        view.update(cx, |stage, cx| {
+            stage.open = false;
+            cx.notify();
+        });
+        cx.run_until_parked();
+        cx.update(gpui::Window::focus_next);
+        let mut walked = Vec::new();
+        for _ in 0..2 {
+            cx.simulate_keystrokes("tab");
+            walked.extend(on(cx));
+        }
+        assert_eq!(walked, ["after", "before"]);
+    }
+
+    /// A keyboard lost while the modal is open comes back to its home; with none open,
+    /// [`super::reclaim`] leaves it to the owner.
+    #[gpui::test]
+    fn a_lost_keyboard_comes_back_to_the_open_trap(cx: &mut TestAppContext) {
+        let (view, cx) = stage(cx, false);
+        assert!(!cx.update(super::reclaim), "nothing open");
+        open(&view, cx);
+        cx.update(gpui::Window::blur);
+        assert!(cx.update(super::reclaim));
+        let home = view.read_with(cx, |stage, _| stage.home.clone());
+        assert!(cx.update(|window, _| home.is_focused(window)));
     }
 }

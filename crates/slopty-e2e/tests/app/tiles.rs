@@ -231,14 +231,12 @@ async fn an_unsaved_edit_survives_the_app_being_killed() {
     stack.shutdown().await;
 }
 
-/// "About Slopty" from the palette: the panel leads with the mark, its cursor lit while the
-/// worker is reachable (steady: the self-test runs under Reduce Motion), then the name and the
-/// version. Esc gives the workspace back.
+/// "About Slopty" from the palette opens the settings on their About page: the version and
+/// the build are said there, once. Esc gives the workspace back.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
-async fn about_slopty_leads_with_the_mark() {
+async fn about_slopty_opens_the_settings_about_page() {
     let mut stack = Stack::launch("e2e-worker").await.unwrap();
-    let dir = stack.dir.path().to_path_buf();
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(drv).await;
@@ -248,9 +246,8 @@ async fn about_slopty_leads_with_the_mark() {
         .unwrap();
     drv.type_text("About Slopty").await.unwrap();
     drv.keys("enter").await.unwrap();
-    let about = |d: &Dump| d.a11y_node("Dialog", Some("About Slopty")).is_some();
-    drv.wait_for("the About panel", STEP, about).await.unwrap();
-    golden(drv, &dir, "about").await;
+    let about = |d: &Dump| d.a11y_node("Group", Some("About")).is_some();
+    drv.wait_for("the settings' About page", STEP, about).await.unwrap();
     drv.keys("escape").await.unwrap();
     drv.wait_for("the workspace back", STEP, |d| !about(d)).await.unwrap();
     stack.shutdown().await;

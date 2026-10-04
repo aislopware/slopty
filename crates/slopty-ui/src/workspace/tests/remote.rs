@@ -935,14 +935,14 @@ fn a_drop_goes_where_the_tile_can_take_it(cx: &mut TestAppContext) {
     assert!(calls.try_recv().is_err(), "the note took nothing");
 }
 
-/// A shell's listening ports show as quiet chips on its tile; one served on another port here
-/// says so on the chip and in a notice; the palette lists them.
+/// A shell's listening ports are counted in the status bar, not on its tile's header; one
+/// served on another port here says so in a notice; the count lists them to open.
 #[gpui::test]
-fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
+fn forwarded_ports_are_counted_and_listed_off_the_tile(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (studio, _calls, _board) = connect_remote(&view, cx);
     let shell = SessionId::new();
-    let tile = opens(&view, cx, &studio, shell, studio.me, 1);
+    let _tile = opens(&view, cx, &studio, shell, studio.me, 1);
     let port = |number| Port { number, pid: 2, process: "vite".to_owned(), session: Some(shell) };
     let forwards = vec![
         Forward { port: port(5173), local: Some(5173) },
@@ -950,17 +950,17 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
     ];
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, forwards, cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("port-5173", tile.item)).is_some(), "a chip per port");
-    assert!(cx.debug_bounds(selector("port-8080", tile.item)).is_some());
-    assert!(cx.debug_bounds(selector("port-out-5173", tile.item)).is_some(), "and its arrow");
     let notice = view.read_with(cx, |v, _| v.toast_text());
     assert_eq!(notice.as_deref(), Some("Port 8080 is taken here; forwarded on 8081"));
-    // The number opens the page in a tile on the shell's worker, named by the worker's port:
+    // Its line opens the page in a tile on the shell's worker, named by the worker's port:
     // each client serves it where it can.
     let mut studio = studio;
     studio.drain();
-    let chip = cx.debug_bounds(selector("port-8080", tile.item)).unwrap();
-    cx.simulate_click(chip.center(), Modifiers::none());
+    let count = cx.debug_bounds("status-ports").expect("the status bar counts them");
+    cx.simulate_click(count.center(), Modifiers::none());
+    cx.run_until_parked();
+    cx.simulate_input("8080 in a tile");
+    cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     let opened: Vec<String> = studio
         .drain()
@@ -975,7 +975,7 @@ fn forwarded_ports_show_on_the_shell_tile(cx: &mut TestAppContext) {
     assert_eq!(opened, ["http://localhost:8080/"]);
     view.update_in(cx, |v, _window, cx| v.ports_changed(shell, Vec::new(), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("port-5173", tile.item)).is_none(), "gone with the server");
+    assert!(cx.debug_bounds("status-ports").is_none(), "gone with the server");
 }
 
 /// Two clients of one worker show one browser item, the worker's address; each loads it from

@@ -201,7 +201,7 @@ fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
 }
 
 /// A worker's header says what is wrong with it only when something is: Screen Recording or
-/// Accessibility off on a Mac, another version. The hosts list reads its machine, and a window
+/// Accessibility off on a Mac, another version. Its menu reads its machine, and a window
 /// asked of a worker that cannot capture says why instead of an empty picker.
 #[gpui::test]
 fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) {
@@ -239,9 +239,8 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     let notices = view.read_with(cx, |v, _| v.toast_texts());
     assert!(notices.iter().any(|n| n.contains("it has no screen capture")), "{notices:?}");
 
-    view.update_in(cx, |v, _w, cx| v.toggle_hosts(cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(leak(format!("hosts-machine-{key}"))).is_some(), "its machine");
+    let facts = view.read_with(cx, |v, _| v.machine_facts(key));
+    assert!(facts.first().is_some_and(|l| l.starts_with("Linux")), "its machine: {facts:?}");
     assert_eq!(navigator::host_line(&healthy(), Some(2.1)), "macOS 26.5 \u{b7} load 2.1");
     assert_eq!(navigator::host_line(&healthy(), None), "macOS 26.5", "no load heard yet");
 }

@@ -975,7 +975,14 @@ impl WorkspaceView {
                 .text_size(px(theme.typography.ui_size * k))
                 .text_color(hsla(s.text_secondary))
                 .font_family(theme.typography.ui_family.clone())
-                .child(crate::palette::status_slot(theme, self.kind_glyph(item), None, muted, k))
+                .child(crate::companions::status_slot(
+                    theme,
+                    self.item_agent(item),
+                    self.kind_glyph(item),
+                    None,
+                    muted,
+                    k,
+                ))
                 .child(SharedString::from(self.tile_title(item)))
         });
         let ghost = div()
@@ -1140,7 +1147,6 @@ impl WorkspaceView {
             (pill, bar)
         });
         let (upload, progress) = upload.unzip();
-        let ports = self.port_pills(tile, item, chrome, cx);
         let branch =
             agent.map_or_else(Vec::new, |(session, _)| self.branch_chips(id, session, chrome));
         let actions = self.header_actions(tile, item, chrome, cx);
@@ -1300,7 +1306,6 @@ impl WorkspaceView {
                 .gap(px(theme.spacing.sm * k))
                 .pr(px(theme.spacing.inset() * k))
                 .children(branch)
-                .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
                 .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
@@ -1344,7 +1349,6 @@ impl WorkspaceView {
                 .when(!renaming, |el| el.child(div().flex_1()))
                 .when_some(worker, gpui::ParentElement::child)
                 .children(branch)
-                .children(ports)
                 .when_some(upload, gpui::ParentElement::child)
                 .when_some(hooks, gpui::ParentElement::child)
                 .child(actions)
@@ -1383,10 +1387,19 @@ impl WorkspaceView {
             .filter(|st| !(agent && matches!(st, Status::NeedsYou | Status::Idle)))
             .filter(|st| !(opening && *st == Status::Working));
         let ink = if focused { s.text_secondary } else { s.text_muted };
-        let slot =
-            crate::palette::status_slot(&self.theme, self.kind_glyph(item), status, hsla(ink), k)
-                .debug_selector(move || format!("status-{}", id.as_uuid()))
-                .into_any_element();
+        let slot = crate::companions::slot(
+            &self.theme,
+            self.item_agent(item),
+            self.kind_glyph(item),
+            status,
+        )
+        .posed(self.tile_status(tile, item))
+        .moments((!focused).then(|| format!("companion-{}", id.as_uuid()).into()))
+        .ink(hsla(ink))
+        .zoom(k)
+        .build()
+        .debug_selector(move || format!("status-{}", id.as_uuid()))
+        .into_any_element();
         self.file_proxy(item, tile, slot, k, cx)
     }
 
@@ -1516,9 +1529,16 @@ impl WorkspaceView {
             let shown = tab == placed.tile;
             let ink = title_ink(theme, shown && placed.focused);
             let status = self.tile_status(tab, item);
-            let slot =
-                crate::palette::status_slot(theme, self.kind_glyph(item), status, hsla(ink), k)
-                    .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
+            let agent = self.item_agent(item);
+            let slot = crate::companions::status_slot(
+                theme,
+                agent,
+                self.kind_glyph(item),
+                status,
+                hsla(ink),
+                k,
+            )
+            .debug_selector(move || format!("tab-slot-{}", id.as_uuid()));
             let title = self.tile_title(item);
             let label = SharedString::from(title.clone());
             let name = self.header_name(tab, id, title, chrome);
@@ -1658,8 +1678,6 @@ impl WorkspaceView {
         }
     }
 
-    /// The ports a shell listens on, served here, each one pill of the header's form: the
-    /// number opens the page in a tile, the arrow at its end in the default browser.
     /// An agent's pull request and worktree, as the worker last said: the request's number
     /// in words toned by its review (green approved, red changes asked, muted draft), a click
     /// away from its page; and the worktree's name, quiet, its branch in the hint. Words, not
@@ -1743,85 +1761,6 @@ impl WorkspaceView {
                 .into_any_element()
         });
         pr.into_iter().chain(worktree).collect()
-    }
-
-    fn port_pills(
-        &self,
-        tile: TileRef,
-        item: &Item,
-        chrome: Chrome,
-        cx: &Draw<'_, Self>,
-    ) -> Vec<gpui::AnyElement> {
-        let theme = &self.theme;
-        let id = item.id;
-        let ItemKind::Terminal { session } = &item.kind else { return Vec::new() };
-        self.forwards(*session)
-            .iter()
-            .filter(|f| f.local.is_some())
-            .map(|forward| {
-                let number = forward.port.number;
-                let label = match forward.local {
-                    Some(local) if local != number => format!("{number} \u{2192} {local}"),
-                    _ => format!("{number}"),
-                };
-                let tone = theme.surfaces.text_secondary;
-                let hover = theme.surfaces.hover;
-                let k = chrome.k;
-                // Words, not a chip: the header's one fill is the state's. The two ends share
-                // one corner, and each takes the hover fill alone under the pointer.
-                let part = |part: String, label: SharedString, name: String| {
-                    let selector = format!("{part}-{}", id.as_uuid());
-                    kit::pill_frame(theme, k)
-                        .id(SharedString::from(part))
-                        .debug_selector(move || selector)
-                        .role(Role::Link)
-                        .aria_label(SharedString::from(name))
-                        .flex_none()
-                        .rounded_none()
-                        .cursor_pointer()
-                        .hover(move |el| el.bg(hsla(hover)))
-                        .child(
-                            ChromeText::new(label, px(theme.typography.small()), k)
-                                .zooming(chrome.zooming),
-                        )
-                };
-                let in_tile = part(
-                    format!("port-{number}"),
-                    label.into(),
-                    format!("Open port {number} in a tile"),
-                )
-                .pl(px(theme.spacing.sm * k))
-                .pr(px(theme.spacing.xs * k));
-                let out = part(
-                    format!("port-out-{number}"),
-                    "\u{2197}".into(),
-                    format!("Open port {number} in the browser"),
-                )
-                .pl(px(theme.spacing.xs * k))
-                .pr(px(theme.spacing.sm * k));
-                let url = forward.worker_url();
-                let worker = tile.worker;
-                let forward = forward.clone();
-                // A port is a number: set in the mono face with figures of one width, as a
-                // path is.
-                kit::tabular(div())
-                    .flex()
-                    .flex_none()
-                    .rounded(px(theme.radii.sm * k))
-                    .overflow_hidden()
-                    .text_size(px(theme.typography.small() * k))
-                    .text_color(hsla(tone))
-                    .font_family(crate::palette::mono_family(theme))
-                    .child(tab_stop(in_tile, theme.surfaces.accent).on_click(cx.listener(
-                        move |this, _ev, _w, cx| this.open_browser(Some(worker), &url, cx),
-                    )))
-                    .child(
-                        tab_stop(out, theme.surfaces.accent)
-                            .on_click(move |_ev, _w, _cx| Self::open_forward(&forward)),
-                    )
-                    .into_any_element()
-            })
-            .collect()
     }
 
     /// A worker's sound was silenced or resumed: every remote tile copies its stream again, so

@@ -5,11 +5,9 @@
 #[cfg(test)]
 mod units {
     use bytes::{BufMut as _, BytesMut};
-    use slopty_core::{ClientId, ItemId};
     use slopty_proto::codec::{self, CodecError, MAX_FRAME_BYTES};
     use slopty_proto::file::{FILE_BYTES, INLINE_FILE_BYTES};
     use slopty_proto::input::CellMetrics;
-    use slopty_proto::items::ItemSync;
     use slopty_proto::media::{Kind, MediaHeader, flags};
     use slopty_proto::terminal::{MAX_FETCH_LINES, MAX_OSC52_BYTES, TermSize};
     use slopty_proto::{ClientMsg, WorkerMsg};
@@ -132,13 +130,6 @@ mod units {
     #[test]
     fn messages_name_their_variants_for_logs() {
         assert_eq!(ClientMsg::InstallHooks.kind(), "InstallHooks");
-        assert_eq!(ClientMsg::Point { item: ItemId::new() }.kind(), "Point");
-        let pointed = ItemSync::Pointed {
-            client: ClientId::new(),
-            name: "x".to_owned(),
-            item: ItemId::new(),
-        };
-        assert_eq!(WorkerMsg::Items(pointed).kind(), "Items");
         let stop = slopty_proto::search::SearchRequest::Stop { id: 3 };
         assert_eq!(ClientMsg::Search(stop).kind(), "Search");
         let failed = slopty_proto::search::SearchEvent::Failed { id: 3, error: String::new() };

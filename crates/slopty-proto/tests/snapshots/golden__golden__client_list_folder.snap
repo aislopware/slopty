@@ -1,5 +1,6 @@
 ---
 source: crates/slopty-proto/tests/golden.rs
+assertion_line: 43
 expression: hex(&bytes)
 ---
-07 00 00 00 0f 05 7e 2f 73 72 63
+07 00 00 00 0e 05 7e 2f 73 72 63

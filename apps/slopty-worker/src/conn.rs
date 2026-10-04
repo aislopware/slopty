@@ -321,7 +321,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         daemon,
         conn,
         client: hello.client,
-        name: hello.name,
         out,
         reports,
         attached: HashMap::new(),
@@ -863,8 +862,6 @@ struct Peer<'d> {
     daemon: &'d Daemon,
     conn: Connection,
     client: ClientId,
-    /// Its name from `Hello`, for the pointings it relays.
-    name: String,
     out: mpsc::Sender<WorkerMsg>,
     /// Receiver reports, for the task that applies them.
     reports: mpsc::Sender<Asked>,
@@ -992,13 +989,6 @@ impl Peer<'_> {
                     tracing::trace!(client = %self.client, %session, "term input received");
                 }
                 self.term(session, req);
-            }
-            ClientMsg::Point { item } => {
-                // Ephemeral: relayed as is, never in the registry. An item the worker no longer
-                // has is for each client to ignore.
-                let pointed =
-                    ItemSync::Pointed { client: self.client, name: self.name.clone(), item };
-                let _sent = self.daemon.events.send(WorkerMsg::Items(pointed));
             }
             ClientMsg::Items(op) => match self.daemon.items.apply(op, self.client) {
                 Ok(delta) => {

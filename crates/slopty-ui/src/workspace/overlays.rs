@@ -12,14 +12,11 @@ use slopty_proto::screen::{DisplayInfo, WindowInfo};
 use slopty_proto::terminal::TermRequest;
 
 use super::WorkspaceView;
-use super::actions::{FindEverywhere, ListWorkers, OpenFile, OpenFolder, OpenPalette, StartThread};
+use super::actions::{FindEverywhere, OpenFile, OpenFolder, OpenPalette, StartThread};
 use super::agents::{agent_status_text, needs_human};
 use crate::icons::Status;
 use crate::palette::{self, CommandPalette, PaletteEvent, PaletteItem, PaletteRun};
 use crate::picker::{PickerEvent, SessionRow, WindowPicker};
-
-/// How many of the run-target shell's last commands the palette offers to run again.
-const RERUN_LINES: usize = 5;
 
 /// How much of an agent's first prompt, and of its last answer, the palette searches: enough
 /// for what a task is about, bounded for a transcript that pasted a log.
@@ -110,15 +107,6 @@ impl WorkspaceView {
         items.extend(self.worker_lines());
         items.extend(self.wake_lines());
         items.extend(self.closed_lines());
-        // The shell a "run" would go to: its last few commands, to run again.
-        if let Some(shell) = self.run_target()
-            && let Some(view) = self.terminals.get(&shell)
-        {
-            let state = view.read(cx).state();
-            items.extend(
-                state.recent_commands(RERUN_LINES).iter().map(|c| PaletteItem::rerun(c, shell)),
-            );
-        }
         items.extend(super::actions::palette_items());
         items.extend(self.attach_lines(cx));
         items.extend(self.group_lines());
@@ -227,17 +215,6 @@ impl WorkspaceView {
             p.set_live(true);
             p
         });
-        self.show_palette(palette, window, cx);
-    }
-
-    /// "List workers": the palette with a line per worker, its state on the right.
-    pub fn list_workers(&mut self, _: &ListWorkers, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette.is_some() {
-            return;
-        }
-        let lines = self.worker_lines().collect();
-        let theme = self.theme.clone();
-        let palette = cx.new(|cx| CommandPalette::new(lines, theme, window, cx));
         self.show_palette(palette, window, cx);
     }
 
@@ -471,14 +448,6 @@ impl WorkspaceView {
                     this.reveal_session(*session, cx);
                     this.pending_find = Some((*session, needle.clone()));
                 }
-                PaletteEvent::Run(PaletteRun::Rerun { session, command }) => {
-                    this.palette_return = None;
-                    this.reveal_session(*session, cx);
-                    if let Some(view) = this.terminals.get(session).cloned() {
-                        let command = command.clone();
-                        view.update(cx, |v, cx| v.run_text(command, cx));
-                    }
-                }
                 PaletteEvent::Run(PaletteRun::Reopen(closing)) => {
                     this.palette_return = None;
                     this.take_back(Some(*closing), cx);
@@ -689,8 +658,9 @@ impl WorkspaceView {
                 w.picker_wanted = false;
             }
             this.let_picker_leave(cx);
-            // The jump focuses its terminal; every other outcome hands focus back.
-            this.pending_focus_self = !matches!(event, PickerEvent::Jump(_));
+            // The jump focuses its terminal; every other outcome hands the keyboard back where
+            // the focused tile keeps it.
+            this.pending_return = !matches!(event, PickerEvent::Jump(_));
             cx.notify();
         })
         .detach();
@@ -715,7 +685,7 @@ impl WorkspaceView {
     /// first, then by [`Self::recency_rank`].
     pub(super) fn session_rows(&self) -> Vec<SessionRow> {
         // Wall clock, as the worker stamped the start: the summary may be relayed long after.
-        let now_ms = super::inbox::wall_ms();
+        let now_ms = super::turns::wall_ms();
         let session_age = |started_ms: u64| {
             (started_ms > 0)
                 .then(|| std::time::Duration::from_millis(now_ms.saturating_sub(started_ms)))

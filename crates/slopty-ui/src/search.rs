@@ -132,6 +132,8 @@ type Selected = (String, Option<usize>);
 /// The surface.
 pub struct ProjectSearch {
     query: Entity<InputState>,
+    /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
+    scope: FocusHandle,
     replace: Entity<InputState>,
     files: Entity<InputState>,
     match_case: bool,
@@ -206,6 +208,7 @@ impl ProjectSearch {
         ];
         Self {
             query,
+            scope: cx.focus_handle(),
             replace,
             files,
             match_case: false,
@@ -1117,8 +1120,10 @@ impl Render for ProjectSearch {
         // The keyboard summons it, so it fades in where it stands, with no travel.
         let panel = crate::kit::fade_in(panel, "search-open", cx);
         let page = isize::try_from(PAGE).unwrap_or(1);
-        let root = crate::kit::anchor(&theme, window)
-            .id("search-backdrop")
+        let home = self.query.read(cx).focus_handle(cx);
+        crate::a11y::hold(&self.scope, &home, cx);
+        let root = crate::kit::anchor(&theme, window).id("search-backdrop");
+        let root = crate::a11y::trap(root, &self.scope)
             .child(panel)
             // While an input method composes in a field, these keys are its own.
             .capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {

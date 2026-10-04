@@ -245,13 +245,13 @@ fn a_tile_row_reads_its_age_or_its_state_then_its_place(cx: &mut TestAppContext)
     });
     assert!(!washed, "a row waiting on the human is not washed a second time");
 
-    // Folded out of sight, it is listed under *Needs you*, whose row joins the agent's words and
-    // its place as a tile's second line does: the one separator, spaces and all, flush against
-    // both.
-    assert!(!shown(cx, "nav-needs-you"), "in view, its own row says it");
+    // It is listed under *Needs you* too, in view or folded out of sight, whose row joins the
+    // agent's words and its place as a tile's second line does: the one separator, spaces and
+    // all, flush against both.
+    assert!(shown(cx, "nav-needs-you"), "the section lists it in view");
     let project = GroupKey::new(fact::REPO, &groups::at(key, "/Users/me/oss/slopty"));
     click(cx, leak(format!("nav-group-{project}")));
-    assert!(shown(cx, "nav-needs-you"), "folded away, the section lists it");
+    assert!(shown(cx, "nav-needs-you"), "and folded away");
     let mut part = |name: &str| {
         cx.debug_bounds(leak(format!("nav-waiting-{name}-{session}")))
             .unwrap_or_else(|| panic!("the agent row's {name}"))
@@ -327,7 +327,7 @@ fn a_folded_worker_rolls_up_what_its_tiles_want(cx: &mut TestAppContext) {
 
     view.update_in(cx, |v, _w, cx| {
         let done =
-            Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(9) };
+            Finished { command: "make".into(), exit: Some(0), elapsed: Duration::from_secs(40) };
         v.command_finished(first, done, cx);
     });
     cx.run_until_parked();
@@ -615,9 +615,9 @@ fn the_plate_glides_on_the_workspaces_clock(cx: &mut TestAppContext) {
     assert_eq!(plate(cx), Some(to), "landed on the second row");
 }
 
-/// One agent is one row. At work with its tile's row in view, *Working* does not list it again:
-/// the row ends in "Working" already. Folded away, *Working* lists it. Waiting, its row ends in
-/// the state's own word ("Needs approval"), not the section's "Needs you".
+/// An agent at work is one row: its tile's, ending in "Working", and no section lists it again,
+/// folded away or not. Waiting, its row ends in the state's own word ("Needs approval"), not the
+/// section's "Needs you".
 #[gpui::test]
 fn an_agent_in_view_is_listed_once_in_its_own_word(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -632,7 +632,6 @@ fn an_agent_in_view_is_listed_once_in_its_own_word(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(!shown(cx, "nav-working"), "its row says it works");
-    assert!(view.read_with(cx, |v, _| v.navigator_working().is_empty()));
     let words: Vec<Option<String>> =
         view.read_with(cx, WorkspaceView::navigator_words).into_iter().map(|(_, w)| w).collect();
     assert!(words.contains(&Some("Working".to_owned())), "{words:?}");
@@ -640,8 +639,7 @@ fn an_agent_in_view_is_listed_once_in_its_own_word(cx: &mut TestAppContext) {
     assert!(!words.contains(&Some("Needs you".to_owned())), "not the section's: {words:?}");
 
     click(cx, leak(format!("nav-worker-{}", studio.key)));
-    assert!(shown(cx, "nav-working"), "folded away, the section lists it");
-    assert_eq!(view.read_with(cx, |v, _| v.navigator_working()), [busy]);
+    assert!(!shown(cx, "nav-working"), "folded away, still no section");
 }
 
 /// An agent at rest says what it last said, and no state: never "Idle". A lone word is left to

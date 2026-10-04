@@ -216,23 +216,27 @@ fn the_icon_slot_keeps_every_title_on_one_edge(cx: &mut TestAppContext) {
     assert!((command_x - tile_x).abs() < 0.5, "an empty slot keeps a command's title on it");
 }
 
-/// The empty workspace asks what an agent should do and takes the keyboard to ask it: what is
-/// typed starts the agent's thread with it as its first prompt, in the machine's latest place. A
-/// shell and a window are the quieter ways in, with their keys read from the bindings, and each
-/// does what its key does. The workers are listed with how they are doing.
+/// The empty workspace leads with a new agent, the row ↵ runs: it opens the agent's tile on the
+/// machine in its latest place, whose field asks the task, and what is typed there starts the
+/// thread with it as its first prompt. A shell and a window are the quieter ways in, with their
+/// keys read from the bindings, and each does what its key does. The workers are listed with
+/// how they are doing.
 #[gpui::test]
-fn the_empty_workspace_asks_what_an_agent_should_do(cx: &mut TestAppContext) {
+fn the_empty_workspace_leads_with_a_new_agent(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut fake = connect(&view, cx, 1, "studio");
     cx.update(|window, _cx| window.set_a11y_active(true));
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    for label in ["New terminal", "Add a window or display", "studio", "On studio", "In ~"] {
+    for label in ["New agent", "New terminal", "Add a window or display", "studio"] {
         assert!(tree.iter().any(|n| n.is("Button", Some(label))), "{label}: {tree:#?}");
     }
-    assert!(!tree.iter().any(|n| n.is("Button", Some("New agent"))), "the question is the way");
-    assert_eq!(strip::begin_keys(), ["⌘T".to_owned(), "⌘O".to_owned()]);
+    assert_eq!(strip::begin_keys(), ["⇧⌘T".to_owned(), "⌘T".to_owned(), "⌘O".to_owned()]);
 
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("empty-workspace").is_none(), "the agent's tile is there");
+    assert!(thread_starts(&mut fake).is_empty(), "nothing sent before the task is given");
     cx.simulate_input("Fix the login redirect");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
@@ -243,16 +247,16 @@ fn the_empty_workspace_asks_what_an_agent_should_do(cx: &mut TestAppContext) {
         [(claude.clone(), "~".to_owned(), Some(prompt))],
         "an agent's thread, given the task"
     );
-    assert!(cx.debug_bounds("ask").is_none(), "its tile is there, starting: no question now");
-    // The start's tile closed, the workspace is empty again and asks again.
+    // The start's tile closed, the workspace is empty again; its row does what ↵ did.
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
+    click(cx, "empty-agent");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(
         thread_starts(&mut fake),
         [(claude, "~".to_owned(), None)],
-        "the field is clear again, and on nothing an agent starts bare"
+        "on nothing an agent starts bare"
     );
     cx.simulate_keystrokes("cmd-w");
     cx.run_until_parked();
@@ -273,11 +277,10 @@ fn the_empty_workspace_asks_what_an_agent_should_do(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("picker-loading").is_some(), "the picker is up, waiting");
 }
 
-/// The question's chips choose where the agent starts: the directory chip steps through the
-/// places shells stand in on the machine, then its home; the machine chip, with several
-/// machines, the next machine.
+/// The empty workspace's agent starts where the machine's shells last stood, and on the
+/// machine "+" chose.
 #[gpui::test]
-fn the_questions_chips_choose_where_the_agent_starts(cx: &mut TestAppContext) {
+fn the_empty_workspaces_agent_starts_in_the_machines_latest_place(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let mut laptop = connect(&view, cx, 2, "laptop");
@@ -290,27 +293,20 @@ fn the_questions_chips_choose_where_the_agent_starts(cx: &mut TestAppContext) {
         v.go_to_workspace(last, cx);
     });
     cx.run_until_parked();
-    let target = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.ask_target());
     let started = |cx: &mut VisualTestContext, fake: &mut Fake| {
-        click(cx, "ask-field");
+        click(cx, "empty-agent");
         cx.simulate_keystrokes("enter");
         cx.run_until_parked();
-        // The start's tile goes again, so the workspace asks again.
+        // The start's tile goes again, so the page shows again.
         cx.simulate_keystrokes("cmd-w");
         cx.run_until_parked();
         thread_starts(fake).into_iter().next().map(|(_, cwd, _)| cwd)
     };
-    if target(cx).is_some_and(|(on, _)| on != key) {
-        click(cx, "ask-worker");
-    }
-    let slopty = Some("/Users/me/oss/slopty".to_owned());
-    assert_eq!(target(cx), Some((key, slopty)), "the latest place first");
-    click(cx, "ask-place");
-    assert_eq!(target(cx), Some((key, None)), "then the worker's own default");
-    assert_eq!(started(cx, &mut studio).as_deref(), Some("~"), "its home");
-    click(cx, "ask-worker");
-    assert_eq!(target(cx), Some((laptop.key, None)), "the next worker");
-    assert_eq!(started(cx, &mut laptop).as_deref(), Some("~"), "on the laptop, at its home");
+    view.update_in(cx, |v, _w, _cx| v.new_on = Some(key));
+    assert_eq!(started(cx, &mut studio).as_deref(), Some("/Users/me/oss/slopty"), "its latest");
+    let other = laptop.key;
+    view.update_in(cx, |v, _w, _cx| v.new_on = Some(other));
+    assert_eq!(started(cx, &mut laptop).as_deref(), Some("~"), "the laptop has none: its home");
 }
 
 fn listing(title: &str) -> ScreenEvent {
@@ -599,7 +595,7 @@ fn the_palette_offers_what_the_focus_can_do(cx: &mut TestAppContext) {
         lines.into_iter().map(|l| l.label).collect()
     };
     let has = |labels: &[String], label: &str| labels.iter().any(|l| l == label);
-    let always = ["New terminal", "New note", "About Slopty", "Overview", "Find in every tile"];
+    let always = ["New terminal", "New note", "Overview", "Find in every tile"];
     let of_a_tile = ["Close tile", "Name this tile", "Maximize column", "Move column left"];
     let elsewhere = [
         "Page back",
@@ -719,10 +715,10 @@ fn a_project_line_goes_to_its_workspace(cx: &mut TestAppContext) {
     assert_eq!(kept, view.read_with(cx, |v, _| v.frecency.clone()), "kept with the layout");
 }
 
-/// "Scope to atlas" narrows the navigator, the attention sections, the inbox and the status
-/// bar's counts alike to atlas; it leads the filter as a token, and Esc lets go of it.
+/// "Scope to atlas" narrows the navigator and its attention sections alike to atlas; it leads
+/// the filter as a token, the bell keeps it, and Esc lets go of it.
 #[gpui::test]
-fn a_scope_filters_the_navigator_the_inbox_and_the_counts_alike(cx: &mut TestAppContext) {
+fn a_scope_filters_the_navigator_and_its_attention_sections_alike(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let (atlas_agent, atlas) = shell_in(&view, cx, &studio, 1, "/w/atlas", true);
@@ -732,10 +728,10 @@ fn a_scope_filters_the_navigator_the_inbox_and_the_counts_alike(cx: &mut TestApp
         v.agent_event(blocked(site_agent), cx);
     });
     cx.run_until_parked();
-    let counts = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, _| v.agent_counts().iter().map(|(_, c)| c.total()).sum::<usize>())
+    let row = |session: SessionId| -> &'static str {
+        Box::leak(format!("nav-waiting-{session}").into_boxed_str())
     };
-    assert_eq!(counts(cx), 2);
+    assert!(cx.debug_bounds(row(site_agent)).is_some(), "both wait");
     let key = view.read_with(cx, |v, _| v.project_groups().group_of(atlas).map(|g| g.key.clone()));
     let scope = ScopeTo { project: key };
     view.update_in(cx, |v, w, cx| v.scope_to(&scope, w, cx));
@@ -743,16 +739,11 @@ fn a_scope_filters_the_navigator_the_inbox_and_the_counts_alike(cx: &mut TestApp
     assert!(cx.debug_bounds("nav-scope").is_some(), "the scope leads the filter");
     let listed = view.read_with(cx, |v, _| v.navigator_tiles());
     assert_eq!(listed, [atlas], "only atlas's rows");
-    assert_eq!(counts(cx), 1, "the status bar counts atlas's agent alone");
     cx.simulate_keystrokes("cmd-shift-u");
     cx.run_until_parked();
-    let row = |session: SessionId| -> &'static str {
-        Box::leak(format!("inbox-waiting-{session}").into_boxed_str())
-    };
-    assert!(cx.debug_bounds(row(atlas_agent)).is_some(), "atlas's agent in the inbox");
+    assert!(cx.debug_bounds("nav-scope").is_some(), "the bell keeps the scope");
+    assert!(cx.debug_bounds(row(atlas_agent)).is_some(), "atlas's agent under Needs you");
     assert!(cx.debug_bounds(row(site_agent)).is_none(), "and not site's");
-    cx.simulate_keystrokes("cmd-shift-u");
-    cx.run_until_parked();
 
     click(cx, "nav-filter");
     cx.simulate_keystrokes("escape");
@@ -760,5 +751,5 @@ fn a_scope_filters_the_navigator_the_inbox_and_the_counts_alike(cx: &mut TestApp
     assert!(cx.debug_bounds("nav-scope").is_none(), "Esc lets go of it");
     let listed = view.read_with(cx, |v, _| v.navigator_tiles());
     assert!(listed.contains(&site), "every row is back: {listed:?}");
-    assert_eq!(counts(cx), 2);
+    assert!(cx.debug_bounds(row(site_agent)).is_some(), "and site's agent with them");
 }

@@ -22,6 +22,7 @@ use slopty_core::SessionId;
 use slopty_theme::Theme;
 
 use crate::colors::hsla;
+use crate::fuzzy::{Fuzzy, Rank, best_first};
 use crate::icons::{self, Glyph, IconName, IconSize, Status};
 use crate::kit::Pace;
 
@@ -537,13 +538,6 @@ pub enum PaletteRun {
         /// What was typed.
         needle: String,
     },
-    /// Type `command` into this shell again (a paste then ↩).
-    Rerun {
-        /// The shell that ran it.
-        session: SessionId,
-        /// What was typed at its prompt.
-        command: String,
-    },
     /// Reveal this file tile and open its find bar on `needle` (find in every tile).
     FindInFile {
         /// The tile.
@@ -564,7 +558,7 @@ impl PaletteRun {
     #[must_use]
     pub const fn verb(&self) -> &'static str {
         match self {
-            Self::Action(_) | Self::Rerun { .. } | Self::Wake(_) => "Run",
+            Self::Action(_) | Self::Wake(_) => "Run",
             Self::Session(_)
             | Self::Item(_)
             | Self::Worker(_)
@@ -605,9 +599,6 @@ impl Clone for PaletteRun {
             Self::FindIn { session, needle } => {
                 Self::FindIn { session: *session, needle: needle.clone() }
             }
-            Self::Rerun { session, command } => {
-                Self::Rerun { session: *session, command: command.clone() }
-            }
             Self::FindInFile { item, needle } => {
                 Self::FindInFile { item: *item, needle: needle.clone() }
             }
@@ -636,9 +627,6 @@ impl std::fmt::Debug for PaletteRun {
             Self::OpenInTile(url) => f.debug_tuple("OpenInTile").field(url).finish(),
             Self::FindIn { session, needle } => {
                 f.debug_struct("FindIn").field("session", session).field("needle", needle).finish()
-            }
-            Self::Rerun { session, command } => {
-                f.debug_struct("Rerun").field("session", session).field("command", command).finish()
             }
             Self::FindInFile { item, needle } => {
                 f.debug_struct("FindInFile").field("item", item).field("needle", needle).finish()
@@ -864,20 +852,6 @@ impl PaletteItem {
         Self::line(label.to_owned(), detail.to_owned(), run, IconName::Globe, Section::Commands)
     }
 
-    /// `Rerun <command>` for a command the active shell ran (a multi-line command shows its
-    /// first line and `…`).
-    #[must_use]
-    pub fn rerun(command: &str, session: SessionId) -> Self {
-        let first = command.lines().next().unwrap_or_default();
-        let label = if command.lines().nth(1).is_some() {
-            format!("Rerun {first} …")
-        } else {
-            format!("Rerun {first}")
-        };
-        let run = PaletteRun::Rerun { session, command: command.to_owned() };
-        Self::line(label, String::new(), run, IconName::RotateCw, Section::Commands)
-    }
-
     /// `Open <relative>` for a file the worker found under `root`.
     #[must_use]
     pub fn found_file(root: &str, relative: &str) -> Self {
@@ -905,9 +879,7 @@ impl PaletteItem {
     pub fn hits(title: &str, total: u32, run: PaletteRun) -> Self {
         let keys = if total == 1 { "1 hit".to_owned() } else { format!("{total} hits") };
         let icon: Glyph = match &run {
-            PaletteRun::FindIn { .. } | PaletteRun::Session(_) | PaletteRun::Rerun { .. } => {
-                IconName::SquareTerminal.into()
-            }
+            PaletteRun::FindIn { .. } | PaletteRun::Session(_) => IconName::SquareTerminal.into(),
             PaletteRun::OpenFile { path, .. } => Glyph::file(path),
             PaletteRun::FindInFile { .. } => IconName::FileText.into(),
             PaletteRun::Item(_) => IconName::StickyNote.into(),
@@ -1360,13 +1332,13 @@ pub fn files_query(query: &str) -> Option<&str> {
 
 /// The items `query` keeps, in their order.
 ///
-/// Every word of the query is found in the label or in where the line is (its worker and
-/// directory), case-insensitive; an empty query keeps all. So a worker's name finds its tiles,
-/// and a directory the shells in it.
+/// Every word of the query is found, fuzzily ([`crate::fuzzy`]), in the label or in where the
+/// line is (its worker and directory); an empty query keeps all. So a worker's name finds its
+/// tiles, a directory the shells in it, and "nwt" "New terminal".
 #[must_use]
 pub fn filter<'a>(query: &str, items: &'a [PaletteItem]) -> Vec<&'a PaletteItem> {
-    let words = query_words(query);
-    items.iter().filter(|item| found_by(&haystack(item), &words)).collect()
+    let mut fuzzy = Fuzzy::new(query);
+    items.iter().filter(|item| fuzzy.rank(&item.label, &place(item)).is_some()).collect()
 }
 
 /// The rest of a query that asks for commands only: what follows a leading `>`, as in VS Code's
@@ -1376,68 +1348,11 @@ pub fn commands_only(query: &str) -> Option<&str> {
     query.trim_start().strip_prefix('>')
 }
 
-/// The query's words a line's label shows, as byte ranges of `label`: each word's first place
-/// in it, case-insensitive. Nothing for a label whose lowercase moves its bytes.
-fn matched_ranges(label: &str, words: &[String]) -> Vec<std::ops::Range<usize>> {
-    let lower = label.to_lowercase();
-    if lower.len() != label.len() {
-        return Vec::new();
-    }
-    let mut ranges: Vec<_> = words
-        .iter()
-        .filter_map(|w| lower.find(w.as_str()).map(|at| at..at.saturating_add(w.len())))
-        .collect();
-    ranges.sort_by_key(|r| r.start);
-    let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(ranges.len());
-    for range in ranges {
-        match merged.last_mut() {
-            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
-            _ => merged.push(range),
-        }
-    }
-    merged
-}
-
-/// A query's words, lowercase.
-fn query_words(query: &str) -> Vec<String> {
-    query.split_whitespace().map(str::to_lowercase).collect()
-}
-
-/// What a query's words are looked for in: the line's label, its context and what its tile is
-/// about, lowercase.
-fn haystack(item: &PaletteItem) -> String {
+/// Where a line is, for the query's words that its label lacks: its worker and directory,
+/// and what its tile is about.
+fn place(item: &PaletteItem) -> String {
     let about = item.about.as_deref().unwrap_or_default();
-    format!("{} {} {about}", item.label, item.context()).to_lowercase()
-}
-
-/// Whether every word is in `haystack`.
-fn found_by(haystack: &str, words: &[String]) -> bool {
-    words.iter().all(|w| haystack.contains(w.as_str()))
-}
-
-/// How well `words` name `label`, for a line they already match: the whole label (4), its
-/// start (3), the start of a word in it for every word (2), inside it (1), or only where the
-/// line is (0). The lines of a section are ranked by it, ties kept in the order they came.
-fn score(label: &str, words: &[String]) -> u8 {
-    let label = label.to_lowercase();
-    let query = words.join(" ");
-    let starts_a_word = |word: &str| {
-        label.match_indices(word).any(|(at, _)| {
-            label
-                .get(..at)
-                .and_then(|before| before.chars().last())
-                .is_none_or(|c| !c.is_alphanumeric())
-        })
-    };
-    if label == query {
-        4
-    } else if label.starts_with(&query) {
-        3
-    } else if words.iter().all(|w| starts_a_word(w)) {
-        2
-    } else {
-        u8::from(words.iter().all(|w| label.contains(w.as_str())))
-    }
+    format!("{} {about}", item.context())
 }
 
 /// What the palette decided.
@@ -1454,20 +1369,23 @@ pub enum PaletteEvent {
 /// The palette: a field and the items that match it.
 pub struct CommandPalette {
     items: Vec<PaletteItem>,
-    /// Each item's [`haystack`], lowercased once.
-    hay: Vec<String>,
+    /// Where each item is ([`place`]), worked out once.
+    places: Vec<String>,
     /// `Open <path>` when the field spells a path; recomputed on every change.
     path_items: Vec<PaletteItem>,
     /// `Open <path>` for the files the worker found for the field's text; dropped on a change.
     found: Vec<PaletteItem>,
     input: Entity<InputState>,
+    /// What its whole surface tracks: Tab stays inside it ([`crate::a11y::trap`]).
+    scope: FocusHandle,
     /// The matches ([`Self::matches`]), worked out when the field, the path lines or the found
     /// files change, never for a frame alone: the plate's glide draws many.
     matched: Vec<At>,
     /// The list's lines: the matches, a heading where a group starts.
     lines: Vec<Line>,
-    /// The query's words the lines were matched against, shown in each label.
-    words: Vec<String>,
+    /// What the query matched in each match's label, as byte ranges, by its place in the
+    /// matches: what its row highlights.
+    marks: Vec<Vec<std::ops::Range<usize>>>,
     /// Which match ↑/↓ have selected.
     selected: usize,
     /// The list's scroll and its lines' heights, so the selected row can be brought into view
@@ -1573,16 +1491,17 @@ impl CommandPalette {
             InputEvent::PressEnter { .. } => this.run(cx),
             InputEvent::Focus | InputEvent::Blur => {}
         });
-        let hay = items.iter().map(haystack).collect();
+        let places = items.iter().map(place).collect();
         let mut palette = Self {
             items,
-            hay,
+            places,
             path_items: Vec::new(),
             found: Vec::new(),
             input,
+            scope: cx.focus_handle(),
             matched: Vec::new(),
             lines: Vec::new(),
-            words: Vec::new(),
+            marks: Vec::new(),
             selected: 0,
             list: ListState::new(0, ListAlignment::Top, px(OVERDRAW)).measure_all(),
             reveal: false,
@@ -1630,7 +1549,7 @@ impl CommandPalette {
             .get(self.selected(self.matched.len()))
             .and_then(|at| self.at(*at))
             .map(|item| item.label.clone());
-        self.hay = items.iter().map(haystack).collect();
+        self.places = items.iter().map(place).collect();
         self.items = items;
         self.refresh(cx);
         if let Some(label) = chosen
@@ -1730,38 +1649,52 @@ impl CommandPalette {
         let only_commands = commands_only(&field);
         let query = only_commands.unwrap_or(&field);
         let empty = query.trim().is_empty();
-        let words = query_words(query);
+        let mut fuzzy = Fuzzy::new(query);
         let mut out: Vec<(At, &PaletteItem)> =
             self.path_items.iter().enumerate().map(|(ix, item)| (At::Path(ix), item)).collect();
-        let mut kept: Vec<(At, &PaletteItem)> = self
+        let path_first = !out.is_empty();
+        let mut kept: Vec<(At, &PaletteItem, Rank)> = self
             .items
             .iter()
-            .zip(&self.hay)
+            .zip(&self.places)
             .enumerate()
             .filter(|(_, (item, _))| only_commands.is_none() || item.section == Section::Commands)
-            .filter(|(_, (_, hay))| found_by(hay, &words))
-            .map(|(ix, (item, _))| (At::Item(ix), item))
+            .filter_map(|(ix, (item, place))| {
+                Some((At::Item(ix), item, fuzzy.rank(&item.label, place)?))
+            })
             .collect();
         // An empty field's commands are the ones run last, then a few more: the ones from
         // history sit under a heading of their own, so the list says why they are there.
         let recent = recent_commands(cx);
-        if self.brief && empty {
-            out.extend(brief(kept, &recent));
-        } else {
-            // How well the words name a line ranks it within its section ([`in_sections`]
-            // keeps the order it is given); a command run lately, then the order the lines
-            // came in, breaks a tie.
-            if !empty {
-                kept.sort_by_cached_key(|(_, item)| {
-                    let lately = recent.iter().position(|r| *r == item.label);
-                    (std::cmp::Reverse(score(&item.label, &words)), lately.unwrap_or(usize::MAX))
-                });
+        let found = self.found.iter().enumerate().map(|(ix, item)| (At::Found(ix), item));
+        let out = if empty {
+            let kept = kept.into_iter().map(|(at, item, _)| (at, item));
+            if self.brief {
+                out.extend(brief(kept.collect(), &recent));
+            } else {
+                out.extend(kept);
             }
-            out.extend(kept);
-        }
+            out.extend(found);
+            in_sections(out, path_first)
+        } else {
+            // The best line leads its group and the group with the best line leads the list;
+            // a command run lately, then the order the lines came in, breaks a tie.
+            let lately = |item: &PaletteItem| {
+                recent.iter().position(|r| *r == item.label).unwrap_or(usize::MAX)
+            };
+            kept.sort_by(|a, b| best_first(&a.2, &b.2).then_with(|| lately(a.1).cmp(&lately(b.1))));
+            let mut sections: Vec<Section> = Vec::new();
+            for (_, item, _) in &kept {
+                if !sections.contains(&item.section) {
+                    sections.push(item.section);
+                }
+            }
+            kept.sort_by_key(|(_, item, _)| sections.iter().position(|s| *s == item.section));
+            out.extend(kept.into_iter().map(|(at, item, _)| (at, item)));
+            out.extend(found);
+            out
+        };
         let recent = if self.brief && empty { recent } else { Vec::new() };
-        out.extend(self.found.iter().enumerate().map(|(ix, item)| (At::Found(ix), item)));
-        let out = in_sections(out, !self.path_items.is_empty());
         let group = |item: &PaletteItem| group(item, &recent);
         // A heading only where there are two groups to tell apart: a list of workers, of
         // ports or of hits is one kind already, and the dialog's title names it.
@@ -1776,11 +1709,15 @@ impl CommandPalette {
             }
             lines.push(Line::Match(ix));
         }
+        self.marks = if empty {
+            Vec::new()
+        } else {
+            out.iter().map(|(_, item)| fuzzy.ranges(&item.label)).collect()
+        };
         let matched = out.into_iter().map(|(at, _)| at).collect();
         self.matched = matched;
         self.list.reset(lines.len());
         self.lines = lines;
-        self.words = words;
     }
 
     /// Esc empties a field that holds text, and closes the palette once it is empty: a query
@@ -1931,7 +1868,7 @@ impl CommandPalette {
                     .when(chosen, |el| {
                         el.font_weight(gpui::FontWeight(slopty_theme::Typography::MEDIUM_WEIGHT))
                     })
-                    .child(self.label(&item.label)),
+                    .child(self.label(ix, &item.label)),
             )
             .child(context)
             .children(trailing.map(|(text, tone)| {
@@ -1957,9 +1894,9 @@ impl CommandPalette {
 
     /// A line's label: what the query matched in `text` over the rest in `text_secondary`,
     /// so the eye finds why the line is there; the whole label in `text` with nothing typed.
-    fn label(&self, label: &str) -> gpui::StyledText {
+    fn label(&self, ix: usize, label: &str) -> gpui::StyledText {
         let s = self.theme.surfaces;
-        let ranges = matched_ranges(label, &self.words);
+        let ranges = self.marks.get(ix).cloned().unwrap_or_default();
         let text = gpui::StyledText::new(SharedString::from(label.to_owned()));
         if ranges.is_empty() {
             return text;
@@ -2159,6 +2096,9 @@ impl Render for CommandPalette {
         let root = if self.leaving {
             root
         } else {
+            let home = self.input.read(cx).focus_handle(cx);
+            crate::a11y::hold(&self.scope, &home, cx);
+            let root = crate::a11y::trap(root, &self.scope);
             // While an input method composes in the field, the arrows and Esc are its own.
             root.capture_action(cx.listener(|this, _: &MoveUp, _window, cx| {
                 if !this.composing(cx) {
@@ -2173,6 +2113,19 @@ impl Render for CommandPalette {
             .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                 if !this.composing(cx) {
                     this.escape(window, cx);
+                }
+            }))
+            // Tab walks the palette's stops rather than typing into its field. Off the field,
+            // where the field's Esc binding does not reach, Esc closes the palette all the same.
+            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                if crate::a11y::cycle(ev, window, cx) {
+                    cx.stop_propagation();
+                    return;
+                }
+                let in_field = this.input.read(cx).focus_handle(cx).is_focused(window);
+                if ev.keystroke.key == "escape" && !ev.keystroke.modifiers.modified() && !in_field {
+                    cx.stop_propagation();
+                    cx.emit(PaletteEvent::Dismiss);
                 }
             }))
             .on_mouse_down(
@@ -2384,10 +2337,10 @@ mod tests {
         (palette, cx)
     }
 
-    /// Within its section a line ranks by how well the query names it: the whole label, its
-    /// start, a word's start, then inside it, ties in the order the lines came; a tile never
-    /// falls below a command for it. `>` keeps only the commands. The label shows what matched
-    /// in `text` over the rest in `text_secondary`.
+    /// A line ranks by how well the query names it ([`crate::fuzzy`]): a label spelled whole
+    /// leads, and letters in order find a line by its words' heads. The group whose best line
+    /// is best leads the list. `>` keeps only the commands. The label shows what matched in
+    /// `text` over the rest in `text_secondary`.
     #[gpui::test]
     fn a_query_ranks_each_section_and_shows_what_it_matched(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
@@ -2412,36 +2365,27 @@ mod tests {
                 p.matches().iter().map(|i| i.label.clone()).collect::<Vec<_>>()
             })
         };
+        let page = typed("page", &palette, cx);
+        assert_eq!(page.len(), 6, "{page:?}");
+        assert_eq!(page.first().map(String::as_str), Some("Page"), "spelled whole, it leads");
         assert_eq!(
-            typed("page", &palette, cx),
-            [
-                "Fix the page header",
-                "Page",
-                "Page back",
-                "Pages",
-                "Open last offered page",
-                "Edit page address"
-            ],
-            "the tile first, then exact, start, word start in the order they came"
+            page.last().map(String::as_str),
+            Some("Fix the page header"),
+            "the commands' group has the best line: the tile's comes after it"
         );
-        assert_eq!(
-            typed("age", &palette, cx).first().map(String::as_str),
-            Some("Fix the page header")
-        );
+        assert_eq!(typed("pg bk", &palette, cx), ["Page back"], "letters in order, every word");
+        let marks = palette.read_with(cx, |p, _| p.marks.clone());
+        assert_eq!(marks, [vec![0..1, 2..3, 5..6, 8..9]], "P, g, b and k of Page back");
+        let edit = typed("page", &palette, cx).iter().position(|l| l == "Edit page address");
+        let marks = palette.read_with(cx, |p, _| p.marks.clone());
+        let ends = edit.and_then(|ix| marks.get(ix)).map(|m| m.iter().map(|r| (r.start, r.end)));
+        assert_eq!(ends.map(Iterator::collect::<Vec<_>>), Some(vec![(5, 9)]), "page in Edit page");
         assert_eq!(
             typed(">page", &palette, cx).first().map(String::as_str),
             Some("Page"),
             "commands only"
         );
         assert_eq!(typed(">", &palette, cx).len(), 5, "every command, no tile");
-        let page = matched_ranges("Edit Page address", &["page".to_owned()]);
-        assert_eq!((page.len(), page.first()), (1, Some(&(5..9))));
-        assert_eq!(
-            matched_ranges("Move column left", &query_words("col LEFT colu")),
-            [5..9, 12..16],
-            "each word's first place, overlaps merged"
-        );
-        assert_eq!(matched_ranges("Straße", &["s".to_owned()]).len(), 1);
         assert_eq!(files_query(">ma"), None, "a command query asks for no files");
         assert!(path_items(">/srv/a/").is_empty(), "nor spells a path");
     }
@@ -2710,14 +2654,14 @@ mod tests {
         queries.dedup();
         let (mut moved, mut asked) = (0, 0);
         for q in &queries {
-            let words = query_words(q);
             let kept = filter(q, &items);
             if kept.len() < 2 {
                 continue;
             }
             asked += 1;
+            let mut fuzzy = Fuzzy::new(q);
             let mut ranked = kept.clone();
-            ranked.sort_by_key(|i| std::cmp::Reverse(score(&i.label, &words)));
+            ranked.sort_by_cached_key(|i| std::cmp::Reverse(fuzzy.rank(&i.label, &place(i))));
             if ranked.first().map(|i| &i.label) != kept.first().map(|i| &i.label) {
                 moved += 1;
                 let top = |v: &[&PaletteItem]| {
@@ -2783,8 +2727,8 @@ mod tests {
     }
 
     /// An empty field lists every tile and worker and five commands: the ones run last, newest
-    /// first, and then the first actions in their order. A readout line (a rerun, a port) only
-    /// shows once it has been run from here.
+    /// first, and then the first actions in their order. A readout line (a port) only shows
+    /// once it has been run from here.
     #[test]
     fn an_empty_field_lists_the_tiles_and_the_recent_commands() {
         let worker = slopty_client::layout::WorkerKey::new(1);
@@ -2793,7 +2737,6 @@ mod tests {
         let mut items = vec![
             PaletteItem::session("zsh", SessionId::new()),
             PaletteItem::worker("studio", "", worker),
-            PaletteItem::rerun("cargo test", SessionId::new()),
         ];
         items.extend(["A", "B", "C", "D", "E", "F", "G"].map(action));
         let shown = |recent: &[&str]| {
@@ -2805,8 +2748,8 @@ mod tests {
         };
         assert_eq!(shown(&[]), ["zsh", "studio", "A", "B", "C", "D", "E"]);
         assert_eq!(
-            shown(&["G", "Rerun cargo test", "Gone"]),
-            ["zsh", "studio", "G", "Rerun cargo test", "A", "B", "C"],
+            shown(&["G", "Gone"]),
+            ["zsh", "studio", "G", "A", "B", "C", "D"],
             "the recent first, a line no longer offered skipped"
         );
     }
@@ -2888,7 +2831,6 @@ mod tests {
             PaletteItem::open_file("/w/a.rs", None).icon,
             PaletteItem::url("a", "", "http://a/").icon,
             PaletteItem::in_tile("a", "", "http://a/").icon,
-            PaletteItem::rerun("ls", session).icon,
             PaletteItem::project("p", slopty_proto::project::ProjectId::new("p").expect("a name"))
                 .icon,
         ]);
