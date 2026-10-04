@@ -6,7 +6,8 @@
 //! - `slopty-<v>-macos-arm64.tar.gz`: the CLI, both worker daemons and the server, signed as they
 //!   are in the bundle, for a Mac that runs them headless.
 //! - `slopty-worker-<v>-linux-<cpu>.tar.gz`: the Linux worker (`slopty-ptyd`, `slopty-worker`,
-//!   `slopty`), glibc [`crate::linux::GLIBC`] and later, for arm64 and `x86_64`.
+//!   `slopty`), glibc [`crate::linux::GLIBC`] and later, for arm64 and `x86_64`, with the static
+//!   `slopty-server` beside them, so `slopty server install` there needs no `--bin-dir`.
 //! - `slopty-server-<v>-linux-<cpu>.tar.gz`: the server, static on musl, for both.
 //! - `slopty-<v>-dSYMs.tar.gz`: the Mac binaries' dSYMs, under their UUIDs.
 //! - `SHA256SUMS` over all of them.
@@ -184,13 +185,14 @@ pub fn run(sh: &Shell, opts: &DistOpts) -> Result<()> {
     step("zip the app", &cmd!(sh, "ditto -c -k --sequesterRsrc --keepParent {app} {zip}"))?;
     let macos = app.join("Contents").join("MacOS");
     let helpers = &bundle::BINARIES[1..];
-    tar(sh, &macos, helpers, &out.join(format!("{}.tar.gz", mac("slopty"))))?;
+    tar(sh, &[(&macos, helpers)], &out.join(format!("{}.tar.gz", mac("slopty"))))?;
     for build in &built.linux {
         let name = build.shipped.name;
         let workers = out.join(format!("slopty-worker-{version}-{name}.tar.gz"));
-        tar(sh, &build.workers, &linux::WORKER_BINARIES, &workers)?;
+        let parts = [(&build.workers, &linux::WORKER_BINARIES[..]), (&build.server, SERVER)];
+        tar(sh, &parts, &workers)?;
         let server = out.join(format!("slopty-server-{version}-{name}.tar.gz"));
-        tar(sh, &build.server, &["slopty-server"], &server)?;
+        tar(sh, &[(&build.server, SERVER)], &server)?;
     }
     if let Some(dsyms) = &built.dsyms {
         let archive = out.join(format!("slopty-{version}-dSYMs.tar.gz"));
@@ -239,10 +241,16 @@ fn notarise(sh: &Shell, app: &Utf8Path, notary: &Notary, out: &Utf8Path) -> Resu
     Ok(())
 }
 
-/// `names` from `dir` into the gzipped tarball `archive`, at its top level.
-fn tar(sh: &Shell, dir: &Utf8Path, names: &[&str], archive: &Utf8Path) -> Result<()> {
+/// The server's binary, in its own archive and beside each Linux worker.
+const SERVER: &[&str] = &["slopty-server"];
+
+/// Each part's names from its directory into the gzipped tarball `archive`, at its top level.
+fn tar(sh: &Shell, parts: &[(&Utf8PathBuf, &[&str])], archive: &Utf8Path) -> Result<()> {
     let file = archive.file_name().unwrap_or_default();
-    step(&format!("archive {file}"), &cmd!(sh, "tar -C {dir} -czf {archive} {names...}"))
+    let args = parts.iter().flat_map(|(dir, names)| {
+        ["-C".to_owned(), dir.to_string()].into_iter().chain(names.iter().map(|n| (*n).to_owned()))
+    });
+    step(&format!("archive {file}"), &cmd!(sh, "tar -czf {archive}").args(args))
 }
 
 /// The archives in `out`, by name.
@@ -302,6 +310,12 @@ fn verify(sh: &Shell, built: &bundle::Bundle, out: &Utf8Path) -> Result<()> {
             cmd!(sh, "tar -tzf {path}").quiet().read()?
         };
         ensure!(!listing.trim().is_empty(), "{archive} is empty");
+        if archive.starts_with("slopty-worker-") {
+            let names: Vec<&str> = listing.lines().map(|l| l.trim_start_matches("./")).collect();
+            for bin in linux::WORKER_BINARIES.iter().chain(SERVER) {
+                ensure!(names.contains(bin), "{archive} lacks {bin}");
+            }
+        }
     }
     println!("  ✓ verify the archives");
     Ok(())

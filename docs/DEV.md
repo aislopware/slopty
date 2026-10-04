@@ -158,10 +158,11 @@ What a person installs, and how this tree makes it.
 - **`cargo xtask dist`** builds a release under `target/dist-out` (`--out` elsewhere):
   `Slopty-<v>-macos-arm64.zip` (the app), `slopty-<v>-macos-arm64.tar.gz` (the CLI, the daemons
   and the server, signed as in the bundle, for a headless Mac),
-  `slopty-worker-<v>-linux-<cpu>.tar.gz`, `slopty-server-<v>-linux-<cpu>.tar.gz`,
+  `slopty-worker-<v>-linux-<cpu>.tar.gz` (the worker, with the server beside it so `slopty
+  server install` there needs no `--bin-dir`), `slopty-server-<v>-linux-<cpu>.tar.gz`,
   `slopty-<v>-dSYMs.tar.gz` and `SHA256SUMS`. It checks what it made: the app's signature, every
-  Mac binary arm64, every Linux one for its CPU, no worker symbol past glibc 2.28, and a static
-  server. It notarises and staples the app when it is signed with a real identity and
+  Mac binary arm64, every Linux one for its CPU, no worker symbol past glibc 2.28, a static
+  server, and each worker archive holding its binaries and the server. It notarises and staples the app when it is signed with a real identity and
   `notarytool` credentials are set: `SLOPTY_NOTARY_PROFILE` (a `xcrun notarytool
   store-credentials` profile), or `APPLE_API_KEY_PATH`, `APPLE_API_KEY_ID` and
   `APPLE_API_ISSUER` (an App Store Connect key). Otherwise, or with `--no-notarize`, it says why
