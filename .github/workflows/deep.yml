@@ -91,6 +91,16 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      # As in the gate (`ci.yml`): Ghostty's zig packages fetched ahead of the build, with
+      # retries and a bound. Left to the build script, a fetch that stalled held asan, loom and
+      # coverage silent until their 240-minute timeout (run 37156507396).
+      - uses: actions/cache@v4
+        with:
+          path: vendor/ghostty/zig-pkg
+          key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
+      - working-directory: vendor/ghostty
+        timeout-minutes: 15
+        run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       - run: cargo xtask setup
       - run: |
           mkdir -p target/deep

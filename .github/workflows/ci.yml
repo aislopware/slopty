@@ -110,6 +110,7 @@ jobs:
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
       - if: matrix.lane != 'tools'
         working-directory: vendor/ghostty
+        timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       # Every package of every platform, for the Mac lanes' cache entry this lane saves.
       - if: matrix.lane == 'clippy-host'
@@ -194,6 +195,7 @@ jobs:
           path: vendor/ghostty/zig-pkg
           key: zig-pkg-${{ hashFiles('vendor/ghostty/build.zig.zon') }}
       - working-directory: vendor/ghostty
+        timeout-minutes: 15
         run: for i in 1 2 3 4 5; do zig build --fetch=all && exit 0; sleep $((i * 15)); done; exit 1
       - run: cargo xtask setup --lane linux
       - run: cargo xtask gate --ci --lane linux
