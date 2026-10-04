@@ -15,10 +15,12 @@
 //! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one. The
 //! person's past prompts, as the agents record them, are searched by [`history`], and what was
 //! said in the threads held here by [`search`]. The windows and displays an agent drives are
-//! named from its tool calls by [`screens`].
+//! named from its tool calls by [`screens`], and which turn wrote a line of a file by
+//! [`authors`].
 
 pub mod acp;
 pub mod attach;
+pub mod authors;
 pub mod carry;
 pub mod claude;
 pub mod codex;

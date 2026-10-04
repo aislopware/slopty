@@ -198,6 +198,76 @@ impl Repo {
         Ok((base, head))
     }
 
+    /// A commit of `tree` on `parent` that says `message`, authored at `at` by Slopty: the same
+    /// arguments always make the same commit, so a history of a thread's turns is made once
+    /// and found again. Nothing names it; it stays while something it is in is asked about.
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn commit_at(
+        &self,
+        tree: &TreeRef,
+        parent: Option<&str>,
+        message: &str,
+        at: slopty_core::WallMs,
+    ) -> Result<String, Failed> {
+        let secs = at.as_millis() / 1_000;
+        let parent = parent.map(|p| format!("parent {p}\n")).unwrap_or_default();
+        let who = format!("Slopty <slopty@localhost> {secs} +0000");
+        let object =
+            format!("tree {}\n{parent}author {who}\ncommitter {who}\n\n{message}\n", tree.0);
+        let out = self
+            .run(&["hash-object", "-t", "commit", "-w", "--stdin"], None, Some(object.as_bytes()))
+            .await?;
+        Ok(String::from_utf8_lossy(&out).trim().to_owned())
+    }
+
+    /// The commit each line of the working file `path` (relative to the root) came from, as
+    /// `git blame` reads the file against the history ending at `head`, in the file's order. A
+    /// line changed since `head` has no commit.
+    ///
+    /// # Errors
+    ///
+    /// When git fails, or `head` has no such file.
+    pub async fn blame(&self, head: &str, path: &str) -> Result<Vec<Option<String>>, Failed> {
+        let file = self.root.join(path);
+        let file = file.to_string_lossy();
+        let args = ["blame", "--porcelain", "--contents", &file, head, "--", path];
+        let out = self.run(&args, None, None).await?;
+        Ok(blamed(&String::from_utf8_lossy(&out)))
+    }
+
+    /// The thread each of `commits` names in its `Slopty-Thread` trailer, with when it was
+    /// made; a commit that names none is left out.
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn trailed(
+        &self,
+        commits: &[String],
+    ) -> Result<std::collections::HashMap<String, (ThreadId, slopty_core::WallMs)>, Failed> {
+        if commits.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let format =
+            "--format=%H%x1f%ct%x1f%(trailers:key=Slopty-Thread,valueonly,separator=%x2C)%x1e";
+        let mut args = vec!["show", "-s", "--no-walk", format];
+        args.extend(commits.iter().map(String::as_str));
+        let out = self.run(&args, None, None).await?;
+        Ok(trailers(&String::from_utf8_lossy(&out)))
+    }
+
+    /// The id git gives the working file `path` (relative to the root).
+    ///
+    /// # Errors
+    ///
+    /// When git fails.
+    pub async fn blob_of(&self, path: &str) -> Result<String, Failed> {
+        self.line(&["hash-object", "--", path], None).await
+    }
+
     /// Let every ref of `thread` go, its snapshots and its review alike: the thread is gone.
     ///
     /// # Errors
@@ -421,6 +491,52 @@ impl Repo {
 }
 
 /// The refs of `thread`'s snapshots.
+/// The commit of each line in `git blame --porcelain`'s answer, in the file's order; the
+/// all-zero commit, a line not in the history, is none.
+fn blamed(porcelain: &str) -> Vec<Option<String>> {
+    let mut lines: Vec<Option<String>> = Vec::new();
+    let mut current: Option<(String, usize)> = None;
+    for line in porcelain.lines() {
+        if line.starts_with('\t') {
+            if let Some((commit, at)) = current.as_mut() {
+                if lines.len() <= *at {
+                    lines.resize(at.saturating_add(1), None);
+                }
+                if let Some(slot) = lines.get_mut(*at) {
+                    *slot = (commit.bytes().any(|b| b != b'0')).then(|| commit.clone());
+                }
+                *at = at.saturating_add(1);
+            }
+            continue;
+        }
+        let mut words = line.split(' ');
+        let (Some(commit), Some(_orig), Some(fin)) = (words.next(), words.next(), words.next())
+        else {
+            continue;
+        };
+        let header = commit.len() >= 40 && commit.bytes().all(|b| b.is_ascii_hexdigit());
+        if let (true, Ok(fin)) = (header, fin.parse::<usize>()) {
+            current = Some((commit.to_owned(), fin.saturating_sub(1)));
+        }
+    }
+    lines
+}
+
+/// `trailed`'s answer read: each commit with a thread in its trailer, and its time.
+fn trailers(out: &str) -> std::collections::HashMap<String, (ThreadId, slopty_core::WallMs)> {
+    out.split('\x1e')
+        .filter_map(|record| {
+            let mut fields = record.trim().split('\x1f');
+            let commit = fields.next()?.trim();
+            let secs: u64 = fields.next()?.trim().parse().ok()?;
+            let thread =
+                fields.next()?.split(',').find_map(|t| t.trim().parse::<ThreadId>().ok())?;
+            let at = slopty_core::WallMs::from_millis(secs.saturating_mul(1_000));
+            Some((commit.to_owned(), (thread, at)))
+        })
+        .collect()
+}
+
 fn refs(thread: ThreadId) -> String {
     format!("refs/slopty/threads/{thread}")
 }
@@ -675,5 +791,37 @@ mod tests {
         assert_eq!(entries[1].path, "new.txt");
         assert_eq!(entries[1].from, None);
         assert!(entries[0].from.is_some() && entries[0].to.is_some());
+    }
+
+    /// Blame's porcelain names each line's commit once per group, its own line numbers after;
+    /// a line not yet committed is the all-zero commit, which is no one's.
+    #[test]
+    fn blame_gives_each_line_its_commit() {
+        let a = "a".repeat(40);
+        let zero = "0".repeat(40);
+        let porcelain = format!(
+            "{a} 1 1 2\nauthor Slopty\nsummary slopty: thread\nfilename x\n\tone\n\
+             {a} 2 2\n\ttwo\n\
+             {zero} 3 3 1\nauthor Not Committed Yet\nprevious {a} x\nfilename x\n\tthree\n\
+             {a} 4 4 1\n\tfour\n"
+        );
+        let lines = blamed(&porcelain);
+        assert_eq!(lines, [Some(a.clone()), Some(a.clone()), None, Some(a)]);
+    }
+
+    /// Each commit's trailer names its thread, a list keeps its first thread, and a commit with
+    /// no trailer or a word that is no thread is left out.
+    #[test]
+    fn trailers_name_the_thread_that_made_a_commit() {
+        let thread = ThreadId::new();
+        let other = ThreadId::new();
+        let out = format!(
+            "c1\x1f100\x1f{thread}\x1e\nc2\x1f200\x1f\x1e\nc3\x1f300\x1fnot a thread\x1e\n\
+             c4\x1f400\x1f{other},{thread}\x1e\n"
+        );
+        let found = trailers(&out);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found.get("c1"), Some(&(thread, slopty_core::WallMs::from_millis(100_000))));
+        assert_eq!(found.get("c4").map(|f| f.0), Some(other));
     }
 }

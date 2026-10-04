@@ -30,6 +30,7 @@ use slopty_worker::manager::Worker;
 use slopty_worker::orchestrate::{self, Agents, Conversations as _, Failure};
 use slopty_worker::session::SessionHandle;
 use slopty_worker::thread::acp::{self, Acp};
+use slopty_worker::thread::authors::Authorship;
 use slopty_worker::thread::carry::carry;
 use slopty_worker::thread::claude::{self, Driver, Sources};
 use slopty_worker::thread::codex::{self, Codex};
@@ -100,6 +101,7 @@ pub struct Threads {
     acp: Acp,
     composer: Composer,
     snapshots: Snapshots,
+    authors: Authorship,
     history: History,
     worker: Worker,
 }
@@ -129,6 +131,7 @@ pub fn open(
                 Typing { worker: worker.clone(), agents: crate::server::DaemonAgents(agents) };
             let composer = Composer::new(host.clone(), Arc::new(typing));
             let git = slopty_worker::changes::git().map(Path::to_path_buf);
+            let authors = Authorship::new(host.clone(), git.clone());
             let snapshots = Snapshots::new(host.clone(), snapshots, git);
             // The threads live under the data directory, where pi's gate is written too.
             let data = dir.parent().unwrap_or(dir).to_path_buf();
@@ -151,6 +154,7 @@ pub fn open(
                 acp,
                 composer,
                 snapshots,
+                authors,
                 history,
                 worker,
             };
@@ -405,6 +409,14 @@ impl Following {
             }
             ThreadRequest::Review { thread, scope } => {
                 self.command(at, thread, Command::Review { scope });
+            }
+            // Blame runs git over every turn: on a task of its own.
+            ThreadRequest::Authors { thread, path } => {
+                let (authors, out) = (threads.authors, at.out.clone());
+                at.tasks.spawn(async move {
+                    let _gone =
+                        out.send(WorkerMsg::Authors(authors.authors(thread, &path).await)).await;
+                });
             }
             // Git takes its time: a keep or a revert is answered from a task of its own.
             ThreadRequest::Intent {
