@@ -263,13 +263,6 @@ fn timing_of_the_editor_helpers() {
     let symbols = median(|| {
         drop(std::hint::black_box(rust.map(|s| crate::highlight::symbols(&symbols_text, s))));
     });
-    let words = |text: &str| {
-        let end = text.len();
-        median(|| {
-            drop(std::hint::black_box(crate::file::complete::candidates(text, "va", end..end)));
-        })
-    };
-    let (words_mib, words_big) = (words(&mib), words(&big));
     let us = |d: Duration| d.as_secs_f64() * 1e6;
     println!(
         "bracket: pair 64 KiB apart {:.0} µs, unmatched {:.0} µs, no bracket at the caret {:.2} µs; \
@@ -283,16 +276,13 @@ fn timing_of_the_editor_helpers() {
     println!(
         "find over 1 MiB: common word (10 000 kept) {:.0} µs, rare word {:.0} µs, `\\w+\\(` {:.0} µs; \
          over 16 MiB: common {:.0} µs, rare {:.0} µs; 1 MiB rope to a string {:.0} µs; \
-         symbols over 1 MiB of Rust {:.0} µs; \
-         word candidates over 1 MiB {:.0} µs, over 16 MiB {:.0} µs",
+         symbols over 1 MiB of Rust {:.0} µs",
         us(common),
         us(rare),
         us(pattern),
         us(common_big),
         us(rare_big),
         us(flatten),
-        us(symbols),
-        us(words_mib),
-        us(words_big)
+        us(symbols)
     );
 }

@@ -216,7 +216,6 @@ fn a_bare_key_binds_where_nothing_takes_typing() {
     let bare = |scope: Scope, name: &str| {
         all.iter().find(|c| c.scope() == scope && c.name() == name).unwrap().takes_bare_keys()
     };
-    assert!(bare(Scope::File, "next_page"));
     assert!(bare(Scope::File, "scroll_down"));
     assert!(!bare(Scope::File, "save"), "the editor types");
     assert!(!bare(Scope::File, "close_find"), "a find bar types");

@@ -38,20 +38,6 @@ objc2-image-io = { workspace = true, features = [
     "CGImageSource",
     "objc2-core-graphics",
 ] }
-# A PDF's text, selected and copied from a file tile (`file::pdf_text`).
-objc2 = { workspace = true }
-objc2-foundation = { workspace = true, features = [
-    "NSArray",
-    "NSData",
-    "NSGeometry",
-    "NSString",
-] }
-objc2-pdf-kit = { workspace = true, features = [
-    "PDFDocument",
-    "PDFPage",
-    "PDFSelection",
-    "objc2-core-foundation",
-] }
 # What a stream's decoder thread, its layer's reports and the view share (`screen::glass`).
 parking_lot.workspace = true
 # The palette's, the pickers' and the symbols' fuzzy match (`fuzzy`).

@@ -299,32 +299,6 @@ fn cmd_d_adds_the_next_match_and_cmd_shift_l_takes_every_one(cx: &mut TestAppCon
     assert_eq!(text(&view, cx), "let count = 1;\nlet m = count + count;", "⌘⇧L takes them all");
 }
 
-#[gpui::test]
-fn a_word_typed_in_code_is_completed_from_the_file(cx: &mut TestAppContext) {
-    let (view, _events, cx) = tile(cx, "/w/src/lib.rs");
-    arrives(&view, cx, text_read("fn compute_total() {}\n", true, 1));
-    let end = text(&view, cx).len();
-    select(&view, cx, end..end);
-    cx.simulate_input("com");
-    cx.run_until_parked();
-    let open = view.read_with(cx, |v, cx| v.editor().read(cx).completion_menu_state().open);
-    assert!(open, "the file's word is offered");
-    keys(cx, "enter");
-    assert_eq!(text(&view, cx), "fn compute_total() {}\ncompute_total", "↩ takes it");
-}
-
-#[gpui::test]
-fn prose_is_offered_no_words(cx: &mut TestAppContext) {
-    let (notes, _events, cx) = tile(cx, "/w/README.md");
-    arrives(&notes, cx, text_read("compute_total", true, 1));
-    let end = text(&notes, cx).len();
-    select(&notes, cx, end..end);
-    cx.simulate_input(" com");
-    cx.run_until_parked();
-    let open = notes.read_with(cx, |v, cx| v.editor().read(cx).completion_menu_state().open);
-    assert!(!open, "Markdown would open the menu on every word");
-}
-
 /// A text read whose `.editorconfig` set `pairs` for it.
 fn configured(text: &str, newline: bool, pairs: &[(&str, &str)]) -> FileRead {
     let size = u64::try_from(text.len()).unwrap_or(0).saturating_add(u64::from(newline));

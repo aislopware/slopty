@@ -12232,6 +12232,9 @@ wide, which "file tile pictures and PDFs" puts at about 1 ms, and the next page 
 overdraw reaches. `PDFKit` answers a selection between two points of one line in tens of
 microseconds, so a drag can ask it on every move.
 
+Paging by key and the text selection were cut on 2026-10-05 (prune #12), and the timing test
+with them; this stays as the record. It was run with:
+
 ```sh
 cargo nextest run -p slopty-ui --run-ignored only timing_of_a_page_flip --no-capture
 ```
@@ -12930,6 +12933,8 @@ does, so it reads a file only up to `COLOURED_BYTES` (2 MiB, about 1.3 s, "Readi
 shown meanwhile); past it the tile is plain text and lists none.
 The word candidates are read from the 1 MiB round the caret (`complete::SCAN_BYTES`), so a
 keystroke costs the 1 MiB row above at any file size rather than the 16 MiB one.
+Word completion was cut on 2026-10-05 (prune #10), and its rows with it; the test no longer
+times it.
 
 ```sh
 cargo nextest run -p slopty-ui --release --run-ignored only timing_of_the_editor_helpers --no-capture

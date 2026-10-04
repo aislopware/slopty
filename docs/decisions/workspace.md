@@ -866,23 +866,16 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     `worker_found_files_notice`. The Linux tests run in a Debian container on binaries
     cross-built with `cargo zigbuild` (MEASUREMENTS.md has the commands).
 
-- ✅ **A PDF's pages take the keys and select text** (2026-10-01). A PDF tile scrolled only
-  with the pointer, and its text could not be copied.
-  - **Preview's keys.** ↓ and ↑ scroll a few lines, Space and Page Down a screen less a line (⇧Space
-    and Page Up back), → and ← go to the next page's top and back (← inside a page goes to its
-    own top), and Home and End go to the first and last pages. They bind in the tile's key
-    context while it shows a PDF (`FileEditor FilePages`), and the palette lists them with
-    their chords.
-  - **Selection through PDFKit.** CoreGraphics draws the pages but cannot say where text is,
-    so `PDFKit` opens the same bytes the first time a page is pressed (`file::pdf_text`). A
-    drag selects from the press to the pointer through
-    `selectionFromPage:atPoint:toPage:atPoint:`, by character, word (double click) or line
-    (triple click), across pages. Each line's bounds are mapped through the crop box and
-    the page's rotation onto the drawn page and painted in the accent tint. ⌘C copies and
-    ⌘A selects every page. A press off the text drops the selection.
-  - **Where a page is, from the list's layout.** The pages' list scrolls as a layer in
-    gpui-fast, so a scrolled page is not painted again and paint-time bounds go stale. A
-    point is placed on a page from `ListState::bounds_for_item` and the page's padding.
+- ✅ **A PDF's pages scroll by key; their text is not selected here** (2026-10-01, cut back
+  2026-10-05 by prune #12). A PDF tile scrolled only with the pointer.
+  - **Preview's scroll keys.** ↓ and ↑ scroll a few lines, Space and Page Down a screen less a
+    line (⇧Space and Page Up back). They bind in the tile's key context while it shows a PDF
+    (`FileEditor FilePages`). A press on the pages gives the tile the keyboard.
+  - **Cut on 2026-10-05:** paging by → and ←, Home and End, and selecting and copying the text
+    through `PDFKit` (`file::pdf_text`, with ⌘C and ⌘A), with their palette lines. A PDF here
+    is read beside the work, and an agent reads the file itself; no frontier tool selects PDF
+    text in its editor, and the audit had already said to stop investing in it. Deleted, not
+    hidden, with the `objc2-pdf-kit` dependency.
   - **Bare keys where nothing takes typing.** The settings form refused a bare key outside
     the folder and project scopes, so it refused the arrows the PDF commands ship with. The
     rule is now per command: a key alone is allowed when the command's scope allows it, or
@@ -890,13 +883,8 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     tile, a project board). Moving the PDF commands into a scope of their own would have
     split one tile's commands across two settings tables, and would have left the next
     textless view inside a typing scope with the same problem.
-  - Numbers in MEASUREMENTS.md, 2026-10-01, "a PDF's page flip and drag". Tests: ui
-    `a_pdfs_keys_page_through_it_and_a_drag_copies_its_text` (the keys, a drag, ⌘C into the
-    clipboard, a double click, ⌘A and a press off the text),
-    `a_point_is_placed_on_its_page_or_the_nearest_one`, `file::pdf_text` (a point on a turned
-    page mapped upright and back), keymap
-    `a_bare_key_binds_where_nothing_takes_typing`, and the timing
-    `timing_of_a_page_flip`.
+  - Tests: ui `a_pdfs_keys_scroll_it`, keymap `a_bare_key_binds_where_nothing_takes_typing`.
+    The e2e golden `file-pdf` is retaken.
 
 - ✅ **A tile from elsewhere goes to its project's workspace** (2026-10-03, the organisation
   study `.research/organization-2026-10-04.md` §6.3). A workspace is most useful when it holds

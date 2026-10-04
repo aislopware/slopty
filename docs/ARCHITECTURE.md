@@ -1047,9 +1047,8 @@ A file tile whose read is `FileRead::Media` shows it instead of the editor
 (`slopty-ui::file::preview`): a picture decoded by ImageIO at the pixels it is drawn at, its
 frames animated unless Reduce Motion is on, and a PDF as a virtualized list of pages that
 CoreGraphics draws at the tile's width on a background thread, the pages near the view kept
-(`file::decode`). The pages take Preview's keys in the key context `FileEditor FilePages`, and
-a drag selects their text through `PDFKit` (`file::pdf_text`, opened at the first press), ⌘C
-copying it.
+(`file::decode`). The pages take Preview's scroll keys in the key context
+`FileEditor FilePages`.
 
 **Search in files** (⌥⌘F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
 files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`

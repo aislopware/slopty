@@ -24,15 +24,11 @@ use parking_lot::Mutex;
 
 mod pages;
 
-pub use pages::{
-    CTX as PAGES_CTX, CopyText, FirstPage, LastPage, NextPage, NextScreen, PreviousPage,
-    PreviousScreen, ScrollDown, ScrollUp, SelectAllText, palette_items,
-};
-use slopty_theme::alpha;
+pub use pages::{CTX as PAGES_CTX, NextScreen, PreviousScreen, ScrollDown, ScrollUp};
 
 use super::FileView;
 use super::decode::{self, Pdf, PictureSize, PreviewError};
-use crate::colors::{hsla, hsla_alpha};
+use crate::colors::hsla;
 use crate::icons::IconName;
 use crate::kit::size_label;
 
@@ -97,13 +93,6 @@ struct Pages {
     width: Option<u32>,
     /// Counts layouts, for which pages were on screen last.
     clock: u64,
-    /// The file's bytes, for `PDFKit` when the text is first wanted.
-    bytes: Bytes,
-    /// `PDFKit`'s reading of the text, opened at the first press on a page; `None` inside when
-    /// it cannot read it.
-    text: std::cell::OnceCell<Option<super::pdf_text::PdfText>>,
-    /// The text selected.
-    selection: Option<pages::Selection>,
 }
 
 struct Drawn {
@@ -296,7 +285,6 @@ impl FileView {
     }
 
     fn open_pdf(bytes: Bytes, cx: &Context<Self>) -> Pages {
-        let kept = bytes.clone();
         let opening = cx.spawn(async move |this, cx| {
             let opened = cx
                 .background_spawn(async move {
@@ -334,9 +322,6 @@ impl FileView {
             drawing: None,
             width: None,
             clock: 0,
-            bytes: kept,
-            text: std::cell::OnceCell::new(),
-            selection: None,
         }
     }
 
@@ -679,7 +664,6 @@ impl FileView {
         };
         let s = self.theme.surfaces;
         let entity = cx.entity();
-        let listen = entity.clone();
         let measure = canvas(
             move |bounds: Bounds<Pixels>, window, cx| {
                 let scale = window.scale_factor();
@@ -689,7 +673,7 @@ impl FileView {
                     redraw_next_frame(&entity, window);
                 }
             },
-            move |_, (), window, _| Self::follow_pointer(&listen, window),
+            |_, (), _, _| {},
         )
         .absolute()
         .size_full();
@@ -710,12 +694,10 @@ impl FileView {
             .bg(hsla(s.canvas))
             .role(Role::Document)
             .aria_label(SharedString::from(summary))
-            .cursor(gpui::CursorStyle::IBeam)
+            // A press gives the tile the keyboard, so the keys scroll the pages.
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(|this, e: &gpui::MouseDownEvent, window, cx| {
-                    this.press_pages(e.position, e.click_count, window, cx);
-                }),
+                cx.listener(|this, _e: &gpui::MouseDownEvent, window, cx| this.focus(window, cx)),
             )
             .child(measure)
             .child(items)
@@ -733,28 +715,6 @@ impl FileView {
         let count = pages.sizes.len();
         let last = ix.saturating_add(1) == count;
         let image = pages.drawn.get(&ix).map(|d| Arc::clone(&d.image));
-        let selected = pages.selection.as_ref().map(|s| s.on_page(ix)).unwrap_or_default();
-        let tint = hsla_alpha(s.accent, alpha::TINT);
-        // The page's selected text, over it.
-        let overlay = canvas(
-            |_, _, _| {},
-            move |bounds: Bounds<Pixels>, (), window, _| {
-                for &area in &selected {
-                    #[expect(clippy::cast_possible_truncation, reason = "a place on screen")]
-                    let [across, down, wide, tall] =
-                        [area.0 as f32, area.1 as f32, area.2 as f32, area.3 as f32];
-                    let page = bounds.size;
-                    let origin = gpui::point(
-                        bounds.origin.x + page.width * across,
-                        bounds.origin.y + page.height * down,
-                    );
-                    let size = gpui::size(page.width * wide, page.height * tall);
-                    window.paint_quad(gpui::fill(Bounds { origin, size }, tint));
-                }
-            },
-        )
-        .absolute()
-        .size_full();
         div()
             .px(px(self.pad * k))
             .pt(px(if ix == 0 { self.pad } else { theme.spacing.sm } * k))
@@ -773,8 +733,7 @@ impl FileView {
                         ix.saturating_add(1)
                     )))
                     .relative()
-                    .children(image.map(|image| img(ImageSource::Render(image)).size_full()))
-                    .child(overlay),
+                    .children(image.map(|image| img(ImageSource::Render(image)).size_full())),
             )
             .into_any_element()
     }

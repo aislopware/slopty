@@ -388,7 +388,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));
     items.extend(crate::project::palette_items(&workspace));
-    items.extend(crate::file::pages_palette_items(&workspace));
     items.extend(crate::file::editor_palette_items(&workspace));
     // Only the Mac has a Web Inspector window of its own; iOS reaches it from Safari on a Mac.
     if cfg!(target_os = "macos") {

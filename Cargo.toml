@@ -265,7 +265,6 @@ objc2-core-graphics = { version = "=0.3.2", default-features = false, features =
 ] }
 objc2-image-io = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 objc2-core-services = { version = "=0.3.2", default-features = false, features = [ "std" ] }
-objc2-pdf-kit = { version = "=0.3.2", default-features = false, features = [ "std" ] }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "std",
     "NSColor",

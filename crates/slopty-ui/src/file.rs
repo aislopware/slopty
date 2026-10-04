@@ -20,12 +20,10 @@
 //! and sends it whole, and the platform decodes it at the size the tile draws it.
 
 mod compare;
-pub mod complete;
 pub mod decode;
 pub mod edit;
 mod editing;
 pub mod find;
-pub mod pdf_text;
 mod preview;
 mod search;
 mod symbols;
@@ -44,13 +42,10 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px,
 };
 use gpui_kit::component::input::{
-    CompletionProvider, Editor, EditorState, InputEvent, RangeDecoration,
-    RangeDecorationCollection, RangeDecorationStyle, Rope, RopeExt as _,
+    Editor, EditorState, InputEvent, RangeDecoration, RangeDecorationCollection,
+    RangeDecorationStyle, Rope, RopeExt as _,
 };
-pub use preview::{
-    CopyText, FirstPage, LastPage, NextPage, NextScreen, PAGES_CTX, PreviousPage, PreviousScreen,
-    ScrollDown, ScrollUp, SelectAllText, palette_items as pages_palette_items,
-};
+pub use preview::{NextScreen, PAGES_CTX, PreviousScreen, ScrollDown, ScrollUp};
 pub use search::SEARCH_CTX;
 use slopty_client::layout::WorkerKey;
 use slopty_client::unsaved::Unsaved;
@@ -1267,15 +1262,9 @@ impl FileView {
     fn install_highlighter(&self, cx: &mut Context<Self>) {
         let factory = crate::highlight::editor::factory(self.syntax, self.theme.clone());
         let language = self.syntax.map_or_else(String::new, |s| s.name().to_lowercase());
-        // Code repeats its names; prose would open the menu on every word typed.
-        let words = self.syntax.is_some_and(|s| !editing::is_prose(s));
         self.editor.update(cx, |e, cx| {
             e.set_highlighter_factory(factory, cx);
             e.set_highlighter(language, cx);
-            e.lsp_mut().completion_provider = words.then(|| {
-                let words: std::rc::Rc<dyn CompletionProvider> = std::rc::Rc::new(complete::Words);
-                words
-            });
         });
     }
 

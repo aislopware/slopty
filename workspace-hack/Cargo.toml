@@ -53,8 +53,7 @@ litemap = { version = "0.8", default-features = false, features = ["alloc"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-objc2 = { path = "../vendor/objc2" }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFAttributedString", "CFBase", "CFByteOrder", "CFCGTypes", "CFCalendar", "CFCharacterSet", "CFData", "CFDate", "CFDictionary", "CFError", "CFFileSecurity", "CFLocale", "CFMachPort", "CFMessagePort", "CFNumber", "CFRunLoop", "CFSet", "CFStream", "CFString", "CFURL", "objc2", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFByteOrder", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFError", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFURL", "std"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGAffineTransform", "CGBase", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataConsumer", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGPDFDocument", "CGPDFPage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
 once_cell = { version = "1" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }
@@ -132,9 +131,10 @@ miniz_oxide = { version = "0.8", features = ["simd"] }
 noq = { version = "1", default-features = false, features = ["fast-apple-datapath", "runtime-tokio"] }
 noq-udp = { path = "../vendor/noq-udp", default-features = false, features = ["fast-apple-datapath", "tracing"] }
 notify = { version = "8" }
+objc2 = { path = "../vendor/objc2" }
 objc2-app-kit = { version = "0.3" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFNotificationCenter", "CFPlugInCOM", "CFUUID"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFNotificationCenter", "CFPlugInCOM", "CFSet", "CFStream", "CFUUID", "objc2"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGColor", "CGDisplayConfiguration", "CGDisplayStream", "CGFont", "CGPath", "CGSession", "objc2"] }
 objc2-core-media = { version = "0.3", default-features = false, features = ["CMAttachment", "CMBase", "CMBlockBuffer", "CMFormatDescription", "CMSampleBuffer", "CMSync", "CMTaggedBufferGroup", "CMTime", "CMTimeRange", "objc2", "objc2-core-audio-types", "objc2-core-video", "std"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2", "objc2-core-graphics", "std"] }
@@ -172,7 +172,9 @@ libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 notify = { version = "8" }
+objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }
@@ -199,7 +201,9 @@ libc = { version = "0.2" }
 miniz_oxide = { version = "0.8", features = ["simd"] }
 mio = { version = "1", features = ["net", "os-ext"] }
 notify = { version = "8" }
+objc2 = { path = "../vendor/objc2" }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["CoreAudioBaseTypes", "objc2", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFAttributedString", "CFCalendar", "CFCharacterSet", "CFFileSecurity", "CFLocale", "CFMessagePort", "CFSet", "CFStream", "objc2"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVPixelBufferPool", "CVReturn", "objc2-core-graphics", "std"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["FoundationErrors", "NSArray", "NSAttributedString", "NSBundle", "NSCalendar", "NSCoder", "NSData", "NSDate", "NSDictionary", "NSDistributedNotificationCenter", "NSEnumerator", "NSError", "NSExtensionContext", "NSExtensionRequestHandling", "NSFileManager", "NSGeometry", "NSIndexSet", "NSItemProvider", "NSNotification", "NSNull", "NSObjCRuntime", "NSObject", "NSOperation", "NSProcessInfo", "NSProgress", "NSRange", "NSRunLoop", "NSSet", "NSString", "NSThread", "NSURL", "NSURLAuthenticationChallenge", "NSURLCredential", "NSURLRequest", "NSURLSession", "NSUUID", "NSUndoManager", "NSUserActivity", "NSValue", "block2", "objc2-core-foundation", "std"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["UIAccessibility", "UIAccessibilityConstants", "UIAccessibilityElement", "UIApplication", "UIButtonConfiguration", "UIColor", "UICommand", "UIControl", "UIDocumentPickerViewController", "UIDragInteraction", "UIDragItem", "UIDragPreviewParameters", "UIDragSession", "UIDropInteraction", "UIFeedbackGenerator", "UIImage", "UIImageView", "UIInteraction", "UIKeyCommand", "UIMainMenuSystem", "UIMenu", "UIMenuBuilder", "UIMenuElement", "UIMenuSystem", "UINotificationFeedbackGenerator", "UIOpenURLContext", "UIPasteConfiguration", "UIPasteConfigurationSupporting", "UIPasteControl", "UIPasteboard", "UIPreviewParameters", "UIResponder", "UIScene", "UISceneOptions", "UISceneSession", "UIScreen", "UITargetedDragPreview", "UITargetedPreview", "UIView", "UIViewController", "UIWindow", "UIWindowScene", "block2", "objc2-core-foundation", "std"] }

@@ -466,12 +466,6 @@ pub fn defaults() -> Vec<Command> {
             &["pageup", "shift-space"],
             &[FILE_PAGES],
         ),
-        c(File, "next_page", crate::file::NextPage, &["right"], &[FILE_PAGES]),
-        c(File, "previous_page", crate::file::PreviousPage, &["left"], &[FILE_PAGES]),
-        c(File, "first_page", crate::file::FirstPage, &["home"], &[FILE_PAGES]),
-        c(File, "last_page", crate::file::LastPage, &["end"], &[FILE_PAGES]),
-        c(File, "copy", crate::file::CopyText, &["cmd-c"], &[FILE_PAGES]),
-        c(File, "select_all", crate::file::SelectAllText, &["cmd-a"], &[FILE_PAGES]),
         // A folder tile: the arrows walk its rows, ↩ opens one, ⌫ and ⌘↑ go up.
         c(Folder, "select_previous", crate::folder::SelectPrevious, &["up"], &[FOLDER]),
         c(Folder, "select_next", crate::folder::SelectNext, &["down"], &[FOLDER]),
