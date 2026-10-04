@@ -29,7 +29,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (2026-09-24). This is the pattern of Nomad clients, Buildkite agents, Teleport agents, Coder
   agents and GitHub runners. The server keeps no list of addresses to dial, and a restarted
   worker simply reconnects.
-  - **Command channel.** Server → worker commands (`open_terminal`, …) travel down the same
+  - **Command channel.** Server → worker commands (`OpenTerminal`, …) travel down the same
     QUIC control stream, so there is no polling.
   - **Liveness.** QUIC keep-alive 1 s with a 5 s idle timeout marks a worker *unreachable*.
     After 20 s (Nomad's TTL + grace defaults), it becomes *gone*. Its items stay visible as
@@ -49,14 +49,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     When the server is down they connect to workers directly: terminals and video keep working,
     and only layout restore, notes and cross-worker orchestration pause.
 
-- ✅ **One verb set drives workers, exposed three ways** (2026-09-24). The verbs live in
-  `slopty-proto::orchestration`, and item ids are explicit handles:
-  - `list_workers`, `list_items`
-  - `open_terminal(worker, cwd, cmd?, env?)`, `send_input(item, text|keys)`
-  - `read_screen(item)`, `read_output(item, since_line)`, `list_commands(item, since)`
-  - `wait_for(item, pattern | idle | exit | agent_state, timeout)`
-  - `spawn_agent(worker, repo, prompt)`, `agent_status(item)`, `close(item)`
-  - `read_file` / `write_file`, `list_ports`
+- ✅ **One verb set drives workers** (2026-09-24, its surfaces narrowed 2026-10-04). The verbs
+  live in `slopty-proto::orchestration`, and item ids are explicit handles. The CLI names them:
+  - `slopty workers`, `slopty item list`
+  - `slopty open --worker … --cwd … -- <cmd>`, `slopty send <term> --text|--keys`
+  - `slopty screen`, `slopty output --since <line>`, `slopty commands --since <line>`
+  - `slopty wait <term> --output <pattern> | --quiet | --exit | --command-done |
+    --agent-input`
+  - `slopty agent spawn`, `slopty agent status`, `slopty close`
+  - `slopty cat` / `slopty put`, `slopty ports`
 
   **Reads come from the worker's libghostty grid, never raw PTY bytes.** There are three
   views: the rendered screen, scrollback by absolute line index (the same numbering the row
@@ -66,14 +67,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     sentinels corrupted by concurrent output, and a 30 s no-change timeout so tools do not hang.
   - **Agent status** stays hook-derived (`docs/decisions/claude-code.md`).
 
-  **The three surfaces:**
-  1. **MCP** Streamable HTTP on the server, rmcp 3.4.1, protocol revision 2026-07-28
-     (stateless, no `initialize`, server-minted handles as plain arguments).
-  2. **The `slopty` CLI**: the same verbs, with JSON output.
-  3. **`slopty mcp`**: a stdio shim that can run as a Claude Code channel and push "agent on
-     worker X is waiting" into the orchestrating session.
+  **The surfaces:**
+  1. **The `slopty` CLI**: every verb, with JSON output. A person's script and an agent's
+     shell both drive the fleet through it.
+  2. **MCP** Streamable HTTP on the server, rmcp 3.4.1, protocol revision 2026-07-28
+     (stateless, no `initialize`, server-minted handles as plain arguments), and
+  3. **`slopty mcp`**, a stdio shim that also pushes "agent on worker X is waiting" into the
+     orchestrating session. Both serve only a project's eight tools (`project_status`,
+     `task_get`, `task_start`, `task_update`, `task_report`, `task_tell`, `task_wait`,
+     `read_thread`; `docs/decisions/projects.md`, "A frontier model is steered by a sentence,
+     not by machinery"). Since 2026-10-04 every other verb is the CLI's alone: an agent's
+     shell already runs it, and a tool block of 46 tools cost every agent about 24 KB of its
+     context.
 
-  `wait_for` reports progress and caps its wait under Claude Code's 5-minute HTTP idle abort.
+  A long wait reports progress and is capped under Claude Code's 5-minute HTTP idle abort.
   The MCP Tasks extension is not relied on, because Claude Code does not document consuming it.
 
 - ✅ **Admission without crypto** (2026-09-24). Every listener (worker and server) accepts a
@@ -136,16 +143,16 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     listening ports (`ports.rs`: libproc) are not seams. A Linux worker adds its platform, its
     `Native`, and those two probes, which it has since 2026-09-28.
 
-- ✅ **The CLI and `slopty mcp` name a terminal `worker/session` and resolve names on the
-  client** (2026-09-25).
+- ✅ **The CLI names a terminal `worker/session` and resolves names on the client**
+  (2026-09-25).
   - **Handles.** A terminal prints as `worker/session` with both UUIDs in full (the `term`
     field in JSON), and every verb takes it back. The worker part may also be a name and the
     session part a unique id prefix; full ids cost no round trip, anything else one
     `ListWorkers` or `ListTerminals`. Text output shortens the handle to `name/prefix`, where the
     prefix is the shortest one no other listed session shares, at least 8 characters: `UUIDv7`s
     open with their creation time, so ids minted a minute apart share their first 8.
-  - **One JSON shape per answer.** `slopty … --json` and the `slopty mcp` tools print the same
-    views (`apps/slopty-cli/src/view.rs`) with snake_case keys, not the wire enums' serde form.
+  - **One JSON shape per answer.** `slopty … --json` prints the views of `slopty-tools`
+    (`crates/slopty-tools/src/view.rs`) with snake_case keys, not the wire enums' serde form.
     `slopty workers` adds each worker's terminal count and the agents waiting on a human, from
     `ListWorkers` and `ListTerminals`, both in flight at once on the one stream. Each listed
     terminal carries its agent (protocol 53); before that, one `AgentStatus` per terminal on an
@@ -157,8 +164,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `notifications/message`, once per episode. Logging is deprecated by SEP-2577, but it is
     the one message a stdio client receives without a `subscriptions/listen` stream, and that
     stream's filters carry no such category. Claude Code channels are not used: they are a
-    research preview on an older revision. `wait_for` sends progress every 10 s when the call
-    carries a progress token.
+    research preview on an older revision. A long wait (`task_wait`, a `project_status` that
+    waits) sends progress every 10 s when the call carries a progress token.
   - The CLI's direct-to-worker `slopty open` (open and attach a raw terminal) became
     `slopty attach` without a session: `open` is now the verb. The local `slopty workers`
     listing of added workers is gone; the server's directory replaces it. Either form exits
@@ -204,9 +211,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - It does not check `Host`, since tailnet names and IP literals are as legitimate as
       `localhost`. It refuses any request that carries `Origin` with a 403 instead. A browser
       always sends that header, and a DNS-rebinding page cannot leave it out.
-  - **Timeout cap.** The server caps `wait_for` at 240 s, under Claude Code's five-minute idle
-    abort of an MCP call. It gives a forwarded wait its own timeout plus 15 s before it stops
-    waiting on the worker, and every other forwarded verb 60 s.
+  - **Timeout cap.** The server caps every wait (`WaitFor`, `Events`, a task's wait) at 240 s
+    (`WAIT_CAP_MS`), under Claude Code's five-minute idle abort of a tool call. It gives a
+    forwarded wait its own timeout plus 15 s before it stops waiting on the worker, and every
+    other forwarded verb 60 s.
 
 - ✅ **The worker's side of the link: registration, redial, and what the verbs mean** (2026-09-25).
   - **Joining.** `slopty-worker` registers with the server named by `--server`, else
@@ -265,14 +273,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     under 16 MiB passed the check above and its answer broke the worker's writer while the
     lease stayed up, and every later verb timed out. Now the worker's writer answers such a
     reply with `Failed`, the server's writer to a worker answers such a request (a
-    `write_file` of a frame's worth) with `Invalid`, and its writer to a client does the same
+    `WriteFile` of a frame's worth) with `Invalid`, and its writer to a client does the same
     for a reply. Any other write failure ends the link: on the worker it ends the session and
-    it redials, and on the server it ends the lease. The MCP endpoint's request body limit is
-    a frame's worth of bytes in base64 plus 1 MiB (`slopty_server::mcp::MAX_BODY_BYTES`), up
-    from rmcp's 4 MiB, so HTTP takes the same files as `slopty mcp` over stdio. Tests:
-    `an_answer_too_large_for_the_link_is_an_error_and_the_link_goes_on` (`slopty-workerd`
-    `server_link`) and `a_file_too_large_for_the_link_is_refused_and_the_link_stays_up`
-    (`slopty-server` `mcp`).
+    it redials, and on the server it ends the lease. The MCP endpoint took a frame's worth of
+    file in one request body until 2026-10-04, and its test proved the worker writer's guard
+    through it. Since MCP serves only a project's tools, a file comes from the CLI, whose
+    encoder refuses an oversized request before it leaves (below, "An oversized request from
+    the CLI"), so the server's guard stays as a backstop with no test that can reach it.
     `ListPorts` walks each terminal's process tree with libproc and reports the TCP sockets
     in the listening state.
 
@@ -285,19 +292,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `tools::call`. It dials nothing: a surface hands it a `Dispatch`, one async
     `call(Verb) -> Outcome`. The server's `Hub` answers in-process; the CLI's `Link` sends the
     verb down its QUIC stream and turns a lost connection into a `Failed` outcome.
-  - **The shape is the CLI's.** Tools take `term` strings, worker names or prefixes, and
-    `wait_for`'s flat condition fields, and answer with the snake_case views. A tool failure,
-    a name that does not resolve included, is an `isError` result reading
-    `message (Code)`; an unknown tool is invalid params.
-  - **Files.** `read_file` answers `content` with `encoding` `utf8` when the bytes are UTF-8
-    and `base64` otherwise, plus the file's `size`. `write_file` takes the same two fields,
-    `utf8` by default. `slopty cat --json` prints the same view.
+  - **The shape is the CLI's.** Verbs take `term` strings and worker names or prefixes, and
+    answer with the snake_case views. Since 2026-10-04 the MCP list is a project's eight tools
+    (above, "One verb set drives workers"); a tool failure, a name that does not resolve
+    included, is an `isError` result reading `message (Code)`, and an unknown tool is invalid
+    params.
+  - **Files.** `slopty cat --json` answers `content` with `encoding` `utf8` when the bytes are
+    UTF-8 and `base64` otherwise, plus the file's `size`.
   - **What stays on each side.** The 240 s wait cap lives in the hub; the tools only pass the
-    timeout through. `wait_for` reports progress through an optional sink: `slopty mcp` turns
-    it into its 10 s progress notifications, and the server's stateless HTTP endpoint gives
-    none. The stdio shim keeps the redial and the needs-a-human notifications.
+    timeout through. A tool's long wait reports progress through an optional sink: `slopty
+    mcp` turns it into its 10 s progress notifications, and the server's stateless HTTP
+    endpoint gives none. The stdio shim keeps the redial and the needs-a-human notifications.
   - A test sends the same calls to the server's endpoint and to `slopty mcp` dialled to that
-    server, over one fake worker, and requires identical results.
+    server, over one fake worker, and requires identical results
+    (`the_server_endpoint_and_slopty_mcp_answer_a_call_alike`).
 
 - ✅ **Superseded 2026-09-25: a terminal ends with its program** (see terminal.md, "An exited
   shell stays until it is closed": the exit is now announced as the session's summary in the
@@ -382,7 +390,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Worker` holds the table's handle from `connect`, and orchestration reads it from there.
     An agent whose status reads `None` is left out. The server's hub keeps the agent of each
     listed terminal current from the worker's `Agent` events, so `ListTerminals` answers with
-    live status, and `slopty workers` and the `list_workers` tool no longer send one
+    live status, and `slopty workers` no longer sends one
     `AgentStatus` per terminal. A waiting agent on a worker that is not online is not counted:
     what it last reported may have been answered since. `SessionKind`, a one-variant leftover,
     is gone.
@@ -395,7 +403,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
       read is. So is a text past `FILE_BYTES` (16 MiB since 2026-09-28, when a tile began to
       hold whole files; a save larger than 64 KiB goes up a bulk stream, workspace.md "A file
       tile edits any file up to 16 MiB").
-    - The write is `slopty_platform::fs::replace`, the same path orchestration's `write_file`
+    - The write is `slopty_platform::fs::replace`, the same path orchestration's `WriteFile`
       takes: a temporary file beside the target, its data ordered ahead of the rename, rename
       over, the old mode kept. A symbolic
       link is followed and the file it names is replaced, so the link survives; renaming over
@@ -421,10 +429,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     on. A cursor ahead of the log, from before a server restart, reads from the oldest.
     `EventFilter::AgentNeedsInput` makes it a wait for any agent on any worker that needs a
     human or went idle, which is the `WaitAny` the audit asked for, with no verb of its own.
-    It is a long poll rather than a push because it works the same over stateless HTTP, the
-    stdio shim and the CLI (`slopty events --follow`), and a cursor loses nothing between
-    calls. Rejected: MCP resource subscriptions and server-sent notifications, which a
-    stateless endpoint cannot hold and Claude Code does not document consuming.
+    It is a long poll rather than a push because it worked the same over stateless HTTP, the
+    stdio shim and the CLI, and a cursor loses nothing between calls; since 2026-10-04 the CLI
+    alone serves it (`slopty events --follow`). Rejected: MCP resource subscriptions and
+    server-sent notifications, which a stateless endpoint cannot hold and Claude Code does not
+    document consuming.
   - **Size.** A terminal opened by a verb was 120×36 until a client showed it, which is too
     narrow for some programs and wasteful for a model reading the screen. `OpenTerminal` and
     `SpawnAgent` take an optional `Size`, and `ResizeTerminal` resizes, within 10×2 and
@@ -432,7 +441,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     any client shows the terminal. Otherwise the session's actor applies it, the check and the
     resize one step there (`SessionHandle::resize_unviewed`), so a client attaching meanwhile
     keeps its seat and the next client to attach drives as before. The worker's link sends the
-    resized summary to the server ahead of the answer, so `list_terminals` shows the new
+    resized summary to the server ahead of the answer, so `ListTerminals` shows the new
     size.
   - **Forgetting a worker.** `ForgetWorker` removes an entry without a live lease, emits
     `WorkerRemoved`, sends every link the directory without it and rewrites the state file. An
@@ -444,7 +453,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `slopty cat` reads in parts. `ListDir` answers entries by name with kind, size and
     modification time, 10 000 at most, with the total. `Stat` follows links and answers `None`
     for a missing path. `SpawnAgent` takes arguments and environment for `claude`.
-  - **An oversized request from the CLI.** `slopty mcp` and the CLI sent a request past a
+  - **An oversized request from the CLI.** The CLI sent a request past a
     frame down the link, the send failed, and the link was dropped with "the connection to the
     server was lost". The encoder refuses before writing, so the link now answers that call
     `Invalid` with the server's own wording and carries on.
@@ -580,14 +589,13 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `a_client_hears_its_path_when_it_changes_and_only_then`, and the CLI's
     `doctor_report_names_the_binary_and_flags_missing_permissions`.
 
-- ✅ **Orchestration arranges the workspace too** (2026-09-27). The verb set named `list_items`
+- ✅ **Orchestration arranges the workspace too** (2026-09-27). The verb set named `ListItems`
   from the start, but only terminals had verbs, so an agent could start a dev server and not
   show anyone the page it served. Six verbs now reach the worker's item registry, the same one
   a client's tiles come from: `ListItems`, `OpenItem` (a page, a file to edit, a note, a
   window or a display), `RenameItem`, `RemoveItem`, `PointAt` and `ListWindows` (what
-  `OpenItem` can stream). As tools they are `list_items`, `open_item`, `rename_item`,
-  `remove_item`, `point_at` and `list_windows`; in the CLI, `slopty item list|open|rename|
-  remove|point` and `slopty windows`.
+  `OpenItem` can stream). In the CLI they are `slopty item list|open|rename|remove|point` and
+  `slopty windows`.
   - **An item is a handle like a terminal.** `ItemRef` is worker and item, printed
     `worker/item` and resolved from an id prefix as a session is.
   - **The registry decides as it does for a client.** An orchestrated change goes through the
@@ -608,7 +616,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `--settings` (`claude-code.md`), and the settings file changes only when a person asks.
   - Tests: `slopty-workerd` `an_orchestrated_item_reaches_a_client_and_leaves_it`, the hub's
     `events_are_read_from_a_cursor_and_waited_for` (the exit),
-    `slopty-tools` `an_item_opens_from_one_kind_and_answers_to_a_prefix`, and the
+    `slopty-tools` `an_item_prefix_must_be_unique`, and the
     `workspace_items` goldens.
 
 - ✅ **The server builds for Linux, and a gate lane keeps it so** (2026-09-27). The topology puts
@@ -694,20 +702,19 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The surfaces.** The CLI takes `--idempotency-key`. Its link gives every changing verb a
     fresh key when none is given, and it redials after a loss. On `Interrupted` it sends the
     verb again under the same key, through a worker or server still coming back, for about
-    8 s. `slopty mcp` shares that link. The MCP tools that change something take an optional
-    `idempotency_key`.
+    8 s. `slopty mcp` shares that link. The project tools that change something take an
+    optional `idempotency_key`.
   - Tests: the ledger's five (repeat, in flight, reuse, lapse, bound), the hub's
     `a_keyed_forget_repeats_its_answer`, the CLI's
     `a_lost_answer_is_asked_again_under_the_same_key`, the `idempotency_keys` goldens, and the
-    server e2e, where an open repeated under one key over the CLI and over MCP opens one
-    terminal.
+    server e2e, where an open repeated under one key over the CLI opens one terminal.
 
 - ✅ **An orchestrating agent reads and answers another, sees a screen, and moves any file**
   (2026-09-28). An agent could see another was blocked but could not answer it except by typing
   its menu's digits, read only its screen, take no picture of a window, and move no file past
-  one 8 MiB read. Four verbs close that, on every surface (tools `read_thread`,
-  `capture_still`, `upload_file`, `download_file`; CLI `slopty agent read|answer`, `slopty
-  capture`, `slopty push|pull`).
+  one 8 MiB read. Four verbs close that, in the CLI (`slopty agent read|answer`, `slopty
+  capture`, `slopty push|pull`); a project's `read_thread` tool reads a thread over MCP as
+  well.
   - **Reading and answering another agent** went through Claude Code's conversation face
     (`ReadConversation`, `AnswerPermission`) until 2026-10-04. They are now the agent-neutral
     `ReadThread` and `AnswerRequest` over the thread model, for any agent
@@ -719,7 +726,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The still** (`CaptureStill`) is `SCScreenshotManager` at native size, PNG-encoded on the
     worker and halved until it fits a reply. A worker without Screen Recording, or without a
     desktop, answers the new `ErrorCode::Unsupported` from the preflight, which prompts nobody.
-    MCP returns it as an image block.
+    `slopty capture` writes the PNG where it is told.
   - **Files of any size** go in 1 MiB parts, four in flight, over the verb link
     (`slopty_tools::bulk`). Up, `Upload` writes parts where they go in a partial beside the
     target, named for the upload, and a finish checks size and BLAKE3 before it renames. A
@@ -728,19 +735,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and after. Only the finish takes the key. The upload is named for the key, so a retried
     call writes into the same parts, and an abort after the finish sweeps what a repeat wrote
     again. The parts ride the server's links rather than the client's bulk streams, because
-    every surface, the server's MCP endpoint included, runs the same ops over `Dispatch`. A
-    1 MiB part holds the link's other verbs and events for a moment at most. The server's
-    endpoint runs on another machine than its caller, so it answers `upload_file` and
-    `download_file` with `Unsupported` (`Dispatch::local_files`).
+    the CLI runs the same ops over `Dispatch` as the server does. A 1 MiB part holds the
+    link's other verbs and events for a moment at most. Until 2026-10-04 the server's MCP
+    endpoint, on another machine than its caller, refused to move files; MCP no longer
+    offers it.
   - Tests: the `agent_verbs` goldens; `Holds`'
     `orchestration_follows_until_the_session_ends`; the worker's page, upload and still
     tests (`orchestrate::{thread_read, upload, still}`); `bulk`'s three against an
-    in-memory worker; the tools' `a_thread_is_read_by_task_thread_or_term_and_answering_is_no_tool` and
-    `a_still_is_an_image_and_files_move_only_where_they_are`; the hub's
+    in-memory worker; the tools' `a_thread_is_read_by_task_thread_or_term_and_answering_is_no_tool`;
+    the hub's
     `the_agent_screen_and_upload_verbs_go_to_their_worker`; and the server e2e. There a
     9 MiB file is pushed and pulled, a conversation played through `slopty hook` is read, and
-    its `PermissionRequest` relay prints the denial answered over MCP. The still is asked of a
-    window no worker has, so no picture is ever taken.
+    its `PermissionRequest` relay prints the denial the person answered over the CLI, after
+    MCP offered an agent no tool to answer with. The still is asked of a window no worker has,
+    so no picture is ever taken.
 
 - ✅ **The worker's control protocol lives in `slopty-proto`** (2026-09-28). The worker's Unix
   socket is a wire between processes: the CLI asks it for status, doctor and screen counters,
