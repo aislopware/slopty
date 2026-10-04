@@ -2605,12 +2605,15 @@ impl WorkspaceView {
             .children(time);
         // The agent's words, then where it runs, as a tile's second line reads: joined by the
         // same separator, spaces and all, so the two lines space their parts alike. What a
-        // waiting one asks is detail, muted, under the heading that says it waits.
+        // waiting one asks is detail, muted, under the heading that says it waits. The words
+        // shrink before the answers do, which are the row's point.
         let words = (!agent.words.is_empty()).then(|| {
             let key = key.clone();
             div()
                 .debug_selector(move || format!("{prefix}-words-{key}"))
-                .flex_none()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
                 .child(agent.words.clone())
         });
         let answers = agent.answer.as_ref().map(|answer| self.approval_buttons(answer, cx));

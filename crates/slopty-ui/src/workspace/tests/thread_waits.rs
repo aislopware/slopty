@@ -440,3 +440,33 @@ fn three_shells_from(
         .map(|v| opens(view, cx, fake, SessionId::new(), fake.me, v))
         .collect()
 }
+
+/// What a waiting thread asks gives way to its answers: words longer than the navigator's row
+/// shrink to an ellipsis, and "Allow" stays whole inside the row.
+#[gpui::test]
+fn long_words_never_push_a_row_s_answers_out_of_view(cx: &mut TestAppContext) {
+    use slopty_proto::thread::{Choice, Effect};
+    let choice = |id: &str, effect| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    let (view, cx) = workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
+    let mut row = asking(None);
+    let thread = row.id;
+    if let Some(card) = row.requests.first_mut() {
+        card.title = "Run `cargo nextest run --workspace --all-features --no-fail-fast`".to_owned();
+        card.options = vec![choice("accept", Effect::Allow), choice("decline", Effect::Deny)];
+    }
+    table(&view, cx, key, vec![row]);
+    cx.run_until_parked();
+
+    let row = cx.debug_bounds(leak(format!("nav-waiting-{thread}"))).expect("its row");
+    let allow = cx.debug_bounds(leak(format!("nav-allow-{thread}"))).expect("Allow on its row");
+    assert!(allow.right() <= row.right(), "Allow {allow:?} inside its row {row:?}");
+}
