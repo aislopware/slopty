@@ -7,10 +7,10 @@
 
 use std::cell::Cell;
 
-use slopty_proto::conversation::ConversationRequest;
+use slopty_proto::thread::Cursor;
+use slopty_proto::thread::wire::{ThreadFrame, ThreadRequest};
 
 use super::*;
-use crate::conversation::fixtures;
 
 /// Longer than every wait a closed thing is held for: the undo of a close, its toast, the
 /// palette's way out.
@@ -220,9 +220,9 @@ fn the_overlays_and_the_overview_leave_nothing(cx: &mut TestAppContext) {
     });
 }
 
-/// An agent's conversation face shown, fed and hidden, then its shell closed and ended.
+/// An agent's thread shown, fed and hidden, then its shell closed and ended.
 #[gpui::test]
-fn a_closed_agent_with_its_face_leaves_nothing(cx: &mut TestAppContext) {
+fn a_closed_agent_with_its_thread_leaves_nothing(cx: &mut TestAppContext) {
     let (view, cx, mut fake) = studio(cx);
     let version = Cell::new(1);
     closes_clean(&view, cx, |cx| {
@@ -233,13 +233,13 @@ fn a_closed_agent_with_its_face_leaves_nothing(cx: &mut TestAppContext) {
             v.focus_tile(tile, cx);
         });
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-j");
-        cx.run_until_parked();
-        view.update_in(cx, |v, _w, cx| {
-            for event in fixtures::events("edit") {
-                v.conversation_event(session, event, cx);
-            }
-        });
+        let thread = agent_thread(&view, cx, fake.key, session);
+        let mut state = crate::conversation::thread::fixtures::thread("edit");
+        state.meta.id = thread;
+        state.meta.terminal = Some(session);
+        let snapshot =
+            ThreadFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 40 }, state: Box::new(state) };
+        view.update_in(cx, |v, _w, cx| v.thread_frame(fake.key, thread, snapshot, cx));
         cx.run_until_parked();
         cx.simulate_keystrokes("cmd-j");
         cx.run_until_parked();
@@ -247,7 +247,7 @@ fn a_closed_agent_with_its_face_leaves_nothing(cx: &mut TestAppContext) {
         assert!(
             asked.iter().any(|m| matches!(
                 m,
-                ClientMsg::Conversation(ConversationRequest::Unfollow { session: s }) if *s == session
+                ClientMsg::Thread(ThreadRequest::Unfollow { thread: t }) if *t == thread
             )),
             "{asked:?}"
         );

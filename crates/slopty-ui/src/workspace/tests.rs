@@ -1486,6 +1486,34 @@ fn blocked(session: SessionId) -> AgentEvent {
     }
 }
 
+/// The worker `key`'s thread table naming a thread whose TUI runs in `session`, as the worker
+/// says it of the agent at work there: the tile shows the thread once drawn again.
+fn agent_thread(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    key: WorkerKey,
+    session: SessionId,
+) -> slopty_proto::thread::ThreadId {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::TableFrame;
+
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    thread
+}
+
 /// An agent the server reports on a session with no tile here still counts, and ⌘⇧A gives it
 /// a tile on its worker; on a worker this client cannot reach, ⌘⇧A says so instead.
 #[gpui::test]

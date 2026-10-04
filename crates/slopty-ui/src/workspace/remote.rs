@@ -37,7 +37,7 @@ use super::actions::{ListPorts, SaveCopy};
 use super::{KeyTarget, WorkspaceView};
 use crate::clipboard::{ClipFiles, ClipSync, provider, shell_paste, worker_file_paths};
 use crate::conversation::Attach;
-use crate::conversation::composer::Target;
+use crate::conversation::attach::Target;
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::screen::{PasteAhead, ScreenView};
 use crate::terminal::{ClipHook, ClipPaste};

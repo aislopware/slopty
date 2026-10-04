@@ -250,9 +250,6 @@ impl WorkspaceView {
         self.probes.retain(|(k, ..)| *k != key);
         self.reset_remote(key, &sessions, cx);
         for session in &sessions {
-            if self.face_shown(*session) && self.faces.views.contains_key(session) {
-                self.faces.held.insert(*session);
-            }
             // The worker's own word on its agent went with the link; the server's stands in.
             self.agents.remove(session);
             self.handoff.forget_session(*session);
@@ -307,27 +304,15 @@ impl WorkspaceView {
             let agent = self.agents.get(&session).cloned();
             let status = agent.as_ref().map(|a| a.status.clone());
             view.update(cx, |v, cx| v.set_agent_status(status, cx));
-            if let Some(face) = self.faces.views.get(&session) {
-                face.update(cx, |v, cx| v.set_agent(agent, cx));
-            }
         }
     }
 
     /// Whether `tile`'s body may show what is no longer so, and is drawn set back: its worker
     /// is away or its link in doubt ([`WorkerStatus::in_doubt`]), or its picture came over a
-    /// link that has gone. A face held through the drop says so in its own composer instead.
+    /// link that has gone.
     pub(super) fn set_back(&self, tile: TileRef) -> bool {
         let Some(w) = self.workers.get(&tile.worker) else { return false };
-        if w.stale_screens.contains(&tile.item) {
-            return true;
-        }
-        if !w.status.in_doubt() && w.link.is_some() {
-            return false;
-        }
-        !matches!(
-            w.doc.get(tile.item).map(|i| &i.kind),
-            Some(ItemKind::Terminal { session }) if self.faces.held.contains(session)
-        )
+        w.stale_screens.contains(&tile.item) || w.status.in_doubt() || w.link.is_none()
     }
 
     /// A worker's link state changed without a link coming or going (a failed attempt).
@@ -371,13 +356,11 @@ impl WorkspaceView {
             if let ItemKind::Terminal { session } = item.kind {
                 self.finished.remove(&session);
                 self.terminals.remove(&session);
-                self.faces.held.remove(&session);
             }
         }
         for session in w.sessions.keys() {
             self.finished.remove(session);
             self.terminals.remove(session);
-            self.faces.held.remove(session);
         }
         let (gone, closed): (Vec<_>, Vec<_>) =
             std::mem::take(&mut self.closed).into_iter().partition(|c| c.tile.worker == key);

@@ -663,6 +663,11 @@ impl ThreadView {
             ("thread-send", IconName::ArrowRight, "Steer")
         };
         let hint_theme = std::rc::Rc::new(theme.clone());
+        let hint: SharedString = if stop && self.goal_goes_on(cx) {
+            format!("{label}. {}", super::goal::GOES_ON).into()
+        } else {
+            label.into()
+        };
         let el = div()
             .id(id)
             .debug_selector(move || id.to_owned())
@@ -681,7 +686,7 @@ impl ThreadView {
             )
             .map(kit::hint_timing)
             .tooltip(move |_window, cx| {
-                cx.new(|_| kit::Hint::new(label, "", std::rc::Rc::clone(&hint_theme))).into()
+                cx.new(|_| kit::Hint::new(hint.clone(), "", std::rc::Rc::clone(&hint_theme))).into()
             });
         let el =
             kit::solid_pressable(el, theme).on_click(cx.listener(move |this, _ev, window, cx| {
@@ -709,8 +714,12 @@ impl ThreadView {
     pub(super) fn shell<E: gpui::Styled>(&self, el: E, capped: bool) -> E {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let r = self.z(theme.radii.lg);
-        let el = if capped { el.rounded_bl(r).rounded_br(r) } else { el.rounded(r) };
+        let el = if capped {
+            let r = self.z(theme.radii.lg);
+            el.rounded_bl(r).rounded_br(r)
+        } else {
+            el.rounded(self.z(theme.radii.lg))
+        };
         let el = el.border(kit::hair(theme)).border_color(hsla(s.border)).bg(hsla(s.elevated));
         kit::rests(el, theme, !capped, true)
     }
@@ -752,6 +761,7 @@ impl ThreadView {
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
                     .children(self.limit_strip(cx))
+                    .children(self.goal_strip(cx))
                     .children(self.notice_strip())
                     .children(self.editing_strip(cx))
                     .children(self.attachment_chips(cx))
@@ -789,6 +799,7 @@ impl ThreadView {
                                 .on_click(cx.listener(|this, _ev, _w, cx| this.pick_files(cx))),
                         )
                     })
+                    .children(self.aside_button(cx))
                     .children(self.model_chip(cx))
                     .children(self.effort_chip(cx))
                     .children(self.mode_chip(cx))
@@ -806,7 +817,7 @@ impl ThreadView {
 /// The tone the share of the context window in use is drawn in: warn past 80 %, error past
 /// 95 %.
 #[must_use]
-pub(crate) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
+pub(super) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
     let s = theme.surfaces;
     match used_pct {
         p if p >= 95.0 => s.error,
@@ -823,7 +834,7 @@ pub(crate) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
 /// The arc is a true one with round ends, and it glides to a new share
 /// ([`kit::Gliding`]), turning back from where it is drawn; under `id`, one per place it shows.
 #[must_use]
-pub(crate) fn context_ring(
+pub(super) fn context_ring(
     theme: &Theme,
     id: impl Into<gpui::ElementId>,
     used_pct: f64,

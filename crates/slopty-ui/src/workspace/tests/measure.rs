@@ -117,8 +117,8 @@ fn measure_an_echo_frame_beside_long_notes(cx: &mut TestAppContext) {
     );
 }
 
-/// A conversation face with a transcript in it, focused (its composer has the keyboard), beside
-/// a shell: what a frame the shell's echo causes costs, and how often it draws the face.
+/// An agent's thread with its turns in it, focused (its composer has the keyboard), beside a
+/// shell: what a frame the shell's echo causes costs, and how often it draws the thread.
 #[gpui::test]
 #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
 fn measure_an_echo_frame_beside_a_focused_face(cx: &mut TestAppContext) {
@@ -134,17 +134,20 @@ fn measure_an_echo_frame_beside_a_focused_face(cx: &mut TestAppContext) {
             cx,
         );
         v.focus_tile(tile, cx);
-        v.show_face(agent, true, cx);
     });
     cx.run_until_parked();
-    view.update_in(cx, |v, _w, cx| {
-        for event in crate::conversation::fixtures::events("tools") {
-            v.conversation_event(agent, event, cx);
-        }
-    });
+    let thread = agent_thread(&view, cx, studio.key, agent);
+    let mut state = crate::conversation::thread::fixtures::thread("tools");
+    state.meta.id = thread;
+    state.meta.terminal = Some(agent);
+    let cursor = slopty_proto::thread::Cursor { epoch: 1, seq: 40 };
+    let snapshot =
+        slopty_proto::thread::wire::ThreadFrame::Snapshot { cursor, state: Box::new(state) };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(studio.key, thread, snapshot, cx));
     cx.run_until_parked();
-    let face = view.read_with(cx, |v, _| v.conversation(agent).cloned()).expect("a face");
-    let composing = cx.update(|window, cx| face.read(cx).focus_handle(cx).is_focused(window));
+    let face = view.read_with(cx, |v, _| v.thread_face(agent).cloned()).expect("its thread");
+    let composing =
+        cx.update(|window, cx| face.read(cx).focus_handle(cx).contains_focused(window, cx));
     assert!(composing, "the composer has the keyboard");
     let terminal = view.read_with(cx, |v, _| v.terminal(busy).cloned()).expect("attached");
     let before = face.read_with(cx, |f, _| f.renders());

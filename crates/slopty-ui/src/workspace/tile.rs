@@ -732,13 +732,13 @@ impl WorkspaceView {
             .map(str::trim)
             .filter(|t| own_title(t, program));
         // An agent on a project is named by what it is there: the orchestrator, or its task.
-        // Any other that has not titled itself is named by its session's first prompt, once
-        // its face has read it: the kind's glyph already says "Claude".
+        // Any other that has not titled itself is named by what its thread is about, once its
+        // worker's table says: the kind's glyph already says "Claude".
         if let Some(agent) = self.agent_state(session).filter(|a| a.status != AgentStatus::None) {
             return self
                 .project_role(session)
                 .or_else(|| set.map(str::to_owned))
-                .or_else(|| self.face(session)?.first_prompt.clone())
+                .or_else(|| self.session_thread(session).and_then(|t| self.thread_named(t)))
                 .unwrap_or_else(|| agent_name(agent.kind).to_owned());
         }
         let running =
@@ -1615,8 +1615,8 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    /// How the tile is doing, in the one status vocabulary: its agent's state (as its face
-    /// knows it, [`Self::agent_mark`]); else, out of reach; else a remote picture on its way;
+    /// How the tile is doing, in the one status vocabulary: its agent's state (as its thread
+    /// knows it too, [`Self::agent_mark`]); else, out of reach; else a remote picture on its way;
     /// else a shell's last command, failed or finished unwatched.
     pub(super) fn tile_status(&self, tile: TileRef, item: &Item) -> Option<Status> {
         let session = match item.kind {
@@ -1843,19 +1843,6 @@ impl WorkspaceView {
                 // A phone's header has room for the tile's name and its state only. A thread
                 // view's composer says the changes and the context itself, a click from the
                 // review and the rate windows, so its header says neither a second time.
-                if self.face_shown(session)
-                    && !self.layout.is_phone()
-                    && self.thread_face(session).is_none()
-                    && let Some(view) = self.faces.views.get(&session)
-                    && let Some(face) = self.face(session)
-                {
-                    actions.extend(crate::conversation::ConversationView::header_chips(
-                        view,
-                        &face.chips,
-                        theme,
-                        chrome.k,
-                    ));
-                }
                 let session = &session;
                 // Another client's size rules this PTY: offer to take it.
                 if self.shell(*session).is_some_and(|s| !s.driving) {
@@ -1996,8 +1983,9 @@ impl WorkspaceView {
         out
     }
 
-    /// The button that turns an agent's tile between its TUI and its conversation: never
-    /// among the readouts it once split. `None` while no agent runs in the shell.
+    /// The button that turns an agent's tile between its TUI and its thread: never among the
+    /// readouts it once split. `None` while no agent runs in the shell, or no thread stands for
+    /// it yet.
     fn face_toggle(
         &self,
         tile: TileRef,
@@ -2005,7 +1993,9 @@ impl WorkspaceView {
         chrome: Chrome,
         cx: &Draw<'_, Self>,
     ) -> Option<gpui::AnyElement> {
-        if self.agent_state(session).is_none_or(|a| a.status == AgentStatus::None) {
+        if self.agent_state(session).is_none_or(|a| a.status == AgentStatus::None)
+            || self.session_thread(session).is_none()
+        {
             return None;
         }
         let face = self.face_shown(session);
@@ -2456,14 +2446,7 @@ impl WorkspaceView {
         cx: &Draw<'_, Self>,
     ) -> gpui::AnyElement {
         let bare = chrome.k < SHAPES_BELOW;
-        // A face held through a dropped link says the worker is away in its own composer.
-        let held = match item.kind {
-            ItemKind::Terminal { session } => self.faces.held.contains(&session),
-            _ => false,
-        };
-        let state = self
-            .body_state(placed.tile, item)
-            .filter(|state| !bare && (!held || !matches!(state, BodyState::Away(_))));
+        let state = self.body_state(placed.tile, item).filter(|_| !bare);
         let content = self.render_content(placed, item, chrome, window, cx);
         if bare {
             return self.render_miniature(placed, item, content, cx);
@@ -2626,27 +2609,20 @@ impl WorkspaceView {
                     let body = self.body_view(&board, placed, cx);
                     fixed(body)
                 }
-                _ if self.faces.held.contains(session)
-                    || (self.terminals.contains_key(session)
-                        && self.face_shown(*session)
-                        && self.body_state(placed.tile, item).is_none()) =>
+                _ if self.terminals.contains_key(session)
+                    && self.face_shown(*session)
+                    && self.body_state(placed.tile, item).is_none() =>
                 {
                     let width = placed.target.w;
                     let handed = Handed::Face { zoom: k, width };
-                    // The agent's thread, once known, is the face; the conversation face is
-                    // only for an agent no thread stands for yet. The tile's header already
-                    // says the title, the agent and its state, so the thread view draws none.
-                    if let Some(thread) = self.thread_face(*session) {
-                        self.hand_over(cx, thread, handed, move |v, cx| {
-                            v.set_layout(k, width, cx);
-                            v.set_header(false, cx);
-                        });
-                        return fixed(self.body_view(thread, placed, cx));
-                    }
-                    let Some(face) = self.faces.views.get(session) else { return well() };
-                    self.hand_over(cx, face, handed, move |v, cx| v.set_layout(k, width, cx));
-                    let body = self.body_view(face, placed, cx);
-                    fixed(body)
+                    // The tile's header already says the title, the agent and its state, so the
+                    // thread view draws none. Its view is made in the frame after it is wanted.
+                    let Some(thread) = self.thread_face(*session) else { return well() };
+                    self.hand_over(cx, thread, handed, move |v, cx| {
+                        v.set_layout(k, width, cx);
+                        v.set_header(false, cx);
+                    });
+                    fixed(self.body_view(thread, placed, cx))
                 }
                 Some(view) => {
                     let covered = self.body_state(placed.tile, item).is_some();

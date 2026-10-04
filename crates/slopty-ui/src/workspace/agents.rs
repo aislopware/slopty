@@ -277,10 +277,6 @@ impl WorkspaceView {
             let status = (event.status != AgentStatus::None).then(|| event.status.clone());
             view.update(cx, |v, cx| v.set_agent_status(status, cx));
         }
-        if let Some(face) = self.faces.views.get(&session) {
-            let agent = (event.status != AgentStatus::None).then(|| event.clone());
-            face.update(cx, |v, cx| v.set_agent(agent, cx));
-        }
         if let Some(elapsed) = self.agent_turn(&event) {
             self.agent_finished(&event, elapsed, cx);
         }

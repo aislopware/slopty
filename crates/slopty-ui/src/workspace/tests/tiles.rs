@@ -721,6 +721,9 @@ fn the_readouts_give_way_to_the_controls_on_hover_and_nothing_moves(cx: &mut Tes
             cx,
         );
     });
+    // The thread's toggle is one of the controls; its tile shows the TUI, where the pill is.
+    agent_thread(&view, cx, fake.key, agent);
+    view.update_in(cx, |v, _w, cx| v.show_face(agent, false, cx));
     cx.simulate_mouse_move(point(px(1.0), px(799.0)), None, Modifiers::none());
     cx.run_until_parked();
     let bounds = |cx: &mut VisualTestContext, part: &str| {

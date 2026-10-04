@@ -1007,7 +1007,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     records its arguments, and the relay runs from the settings it was handed) and
     `a_run_gets_the_relay_on_the_one_settings_it_keeps`.
 
-- ✅ **Claude Code gets a conversation face; the TUI stays the source of truth** (2026-09-27,
+- ❌ **Claude Code gets a conversation face; the TUI stays the source of truth** (2026-09-27;
+  superseded 2026-10-04 by ui.md, "One face for every agent";
   verified against Claude Code 2.1.283; research and plan in
   `.research/claude-gui-study-2026-09-27.md`). The person wants a view of an agent's work beside
   its TUI, toggled per tile: the edits as diffs, the tool calls with their results, subagents,
@@ -1132,8 +1133,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`the_persons_line_passes_through_unchanged`, `the_meters_are_forwarded_as_a_hook`,
   `a_run_gets_the_status_line_wrapper_in_front_of_the_persons_own`).
 
-- ✅ **A followed conversation streams from the worker; a permission prompt waits for its
-  followers** (2026-09-27, phase 1b of "Claude Code gets a conversation face").
+- ❌ **A followed conversation streams from the worker; a permission prompt waits for its
+  followers** (2026-09-27, phase 1b of "Claude Code gets a conversation face"; superseded
+  2026-10-04 by ui.md, "One face for every agent").
   - **One definition of an entry.** The entry types (`Entry`, `Body`, `ToolDetail`, `Change`,
     `Clipped`, `TextRef`, …) and the meters moved from `slopty_agent` to
     `slopty_proto::conversation`, and the decoder builds them directly (`slopty_agent`
@@ -1189,11 +1191,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`a_permission_request_and_its_decision_are_single_json_lines`), the relay
     (`a_permission_request_prints_the_workers_decision`, which checks the relay's end stays
     open while it waits), the goldens, and end to end through the real relay run as the test's
-    own child with the captured fixtures
-    (`a_followed_conversation_streams_and_holds_permission_for_the_follower`: the snapshot equals
-    the decoder's own reading, the appended half and the subagent arrive as changes, the meters
-    come, an "always" answer is what the relay prints, a killed relay withdraws, an unfollow
-    releases, and with nobody following the relay is let go at once).
+    own child (`a_prompt_is_held_while_its_thread_is_followed`: the held prompt shows on the
+    followed thread as a request, an "always" answer is what the relay prints, a second answer
+    finds nothing, a killed relay withdraws, the last follower leaving hands it back to the
+    TUI, and with nobody following the relay is let go at once).
 
 - ✅ **Slopty's Claude Code mod is the live channel, behind a strict version gate; the mod is
   TypeScript** (2026-09-27, phase 1c of "Claude Code gets a conversation face", verified against
@@ -1779,8 +1780,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     (`an_approval_note_carries_the_buttons_while_its_prompt_is_held`), headless
     `an_approval_is_answered_from_the_note_and_the_inbox_where_they_are` and
     `a_prompt_whose_terminal_is_in_front_goes_back_to_it`, and the worker end to end
-    (`an_approver_answers_without_following_and_the_tui_asks_otherwise`). That last test runs
-    the real relay as its own child and sends the bounded hold as a control-socket request.
+    (`the_tables_holder_answers_without_following_and_the_tui_asks_otherwise`, in the worker's
+    `tests/threads.rs`). That last test runs the real relay as its own child and sends the
+    bounded hold as a control-socket request.
     No test posts a real notification. Goldens: new `conversation__client_approvals_on` and
     `conversation__client_release`.
 

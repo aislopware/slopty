@@ -2,11 +2,10 @@
 //! the agent's draft.
 
 use super::*;
-use crate::conversation::ConversationView;
 use crate::terminal::TerminalViewEvent;
 
 /// A shell's block goes to the agent tile focused last on the same worker: that tile comes up
-/// on its face, and the draft holds the block's Markdown after what was typed there. With no
+/// on its thread, and the draft holds the block's Markdown after what was typed there. With no
 /// agent on the worker, the shell offers nothing to attach to.
 #[gpui::test]
 fn a_block_from_a_shell_lands_in_the_last_agents_draft(cx: &mut TestAppContext) {
@@ -25,9 +24,8 @@ fn a_block_from_a_shell_lands_in_the_last_agents_draft(cx: &mut TestAppContext) 
         v.focus_tile(agent_tile, cx);
     });
     cx.run_until_parked();
-    // A draft under way on the agent's face.
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
+    // A draft under way on the agent's thread.
+    agent_thread(&view, cx, studio.key, agent);
     cx.simulate_input("look at this");
     cx.run_until_parked();
     view.update_in(cx, |v, _w, cx| v.focus_tile(shell_tile, cx));
@@ -39,9 +37,9 @@ fn a_block_from_a_shell_lands_in_the_last_agents_draft(cx: &mut TestAppContext) 
     let terminal = view.read_with(cx, |v, _| v.terminals.get(&shell).cloned()).expect("drawn");
     terminal.update(cx, |_, cx| cx.emit(TerminalViewEvent::Attach(block.to_owned())));
     cx.run_until_parked();
-    let face = view.read_with(cx, |v, _| v.conversation(agent).cloned()).expect("a face");
-    let draft = face.read_with(cx, ConversationView::draft);
+    let face = view.read_with(cx, |v, _| v.thread_face(agent).cloned()).expect("its thread");
+    let draft = face.read_with(cx, crate::conversation::thread::ThreadView::draft);
     assert_eq!(draft, format!("look at this\n\n{block}"));
     assert_eq!(focused(&view, cx), Some(agent_tile), "the agent's tile comes forward");
-    assert!(view.read_with(cx, |v, _| v.face_shown(agent)), "on its face");
+    assert!(view.read_with(cx, |v, _| v.face_shown(agent)), "on its thread");
 }

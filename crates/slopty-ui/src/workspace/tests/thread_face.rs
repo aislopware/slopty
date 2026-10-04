@@ -7,8 +7,8 @@ use slopty_proto::thread::wire::TableFrame;
 
 use super::*;
 
-/// Known to the table, the agent's thread is drawn in its tile in place of the conversation
-/// face, with no header of its own (the tile's says the same), and what is typed goes to its
+/// Known to the table, the agent's thread is drawn in its tile in place of its TUI, with no
+/// header of its own (the tile's says the same), and what is typed goes to its
 /// composer.
 #[gpui::test]
 fn an_agent_tile_whose_thread_is_known_draws_and_focuses_its_thread_view(cx: &mut TestAppContext) {
@@ -38,7 +38,6 @@ fn an_agent_tile_whose_thread_is_known_draws_and_focuses_its_thread_view(cx: &mu
     let body = cx.debug_bounds(selector("item", tile.item)).expect("the tile");
     let composer = cx.debug_bounds("thread-composer").expect("the thread view's composer");
     assert!(body.contains(&composer.center()), "in the tile: {body:?} {composer:?}");
-    assert!(cx.debug_bounds("composer").is_none(), "not the conversation face");
     assert!(cx.debug_bounds("thread-header").is_none(), "the tile's header says it once");
 
     cx.simulate_input("ship it");
@@ -125,10 +124,10 @@ fn a_thread_that_moves_away_hands_the_keyboard_back_to_its_tile(cx: &mut TestApp
     assert!(terminal_focused(&view, cx, here), "the keyboard is back in the tile's shell");
 }
 
-/// A tile showing its agent's conversation face with the keyboard keeps the keyboard when the
-/// agent's thread becomes known and its view takes the face's place.
+/// A tile showing its agent's TUI with the keyboard keeps the keyboard when the agent's thread
+/// becomes known and its view takes the TUI's place.
 #[gpui::test]
-fn the_thread_view_takes_the_keyboard_from_the_face_it_replaces(cx: &mut TestAppContext) {
+fn the_thread_view_takes_the_keyboard_from_the_tui_it_replaces(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
@@ -138,17 +137,11 @@ fn the_thread_view_takes_the_keyboard_from_the_face_it_replaces(cx: &mut TestApp
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
         v.threads_linked(key, cx);
         v.focus_tile(tile, cx);
-        v.show_face(session, true, cx);
     });
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
-    let face_has_it = cx.update(|window, cx| {
-        view.read(cx)
-            .conversation(session)
-            .is_some_and(|f| f.read(cx).focus_handle(cx).contains_focused(window, cx))
-    });
-    assert!(face_has_it, "the conversation face has the keyboard first");
+    assert!(terminal_focused(&view, cx, session), "the TUI has the keyboard first");
 
     let mut state = crate::conversation::thread::fixtures::thread("edit");
     state.meta.terminal = Some(session);

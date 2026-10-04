@@ -10,13 +10,13 @@
 //! every note it posted, because the navigator now shows the same things. The icon badge is the
 //! bell's count.
 //!
-//! An agent that waits on a yes or no held for this client (`approvals`) is posted with
-//! the approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
-//! "Show" opens its tile as a tap does. The prompt is held a moment after the agent's status
-//! says it waits, so the note already up is replaced, silently, once the prompt comes, and
-//! again without the buttons once it is no longer held (the terminal asks by then). A prompt
-//! this client answered takes its note away instead: the agent still reads as waiting until its
-//! worker says the prompt settled, and the answer is not news.
+//! An agent that waits on a yes or no its thread's row shows (`approvals`) is posted with the
+//! approval buttons (`notify::APPROVAL`): "Allow" and "Deny" answer it where the note is,
+//! "Show" opens its tile as a tap does. The row shows the request a moment after the agent's
+//! status says it waits, so the note already up is replaced, silently, once the request comes,
+//! and again without the buttons once it is gone (the terminal asks by then). A request this
+//! client answered takes its note away instead: the agent still reads as waiting until its
+//! worker's table moves past it, and the answer is not news.
 //!
 //! Nothing notifies either while the person is at another of their devices
 //! ([`Attention::set_present_elsewhere`]): at the Mac, the phone in their pocket stays quiet, and
@@ -40,10 +40,9 @@ use gpui::{Context, Entity};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ItemId, SessionId};
 use slopty_platform::notify::{self, APPROVAL, Note, Notifier, Tap};
-use slopty_proto::conversation::Verdict;
 use slopty_proto::items::ItemKind;
-use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::attention::{Notice, NoticeKind};
+use slopty_proto::thread::{AskId, ThreadId};
 
 use super::agents::{agent_ask_line, agent_status_word};
 use super::approvals::answerable;
@@ -58,10 +57,10 @@ const ITEM: &str = "item";
 const SESSION: &str = "session";
 /// The `userInfo` key of the thread, for a note about one with no terminal.
 const THREAD: &str = "thread";
-/// The `userInfo` key of the permission prompt an approval note answers.
+/// The `userInfo` key of the thread's request an approval note answers.
 const ASK: &str = "ask";
 
-/// What a note's answer says when its prompt was no longer held: answered elsewhere, or the
+/// What a note's answer says when its request was no longer open: answered elsewhere, or the
 /// terminal asks by now.
 pub(super) const NO_LONGER_WAITING: &str = "That prompt is no longer waiting";
 
@@ -151,15 +150,15 @@ pub struct Asking {
     pub title: String,
     /// What it asks (`agent_ask_line`), else its state in a word or two.
     pub body: String,
-    /// The yes or no the note's buttons answer, as the note carries it: a terminal's prompt
-    /// held for this client by its number, a thread's request by its id.
+    /// The yes or no the note's buttons answer, as the note carries it: the request's id on the
+    /// thread the agent runs.
     pub approval: Option<String>,
-    /// The prompt or request this client answered that its worker has not yet said is settled.
+    /// The request this client answered that its worker's table still shows open.
     pub answered: Option<String>,
 }
 
 impl Asking {
-    /// Its note: the approval buttons while a prompt is held, and a sound unless `silent`.
+    /// Its note: the approval buttons while a yes or no is open, and a sound unless `silent`.
     fn note(&self, silent: bool) -> Note {
         let mut info = self.route.info();
         if let Some(ask) = &self.approval {
@@ -520,8 +519,14 @@ impl WorkspaceView {
                 let body = agent_ask_line(agent).unwrap_or_else(|| agent_status_word(agent));
                 let item = w.tile.map(|t| t.item);
                 let route = Route { worker: w.worker, item, about: About::Session(w.session) };
-                let approval = self.approval(w.session).map(|prompt| prompt.ask.to_string());
-                let answered = self.answered_here(w.session).map(|ask| ask.to_string());
+                let approval = self
+                    .session_request(w.session)
+                    .filter(|a| answerable(a))
+                    .map(|a| a.id.0.clone());
+                let answered = self
+                    .session_thread(w.session)
+                    .and_then(|t| self.thread_answered_here(t))
+                    .map(|ask| ask.0.clone());
                 let title = self.route_title(route);
                 Some(Asking { route, title, body, approval, answered })
             })
@@ -640,14 +645,14 @@ impl WorkspaceView {
     pub fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
         let route = Route::of_tap(tap);
         tracing::debug!(id = tap.id, ?route, action = ?tap.action, "note opened");
-        let verdict = match tap.action.as_deref() {
-            Some(notify::ALLOW) => Some(Verdict::Allow),
-            Some(notify::DENY) => Some(Verdict::Deny { message: String::new(), interrupt: false }),
+        let allow = match tap.action.as_deref() {
+            Some(notify::ALLOW) => Some(true),
+            Some(notify::DENY) => Some(false),
             Some(_) | None => None,
         };
-        if let Some(verdict) = verdict {
+        if let Some(allow) = allow {
             if let (Some(route), Some(ask)) = (route, tap.info.get(ASK)) {
-                self.verdict_tapped(route, ask.clone(), verdict, cx);
+                self.verdict_tapped(route, AskId(ask.clone()), allow, cx);
             }
             return;
         }

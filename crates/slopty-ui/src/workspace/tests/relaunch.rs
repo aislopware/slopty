@@ -62,9 +62,9 @@ fn layout_file() -> (std::path::PathBuf, std::path::PathBuf) {
     (dir, path)
 }
 
-/// The face the person picked on an agent's tile, and where the main window stood, are saved
-/// with the layout; the next run shows that tile's face again once its worker is back, and
-/// says where the window goes.
+/// The TUI the person picked over an agent's thread, and where the main window stood, are saved
+/// with the layout; the next run shows that tile's TUI again once its worker is back with the
+/// thread, and says where the window goes.
 #[gpui::test]
 fn a_relaunch_shows_each_picked_face_and_knows_where_the_window_stood(cx: &mut TestAppContext) {
     let (dir, path) = layout_file();
@@ -97,9 +97,11 @@ fn a_relaunch_shows_each_picked_face_and_knows_where_the_window_stood(cx: &mut T
             v.set_window_frame(Some(frame.clone()), cx);
         });
         vcx.run_until_parked();
+        agent_thread(&view, vcx, key, session);
+        assert!(view.read_with(vcx, |v, _| v.face_shown(session)), "the thread first");
         vcx.simulate_keystrokes("cmd-j");
         vcx.run_until_parked();
-        assert!(view.read_with(vcx, |v, _| v.face_shown(session)), "the face, picked");
+        assert!(!view.read_with(vcx, |v, _| v.face_shown(session)), "the TUI, picked");
         vcx.executor().advance_clock(SAVE_AFTER);
         vcx.run_until_parked();
         view.read_with(vcx, |v, _| v.item(tile).cloned()).expect("its item")
@@ -110,11 +112,11 @@ fn a_relaunch_shows_each_picked_face_and_knows_where_the_window_stood(cx: &mut T
 
     let (view, cx) = relaunched(cx, &path);
     assert_eq!(view.read_with(cx, |v, _| v.window_frame().cloned()), Some(frame));
-    assert!(!view.read_with(cx, |v, _| v.face_shown(session)), "not before its worker is back");
-    let _studio = back(&view, cx, 1, vec![running], vec![item]);
+    let studio = back(&view, cx, 1, vec![running], vec![item]);
+    agent_thread(&view, cx, studio.key, session);
     view.update(cx, |_v, cx| cx.notify());
     cx.run_until_parked();
-    assert!(view.read_with(cx, |v, _| v.face_shown(session)), "the face again");
+    assert!(!view.read_with(cx, |v, _| v.face_shown(session)), "the TUI again");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

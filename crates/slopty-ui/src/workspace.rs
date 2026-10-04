@@ -1462,9 +1462,6 @@ impl WorkspaceView {
         for view in self.browsers.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
-        for view in self.faces.views.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
         self.set_threads_theme(&theme, cx);
         for view in self.projects.views.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
@@ -1606,12 +1603,9 @@ impl WorkspaceView {
             ("uploads", self.uploads.len()),
             ("ports", self.ports.len()),
             ("nav.folded", self.nav.folded.len()),
-            ("faces.views", self.faces.views.len()),
             ("faces.chosen", self.faces.chosen.len()),
-            ("faces.following", self.faces.following.len()),
             ("faces.focus", self.faces.focus.len()),
-            ("faces.subscriptions", self.faces.subscriptions.len()),
-            ("faces.held", self.faces.held.len()),
+            ("faces.drafts", self.faces.drafts.len()),
         ]
         .into_iter()
         .chain(self.project_sizes())
@@ -1711,15 +1705,11 @@ impl WorkspaceView {
     fn give_pending_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(session) = self.pending_focus.take() {
             // A tile showing its project's board takes the keyboard in the board, one showing
-            // its conversation in its composer.
+            // its thread in its composer.
             if let Some(board) = self.board_view(session).filter(|_| self.board_shown(session)) {
                 board.clone().update(cx, |v, cx| v.focus(window, cx));
             } else if let Some(thread) = self.thread_face(session).cloned() {
                 thread.update(cx, |v, cx| v.focus(window, cx));
-            } else if let Some(face) =
-                self.faces.views.get(&session).filter(|_| self.face_shown(session))
-            {
-                face.clone().update(cx, |v, cx| v.focus(window, cx));
             } else if let Some(view) = self.terminals.get(&session) {
                 let handle = view.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);

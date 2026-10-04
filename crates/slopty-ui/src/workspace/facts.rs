@@ -1,10 +1,10 @@
 //! What the strip and the chrome show of a body that changes on its own: a shell's command and
-//! title, a stream's first frame and sound, a face's turn and approval, a file's unsaved edit, a
-//! page's address and title, a folder's way up. Copied out of the body
-//! each time it changes, and news for the views that show it only when the copy changes.
+//! title, a stream's first frame and sound, a file's unsaved edit, a page's address and title, a
+//! folder's way up. Copied out of the body each time it changes, and news for the views that show
+//! it only when the copy changes.
 //!
 //! GPUI draws a view again when an entity it read changed. A shell changes with every line of
-//! output, a stream with every frame, a face with every streamed word; a header or a navigator
+//! output, a stream with every frame; a header or a navigator
 //! row that read them would be built again as often, for a title or a mark that stayed as it
 //! was. So the strip and the chrome read these facts, which are the workspace's, and never the
 //! bodies themselves.
@@ -17,7 +17,6 @@ use slopty_proto::screen::SourceState;
 
 use super::WorkspaceView;
 use crate::browser::BrowserView;
-use crate::conversation::{ConversationView, HeaderChips};
 use crate::file::FileView;
 use crate::folder::FolderView;
 use crate::screen::{ScreenView, StreamHeader};
@@ -97,33 +96,6 @@ impl ScreenFacts {
     }
 }
 
-/// What the workspace shows of a face.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub(super) struct FaceFacts {
-    /// The transcript shows the agent mid-turn ([`ConversationView::mid_turn`]).
-    pub mid_turn: bool,
-    /// Its first prompt's first line, which names a tile its agent has not titled.
-    pub first_prompt: Option<String>,
-    /// An approval is open in it.
-    pub asks: bool,
-    /// One line of what the agent does ([`ConversationView::summary`]).
-    pub summary: Option<String>,
-    /// What the tile's header shows of it.
-    pub chips: HeaderChips,
-}
-
-impl FaceFacts {
-    pub(super) fn of(view: &ConversationView) -> Self {
-        Self {
-            mid_turn: view.mid_turn(),
-            first_prompt: view.first_prompt(),
-            asks: view.approvals().prompt().is_some(),
-            summary: view.summary(),
-            chips: view.header_chips_state(),
-        }
-    }
-}
-
 /// What the workspace shows of a file: whether its edit is not yet on disk. Its editor
 /// changes with every keystroke and caret blink; the header's dot, a few times an edit.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -190,11 +162,6 @@ impl WorkspaceView {
         self.facts.screens.get(&id)
     }
 
-    /// `session`'s face as last copied.
-    pub(super) fn face(&self, session: SessionId) -> Option<&FaceFacts> {
-        self.facts.faces.get(&session)
-    }
-
     /// Copy `session`'s shell again: what changed, if anything.
     pub(super) fn copy_shell(
         &mut self,
@@ -214,36 +181,6 @@ impl WorkspaceView {
         let now = ScreenFacts::of(view.read(cx));
         if self.facts.screens.insert(id, now) != Some(now) {
             cx.notify();
-        }
-    }
-
-    /// Copy `session`'s face again: what changed, if anything.
-    pub(super) fn copy_face(
-        &mut self,
-        session: SessionId,
-        cx: &App,
-    ) -> Option<(FaceFacts, FaceFacts)> {
-        let now = FaceFacts::of(self.faces.views.get(&session)?.read(cx));
-        let was = self.facts.faces.insert(session, now.clone()).unwrap_or_default();
-        (was != now).then_some((was, now))
-    }
-
-    /// Copy `session`'s face again. Its turn, its first prompt or an approval is news for
-    /// every mark and title; its line, for the navigator and the strip's overview; its
-    /// readouts, for its tile's header. Nothing else it streams is anybody's news.
-    pub(super) fn face_changed(&mut self, session: SessionId, cx: &mut Context<Self>) {
-        let Some((was, now)) = self.copy_face(session, cx) else { return };
-        if (was.mid_turn, &was.first_prompt, was.asks)
-            != (now.mid_turn, &now.first_prompt, now.asks)
-        {
-            cx.notify();
-            return;
-        }
-        if was.summary != now.summary {
-            App::notify(cx, self.chrome.nav_rows.entity_id());
-            App::notify(cx, self.strip_host.entity_id());
-        } else if was.chips != now.chips {
-            App::notify(cx, self.strip_host.entity_id());
         }
     }
 
@@ -363,10 +300,9 @@ impl WorkspaceView {
 
     /// Forget the facts of bodies no longer kept.
     pub(super) fn prune_facts(&mut self) {
-        let Self { facts, terminals, screens, faces, files, browsers, folders, .. } = self;
+        let Self { facts, terminals, screens, files, browsers, folders, .. } = self;
         facts.shells.retain(|session, _| terminals.contains_key(session));
         facts.screens.retain(|id, _| screens.contains_key(id));
-        facts.faces.retain(|session, _| faces.views.contains_key(session));
         facts.files.retain(|id, _| files.contains_key(id));
         facts.pages.retain(|id, _| browsers.contains_key(id));
         facts.folders.retain(|id, _| folders.contains_key(id));
@@ -379,7 +315,6 @@ impl WorkspaceView {
 pub(super) struct Facts {
     shells: std::collections::HashMap<SessionId, ShellFacts>,
     screens: std::collections::HashMap<ItemId, ScreenFacts>,
-    faces: std::collections::HashMap<SessionId, FaceFacts>,
     files: std::collections::HashMap<ItemId, FileFacts>,
     pages: std::collections::HashMap<ItemId, PageFacts>,
     folders: std::collections::HashMap<ItemId, FolderFacts>,
@@ -393,11 +328,10 @@ pub(super) struct Facts {
 impl Facts {
     /// How many facts are kept of each kind, for the footprint.
     #[cfg(test)]
-    pub(super) fn lens(&self) -> [(&'static str, usize); 6] {
+    pub(super) fn lens(&self) -> [(&'static str, usize); 5] {
         [
             ("facts.shells", self.shells.len()),
             ("facts.screens", self.screens.len()),
-            ("facts.faces", self.faces.len()),
             ("facts.files", self.files.len()),
             ("facts.pages", self.pages.len()),
             ("facts.folders", self.folders.len()),

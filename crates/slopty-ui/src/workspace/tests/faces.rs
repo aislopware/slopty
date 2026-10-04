@@ -1,11 +1,14 @@
-//! An agent terminal's conversation face in the workspace: the toggle, what it follows, what
-//! its composer types into the PTY, and its answers to a held prompt.
+//! An agent terminal's thread face in the workspace: the toggle, what it follows, the marks and
+//! names its thread gives the tile, and which started threads open as tiles.
 
 use slopty_core::WallMs;
-use slopty_proto::conversation::{ConversationRequest, PermissionEvent, Settled, Verdict};
+use slopty_proto::thread::wire::{
+    Intent, IntentDone, Outcome, RequestCard, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
+};
+use slopty_proto::thread::{AskId, Cursor, Phase, Request, ThreadMeta, ThreadState};
 
 use super::*;
-use crate::conversation::{ConversationView, fixtures};
+use crate::icons::Status;
 
 /// A shell of this client's on `fake`'s worker with Claude Code working in it, focused.
 fn agent_tile(
@@ -24,196 +27,110 @@ fn agent_tile(
     (tile, session)
 }
 
-/// What the workspace asked of the worker about conversations.
-fn requests(fake: &mut Fake) -> Vec<ConversationRequest> {
+/// A thread whose TUI runs in `session`.
+fn thread_on(session: SessionId) -> ThreadState {
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    state
+}
+
+/// `rows` as `key`'s whole thread table, its link up.
+fn table(
+    view: &Entity<WorkspaceView>,
+    cx: &mut VisualTestContext,
+    key: WorkerKey,
+    rows: Vec<ThreadRow>,
+) {
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
+    view.update_in(cx, |v, _w, cx| {
+        v.threads_linked(key, cx);
+        v.thread_table(key, &table, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// What the workspace asked of the worker about threads.
+fn thread_requests(fake: &mut Fake) -> Vec<ThreadRequest> {
     fake.drain()
         .into_iter()
         .filter_map(|m| match m {
-            ClientMsg::Conversation(req) => Some(req),
+            ClientMsg::Thread(req) => Some(req),
             _ => None,
         })
         .collect()
+}
+
+fn follows(requests: &[ThreadRequest], thread: slopty_proto::thread::ThreadId) -> bool {
+    requests.iter().any(|r| matches!(r, ThreadRequest::Follow { thread: t, .. } if *t == thread))
 }
 
 fn face_shown(view: &Entity<WorkspaceView>, cx: &VisualTestContext, session: SessionId) -> bool {
     view.read_with(cx, |v, _| v.face_shown(session))
 }
 
-/// ⌘J swaps the tile between the TUI and the face over the same session: showing the face
-/// follows the conversation and gives the composer the keyboard, hiding it unfollows and gives
-/// the terminal the keyboard back, and a draft and the place in the list survive the round.
+/// ⌘J swaps the tile between its thread and the TUI over the same session: hiding the thread
+/// lets it go and gives the terminal the keyboard back, showing it follows it again with the
+/// keyboard in its composer, and a draft survives the round.
 #[gpui::test]
 fn the_face_toggles_over_the_same_session_and_keeps_its_draft(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (tile, session) = agent_tile(&view, cx, &mut studio);
-    assert!(!face_shown(&view, cx, session), "the TUI is the default on a Mac");
-
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    assert!(face_shown(&view, cx, session));
-    assert_eq!(requests(&mut studio), [ConversationRequest::Follow { session }]);
-    view.update_in(cx, |v, _w, cx| {
-        for event in fixtures::events("edit") {
-            v.conversation_event(session, event, cx);
-        }
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("composer").is_some(), "the face is drawn in the tile");
-    let face = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("a face");
-    assert!(!face.read_with(cx, |f, _| f.rows().is_empty()), "the conversation is in its list");
+    assert!(!face_shown(&view, cx, session), "the TUI until a thread is known");
+    let state = thread_on(session);
+    let thread = state.meta.id;
+    table(&view, cx, studio.key, vec![state.row(WallMs::ZERO)]);
+    assert!(face_shown(&view, cx, session), "the thread once known");
+    assert!(follows(&thread_requests(&mut studio), thread));
     cx.simulate_input("half a thought");
     cx.run_until_parked();
 
     cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();
     assert!(!face_shown(&view, cx, session));
-    assert_eq!(requests(&mut studio), [ConversationRequest::Unfollow { session }]);
+    assert!(thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }));
     assert!(terminal_focused(&view, cx, session), "the TUI takes the keyboard back");
-    assert!(cx.debug_bounds("composer").is_none());
+    assert!(cx.debug_bounds("thread-composer").is_none());
 
     cx.simulate_keystrokes("cmd-j");
     cx.run_until_parked();
-    assert_eq!(requests(&mut studio), [ConversationRequest::Follow { session }]);
-    assert_eq!(face.read_with(cx, ConversationView::draft), "half a thought", "the draft waited");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(follows(&thread_requests(&mut studio), thread), "followed again");
+    let draft = view.read_with(cx, |v, cx| v.thread_face(session).map(|t| t.read(cx).draft(cx)));
+    assert_eq!(draft.as_deref(), Some("half a thought"), "the draft waited");
     assert_eq!(focused(&view, cx), Some(tile));
+    cx.simulate_input(", whole");
+    cx.run_until_parked();
+    let draft = view.read_with(cx, |v, cx| v.thread_face(session).map(|t| t.read(cx).draft(cx)));
+    assert_eq!(draft.as_deref(), Some("half a thought, whole"), "the keyboard is the thread's");
 }
 
-/// The composer types into the agent's own PTY as a person would: a message as one bracketed
-/// paste and, a moment later, Enter; a slash command as typed text. Esc stops the turn.
+/// The agent leaving the terminal lets its thread go and gives the TUI the keyboard; back, the
+/// pick stands; closing the tile lets it go again.
 #[gpui::test]
-fn the_composer_types_into_the_same_pty(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (_tile, session) = agent_tile(&view, cx, &mut studio);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    studio.drain();
-    let sent = |studio: &mut Fake| -> Vec<TermRequest> {
-        studio
-            .drain()
-            .into_iter()
-            .filter_map(|m| match m {
-                ClientMsg::Term { session: s, req } if s == session => Some(req),
-                _ => None,
-            })
-            .collect()
-    };
-
-    cx.simulate_input("Fix the flaky test");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert_eq!(
-        sent(&mut studio),
-        [TermRequest::Paste { text: "Fix the flaky test".into(), confirmed: true }]
-    );
-    cx.executor().advance_clock(crate::conversation::composer::SUBMIT_PAUSE);
-    cx.run_until_parked();
-    let enter = sent(&mut studio);
-    assert!(
-        matches!(enter.as_slice(), [TermRequest::Key(k)] if k.code == slopty_proto::input::KeyCode::Enter),
-        "Enter after the pause: {enter:?}"
-    );
-
-    cx.simulate_input("/compact");
-    cx.simulate_keystrokes("enter");
-    cx.run_until_parked();
-    assert_eq!(sent(&mut studio), [TermRequest::Raw(b"/compact".to_vec())]);
-    cx.executor().advance_clock(crate::conversation::composer::SUBMIT_PAUSE);
-    cx.run_until_parked();
-    studio.drain();
-
-    cx.simulate_keystrokes("escape");
-    cx.run_until_parked();
-    let esc = sent(&mut studio);
-    assert!(
-        matches!(esc.as_slice(), [TermRequest::Key(k)] if k.code == slopty_proto::input::KeyCode::Escape),
-        "Esc stops the working agent: {esc:?}"
-    );
-}
-
-/// A held prompt takes the composer's place and says what Always would grant;
-/// Allow once answers it once, however often it is pressed, and the worker's word that it
-/// settled takes the card away.
-#[gpui::test]
-fn a_held_prompt_is_answered_once(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (_tile, session) = agent_tile(&view, cx, &mut studio);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    studio.drain();
-    view.update_in(cx, |v, _w, cx| {
-        let asked = fixtures::bash_prompt(session, 7);
-        v.permission_event(PermissionEvent::Asked(Box::new(asked)), cx);
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("approval").is_some(), "the card is up");
-    assert!(cx.debug_bounds("composer").is_none(), "in the composer's place");
-    assert!(cx.debug_bounds("always-scope").is_some(), "what Always grants, above the buttons");
-
-    for _ in 0..2 {
-        let at = cx.debug_bounds("allow-once").expect("allow once").center();
-        cx.simulate_click(at, Modifiers::none());
-        cx.run_until_parked();
-    }
-    assert_eq!(
-        requests(&mut studio),
-        [ConversationRequest::Answer { session, ask: 7, verdict: Verdict::Allow }]
-    );
-    let me = studio.me;
-    view.update_in(cx, |v, _w, cx| {
-        let outcome = Settled::Answered { verdict: Verdict::Allow, by: me };
-        v.permission_event(PermissionEvent::Settled { session, ask: 7, outcome }, cx);
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("approval").is_none());
-    assert!(cx.debug_bounds("composer").is_some());
-}
-
-/// A prompt the worker hands back to the TUI says so and offers the terminal.
-#[gpui::test]
-fn a_released_prompt_offers_the_terminal(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (_tile, session) = agent_tile(&view, cx, &mut studio);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    view.update_in(cx, |v, _w, cx| {
-        let asked = fixtures::bash_prompt(session, 3);
-        v.permission_event(PermissionEvent::Asked(Box::new(asked)), cx);
-        let outcome = Settled::Released;
-        v.permission_event(PermissionEvent::Settled { session, ask: 3, outcome }, cx);
-    });
-    cx.run_until_parked();
-    let at = cx.debug_bounds("show-terminal").expect("the way to the TUI").center();
-    cx.simulate_click(at, Modifiers::none());
-    cx.run_until_parked();
-    assert!(!face_shown(&view, cx, session));
-    assert!(terminal_focused(&view, cx, session));
-}
-
-/// Closing the tile unfollows its conversation; so does the agent leaving the terminal.
-#[gpui::test]
-fn closing_the_tile_or_the_agent_leaving_unfollows(cx: &mut TestAppContext) {
+fn closing_the_tile_or_the_agent_leaving_lets_the_thread_go(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (tile, session) = agent_tile(&view, cx, &mut studio);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    assert_eq!(requests(&mut studio), [ConversationRequest::Follow { session }]);
+    let state = thread_on(session);
+    let thread = state.meta.id;
+    table(&view, cx, studio.key, vec![state.row(WallMs::ZERO)]);
+    assert!(follows(&thread_requests(&mut studio), thread));
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::None, ..blocked(session) }, cx);
     });
     cx.run_until_parked();
-    assert_eq!(requests(&mut studio), [ConversationRequest::Unfollow { session }]);
+    assert!(thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }));
     assert!(terminal_focused(&view, cx, session), "the keyboard goes back to the TUI");
 
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
     });
     cx.run_until_parked();
-    assert_eq!(requests(&mut studio), [ConversationRequest::Follow { session }], "the pick stuck");
+    assert!(follows(&thread_requests(&mut studio), thread), "the thread again");
     view.update_in(cx, |v, _w, cx| {
         let key = studio.key;
         v.apply_sync(
@@ -223,29 +140,7 @@ fn closing_the_tile_or_the_agent_leaving_unfollows(cx: &mut TestAppContext) {
         );
     });
     cx.run_until_parked();
-    assert_eq!(requests(&mut studio), [ConversationRequest::Unfollow { session }]);
-}
-
-/// On a phone-width layout an agent's tile shows its conversation until the person picks
-/// the TUI, and the pick stays.
-#[gpui::test]
-fn a_phone_shows_the_face_first(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    cx.simulate_resize(size(px(390.0), px(844.0)));
-    cx.run_until_parked();
-    let mut studio = connect(&view, cx, 1, "studio");
-    let session = SessionId::new();
-    let _tile = opens(&view, cx, &studio, session, studio.me, 1);
-    studio.drain();
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
-    });
-    cx.run_until_parked();
-    assert!(face_shown(&view, cx, session));
-    assert_eq!(requests(&mut studio), [ConversationRequest::Follow { session }]);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    assert!(!face_shown(&view, cx, session), "the person picked the TUI");
+    assert!(thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }));
 }
 
 /// On a phone the title of an agent's tile reads whole beside its pill. The pill says the
@@ -296,156 +191,73 @@ fn a_phone_header_keeps_its_title_and_the_pill_gives_way(cx: &mut TestAppContext
     assert!((other - word).abs() < 0.5, "the word, not the ask: {other} against {word}");
 }
 
-/// While the face shows the agent mid-turn (a block still streaming, a call in flight), its
-/// tile is marked working though the worker's hook still says idle, and its row's second line
-/// does not say "Idle"; once the block settles the mark follows the hook again. The face projects
-/// the transcript; it drives nothing.
+/// While the agent's thread says a turn runs, its tile is marked working though the worker's
+/// hook still says idle, and its row's second line does not say "Idle"; once the thread rests
+/// the mark follows the hook again. The thread folds in the transcript; it drives nothing.
 #[gpui::test]
-fn a_face_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppContext) {
+fn a_thread_mid_turn_marks_its_tile_working_while_the_hook_lags(cx: &mut TestAppContext) {
     use std::time::SystemTime;
-
-    use slopty_proto::conversation::{
-        BashDetail, Body, Change, Clipped, ConversationEvent, Entry, Live, LiveId, LiveKind,
-        ShellStatus, ThreadId, ToolCall, ToolDetail,
-    };
-
-    use crate::icons::Status;
 
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (tile, session) = agent_tile(&view, cx, &mut studio);
-    cx.simulate_keystrokes("cmd-j");
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Idle, ..blocked(session) }, cx);
     });
-    cx.run_until_parked();
+    let mut state = thread_on(session);
+    state.status.phase = Phase::Idle;
+    table(&view, cx, studio.key, vec![state.row(WallMs::ZERO)]);
     let mark = |cx: &mut VisualTestContext| {
         view.read_with(cx, |v, _| v.item(tile).and_then(|item| v.tile_status(tile, item)))
     };
     assert_eq!(mark(cx), Some(Status::Idle), "the hook's word");
 
-    let id = LiveId { turn: "t1".into(), step: 0, block: 0 };
-    let start = Live::Start { thread: ThreadId::Main, id: id.clone(), kind: LiveKind::Text };
-    view.update_in(cx, |v, _w, cx| {
-        v.conversation_event(session, ConversationEvent::Live(vec![start]), cx);
+    state.status.phase = Phase::Working;
+    let mut row = state.row(WallMs::ZERO);
+    row.last_line = Some("Running **the tests**".to_owned());
+    table(&view, cx, studio.key, vec![row]);
+    assert_eq!(mark(cx), Some(Status::Working), "the thread knows better");
+    let said = view.read_with(cx, |v, cx| {
+        v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0).unwrap_or_default()
     });
-    cx.run_until_parked();
-    assert_eq!(mark(cx), Some(Status::Working), "the face knows better");
-    // The row's second line: what the face says, never the hook's "Idle".
-    let meta = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| {
-            v.item(tile).map(|item| v.tile_meta(item, SystemTime::now(), cx).0).unwrap_or_default()
-        })
-    };
-    let said = meta(cx);
     assert!(!said.contains("Idle"), "{said:?}");
+    let line = view.read_with(cx, |v, _| v.face_summary(session));
+    assert_eq!(line.as_deref(), Some("Running the tests"), "its last line, said plainly");
 
-    view.update_in(cx, |v, _w, cx| {
-        v.conversation_event(session, ConversationEvent::Live(vec![Live::Clear { id }]), cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(mark(cx), Some(Status::Idle), "settled: the hook's word again");
-
-    // A call whose input is still streaming has no entry yet: the lines name it as its live
-    // row does.
-    let streaming = LiveId { turn: "t1".into(), step: 1, block: 0 };
-    let kind = LiveKind::Tool { id: "toolu_0".into(), name: "Bash".into() };
-    let events = vec![
-        Live::Start { thread: ThreadId::Main, id: streaming.clone(), kind },
-        Live::Append { id: streaming.clone(), text: r#"{"command": "echo hi""#.into() },
-    ];
-    view.update_in(cx, |v, _w, cx| {
-        v.conversation_event(session, ConversationEvent::Live(events), cx);
-    });
-    cx.run_until_parked();
-    let said = meta(cx);
-    assert!(said.contains("echo hi"), "{said:?}");
-    view.update_in(cx, |v, _w, cx| {
-        let clear = Live::Clear { id: streaming };
-        v.conversation_event(session, ConversationEvent::Live(vec![clear]), cx);
-    });
-    cx.run_until_parked();
-
-    // A call in flight with no answer before it: the face's summary names the call.
-    let call = ToolCall {
-        name: "Bash".into(),
-        detail: ToolDetail::Bash(BashDetail {
-            command: Clipped { text: "echo hi".into(), lines: 1, chars: 7, full: None },
-            description: None,
-            background: false,
-            task_id: None,
-            status: ShellStatus::Running,
-            exit_code: None,
-            stdout: None,
-            stderr: None,
-            output_file: None,
-            finished_ms: None,
-        }),
-        result: None,
-    };
-    let entry =
-        Entry { id: "toolu_1".into(), at_ms: WallMs::ZERO, body: Body::Tool(Box::new(call)) };
-    let upsert = Change::Upsert { thread: ThreadId::Main, entry };
-    view.update_in(cx, |v, _w, cx| {
-        v.conversation_event(session, ConversationEvent::Changes(vec![upsert]), cx);
-    });
-    cx.run_until_parked();
-    assert_eq!(mark(cx), Some(Status::Working), "a call in flight");
-    let said = meta(cx);
-    assert!(!said.contains("Idle") && said.contains("echo hi"), "{said:?}");
+    state.status.phase = Phase::Idle;
+    table(&view, cx, studio.key, vec![state.row(WallMs::ZERO)]);
+    assert_eq!(mark(cx), Some(Status::Idle), "at rest: the hook's word again");
 }
 
-/// While the face shows an approval, the card is the tile's statement: the header wears no
-/// pill saying the same thing above it. Over the TUI the pill is back.
+/// While the thread shows a request in its tray, that is the tile's statement: the header
+/// wears no pill saying the same thing above it. Over the TUI the pill is back.
 #[gpui::test]
-fn the_approval_card_is_said_once(cx: &mut TestAppContext) {
+fn the_request_is_said_once(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (tile, session) = agent_tile(&view, cx, &mut studio);
-    view.update_in(cx, |v, _w, cx| {
-        v.agent_event(blocked(session), cx);
-        v.show_face(session, true, cx);
-    });
-    cx.run_until_parked();
-    view.update_in(cx, |v, _w, cx| {
-        let asked = fixtures::bash_prompt(session, 7);
-        v.permission_event(PermissionEvent::Asked(Box::new(asked)), cx);
-    });
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("approval").is_some(), "the card is up");
+    view.update_in(cx, |v, _w, cx| v.agent_event(blocked(session), cx));
+    let mut row = thread_on(session).row(WallMs::ZERO);
+    row.requests = vec![RequestCard {
+        id: AskId("ask-1".to_owned()),
+        item: None,
+        kind: Request::APPROVAL.to_owned(),
+        title: "Run `cargo test`".to_owned(),
+        options: Vec::new(),
+        opened_ms: WallMs::ZERO,
+    }];
+    table(&view, cx, studio.key, vec![row]);
+    assert!(view.read_with(cx, |v, _| v.face_asks(session)), "the thread asks");
     assert!(cx.debug_bounds(selector("agent", tile.item)).is_none(), "no pill over it");
     view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds(selector("agent", tile.item)).is_some(), "the TUI's header says it");
 }
 
-/// An agent that has not titled itself is named by its session's first prompt once its face
-/// has read the conversation, rather than "Claude Code" beside "Claude Code 2".
+/// Two agents that have not titled themselves read alike, "Claude Code" and "Claude Code 2",
+/// until one's thread is titled; that one is then named by it and the other loses its number.
 #[gpui::test]
-fn an_untitled_agent_is_named_by_its_first_prompt(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (_tile, session) = agent_tile(&view, cx, &mut studio);
-    let title = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.terminal_title(session));
-    assert_eq!(title(cx), "Claude Code", "nothing read yet");
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    view.update_in(cx, |v, _w, cx| {
-        for event in fixtures::events("edit") {
-            v.conversation_event(session, event, cx);
-        }
-    });
-    cx.run_until_parked();
-    let prompt = view
-        .read_with(cx, |v, cx| v.conversation(session).and_then(|f| f.read(cx).first_prompt()))
-        .expect("the recorded session opens on a prompt");
-    assert_eq!(title(cx), prompt);
-}
-
-/// Two untitled agents read alike until one's first prompt names it; the other then loses its
-/// number, though nothing but the face's news changed.
-#[gpui::test]
-fn a_first_prompt_renumbers_the_agents_that_read_alike(cx: &mut TestAppContext) {
+fn an_untitled_agent_is_named_by_its_thread(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (first, one) = agent_tile(&view, cx, &mut studio);
@@ -453,112 +265,23 @@ fn a_first_prompt_renumbers_the_agents_that_read_alike(cx: &mut TestAppContext) 
     let second = opens(&view, cx, &studio, two, studio.me, 2);
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(two) }, cx);
-        v.focus_tile(first, cx);
     });
     cx.run_until_parked();
     let titles = |cx: &mut VisualTestContext| {
         view.read_with(cx, |v, _| [first, second].map(|t| v.tile_title(v.item(t).unwrap())))
     };
     assert_eq!(titles(cx), ["Claude Code", "Claude Code 2"]);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    let first_prompt = |cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.conversation(one).and_then(|f| f.read(cx).first_prompt()))
-    };
-    for event in fixtures::events("edit") {
-        view.update_in(cx, |v, _w, cx| v.conversation_event(one, event, cx));
-        cx.run_until_parked();
-        if let Some(prompt) = first_prompt(cx) {
-            assert_eq!(titles(cx), [prompt, "Claude Code".to_owned()]);
-            return;
-        }
-    }
-    panic!("the recorded session has a prompt");
+    let mut row = thread_on(one).row(WallMs::ZERO);
+    row.title = "Fix the flaky test".to_owned();
+    table(&view, cx, studio.key, vec![row]);
+    assert_eq!(titles(cx), ["Fix the flaky test", "Claude Code"]);
 }
 
-/// A link that drops under a shown face leaves the face on its tile: the draft stays, the
-/// composer says the worker is away, and no pill is laid over it to say so twice.
-#[gpui::test]
-fn a_face_stays_through_a_dropped_link_with_its_draft(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut studio = connect(&view, cx, 1, "studio");
-    let (tile, session) = agent_tile(&view, cx, &mut studio);
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    cx.simulate_input("half a thought");
-    cx.run_until_parked();
-    let face = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("a face");
-
-    let key = studio.key;
-    view.update_in(cx, |v, _w, cx| {
-        v.disconnect_worker(key, WorkerStatus::Unreachable, cx);
-    });
-    cx.run_until_parked();
-    assert!(face_shown(&view, cx, session), "the face stays on its tile");
-    assert!(cx.debug_bounds("composer").is_some(), "and is drawn");
-    let kept = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("kept");
-    assert_eq!(kept.entity_id(), face.entity_id(), "the same face, not a new one");
-    assert_eq!(face.read_with(cx, ConversationView::draft), "half a thought");
-    assert_eq!(face.read_with(cx, |f, _| f.away().map(str::to_owned)), Some("studio".to_owned()));
-    assert!(
-        cx.debug_bounds(selector("state", tile.item)).is_none(),
-        "the composer says it; no pill says it again"
-    );
-
-    // The worker is back with the agent still at work: the same face follows again on the new
-    // link, its draft kept, over the same shell.
-    let shell = view.read_with(cx, |v, _| v.terminal(session).map(Entity::entity_id));
-    let (tx, rx) = mpsc::channel(256);
-    let factory: ScreenFactory =
-        Arc::new(|stream, _codec| slopty_client::ScreenHandle::detached(stream));
-    let me = ClientId::new();
-    let working = SessionAgent {
-        kind: AgentKind::ClaudeCode,
-        status: AgentStatus::Working,
-        source: AgentSource::Hook,
-        since_ms: WallMs::ZERO,
-        mode: None,
-    };
-    let sessions = vec![SessionSummary { agent: Some(working), ..summary(session, None) }];
-    view.update_in(cx, |v, _w, cx| {
-        let link = WorkerLink { me, out: tx, open_screen: factory, remote: None };
-        v.connect_worker(key, link, hello("studio", sessions), cx);
-    });
-    studio.rx = rx;
-    cx.run_until_parked();
-    assert!(face_shown(&view, cx, session), "still the face");
-    let again = view.read_with(cx, |v, _| v.conversation(session).map(Entity::entity_id));
-    assert_eq!(again, Some(face.entity_id()), "the same face");
-    assert_eq!(view.read_with(cx, |v, _| v.terminal(session).map(Entity::entity_id)), shell);
-    assert_eq!(face.read_with(cx, ConversationView::draft), "half a thought");
-    assert_eq!(face.read_with(cx, |f, _| f.away().map(str::to_owned)), None, "no longer away");
-    assert!(
-        requests(&mut studio)
-            .iter()
-            .any(|r| matches!(r, ConversationRequest::Follow { session: s } if *s == session)),
-        "followed again on the new link"
-    );
-}
-
-/// What the workspace asked of the worker about threads.
-fn thread_requests(fake: &mut Fake) -> Vec<slopty_proto::thread::wire::ThreadRequest> {
-    fake.drain()
-        .into_iter()
-        .filter_map(|m| match m {
-            ClientMsg::Thread(req) => Some(req),
-            _ => None,
-        })
-        .collect()
-}
-
-/// An agent tile whose terminal the worker's thread table names opens on its face on a Mac
-/// too, and on its thread view: the link brings the table and the thread's frames into it,
-/// the TUI picked lets the thread go, and a dropped link keeps what it showed.
+/// An agent tile whose terminal the worker's thread table names opens on its thread view on a
+/// Mac too: the link brings the table and the thread's frames into it, a dropped link keeps
+/// what it showed, and a new one catches up from where it stood.
 #[gpui::test]
 fn an_agent_with_a_thread_opens_on_its_thread_view(cx: &mut TestAppContext) {
-    use slopty_proto::thread::Cursor;
-    use slopty_proto::thread::wire::{TableFrame, ThreadFrame, ThreadRequest};
-
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (_tile, session) = agent_tile(&view, cx, &mut studio);
@@ -567,22 +290,16 @@ fn an_agent_with_a_thread_opens_on_its_thread_view(cx: &mut TestAppContext) {
     assert_eq!(thread_requests(&mut studio), [ThreadRequest::Table { have: None }]);
     assert!(!face_shown(&view, cx, session), "the TUI until a thread is known");
 
-    let mut state = crate::conversation::thread::fixtures::thread("edit");
-    state.meta.terminal = Some(session);
+    let state = thread_on(session);
     let thread = state.meta.id;
-    let table = TableFrame::Snapshot {
-        cursor: Cursor { epoch: 1, seq: 1 },
-        rows: vec![state.row(WallMs::ZERO)],
-    };
-    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
-    cx.run_until_parked();
+    table(&view, cx, key, vec![state.row(WallMs::ZERO)]);
     assert!(face_shown(&view, cx, session), "face-first once the agent has a thread");
-    let follows = thread_requests(&mut studio);
+    let follows_now = thread_requests(&mut studio);
     assert!(
-        follows.iter().any(
+        follows_now.iter().any(
             |r| matches!(r, ThreadRequest::Follow { thread: t, have: None, .. } if *t == thread)
         ),
-        "its thread view follows it: {follows:?}"
+        "its thread view follows it: {follows_now:?}"
     );
     let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("a thread view");
     let snapshot =
@@ -605,30 +322,18 @@ fn an_agent_with_a_thread_opens_on_its_thread_view(cx: &mut TestAppContext) {
             .any(|r| matches!(r, ThreadRequest::Follow { have: Some(Cursor { seq: 40, .. }), .. })),
         "caught up from where it stood: {again:?}"
     );
-
-    drop(face);
-    view.update_in(cx, |v, _w, cx| v.show_face(session, false, cx));
-    cx.run_until_parked();
-    assert!(!face_shown(&view, cx, session));
-    assert!(view.read_with(cx, |v, _| v.thread_face(session).is_none()));
-    assert!(
-        thread_requests(&mut studio).contains(&ThreadRequest::Unfollow { thread }),
-        "the TUI picked lets the thread go"
-    );
 }
 
 /// An agent's subagents are the table's rows whose chain of parents reaches its thread, however
 /// deep; another agent's are not, nor a chain that loops.
 #[gpui::test]
 fn an_agent_s_subagents_are_the_rows_under_its_thread(cx: &mut TestAppContext) {
-    use slopty_proto::thread::wire::TableFrame;
-    use slopty_proto::thread::{Cursor, ItemId, Link, ThreadId};
+    use slopty_proto::thread::{ItemId, Link, ThreadId};
 
     let (view, cx) = workspace(cx);
     let mut studio = connect(&view, cx, 1, "studio");
     let (_tile, session) = agent_tile(&view, cx, &mut studio);
     let key = studio.key;
-    view.update_in(cx, |v, _w, cx| v.threads_linked(key, cx));
 
     let mut root = crate::conversation::thread::fixtures::empty();
     root.meta.terminal = Some(session);
@@ -643,9 +348,7 @@ fn an_agent_s_subagents_are_the_rows_under_its_thread(cx: &mut TestAppContext) {
     let mut looping = row(None);
     looping.parent = Some(Link { thread: looping.id, item: ItemId("call".to_owned()) });
     let rows = vec![root.row(WallMs::ZERO), child.clone(), grandchild.clone(), other, looping];
-    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows };
-    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
-    cx.run_until_parked();
+    table(&view, cx, key, rows);
 
     let mut found: Vec<ThreadId> =
         view.read_with(cx, |v, cx| v.subagents(session, cx).into_iter().map(|r| r.id).collect());
@@ -653,4 +356,55 @@ fn an_agent_s_subagents_are_the_rows_under_its_thread(cx: &mut TestAppContext) {
     let mut want = vec![child.id, grandchild.id];
     want.sort();
     assert_eq!(found, want);
+}
+
+/// A thread the worker started from another (a branch) opens as a tile of its own; an aside
+/// stays in the sheet of the view that asked it, and its row is nobody's: no tile, no terminal's
+/// thread, no wait counted.
+#[gpui::test]
+fn a_branch_opens_as_a_tile_and_an_aside_does_not(cx: &mut TestAppContext) {
+    let (view, cx) = workspace(cx);
+    let mut studio = connect(&view, cx, 1, "studio");
+    let (_tile, session) = agent_tile(&view, cx, &mut studio);
+    let key = studio.key;
+    let mut state = thread_on(session);
+    state.meta.caps.push(slopty_proto::thread::Cap::named(slopty_proto::thread::Cap::FORK));
+    let thread = state.meta.id;
+    table(&view, cx, key, vec![state.row(WallMs::ZERO)]);
+    let started = |cx: &mut VisualTestContext, intent: Intent| {
+        let made = slopty_proto::thread::ThreadId::new();
+        view.update_in(cx, |v, _w, cx| {
+            let hub = v.thread_hub(key, cx);
+            let id = hub.update(cx, |hub, cx| hub.intent(thread, intent, cx));
+            let done = IntentDone { id, outcome: Outcome::Started { thread: made } };
+            v.thread_done(key, &done, cx);
+        });
+        cx.run_until_parked();
+        made
+    };
+
+    let branch = started(cx, Intent::Fork { after: None });
+    assert!(view.read_with(cx, |v, _| v.tile_of_thread(branch)).is_some(), "the branch's tile");
+
+    let aside = started(cx, Intent::Aside);
+    assert!(view.read_with(cx, |v, _| v.tile_of_thread(aside)).is_none(), "no tile for an aside");
+    let mut asked = crate::conversation::thread::fixtures::empty();
+    asked.meta.id = aside;
+    asked.meta.terminal = Some(session);
+    asked.meta.facts.insert(ThreadMeta::ASIDE_FACT.to_owned(), thread.to_string());
+    let mut aside_row = asked.row(WallMs::ZERO);
+    aside_row.requests = vec![RequestCard {
+        id: AskId("ask-1".to_owned()),
+        item: None,
+        kind: Request::APPROVAL.to_owned(),
+        title: "Run `ls`".to_owned(),
+        options: Vec::new(),
+        opened_ms: WallMs::ZERO,
+    }];
+    table(&view, cx, key, vec![state.row(WallMs::ZERO), aside_row]);
+    view.read_with(cx, |v, _| {
+        assert_eq!(v.session_thread(session), Some(thread), "the terminal's thread stays its own");
+        assert!(v.thread_request(aside).is_none(), "no row of its own in the chrome");
+        assert_eq!(v.needs_you_count(), 0, "its request is the sheet's");
+    });
 }

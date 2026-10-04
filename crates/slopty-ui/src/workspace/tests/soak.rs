@@ -13,7 +13,6 @@ use slopty_proto::file::FileRead;
 
 use super::leaks::{close, closes_clean_times, next, studio};
 use super::*;
-use crate::conversation::fixtures;
 
 /// How many times the soak opens and closes every kind; unset, [`GATE_CYCLES`].
 const CYCLES_ENV: &str = "SLOPTY_SOAK_CYCLES";
@@ -25,7 +24,7 @@ fn cycles() -> usize {
     std::env::var(CYCLES_ENV).ok().and_then(|n| n.parse().ok()).unwrap_or(GATE_CYCLES)
 }
 
-/// Views a cycle holds on to: a terminal, an agent, its face, a file, a folder, a note, a
+/// Views a cycle holds on to: a terminal, an agent, its thread, a file, a folder, a note, a
 /// screen and a page.
 const KINDS: usize = 8;
 
@@ -59,17 +58,18 @@ fn shells(
         v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
-    view.update_in(cx, |v, _w, cx| {
-        for event in fixtures::events("edit") {
-            v.conversation_event(agent, event, cx);
-        }
-    });
+    let thread = agent_thread(view, cx, fake.key, agent);
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.id = thread;
+    state.meta.terminal = Some(agent);
+    let cursor = slopty_proto::thread::Cursor { epoch: 1, seq: 40 };
+    let snapshot =
+        slopty_proto::thread::wire::ThreadFrame::Snapshot { cursor, state: Box::new(state) };
+    view.update_in(cx, |v, _w, cx| v.thread_frame(fake.key, thread, snapshot, cx));
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
         hold(held, "agent", v.terminals.get(&agent));
-        hold(held, "conversation", v.conversation(agent));
+        hold(held, "thread", v.thread_face(agent));
     });
     close(view, cx, tile);
 

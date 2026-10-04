@@ -8,13 +8,12 @@ use slopty_core::{ClientId, WallMs};
 use slopty_platform::notify::Memory;
 use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, AgentStatus, BlockReason};
-use slopty_proto::conversation::{
-    Clipped, ConversationRequest, PermissionEvent, PermissionPrompt, ToolDetail,
-};
 use slopty_proto::handshake::HelloAck;
 use slopty_proto::items::{Item, ItemOp, ItemSync};
 use slopty_proto::server::{Os, WorkerCaps};
 use slopty_proto::terminal::{SessionState, SessionSummary};
+use slopty_proto::thread::wire::{Intent, RequestCard, TableFrame, ThreadRequest, ThreadRow};
+use slopty_proto::thread::{AskId, Choice, Cursor, Effect, Request, ThreadState};
 use slopty_theme::Theme;
 use tokio::sync::mpsc;
 
@@ -533,34 +532,78 @@ fn press(cx: &mut VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-fn conversation(link: &mut mpsc::Receiver<ClientMsg>) -> Vec<ConversationRequest> {
+/// The thread requests the workspace sent on `link`.
+fn thread_sent(link: &mut mpsc::Receiver<ClientMsg>) -> Vec<ThreadRequest> {
     std::iter::from_fn(|| link.try_recv().ok())
         .filter_map(|msg| match msg {
-            ClientMsg::Conversation(req) => Some(req),
+            ClientMsg::Thread(req) => Some(req),
             _ => None,
         })
         .collect()
 }
 
-fn asked(session: SessionId, ask: u64, tool: &str) -> PermissionEvent {
-    PermissionEvent::Asked(Box::new(PermissionPrompt {
-        session,
-        ask,
-        tool: tool.to_owned(),
-        detail: ToolDetail::Other {
-            input: Clipped { text: String::new(), lines: 0, chars: 0, full: None },
-        },
-        suggestions: Vec::new(),
-        mode: None,
-        asked_ms: WallMs::ZERO,
-        until_ms: WallMs::ZERO,
-    }))
+/// The intents among `sent`, by the request they answer or hand back.
+fn intents(sent: &[ThreadRequest]) -> Vec<Intent> {
+    sent.iter()
+        .filter_map(|r| match r {
+            ThreadRequest::Intent {
+                intent: i @ (Intent::Answer { .. } | Intent::Release { .. }),
+                ..
+            } => Some(i.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
-/// The workspace asks its worker for approvals as it links. A yes or no held for it rides the
-/// agent's note: "Allow" on the note answers it once and moves nothing, a second press says it
-/// no longer waits, and its row's "Deny" and "Allow" under *Needs you* answer the next ones
-/// without going to the agent. A question never gets the buttons.
+fn allowed(ask: &str) -> Intent {
+    Intent::Answer { ask: AskId(ask.to_owned()), choice: "accept".to_owned(), message: None }
+}
+
+fn denied(ask: &str) -> Intent {
+    Intent::Answer { ask: AskId(ask.to_owned()), choice: "decline".to_owned(), message: None }
+}
+
+/// The thread whose TUI runs in `session`, its row asking `ask` of `kind`, or nothing.
+fn asking_row(state: &ThreadState, ask: Option<(&str, &str)>) -> ThreadRow {
+    let choice = |id: &str, effect| Choice {
+        id: id.to_owned(),
+        label: id.to_owned(),
+        effect,
+        scope: None,
+        stops: false,
+    };
+    let mut row = state.row(WallMs::ZERO);
+    row.requests = ask
+        .map(|(id, kind)| RequestCard {
+            id: AskId(id.to_owned()),
+            item: None,
+            kind: kind.to_owned(),
+            title: "Run `cargo test`".to_owned(),
+            options: vec![choice("accept", Effect::Allow), choice("decline", Effect::Deny)],
+            opened_ms: WallMs::ZERO,
+        })
+        .into_iter()
+        .collect();
+    row
+}
+
+/// `key`'s thread table, its one row `row`.
+fn table(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, key: WorkerKey, row: ThreadRow) {
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![row] };
+    view.update_in(cx, |v, _window, cx| v.thread_table(key, &table, cx));
+    cx.run_until_parked();
+}
+
+fn thread_on(session: SessionId) -> ThreadState {
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    state
+}
+
+/// A yes or no on the agent's thread rides the agent's note: "Allow" on the note answers it
+/// once and moves nothing, a second press sends nothing, and its row's "Deny" and "Allow" under
+/// *Needs you* answer the next ones without going to the agent. A question never gets the
+/// buttons.
 #[gpui::test]
 fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -569,116 +612,104 @@ fn an_approval_is_answered_from_the_note_and_its_row_where_they_are(cx: &mut Tes
     let (tiles, mut link) = worker(&view, cx, key, "mini", &[session, other]);
     view.update_in(cx, |v, _window, cx| {
         v.focus_tile(tiles[1], cx);
-        v.agent_event(
-            AgentEvent {
-                session,
-                kind: AgentKind::ClaudeCode,
-                status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
-                agent_session: None,
-                detail: Some("$ cargo test".into()),
-                attention: true,
-                source: AgentSource::Hook,
-                since_ms: WallMs::ZERO,
-                mode: None,
-            },
-            cx,
-        );
+        v.agent_event(blocked_on(session), cx);
+        v.threads_linked(key, cx);
     });
-    cx.run_until_parked();
-    assert_eq!(conversation(&mut link), [ConversationRequest::Approvals { on: true }]);
+    let state = thread_on(session);
+    let thread = state.meta.id;
 
-    view.update_in(cx, |v, _window, cx| {
-        v.permission_event(asked(session, 7, "AskUserQuestion"), cx);
-    });
+    table(&view, cx, key, asking_row(&state, Some(("q-1", Request::QUESTION))));
     let none = view.update(cx, |v, _| v.attention_look().asking[0].approval.clone());
-    assert_eq!(none, None, "a question waits for the conversation");
+    assert_eq!(none, None, "a question waits for the thread");
 
-    view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 8, "Bash"), cx));
+    table(&view, cx, key, asking_row(&state, Some(("ask-8", Request::APPROVAL))));
+    thread_sent(&mut link);
     let tap = view.update(cx, |v, _| {
         let look = v.attention_look();
         let [asks] = look.asking.as_slice() else { panic!("one agent asks: {look:?}") };
-        assert_eq!(asks.approval.as_deref(), Some("8"), "the note answers the prompt held");
+        assert_eq!(asks.approval.as_deref(), Some("ask-8"), "the note answers the request");
         let note = asks.note(false);
         Tap { id: note.id, info: note.info, action: Some(notify::ALLOW.to_owned()) }
     });
     view.update_in(cx, |v, _window, cx| v.open_notification(&tap, cx));
-    let answer = ConversationRequest::Answer { session, ask: 8, verdict: Verdict::Allow };
-    assert_eq!(conversation(&mut link), [answer], "allowed once");
+    assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-8")], "allowed once");
     view.update_in(cx, |v, _window, cx| {
         assert_eq!(v.focused(), Some(tiles[1]), "the answer moved nothing");
         v.open_notification(&tap, cx);
     });
-    assert!(conversation(&mut link).is_empty(), "a second press sends nothing");
+    assert!(intents(&thread_sent(&mut link)).is_empty(), "a second press sends nothing");
 
-    view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 9, "Bash"), cx));
+    table(&view, cx, key, asking_row(&state, Some(("ask-9", Request::APPROVAL))));
     cx.update(|_w, cx| cx.set_reduce_motion(true));
     cx.run_until_parked();
-    press(cx, leak(format!("nav-deny-{session}")));
-    let deny = Verdict::Deny { message: String::new(), interrupt: false };
-    let answer = ConversationRequest::Answer { session, ask: 9, verdict: deny };
-    assert_eq!(conversation(&mut link), [answer], "denied from its row");
+    press(cx, leak(format!("nav-deny-{thread}")));
+    assert_eq!(intents(&thread_sent(&mut link)), [denied("ask-9")], "denied from its row");
     view.update(cx, |v, _cx| {
         assert_eq!(v.focused(), Some(tiles[1]), "without going to the agent");
-        assert!(v.approval(session).is_none(), "answered");
+        assert!(v.session_answer(session).is_none(), "answered");
     });
 
-    view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 10, "Bash"), cx));
+    table(&view, cx, key, asking_row(&state, Some(("ask-10", Request::APPROVAL))));
     cx.run_until_parked();
-    press(cx, leak(format!("nav-allow-{session}")));
-    let answer = ConversationRequest::Answer { session, ask: 10, verdict: Verdict::Allow };
-    assert_eq!(conversation(&mut link), [answer], "allowed from its row");
+    press(cx, leak(format!("nav-allow-{thread}")));
+    assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-10")], "allowed from its row");
     assert!(
-        cx.debug_bounds(leak(format!("nav-allow-{session}"))).is_none(),
+        cx.debug_bounds(leak(format!("nav-allow-{thread}"))).is_none(),
         "answered, the row has no buttons"
     );
 }
 
-/// The person looking at the session's terminal with the app in front gets Claude Code's own
-/// dialog at once: the prompt is handed back rather than held for a button. With the app away,
-/// it waits for the note's buttons.
+/// The person looking at the agent's terminal, its TUI shown, with the app in front gets the
+/// agent's own dialog at once: the request is handed back rather than held for a button. With
+/// the app away, it waits for the note's buttons.
 #[gpui::test]
-fn a_prompt_whose_terminal_is_in_front_goes_back_to_it(cx: &mut TestAppContext) {
+fn a_request_whose_terminal_is_in_front_goes_back_to_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
-    let (tiles, mut link) = worker(&view, cx, WorkerKey::new(7), "mini", &[session]);
+    let key = WorkerKey::new(7);
+    let (tiles, mut link) = worker(&view, cx, key, "mini", &[session]);
     view.update_in(cx, |v, _window, cx| {
+        v.agent_event(blocked_on(session), cx);
+        v.threads_linked(key, cx);
         v.focus_tile(tiles[0], cx);
+        v.show_face(session, false, cx);
         v.set_app_active(false, cx);
-        v.permission_event(asked(session, 3, "Bash"), cx);
     });
-    cx.run_until_parked();
-    assert_eq!(conversation(&mut link), [ConversationRequest::Approvals { on: true }]);
-    view.update(cx, |v, _cx| assert!(v.approval(session).is_some(), "away, it waits"));
+    let state = thread_on(session);
+    table(&view, cx, key, asking_row(&state, Some(("ask-3", Request::APPROVAL))));
+    assert!(intents(&thread_sent(&mut link)).is_empty(), "away, it waits");
+    view.update(cx, |v, _cx| assert!(v.session_answer(session).is_some(), "for the note"));
     view.update_in(cx, |v, _window, cx| v.set_app_active(true, cx));
     cx.run_until_parked();
-    assert_eq!(conversation(&mut link), [ConversationRequest::Release { session, ask: 3 }]);
-    view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 4, "Bash"), cx));
-    cx.run_until_parked();
-    let sent = conversation(&mut link);
-    assert!(
-        sent.contains(&ConversationRequest::Release { session, ask: 4 }),
-        "handed back: {sent:?}"
-    );
-    view.update(cx, |v, _cx| assert!(v.approval(session).is_none(), "and not offered here"));
+    let release = |ask: &str| Intent::Release { ask: AskId(ask.to_owned()) };
+    assert_eq!(intents(&thread_sent(&mut link)), [release("ask-3")]);
+    table(&view, cx, key, asking_row(&state, Some(("ask-4", Request::APPROVAL))));
+    assert_eq!(intents(&thread_sent(&mut link)), [release("ask-4")], "handed back");
+    view.update(cx, |v, _cx| assert!(v.session_answer(session).is_none(), "and not offered"));
 }
 
-/// A note's "Allow" that comes before its prompt (the tap launched the app, or the link is
-/// new and the worker has not sent what it holds) waits for it and answers it once it is here.
-/// One whose prompt never comes says so once the worker has had time to send it: a toast in
-/// front, the app's own note while it is away. One whose worker is not reached gives up after
-/// a while.
+/// A note's "Allow" that comes before its request (the tap launched the app, or the link is
+/// new and the worker's table has not come) waits for it and answers it once it is here. One
+/// whose request never comes says so once the table has had time to come: a toast in front,
+/// the app's own note while it is away. One whose worker is not reached gives up after a while.
 #[gpui::test]
-fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
+fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
     use crate::workspace::approvals::{HOLD_VERDICT, NOT_REACHED, SYNCED};
     let (view, cx) = workspace(cx);
     let session = SessionId::new();
     let key = WorkerKey::new(7);
     let (tiles, mut link) = worker(&view, cx, key, "mini", &[session]);
-    assert_eq!(conversation(&mut link), [ConversationRequest::Approvals { on: true }]);
+    view.update_in(cx, |v, _window, cx| {
+        v.agent_event(blocked_on(session), cx);
+        v.threads_linked(key, cx);
+    });
+    let state = thread_on(session);
+    table(&view, cx, key, asking_row(&state, None));
+    thread_sent(&mut link);
     let route = Route { worker: key, item: Some(tiles[0].item), about: About::Session(session) };
-    let tap = |route: Route, ask: u64, action: &str| {
+    let tap = |route: Route, ask: &str, action: &str| {
         let mut info = route.info();
-        info.insert(ASK.to_owned(), ask.to_string());
+        info.insert(ASK.to_owned(), ask.to_owned());
         Tap { id: route.about.note_id(), info, action: Some(action.to_owned()) }
     };
     let events = Rc::new(std::cell::RefCell::new(Vec::new()));
@@ -691,32 +722,34 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
     });
     let toast = |cx: &mut VisualTestContext| view.read_with(cx, |v, _| v.toast_text());
 
-    view.update_in(cx, |v, _window, cx| v.open_notification(&tap(route, 8, notify::ALLOW), cx));
+    view.update_in(cx, |v, _window, cx| {
+        v.open_notification(&tap(route, "ask-8", notify::ALLOW), cx);
+    });
     cx.run_until_parked();
-    assert!(conversation(&mut link).is_empty(), "the prompt is not here yet: it waits");
+    assert!(intents(&thread_sent(&mut link)).is_empty(), "the request is not here yet: it waits");
     assert_eq!(toast(cx), None, "nothing said yet");
-    view.update_in(cx, |v, _window, cx| v.permission_event(asked(session, 8, "Bash"), cx));
-    cx.run_until_parked();
-    let answer = ConversationRequest::Answer { session, ask: 8, verdict: Verdict::Allow };
-    assert_eq!(conversation(&mut link), [answer], "answered as it came");
+    table(&view, cx, key, asking_row(&state, Some(("ask-8", Request::APPROVAL))));
+    assert_eq!(intents(&thread_sent(&mut link)), [allowed("ask-8")], "answered as it came");
     assert_eq!(
-        events.borrow().as_slice(),
-        [WorkspaceEvent::TapsSettled],
+        events.borrow().last(),
+        Some(&WorkspaceEvent::TapsSettled),
         "out: an app woken for it may sleep again"
     );
     events.borrow_mut().clear();
 
-    view.update_in(cx, |v, _window, cx| v.open_notification(&tap(route, 9, notify::DENY), cx));
+    view.update_in(cx, |v, _window, cx| {
+        v.open_notification(&tap(route, "ask-9", notify::DENY), cx);
+    });
     cx.run_until_parked();
-    assert_eq!(toast(cx), None, "still in time for the worker");
+    assert_eq!(toast(cx), None, "still in time for the table");
     cx.executor().advance_clock(SYNCED);
     cx.run_until_parked();
-    assert_eq!(toast(cx).as_deref(), Some(NO_LONGER_WAITING), "the worker sent all it holds");
-    assert_eq!(conversation(&mut link), Vec::<ConversationRequest>::new());
+    assert_eq!(toast(cx).as_deref(), Some(NO_LONGER_WAITING), "the table came without it");
+    assert_eq!(intents(&thread_sent(&mut link)), []);
 
     view.update_in(cx, |v, _window, cx| {
         v.set_app_active(false, cx);
-        v.open_notification(&tap(route, 10, notify::ALLOW), cx);
+        v.open_notification(&tap(route, "ask-10", notify::ALLOW), cx);
     });
     cx.run_until_parked();
     assert!(
@@ -728,7 +761,7 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
     let far =
         Route { worker: WorkerKey::new(99), item: None, about: About::Session(SessionId::new()) };
     events.borrow_mut().clear();
-    view.update_in(cx, |v, _window, cx| v.open_notification(&tap(far, 1, notify::ALLOW), cx));
+    view.update_in(cx, |v, _window, cx| v.open_notification(&tap(far, "ask-1", notify::ALLOW), cx));
     cx.executor().advance_clock(SYNCED);
     cx.run_until_parked();
     assert!(events.borrow().is_empty(), "a worker not linked yet is waited for");
@@ -739,6 +772,21 @@ fn a_notes_answer_waits_for_its_prompt(cx: &mut TestAppContext) {
         [WorkspaceEvent::Unanswered { route: far, why: NOT_REACHED }, WorkspaceEvent::TapsSettled],
         "until it is given up on"
     );
+}
+
+/// Claude Code waiting on a yes or no in `session`.
+fn blocked_on(session: SessionId) -> AgentEvent {
+    AgentEvent {
+        session,
+        kind: AgentKind::ClaudeCode,
+        status: AgentStatus::Blocked(BlockReason::Permission { tool: "Bash".into() }),
+        agent_session: None,
+        detail: Some("$ cargo test".into()),
+        attention: true,
+        source: AgentSource::Hook,
+        since_ms: WallMs::ZERO,
+        mode: None,
+    }
 }
 
 fn leak(text: String) -> &'static str {

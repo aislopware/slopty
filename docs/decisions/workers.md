@@ -451,7 +451,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   Measured (MEASUREMENTS.md, "one transcript read for every follower"): with 4 followers an
   idle tick costs about 53 µs instead of 210, an appended record about 130 µs instead of 335.
   Test: `followers_share_one_read_and_a_late_one_gets_it_whole` counts the reads. The follow
-  e2e (`a_followed_conversation_streams_and_holds_permission_for_the_follower`) runs on it.
+  e2e (`a_prompt_is_held_while_its_thread_is_followed`) runs on it.
 
 - ✅ **The item registry is written by one writer, compact, as it stands** (2026-09-28). Every
   item change used to start its own blocking task that cloned the whole registry and wrote it

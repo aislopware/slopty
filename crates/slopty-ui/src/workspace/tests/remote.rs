@@ -19,8 +19,7 @@ use slopty_proto::transfer::{
 };
 
 use super::*;
-use crate::conversation::ConversationView;
-use crate::conversation::composer::Attachment;
+use crate::conversation::attach::Attachment;
 
 /// What the workspace asked of a worker's [`Remote`].
 #[derive(Debug)]
@@ -653,10 +652,11 @@ fn a_promise_is_fetched_over_the_link_the_worker_has_now(cx: &mut TestAppContext
     assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
 
-/// A picture pasted into an agent's composer goes up to a directory of its own on the worker,
-/// with a chip in the composer from the paste until the message goes; the draft never holds its
-/// path, and nothing goes to the PTY until the message is sent, led by the landed path. A file
-/// dropped on the face, or picked with the paperclip, is attached the same way.
+/// A picture pasted into an agent's thread composer goes up to a directory of its own on the
+/// worker, with a chip in the composer from the paste until the message goes; the draft never
+/// holds its path, and nothing is sent until the message is, its text followed by the landed
+/// path. A file dropped on the thread, or picked with the attach button, is attached the same
+/// way.
 #[gpui::test]
 fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -666,10 +666,10 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
         v.focus_tile(tile, cx);
-        v.show_face(session, true, cx);
     });
     cx.run_until_parked();
-    let face = view.read_with(cx, |v, _| v.conversation(session).cloned()).expect("a face");
+    agent_thread(&view, cx, studio.key, session);
+    let face = view.read_with(cx, |v, _| v.thread_face(session).cloned()).expect("its thread");
     cx.simulate_input("look at");
     studio.drain();
 
@@ -692,7 +692,11 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     };
     assert_eq!(chips(cx), ["\u{2191} 0%"], "a chip while it uploads");
     assert!(cx.debug_bounds("composer-attachment").is_some(), "drawn in the composer");
-    assert_eq!(face.read_with(cx, ConversationView::draft), "look at", "nothing typed yet");
+    assert_eq!(
+        face.read_with(cx, crate::conversation::thread::ThreadView::draft),
+        "look at",
+        "nothing typed yet"
+    );
 
     view.update_in(cx, |v, _window, cx| {
         v.xfer_message(XferMsg::Progress { xfer, done: png.len() as u64 / 2 }, cx);
@@ -706,25 +710,30 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     cx.run_until_parked();
     assert_eq!(chips(cx).len(), 1, "the chip stays once it landed");
     assert!(cx.debug_bounds("composer-attachment-progress").is_none(), "done going up");
-    assert_eq!(face.read_with(cx, ConversationView::draft), "look at", "no path in the draft");
+    assert_eq!(
+        face.read_with(cx, crate::conversation::thread::ThreadView::draft),
+        "look at",
+        "no path in the draft"
+    );
     assert!(!file.exists(), "the scratch copy here goes with the upload");
-    let typed: Vec<ClientMsg> = studio
-        .drain()
-        .into_iter()
-        .filter(|m| matches!(m, ClientMsg::Term { req, .. } if req.is_input()))
-        .collect();
-    assert!(typed.is_empty(), "the chip waits for the message: {typed:?}");
+    let sent = |studio: &mut Fake| -> Vec<String> {
+        use slopty_proto::thread::wire::{Intent, ThreadRequest};
+        studio
+            .drain()
+            .into_iter()
+            .filter_map(|m| match m {
+                ClientMsg::Thread(ThreadRequest::Intent {
+                    intent: Intent::Send { text, .. },
+                    ..
+                }) => Some(text),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(sent(&mut studio).is_empty(), "the chip waits for the message");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let pasted: Vec<String> = studio
-        .drain()
-        .into_iter()
-        .filter_map(|m| match m {
-            ClientMsg::Term { req: TermRequest::Paste { text, .. }, .. } => Some(text),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(pasted, [format!("look at {landed}")], "the path goes with the message");
+    assert_eq!(sent(&mut studio), [format!("look at {landed}")], "the path goes with it");
     assert!(chips(cx).is_empty(), "the chip went with it");
 
     let dir = tempfile::tempdir().unwrap();
@@ -735,7 +744,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     let Call::Upload(xfer, files, dest) = calls.try_recv().expect("an upload") else {
         panic!("an upload");
     };
-    assert_eq!((files, dest), (vec![dropped], Dest::Attachment), "a drop on the face attaches");
+    assert_eq!((files, dest), (vec![dropped], Dest::Attachment), "a drop on the thread attaches");
     assert_eq!(face.read_with(cx, |f, _| f.attachments()[0].name.clone()), "design.png");
 
     // The chip is the one place the upload is said, and the way to take it off the draft.
@@ -748,7 +757,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
     let nodes = tree(cx);
     assert!(!nodes.iter().any(|n| n.is("Button", Some("Cancel upload"))), "{nodes:#?}");
 
-    // The paperclip asks for the system's picker, for this tile.
+    // The attach button asks for the system's picker, for this tile.
     let asked = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = std::rc::Rc::clone(&asked);
     cx.update(|_, cx| {
@@ -756,7 +765,7 @@ fn a_picture_pasted_into_the_composer_stays_a_chip_until_sent(cx: &mut TestAppCo
             move |ask: &crate::workspace::folders::FilesAsk| sink.borrow_mut().push(ask.clone()),
         )));
     });
-    let clip = cx.debug_bounds("composer-attach").expect("the paperclip");
+    let clip = cx.debug_bounds("thread-attach").expect("the attach button");
     cx.simulate_click(clip.center(), Modifiers::none());
     cx.run_until_parked();
     assert_eq!(*asked.borrow(), [crate::workspace::folders::FilesAsk::Import(tile)]);
@@ -1107,7 +1116,7 @@ fn a_drops_landing_goes_once_nothing_uploads_from_it(cx: &mut TestAppContext) {
 
 /// A composer that has the keyboard as the window becomes active starts its caret from a focus
 /// listener, which runs after the frame is painted: the frame after is drawn as from scratch,
-/// and so is the chip of a file dropped on the face.
+/// and so is the chip of a file dropped on the thread.
 #[gpui::test]
 fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     let (view, cx) = still_workspace(cx);
@@ -1117,8 +1126,8 @@ fn a_caret_started_by_focus_is_drawn_as_from_scratch(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| {
         v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
         v.focus_tile(tile, cx);
-        v.show_face(session, true, cx);
     });
+    agent_thread(&view, cx, studio.key, session);
     cx.update(|window, _cx| window.activate_window());
     cx.run_until_parked();
     let stale = cx.update(|window, cx| crate::retained::stale(window, cx, 12));

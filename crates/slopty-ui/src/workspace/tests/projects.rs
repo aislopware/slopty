@@ -1640,9 +1640,9 @@ fn native(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, seq: u64, id
 }
 
 /// A click on one of Claude Code's own subagents in the tree opens it as its task's row opens
-/// the task: the agent's tile, showing its face, on the subagent's thread. Where the tile shows
-/// the thread view that is its way into a subagent (the bar that leads back); before the
-/// session's thread is known, the conversation face's.
+/// the task: the agent's tile, showing its thread, on the subagent's thread through the thread
+/// view's own way into a subagent (the bar that leads back). Before the session's thread is
+/// known, the tile comes forward and says it has none yet.
 #[gpui::test]
 fn a_click_on_a_subagent_opens_its_thread(cx: &mut TestAppContext) {
     use slopty_proto::thread::wire::TableFrame;
@@ -1660,15 +1660,13 @@ fn a_click_on_a_subagent_opens_its_thread(cx: &mut TestAppContext) {
     cx.simulate_click(row, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(focused(&view, cx), Some(agent_tile), "its agent's tile");
-    let face = view.read_with(cx, |v, _| v.face_shown(agent));
-    assert!(face, "showing its face");
-    let thread =
-        view.read_with(cx, |v, cx| v.conversation(agent).map(|f| f.read(cx).thread().clone()));
-    assert_eq!(
-        thread,
-        Some(slopty_proto::conversation::ThreadId::Agent("a1".to_owned())),
-        "on the subagent's thread"
-    );
+    // It waits a frame or two for a thread view to be made.
+    for _ in 0..3 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    let said = view.read_with(cx, |v, _| v.toast_text());
+    assert_eq!(said.as_deref(), Some("The Explore subagent has no thread here yet"));
 
     // The worker's table names the session's thread and the subagent's under it.
     let key = setup.fake.key;

@@ -521,11 +521,13 @@ fn the_palette_scrolls_to_the_selected_line(cx: &mut TestAppContext) {
     assert!(inside(cx, "palette-item-0"), "a new query selects the first line, in view");
 }
 
-/// An agent's line is found by words deep in its first prompt, past what its title shows, and
-/// by the answer of its last turn, once its face has read the transcript; a word in neither
-/// finds nothing.
+/// An agent's line is found by the last line its agent wrote, as its thread's row says it, as
+/// well as by its title; a word in neither finds nothing.
 #[gpui::test]
-fn the_palette_finds_an_agent_by_its_first_prompt_and_last_answer(cx: &mut TestAppContext) {
+fn the_palette_finds_an_agent_by_what_its_thread_last_said(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Cursor;
+    use slopty_proto::thread::wire::TableFrame;
+
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let session = SessionId::new();
@@ -535,12 +537,15 @@ fn the_palette_finds_an_agent_by_its_first_prompt_and_last_answer(cx: &mut TestA
         v.focus_tile(tile, cx);
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-j");
-    cx.run_until_parked();
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    let mut row = state.row(WallMs::ZERO);
+    row.title = "Fix the flaky test".to_owned();
+    row.last_line = Some("The **correct step** was to pin the clock".to_owned());
+    let table = TableFrame::Snapshot { cursor: Cursor { epoch: 1, seq: 1 }, rows: vec![row] };
     view.update_in(cx, |v, _w, cx| {
-        for event in crate::conversation::fixtures::events("edit") {
-            v.conversation_event(session, event, cx);
-        }
+        v.threads_linked(studio.key, cx);
+        v.thread_table(studio.key, &table, cx);
     });
     cx.run_until_parked();
     let found = |cx: &mut VisualTestContext, query: &str| {
@@ -551,10 +556,8 @@ fn the_palette_finds_an_agent_by_its_first_prompt_and_last_answer(cx: &mut TestA
                 .any(|line| matches!(line.run, PaletteRun::Session(s) if s == session))
         })
     };
-    let title = view.read_with(cx, |v, _| v.terminal_title(session));
-    assert!(!title.contains("gamma"), "the title stops short of it: {title}");
-    assert!(found(cx, "gamma delta"), "by the first prompt");
-    assert!(found(cx, "correct step"), "by the last answer");
+    assert!(found(cx, "flaky test"), "by its title");
+    assert!(found(cx, "pin the clock"), "by what it last said");
     assert!(!found(cx, "login redirect"), "by neither");
 }
 
