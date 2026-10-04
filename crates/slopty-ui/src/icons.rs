@@ -891,20 +891,43 @@ impl Element for Spinner {
         if let Some(inner) = &mut self.inner {
             inner.paint(window, cx);
         }
-        let reduce = cx.reduce_motion();
-        let now = cx.background_executor().now();
-        let view = window.current_view();
-        let clock = SpinClock::get(cx);
-        if !clock.wake.contains(&view) {
-            clock.wake.push(view);
-        }
-        if clock.armed.is_some() {
-            return;
-        }
-        let step = if reduce { BREATH_STEP } else { SPIN_STEP };
-        let wait = until_next(now.saturating_duration_since(clock.epoch), step);
-        SpinClock::arm(cx, Timer::Step, wait);
+        wake_at_next_step(window, cx);
     }
+}
+
+/// How long after the spin clock's start every working mark was last woken: the moment each
+/// drawing that steps with the marks (a companion) shows, so they step together.
+pub(crate) fn steps_shown(cx: &mut App) -> Duration {
+    SpinClock::get(cx).shown
+}
+
+/// How long after the spin clock's start it is now.
+pub(crate) fn steps_now(cx: &mut App) -> Duration {
+    let now = cx.background_executor().now();
+    now.saturating_duration_since(SpinClock::get(cx).epoch)
+}
+
+/// Whether `view` drew a working mark since the clock's last step, so its next step wakes it.
+pub(crate) fn steps_wake(cx: &mut App, view: EntityId) -> bool {
+    SpinClock::get(cx).wake.contains(&view)
+}
+
+/// The view being painted draws again at the spin clock's next step, as one painting a
+/// working mark does: a step under Reduce Motion is a breath's.
+pub(crate) fn wake_at_next_step(window: &Window, cx: &mut App) {
+    let reduce = cx.reduce_motion();
+    let now = cx.background_executor().now();
+    let view = window.current_view();
+    let clock = SpinClock::get(cx);
+    if !clock.wake.contains(&view) {
+        clock.wake.push(view);
+    }
+    if clock.armed.is_some() {
+        return;
+    }
+    let step = if reduce { BREATH_STEP } else { SPIN_STEP };
+    let wait = until_next(now.saturating_duration_since(clock.epoch), step);
+    SpinClock::arm(cx, Timer::Step, wait);
 }
 
 #[cfg(test)]

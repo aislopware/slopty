@@ -14235,3 +14235,45 @@ times and counts are printed; no prompt is.
 ```sh
 cargo test --release -p slopty-worker --test history -- --ignored --nocapture measure
 ```
+
+## 2026-10-04 — companions on the step clock
+
+The headless workspace (`slopty-ui` tests, the GPUI test platform) with eight agents on one
+worker, each in its own tile: three working, one waiting on the person (a question), one done
+and three idle, then all eight idle. The person counts as present (the yard is awake). Each
+arm warms up for two seconds, then counts the workspace's renders over five simulated seconds
+of 120 ticks, as the working mark's entry above does, and the wall time those five seconds
+took. The test build is unoptimised (`profile.test`, opt-level 0) and ran under `nice -n 19`
+beside other builds on an M1 Max, so the times are an upper bound and wander by about 3 ms
+between runs; the frame counts do not wander.
+
+```sh
+CARGO_BUILD_JOBS=4 nice -n 19 cargo nextest run -p slopty-ui --lib \
+  -E 'test(companions_cost)' --run-ignored only --no-capture
+```
+
+| `[theme] companions` | crowd | frames a second | time drawing a second (3 runs) |
+| --- | --- | --- | --- |
+| off | mixed | 12 | 10.7, 10.0, 12.8 ms |
+| quiet | mixed | 12 | 12.2, 11.6, 13.9 ms |
+| lively | mixed | 12 | 12.7, 12.2, 13.8 ms |
+| off | at rest | 0 | 53, 50, 60 µs |
+| quiet | at rest | 0 | 50, 52, 50 µs |
+| lively | at rest | 0 | 53, 50, 54 µs |
+
+- Companions draw no frame of their own: a crowd at work draws the working mark's twelve a
+  second with them off, quiet or lively, and nothing at rest. The lively yard's play rides
+  only frames a working companion already draws.
+- A frame with companions costs about 1–2 ms more per second (0.1 ms a frame, unoptimised)
+  than one with the marks: the 16 × 16 sprites are up to 96 quads each. At rest all three cost
+  the same, since nothing is drawn.
+- The first probe found the needs-you wave at 15 renders a second beside a working
+  companion, not 12. Each wave beat fell on the clock's step grid, but its own timer and the
+  clock's notified the view separately, and the test platform builds a dirty window at every
+  effect flush. The wave's clock now leaves a view to the spin clock when it will wake it at
+  that step anyway (`icons::steps_wake`), and the beats ride the mark's frames: 12.
+- The lively one-shots that do draw at rest are bounded: a finished turn's hop is six steps
+  (the second "at rest" second of `companions_draw_no_frame_the_working_mark_does_not` reads
+  7 lively, 1 off or quiet), a needs-you wave is six beats over two seconds.
+- So lively stays the default (`docs/decisions/brand.md`, "Companions"). Not measured yet: the
+  app's own process CPU idle with a lively yard on a real display, release build.

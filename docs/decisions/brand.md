@@ -24,7 +24,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     cursor turns into a dot at 16 px anyway, and that a beam is too thin to hold.
   - **In the app, the cursor is the live element** (built 2026-09-30: `slopty-ui`
     `workspace::about::Mark`, `docs/decisions/ui.md`, "Slopty's mark in the app"). Where the
-    app shows the mark (the empty workspace, the About panel), the cursor dot blinks at the
+    app shows the mark (the empty workspace), the cursor dot blinks at the
     terminal's cursor rate. It holds steady under Reduce Motion. Lit means connected, and the
     cursor is the unlit level while no worker is reachable. The dock icon stays static, since
     app icons do not animate.
@@ -154,3 +154,79 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     Rerun: `cargo nextest run -p xtask icon --no-capture`. The review renders
     (`icon-{16,32,128,512,1024}.png` and the five other appearances at 512 px) come from
     `cargo xtask icon target/e2e/artifacts`.
+
+- ✅ **Companions: a small pixel character for each agent, in its mark's place** (2026-10-04,
+  `.research/mascots-2026-10-04.md`). The user asked for small playful touches: pixel-art
+  characters for Claude Code, Codex, pi and the other agents that move about and play. They
+  are called companions in the chrome, and `[theme] companions` sets how much they do.
+  - **The characters are Slopty's own** (study §3, §4.2). Ember (Claude Code) is a round body
+    under a four-point sparkle tuft on two feet, in the theme's agent orange: no arms, no
+    rectangle, never four legs, so nothing of the registered Clawd design. Brace (Codex) is a
+    capsule with a visor whose arms are braces, in ink. Pi is pi's own MIT mark at twice its
+    size with eyes on its bar, in its three colours (`slopty_theme::PI`), the one vendor mark
+    whose licence allows it. Op (`OpenCode`) is a box in its mark's frame. Any other agent is
+    Blob, a dome wearing one of an open set of accessories picked by an FNV-1a hash of its name,
+    so two unknown agents differ and keep their looks on every run. Dot is the brand's grid
+    come alive, its cursor its one eye; it stands where no agent is. No character copies a
+    vendor's mascot or logo; the hint names the agent in plain words.
+  - **Sprites are code** (`slopty-ui` `companions::sprites`): eight-by-eight ASCII grids read
+    by a `const fn`, so a row of the wrong width or an unknown cell fails the build. Their cells
+    are ink slots (body, shade, accent, outline, eye, glint, prop, cue, muted) filled from the
+    theme as they paint (`companions::Palette`). A pose is built on the stack from the body
+    and transforms (sit, eyes shut or turned, a stride, a plaster, a yawn, the outline only)
+    plus a prop overlay. The sixteen grid is the eight one doubled with `Scale2x`, smoothing
+    only the body's own edges so a sparkle, a prop or a cue stays crisp, and pi's square blocks
+    are doubled plainly; each eye gains a glint. Each row's runs of one ink, stacked into
+    rectangles, are one snapped quad each, cells whole device pixels: at most 24 quads small
+    and 96 large. No PNG, no atlas, no fork change.
+  - **Poses follow the one status vocabulary** (study §4.3): working at its task (typing at a
+    keyboard, reading a page, a little screen for a command, a thought rising, a little one
+    hopping off for a subagent, ticking a list, from the newest running call's kind; a row
+    that knows only its status types), waiting sat under a clock, needs you with an arm up and
+    the hand in amber, to review holding a page up, done with both arms up, failed sat with
+    eyes shut and a red plaster, asleep with a rising "z", silent yawning, gone as its outline
+    only. The cue pixel takes the state's fill, so amber still means needs you.
+  - **Where they stand.** The conversation's working line (the spinner's slot; subagents trail
+    smaller after the words), the navigator's agent rows and tile rows, a tile header's and its
+    tabs' slots, Dot beside the empty workspace's mark (a click is one hop; the study's second
+    place for Dot, the inbox's empty line, went with the inbox), and, lively, the yard: every
+    live agent's companion in the status bar beside the agent summary, needs you first, each a
+    button named for who it is and what it does that goes to its tile, a count past a quarter
+    of the window.
+    Every place is a slot that exists, or a layer over the layout (Dot): nothing moves with
+    companions on or off, and none covers content.
+  - **Motion means work, and adds no frame.** A working companion steps on the working mark's
+    clock (`icons::wake_at_next_step`; a frame every second step, six a second), so a window
+    with an agent at work draws its twelve frames a second with companions off, quiet or
+    lively. Everything else holds a pose and asks for nothing. Lively adds three moments, each
+    on the clock's own step grid so it shares a frame with the mark when one runs: a wave of
+    two seconds at three frames a second as an agent comes to need the person, a hop of half a
+    second (six steps) as a turn ends in a tile on screen and not focused, and Dot's hop on a
+    click. A moment plays only for a companion drawn before the change (GPUI's element state
+    is dropped for one not drawn), so one scrolled to later never replays it. Lively play in
+    the yard (blinks, a "z" rising, idle ones walking out to meet a neighbour and back) rides
+    only frames a working companion in the same view already draws: with nothing at work the
+    yard holds still. Two minutes after the person's last input on the machine (the app's own
+    away rule, `slopty_platform::idle`), everyone in the yard but who waits on them or failed
+    falls asleep. So lively costs nothing at rest and is the default, as the user asked for
+    characters that run and play (MEASUREMENTS, "companions on the step clock").
+  - **Reduce Motion: every companion holds its pose.** A working one breathes in opacity as
+    the working mark does (the live cue the platform keeps), no moment plays, and a finished
+    turn shows the raised arms for a second instead of a hop. **Increase Contrast** draws the
+    outline cells in `text`, props and quiet marks in `text_secondary`. A companion has no role
+    where a row says the state (the slot keeps the status's name); in the yard each is a
+    button with a label. No sound, ever.
+  - **Rejected.** Vendor mascots (Clawd is a registered design mark whose registration claims no
+    colour; OpenAI and Google ask for no imitation); backdrops, confetti and scenes; a clock of
+    their own for idle play (it would draw while nothing works); idle wandering in rows; drag
+    to hand off; tamagotchi mechanics.
+  - Tests: `companions::tests` (every kind has every pose on both grids, every pose looks its
+    own, no two silhouettes share three quarters of their cells, the quads are few and are the
+    frame, at least half of each agent companion's edge (a third of pi's coloured blocks)
+    reads 3:1 on the content and panel planes in both variants and at both contrasts, Dot in
+    the mark's own fixed green, an
+    unknown agent keeps its accessory, the task from the call, the pose from the state, the
+    working companion's twelve frames, the wave's six beats, no replay, Reduce Motion, off);
+    `workspace::tests::companions` (no frame beyond the working mark's off, quiet or lively;
+    the yard's order and click; the yard asleep while the person is away); `slopty-settings`
+    `companions_values` and the schema's choice.
