@@ -3,7 +3,9 @@
 //!
 //! Three doors had led there, each its own control: a fork on a settled turn's fold, "Edit from
 //! here" on a message, and "Continue in…" in the model chip's menu. They are one choice with
-//! three settings, so they are one panel:
+//! four settings, so they are one panel:
+//! - **As**: a thread of its own, or an aside: a question beside the work, asked of a fork of the
+//!   whole thread in a sheet over it (`super::aside`), where the agent forks.
 //! - **Agent**: this thread's own, or another the worker can start.
 //! - **From**: this message (the new thread starts just before it, the message waiting in its
 //!   composer) or the end (everything so far).
@@ -47,6 +49,8 @@ pub(super) struct Branching {
     pub from_end: bool,
     /// Put the files back as they were before this message.
     pub revert: bool,
+    /// Ask aside, rather than branch a thread of its own.
+    pub aside: bool,
 }
 
 /// The turn before `turn`, which a fork from just before `turn`'s message shares through.
@@ -151,6 +155,7 @@ impl ThreadView {
                 agent: state.meta.agent.clone(),
                 from_end,
                 revert: false,
+                aside: false,
             });
         }
         self.rebuild(cx);
@@ -163,8 +168,14 @@ impl ThreadView {
         }
     }
 
-    /// Ask for the new thread the panel says, and shut it.
-    fn branch(&mut self, cx: &mut Context<Self>) {
+    /// Ask for the new thread the panel says, and shut it: an aside asks the draft aside.
+    fn branch(&mut self, window: &mut gpui::Window, cx: &mut Context<Self>) {
+        if self.branching.as_ref().is_some_and(|b| b.aside) {
+            self.branching = None;
+            self.ask_aside(window, cx);
+            self.rebuild(cx);
+            return;
+        }
         let asked = self.branching.as_ref().and_then(|b| {
             let state = self.state(cx)?;
             let intent = branch_intent(state, b)?;
@@ -300,8 +311,25 @@ impl ThreadView {
         let theme = &self.theme;
         let s = theme.surfaces;
         let own = b.agent == state.meta.agent;
+        let aside = b.aside;
+        let as_row = (own && self.can_aside(cx)).then(|| {
+            let choice = |id: &str, label: &'static str, on: bool| {
+                self.branch_choice(id.to_owned(), label.into(), b.aside == on, None)
+                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+                        this.set_branch(|b| b.aside = on, cx);
+                    }))
+                    .into_any_element()
+            };
+            self.branch_setting(
+                "As",
+                vec![
+                    choice("branch-as-thread", "A thread", false),
+                    choice("branch-as-aside", "An aside", true),
+                ],
+            )
+        });
         let agents = self.branch_agents(cx);
-        let agent_row = (agents.len() > 1).then(|| {
+        let agent_row = (!aside && agents.len() > 1).then(|| {
             let choices = agents
                 .iter()
                 .enumerate()
@@ -331,7 +359,7 @@ impl ThreadView {
         });
         // Another agent takes an account of the whole thread: there is no "before this
         // message" on it.
-        let message_ok = own && from_message(&state.meta, state, b.turn);
+        let message_ok = !aside && own && from_message(&state.meta, state, b.turn);
         let from_row = message_ok.then(|| {
             let choice = |id: &str, label: &'static str, end: bool| {
                 self.branch_choice(id.to_owned(), label.into(), b.from_end == end, None)
@@ -348,7 +376,7 @@ impl ThreadView {
                 ],
             )
         });
-        let files_row = (own && !b.from_end && state.meta.can(Cap::REWIND)).then(|| {
+        let files_row = (!aside && own && !b.from_end && state.meta.can(Cap::REWIND)).then(|| {
             let choice = |id: &str, label: &'static str, revert: bool| {
                 self.branch_choice(id.to_owned(), label.into(), b.revert == revert, None)
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
@@ -365,8 +393,13 @@ impl ThreadView {
             )
         });
         let busy = self.working(cx);
-        let ready = branch_intent(state, b).is_some() && !busy;
+        let ready = aside || (branch_intent(state, b).is_some() && !busy);
         let what = match (own, b.from_end) {
+            _ if aside => {
+                "Your draft, asked of a copy of this thread in a sheet over it; gone when it \
+                 closes unless you keep it"
+                    .to_owned()
+            }
             (false, _) => {
                 format!("{} starts with an account of this thread", agent_label(&b.agent))
             }
@@ -375,7 +408,8 @@ impl ThreadView {
                 "A new thread from just before this message, which waits to be edited".to_owned()
             }
         };
-        let what = if busy { "Branches once the turn ends".to_owned() } else { what };
+        let what = if busy && !aside { "Branches once the turn ends".to_owned() } else { what };
+        let go = if aside { "Ask aside" } else { "Branch" };
         Some(
             kit::card(theme)
                 .id("branch-panel")
@@ -390,6 +424,7 @@ impl ThreadView {
                 .flex_col()
                 .gap(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
+                .children(as_row)
                 .children(agent_row)
                 .children(from_row)
                 .children(files_row)
@@ -414,9 +449,11 @@ impl ThreadView {
                             }),
                         ))
                         .child(
-                            self.button("branch-go", "Branch", ButtonKind::Primary)
+                            self.button("branch-go", go, ButtonKind::Primary)
                                 .when(!ready, |el| el.opacity(slopty_theme::alpha::PRESSED))
-                                .on_click(cx.listener(|this, _ev, _w, cx| this.branch(cx))),
+                                .on_click(
+                                    cx.listener(|this, _ev, window, cx| this.branch(window, cx)),
+                                ),
                         ),
                 )
                 .into_any_element(),
@@ -460,6 +497,7 @@ mod tests {
             agent: agent.clone(),
             from_end,
             revert,
+            aside: false,
         };
         state.meta.caps = vec![Cap::named(Cap::REWIND), Cap::named(Cap::CONTINUE)];
         assert_eq!(

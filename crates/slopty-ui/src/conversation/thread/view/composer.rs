@@ -800,7 +800,6 @@ impl ThreadView {
                                 .on_click(cx.listener(|this, _ev, _w, cx| this.pick_files(cx))),
                         )
                     })
-                    .children(self.aside_button(cx))
                     .children(self.model_chip(cx))
                     .children(self.effort_chip(cx))
                     .children(self.mode_chip(cx))

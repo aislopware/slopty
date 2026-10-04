@@ -4428,15 +4428,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     A word the caret selected is then matched only where it stands whole, as Sublime Text and
     VS Code match it, so `n` does not take the `n` in `len`; a selection made by hand matches
     anywhere (aislopware/gpui-kit#5).
-  - **Words from the file are offered as one is typed** (`file::complete`). The candidates are
-    the file's other words that start with the typed ones, the nearest to the caret first, at
-    most 50, with the find bar's smart case. They come from the 1 MiB round the caret, read
-    off the UI thread, so a keystroke in a 16 MiB file costs what one in a 1 MiB file does.
-    gpui-kit's completion menu shows them, and ↩ takes one. Code only: in Markdown, or a file
-    with no grammar, the menu would open on every word of prose. A Return the menu took went
-    on to type a newline as well, because the menu called `cx.propagate()` before handling
-    the key. That is fixed in the fork (aislopware/gpui-kit#6, with a test that sends a Return
-    carrying its text).
+  - **No word completion** (cut 2026-10-05, prune #10). The editor offered the file's other
+    words as one typed (`file::complete`). The editor is for a person's quick fix beside an
+    agent that writes the code, and no frontier tool ships word completion there (Amp removed
+    its Tab, Claude Code Desktop has none), so it went whole rather than hidden.
   - **EditorConfig is resolved on the worker, and the client acts on what it knows.** The
     worker reads the `.editorconfig` files above the file with `ec4rs` (the EditorConfig core
     tests pass with it, and Zed resolves with it), adds the specification's fallbacks, and
@@ -6393,9 +6388,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and the settings crate's `[font]` keys.
 
 - ✅ **An aside is a sheet over its thread, not a tile** (2026-10-04, A9 on lane A's contract).
-  - "Ask aside" asks a question beside the work without touching it. It is an icon door in
-    the composer's foot and a palette line, with no default key (`ask_aside`). It is offered
-    where the agent forks (`Cap::FORK`), and not on a thread that is itself an aside.
+  - "Ask aside" asks a question beside the work without touching it. It is a choice of
+    "Branch from here" (As: a thread, or an aside; the agent, the start and the files then
+    drop, since an aside forks the whole thread as its own agent) and a palette line, with no
+    default key (`ask_aside`). It was an icon in the composer's foot too until 2026-10-05:
+    a second door to the same thing, crowding the composer. It is offered where the agent
+    forks (`Cap::FORK`), and not on a thread that is itself an aside.
   - It forks the whole thread (`Intent::Aside`), and the draft goes to the fork as its
     question once the fork is there. With no draft, the sheet opens on the fork's own
     composer.

@@ -1,5 +1,6 @@
 //! "Ask aside": a question beside the work, asked of a fork of the whole thread that shows in a
-//! sheet over it and is gone when the sheet closes, unless the person keeps it.
+//! sheet over it and is gone when the sheet closes, unless the person keeps it. It is one of
+//! "Branch from here"'s choices (`super::branch`), and in the palette.
 //!
 //! The worker forks the thread for it (`Intent::Aside`, where the agent forks, `Cap::FORK`)
 //! and marks the fork as an aside of this one (`ThreadMeta::aside_of`), so it stays out of the
@@ -53,7 +54,7 @@ impl Aside {
 
 impl ThreadView {
     /// Whether an aside can be asked here: the agent forks, and this is not an aside itself.
-    fn can_aside(&self, cx: &gpui::App) -> bool {
+    pub(super) fn can_aside(&self, cx: &gpui::App) -> bool {
         self.state(cx).is_some_and(|st| st.meta.can(Cap::FORK) && st.meta.aside_of().is_none())
     }
 
@@ -61,15 +62,6 @@ impl ThreadView {
     #[must_use]
     pub fn aside(&self) -> Option<ThreadId> {
         self.aside.as_ref().filter(|a| !a.closed).and_then(|a| a.thread)
-    }
-
-    /// The composer's door to an aside.
-    pub(super) fn aside_button(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        (self.can_aside(cx) && self.aside.as_ref().is_none_or(|a| a.closed)).then(|| {
-            self.icon_button("thread-ask-aside", IconName::MessageCircleQuestionMark, "Ask aside")
-                .on_click(cx.listener(|this, _ev, window, cx| this.ask_aside(window, cx)))
-                .into_any_element()
-        })
     }
 
     /// Ask the draft aside: fork the thread, and send the draft to the fork once it is there.

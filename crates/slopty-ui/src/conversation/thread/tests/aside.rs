@@ -32,21 +32,53 @@ fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-/// The draft is asked aside: the thread forks, the sheet opens over it, and the question goes
-/// to the fork once it is there. Closing the sheet ends the fork for good.
+/// A thread whose agent forks, with one message of the person's, `u`.
+fn forking() -> slopty_proto::thread::ThreadState {
+    use slopty_core::WallMs;
+    use slopty_proto::thread::{Clipped, Item, ItemBody, ItemId, TurnId, UserMessage};
+
+    let mut state = fixtures::empty();
+    state.meta.caps = vec![Cap::named(Cap::FORK), Cap::named(Cap::STEER)];
+    state.items = vec![Item {
+        id: ItemId("u".to_owned()),
+        turn: TurnId(1),
+        at_ms: WallMs::ZERO,
+        body: ItemBody::User(UserMessage {
+            text: Clipped::whole("Speed up the parser"),
+            images: Vec::new(),
+            command: None,
+            intent: None,
+        }),
+    }];
+    state
+}
+
+/// "Branch from here" under the message, as an aside.
+fn branch_aside(cx: &mut gpui::VisualTestContext) {
+    let message = cx.debug_bounds("item-u").expect("the message").center();
+    cx.simulate_mouse_move(message, None, Modifiers::none());
+    cx.run_until_parked();
+    click(cx, "branch-u");
+    click(cx, "branch-as-aside");
+    assert!(cx.debug_bounds("branch-from-message").is_none(), "an aside forks it all");
+    click(cx, "branch-go");
+}
+
+/// The draft is asked aside from "Branch from here": the thread forks, the sheet opens over
+/// it, and the question goes to the fork once it is there. Closing the sheet ends the fork for
+/// good.
 #[gpui::test]
 fn an_aside_asks_beside_the_thread_and_closes_for_good(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
+    let state = forking();
     let thread = state.meta.id;
-    state.meta.caps = vec![Cap::named(Cap::FORK), Cap::named(Cap::STEER)];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
 
     cx.simulate_input("Why is the parser slow?");
-    click(cx, "thread-ask-aside");
+    branch_aside(cx);
     let asked = sent_intents(&sent);
     let [(id, on, Intent::Aside)] = asked.as_slice() else { panic!("{asked:?}") };
     assert_eq!(*on, thread);
@@ -70,11 +102,12 @@ fn an_aside_asks_beside_the_thread_and_closes_for_good(cx: &mut TestAppContext) 
         Some((fork, Intent::Discard))
     );
     assert!(cx.debug_bounds("thread-aside").is_none(), "the sheet goes");
-    assert!(cx.debug_bounds("thread-ask-aside").is_some(), "and another can be asked");
+    branch_aside(cx);
+    assert_eq!(sent_intents(&sent).last().map(|(_, _, i)| i.clone()), Some(Intent::Aside));
 }
 
-/// A kept aside loses its mark, and once the worker says so the workspace is asked to open it
-/// as a thread of its own; a thread that is itself an aside offers no aside.
+/// An aside asked from the palette, kept, loses its mark, and once the worker says so the
+/// workspace is asked to open it as a thread of its own.
 #[gpui::test]
 fn a_kept_aside_becomes_a_thread(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -96,8 +129,9 @@ fn a_kept_aside_becomes_a_thread(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
 
-    click(cx, "thread-ask-aside");
-    let (id, ..) = sent_intents(&sent).pop().expect("asked");
+    cx.dispatch_action(crate::conversation::AskAside);
+    cx.run_until_parked();
+    let (id, ..) = sent_intents(&sent).pop().expect("asked from the palette");
     let fork = ThreadId::new();
     let done = IntentDone { id, outcome: Outcome::Started { thread: fork } };
     hub.update(cx, |hub, cx| hub.done(&done, cx));
@@ -113,7 +147,6 @@ fn a_kept_aside_becomes_a_thread(cx: &mut TestAppContext) {
         .insert(slopty_proto::thread::ThreadMeta::ASIDE_FACT.to_owned(), thread.to_string());
     hub.update(cx, |hub, cx| hub.frame(fork, snapshot(forked, 1), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-ask-aside").is_none(), "no aside of an aside, nor a second");
 
     click(cx, "aside-keep");
     let (keep, on, intent) = sent_intents(&sent).pop().expect("kept");
