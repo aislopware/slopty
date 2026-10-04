@@ -407,9 +407,10 @@ impl Worker {
     /// What a request runs, and with what environment. One whose program is Claude Code itself
     /// and which Slopty has not wired yet (a tile opened on `claude`, ⌘⇧T) is started the way
     /// the worker starts an agent of its own: with the hook relay, so its status and its
-    /// permission prompts reach the app; with Slopty's tools when this worker has a server;
-    /// with the mod; and pinned to a conversation id, so it can come back after a reboot. It
-    /// is the person's own, so the mode that asks no permission is not locked. The request's
+    /// permission prompts reach the app; with Slopty's tools when its session names a project,
+    /// else the pointer to Slopty's CLI; with the mod; and
+    /// pinned to a conversation id, so it can come back after a reboot. It is the person's own,
+    /// so the mode that asks no permission is not locked. The request's
     /// arguments and variables are kept, and the mod's variables go last. One whose program is
     /// Codex gets Slopty's tools on its MCP servers when this worker has a server.
     async fn as_agent(&self, req: &OpenSession) -> (Vec<String>, Vec<(String, String)>) {
@@ -433,13 +434,14 @@ impl Worker {
         let args = req.command.get(1..).unwrap_or_default().to_vec();
         let launch = self.agent_launch();
         let Some(relay) = launch.relay.clone() else { return unchanged };
-        let served = self.served();
+        let project =
+            req.env.iter().any(|(k, v)| k == slopty_proto::project::PROJECT_ENV && !v.is_empty());
         let cwd = req.cwd.as_deref().map_or_else(slopty_platform::dirs::home, |cwd| {
             crate::file::expand_home(Path::new(cwd))
         });
         // Reads the person's settings files for their status line: blocking I/O.
         let wired = tokio::task::spawn_blocking(move || {
-            slopty_agent::hooks::wired(args, &relay, &cwd, served)
+            slopty_agent::hooks::wired(args, &relay, &cwd, project)
         })
         .await;
         let Ok(Some(args)) = wired else { return unchanged };

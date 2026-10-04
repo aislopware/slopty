@@ -38,8 +38,9 @@ pub struct Resume {
     pub mcp: bool,
     /// Its `--settings` locked it out of the mode that asks no permission, locked afresh.
     pub locked: bool,
-    /// The system prompt appended to it, kept only when it was started with Slopty's tools:
-    /// the server's role for a project's agent.
+    /// The system prompt appended to it, kept when it was started with Slopty's tools (the
+    /// server's role for a project's agent) or carries the pointer to Slopty's CLI
+    /// ([`crate::hooks::POINTER`]).
     pub role: Option<String>,
 }
 
@@ -89,7 +90,7 @@ pub struct Invocation {
     pub mcp: bool,
     /// Its `--settings` locked out the mode that asks no permission.
     pub locked: bool,
-    /// Its appended system prompt, when it also had Slopty's tools ([`Resume::role`]).
+    /// Its appended system prompt, when [`Resume::role`] keeps it.
     pub role: Option<String>,
     /// It is a `--print` run, not a conversation in the terminal.
     pub print: bool,
@@ -207,7 +208,7 @@ pub fn invocation(args: &[String]) -> Invocation {
             }
         }
     }
-    out.role = role.filter(|_| out.mcp);
+    out.role = role.filter(|role| out.mcp || role.contains(crate::hooks::POINTER));
     out
 }
 

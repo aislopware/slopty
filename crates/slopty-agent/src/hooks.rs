@@ -116,21 +116,68 @@ fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> 
 /// `claude` arguments that start a person's own Claude Code wired as an agent the worker starts.
 ///
 /// That is a conversation pinned to a fresh id ([`crate::resume::with_session_id`]), the relay
-/// at `relay` ([`with_relay`]), and Slopty's tools when the session has a server (`served`,
-/// [`with_mcp`]). The person's own flags and prompt are kept. `None` for a run that is wired
-/// already, or that prints and exits (`--print`): it stays as it was given.
+/// at `relay` ([`with_relay`]), and for a project's agent (`project`, its session names a
+/// project) Slopty's tools ([`with_mcp`]); any other gets only the paragraph that points it at
+/// Slopty's CLI ([`with_pointer`]). The person's own flags and prompt are kept. `None` for a
+/// run that is wired already, or that prints and exits (`--print`): it stays as it was given.
 ///
-/// One rule for every door: a tile opened on `claude`, ⌘⇧T, and a `claude` typed in a Slopty
-/// shell (`slopty hook wire`).
+/// One rule for every door: a tile opened on `claude`, ⌘⇧T, a project task's thread, and a
+/// `claude` typed in a Slopty shell (`slopty hook wire`).
 #[must_use]
-pub fn wired(args: Vec<String>, relay: &str, cwd: &Path, served: bool) -> Option<Vec<String>> {
+pub fn wired(args: Vec<String>, relay: &str, cwd: &Path, project: bool) -> Option<Vec<String>> {
     let given = crate::resume::invocation(&args);
     if given.relay || given.print {
         return None;
     }
     let (args, _conversation) = crate::resume::with_session_id(args);
     let args = with_relay(args, relay, cwd);
-    Some(if served { with_mcp(args, relay) } else { args })
+    Some(if project { with_mcp(args, relay) } else { with_pointer(args) })
+}
+
+/// What an agent Slopty starts outside a project is told of Slopty, in place of its tools: one
+/// paragraph that points at the CLI, whose help it reads when the work calls for it.
+pub const POINTER: &str = "This session runs inside Slopty, which reaches the person's other \
+    machines: their terminals, files, windows, clipboard and coding agents. When the work \
+    needs one of those, run `slopty --help` (and `slopty <command> --help`) to see how.";
+
+/// The flag Claude Code appends to its system prompt with.
+const APPEND_SYSTEM_PROMPT: &str = "--append-system-prompt";
+
+/// `claude` arguments that also append [`POINTER`] to its system prompt.
+///
+/// Claude Code keeps one such flag, so a prompt the caller appends already gets the pointer
+/// after it, and otherwise the flag goes first, in its `=` form.
+#[must_use]
+pub fn with_pointer(args: Vec<String>) -> Vec<String> {
+    let mut out = Vec::with_capacity(args.len().saturating_add(1));
+    let mut words = args.into_iter();
+    let mut joined = false;
+    while let Some(word) = words.next() {
+        if word == "--" {
+            out.push(word);
+            out.extend(words.by_ref());
+            break;
+        }
+        let inline = word.strip_prefix(APPEND_SYSTEM_PROMPT).and_then(|r| r.strip_prefix('='));
+        if let Some(theirs) = inline.filter(|_| !joined) {
+            out.push(format!("{APPEND_SYSTEM_PROMPT}={theirs}\n\n{POINTER}"));
+            joined = true;
+            continue;
+        }
+        if word == APPEND_SYSTEM_PROMPT
+            && !joined
+            && let Some(theirs) = words.next()
+        {
+            out.extend([word, format!("{theirs}\n\n{POINTER}")]);
+            joined = true;
+            continue;
+        }
+        out.push(word);
+    }
+    if !joined {
+        out.insert(0, format!("{APPEND_SYSTEM_PROMPT}={POINTER}"));
+    }
+    out
 }
 
 /// The setting that keeps a session out of the mode that asks no permission at all, whatever
@@ -470,26 +517,53 @@ mod tests {
         assert!(server.get("env").is_none(), "the session's own environment names the server");
     }
 
-    /// A person's `claude` gets a pinned conversation, the relay and, with a server, Slopty's
-    /// tools, its own words last; a run wired already, or one that prints and exits, is left
-    /// as it was given, and one that picks its conversation keeps it.
+    /// A person's `claude` gets a pinned conversation, the relay and the pointer to Slopty's
+    /// CLI, its own words last, and a project's agent Slopty's tools instead of the pointer; a
+    /// run wired already, or one that prints and exits, is left as it was given, and one that
+    /// picks its conversation keeps it.
     #[test]
     fn a_persons_claude_is_wired_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
         let relay = "/opt/Slopty/slopty";
-        let out =
-            wired(words(&["--model", "opus", "fix it"]), relay, dir.path(), true).expect("wired");
+        let given = || words(&["--model", "opus", "fix it"]);
+        let out = wired(given(), relay, dir.path(), false).expect("wired");
         assert!(out.ends_with(&words(&["--model", "opus", "fix it"])), "{out:?}");
-        assert!(out.iter().any(|a| a.starts_with("--mcp-config=")), "tools with a server");
+        assert!(!out.iter().any(|a| a.starts_with("--mcp-config")), "no tools: {out:?}");
+        assert_eq!(out.first(), Some(&format!("--append-system-prompt={POINTER}")));
         assert_eq!(out.iter().filter(|a| *a == "--session-id").count(), 1);
         let started = crate::resume::invocation(&out);
-        assert!(started.relay && started.mcp, "{out:?}");
-        assert_eq!(wired(out, relay, dir.path(), true), None, "wired once");
+        assert!(started.relay && !started.mcp, "{out:?}");
+        assert_eq!(started.role.as_deref(), Some(POINTER), "a restart keeps the pointer");
+        assert_eq!(wired(out, relay, dir.path(), false), None, "wired once");
+        let task = wired(given(), relay, dir.path(), true).expect("wired");
+        let started = crate::resume::invocation(&task);
+        assert!(started.relay && started.mcp && started.role.is_none(), "{task:?}");
         let alone = wired(words(&["--resume", "abc"]), relay, dir.path(), false).expect("wired");
-        assert!(!alone.iter().any(|a| a == "--session-id" || a.starts_with("--mcp-config")));
+        assert!(!alone.iter().any(|a| a == "--session-id"));
         assert!(alone.ends_with(&words(&["--resume", "abc"])), "{alone:?}");
         assert_eq!(wired(words(&["-p", "hi"]), relay, dir.path(), true), None, "a print run");
+    }
+
+    /// A system prompt the person appends keeps its place and gets the pointer after it, in
+    /// either form, once; words after `--` are the prompt's.
+    #[test]
+    fn the_pointer_joins_the_persons_own_appended_prompt() {
+        let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let joined = format!("Be brief.\n\n{POINTER}");
+        assert_eq!(
+            with_pointer(words(&["--append-system-prompt", "Be brief.", "fix it"])),
+            words(&["--append-system-prompt", &joined, "fix it"])
+        );
+        assert_eq!(
+            with_pointer(words(&["--model", "opus", "--append-system-prompt=Be brief."])),
+            words(&["--model", "opus", &format!("--append-system-prompt={joined}")])
+        );
+        let first = format!("--append-system-prompt={POINTER}");
+        assert_eq!(
+            with_pointer(words(&["--", "--append-system-prompt", "x"])),
+            words(&[&first, "--", "--append-system-prompt", "x"])
+        );
     }
 
     #[test]

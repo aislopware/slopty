@@ -140,8 +140,9 @@ mod tests {
     }
 
     /// Typed in a Slopty shell, `claude` starts with the relay's hooks and status line on the
-    /// one `--settings`, the person's own settings merged in, Slopty's tools, a pinned
-    /// conversation and the mod with its switch; the person's flags and prompt follow as typed.
+    /// one `--settings`, the person's own settings merged in, the pointer to Slopty's CLI
+    /// rather than its tools (it is no project's agent), a pinned conversation and the mod with
+    /// its switch; the person's flags and prompt follow as typed.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_typed_claude_is_wired_as_one_slopty_starts() {
         let relay = relay();
@@ -167,9 +168,9 @@ mod tests {
             assert!(hook.as_str().is_some_and(|c| c.contains(&relay)), "{shell}: {hook}");
             let line = settings["statusLine"]["command"].as_str().unwrap_or_default();
             assert!(line.contains(&relay), "{shell}: the status-line wrapper: {line}");
-            let mcp = args.iter().find_map(|a| a.strip_prefix("--mcp-config=")).expect("tools");
-            let mcp: Value = serde_json::from_str(mcp).unwrap();
-            assert_eq!(mcp["mcpServers"]["slopty"]["command"], Value::from(relay.clone()));
+            assert!(!args.iter().any(|a| a.starts_with("--mcp-config")), "{shell}: {args:?}");
+            let pointer = format!("--append-system-prompt={}", slopty_agent::hooks::POINTER);
+            assert!(args.contains(&pointer), "{shell}: {args:?}");
             let cwd = std::fs::read_to_string(place.path("ran.cwd")).unwrap();
             assert_eq!(
                 Path::new(cwd.trim()).canonicalize().unwrap(),

@@ -103,9 +103,9 @@ mod agent_open {
     }
 
     /// A bare `claude` gets the relay, so its status and its permission prompts reach the app,
-    /// Slopty's tools when the worker has a server, the mod, and a conversation id of its own,
-    /// and the person's mode is not locked. One already wired, a `--print` run, and a worker
-    /// with no relay to hand out start as asked.
+    /// the pointer to Slopty's CLI rather than its tools (it is no project's agent), the mod,
+    /// and a conversation id of its own, and the person's mode is not locked. One already wired, a
+    /// `--print` run, and a worker with no relay to hand out start as asked.
     #[tokio::test]
     async fn claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents() {
         let dir = tempfile::tempdir().unwrap();
@@ -129,7 +129,8 @@ mod agent_open {
         let seen = started(&worker, &dir, &["claude", "--model", "opus"]).await;
         let args = argv(&seen);
         let kept = slopty_agent::resume::invocation(&args);
-        assert!(kept.relay && kept.mcp && !kept.locked, "{args:?}");
+        assert!(kept.relay && !kept.mcp && !kept.locked, "{args:?}");
+        assert_eq!(kept.role.as_deref(), Some(slopty_agent::hooks::POINTER), "{args:?}");
         assert_eq!(kept.args, ["--model", "opus"], "its own flags kept");
         let pinned = args.iter().position(|a| a == "--session-id").expect("a conversation id");
         assert!(uuid_like(&args[pinned + 1]), "{args:?}");

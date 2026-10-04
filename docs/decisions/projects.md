@@ -941,7 +941,10 @@ Tests:
 - Now the worker wires every open whose program is `claude` and which Slopty has not wired
   already (`Worker::as_agent`, beside the spawn path):
   - the relay on its `--settings`;
-  - `--mcp-config` naming `slopty mcp`, when the worker has a server;
+  - `--mcp-config` naming `slopty mcp` when its session names a project (a task's thread);
+    any other gets one paragraph on `--append-system-prompt` pointing it at `slopty --help`
+    (`slopty_agent::hooks::POINTER`, joined to a system prompt the person appends), since
+    Slopty's tools are for a project's agents (2026-10-04);
   - the mod;
   - `--session-id`, so it can come back after a reboot.
 - It is the person's own agent, so the mode that asks no permission is not locked. The open's
@@ -962,9 +965,9 @@ Tests:
   (`slopty_agent::resume::Resume`), never as the documents themselves, and given afresh:
   - `mcp`: an `--mcp-config` serving `slopty mcp`;
   - `locked`: `--settings` holding `permissions.disableBypassPermissionsMode`.
-- One system prompt is kept: the one appended to an agent started with Slopty's tools, which is
-  the server's role. A system prompt on any other agent is still never written down, since it
-  may carry anything.
+- Two system prompts are kept: the one appended to an agent started with Slopty's tools, which
+  is the server's role, and one that carries the pointer to Slopty's CLI. A system prompt on
+  any other agent is still never written down, since it may carry anything.
 - A shell the person ran the agent in gets everything back but the role. The role spans lines,
   which a line typed at a prompt cannot carry.
 - `--worktree` is not kept, because the resume runs in the directory the agent was in, which is
@@ -1846,8 +1849,8 @@ follow-up)
     refused before it runs; and gh's refusal comes back in its words.
   - `git::tests` (`slopty-proto`): buckets and standing.
   - The goldens `client_git_pull_status`, `client_git_merge`, `worker_git_pull_status`,
-    `worker_git_no_pull`, `worker_git_merged` and `verb_git_merge`. `worker_git_pushed`
-    changed: a push now carries the pull request.
+    `worker_git_no_pull` and `worker_git_merged`. `worker_git_pushed` changed: a push now
+    carries the pull request.
 
 **A project keeps the person's scripts.** ✅ 2026-10-04
 - Before: the person typed the project's dev server, test run or build into a terminal they

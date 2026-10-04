@@ -347,10 +347,10 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
 /// `relay` is this binary.
 ///
 /// Inside a session it is wired as an agent the worker starts ([`hooks::wired`]): the relay's
-/// hooks and status line, Slopty's tools when the session has a server, and a pinned
-/// conversation. Wherever the worker named its mod, it also loads the mod, with the switch that
-/// lets it run, unless the person loads it already. An inherited switch that silences the
-/// mod's traffic is the person's, and is left alone.
+/// hooks and status line, Slopty's tools in a project's session and the pointer to Slopty's
+/// CLI in any other, and a pinned conversation. Wherever the worker named its mod, it also loads
+/// the mod, with the switch that lets it run, unless the person loads it already. An inherited
+/// switch that silences the mod's traffic is the person's, and is left alone.
 fn wire(
     args: Vec<String>,
     relay: &str,
@@ -359,9 +359,9 @@ fn wire(
 ) -> (Vec<(String, String)>, Vec<String>) {
     use slopty_agent::claude_mod::{self, Installed};
     let set = |name: &str| var(name).filter(|v| !v.is_empty());
-    let served = set(slopty_proto::project::SERVER_ENV).is_some();
+    let project = set(slopty_proto::project::PROJECT_ENV).is_some();
     let args = match set(SESSION_ENV) {
-        Some(_session) => hooks::wired(args.clone(), relay, cwd, served).unwrap_or(args),
+        Some(_session) => hooks::wired(args.clone(), relay, cwd, project).unwrap_or(args),
         None => args,
     };
     let installed = set(claude_mod::DIR_ENV)
