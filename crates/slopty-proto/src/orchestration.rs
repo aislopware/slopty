@@ -985,6 +985,22 @@ pub enum Verb {
         /// What to do.
         op: crate::git::GitOp,
     },
+    /// Put a finish off until later ([`crate::snooze`]): the server keeps it, across restarts,
+    /// and tells every client. Answered with [`Outcome::Snoozed`]. Refused for a thread that
+    /// needs the person now, and from an agent.
+    Snooze {
+        /// What.
+        of: crate::snooze::SnoozeOf,
+        /// Until when.
+        until: crate::snooze::Until,
+        /// The person's IANA time zone, for the presets; the server's own when absent.
+        zone: Option<String>,
+    },
+    /// End a snooze now. Answered with [`Outcome::Done`], whether or not one held.
+    Unsnooze {
+        /// What.
+        of: crate::snooze::SnoozeOf,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1082,7 +1098,9 @@ impl Verb {
             | Self::TaskPick { .. }
             | Self::ScheduleSet { .. }
             | Self::ScheduleDelete { .. }
-            | Self::ScheduleRun { .. } => true,
+            | Self::ScheduleRun { .. }
+            | Self::Snooze { .. }
+            | Self::Unsnooze { .. } => true,
             Self::Git { op, .. } => !matches!(op, crate::git::GitOp::Status),
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.
@@ -1564,6 +1582,8 @@ pub enum Outcome {
     },
     /// For [`Verb::Git`]: what it did.
     Git(Box<crate::git::GitDone>),
+    /// For [`Verb::Snooze`]: the snooze as the server keeps it, its time worked out.
+    Snoozed(crate::snooze::Snooze),
 }
 
 /// Which thread a [`Verb::ReadThread`] or a [`Verb::AnswerRequest`] is about.

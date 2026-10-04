@@ -4551,10 +4551,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Snooze, honestly.** A snoozed finish leaves *Unread* and the bell's count, keeps its
     tile's dot, and comes back when its session finishes again or after an hour. An agent
     that needs the person cannot be snoozed: it stays where they see it until answered.
+    (Amended 2026-10-04 by "Snooze is the server's, with presets".)
   - **Off screen, the corner says it.** With the app in front, an agent that newly needs the
     person, or a shell or agent that fails or finishes, while its tile is out of view gets a
     notice naming it, with its status mark and "Go". One in view says it itself, and a newer
-    notice for the same tile replaces the older.
+    notice for the same tile replaces the older. (Narrowed 2026-10-04 by "The corner points
+    at what needs you, and only that".)
   - **A notice under the pointer stays.** Hovering holds every notice; leaving gives it two
     more seconds (`SAY_AFTER_HOVER`), as macOS banners and Linear's toasts do.
   - Not yet: pushes chosen by presence (the server does not know where the person is), and a
@@ -5946,3 +5948,57 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `conversation::thread::view::later::tests::{a_held_message_says_when_it_goes,
     the_times_run_forward_from_now}`, `conversation::figures::tests::{tomorrow_at_an_hour_reads_as_tomorrow_then,
     a_message_s_day_reads_by_how_far_back_it_is}`.
+
+- ✅ **Snooze is the server's, with presets** (2026-10-04, `.research/t3code-ui-2026-10-03.md`
+  §3.14). Amends "Snooze, honestly".
+  - Before: a snooze lasted an hour, held in one client's memory. Another device still showed
+    the finish, and a relaunch lost it.
+  - Prior art: T3 Code's snooze keeps a wall time on the server. It offers presets from one
+    shared list, which drops "This evening" once evening is under an hour off. A snoozed
+    thread wakes early when something happens: a request for the person, a fresh failure, or
+    a run that finished after the snooze.
+  - The server holds every snooze (`slopty_proto::snooze`, `hub::snooze`).
+    - `Verb::Snooze { of, until, zone }` sets one. `of` is a thread (`ThreadAt`) or, for a
+      shell's finish or an agent known only by its tile, a terminal (`TermRef`).
+    - `until` is a preset or a time the person picked: "In 1 hour", "This evening" (18:00),
+      "Tomorrow" (09:00), or `At`. The presets are worked out in the zone the client sends,
+      else the server's own, with jiff's built-in database, so a change of clocks lands on
+      the hour the person means. "This evening" under an hour off is refused, pointing at
+      tomorrow.
+    - `Verb::Unsnooze` ends one now.
+    - Both are refused from an agent. A thread or tile that needs the person now is refused
+      too, since it stays where they see it until answered.
+  - **Everywhere and across restarts.** The list goes to every client after where the person
+    is (`FromServer::Snoozes`) and again on every change, each list replacing the last. It is
+    kept in `snoozes.json` beside the workers' file, written whole on each change and at
+    shutdown. A snooze that ended while the server was down is let go when it loads.
+  - **It ends on its own.** The delivery loop wakes at the soonest end. A snooze ends early
+    when its thread has news: any notice the ladder makes for it (needs you, failed, or
+    finished again) ends the thread's snooze and its tile's. The server sees no shell
+    command finish, so a client that sees a snoozed shell finish again sends `Unsnooze`.
+  - The client's own hour-long snooze (`SNOOZE_FOR`) goes, with no shim. The inbox reads the
+    server's list and offers the presets (lane D, `target/lanes/ui-queue.md`); until it
+    does, the server's side stands alone.
+  - Tests: `hub::snooze::tests` (presets across Berlin's change of clocks and in another
+    zone, ending at its time and on news, the person's alone, refused while it needs them)
+    and `a_snooze_outlives_a_restart` (server loopback); the goldens in `golden_snooze`.
+
+- **The corner points at what needs you, and only that** (2026-10-04, ruled; built by lane D,
+  the same study §3.14). Narrows "Off screen, the corner says it".
+  - Before: with the app in front, a tile out of view that came to need the person, failed or
+    finished put a notice in the corner with "Go". The inbox and the bell already list
+    failures and finishes, and the person mostly directs and watches, so those notices were
+    noise that pulled the eye from the work.
+  - Prior art: T3 Code toasts only "Approval needed" for a thread other than the one in view,
+    with "Open thread".
+  - Now the corner speaks only when an agent comes to need the person, its tile is off
+    screen, and the inbox is closed. With the inbox open, its row already says it. A failure
+    or a finish goes to the inbox and the bell quietly, as their dot and count.
+  - **A pointer, never an answer.** The notice names the agent and what it asks, with its
+    status mark and "Go", which brings its tile into view with the keyboard. It never carries
+    Allow, Deny or a choice. The answer is given where the whole request can be read: the
+    tile, the inbox row, or the actionable system notification when the app is away.
+  - A newer notice for the same tile replaces the older, and one whose agent was answered
+    anywhere goes at once.
+  - The workspace side is lane D's (`workspace/toast.rs`, `agents.rs`, triage), with the
+    contract in `target/lanes/ui-queue.md`.

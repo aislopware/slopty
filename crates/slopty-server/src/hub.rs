@@ -66,6 +66,7 @@ mod projects;
 mod queue;
 mod review;
 mod settle;
+mod snooze;
 mod steps;
 
 pub use ladder::Seated;
@@ -161,6 +162,8 @@ struct Inner {
     rankers: Arc<Semaphore>,
     /// Wakes the loop that delivers reports ([`Hub::deliver_reports`]).
     deliver: Arc<Notify>,
+    /// The snoozes as they change, for the store ([`Hub::snoozes_kept`]).
+    snoozes_kept: watch::Sender<Vec<slopty_proto::snooze::Snooze>>,
 }
 
 /// The newest [`HubEvent`]s, oldest first.
@@ -212,6 +215,8 @@ struct State {
     reviews: review::Reviews,
     /// Every worker's thread rows, the ladder made of them, and where the person is.
     board: ladder::Board,
+    /// The person's snoozes.
+    snoozes: snooze::Snoozes,
 }
 
 /// A project change made under a key, so a repeat of the verb answers as the first did.
@@ -386,7 +391,9 @@ impl Hub {
         let state = Mutex::new(state);
         let rankers = Arc::new(Semaphore::new(projects::RANKERS));
         let deliver = Arc::new(Notify::new());
-        let inner = Inner { name, lan, state, events, persist, log, head, rankers, deliver };
+        let (snoozes_kept, _none) = watch::channel(Vec::new());
+        let inner =
+            Inner { name, lan, state, events, persist, log, head, rankers, deliver, snoozes_kept };
         Self { inner: Arc::new(inner) }
     }
 
@@ -882,6 +889,12 @@ impl Hub {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
             Verb::ProjectDelete { project } => self.project_delete(&project),
+            Verb::Snooze { .. } | Verb::Unsnooze { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "a snooze is the person's way to put a finish off, never an agent's",
+            ),
+            Verb::Snooze { of, until, zone } => self.snooze(of, until, zone.as_deref()),
+            Verb::Unsnooze { of } => self.unsnooze(of),
             Verb::Git { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
                 "the commit sheet is the person's; an agent commits, pushes and opens pull \
@@ -1745,7 +1758,9 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskMerge { .. }
         | Verb::TaskPush { .. }
         | Verb::TaskReview { .. }
-        | Verb::ProjectDelete { .. } => None,
+        | Verb::ProjectDelete { .. }
+        | Verb::Snooze { .. }
+        | Verb::Unsnooze { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }

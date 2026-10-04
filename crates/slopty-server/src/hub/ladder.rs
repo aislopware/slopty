@@ -82,6 +82,11 @@ struct Sitting {
 }
 
 impl Board {
+    /// The ladder last published.
+    pub(super) const fn published(&self) -> &Ladder {
+        &self.published
+    }
+
     /// Take in a worker's table frame. A snapshot replaces what it published before.
     ///
     /// Answers what each thread the frame names says it spent, under the terminal its agent
@@ -429,6 +434,7 @@ impl Hub {
         let notices = moved(&mut state.board, &ladder);
         self.announce(FromServer::Ladder(Box::new(ladder.clone())));
         state.board.published = ladder;
+        self.snoozes_heard(state, &notices);
         for notice in notices {
             for link in route(&state.board.seats, &notice) {
                 let Some(seat) = state.board.seats.get(&link) else { continue };

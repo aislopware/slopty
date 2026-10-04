@@ -1,0 +1,8 @@
+---
+source: crates/slopty-proto/tests/golden_snooze.rs
+expression: hex(&bytes)
+---
+32 00 00 00 03 15 29 00 10 01 99 a0 00 00 00 70
+00 80 00 00 00 00 00 00 01 10 01 99 a1 b1 c3 d4
+70 00 80 00 00 00 00 00 7e 7e 80 b5 9d a4 8c 34
+80 d8 c1 a2 8c 34

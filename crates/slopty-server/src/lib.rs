@@ -33,7 +33,7 @@ pub use hub::{Acting, GONE_AFTER, Hub, Lan, Lease, Speaker, SystemLan, WAIT_CAP_
 pub use mcp::Mcp;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;
-pub use store::{ProjectStore, Store};
+pub use store::{ProjectStore, SnoozeStore, Store};
 use tokio::task::JoinHandle;
 
 /// Log whether this machine serves as a Tailscale peer relay: the server's machine is always
@@ -96,6 +96,7 @@ pub struct Server {
     quic: SocketAddr,
     mcp: SocketAddr,
     store: Store,
+    snoozes: SnoozeStore,
     tasks: Vec<JoinHandle<()>>,
     /// Keeps the projects; finishes, writing them, once the hub stops sending it changes.
     keeper: JoinHandle<()>,
@@ -113,6 +114,8 @@ impl Server {
         let hub = Hub::new(config.name, store.load().await.map_err(unreadable(store.path()))?);
         let kept = projects.load().await.map_err(unreadable(projects.path()))?;
         hub.adopt_projects(kept.clone());
+        let snoozes = SnoozeStore::in_dir(&config.data_dir);
+        hub.adopt_snoozes(snoozes.load().await.map_err(unreadable(snoozes.path()))?);
         let keeper = tokio::spawn(projects.keep(kept, hub.keep_projects()));
         let listener = ServerListener::bind(config.quic, config.admission.clone())?;
         let quic = listener.local_addr()?;
@@ -126,6 +129,7 @@ impl Server {
         }
         let tasks = vec![
             tokio::spawn(store.clone().keep(hub.persisted())),
+            tokio::spawn(snoozes.clone().keep(hub.snoozes_kept())),
             tokio::spawn(Hub::deliver_reports(hub.downgrade())),
             tokio::spawn(Hub::publish_ladder(hub.downgrade())),
             tokio::spawn(link::serve(listener.clone(), hub.clone())),
@@ -134,7 +138,7 @@ impl Server {
             tokio::spawn(Hub::settle_finished(hub.downgrade())),
         ];
         tracing::info!(name = %hub.name(), %quic, %mcp, state = %store.path().display(), "serving");
-        Ok(Self { hub, listener, quic, mcp, store, tasks, keeper })
+        Ok(Self { hub, listener, quic, mcp, store, snoozes, tasks, keeper })
     }
 
     /// The registry.
@@ -174,6 +178,9 @@ impl Server {
             && let Err(e) = self.store.save(&workers).await
         {
             tracing::warn!(error = %e, "state not saved at shutdown");
+        }
+        if let Err(e) = self.snoozes.save(&self.hub.snoozes()).await {
+            tracing::warn!(error = %e, "snoozes not saved at shutdown");
         }
         self.hub.stop_keeping();
         if let Err(e) = self.keeper.await {

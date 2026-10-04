@@ -80,6 +80,8 @@ pub enum Change {
     /// A notice the server picked this client to show. Once notices flow they are the only
     /// trigger of an OS notification or an alert, so two devices never both alert.
     Notice(Box<Notice>),
+    /// Every snooze that holds, replacing the last (`slopty_proto::snooze`).
+    Snoozes(Vec<slopty_proto::snooze::Snooze>),
 }
 
 /// Whether to dial a worker now, and where.
@@ -199,6 +201,7 @@ impl Directory {
             FromServer::Ladder(ladder) => vec![Change::Ladder(ladder)],
             FromServer::Present(present) => vec![Change::Present(present)],
             FromServer::Notice(notice) => vec![Change::Notice(notice)],
+            FromServer::Snoozes(snoozes) => vec![Change::Snoozes(snoozes)],
         }
     }
 

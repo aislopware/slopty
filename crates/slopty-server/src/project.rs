@@ -36,7 +36,7 @@ use crate::placement;
 
 mod attempts;
 mod schedule;
-mod when;
+pub(crate) mod when;
 
 /// Latest timeline entries a connecting client gets, and a status read with no cursor.
 pub const RECENT_ENTRIES: usize = 64;

@@ -334,6 +334,9 @@ pub enum FromServer {
     Present(Vec<crate::thread::attention::Present>),
     /// For a client: a notice the server picked it to show, from where the person is.
     Notice(Box<crate::thread::attention::Notice>),
+    /// For a client: every snooze that holds ([`crate::snooze`]), sent after where the person
+    /// is and again on every change. Each replaces the last.
+    Snoozes(Vec<crate::snooze::Snooze>),
 }
 
 /// Why the server refused a hello.

@@ -2282,6 +2282,7 @@ impl Hub {
         let (respent, reset) = state.projects.windows_due(wall);
         self.projects_moved(state, respent);
         let scheduled = self.schedules_due(state, wall, tokio::time::Instant::now());
+        let woken = self.snoozes_due(state, wall, tokio::time::Instant::now());
         let (terminals, _) = live(state);
         Self::reword_outcomes(state);
         let projects = &state.projects;
@@ -2297,7 +2298,8 @@ impl Hub {
         // A plan window that resets may lift a budget's hold with no agent saying so.
         let reset =
             reset.and_then(|at| now.checked_add(Duration::from_millis(at.millis_since(wall))));
-        let next = [state.deliveries.next_due(), reset, scheduled].into_iter().flatten().min();
+        let next =
+            [state.deliveries.next_due(), reset, scheduled, woken].into_iter().flatten().min();
         drop(guard);
         next
     }

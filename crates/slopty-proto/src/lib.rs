@@ -57,6 +57,7 @@ pub mod ptyd;
 pub mod screen;
 pub mod search;
 pub mod server;
+pub mod snooze;
 pub mod tailnet;
 pub mod terminal;
 pub mod thread;

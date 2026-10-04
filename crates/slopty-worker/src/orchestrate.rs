@@ -382,6 +382,8 @@ impl Orchestrator {
             | Verb::ScheduleSet { .. }
             | Verb::ScheduleDelete { .. }
             | Verb::ScheduleRun { .. }
+            | Verb::Snooze { .. }
+            | Verb::Unsnooze { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectNeeds { .. }
             | Verb::ProjectList
