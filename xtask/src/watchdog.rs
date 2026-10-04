@@ -20,6 +20,7 @@ const AGAIN: Duration = Duration::from_mins(5);
 const SAMPLED: usize = 6;
 
 /// How many lines of each sample's call graph are kept.
+#[cfg(target_os = "macos")]
 const SAMPLE_LINES: usize = 60;
 
 /// Reports on its own thread until [`Watchdog::finish`].
