@@ -9,9 +9,10 @@
 use slopty_core::WallMs;
 use slopty_proto::agent::BlockReason;
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::{ReportKind, TaskId};
+use slopty_proto::project::TaskId;
 
 use super::{Hub, State};
+use crate::deliver::Kind;
 use crate::project::{Change, Heard, Upshot, clipped};
 
 /// The most of an agent's last words an outcome carries, in bytes.
@@ -51,9 +52,9 @@ impl Hub {
         state.deliveries.reword(|(project, _), task, kind| {
             let term = projects.task(project, task).ok()?.assignment.as_ref()?.term;
             match kind {
-                ReportKind::Done => Some(rested_words(task, &board.last_words(term)?)),
-                ReportKind::NeedsInput => Some(waits_words(task, &board.asking(term)?)),
-                ReportKind::Stuck | ReportKind::Checkpoint => None,
+                Kind::Done => Some(rested_words(task, &board.last_words(term)?)),
+                Kind::NeedsInput => Some(waits_words(task, &board.asking(term)?)),
+                Kind::Stuck => None,
             }
         });
     }

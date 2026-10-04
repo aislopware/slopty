@@ -63,17 +63,6 @@ pub(super) struct Board {
 /// dev server, say): no subagent, monitor or scheduled prompt of its own.
 pub(super) const COMMANDS_WAIT: &str = "command";
 
-/// How full one thread read its plan's windows, under the terminal its agent runs in.
-#[derive(Debug)]
-pub(super) struct Figures {
-    /// The terminal.
-    pub term: TermRef,
-    /// The thread.
-    pub thread: ThreadId,
-    /// The plan's rate windows as it last read them.
-    pub windows: Vec<slopty_proto::thread::Limit>,
-}
-
 /// A person's client link.
 #[derive(Debug)]
 struct Sitting {
@@ -86,41 +75,21 @@ struct Sitting {
 
 impl Board {
     /// Take in a worker's table frame. A snapshot replaces what it published before.
-    ///
-    /// Answers how full each thread the frame names read its plan's windows, under the
-    /// terminal its agent runs in: a subagent's under its root's, since the project knows the
-    /// root's terminal. A thread whose family runs in no terminal says nothing.
-    pub(super) fn take(&mut self, worker: WorkerId, frame: TableFrame) -> Vec<Figures> {
+    pub(super) fn take(&mut self, worker: WorkerId, frame: TableFrame) {
         let table = self.tables.entry(worker).or_default();
-        let named: Vec<ThreadId> = match frame {
+        match frame {
             TableFrame::Snapshot { rows, .. } => {
                 *table = rows.into_iter().map(|r| (r.id, r)).collect();
-                table.keys().copied().collect()
             }
             TableFrame::Delta { rows, removed, .. } => {
                 for gone in removed {
                     table.remove(&gone);
                 }
-                let named = rows.iter().map(|r| r.id).collect();
                 table.extend(rows.into_iter().map(|r| (r.id, r)));
-                named
             }
-        };
+        }
         self.wake.notify_one();
         self.seen.extend(table.values().filter(|r| seat_fact(r).is_some()).map(|r| (worker, r.id)));
-        named
-            .into_iter()
-            .filter_map(|id| {
-                let row = table.get(&id)?;
-                let root = table.get(&root_of(table, row))?;
-                let session = seat_of(row).or_else(|| seat_of(root))?;
-                Some(Figures {
-                    term: TermRef { worker, session },
-                    thread: id,
-                    windows: row.meters.limits.clone(),
-                })
-            })
-            .collect()
     }
 
     /// The thread seated at `term` (its TUI runs there, or a task's thread was started there)

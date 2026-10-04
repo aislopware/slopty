@@ -132,12 +132,12 @@ mod tests {
 
     /// Wait until the worker `name` is online and has said Claude Code is installed there. A
     /// worker registers before it has looked for its agents, and until it says, placement
-    /// counts it as having none: a task put on it then is refused as unplaced.
-    async fn registered_with_claude(hub: &Hub, name: &str) {
+    /// counts it as having none: a task put on it then is refused as unplaced. Its id.
+    async fn registered_with_claude(hub: &Hub, name: &str) -> WorkerId {
         until(&format!("{name} registers with Claude Code installed"), async || {
             hub.directory()
-                .iter()
-                .any(|w| {
+                .into_iter()
+                .find(|w| {
                     w.name == name
                         && w.liveness == Liveness::Online
                         && w.caps
@@ -145,9 +145,9 @@ mod tests {
                             .iter()
                             .any(|a| a.agent.is(slopty_proto::thread::AgentId::CLAUDE_CODE))
                 })
-                .then_some(())
+                .map(|w| w.worker)
         })
-        .await;
+        .await
     }
 
     async fn status(hub: &Hub, project: &ProjectId) -> ProjectStatus {
@@ -252,10 +252,8 @@ mod tests {
                 title: "Demo".to_owned(),
                 repo: root.to_string_lossy().into_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -269,7 +267,6 @@ mod tests {
                 spec: Box::new(TaskSpec {
                     title: "Look around".to_owned(),
                     brief: "Read the code.".to_owned(),
-                    owns: vec!["src".to_owned()],
                     ..TaskSpec::default()
                 }),
             })
@@ -309,7 +306,7 @@ mod tests {
             { "name": "project_status", "arguments": {} },
             {
                 "name": "task_report",
-                "arguments": { "kind": "checkpoint", "note": "Read the entry point." },
+                "arguments": { "note": "Read the entry point." },
             },
         ]);
         let launch = TaskLaunch {
@@ -407,44 +404,6 @@ mod tests {
         assert!(moments.iter().any(|m| matches!(m, Moment::Assigned { spawned: true, .. })));
         assert!(moments.iter().any(|m| matches!(m, Moment::Branch { .. })), "{moments:?}");
         assert!(moments.iter().any(|m| matches!(m, Moment::Reported { .. })), "{moments:?}");
-
-        // The plan window its status line read reaches the project through its thread, and
-        // the person's budget below it holds the project: no task starts, and the CLI says why.
-        until("the agent's plan window reaches the project", async || {
-            let spend = status(&hub, &project).await.project.spend;
-            (spend.windows.get("five-hour").copied().map(u64::from) == Some(4_000)).then_some(())
-        })
-        .await;
-        let addr = server.quic_addr();
-        slopty(&root, addr, &["project", "update", "demo", "--budget", "five-hour=30%"]).await;
-        let said = slopty(&root, addr, &["project", "status", "demo"]).await;
-        assert!(said.contains("budget  five-hour 40.00% of 30.00% (133%)"), "{said}");
-        let held = status(&hub, &project).await;
-        let reached = held.timeline.iter().any(|e| {
-            matches!(&e.what, Moment::Budget { meter, share_bp: 13_333 } if meter == "five-hour")
-        });
-        assert!(reached, "{:?}", held.timeline);
-        let next = hub
-            .dispatch(Verb::TaskCreate {
-                project: project.clone(),
-                spec: Box::new(TaskSpec { title: "More".to_owned(), ..TaskSpec::default() }),
-            })
-            .await;
-        let Outcome::Task(next) = next else { panic!("{next:?}") };
-        let launch = TaskLaunch {
-            pin: None,
-            cwd: root.to_string_lossy().into_owned(),
-            run: Runner::Command { argv: vec!["true".to_owned()] },
-            env: Vec::new(),
-            size: None,
-            ignore_dependencies: false,
-        };
-        let refused =
-            hub.dispatch(Verb::TaskSpawn { project: project.clone(), task: next.id, launch }).await;
-        assert!(
-            matches!(&refused, Outcome::Error { message, .. } if message.contains("raises the budget")),
-            "{refused:?}"
-        );
 
         server.shutdown().await;
     }
@@ -699,11 +658,10 @@ esac
 "#;
 
     /// What a worker's person says of it, labels and probe commands in its settings, reaches
-    /// `slopty workers` as facts, and a task's placement rules read them. A command task made
-    /// and started in one `slopty task start` runs where its rules place it, with its project
-    /// and task in its environment.
+    /// `slopty workers` as facts. A command task made and started in one `slopty task start`
+    /// runs on the worker it names, with its project and task in its environment.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_worker_s_own_facts_place_a_command_task_that_runs() {
+    async fn a_worker_s_own_facts_are_listed_and_a_command_task_runs_where_it_says() {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let settings = "[worker.labels]\nrack = \"b2\"\n[worker.probes]\nhello = \"echo hi\"\n";
@@ -741,12 +699,8 @@ esac
                 "--kind",
                 "check",
                 "--read-only",
-                "--require",
-                r#"labels.rack == "b2""#,
-                "--require",
-                r#"probes.hello == "hi""#,
-                "--prefer",
-                "5:cpus >= 1",
+                "--worker",
+                &worker.to_string(),
                 "--command",
                 "--cwd",
                 &repo,
@@ -757,19 +711,6 @@ esac
             ],
         )
         .await;
-        let ranked: Value = serde_json::from_str(
-            &slopty(
-                &root,
-                addr,
-                &["--json", "task", "suggest", "--project", "demo", "--task", "1"],
-            )
-            .await,
-        )
-        .unwrap();
-        assert_eq!(ranked[0]["worker"], worker.to_string(), "{ranked}");
-        assert_eq!(ranked[0]["fits"], true, "{ranked}");
-        assert_eq!(ranked[0]["score"], 5, "{ranked}");
-
         let ran = until("the command ran", async || {
             std::fs::read_to_string(&out).ok().filter(|t| !t.is_empty())
         })
@@ -803,10 +744,8 @@ esac
                 title: "Demo".to_owned(),
                 repo: root.to_string_lossy().into_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -825,7 +764,7 @@ esac
         let record = root.join("record.json");
         let calls = json!([
             { "name": "task_update", "arguments": { "status": "reviewing" } },
-            { "name": "task_report", "arguments": { "kind": "done", "note": "Reviewed." } },
+            { "name": "task_report", "arguments": { "note": "Reviewed." } },
         ]);
         let spawned = hub
             .dispatch(Verb::SpawnAgent {
@@ -909,10 +848,8 @@ esac
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -974,14 +911,14 @@ esac
     }
 
     /// Two real workers, the orchestrator's with a clone of the project's repository and
-    /// another with none. A task the rules put on the other gets a clone there first, made by
+    /// another with none. A task pinned to the other gets a clone there first, made by
     /// that worker's own git from the address the orchestrator's clone names (its person's
     /// `insteadOf` reaching the forge), shown as a step. Once its agent reports done, the
     /// branch it committed comes home: bundled there, carried by the server, fetched into the
     /// orchestrator's clone at the same commit, and the card says it arrived.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_task_s_clone_is_made_where_it_runs_and_its_branch_comes_home() {
-        use slopty_proto::project::{Placement, StepKind, StepState};
+        use slopty_proto::project::{StepKind, StepState};
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         // The forge: a bare repository that both workers' git reaches as an https address.
@@ -1017,7 +954,7 @@ esac
         let programs = root.join("programs");
         let _linux_daemons =
             worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
-        registered_with_claude(&hub, "linux-box").await;
+        let linux_worker = registered_with_claude(&hub, "linux-box").await;
 
         let shell = Verb::OpenTerminal {
             worker: studio,
@@ -1036,10 +973,8 @@ esac
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -1053,18 +988,17 @@ esac
         .await;
         assert_eq!(id.url.as_deref(), Some(url), "the address to clone from, as its config has it");
 
-        let on_linux = Placement {
-            require: vec![r#"name == "linux-box""#.to_owned()],
-            ..Placement::default()
+        let spec = TaskSpec {
+            title: "Write it".to_owned(),
+            pin: Some(linux_worker),
+            ..TaskSpec::default()
         };
-        let spec =
-            TaskSpec { title: "Write it".to_owned(), placement: on_linux, ..TaskSpec::default() };
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
         let (record, gate) = (root.join("record.json"), root.join("go"));
         let branch = "worktree-slopty-demo-1";
-        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": branch } }]);
+        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": branch } }]);
         let launch = TaskLaunch {
             pin: None,
             cwd: String::new(),
@@ -1197,7 +1131,6 @@ esac
                     Some(format!("{:?} {how}", s.kind))
                 }
                 Moment::Verified(run) => Some(format!("verified {}", run.passed)),
-                Moment::Reviewed(run) => Some(format!("reviewed {}", run.verdict.approved)),
                 _ => None,
             })
             .collect()
@@ -1229,7 +1162,6 @@ esac
     const ACROSS_BRANCH: &str = "worktree-slopty-demo-1";
 
     async fn across(verifier: &str, env: Vec<(String, String)>) -> Across {
-        use slopty_proto::project::Placement;
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap();
         let seed = root.join("seed");
@@ -1258,7 +1190,7 @@ esac
         std::fs::write(linux_home.join(".claude.json"), "{}").unwrap();
         let programs = root.join("programs");
         let linux = worker_named(&linux_dir, server.quic_addr(), &programs, "", "linux-box").await;
-        registered_with_claude(&hub, "linux-box").await;
+        let linux_worker = registered_with_claude(&hub, "linux-box").await;
 
         let shell = Verb::OpenTerminal {
             worker: studio,
@@ -1277,10 +1209,8 @@ esac
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: Some(verifier.to_owned()),
                 push: false,
-                ask_to_start: false,
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -1293,17 +1223,16 @@ esac
         })
         .await;
 
-        let on_linux = Placement {
-            require: vec![r#"name == "linux-box""#.to_owned()],
-            ..Placement::default()
+        let spec = TaskSpec {
+            title: "Write it".to_owned(),
+            pin: Some(linux_worker),
+            ..TaskSpec::default()
         };
-        let spec =
-            TaskSpec { title: "Write it".to_owned(), placement: on_linux, ..TaskSpec::default() };
         let task =
             hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
         let gate = root.join("go");
-        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": ACROSS_BRANCH } }]);
+        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": ACROSS_BRANCH } }]);
         let mut all = vec![
             ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
             ("STUB_MCP_AFTER".to_owned(), gate.to_string_lossy().into_owned()),
@@ -1615,10 +1544,8 @@ esac
                 title: "Demo".to_owned(),
                 repo: "demo".to_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: Some(verifier.to_owned()),
                 push: false,
-                ask_to_start: false,
                 orchestrator: Some(orchestrator),
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -1636,7 +1563,7 @@ esac
         assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
         let (record, gate, later) = (root.join("record.json"), root.join("go"), root.join("later"));
         std::fs::write(&gate, "").unwrap();
-        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": "task-1" } }]);
+        let calls = json!([{ "name": "task_report", "arguments": { "note": "Wrote it.", "branch": "task-1" } }]);
         let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
         let launch = TaskLaunch {
             pin: Some(worker),
@@ -1740,233 +1667,6 @@ esac
                 "Merge began",
                 "Rebase failed"
             ]
-        );
-        server.shutdown().await;
-    }
-
-    /// One worker, with a reviewer asked for. The task's agent reports done, its verifier
-    /// passes, and the server starts a reviewer of its own: a stub `claude` in a checkout of the
-    /// verified commit with the task's diff beside it, read-only, a terminal the person can
-    /// open. Its `review_report` blocks the merge, so the task goes back and its agent's next
-    /// prompt brings the findings through its hooks; the reviewer's terminal stays to be read.
-    /// The person reads the work and approves it with `slopty task review`, the reviewer is
-    /// let go, the task waits ready to merge, and on `slopty task merge` the queue
-    /// fast-forwards `main` to the tree both checked. Then the person lets the project go with
-    /// `slopty project delete`.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_reviewer_s_block_goes_back_to_the_agent_and_the_person_s_word_merges_it() {
-        use slopty_proto::project::{REVIEW_DIFF, Reviewer, StepKind};
-        let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap();
-        let repo = root.join("demo");
-        std::fs::create_dir_all(&repo).unwrap();
-        git(&repo, &["init", "-q", "-b", "main"]);
-        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
-        git(&repo, &["add", "."]);
-        git(&repo, &["commit", "-q", "-m", "first"]);
-        git(&repo, &["remote", "add", "origin", "git@github.com:aislopware/demo.git"]);
-        let base = git_out(&repo, &["rev-parse", "main"]);
-        let tree = repo.join(".claude/worktrees/t1");
-        git(&repo, &["worktree", "add", "-q", "-b", "task-1", &tree.to_string_lossy(), "main"]);
-        std::fs::write(tree.join("work.txt"), "done\n").unwrap();
-        git(&tree, &["add", "."]);
-        git(&tree, &["commit", "-q", "-m", "the work"]);
-        let head = git_out(&tree, &["rev-parse", "HEAD"]);
-
-        let reviewer_record = root.join("reviewer.json");
-        let verdict = json!([{ "name": "review_report", "arguments": {
-            "approved": false,
-            "summary": "work.txt says done and nothing reads it.",
-            "findings": [
-                { "path": "work.txt", "line": 1, "severity": "blocker", "blocking": true,
-                  "body": "Nothing reads work.txt; wire it in or drop it." },
-                { "severity": "nit", "body": "The commit message could say why." }
-            ]
-        } }]);
-        let reviewer_env = [
-            ("STUB_RECORD".to_owned(), reviewer_record.to_string_lossy().into_owned()),
-            ("STUB_MCP_CALLS".to_owned(), verdict.to_string()),
-        ];
-        let (server, _daemons, worker) = fleet_with(&root, "", &reviewer_env).await;
-        let hub = server.hub().clone();
-        let shell = Verb::OpenTerminal {
-            worker,
-            cwd: Some(repo.to_string_lossy().into_owned()),
-            command: Vec::new(),
-            env: Vec::new(),
-            name: None,
-            size: None,
-            session: None,
-        };
-        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("a shell") };
-        let project = ProjectId::new("demo").unwrap();
-        let brief = "Nothing is added that nothing reads";
-        let made = hub
-            .dispatch(Verb::ProjectCreate {
-                project: project.clone(),
-                title: "Demo".to_owned(),
-                repo: "demo".to_owned(),
-                target: "main".to_owned(),
-                review: Some(brief.to_owned()),
-                verifier: Some("test -f work.txt".to_owned()),
-                push: false,
-                ask_to_start: false,
-                orchestrator: Some(orchestrator),
-                limits: LimitsChange::default(),
-                metadata: None,
-                members: Vec::new(),
-            })
-            .await;
-        assert!(matches!(made, Outcome::Project(_)), "{made:?}");
-        until("the project learns its repository", async || {
-            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
-        })
-        .await;
-        let spec = TaskSpec { title: "Write it".to_owned(), ..TaskSpec::default() };
-        let task =
-            hub.dispatch(Verb::TaskCreate { project: project.clone(), spec: Box::new(spec) }).await;
-        assert!(matches!(&task, Outcome::Task(t) if t.id == TaskId(1)), "{task:?}");
-        let (record, later) = (root.join("agent.json"), root.join("later"));
-        let calls = json!([{ "name": "task_report", "arguments": { "kind": "done", "note": "Wrote it.", "branch": "task-1" } }]);
-        let prompt = json!([{ "hook_event_name": "UserPromptSubmit", "prompt": "go on" }]);
-        let launch = TaskLaunch {
-            pin: Some(worker),
-            cwd: tree.to_string_lossy().into_owned(),
-            run: Runner::Claude { prompt: None, args: Vec::new() },
-            env: vec![
-                ("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned()),
-                ("STUB_MCP_CALLS".to_owned(), calls.to_string()),
-                ("STUB_LATER".to_owned(), prompt.to_string()),
-                ("STUB_LATER_AFTER".to_owned(), later.to_string_lossy().into_owned()),
-            ],
-            size: None,
-            ignore_dependencies: false,
-        };
-        let spawned = hub
-            .dispatch(Verb::TaskSpawn { project: project.clone(), task: TaskId(1), launch })
-            .await;
-        let Outcome::Task(spawned) = spawned else { panic!("{spawned:?}") };
-        let agent = spawned.assignment.unwrap().term;
-
-        let started = std::time::Instant::now();
-        let card = card_when(&hub, &project, "the reviewer asks for changes", |card| {
-            card.reviewed.is_some() && card.state == TaskState::Waiting
-        })
-        .await;
-        eprintln!("MEASURE spawn to a reviewer's word: {:?}", started.elapsed());
-        let run = card.reviewed.unwrap();
-        let Reviewer::Agent(reviewer) = run.by else { panic!("{run:?}") };
-        assert_eq!((run.head.as_str(), run.base.as_str()), (head.as_str(), base.as_str()));
-        assert!(!run.verdict.approved && run.verdict.findings[0].blocking, "{run:?}");
-        assert!(card.verified.is_some_and(|v| v.passed && v.head == head));
-        let step = card.step.unwrap();
-        assert_eq!((step.kind, step.term), (StepKind::Review, Some(reviewer)), "kept to read");
-        let listed = match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
-            Outcome::Terminals(list) => list,
-            other => panic!("{other:?}"),
-        };
-        assert!(listed.iter().any(|(_, s)| s.id == reviewer.session), "a terminal to open");
-
-        let seen: Value =
-            serde_json::from_slice(&std::fs::read(&reviewer_record).unwrap()).unwrap();
-        let args: Vec<&str> =
-            seen["argv"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-        let flag = args.iter().position(|a| *a == "--disallowedTools").expect("read-only");
-        assert_eq!(args[flag + 1], "Edit,Write,NotebookEdit");
-        assert!(args.iter().any(|a| a.contains(brief)), "told the brief: {args:?}");
-        let place = root.join("home/slopty/verify/demo-review-1");
-        assert_eq!(seen["cwd"], json!(place.to_string_lossy()), "in a checkout of its own");
-        assert_eq!(seen["env"]["SLOPTY_TASK"], "1", "{seen}");
-        assert!(seen["mcp"][0]["error"].is_null(), "its verdict taken: {seen}");
-        assert_eq!(git_out(&place, &["rev-parse", "HEAD"]), head, "the verified commit");
-        let diff = std::fs::read_to_string(place.join(REVIEW_DIFF)).unwrap();
-        assert!(diff.contains("+done") && diff.contains("work.txt"), "{diff}");
-
-        let reports = slopty_agent::reports::dir(&root.join("worker.sock"));
-        until("the report waits for the agent's hooks", async || {
-            reports.join(format!("{}.json", agent.session)).exists().then_some(())
-        })
-        .await;
-        std::fs::write(&later, "").unwrap();
-        let seen: Value = until("the agent's next prompt hands it the review", async || {
-            let seen: Value = serde_json::from_slice(&std::fs::read(&record).ok()?).ok()?;
-            (seen["hooks"].as_array()?.len() >= 2).then_some(seen)
-        })
-        .await;
-        let handed = seen["hooks"][1]["outputs"][0]["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        for words in ["What blocks the merge", "work.txt:1", "Nothing reads work.txt", "Also noted"]
-        {
-            assert!(handed.contains(words), "{words:?} in {handed}");
-        }
-        assert_eq!(seen["typed"], json!([]), "nothing typed into the agent");
-
-        let said = slopty(
-            &root,
-            server.quic_addr(),
-            &[
-                "task",
-                "review",
-                "--project",
-                "demo",
-                "--task",
-                "1",
-                "--approve",
-                "--summary",
-                "It is read by the next task.",
-            ],
-        )
-        .await;
-        assert!(said.contains("#1"), "{said}");
-        let ready = card_when(&hub, &project, "the person's word makes it ready", |card| {
-            card.state == TaskState::Done
-        })
-        .await;
-        assert_eq!(ready.merge, None, "it waits for the person's Merge");
-        let asked = slopty(
-            &root,
-            server.quic_addr(),
-            &["task", "merge", "--project", "demo", "--task", "1"],
-        )
-        .await;
-        assert!(asked.contains("#1"), "{asked}");
-        let card = card_when(&hub, &project, "the person's Merge merges it", |card| {
-            card.state == TaskState::Merged
-        })
-        .await;
-        assert_eq!(card.reviewed.map(|r| r.by), Some(Reviewer::Person));
-        let tree_of =
-            |dir: &Path, commit: &str| git_out(dir, &["rev-parse", &format!("{commit}^{{tree}}")]);
-        assert_eq!(tree_of(&repo, "main"), tree_of(&tree, &head), "main fast-forwarded");
-        assert_eq!(git_out(&repo, &["rev-parse", "main~1"]), base, "to the work alone");
-        until("the reviewer the person spoke over is let go", async || {
-            match hub.dispatch(Verb::ListTerminals { worker: Some(worker) }).await {
-                Outcome::Terminals(list) => {
-                    list.iter().all(|(_, s)| s.id != reviewer.session).then_some(())
-                }
-                _ => None,
-            }
-        })
-        .await;
-        assert_eq!(
-            moments(&hub, &project).await,
-            [
-                "Verify began",
-                "verified true",
-                "Review began",
-                "reviewed false",
-                "reviewed true",
-                "Merge began",
-                "Merge done"
-            ]
-        );
-        let gone = slopty(&root, server.quic_addr(), &["project", "delete", "demo"]).await;
-        assert!(gone.contains("demo"), "{gone}");
-        assert!(
-            matches!(hub.dispatch(Verb::ProjectList).await, Outcome::Projects(p) if p.is_empty()),
-            "the person let it go"
         );
         server.shutdown().await;
     }

@@ -54,7 +54,7 @@ use slopty_proto::orchestration::{
 use slopty_proto::project::{AgentReport, Facts, ProjectId, ProjectStatus, ProjectsPart, TaskId};
 use slopty_proto::server::{FromServer, Liveness, Refusal, Registration, ToServer, WorkerInfo};
 use slopty_proto::terminal::{SessionState, SessionSummary};
-use tokio::sync::{Notify, Semaphore, broadcast, mpsc, oneshot, watch};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 
 use crate::deliver::Deliveries;
 use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
@@ -64,7 +64,6 @@ mod ladder;
 mod outcomes;
 mod projects;
 mod queue;
-mod review;
 mod settle;
 mod steps;
 
@@ -157,8 +156,6 @@ struct Inner {
     log: Mutex<Log>,
     /// The log's next sequence number, for [`Verb::Events`] to wait on.
     head: watch::Sender<u64>,
-    /// Rankings of placement rules running at once ([`projects::RANKERS`]).
-    rankers: Arc<Semaphore>,
     /// Wakes the loop that delivers reports ([`Hub::deliver_reports`]).
     deliver: Arc<Notify>,
 }
@@ -208,8 +205,6 @@ struct State {
     steps: steps::Steps,
     /// The projects' lanes running: their verifiers and merge queues.
     lanes: queue::Lanes,
-    /// The reviewers at work, by the task they read.
-    reviews: review::Reviews,
     /// Every worker's thread rows, the ladder made of them, and where the person is.
     board: ladder::Board,
 }
@@ -384,9 +379,8 @@ impl Hub {
         let log = Mutex::new(Log { ring: VecDeque::with_capacity(EVENT_LOG), first, next: first });
         let (head, _none) = watch::channel(first);
         let state = Mutex::new(state);
-        let rankers = Arc::new(Semaphore::new(projects::RANKERS));
         let deliver = Arc::new(Notify::new());
-        let inner = Inner { name, lan, state, events, persist, log, head, rankers, deliver };
+        let inner = Inner { name, lan, state, events, persist, log, head, deliver };
         Self { inner: Arc::new(inner) }
     }
 
@@ -819,17 +813,6 @@ impl Hub {
             Verb::TaskSpawn { project, task, launch } => {
                 self.task_spawn(caller, key, project, task, launch).await
             }
-            Verb::TaskStart { .. } if caller == Caller::Agent => error(
-                ErrorCode::Forbidden,
-                "a proposed task is the person's to start; your task_start proposed it, and you \
-                 hear when it starts",
-            ),
-            Verb::TaskStart { project, task, pin } => {
-                self.task_start(key, project, task, pin).await
-            }
-            Verb::PlacementSuggest { project, task, placement } => {
-                self.placement_suggest(project.as_ref(), task, placement).await
-            }
             Verb::WorkerFacts { worker } => self.worker_facts(worker),
             Verb::TaskGet { project, task } => self.task_get(&project, task),
             Verb::WorkingOn { session } => self.working_on(session),
@@ -858,9 +841,6 @@ impl Hub {
                 "the server clones and carries branches for tasks itself; task_start and \
                      task_report do it",
             ),
-            Verb::TaskReview { project, task, verdict } => {
-                self.task_review(caller, from, (&project, task), verdict)
-            }
             Verb::TaskPush { project, task } => self.task_push(caller, (&project, task)).await,
             Verb::ProjectDelete { .. } if caller == Caller::Agent => {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
@@ -889,8 +869,7 @@ impl Hub {
             Verb::Verify { .. }
             | Verb::Rebase { .. }
             | Verb::FastForward { .. }
-            | Verb::TestDiff { .. }
-            | Verb::ReviewCheckout { .. } => error(
+            | Verb::TestDiff { .. } => error(
                 ErrorCode::Forbidden,
                 "the server checks and merges tasks itself, one at a time; a task's done report \
                  starts its checks, and the person's task merge lands it",
@@ -909,7 +888,6 @@ impl Hub {
             | Verb::TaskUpdate { .. }
             | Verb::TaskReport { .. }
             | Verb::TaskTell { .. }
-            | Verb::ProjectNeeds { .. }
             | Verb::TaskMerge { .. }) => self.project_change(caller, key, &verb),
             other => self.forward(key, other).await,
         }
@@ -1201,9 +1179,6 @@ impl Hub {
         projects::unwatch(state, term.session);
         let updates = state.projects.session_ended(term, WallMs::now());
         self.projects_moved(state, updates);
-        self.reviewer_closed(state, term);
-        // An agent ending makes room: a reviewer waiting for it may start.
-        self.kick_all(state);
     }
 
     /// Log and push each project change, and send the store what it keeps. Called under the
@@ -1490,9 +1465,7 @@ impl Lease {
             ToServer::Threads(frame) => {
                 let now = WallMs::now();
                 let mut moved = Vec::new();
-                for f in state.board.take(worker, frame) {
-                    moved.extend(state.projects.spent(f.term, f.thread, &f.windows, now));
-                }
+                state.board.take(worker, frame);
                 for (term, status) in state.board.seat_moves(worker) {
                     hub.adopt(&mut state, term);
                     moved.extend(state.projects.agent_status(term, &status, now));
@@ -1575,9 +1548,7 @@ fn remember(
         Verb::TaskCreate { project, .. }
         | Verb::TaskUpdate { project, .. }
         | Verb::TaskSpawn { project, .. }
-        | Verb::TaskStart { project, .. }
         | Verb::TaskTell { project, .. }
-        | Verb::ProjectNeeds { project, .. }
         | Verb::TaskReport { project, .. }
         | Verb::TaskMerge { project, .. } => Some(project),
         _ => None,
@@ -1709,17 +1680,13 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskCreate { .. }
         | Verb::TaskUpdate { .. }
         | Verb::TaskSpawn { .. }
-        | Verb::TaskStart { .. }
         | Verb::TaskTell { .. }
-        | Verb::ProjectNeeds { .. }
-        | Verb::PlacementSuggest { .. }
         | Verb::WorkerFacts { .. }
         | Verb::TaskGet { .. }
         | Verb::WorkingOn { .. }
         | Verb::TaskReport { .. }
         | Verb::TaskMerge { .. }
         | Verb::TaskPush { .. }
-        | Verb::TaskReview { .. }
         | Verb::ProjectDelete { .. }
         | Verb::ScriptSet { .. }
         | Verb::ScriptDelete { .. }
@@ -1746,7 +1713,6 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::FetchBundle { worker, .. }
         | Verb::PullChecks { worker, .. }
         | Verb::Verify { worker, .. }
-        | Verb::ReviewCheckout { worker, .. }
         | Verb::Rebase { worker, .. }
         | Verb::TestDiff { worker, .. }
         | Verb::FastForward { worker, .. }

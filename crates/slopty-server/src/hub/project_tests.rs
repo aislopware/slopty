@@ -1,6 +1,6 @@
-//! Projects through the hub: verbs answered from the store, a task's terminal placed by rules
-//! over the workers' facts and put on the task, every start counted against the bounds, and
-//! what a worker's link reports moving the task.
+//! Projects through the hub: verbs answered from the store, a task's terminal placed on the
+//! worker it names or the least busy one and put on the task, every start counted against the
+//! bounds, and what a worker's link reports moving the task.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -9,8 +9,8 @@ use slopty_agent::vouch::SessionKey;
 use slopty_proto::agent::{AgentEvent, AgentKind, AgentSource, BlockReason, PullRequest, Worktree};
 use slopty_proto::orchestration::{BranchBundle, ThreadOf, UploadPart};
 use slopty_proto::project::{
-    Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, Placement, ProjectId, Runner, TASK_ENV,
-    TaskCard, TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
+    Bounds, Fact, LimitsChange, Moment, PROJECT_ENV, ProjectId, Runner, TASK_ENV, TaskCard,
+    TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState,
 };
 use slopty_proto::server::Os;
 
@@ -66,10 +66,8 @@ pub(super) async fn create_with(hub: &Hub, orchestrator: Option<TermRef>, limits
             title: "Projects".to_owned(),
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
-            review: None,
             verifier: None,
             push: false,
-            ask_to_start: false,
             orchestrator,
             limits,
             metadata: None,
@@ -83,21 +81,18 @@ pub(super) async fn create(hub: &Hub, orchestrator: Option<TermRef>) {
     create_with(hub, orchestrator, LimitsChange::default()).await;
 }
 
-pub(super) async fn new_task(hub: &Hub, placement: Placement) -> TaskId {
+/// A task pinned to `pin`, when it names a worker.
+pub(super) async fn new_task(hub: &Hub, pin: Option<WorkerId>) -> TaskId {
     let spec = TaskSpec {
         title: "Server".to_owned(),
         brief: "Build it.".to_owned(),
-        placement,
+        pin,
         ..TaskSpec::default()
     };
     match hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await {
         Outcome::Task(task) => task.id,
         other => panic!("{other:?}"),
     }
-}
-
-fn linux_only() -> Placement {
-    Placement { require: vec![r#"os == "linux""#.to_owned()], ..Placement::default() }
 }
 
 pub(super) async fn status(hub: &Hub) -> ProjectStatus {
@@ -177,16 +172,17 @@ pub(super) fn refused(outcome: &Outcome, code: ErrorCode) -> &str {
     }
 }
 
-/// A Linux-only task starts on the Linux worker, never the Mac, with the project and the task
-/// in its environment over the caller's; once the worker answers it is the task's terminal, and
-/// every link hears so. With the Linux worker gone, the start is refused saying why of each.
+/// A task pinned to the Linux worker starts there, never on the Mac, with the project and the
+/// task in its environment over the caller's; once the worker answers it is the task's
+/// terminal, and every link hears so. With the Linux worker gone, the start is refused saying
+/// why.
 #[tokio::test]
-async fn a_linux_only_task_is_spawned_on_the_linux_worker_and_put_on_its_task() {
+async fn a_pinned_task_is_spawned_on_its_worker_and_put_on_its_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_mac, _mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, linux_only()).await;
+    let task = new_task(&hub, Some(linux)).await;
     let mut pushed = hub.subscribe();
 
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
@@ -218,22 +214,21 @@ async fn a_linux_only_task_is_spawned_on_the_linux_worker_and_put_on_its_task() 
     refused(&again.await, ErrorCode::Conflict);
 
     drop(linux_lease);
-    let other = new_task(&hub, linux_only()).await;
+    let other = new_task(&hub, Some(linux)).await;
     let no = hub.dispatch(Verb::TaskSpawn { project: project(), task: other, launch: claude(&[]) });
     let no = no.await;
-    let said = refused(&no, ErrorCode::Unplaced);
-    assert!(said.contains("box: not online"), "{said}");
-    assert!(said.contains("studio: false here"), "{said}");
+    assert_eq!(refused(&no, ErrorCode::Unplaced), "no worker can take task 2 now: box: not online");
 }
 
-/// A pin is the orchestrator's own word: the task starts there whatever its rules say.
+/// The worker a start names is the orchestrator's own word: the task starts there whatever
+/// worker the task names.
 #[tokio::test]
-async fn a_pinned_start_goes_where_it_is_pinned_over_every_rule() {
+async fn a_start_s_pin_goes_over_the_task_s() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
-    let (_linux, _linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    let (linux, _linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, linux_only()).await;
+    let task = new_task(&hub, Some(linux)).await;
     let launch = TaskLaunch { pin: Some(mac), ..claude(&[]) };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
     let start = request(&mut mac_rx).await;
@@ -244,9 +239,8 @@ async fn a_pinned_start_goes_where_it_is_pinned_over_every_rule() {
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 }
 
-/// The person's "Run on" pins a task to a worker over its rules, and "Anywhere" lets them
-/// choose again; the card says where it is pinned. A started task keeps why it went where it
-/// did: the pin, or the rules that held.
+/// The person's "Run on" pins a task to a worker, and "Anywhere" lets the server choose again;
+/// the card says where it is pinned.
 #[tokio::test]
 async fn a_task_runs_where_the_person_says_and_keeps_why_it_went_there() {
     use slopty_proto::project::RunOn;
@@ -260,89 +254,26 @@ async fn a_task_runs_where_the_person_says_and_keeps_why_it_went_there() {
         change: Box::new(TaskChange { run_on: Some(run_on), ..TaskChange::default() }),
     };
 
-    let pinned = new_task(&hub, linux_only()).await;
+    let pinned = new_task(&hub, None).await;
     assert!(matches!(hub.dispatch(run_on(pinned, RunOn::Worker(mac))).await, Outcome::Task(_)));
     assert_eq!(task_now(&hub, pinned).await.pin, Some(mac), "the card says where it is pinned");
     let asked =
         spawn(&hub, Verb::TaskSpawn { project: project(), task: pinned, launch: claude(&[]) });
     let start = request(&mut mac_rx).await;
     opened(&mac_lease, &start);
-    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
-    let placed = started.assignment.and_then(|a| a.placed).expect("why it went there");
-    assert!(placed.pinned && placed.why.starts_with("pinned"), "{placed:?}");
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
     linux_rx.try_recv().unwrap_err();
 
-    let free = new_task(&hub, linux_only()).await;
+    let free = new_task(&hub, None).await;
     hub.dispatch(run_on(free, RunOn::Worker(mac))).await;
     hub.dispatch(run_on(free, RunOn::Anywhere)).await;
     assert_eq!(task_now(&hub, free).await.pin, None, "anywhere takes the pin off");
     let asked =
         spawn(&hub, Verb::TaskSpawn { project: project(), task: free, launch: claude(&[]) });
     let start = request(&mut linux_rx).await;
-    assert_eq!(chosen(&start.1).0, linux, "its rules choose again");
+    assert_eq!(chosen(&start.1).0, linux, "the worker running the fewest agents");
     opened(&linux_lease, &start);
-    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
-    let card = task_now(&hub, started.id).await;
-    let placed = card.assignment.and_then(|a| a.placed).expect("on the card too");
-    assert!(!placed.pinned, "{placed:?}");
-    assert_eq!(placed.why, r#"os == "linux""#, "the rule that held");
-}
-
-/// When the person asks to start each task, an agent's `task_spawn` only proposes it: the task
-/// keeps the start with where it would go and why, the timeline says so, and no worker is
-/// asked. Only the person starts it, on the worker they choose, as the agent asked; then the
-/// proposal is spent. An agent may not set the setting, nor start what it proposed.
-#[tokio::test]
-async fn an_agent_s_start_waits_for_the_person_when_they_ask_to_start_tasks() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
-    let (linux, _linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    let orchestrator = SessionId::new();
-    announce(&mac_lease, orchestrator, true);
-    create(&hub, Some(TermRef { worker: mac, session: orchestrator })).await;
-    let agent = Speaker::Proven(orchestrator);
-    let ask = |on: bool| Verb::ProjectSet {
-        project: project(),
-        orchestrator: None,
-        verifier: None,
-        review: None,
-        push: None,
-        ask_to_start: Some(on),
-        limits: LimitsChange::default(),
-        metadata: None,
-        members: None,
-    };
-    let by_agent = spawn_as(&hub, agent, ask(false)).await.unwrap();
-    refused(&by_agent, ErrorCode::Forbidden);
-    assert!(matches!(hub.dispatch(ask(true)).await, Outcome::Project(_)));
-    let task = new_task(&hub, linux_only()).await;
-
-    let launch = TaskLaunch { env: Vec::new(), ..claude(&[]) };
-    let propose = Verb::TaskSpawn { project: project(), task, launch };
-    let answer = spawn_as(&hub, agent, propose).await.unwrap();
-    let Outcome::Task(proposed) = answer else { panic!("not a task: {answer:?}") };
-    let held = proposed.proposal.expect("the start is held").proposed;
-    assert_eq!((held.runs.as_str(), held.on), ("claude", Some(linux)), "{held:?}");
-    assert_eq!(held.why, r#"os == "linux""#);
-    assert!(mac_rx.try_recv().is_err() && linux_rx.try_recv().is_err(), "no worker was asked");
-    let card = task_now(&hub, task).await;
-    assert_eq!(card.state, TaskState::Planned);
-    assert_eq!(card.proposed.map(|p| p.on), Some(Some(linux)), "the card shows it");
-    let timeline = status(&hub).await.timeline;
-    assert!(timeline.iter().any(|e| matches!(e.what, Moment::Proposed { .. })), "{timeline:?}");
-
-    let start = |pin| Verb::TaskStart { project: project(), task, pin };
-    refused(&spawn_as(&hub, agent, start(None)).await.unwrap(), ErrorCode::Forbidden);
-    let asked = spawn(&hub, start(Some(mac)));
-    let begun = request(&mut mac_rx).await;
-    let Verb::SpawnAgent { prompt, .. } = &begun.1 else { panic!("{:?}", begun.1) };
-    assert_eq!(prompt.as_deref(), Some("Read your brief."), "as the agent asked");
-    opened(&mac_lease, &begun);
-    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
-    assert!(started.proposal.is_none(), "the proposal is spent");
-    assert_eq!(started.assignment.map(|a| a.term.worker), Some(mac), "where the person chose");
-    let again = hub.dispatch(start(None)).await;
-    assert!(refused(&again, ErrorCode::Invalid).contains("no start proposed"));
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 }
 
 /// A task runs any command, not only Claude Code: a benchmark opens in a terminal of its own,
@@ -352,7 +283,7 @@ async fn a_command_task_is_placed_run_and_put_on_its_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, linux_only()).await;
+    let task = new_task(&hub, None).await;
     let launch = TaskLaunch {
         run: Runner::Command { argv: vec!["cargo".to_owned(), "bench".to_owned()] },
         cwd: String::new(),
@@ -373,16 +304,18 @@ async fn a_command_task_is_placed_run_and_put_on_its_task() {
     assert_eq!(started.assignment.map(|a| a.term), Some(term));
 }
 
-/// Two starts at once never both take the last place on a worker: the second is placed while
-/// the first is still starting, and counts it.
+/// Two starts at once never both take the fleet's last place: the second is placed while the
+/// first is still starting, and counts it.
 #[tokio::test]
-async fn concurrent_starts_never_pass_the_project_s_cap_per_worker() {
+async fn concurrent_starts_never_pass_the_fleet_s_bound() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    let one = LimitsChange { live_per_worker: Some(1), ..LimitsChange::default() };
-    create_with(&hub, None, one).await;
-    let (a, b) =
-        (new_task(&hub, Placement::default()).await, new_task(&hub, Placement::default()).await);
+    hub.set_policy(Policy {
+        bounds: Bounds { live_agents: 1, ..Bounds::default() },
+        ..Policy::default()
+    });
+    create(&hub, None).await;
+    let (a, b) = (new_task(&hub, None).await, new_task(&hub, None).await);
     let first = spawn(&hub, Verb::TaskSpawn { project: project(), task: a, launch: claude(&[]) });
     let second = spawn(&hub, Verb::TaskSpawn { project: project(), task: b, launch: claude(&[]) });
     let start = request(&mut rx).await;
@@ -396,13 +329,13 @@ async fn concurrent_starts_never_pass_the_project_s_cap_per_worker() {
     })
     .await
     .unwrap();
-    assert!(refused(&late, ErrorCode::Unplaced).contains("live_per_worker"), "{late:?}");
+    assert!(refused(&late, ErrorCode::Limit).contains("live_agents"), "{late:?}");
     assert!(rx.try_recv().is_err(), "one start went to the worker");
     opened(&lease, &start);
     assert!(matches!(placed.await.unwrap(), Outcome::Task(_)));
     let again = Verb::TaskSpawn { project: project(), task: refused_task, launch: claude(&[]) };
     let full = hub.dispatch(again);
-    assert!(refused(&full.await, ErrorCode::Unplaced).contains("box: runs 1"));
+    assert!(refused(&full.await, ErrorCode::Limit).contains("runs 1 agents"));
 }
 
 /// A caller that leaves while its start is on the way does not leave an agent running for
@@ -412,7 +345,7 @@ async fn a_start_whose_caller_left_still_puts_its_terminal_on_the_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let start = request(&mut rx).await;
     asked.abort();
@@ -434,7 +367,7 @@ async fn a_start_its_task_can_no_longer_take_is_closed() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let start = request(&mut rx).await;
     for state in [TaskState::Done, TaskState::Merged] {
@@ -478,22 +411,9 @@ async fn every_agent_counts_against_the_fleet_bound_the_person_set() {
     assert!(matches!(asked.await.unwrap(), Outcome::Opened(_)));
     let said = refused(&hub.dispatch(plain()).await, ErrorCode::Limit).to_owned();
     assert!(said.contains("runs 1 agents") && said.contains("live_agents"), "{said}");
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let start = hub.dispatch(Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     refused(&start.await, ErrorCode::Limit);
-    let greedy = LimitsChange { live_per_project: Some(500), ..LimitsChange::default() };
-    let set = Verb::ProjectSet {
-        project: project(),
-        orchestrator: None,
-        review: None,
-        verifier: None,
-        push: None,
-        ask_to_start: None,
-        limits: greedy,
-        metadata: None,
-        members: None,
-    };
-    assert!(refused(&hub.dispatch(set).await, ErrorCode::Limit).contains("the person allows"));
 }
 
 /// No agent starts another with more than it has: flags that loosen Claude Code's permissions
@@ -503,7 +423,7 @@ async fn flags_that_loosen_permissions_need_the_person_s_word() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, _lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let loose = claude(&["--dangerously-skip-permissions"]);
     let start = hub.dispatch(Verb::TaskSpawn { project: project(), task, launch: loose.clone() });
     assert!(refused(&start.await, ErrorCode::Limit).contains("permission_flags"));
@@ -561,7 +481,7 @@ async fn a_restarted_server_frees_the_tasks_whose_terminals_ended_while_it_was_a
     let session = SessionId::new();
     let (linux, lease, _rx) = worker_on(&hub, "box", Os::Linux, vec![summary(session)]);
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let term = TermRef { worker: linux, session };
     let assigned = hub.assign_for_test(&project(), task, term);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -580,18 +500,15 @@ async fn a_restarted_server_frees_the_tasks_whose_terminals_ended_while_it_was_a
     assert!(matches!(again.await.unwrap(), Outcome::Task(_)));
 }
 
-/// What a worker reports of itself is a fact placement reads, beside what the server knows of
-/// it; a suggestion ranks every worker with its reasons, and changes nothing.
+/// What a worker reports of itself is a fact `list_workers` shows, beside what the server
+/// knows of it, whose word wins.
 #[tokio::test]
-async fn a_suggestion_ranks_the_workers_by_their_reported_facts_with_reasons() {
+async fn a_worker_s_reported_facts_are_shown_under_the_server_s() {
     let hub = Hub::new("server".to_owned(), Vec::new());
-    let (_studio, _studio_lease, _) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     let (linux, lease, _rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     let labels = BTreeMap::from([("fast-disk".to_owned(), Fact::Bool(true))]);
-    let probes = BTreeMap::from([("cuda".to_owned(), Fact::Text("GPU 0".to_owned()))]);
     lease.handle(ToServer::Facts(BTreeMap::from([
         ("labels".to_owned(), Fact::Map(labels)),
-        ("probes".to_owned(), Fact::Map(probes)),
         ("os".to_owned(), Fact::Text("pretend".to_owned())),
     ])));
     let Outcome::Facts(all) = hub.dispatch(Verb::WorkerFacts { worker: Some(linux) }).await else {
@@ -600,27 +517,6 @@ async fn a_suggestion_ranks_the_workers_by_their_reported_facts_with_reasons() {
     let facts = &all.first().unwrap().facts;
     assert_eq!(facts.get("os"), Some(&Fact::Text("linux".to_owned())), "the server's word wins");
     assert!(facts.contains_key("labels") && facts.contains_key("cpus"));
-
-    create(&hub, None).await;
-    let placement = Placement {
-        require: vec![r#"labels["fast-disk"]"#.to_owned()],
-        prefer: vec![slopty_proto::project::Preference {
-            expr: "has(probes.cuda)".to_owned(),
-            weight: 5,
-        }],
-        ..Placement::default()
-    };
-    let verb =
-        Verb::PlacementSuggest { project: Some(project()), task: None, placement: Some(placement) };
-    let Outcome::Suggestions(ranked) = hub.dispatch(verb).await else { panic!("suggestions") };
-    let names: Vec<(&str, bool, i64)> =
-        ranked.iter().map(|s| (s.name.as_str(), s.fits, s.score)).collect();
-    assert_eq!(names, [("box", true, 5), ("studio", false, 0)]);
-    let studio = &ranked[1];
-    assert!(studio.reasons.iter().any(|r| !r.held && r.detail.contains("labels")), "{studio:?}");
-    let bad = Placement { require: vec!["os ==".to_owned()], ..Placement::default() };
-    let verb = Verb::PlacementSuggest { project: None, task: None, placement: Some(bad) };
-    refused(&hub.dispatch(verb).await, ErrorCode::BadExpression);
 }
 
 pub(super) fn agent(session: SessionId, status: AgentStatus) -> ToServer {
@@ -656,7 +552,7 @@ async fn a_worker_s_reports_move_the_task_its_agent_works_on() {
     let branch = AgentBranch { session, pr: None, worktree: Some(worktree) };
     lease.handle(ToServer::Report(AgentReport::Branch(branch.clone())));
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let Outcome::Task(assigned) = hub.assign_for_test(&project(), task, term) else {
         panic!("assigned")
     };
@@ -728,7 +624,7 @@ async fn a_status_read_waits_for_the_project_s_next_change() {
     );
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(!waiting.is_finished(), "nothing new yet");
-    new_task(&hub, Placement::default()).await;
+    new_task(&hub, None).await;
     let Outcome::Project(news) =
         tokio::time::timeout(Duration::from_secs(10), waiting).await.unwrap().unwrap()
     else {
@@ -759,7 +655,7 @@ async fn a_client_is_told_the_projects_with_the_fleet_as_of_one_event() {
     assert_eq!(snapshot.projects.len(), 1);
     assert_eq!(snapshot.projects.first().map(|p| p.project.id.clone()), Some(project()));
     assert!(snapshot.projects.iter().all(|p| !p.timeline.is_empty()), "with its latest entries");
-    new_task(&hub, Placement::default()).await;
+    new_task(&hub, None).await;
     let Ok(FromServer::Event(after)) = pushed.try_recv() else { panic!("a change is pushed") };
     assert!(after.seq > snapshot.seq, "a change after the snapshot is past its seq");
 }
@@ -789,7 +685,7 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let start = request(&mut rx).await;
     let (_, session) = chosen(&start.1);
@@ -834,10 +730,10 @@ async fn a_start_whose_answer_was_lost_is_put_on_its_task_when_its_terminal_show
 }
 
 /// A permission is the person's: an agent answering one is refused, as is an agent merging a
-/// task, recording its verifier, naming a verifier at all or setting a budget. The CLI in a
-/// terminal speaks for an agent when an agent runs there, when it works on a project, when the
-/// server does not know it, and when an agent opened it or typed into it; in the person's own shell
-/// it speaks for the person.
+/// task, recording its verifier or naming a verifier at all. The CLI in a terminal speaks for an
+/// agent when an agent runs there, when it works on a project, when the server does not know it,
+/// and when an agent opened it or typed into it; in the person's own shell it speaks for the
+/// person.
 #[tokio::test]
 async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -846,7 +742,7 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
     let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, sessions);
     announce(&lease, agent_here, true);
     create(&hub, Some(TermRef { worker, session: agent_here })).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let term = TermRef { worker, session: plain };
     let orchestrating = Speaker::Proven(agent_here);
     let answer = Verb::AnswerRequest {
@@ -892,10 +788,8 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
         Verb::ProjectSet {
             project: project(),
             orchestrator: None,
-            review: None,
             verifier: weaker(),
             push: None,
-            ask_to_start: None,
             limits: LimitsChange::default(),
             metadata: None,
             members: None,
@@ -904,27 +798,6 @@ async fn an_agent_never_takes_the_person_s_word_through_any_surface() {
         let said = hub.dispatch_as(orchestrating, None, verb).await;
         assert!(refused(&said, ErrorCode::Forbidden).contains("verifier"), "{said:?}");
     }
-
-    let budget = LimitsChange {
-        budget: Some(slopty_proto::project::Budget(BTreeMap::from([(
-            "usd".to_owned(),
-            1_000_000_000,
-        )]))),
-        ..LimitsChange::default()
-    };
-    let raise = Verb::ProjectSet {
-        project: project(),
-        orchestrator: None,
-        review: None,
-        verifier: None,
-        push: None,
-        ask_to_start: None,
-        limits: budget,
-        metadata: None,
-        members: None,
-    };
-    let said = hub.dispatch_as(orchestrating, None, raise).await;
-    assert!(refused(&said, ErrorCode::Forbidden).contains("budget"), "{said:?}");
 
     let input = Verb::SendInput {
         term: TermRef { worker, session: typed_into },
@@ -968,7 +841,7 @@ async fn an_agent_looser_than_allowed_is_closed() {
     create(&hub, None).await;
     let mut started = Vec::new();
     for _ in 0..2 {
-        let task = new_task(&hub, Placement::default()).await;
+        let task = new_task(&hub, None).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
         let start = request(&mut rx).await;
         announce(&lease, chosen(&start.1).1, true);
@@ -1035,7 +908,7 @@ async fn an_agent_looser_by_its_command_line_is_refused_or_closed() {
     let own = SessionId::new();
     let (linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, vec![summary(own)]);
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let line = "cd ~/src && claude --allowedTools Bash".to_owned();
     let sh = |line: String| vec!["/bin/sh".to_owned(), "-c".to_owned(), line];
     let launch = TaskLaunch { run: Runner::Command { argv: sh(line.clone()) }, ..claude(&[]) };
@@ -1085,7 +958,7 @@ async fn an_agent_looser_by_its_command_line_is_refused_or_closed() {
 /// orchestrator is told its role once it is named. An agent reports only on its own task, from
 /// the terminal its token proves: not with no token, not from a shell, not on another task,
 /// not as the orchestrator.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_report_reaches_the_orchestrator_through_its_worker() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
@@ -1099,7 +972,7 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
         got.ok()
     };
     let next_batch = async |rx: &mut mpsc::Receiver<FromServer>| loop {
-        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+        match tokio::time::timeout(Duration::from_mins(10), rx.recv()).await {
             Ok(Some(FromServer::Deliver { session, batch, context })) => {
                 return (session, batch, context);
             }
@@ -1112,8 +985,8 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     assert!(context.contains("You orchestrate the Slopty project slopty"), "{context}");
     lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
 
-    let task = new_task(&hub, Placement::default()).await;
-    let other = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
+    let other = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);
@@ -1124,8 +997,7 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     assert!(!hub.vouches(orchestrator.session, &token), "no other's");
 
     let report = slopty_proto::project::Report {
-        kind: slopty_proto::project::ReportKind::NeedsInput,
-        note: "Which crate owns the store?".to_owned(),
+        note: "The store keeps every project.".to_owned(),
         artifacts: Vec::new(),
         branch: Some("task-1".to_owned()),
         pr: None,
@@ -1148,7 +1020,7 @@ async fn a_report_reaches_the_orchestrator_through_its_worker() {
     assert!(matches!(said, Outcome::Task(_)), "{said:?}");
     let (session, batch, context) = next_batch(&mut rx).await;
     assert_eq!(session, orchestrator.session);
-    assert!(context.contains("task 1: needs input\n  Which crate owns the store?"), "{context}");
+    assert!(context.contains("task 1: done\n  The store keeps every project."), "{context}");
     assert!(context.contains("branch: task-1"), "{context}");
     lease.handle(ToServer::Report(AgentReport::Delivered { session, batch }));
     assert!(deliver(&mut rx).is_none_or(|m| !matches!(m, FromServer::Deliver { .. })));
@@ -1262,7 +1134,7 @@ async fn an_agent_names_no_environment_that_steers_what_it_starts() {
     let orchestrator = SessionId::new();
     announce(&lease, orchestrator, true);
     create(&hub, Some(TermRef { worker: linux, session: orchestrator })).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let with = |name: &str| vec![(name.to_owned(), "/tmp/elsewhere".to_owned())];
     let terminal = |env| Verb::OpenTerminal {
         worker: linux,
@@ -1384,10 +1256,8 @@ fn orchestrated_by(term: TermRef) -> Verb {
     Verb::ProjectSet {
         project: project(),
         orchestrator: Some(term),
-        review: None,
         verifier: None,
         push: None,
-        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
         members: None,
@@ -1417,8 +1287,8 @@ async fn an_agent_puts_to_work_only_terminals_its_project_holds() {
 }
 
 /// While as many tasks wait on the person as the project's review limit, the orchestrator's
-/// start is refused in words that say why, and nothing reaches a worker; asked to propose its
-/// starts, it still may, and the person's own start goes. Only the person sets the limit.
+/// start is refused in words that say why, and nothing reaches a worker; the person's own start
+/// goes. Only the person sets the limit.
 #[tokio::test]
 async fn an_agent_starts_no_more_work_than_the_person_can_review() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -1427,26 +1297,24 @@ async fn an_agent_starts_no_more_work_than_the_person_can_review() {
     announce(&lease, orchestrator, true);
     create(&hub, Some(TermRef { worker: linux, session: orchestrator })).await;
     let as_orchestrator = Speaker::Proven(orchestrator);
-    let limit = |review, ask_to_start| Verb::ProjectSet {
+    let limit = |review| Verb::ProjectSet {
         project: project(),
         orchestrator: None,
-        review: None,
         verifier: None,
         push: None,
-        ask_to_start,
-        limits: LimitsChange { review, ..LimitsChange::default() },
+        limits: LimitsChange { review },
         metadata: None,
         members: None,
     };
-    let theirs = hub.dispatch_as(as_orchestrator, None, limit(Some(5), None)).await;
+    let theirs = hub.dispatch_as(as_orchestrator, None, limit(Some(5))).await;
     assert!(refused(&theirs, ErrorCode::Forbidden).contains("review limit"), "{theirs:?}");
-    assert!(matches!(hub.dispatch(limit(Some(1), None)).await, Outcome::Project(_)));
-    let ready = new_task(&hub, Placement::default()).await;
+    assert!(matches!(hub.dispatch(limit(Some(1))).await, Outcome::Project(_)));
+    let ready = new_task(&hub, None).await;
     let done = Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() });
     let update = Verb::TaskUpdate { project: project(), task: ready, change: done };
     assert!(matches!(hub.dispatch(update).await, Outcome::Task(_)));
 
-    let next = new_task(&hub, Placement::default()).await;
+    let next = new_task(&hub, None).await;
     let launch = TaskLaunch { env: Vec::new(), ..claude(&[]) };
     let start = || Verb::TaskSpawn { project: project(), task: next, launch: launch.clone() };
     let held = hub.dispatch_as(as_orchestrator, None, start()).await;
@@ -1454,10 +1322,6 @@ async fn an_agent_starts_no_more_work_than_the_person_can_review() {
     assert!(said.contains("task 1 ready to merge") && said.contains("review limit of 1"), "{said}");
     assert!(rx.try_recv().is_err(), "nothing reached the worker");
 
-    assert!(matches!(hub.dispatch(limit(None, Some(true))).await, Outcome::Project(_)));
-    let proposed = hub.dispatch_as(as_orchestrator, None, start()).await;
-    let Outcome::Task(card) = &proposed else { panic!("{proposed:?}") };
-    assert!(card.proposal.is_some(), "the person starts what is proposed");
     let by_person = spawn(&hub, start());
     let _start = request(&mut rx).await;
     by_person.abort();
@@ -1481,10 +1345,8 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
             title: "Elsewhere".to_owned(),
             repo: "~/src/elsewhere".to_owned(),
             target: "main".to_owned(),
-            review: None,
             verifier: None,
             push: false,
-            ask_to_start: false,
             orchestrator: Some(TermRef { worker: linux, session: theirs }),
             limits: LimitsChange::default(),
             metadata: None,
@@ -1508,7 +1370,7 @@ async fn a_project_s_looser_permissions_are_its_own_agents_only() {
         let said = hub.dispatch_as(who, None, loose.clone()).await;
         assert!(refused(&said, ErrorCode::Limit).contains("--allowedTools"), "{said:?}");
     }
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let launch = TaskLaunch { env: Vec::new(), ..claude(&["--allowedTools", "Bash"]) };
     let spawned = Verb::TaskSpawn { project: project(), task, launch };
     let said = hub.dispatch_as(Speaker::Proven(theirs), None, spawned).await;
@@ -1531,7 +1393,7 @@ async fn the_terminals_an_agent_opened_are_kept_across_a_restart() {
     let (worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     announce(&lease, orchestrator, true);
     create(&hub, Some(TermRef { worker, session: orchestrator })).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let shell = opened_by(&hub, orchestrator, worker, &lease, &mut rx).await;
     let mut watched = Vec::new();
     while let Ok(keep) = kept.try_recv() {
@@ -1562,15 +1424,15 @@ async fn the_terminals_an_agent_opened_are_kept_across_a_restart() {
     assert!(matches!(given, Outcome::Project(_)), "{given:?}");
 }
 
-/// Tasks are one level: a task's agent makes, starts and tells no task, changes only its own
-/// (taking the paths it will write with its change), and makes no project.
+/// Tasks are one level: a task's agent makes, starts and tells no task, changes only its own,
+/// and makes no project.
 #[tokio::test]
 async fn a_task_s_agent_works_only_on_its_own_task() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
-    let beside = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
+    let beside = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let agent = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -1590,10 +1452,10 @@ async fn a_task_s_agent_works_only_on_its_own_task() {
     let done = Box::new(TaskChange { state: Some(TaskState::Done), ..TaskChange::default() });
     let change = Verb::TaskUpdate { project: project(), task: beside, change: done };
     refused(&hub.dispatch_as(as_agent, None, change).await, ErrorCode::Forbidden);
-    let claim = TaskChange { claim: vec!["docs".to_owned()], ..TaskChange::default() };
-    let own = Verb::TaskUpdate { project: project(), task, change: Box::new(claim) };
-    let Outcome::Task(claimed) = hub.dispatch_as(as_agent, None, own).await else { panic!("own") };
-    assert_eq!(claimed.owns, ["docs"]);
+    let said = TaskChange { status: Some("reading the store".to_owned()), ..TaskChange::default() };
+    let own = Verb::TaskUpdate { project: project(), task, change: Box::new(said) };
+    let Outcome::Task(changed) = hub.dispatch_as(as_agent, None, own).await else { panic!("own") };
+    assert_eq!(changed.status.as_deref(), Some("reading the store"));
     let made = hub
         .dispatch_as(
             as_agent,
@@ -1603,10 +1465,8 @@ async fn a_task_s_agent_works_only_on_its_own_task() {
                 title: "Mine".to_owned(),
                 repo: "~/src/mine".to_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: None,
                 limits: LimitsChange::default(),
                 metadata: None,
@@ -1656,16 +1516,16 @@ async fn the_orchestrator_is_told_where_its_repository_is_cloned() {
         ),
         "{context}"
     );
-    assert!(context.contains(r#"`"github.com/aislopware/slopty" in repos`"#), "{context}");
+    assert!(context.contains("A worker's `repos` fact names where its clones are."), "{context}");
     let learned = status(&hub).await.project.repo_id;
     assert_eq!(learned.and_then(|id| id.origin).as_deref(), origin, "the project keeps it");
     delivering.abort();
 }
 
-/// A task started with no directory goes beside a clone of the project's repository, the
-/// rules permitting, and starts in it: an agent that writes in a git worktree of its own,
-/// named for the task, one that only reads in the clone itself. A worker with no clone cannot
-/// take it, and the refusal says so.
+/// A task started with no directory goes beside a clone of the project's repository and starts
+/// in it: an agent that writes in a git worktree of its own, named for the task, one that only
+/// reads in the clone itself. Named no worker, it goes to one with a clone; with none online
+/// and no address to clone from, the refusal says so.
 #[tokio::test]
 async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own() {
     let hub = Hub::new("server".to_owned(), Vec::new());
@@ -1681,14 +1541,14 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let orchestrator = SessionId::new();
     let origin = Some("github.com/aislopware/slopty");
     let studio = vec![in_clone(orchestrator, "/w/slopty", origin)];
-    let (studio, _studio_lease, _studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
+    let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
     let linux = vec![in_clone(SessionId::new(), "/home/c/slopty", None)];
-    let (_linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
     let (_bare, _bare_lease, _bare_rx) = worker_on(&hub, "bare", Os::Linux, Vec::new());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
     let anywhere = TaskLaunch { cwd: String::new(), ..claude(&[]) };
 
-    let writes = new_task(&hub, linux_only()).await;
+    let writes = new_task(&hub, Some(linux)).await;
     let verb = Verb::TaskSpawn { project: project(), task: writes, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
     let start = request(&mut linux_rx).await;
@@ -1704,7 +1564,7 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     let spec = TaskSpec {
         title: "Read the logs".to_owned(),
         read_only: true,
-        placement: linux_only(),
+        pin: Some(linux),
         ..TaskSpec::default()
     };
     let Outcome::Task(reads) =
@@ -1721,13 +1581,21 @@ async fn a_task_with_no_directory_goes_beside_a_clone_in_a_worktree_of_its_own()
     opened(&linux_lease, &start);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
-    let only_bare =
-        Placement { require: vec![r#"name == "bare""#.to_owned()], ..Placement::default() };
-    let there = new_task(&hub, only_bare).await;
-    let launch = anywhere;
-    let no = hub.dispatch(Verb::TaskSpawn { project: project(), task: there, launch }).await;
+    let there = new_task(&hub, None).await;
+    let verb = Verb::TaskSpawn { project: project(), task: there, launch: anywhere.clone() };
+    let asked = spawn(&hub, verb);
+    let start = request(&mut studio_rx).await;
+    let Verb::SpawnAgent { cwd, .. } = start.1.clone() else { panic!("{:?}", start.1) };
+    assert_eq!(cwd, "/w/slopty", "beside a clone, on the worker running fewer agents");
+    opened(&studio_lease, &start);
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
+
+    drop((studio_lease, linux_lease));
+    let stranded = new_task(&hub, None).await;
+    let verb = Verb::TaskSpawn { project: project(), task: stranded, launch: anywhere };
+    let no = hub.dispatch(verb).await;
     let said = refused(&no, ErrorCode::Unplaced);
-    assert!(said.contains("in repos"), "the clone rule is named: {said}");
+    assert!(said.contains("no address to clone it from is known"), "{said}");
 }
 
 /// A shell in the clone at `path` of the repository `origin`, cloned from `url`.
@@ -1753,8 +1621,8 @@ pub(super) fn answer(lease: &Lease, id: RequestId, outcome: Outcome) {
     lease.handle(ToServer::Reply { id, outcome });
 }
 
-/// A task with no directory whose rules want a worker with no clone of the project's
-/// repository gets one there first, from the address the orchestrator's clone names: the card
+/// A task with no directory pinned to a worker with no clone of the project's repository gets
+/// one there first, from the address the orchestrator's clone names: the card
 /// shows how far it is as git says, the timeline its start and end, and the agent then starts
 /// in it. A clone that fails is the start's refusal, and the card says why.
 #[tokio::test]
@@ -1765,11 +1633,11 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     let url = "https://example.com/o/demo.git";
     let studio = vec![in_repo(orchestrator, "/w/demo", Some(url))];
     let (studio, _studio_lease, _studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
-    let (_linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
     let anywhere = TaskLaunch { cwd: String::new(), ..claude(&[]) };
 
-    let task = new_task(&hub, linux_only()).await;
+    let task = new_task(&hub, Some(linux)).await;
     let verb = Verb::TaskSpawn { project: project(), task, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
     let (id, verb) = request(&mut linux_rx).await;
@@ -1812,7 +1680,7 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     );
 
     // The next task there finds the clone: no second one.
-    let next = new_task(&hub, linux_only()).await;
+    let next = new_task(&hub, Some(linux)).await;
     let verb = Verb::TaskSpawn { project: project(), task: next, launch: anywhere.clone() };
     let asked = spawn(&hub, verb);
     let start = request(&mut linux_rx).await;
@@ -1821,10 +1689,8 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 
     // A clone that fails: the start is refused saying why, and so is the card.
-    let (_other, other_lease, mut other_rx) = worker_on(&hub, "other", Os::Linux, Vec::new());
-    let only_other =
-        Placement { require: vec![r#"name == "other""#.to_owned()], ..Placement::default() };
-    let failing = new_task(&hub, only_other).await;
+    let (other, other_lease, mut other_rx) = worker_on(&hub, "other", Os::Linux, Vec::new());
+    let failing = new_task(&hub, Some(other)).await;
     let verb = Verb::TaskSpawn { project: project(), task: failing, launch: anywhere };
     let asked = spawn(&hub, verb);
     let (id, verb) = request(&mut other_rx).await;
@@ -1844,15 +1710,15 @@ async fn a_task_on_a_worker_with_no_clone_gets_one_made_and_shown() {
 /// mid-trip sends the branch once more after it.
 #[tokio::test]
 async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
-    use slopty_proto::project::{Report, ReportKind, StepKind, StepState, TaskStep};
+    use slopty_proto::project::{Report, StepKind, StepState, TaskStep};
     let hub = Hub::new("server".to_owned(), Vec::new());
     let orchestrator = SessionId::new();
     let studio = vec![in_repo(orchestrator, "/w/demo", Some("https://example.com/o/demo.git"))];
     let (studio, studio_lease, mut studio_rx) = worker_on(&hub, "studio", Os::MacOs, studio);
     let linux = vec![in_repo(SessionId::new(), "/home/c/demo", None)];
-    let (_linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
+    let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, linux);
     create(&hub, Some(TermRef { worker: studio, session: orchestrator })).await;
-    let task = new_task(&hub, linux_only()).await;
+    let task = new_task(&hub, Some(linux)).await;
     let launch = TaskLaunch { cwd: String::new(), ..claude(&[]) };
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch });
     let start = request(&mut linux_rx).await;
@@ -1861,7 +1727,6 @@ async fn a_finished_task_s_branch_is_brought_to_the_orchestrator_s_clone() {
 
     let branch = format!("worktree-slopty-slopty-{task}");
     let report = Report {
-        kind: ReportKind::Done,
         note: "Built it.".to_owned(),
         artifacts: Vec::new(),
         branch: Some(branch.clone()),
@@ -1959,7 +1824,7 @@ async fn the_person_lets_a_project_go_and_every_client_hears_it() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let mut kept = hub.keep_projects();
     create(&hub, None).await;
-    new_task(&hub, Placement::default()).await;
+    new_task(&hub, None).await;
     let mut pushed = hub.subscribe();
     let delete = || Verb::ProjectDelete { project: project() };
     let theirs = hub.dispatch_as(Speaker::Agent, None, delete()).await;
@@ -1984,132 +1849,19 @@ async fn the_person_lets_a_project_go_and_every_client_hears_it() {
     create(&hub, None).await;
 }
 
-/// What a project's work needs places it: a task owning the app's paths goes to the Mac as
-/// "Apple work", one owning the docs to the Linux worker as "Linux first", and the card and the
-/// ranking say the need by name. A rule that does not compile, a name given twice, and needs
-/// that together hold more rules than a placement are refused; a name is kept trimmed.
-#[tokio::test]
-async fn work_goes_where_its_needs_say_and_the_board_says_which() {
-    use slopty_proto::project::{Need, Preference};
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (mac, mac_lease, mut mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
-    let (linux, _linux_lease, _linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
-    create(&hub, None).await;
-    let needs = |needs: Vec<Need>| Verb::ProjectNeeds { project: project(), needs };
-    let apple = Need {
-        name: " Apple work ".to_owned(),
-        paths: vec!["apps/slopty".to_owned()],
-        require: vec![r#"os == "macos""#.to_owned()],
-        prefer: Vec::new(),
-    };
-    let linux_first = Need {
-        name: "Linux first".to_owned(),
-        paths: Vec::new(),
-        require: Vec::new(),
-        prefer: vec![Preference { expr: r#"os == "linux""#.to_owned(), weight: 20 }],
-    };
-    let broken = Need { require: vec!["os ==".to_owned()], ..apple.clone() };
-    let answer = hub.dispatch(needs(vec![broken])).await;
-    let message = refused(&answer, ErrorCode::BadExpression);
-    assert!(message.starts_with("the need \" Apple work \""), "{message}");
-    let twice = Need { name: "Apple work".to_owned(), ..apple.clone() };
-    refused(&hub.dispatch(needs(vec![apple.clone(), twice])).await, ErrorCode::Invalid);
-    let many = |name: &str| Need {
-        name: name.to_owned(),
-        paths: Vec::new(),
-        require: (0..20).map(|n| format!("cpus > {n}")).collect(),
-        prefer: Vec::new(),
-    };
-    let answer = hub.dispatch(needs(vec![many("a"), many("b")])).await;
-    let message = refused(&answer, ErrorCode::BadExpression);
-    assert!(message.starts_with("the needs together"), "{message}");
-    let Outcome::Project(said) = hub.dispatch(needs(vec![apple, linux_first])).await else {
-        panic!("needs said")
-    };
-    let names: Vec<&str> = said.project.needs.iter().map(|n| n.name.as_str()).collect();
-    assert_eq!(names, ["Apple work", "Linux first"]);
-    let s = status(&hub).await;
-    assert!(s.timeline.iter().any(|e| matches!(&e.what, Moment::Needs { names }
-        if names == &["Apple work", "Linux first"])));
-
-    let owning = |path: &str| TaskSpec {
-        title: "Work".to_owned(),
-        brief: "Do it.".to_owned(),
-        owns: vec![path.to_owned()],
-        ..TaskSpec::default()
-    };
-    let made = |spec| Verb::TaskCreate { project: project(), spec: Box::new(spec) };
-    let Outcome::Task(app) = hub.dispatch(made(owning("apps/slopty/src"))).await else {
-        panic!("made")
-    };
-    let Outcome::Task(docs) = hub.dispatch(made(owning("docs"))).await else { panic!("made") };
-
-    let asked =
-        spawn(&hub, Verb::TaskSpawn { project: project(), task: app.id, launch: claude(&[]) });
-    let start = request(&mut mac_rx).await;
-    assert_eq!(chosen(&start.1).0, mac);
-    opened(&mac_lease, &start);
-    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
-    let placed = started.assignment.and_then(|a| a.placed).expect("why");
-    assert_eq!(placed.why, "Apple work", "{placed:?}");
-
-    let suggest =
-        Verb::PlacementSuggest { project: Some(project()), task: Some(docs.id), placement: None };
-    let Outcome::Suggestions(ranked) = hub.dispatch(suggest).await else { panic!("ranked") };
-    let first = ranked.first().expect("a worker");
-    assert_eq!((first.worker, first.why()), (linux, "Linux first +20".to_owned()));
-    let mac_ranked = ranked.iter().find(|s| s.worker == mac).expect("the Mac");
-    let reason = mac_ranked.reasons.iter().find(|r| r.rule == r#"os == "linux""#).unwrap();
-    assert_eq!(reason.need.as_deref(), Some("Linux first"), "{reason:?}");
-
-    // A task's own rules and its needs' together are held to one placement's count.
-    let own = TaskSpec {
-        placement: Placement {
-            require: (0..32).map(|n| format!("cpus > {n}")).collect(),
-            ..Placement::default()
-        },
-        ..owning("apps/slopty/big")
-    };
-    let Outcome::Task(big) = hub.dispatch(made(own)).await else { panic!("made") };
-    let suggest =
-        Verb::PlacementSuggest { project: Some(project()), task: Some(big.id), placement: None };
-    let message = refused(&hub.dispatch(suggest).await, ErrorCode::BadExpression).to_owned();
-    assert!(message.contains("(Apple work, Linux first) make 33 require rules"), "{message}");
-}
-
 /// A task never goes to a worker that cannot run its agent: a Codex task only where Codex is
-/// installed, pinned or not, and the refusal says so of each worker, with the need that kept
-/// the other out. It opens the person's own `codex` with its role as developer instructions,
-/// in a worktree of its own beside a clone, its brief last; a flag that would loosen what it
-/// asks the person is refused unless the person allows it.
+/// installed, pinned or not, and the refusal says so. It opens the person's own `codex` with its
+/// role as developer instructions, in a worktree of its own beside a clone, its brief last; a flag
+/// that would loosen what it asks the person is refused unless the person allows it.
 #[tokio::test]
 async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
-    use slopty_proto::project::Need;
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (mac, mac_lease, _mac_rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     let (linux, linux_lease, mut linux_rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     mac_lease.handle(ToServer::Facts(installed(&["claude"])));
     linux_lease.handle(ToServer::Facts(installed(&["codex"])));
     create(&hub, None).await;
-    let apple = Need {
-        name: "Apple work".to_owned(),
-        paths: vec!["apps/slopty".to_owned()],
-        require: vec![r#"os == "macos""#.to_owned()],
-        prefer: Vec::new(),
-    };
-    let said = hub.dispatch(Verb::ProjectNeeds { project: project(), needs: vec![apple] }).await;
-    assert!(matches!(said, Outcome::Project(_)), "{said:?}");
-    let owning = |path: &str| TaskSpec {
-        title: "Work".to_owned(),
-        brief: "Do it.".to_owned(),
-        owns: vec![path.to_owned()],
-        ..TaskSpec::default()
-    };
-    let made = |spec| Verb::TaskCreate { project: project(), spec: Box::new(spec) };
-    let Outcome::Task(app) = hub.dispatch(made(owning("apps/slopty/ios"))).await else {
-        panic!("made")
-    };
-    let Outcome::Task(docs) = hub.dispatch(made(owning("docs"))).await else { panic!("made") };
+    let docs = new_task(&hub, None).await;
     let codex = |args: &[&str], pin: Option<WorkerId>| TaskLaunch {
         pin,
         run: Runner::Codex {
@@ -2121,27 +1873,18 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
     let spawn_verb =
         |task: TaskId, launch: TaskLaunch| Verb::TaskSpawn { project: project(), task, launch };
 
-    let message =
-        refused(&hub.dispatch(spawn_verb(app.id, codex(&[], None))).await, ErrorCode::Unplaced)
-            .to_owned();
-    assert!(message.contains("studio: codex is not installed"), "{message}");
-    assert!(message.contains(r#"box: fails Apple work (os == "macos")"#), "{message}");
-    let pinned = hub.dispatch(spawn_verb(docs.id, codex(&[], Some(mac)))).await;
+    let pinned = hub.dispatch(spawn_verb(docs, codex(&[], Some(mac)))).await;
     let message = refused(&pinned, ErrorCode::Unplaced);
     assert!(message.contains("studio: codex is not installed"), "a pin is no way round: {message}");
     let loose = codex(&["--dangerously-bypass-approvals-and-sandbox"], None);
-    let answer = hub.dispatch(spawn_verb(docs.id, loose)).await;
+    let answer = hub.dispatch(spawn_verb(docs, loose)).await;
     let message = refused(&answer, ErrorCode::Limit);
     assert!(
         message.starts_with("--dangerously-bypass-approvals-and-sandbox may give"),
         "{message}"
     );
-    let suggest =
-        Verb::PlacementSuggest { project: Some(project()), task: Some(docs.id), placement: None };
-    let Outcome::Suggestions(ranked) = hub.dispatch(suggest).await else { panic!("ranked") };
-    assert!(ranked.iter().all(|s| s.fits), "no start proposed, so no agent is asked of them");
 
-    let asked = spawn(&hub, spawn_verb(docs.id, codex(&["-m", "o3"], None)));
+    let asked = spawn(&hub, spawn_verb(docs, codex(&["-m", "o3"], None)));
     let start = request(&mut linux_rx).await;
     let Verb::OpenTerminal { worker, command, env, .. } = &start.1 else { panic!("{:?}", start.1) };
     assert_eq!(*worker, linux);
@@ -2151,11 +1894,9 @@ async fn a_codex_task_goes_only_where_codex_is_and_starts_with_its_role() {
         "{command:?}"
     );
     assert_eq!(command[3..], ["-m", "o3", "Read your brief."], "a named cwd: no worktree");
-    assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == docs.id.to_string()), "{env:?}");
+    assert!(env.iter().any(|(k, v)| k == TASK_ENV && *v == docs.to_string()), "{env:?}");
     opened(&linux_lease, &start);
-    let Outcome::Task(started) = asked.await.unwrap() else { panic!("not a task") };
-    let placed = started.assignment.and_then(|a| a.placed).expect("why");
-    assert!(!placed.why.contains("agent"), "an agent installed is said by no worker: {placed:?}");
+    assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
 }
 
 /// A member: what a tile must have to be in the project.
@@ -2177,9 +1918,7 @@ async fn a_project_without_an_orchestrator_is_kept_and_listed() {
             repo: String::new(),
             target: String::new(),
             verifier: None,
-            review: None,
             push: false,
-            ask_to_start: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,
@@ -2205,9 +1944,7 @@ async fn members_name_clones_and_folders() {
         members,
         orchestrator: None,
         verifier: None,
-        review: None,
         push: None,
-        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
     };

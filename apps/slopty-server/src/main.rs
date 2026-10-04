@@ -114,19 +114,7 @@ fn admission(settings: &slopty_settings::ServerSettings) -> Admission {
 /// The person's bounds on projects and the fleet (`[server.projects]`). A project name there
 /// that is no name is skipped, saying so; bounds past their ceiling leave the defaults.
 fn policy(settings: &slopty_settings::ProjectBounds) -> Policy {
-    let bounds = Bounds {
-        live_agents: settings.live_agents,
-        live_per_worker: settings.live_per_worker,
-        live_per_project: settings.live_per_project,
-        timeline_kept: settings.timeline_kept,
-        permission_flags: false,
-        projects: settings.projects,
-        tasks_per_project: settings.tasks_per_project,
-        title_max: settings.title_max,
-        brief_max: settings.brief_max,
-        owns_max: settings.owns_max,
-        comprehension_depth: settings.comprehension_depth,
-    };
+    let bounds = Bounds { live_agents: settings.live_agents, permission_flags: false };
     let bounds = match bounds.check() {
         Ok(()) => bounds,
         Err(e) => {
@@ -278,13 +266,10 @@ mod tests {
         );
         assert!(default.permission_flags.is_empty(), "no project may loosen by default");
         let text = "[server.projects]\nlive_agents = 3\n\
-                    permission_flags = [\"nightly\", \"Not A Name\"]\n\
-                    tasks_per_project = 50\nowns_max = 4\ncomprehension_depth = 2\n";
+                    permission_flags = [\"nightly\", \"Not A Name\"]\n";
         std::fs::write(root.path().join("settings.toml"), text).unwrap();
         let set = policy(&settings(&data_dir).projects);
-        let b = set.bounds;
-        assert_eq!((b.live_agents, b.tasks_per_project, b.owns_max), (3, 50, 4));
-        assert_eq!(b.comprehension_depth, 2);
+        assert_eq!(set.bounds.live_agents, 3);
         assert_eq!(
             set.permission_flags.into_iter().collect::<Vec<_>>(),
             [ProjectId::new("nightly").unwrap()]

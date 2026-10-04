@@ -17,10 +17,9 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::Review;
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Checks, ChecksState, Fact, Finding, Merge, Moment, Native, NativeChange, NativeCounts, Natives,
-    Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, ReportKind, ReviewRun,
-    Reviewer, StepKind, StepState, Suggestion, TaskCard, TaskId, TaskState, TaskStep,
-    TimelineEntry, VerifierRun, WorkerFacts,
+    Checks, ChecksState, Fact, Merge, Moment, Native, NativeChange, NativeCounts, Natives, Project,
+    ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, StepKind, StepState, TaskCard, TaskId,
+    TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
 };
 
 /// `card`'s pull request as a row says it, with its own checks and its review, and whether
@@ -77,10 +76,6 @@ fn unknown_words(checks: &Checks) -> String {
         None => "checks unknown".to_owned(),
     }
 }
-
-/// How many of a review's findings the person's "Address comments" names; the agent reads
-/// the rest in the review it was given.
-const TOLD_FINDINGS: usize = 5;
 
 /// How many timeline entries a board keeps: a screenful many times over, and a bound on a
 /// project the client watches for days.
@@ -244,15 +239,11 @@ pub enum TaskAction {
     Merge,
     /// Check it again from the start, and merge it if it passes.
     Retry,
-    /// Approve its work over its reviewer.
-    Approve,
-    /// Choose the worker it runs on, from the server's ranking of them.
+    /// Choose the worker it runs on.
     RunOn,
-    /// Start it as its orchestrator proposed.
-    Start,
     /// Tell its agent, as the person, to make its failed verifier pass.
     FixCi,
-    /// Tell its agent, as the person, to address what its review asked for.
+    /// Tell its agent, as the person, to address what its pull request's review asked for.
     AddressComments,
     /// Tell its agent, as the person, to resolve the conflicts its rebase met.
     ResolveConflicts,
@@ -272,9 +263,7 @@ impl TaskAction {
         match self {
             Self::Merge => "Merge",
             Self::Retry => "Retry",
-            Self::Approve => "Approve",
             Self::RunOn => "Run on\u{2026}",
-            Self::Start => "Start",
             Self::FixCi => "Fix CI",
             Self::AddressComments => "Address comments",
             Self::ResolveConflicts => "Resolve conflicts",
@@ -296,9 +285,7 @@ impl TaskAction {
         let word = match self {
             Self::Merge => "merge",
             Self::Retry => "retry",
-            Self::Approve => "approve",
             Self::RunOn => "run-on",
-            Self::Start => "start",
             Self::FixCi => "fix-ci",
             Self::AddressComments => "address-comments",
             Self::ResolveConflicts => "resolve-conflicts",
@@ -321,7 +308,7 @@ pub struct Place {
     pub worktree: Option<String>,
     /// The branch its work is on.
     pub branch: Option<String>,
-    /// Why it went there, in the ranking's words: a need's name, the rules that scored.
+    /// Why it went there, when it was named: "pinned".
     pub why: Option<String>,
 }
 
@@ -334,30 +321,6 @@ pub enum PlaceHow {
     Ran,
     /// It is pinned there and has not started.
     Pinned,
-    /// It would start there, as its proposal says.
-    Proposed,
-}
-
-/// A need as the board says it: the paths it covers ("Every task" when none), and what it
-/// asks of a worker ("Requires os == "macos"; prefers cpus +2").
-#[must_use]
-pub fn need_words(need: &slopty_proto::project::Need) -> (String, String) {
-    let covers =
-        if need.paths.is_empty() { "Every task".to_owned() } else { need.paths.join(", ") };
-    let mut asks = Vec::new();
-    if !need.require.is_empty() {
-        asks.push(format!("requires {}", need.require.join(" and ")));
-    }
-    if !need.prefer.is_empty() {
-        let prefers: Vec<String> =
-            need.prefer.iter().map(|p| format!("{} {:+}", p.expr, p.weight)).collect();
-        asks.push(format!("prefers {}", prefers.join(", ")));
-    }
-    let mut asks = asks.join("; ");
-    if let Some(first) = asks.get(..1) {
-        asks = format!("{}{}", first.to_uppercase(), asks.get(1..).unwrap_or_default());
-    }
-    (covers, asks)
 }
 
 /// A system's name as the board says it.
@@ -387,8 +350,6 @@ pub enum StageKind {
     Branch,
     /// The project's verifier.
     Verifier,
-    /// The fresh reviewer, or the person.
-    Reviewer,
     /// The merge queue.
     Queue,
     /// The pull request.
@@ -410,7 +371,6 @@ impl StageKind {
         match self {
             Self::Branch => "branch",
             Self::Verifier => "verifier",
-            Self::Reviewer => "reviewer",
             Self::Queue => "queue",
             Self::Pull => "pull",
             Self::Checks => "checks",
@@ -515,14 +475,40 @@ impl Estimate {
     }
 }
 
-/// The "Run on" picker open on a task: the server's ranking of the workers for it, once it
-/// answers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The "Run on" picker open on a task: every worker with its facts, once the server answers.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RunOnPicker {
     /// The task.
     pub task: TaskId,
-    /// Every worker, best first, each with its reasons; `None` while the server ranks them.
-    pub ranked: Option<Vec<Suggestion>>,
+    /// Every worker by name; `None` while the server reads them.
+    pub workers: Option<Vec<WorkerFacts>>,
+}
+
+/// A worker as the "Run on" picker offers it: its name, its system and the agents it runs,
+/// and whether it is online to take a start.
+#[must_use]
+pub fn run_on_words(worker: &WorkerFacts) -> (String, String, bool) {
+    let text = |name: &str| match worker.facts.get(name) {
+        Some(Fact::Text(t)) => Some(t.clone()),
+        _ => None,
+    };
+    let name = text("name").unwrap_or_else(|| worker.worker.to_string());
+    let online = matches!(worker.facts.get("online"), Some(Fact::Bool(true)));
+    let agents = match worker.facts.get("live_agents") {
+        Some(Fact::Int(1)) => "1 agent".to_owned(),
+        Some(Fact::Int(n)) => format!("{n} agents"),
+        _ => String::new(),
+    };
+    let line = [
+        text("os").unwrap_or_default(),
+        agents,
+        if online { String::new() } else { "offline".to_owned() },
+    ]
+    .into_iter()
+    .filter(|p| !p.is_empty())
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ");
+    (name, line, online)
 }
 
 /// One line of the tree, in the order it is drawn.
@@ -711,16 +697,10 @@ impl Board {
         let (worktree, branch) = (card.worktree.clone(), card.branch.clone());
         if let Some(a) = &card.assignment {
             let how = if a.open() { PlaceHow::Runs } else { PlaceHow::Ran };
-            let why = a.placed.as_ref().map(|p| p.why.clone()).filter(|w| !w.is_empty());
-            return Some(Place { worker: a.term.worker, how, worktree, branch, why });
+            return Some(Place { worker: a.term.worker, how, worktree, branch, why: None });
         }
-        if let Some(pin) = card.pin {
-            let why = Some("pinned".to_owned());
-            return Some(Place { worker: pin, how: PlaceHow::Pinned, worktree, branch, why });
-        }
-        let proposed = card.proposed.as_ref()?;
-        let why = Some(proposed.why.clone()).filter(|w| !w.is_empty());
-        Some(Place { worker: proposed.on?, how: PlaceHow::Proposed, worktree, branch, why })
+        let why = Some("pinned".to_owned());
+        Some(Place { worker: card.pin?, how: PlaceHow::Pinned, worktree, branch, why })
     }
 
     /// Whether the person may move `task` to another worker now: a start not made yet, which
@@ -858,14 +838,12 @@ impl Board {
 
     /// What the person can do to `task` from the board, besides opening its agent:
     /// - merge a finished task the queue does not hold, as no check queued it;
-    /// - retry what failed on its way to the target (its branch home, its verifier, its reviewer,
-    ///   its merge), which checks it afresh;
-    /// - approve its work over a reviewer that asked for changes or ended with nothing said, once
-    ///   its verifier passed.
+    /// - retry what failed on its way to the target (its branch home, its verifier, its merge),
+    ///   which checks it afresh.
     ///
     /// While its agent runs, the next step is the person's word to it, which comes first:
     /// - fix CI when its verifier's failure still speaks;
-    /// - address the comments when its review, or its pull request's, asked for changes;
+    /// - address the comments when its pull request's review asked for changes;
     /// - resolve the conflicts its rebase onto the target met.
     ///
     /// Checking a failure again unchanged would fail the same way, so a failed verifier or
@@ -890,8 +868,8 @@ impl Board {
         if fix_ci {
             out.push(TaskAction::FixCi);
         }
-        let review_asked = self.review(task).is_some_and(|r| !r.verdict.approved)
-            || card.pr.as_ref().is_some_and(|pr| pr.review == Some(Review::ChangesRequested));
+        let review_asked =
+            card.pr.as_ref().is_some_and(|pr| pr.review == Some(Review::ChangesRequested));
         if live && review_asked {
             out.push(TaskAction::AddressComments);
         }
@@ -903,23 +881,12 @@ impl Board {
             out.push(TaskAction::Merge);
         }
         let retried = |kind: StepKind| match kind {
-            StepKind::Home | StepKind::Review | StepKind::Merge => true,
+            StepKind::Home | StepKind::Merge => true,
             StepKind::Verify | StepKind::Rebase => !live,
             StepKind::Clone => false,
         };
         if failed.is_some_and(|s| retried(s.kind)) && !fix_ci {
             out.push(TaskAction::Retry);
-        }
-        let passed =
-            card.verified.as_ref().map_or_else(|| self.project.verifier.is_none(), |r| r.passed);
-        let asked = card.reviewed.as_ref().is_some_and(|r| !r.verdict.approved)
-            && card.state != TaskState::Done;
-        let silent = failed.is_some_and(|s| s.kind == StepKind::Review) && card.reviewed.is_none();
-        if passed && (asked || silent) {
-            out.push(TaskAction::Approve);
-        }
-        if card.proposed.is_some() && self.terminal(Some(card.id)).is_none() {
-            out.push(TaskAction::Start);
         }
         if self.not_started(card) {
             out.push(TaskAction::RunOn);
@@ -978,21 +945,6 @@ impl Board {
             }
             TaskAction::AddressComments => {
                 let mut lines = vec!["Address the review's comments.".to_owned()];
-                if let Some(run) = self.review(task).filter(|r| !r.verdict.approved) {
-                    let summary = crate::kit::first_line(&run.verdict.summary);
-                    if !summary.is_empty() {
-                        lines.push(summary.to_owned());
-                    }
-                    for finding in run.verdict.findings.iter().take(TOLD_FINDINGS) {
-                        let place = finding_place(finding);
-                        let body = crate::kit::first_line(&finding.body);
-                        let blocking = if finding.blocking { "blocking" } else { "note" };
-                        lines.push(match place {
-                            Some(place) => format!("- {blocking}, {place}: {body}"),
-                            None => format!("- {blocking}: {body}"),
-                        });
-                    }
-                }
                 if let Some(pr) =
                     card.pr.as_ref().filter(|pr| pr.review == Some(Review::ChangesRequested))
                 {
@@ -1014,10 +966,8 @@ impl Board {
                 ))
             }
             TaskAction::Merge
-            | TaskAction::Retry
-            | TaskAction::Approve
             | TaskAction::RunOn
-            | TaskAction::Start
+            | TaskAction::Retry
             | TaskAction::PushAgain
             | TaskAction::Cancel
             | TaskAction::Stop => None,
@@ -1034,14 +984,13 @@ impl Board {
     }
 
     /// `task`'s way to the target in one row, once its work is on it: its branch, what its
-    /// verifier and its reviewer said, its place in the queue, its pull request with its own
+    /// verifier said, its place in the queue, its pull request with its own
     /// checks, and the to-dos still open. Empty while it is still being worked on, and once it
     /// has merged.
     #[must_use]
     pub fn pipeline(&self, task: TaskId) -> Vec<Stage> {
         let Some(card) = self.tasks.get(&task) else { return Vec::new() };
         let on_its_way = card.verified.is_some()
-            || card.reviewed.is_some()
             || card.merge.is_some()
             || card.pr.is_some()
             || matches!(card.state, TaskState::Verifying | TaskState::Done);
@@ -1074,13 +1023,6 @@ impl Board {
             let words = if run.passed { "Verified" } else { "Verifier failed" };
             out.push(stage(StageKind::Verifier, words.to_owned(), !run.passed));
         }
-        if running(StepKind::Review) {
-            out.push(stage(StageKind::Reviewer, "Reviewing".to_owned(), false));
-        } else if let Some(run) = self.review(task) {
-            let approved = run.verdict.approved;
-            let words = if approved { "Approved" } else { "Changes asked" };
-            out.push(stage(StageKind::Reviewer, words.to_owned(), !approved));
-        }
         if running(StepKind::Merge) {
             out.push(stage(StageKind::Queue, "Merging".to_owned(), false));
         } else if let Some((place, _)) = self.queue_place(task) {
@@ -1103,17 +1045,6 @@ impl Board {
             n => out.push(stage(StageKind::ToDos, format!("{n} to-dos open"), true)),
         }
         out
-    }
-
-    /// The tasks whose start their orchestrator proposed and the person has not made, by
-    /// number.
-    #[must_use]
-    pub fn proposed(&self) -> Vec<TaskId> {
-        self.tasks
-            .values()
-            .filter(|c| c.proposed.is_some() && self.terminal(Some(c.id)).is_none())
-            .map(|c| c.id)
-            .collect()
     }
 
     /// How long a task of `kind` works before it is done, from this project's tasks whose
@@ -1174,21 +1105,6 @@ impl Board {
         self.on_worker(worker).len()
     }
 
-    /// The reviewer's last word on `task` while it still speaks to what the task is now, as
-    /// [`Self::verdict`]: an approval while the task waits to merge, changes asked until the
-    /// work is checked again or merged.
-    #[must_use]
-    pub fn review(&self, task: TaskId) -> Option<&ReviewRun> {
-        let card = self.tasks.get(&task)?;
-        let run = card.reviewed.as_ref()?;
-        let speaks = if run.verdict.approved {
-            card.state == TaskState::Done
-        } else {
-            !matches!(card.state, TaskState::Merged | TaskState::Verifying)
-        };
-        speaks.then_some(run)
-    }
-
     /// The tasks whose agent waits on the person, by number.
     #[must_use]
     pub fn needs_you(&self) -> Vec<TaskId> {
@@ -1239,8 +1155,7 @@ impl Board {
 
 /// What `entry` says to the person when it lands, as a toast or a note.
 ///
-/// That is a failure that holds a task up, an agent that cannot go on, a start that waits for
-/// them, or a budget near or at its cap. `None` for the rest, which the board says where it
+/// That is a failure that holds a task up. `None` for the rest, which the board says where it
 /// shows.
 #[must_use]
 pub fn news_line(board: &Board, entry: &TimelineEntry) -> Option<String> {
@@ -1265,21 +1180,8 @@ pub fn news_line(board: &Board, entry: &TimelineEntry) -> Option<String> {
             StepKind::Clone => of(format!("the clone it needs failed: {}", first(why))),
             StepKind::Home => of(format!("its branch did not come home: {}", first(why))),
             StepKind::Verify => of(format!("its verifier did not run: {}", first(why))),
-            StepKind::Review => of(format!("its review stopped: {}", first(why))),
             StepKind::Merge => of(format!("its merge stopped: {}", first(why))),
         },
-        Moment::Reported { report } if report.kind == ReportKind::Stuck => {
-            of(format!("its agent is stuck: {}", first(&report.note)))
-        }
-        Moment::Proposed { .. } => of("waits for you to start it".to_owned()),
-        Moment::Budget { meter, share_bp } => {
-            let what = format!("{meter} window");
-            if *share_bp >= 10_000 {
-                format!("its {what} budget is spent; no task starts until it is raised")
-            } else {
-                format!("{}% of its {what} budget is spent", share_bp / 100)
-            }
-        }
         _ => return None,
     })
 }
@@ -1295,31 +1197,16 @@ pub fn moment_line(
     match &entry.what {
         Moment::Created => "Project created".to_owned(),
         Moment::Orchestrator { term } => format!("Orchestrator on {}", name(term.worker)),
-        Moment::Needs { names } => match names.as_slice() {
-            [] => "Needs nothing of its workers".to_owned(),
-            names => format!("Needs: {}", names.join(", ")),
-        },
-        Moment::Limits { limits } => format!(
-            "Limits: {} agents in all, {} per worker",
-            limits.live_per_project, limits.live_per_worker
-        ),
-        Moment::Budget { meter, share_bp } => super::spend::budget_line(meter, *share_bp),
+        Moment::Limits { limits } => {
+            format!("Review limit: {} waiting on you at most", limits.review)
+        }
         Moment::TaskCreated { title } => format!("Created: {title}"),
-        Moment::Claimed { paths } => match paths.as_slice() {
-            [] => "Owns nothing".to_owned(),
-            [one] => format!("Owns {one}"),
-            [first, rest @ ..] => format!("Owns {first} and {} more", rest.len()),
-        },
         Moment::Assigned { term, spawned: true } => {
             format!("Started on {}", name(term.worker))
         }
         Moment::Assigned { term, spawned: false } => {
             format!("Taken on in a terminal on {}", name(term.worker))
         }
-        Moment::Proposed { on: Some(worker) } => {
-            format!("Proposed to start on {}", name(*worker))
-        }
-        Moment::Proposed { on: None } => "Proposed to start".to_owned(),
         Moment::State { to, .. } => state_word(*to).to_owned(),
         Moment::Branch { branch, pr } => match (branch, pr) {
             (Some(branch), Some(pr)) => format!("On {branch}, pull request #{pr}"),
@@ -1343,22 +1230,13 @@ pub fn moment_line(
                 None => "The pull request's checks could not be read".to_owned(),
             },
         },
-        Moment::Reviewed(run) => review_line(run),
         Moment::AgentGone { .. } => "Agent ended".to_owned(),
         Moment::Note { text } => crate::kit::first_line(text).to_owned(),
         Moment::Told { text } => format!("You told its agent: {}", crate::kit::first_line(text)),
-        Moment::Reported { report } => {
-            let kind = match report.kind {
-                ReportKind::Checkpoint => "Checkpoint",
-                ReportKind::NeedsInput => "Needs an answer",
-                ReportKind::Stuck => "Stuck",
-                ReportKind::Done => "Reported done",
-            };
-            match crate::kit::first_line(&report.note) {
-                "" => kind.to_owned(),
-                line => format!("{kind}: {line}"),
-            }
-        }
+        Moment::Reported { report } => match crate::kit::first_line(&report.note) {
+            "" => "Reported done".to_owned(),
+            line => format!("Reported done: {line}"),
+        },
         Moment::Delivered { term, reports: 1 } => format!("A report delivered to {}", agent(*term)),
         Moment::Delivered { term, reports } => {
             format!("{reports} reports delivered to {}", agent(*term))
@@ -1404,12 +1282,6 @@ pub fn step_line(step: &TaskStep, name: impl Fn(WorkerId) -> String) -> String {
         }
         (StepKind::Merge, StepState::Done { detail }) => format!("Merged: {}", first(detail)),
         (StepKind::Merge, StepState::Failed { why }) => format!("Not merged: {}", first(why)),
-        (StepKind::Review, StepState::Running { phase, .. }) => match first(phase).as_str() {
-            "" => format!("Reviewing on {at}"),
-            line => format!("Reviewing on {at}: {line}"),
-        },
-        (StepKind::Review, StepState::Done { detail }) => format!("Reviewed: {}", first(detail)),
-        (StepKind::Review, StepState::Failed { why }) => format!("Review: {}", first(why)),
         (StepKind::Rebase, StepState::Running { .. }) => format!("Rebasing on {at}"),
         (StepKind::Rebase, StepState::Done { .. }) => format!("Rebased on {at}"),
         (StepKind::Rebase, StepState::Failed { why }) => format!("Conflicts: {}", first(why)),
@@ -1474,59 +1346,6 @@ pub fn queue_words(place: usize) -> String {
         _ => "th",
     };
     if place == 1 { "Next to merge".to_owned() } else { format!("{place}{suffix} to merge") }
-}
-
-/// What a reviewer judged and how, after its verdict's word: the commits it read, the person
-/// when it was their word, what it found and how long it read.
-#[must_use]
-pub fn review_detail(run: &ReviewRun) -> String {
-    let mut parts = vec![match (run.head.as_str(), run.base.as_str()) {
-        ("", _) => String::new(),
-        (head, "") => short_commit(head).to_owned(),
-        (head, base) => format!("{} over {}", short_commit(head), short_commit(base)),
-    }];
-    parts.retain(|p| !p.is_empty());
-    if run.by == Reviewer::Person {
-        parts.push("by you".to_owned());
-    }
-    let found = run.verdict.findings.len().saturating_add(usize::from(run.more));
-    let blocking = run.blocking().count();
-    match (found, blocking) {
-        (0, _) => {}
-        (1, 0) => parts.push("1 note".to_owned()),
-        (n, 0) => parts.push(format!("{n} notes")),
-        (n, b) if n == b => parts.push(format!("{b} blocking")),
-        (n, b) => parts.push(format!("{b} blocking of {n}")),
-    }
-    if run.took_ms > 0 {
-        parts.push(crate::kit::duration(std::time::Duration::from_millis(run.took_ms)));
-    }
-    parts.join(" \u{b7} ")
-}
-
-/// Where a finding points, as an editor and a compiler say it: `path:line`, or the path alone.
-#[must_use]
-pub fn finding_place(f: &Finding) -> Option<String> {
-    let path = f.path.as_deref().filter(|p| !p.is_empty())?;
-    Some(f.line.map_or_else(|| path.to_owned(), |line| format!("{path}:{line}")))
-}
-
-/// What a review said, in a line: who, at which commit, and for changes asked the first
-/// finding that blocks.
-#[must_use]
-pub fn review_line(run: &ReviewRun) -> String {
-    let at = short_commit(&run.head);
-    let by = match run.by {
-        Reviewer::Agent(_) => "Reviewer",
-        Reviewer::Person => "You",
-    };
-    if run.verdict.approved {
-        return format!("{by} approved {at}");
-    }
-    match run.blocking().next() {
-        Some(f) => format!("{by} asked for changes at {at}: {}", crate::kit::first_line(&f.body)),
-        None => format!("{by} asked for changes at {at}"),
-    }
 }
 
 /// A commit as people read it: its first seven hex digits.

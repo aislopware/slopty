@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use slopty_core::SessionId;
 use slopty_proto::orchestration::{Outcome, Verb};
-use slopty_proto::project::{Placement, TaskId, TaskSpec};
+use slopty_proto::project::{TaskId, TaskSpec};
 use slopty_proto::server::ToServer;
 use slopty_proto::thread::attention::Counts;
 use slopty_proto::thread::wire::RequestCard;
@@ -84,7 +84,6 @@ async fn task(hub: &Hub) -> TaskId {
     let spec = TaskSpec {
         title: "Ladder".to_owned(),
         brief: "Rank it.".to_owned(),
-        placement: Placement::default(),
         ..TaskSpec::default()
     };
     match hub.dispatch(Verb::TaskCreate { project: project(), spec: Box::new(spec) }).await {
@@ -295,56 +294,6 @@ async fn a_failed_subagent_waits_for_its_family_to_rest() {
     assert_eq!(rank(vec![moved(&parent, Phase::Working, 4_500), asking]), Some(Rung::NeedsYou));
     let heard = desk.notices();
     assert_eq!(heard.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::NeedsYou]);
-}
-
-/// How full a project's agents read their plan's windows comes with the thread table every
-/// worker publishes, the whole table again at each registration: each thread's own reading
-/// under the terminal its family runs in, so a subagent's counts on its root's task, and a
-/// thread in no project's terminal counts for none. A window is the fullest any of them read.
-#[tokio::test]
-async fn a_project_s_spend_comes_with_its_threads_rows() {
-    let hub = Hub::new("server".to_owned(), Vec::new());
-    let (orchestrating, building, elsewhere) =
-        (SessionId::new(), SessionId::new(), SessionId::new());
-    let worker = WorkerId::new();
-    let sessions = vec![summary(orchestrating), summary(building), summary(elsewhere)];
-    let (tx, _rx) = mpsc::channel(8);
-    let lease = hub.register(registration(worker, sessions), [100, 64, 0, 7].into(), tx).unwrap();
-    let term = |session| TermRef { worker, session };
-    create(&hub, Some(term(orchestrating))).await;
-    let build = task(&hub).await;
-    assert!(matches!(hub.assign_for_test(&project(), build, term(building)), Outcome::Task(_)));
-
-    let reading = |terminal, used_bp| {
-        let mut row = row(Phase::Working, 10, terminal);
-        row.meters.limits = vec![slopty_proto::thread::Limit {
-            name: "five-hour".to_owned(),
-            used_bp,
-            resets_ms: None,
-        }];
-        row
-    };
-    let orchestrator = reading(Some(orchestrating), 1_000);
-    let builder = reading(Some(building), 2_000);
-    let subagent = under(reading(None, 4_200), &builder);
-    let stranger = reading(Some(elsewhere), 9_000);
-    let rows = vec![orchestrator, builder, subagent, stranger];
-    lease.handle(snapshot(rows.clone()));
-    let spend = || hub.inner.state.lock().projects.project(&project()).unwrap().spend.clone();
-    assert_eq!(spend().windows.get("five-hour"), Some(&4_200), "the stranger's is not");
-    lease.handle(snapshot(rows));
-    assert_eq!(spend().windows.get("five-hour"), Some(&4_200), "the same readings again");
-    let fresh = reading(Some(orchestrating), 6_000);
-    lease.handle(delta(vec![fresh.clone()]));
-    assert_eq!(
-        spend().windows.get("five-hour"),
-        Some(&6_000),
-        "a new thread of the orchestrator's"
-    );
-    let mut lower = fresh;
-    lower.meters.limits[0].used_bp = 3_000;
-    lease.handle(delta(vec![lower]));
-    assert_eq!(spend().windows.get("five-hour"), Some(&4_200), "a later reading replaces its own");
 }
 
 /// A project task's agent that comes to rest says nothing to the person: its work reaches them

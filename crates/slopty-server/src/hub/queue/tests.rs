@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use slopty_proto::orchestration::{Line, Screen};
 use slopty_proto::project::{
-    Checks, ChecksState, GiveBacks, LimitsChange, Merge, Moment, Placement, Report, ReportKind,
-    StepKind, StepState, TaskId, TaskState, TestDiff,
+    Checks, ChecksState, GiveBacks, LimitsChange, Merge, Moment, Report, StepKind, StepState,
+    TaskId, TaskState, TestDiff,
 };
 use slopty_proto::server::Os;
 
@@ -139,16 +139,14 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
     let set = Verb::ProjectSet {
         project: project(),
         orchestrator: None,
-        review: None,
         verifier: Some("cargo gate".to_owned()),
         push: Some(true),
-        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
         members: None,
     };
     assert!(matches!(hub.dispatch(set).await, Outcome::Project(_)));
-    let task = new_task(hub, Placement::default()).await;
+    let task = new_task(hub, None).await;
     let agent = TermRef { worker, session: agent };
     let assigned = hub.assign_for_test(&project(), task, agent);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -159,7 +157,6 @@ pub(in crate::hub) async fn fleet(hub: &Hub) -> (Studio, TermRef, TaskId, TermRe
 /// The agent says it is done, with its branch.
 pub(in crate::hub) async fn done(hub: &Hub, task: TaskId, agent: TermRef) {
     let report = Report {
-        kind: ReportKind::Done,
         note: "Built it.".to_owned(),
         artifacts: Vec::new(),
         branch: Some(BRANCH.to_owned()),
@@ -639,9 +636,9 @@ async fn a_task_given_back_three_times_waits_on_the_person() {
         assert!(matches!(verb, Verb::ReadScreen { term: t } if t == term), "{verb:?}");
         answer(&studio.lease, id, screen(&["error: it broke"]));
         let want = if round <= 3 {
-            GiveBacks { count: round, reviews: 0, held: false }
+            GiveBacks { count: round, held: false }
         } else {
-            GiveBacks { count: 3, reviews: 0, held: true }
+            GiveBacks { count: 3, held: true }
         };
         let reached = tokio::time::timeout(Duration::from_secs(10), async {
             while task_now(&hub, task).await.give_backs != want {

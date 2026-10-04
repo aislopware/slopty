@@ -3,7 +3,7 @@
 
 use slopty_proto::agent::{AgentBranch, Worktree};
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::{AgentReport, Placement, SCRIPTS_MAX, Script};
+use slopty_proto::project::{AgentReport, SCRIPTS_MAX, Script};
 use slopty_proto::server::{Os, ToServer};
 
 use super::super::super::project_tests::{
@@ -116,9 +116,7 @@ async fn a_script_runs_in_the_project_s_folder_or_a_task_s_worktree() {
         members: None,
         orchestrator: Some(TermRef { worker, session: orchestrating }),
         verifier: None,
-        review: None,
         push: None,
-        ask_to_start: None,
         limits: slopty_proto::project::LimitsChange::default(),
         metadata: None,
     };
@@ -132,7 +130,7 @@ async fn a_script_runs_in_the_project_s_folder_or_a_task_s_worktree() {
     );
     asked.abort();
 
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let early = hub.dispatch(run(None, Some(task))).await;
     assert!(refused(&early, ErrorCode::Invalid).contains("no worktree"));
     let tree = Worktree {

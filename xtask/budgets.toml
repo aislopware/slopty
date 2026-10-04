@@ -48,8 +48,6 @@
 "media.packetize_cost.p_frame.parity_200" = 210132
 "media.reassemble_cost.keyframe" = 230383
 "media.reassemble_cost.p_frame" = 51011
-"server.placement_cost.compile_4_rules" = 674588
-"server.placement_cost.rank_32_workers" = 3074748
 "server.projects_cost.agent_report" = 14052
 "server.projects_cost.file_write_compact" = 85794382
 "server.projects_cost.log_append" = 15169

@@ -1,13 +1,13 @@
 //! What changed in a project since this client last looked at its board, in a few lines.
 //!
 //! The cursor is the last timeline entry the board showed here ([`Looked`]); the recap reads
-//! the entries after it and keeps what moves the person: work given back, a verifier or a step
-//! that failed, an agent that ended or got stuck, starts waiting for them, and then what got
-//! done. Each line names its tasks, most recent last, so the board can say "Merged #4 and #6".
+//! the entries after it and keeps what moves the person: a verifier or a step that failed, an
+//! agent that ended, and then what got done. Each line names its tasks, most recent last, so the
+//! board can say "Merged #4 and #6".
 
 use slopty_core::WallMs;
 use slopty_proto::project::{
-    ChecksState, Moment, ReportKind, StepKind, StepState, TaskId, TaskState, TimelineEntry,
+    ChecksState, Moment, StepKind, StepState, TaskId, TaskState, TimelineEntry,
 };
 
 use super::model::Board;
@@ -27,8 +27,6 @@ pub struct Looked {
 /// One kind of thing a recap tells, in the order it is told: what needs the person first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RecapKind {
-    /// A reviewer, or the person elsewhere, gave the work back.
-    ChangesAsked,
     /// Its verifier failed.
     VerifyFailed,
     /// Its work does not rebase onto the target.
@@ -37,12 +35,8 @@ pub enum RecapKind {
     ChecksFailed,
     /// A step the server takes failed: a clone, bringing the branch home, a merge.
     StepFailed,
-    /// Its agent reported it is stuck, or needs an answer.
-    Stuck,
     /// Its agent ended before the work merged.
     AgentEnded,
-    /// Its orchestrator proposed its start, which waits for the person.
-    Proposed,
     /// Its work merged.
     Merged,
     /// Its verifier passed.
@@ -57,14 +51,11 @@ impl RecapKind {
     /// How a line of it begins.
     const fn words(self) -> &'static str {
         match self {
-            Self::ChangesAsked => "Changes asked on",
             Self::VerifyFailed => "Verifier failed on",
             Self::Conflicts => "Conflicts on",
             Self::ChecksFailed => "Checks failed on",
             Self::StepFailed => "A step failed on",
-            Self::Stuck => "Stuck:",
             Self::AgentEnded => "Agent ended on",
-            Self::Proposed => "Proposed",
             Self::Merged => "Merged",
             Self::Verified => "Verified",
             Self::Started => "Started",
@@ -77,21 +68,17 @@ impl RecapKind {
     pub const fn needs_you(self) -> bool {
         matches!(
             self,
-            Self::ChangesAsked
-                | Self::VerifyFailed
+            Self::VerifyFailed
                 | Self::Conflicts
                 | Self::ChecksFailed
                 | Self::StepFailed
-                | Self::Stuck
                 | Self::AgentEnded
-                | Self::Proposed
         )
     }
 
     /// What a timeline entry tells, if a recap keeps it.
     fn of(what: &Moment) -> Option<Self> {
         match what {
-            Moment::Reviewed(run) if !run.verdict.approved => Some(Self::ChangesAsked),
             Moment::Verified(run) if !run.passed => Some(Self::VerifyFailed),
             Moment::Verified(_) => Some(Self::Verified),
             Moment::Checks(checks) if checks.state == ChecksState::Failing => {
@@ -103,12 +90,7 @@ impl RecapKind {
                 (_, StepState::Failed { .. }) => Some(Self::StepFailed),
                 _ => None,
             },
-            Moment::Reported { report } => {
-                matches!(report.kind, ReportKind::Stuck | ReportKind::NeedsInput)
-                    .then_some(Self::Stuck)
-            }
             Moment::AgentGone { .. } => Some(Self::AgentEnded),
-            Moment::Proposed { .. } => Some(Self::Proposed),
             Moment::State { to: TaskState::Merged, .. } => Some(Self::Merged),
             Moment::Assigned { spawned: true, .. } => Some(Self::Started),
             Moment::TaskCreated { .. } => Some(Self::Created),

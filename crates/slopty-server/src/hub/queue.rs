@@ -10,7 +10,7 @@
 //! thread it came from as trailers, verified again unless the rebase left the tree already
 //! verified, and the target is fast-forwarded to it. A failure or a conflict gives the task
 //! back to its agent with the reason, through its hooks, and the orchestrator hears too; past
-//! [`GIVE_BACKS_MAX`] (or a reviewer's one round) the failure waits for the person instead.
+//! [`GIVE_BACKS_MAX`] the failure waits for the person instead.
 //!
 //! The lane holds nothing the store does not: what it does next is read from the tasks each
 //! time ([`crate::project::Job`]), so a server that restarts takes it up where it stood. A job
@@ -24,14 +24,15 @@ use std::time::Duration;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    Commits, GIVE_BACKS_MAX, GiveBacks, Merge, Moment, ProjectId, ReportKind, ReviewRun, Reviewer,
-    StepKind, StepState, TEST_PATHS_KEY, Task, TaskId, TaskState, TaskStep, TestDiff, VerifierRun,
+    Commits, GIVE_BACKS_MAX, Merge, Moment, ProjectId, StepKind, StepState, TEST_PATHS_KEY, Task,
+    TaskId, TaskState, TaskStep, TestDiff, VerifierRun,
 };
 use slopty_proto::terminal::SessionState;
 use slopty_proto::thread::ThreadId;
 
 use super::steps::{Onto, said};
 use super::{Hub, State, error};
+use crate::deliver::Kind;
 use crate::project::{Advance, Caller, Job, Queue};
 
 /// How often a running verifier's last line is read for its step.
@@ -155,7 +156,7 @@ impl Hub {
     }
 
     /// `task`'s agent said it is done and its branch is in the orchestrator's clone: its
-    /// verifier and reviewer run there, when the task or its project names them and there is a
+    /// verifier runs there, when the task or its project names one and there is a
     /// clone to run them in. A task with none is ready to merge at once: done, waiting for the
     /// person's Merge.
     pub(super) fn verify_soon(&self, state: &mut State, (project, task): (&ProjectId, TaskId)) {
@@ -164,7 +165,7 @@ impl Hub {
         else {
             return;
         };
-        let checks = t.verifier.is_some() || record.verifier.is_some() || record.review.is_some();
+        let checks = t.verifier.is_some() || record.verifier.is_some();
         let placed =
             record.orchestrator.is_some() && record.repo_id.is_some() && t.branch.is_some();
         if !placed || t.state == TaskState::Merged || t.read_only {
@@ -187,22 +188,31 @@ impl Hub {
         self.kick(state, project);
     }
 
-    /// `task`'s work is to be judged afresh: the terminal its last verifier or reviewer was
-    /// kept in, and a reviewer still reading the older work, are closed.
-    pub(super) fn let_go(&self, state: &mut State, (project, task): (&ProjectId, TaskId)) {
-        let reading = state.reviews.remove(&(project.clone(), task)).map(|r| r.term());
+    /// `task`'s work is to be judged afresh: the terminal its last verifier was kept in is
+    /// closed.
+    pub(super) fn let_go(&self, state: &State, (project, task): (&ProjectId, TaskId)) {
         let kept = state
             .projects
             .task(project, task)
             .ok()
             .and_then(|t| t.step.as_ref().filter(|s| !s.running())?.term);
-        for term in reading.into_iter().chain(kept) {
+        if let Some(term) = kept {
             self.close_soon(term);
         }
     }
 
+    /// Close `term`, in the background: nothing waits on it.
+    pub(super) fn close_soon(&self, term: TermRef) {
+        let hub = self.clone();
+        tokio::spawn(async move {
+            if let failed @ Outcome::Error { .. } = hub.forward(None, Verb::Close { term }).await {
+                tracing::debug!(?failed, "a terminal not closed");
+            }
+        });
+    }
+
     /// What `task`'s work did to the project's tests, read in the orchestrator's clone once
-    /// its branch is there: on its card, and in what its agent and its reviewer are told.
+    /// its branch is there: on its card, and in what its agent is told.
     pub(super) async fn read_tests(&self, (project, task): (&ProjectId, TaskId)) {
         let Ok(place) = self.lane_place(project, task) else { return };
         let test_paths = {
@@ -253,7 +263,6 @@ impl Hub {
             let went = match job {
                 Some(Job::Verify(task)) => self.verify_job(&project, task).await,
                 Some(Job::Merge(task)) => self.merge_job(&project, task).await,
-                Some(Job::Review(task)) => self.review_job(&project, task).await,
                 None => Went::Hold,
             };
             let mut state = self.inner.state.lock();
@@ -514,11 +523,9 @@ impl Hub {
                 term: None,
                 commits: None,
             };
-            // With a reviewer to read it next, it stays being checked until the review says.
             // Done, it is ready to merge, or in the queue when the person's Merge said so.
-            let reviews = self.inner.state.lock().projects.reviews(project);
             let advance = Advance {
-                state: (!reviews).then_some(TaskState::Done),
+                state: Some(TaskState::Done),
                 step: Some(step),
                 merge: Queue::Keep,
                 moment: Some(Moment::Verified(run.clone())),
@@ -529,7 +536,7 @@ impl Hub {
         } else {
             let why = last_line(&run.summary).map_or_else(|| exit_words(run.exit), str::to_owned);
             let words = verifier_words(&place, &run, None);
-            let told = Told { run: Some((run, term)), review: None, words };
+            let told = Told { run: Some((run, term)), words };
             self.give_back(at, StepKind::Verify, Some(place.worker), &why, Some(told));
         }
         Went::Next
@@ -609,7 +616,7 @@ impl Hub {
                         short(&candidate),
                         place.target,
                     );
-                    let told = Told { run: None, review: None, words: told };
+                    let told = Told { run: None, words: told };
                     // Its own step, so the board offers the person "Resolve conflicts".
                     self.give_back(at, StepKind::Rebase, Some(place.worker), &message, Some(told));
                     return Went::Next;
@@ -638,7 +645,7 @@ impl Hub {
                         let sent = self.send_target(at, place.worker).await;
                         let next = onto_words(&place.target, &sent);
                         let words = verifier_words(&place, &run, Some((&onto, &next)));
-                        let told = Told { run: Some((run, term)), review: None, words };
+                        let told = Told { run: Some((run, term)), words };
                         self.give_back(at, StepKind::Merge, Some(place.worker), &why, Some(told));
                         return Went::Next;
                     }
@@ -677,10 +684,9 @@ impl Hub {
 }
 
 /// What a task given back carries beyond its reason: the verifier's run and the terminal it
-/// is kept in, or the review that asked for changes, and the words its agent reads.
+/// is kept in, and the words its agent reads.
 pub(super) struct Told {
     pub run: Option<(VerifierRun, TermRef)>,
-    pub review: Option<(ReviewRun, Option<TermRef>)>,
     pub words: String,
 }
 
@@ -689,10 +695,8 @@ impl Hub {
     /// `worker`, else the orchestrator's), and its agent and the orchestrator told. It waits
     /// at its agent's prompt when that still runs, and is up next otherwise.
     ///
-    /// Past [`GIVE_BACKS_MAX`] give-backs, or a reviewer's second ask for changes, the
-    /// failure is held for the person instead: its agent is not told, and the task waits on
-    /// them until they say what next. Changes the person asks for go to the agent whatever the
-    /// count, and start it again.
+    /// Past [`GIVE_BACKS_MAX`] give-backs the failure is held for the person instead: its
+    /// agent is not told, and the task waits on them until they say what next.
     pub(super) fn give_back(
         &self,
         (project, task): (&ProjectId, TaskId),
@@ -712,25 +716,19 @@ impl Hub {
             .or_else(|| record.orchestrator.map(|o| o.worker))
             .or_else(|| t.assignment.as_ref().map(|a| a.term.worker));
         let target = record.target.clone();
-        let (run, review, words) = match told {
-            Some(Told { run, review, words }) => (run, review, words),
-            None => (None, None, format!("Your work could not be verified or merged: {why}.")),
+        let (run, words) = match told {
+            Some(Told { run, words }) => (run, words),
+            None => (None, format!("Your work could not be verified or merged: {why}.")),
         };
-        let by_person = review.as_ref().is_some_and(|(run, _)| run.by == Reviewer::Person);
-        let reviewer = kind == StepKind::Review && !by_person;
-        let mut give_backs = if by_person { GiveBacks::default() } else { t.give_backs };
-        let held = !by_person && !give_backs.room(reviewer);
+        let mut give_backs = t.give_backs;
+        let held = !give_backs.room();
         if held {
             give_backs.held = true;
-        } else if !by_person {
+        } else {
             give_backs.count = give_backs.count.saturating_add(1);
-            give_backs.reviews = give_backs.reviews.saturating_add(u8::from(reviewer));
         }
         let tests = t.tests.as_ref().map(TestDiff::line);
-        let term = run
-            .as_ref()
-            .map(|(_, term)| *term)
-            .or_else(|| review.as_ref().and_then(|(_, term)| *term));
+        let term = run.as_ref().map(|(_, term)| *term);
         let step = worker.map(|worker| TaskStep {
             kind,
             worker,
@@ -740,19 +738,16 @@ impl Hub {
             commits: None,
         });
         let verified = run.map(|(run, _)| run);
-        let reviewed = review.map(|(run, _)| run);
-        let moment = match (&verified, &reviewed, &step) {
-            (Some(run), ..) => Some(Moment::Verified(run.clone())),
-            (None, Some(run), _) => Some(Moment::Reviewed(run.clone())),
-            (None, None, Some(step)) => Some(Moment::Step(step.clone())),
-            (None, None, None) => None,
+        let moment = match (&verified, &step) {
+            (Some(run), _) => Some(Moment::Verified(run.clone())),
+            (None, Some(step)) => Some(Moment::Step(step.clone())),
+            (None, None) => None,
         };
         let to = if live { TaskState::Waiting } else { TaskState::Planned };
         let advance = Advance {
             state: Some(to),
             step,
             verified,
-            reviewed,
             merge: Queue::Leave,
             moment,
             fresh: false,
@@ -769,7 +764,7 @@ impl Hub {
                  so it waits on the person now and its agent was not told; leave it to them.",
                 give_backs.count
             );
-            state.deliveries.notice((project.clone(), None), task, ReportKind::Stuck, &above, at);
+            state.deliveries.notice((project.clone(), None), task, Kind::Stuck, &above, at);
             drop(state);
             self.inner.deliver.notify_one();
             return;
@@ -780,25 +775,17 @@ impl Hub {
             own.push_str(tests);
         }
         let own = format!("{own}\nThe task is back with you; {target} has not moved for it.");
-        state.deliveries.notice(
-            (project.clone(), Some(task)),
-            task,
-            ReportKind::NeedsInput,
-            &own,
-            at,
-        );
+        state.deliveries.notice((project.clone(), Some(task)), task, Kind::NeedsInput, &own, at);
         let next = if live {
             "its agent was told"
         } else {
             "nothing runs for it now; task_start starts it again"
         };
-        let count = if by_person {
-            "the person asked for changes".to_owned()
-        } else {
-            format!("give-back {} of {GIVE_BACKS_MAX}", give_backs.count)
-        };
-        let above = format!("task {task} was given back ({count}): {why}; {next}.");
-        state.deliveries.notice((project.clone(), None), task, ReportKind::Stuck, &above, at);
+        let count = give_backs.count;
+        let above = format!(
+            "task {task} was given back (give-back {count} of {GIVE_BACKS_MAX}): {why}; {next}."
+        );
+        state.deliveries.notice((project.clone(), None), task, Kind::Stuck, &above, at);
         drop(state);
         self.inner.deliver.notify_one();
     }
@@ -877,7 +864,7 @@ impl Hub {
         };
         let at = tokio::time::Instant::now();
         // At once: a merge is final, and what depends on the task can start now.
-        let kind = ReportKind::NeedsInput;
+        let kind = Kind::NeedsInput;
         state.deliveries.notice((project.clone(), None), task, kind, &words, at);
         drop(state);
         self.inner.deliver.notify_one();

@@ -6,8 +6,7 @@
 //! of those is something the project's orchestrator is to hear, from the server since the agent
 //! said nothing:
 //!
-//! - it came to rest from a turn in which it said no word of its own (a need, a block or a finish:
-//!   a checkpoint is progress, not an answer);
+//! - it came to rest from a turn in which it did not report;
 //! - it waits on the person: a permission, a question. Only the person answers it, so the
 //!   orchestrator hears it only to stop waiting blindly;
 //! - it exited, or its terminal closed, while its task still followed it.
@@ -23,9 +22,10 @@ use std::collections::HashMap;
 
 use slopty_proto::agent::{AgentStatus, BlockReason};
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::{ReportKind, Spent};
+use slopty_proto::project::Spent;
 
 use super::{ProjectId, Projects, TaskId, open_term};
+use crate::deliver::Kind;
 
 /// Each task's agent's turn, by its terminal, and what the orchestrators are to hear.
 #[derive(Debug, Default)]
@@ -82,13 +82,13 @@ impl Turns {
 }
 
 impl Upshot {
-    /// The kind of report it is delivered as, which paces it ([`crate::deliver`]); none for
-    /// [`Self::Moved`], which takes back rather than adds.
-    pub(crate) const fn kind(&self) -> Option<ReportKind> {
+    /// The kind of word it is delivered as, which says when it goes ([`crate::deliver`]);
+    /// none for [`Self::Moved`], which takes back rather than adds.
+    pub(crate) const fn kind(&self) -> Option<Kind> {
         match self {
-            Self::Rested => Some(ReportKind::Done),
-            Self::Waits(_) => Some(ReportKind::NeedsInput),
-            Self::Exited => Some(ReportKind::Stuck),
+            Self::Rested => Some(Kind::Done),
+            Self::Waits(_) => Some(Kind::NeedsInput),
+            Self::Exited => Some(Kind::Stuck),
             Self::Moved => None,
         }
     }
@@ -181,12 +181,9 @@ impl Projects {
         self.turns.by_term.remove(&term);
     }
 
-    /// `task`'s agent reported `kind`: a need, a block or a finish is its own answer for the
-    /// turn under way, and what the server would have said of it is not said.
-    pub(super) fn answered(&mut self, id: &ProjectId, task: TaskId, kind: ReportKind) {
-        if kind == ReportKind::Checkpoint {
-            return;
-        }
+    /// `task`'s agent reported: its own answer for the turn under way, so what the server
+    /// would have said of it is not said.
+    pub(super) fn answered(&mut self, id: &ProjectId, task: TaskId) {
         let term = self.records.get(id).and_then(|r| r.task(task).ok()).and_then(open_term);
         if let Some(turn) = term.and_then(|t| self.turns.by_term.get_mut(&t)) {
             turn.answered = true;

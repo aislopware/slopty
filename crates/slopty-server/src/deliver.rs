@@ -1,21 +1,16 @@
 //! Reports on their way to the agent they are for (`docs/decisions/projects.md`, "Reports go
 //! up through hooks").
 //!
-//! A task's agent reports to the project's orchestrator. What goes to an agent waits here per
-//! node (the orchestrator, or a task for the person's and the orchestrator's words to it), and
-//! goes when its kind says:
+//! A task's agent reports its finished work to the project's orchestrator. What goes to an
+//! agent waits here per node (the orchestrator, or a task for the person's and the
+//! orchestrator's words to it), and goes when its [`Kind`] says:
 //!
-//! - a need ([`ReportKind::NeedsInput`]) at once, but at most once per task every [`NEED_EVERY`];
-//! - a block ([`ReportKind::Stuck`]) at once, but at most once per task every [`STUCK_EVERY`];
-//! - a finish ([`ReportKind::Done`]) once it has settled for [`DONE_SETTLE`], so the agent hears
-//!   the last word and not a flurry: a later report of the task replaces it;
-//! - a checkpoint with whatever goes next, or after [`CHECKPOINT_WAIT`].
+//! - a finish ([`Kind::Done`]) once it has settled for [`DONE_SETTLE`], so the agent hears the last
+//!   word and not a flurry: a later report of the task replaces it;
+//! - a need ([`Kind::NeedsInput`]) or a block ([`Kind::Stuck`]) at once.
 //!
-//! A task's later report of a kind replaces its earlier one still waiting, so what waits for a
-//! node is bounded by its tasks, and an agent that reports in a loop costs the orchestrator one
-//! turn
-//! per pacing interval, not one per report. Every report is on the timeline at once whatever
-//! waits here.
+//! A task's later report replaces its earlier one still waiting, so what waits for a node is
+//! bounded by its tasks. Every report is on the timeline at once whatever waits here.
 //!
 //! What the server says of a task's agent that did not report ([`Deliveries::outcome`]: it came
 //! to rest, waits on the person, or exited) is paced as the report it stands for, a wait on the
@@ -34,17 +29,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use slopty_proto::orchestration::TermRef;
-use slopty_proto::project::{ProjectId, Report, ReportKind, TaskId};
+use slopty_proto::project::{ProjectId, Report, TaskId};
 use tokio::time::Instant;
 
 /// How long a finish settles before it is delivered.
 pub(crate) const DONE_SETTLE: Duration = Duration::from_mins(2);
-/// How long a checkpoint waits for something to ride with.
-pub(crate) const CHECKPOINT_WAIT: Duration = Duration::from_hours(1);
-/// How often one task's block may interrupt.
-pub(crate) const STUCK_EVERY: Duration = Duration::from_mins(3);
-/// How often one task's need may interrupt.
-pub(crate) const NEED_EVERY: Duration = Duration::from_mins(1);
 /// How long a task's agent waits on the person before the orchestrator hears so: a
 /// permission the person answers at once wakes nobody.
 pub(crate) const WAIT_SETTLE: Duration = Duration::from_secs(30);
@@ -54,6 +43,18 @@ pub(crate) const CONTEXT_MAX: usize = 9_000;
 
 /// Where words go in a project: a task's agent, or the orchestrator when the task is absent.
 pub(crate) type Node = (ProjectId, Option<TaskId>);
+
+/// What a word waiting for a node says of its task, which decides when it goes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum Kind {
+    /// The work is finished: it goes once it has settled.
+    Done,
+    /// An answer is wanted: at once, or for an agent waiting on the person once the wait
+    /// lasted [`WAIT_SETTLE`].
+    NeedsInput,
+    /// It cannot go on: at once.
+    Stuck,
+}
 
 /// Who wrote what waits for a node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,44 +78,23 @@ enum By {
 #[derive(Clone, Debug)]
 struct Item {
     task: Option<TaskId>,
+    kind: Kind,
     report: Report,
     at: Instant,
     by: By,
 }
 
 impl Item {
-    /// The pacing it goes under: its task's needs, or its task's blocks. The person's words
-    /// are not paced.
-    fn paced(&self) -> Option<(TaskId, bool)> {
-        if matches!(self.by, By::Person | By::Orchestrator) {
-            return None;
-        }
-        let stuck = match self.report.kind {
-            ReportKind::NeedsInput => false,
-            ReportKind::Stuck => true,
-            ReportKind::Done | ReportKind::Checkpoint => return None,
-        };
-        self.task.map(|task| (task, stuck))
-    }
-
-    /// When it falls due, given when its task's last report of its kind went.
-    fn due(&self, last: Option<Instant>) -> Instant {
+    /// When it falls due.
+    fn due(&self) -> Instant {
         if matches!(self.by, By::Person | By::Orchestrator) {
             return self.at;
         }
         let after = |wait: Duration| self.at.checked_add(wait).unwrap_or(self.at);
-        let paced = |every: Duration| {
-            let next = last.and_then(|last| last.checked_add(every));
-            next.map_or(self.at, |next| next.max(self.at))
-        };
-        match self.report.kind {
-            ReportKind::NeedsInput if self.by == By::Outcome => {
-                paced(NEED_EVERY).max(after(WAIT_SETTLE))
-            }
-            ReportKind::NeedsInput => paced(NEED_EVERY),
-            ReportKind::Stuck => paced(STUCK_EVERY),
-            ReportKind::Done => after(DONE_SETTLE),
-            ReportKind::Checkpoint => after(CHECKPOINT_WAIT),
+        match self.kind {
+            Kind::NeedsInput if self.by == By::Outcome => after(WAIT_SETTLE),
+            Kind::NeedsInput | Kind::Stuck => self.at,
+            Kind::Done => after(DONE_SETTLE),
         }
     }
 }
@@ -131,8 +111,6 @@ struct Outstanding {
 struct Queue {
     waiting: Vec<Item>,
     outstanding: Option<Outstanding>,
-    /// When each task's last need and block went, for their pacing.
-    paced_last: HashMap<(TaskId, bool), Instant>,
     /// A report came since the last batch went: what waits may go before that one is read.
     fresh: bool,
     /// Its node had no live terminal when it fell due: it waits for one ([`Deliveries::unpark`]).
@@ -146,8 +124,7 @@ impl Queue {
         if self.parked || (self.outstanding.is_some() && !self.fresh) {
             return None;
         }
-        let last = |i: &Item| i.paced().and_then(|key| self.paced_last.get(&key).copied());
-        self.waiting.iter().map(|i| i.due(last(i))).min()
+        self.waiting.iter().map(Item::due).min()
     }
 }
 
@@ -178,39 +155,38 @@ pub(crate) struct Deliveries {
     next_batch: u64,
     /// What the server last sent each node of each task's agent, by its kind and words: the
     /// same again says nothing new and is not sent.
-    told: HashMap<(Node, TaskId), (ReportKind, u64)>,
+    told: HashMap<(Node, TaskId), (Kind, u64)>,
 }
 
 /// An outcome's kind and words, to know it again.
-fn fingerprint(item: &Item) -> (ReportKind, u64) {
+fn fingerprint(item: &Item) -> (Kind, u64) {
     let mut hasher = std::hash::DefaultHasher::new();
     std::hash::Hash::hash(&item.report.note, &mut hasher);
-    (item.report.kind, std::hash::Hasher::finish(&hasher))
+    (item.kind, std::hash::Hasher::finish(&hasher))
 }
 
 impl Deliveries {
-    /// A report of `task` for `node`: it replaces the task's checkpoint and finish still
-    /// waiting, and its need or block when it is one; it waits with the task's others.
+    /// `task`'s report of its finished work for `node`: it replaces the task's report still
+    /// waiting.
     pub(crate) fn add(&mut self, node: Node, task: Option<TaskId>, report: Report, at: Instant) {
-        self.push(node, Item { task, report, at, by: By::Agent });
+        self.push(node, Item { task, kind: Kind::Done, report, at, by: By::Agent });
+    }
+
+    /// The server's standing instructions for `node`'s agent (its role): they go at once, and
+    /// replace those still waiting.
+    pub(crate) fn instructions(&mut self, node: Node, note: &str, at: Instant) {
+        let (kind, report) = (Kind::NeedsInput, words(note));
+        self.push(node, Item { task: None, kind, report, at, by: By::Server });
     }
 
     /// The server's own `note` about `task`, for `node`, paced as a report of `kind`: it
     /// replaces the server's earlier notice about the task still waiting, never the task's own
     /// reports, and counts as a report delivered.
-    pub(crate) fn notice(
-        &mut self,
-        node: Node,
-        task: TaskId,
-        kind: ReportKind,
-        note: &str,
-        at: Instant,
-    ) {
+    pub(crate) fn notice(&mut self, node: Node, task: TaskId, kind: Kind, note: &str, at: Instant) {
         // It quotes what others wrote (a verifier's output, git's words), so it is kept from
         // closing its block as an agent's words are.
-        let note = plain(note);
-        let report = Report { kind, note, artifacts: Vec::new(), branch: None, pr: None };
-        self.push(node, Item { task: Some(task), report, at, by: By::Server });
+        let report = words(note);
+        self.push(node, Item { task: Some(task), kind, report, at, by: By::Server });
     }
 
     /// What the server says of `task`'s agent, which did not report, for `node`: `note`, paced
@@ -220,13 +196,12 @@ impl Deliveries {
         &mut self,
         node: Node,
         task: TaskId,
-        kind: ReportKind,
+        kind: Kind,
         note: &str,
         at: Instant,
     ) {
-        let report =
-            Report { kind, note: plain(note), artifacts: Vec::new(), branch: None, pr: None };
-        self.push(node, Item { task: Some(task), report, at, by: By::Outcome });
+        let report = words(note);
+        self.push(node, Item { task: Some(task), kind, report, at, by: By::Outcome });
     }
 
     /// `task`'s agent went back to work: what the server was to say of it for `node`, and has
@@ -240,13 +215,10 @@ impl Deliveries {
 
     /// Read again what the server says of each agent that did not report, as it waits:
     /// `words` gives the note for its node, task and kind now, or keeps it when it gives none.
-    pub(crate) fn reword(
-        &mut self,
-        mut words: impl FnMut(&Node, TaskId, ReportKind) -> Option<String>,
-    ) {
+    pub(crate) fn reword(&mut self, mut words: impl FnMut(&Node, TaskId, Kind) -> Option<String>) {
         for (node, queue) in &mut self.queues {
             for item in queue.waiting.iter_mut().filter(|i| i.by == By::Outcome) {
-                let kind = item.report.kind;
+                let kind = item.kind;
                 if let Some(note) = item.task.and_then(|task| words(node, task, kind)) {
                     item.report.note = plain(&note);
                 }
@@ -264,47 +236,28 @@ impl Deliveries {
         words: &str,
         at: Instant,
     ) {
-        let note = plain(words);
-        let report = Report {
-            kind: ReportKind::NeedsInput,
-            note,
-            artifacts: Vec::new(),
-            branch: None,
-            pr: None,
-        };
-        self.push((project, task), Item { task, report, at, by: By::Person });
+        let (kind, report) = (Kind::NeedsInput, self::words(words));
+        self.push((project, task), Item { task, kind, report, at, by: By::Person });
     }
 
     /// The orchestrator's words to the agent of `node`'s task: they go at once, after the
     /// person's words and never in their place, and replace its own earlier words still unread.
-    /// A project held at its budget holds them as it holds reports.
     pub(crate) fn orchestrator(&mut self, node: Node, words: &str, at: Instant) {
-        let report = Report {
-            kind: ReportKind::NeedsInput,
-            note: plain(words),
-            artifacts: Vec::new(),
-            branch: None,
-            pr: None,
-        };
-        let task = node.1;
-        self.push(node, Item { task, report, at, by: By::Orchestrator });
+        let (kind, report, task) = (Kind::NeedsInput, self::words(words), node.1);
+        self.push(node, Item { task, kind, report, at, by: By::Orchestrator });
     }
 
     fn push(&mut self, node: Node, item: Item) {
         let queue = self.queues.entry(node).or_default();
-        let (task, kind) = (item.task, item.report.kind);
+        let task = item.task;
         queue.waiting.retain(|i| {
-            let settles = matches!(i.report.kind, ReportKind::Checkpoint | ReportKind::Done);
             // Every word the person says is kept: a second message is not a newer first.
             let replaced = match item.by {
                 By::Person => false,
                 By::Server | By::Outcome => i.by == item.by,
                 By::Orchestrator => i.by == By::Orchestrator,
                 // The agent's own word stands for what the server would say of it.
-                By::Agent => {
-                    (i.by == By::Agent && (settles || (task.is_some() && i.report.kind == kind)))
-                        || (i.by == By::Outcome && task.is_some())
-                }
+                By::Agent => i.by == By::Agent || (i.by == By::Outcome && task.is_some()),
             };
             i.task != task || !replaced
         });
@@ -321,21 +274,14 @@ impl Deliveries {
     }
 
     /// The batches due by `now`, each for its node's live terminal as `term_of` names it. What
-    /// waits for a node with no live terminal stays. A batch holds what its node had
-    /// outstanding too, and replaces it.
-    ///
-    /// A project `held` (its budget spent) sends only the person's words: every other report
-    /// would start a turn, so it waits, parked, for the hold to lift ([`Self::unpark`]).
+    /// waits for a node with no live terminal stays, parked until one comes
+    /// ([`Self::unpark`]). A batch holds what its node had outstanding too, and replaces it.
     pub(crate) fn take(
         &mut self,
         now: Instant,
         mut term_of: impl FnMut(&Node) -> Option<TermRef>,
-        held: impl Fn(&ProjectId) -> bool,
     ) -> Vec<Batch> {
         let mut out = Vec::new();
-        for queue in self.queues.values_mut() {
-            queue.paced_last.retain(|_, last| now.duration_since(*last) < STUCK_EVERY);
-        }
         for (node, queue) in &mut self.queues {
             if queue.due().is_none_or(|due| due > now) {
                 continue;
@@ -350,33 +296,16 @@ impl Deliveries {
             if queue.due().is_none_or(|due| due > now) {
                 continue;
             }
-            let holding = held(&node.0);
-            let term = term_of(node)
-                .filter(|_| !holding || queue.waiting.iter().any(|i| i.by == By::Person));
-            let Some(term) = term else {
+            let Some(term) = term_of(node) else {
                 queue.parked = true;
                 continue;
             };
             let mut items = queue.outstanding.take().map(|o| o.items).unwrap_or_default();
-            let kept_back = if holding {
-                let (person, rest) = std::mem::take(&mut queue.waiting)
-                    .into_iter()
-                    .partition(|i| i.by == By::Person);
-                items.extend::<Vec<Item>>(person);
-                rest
-            } else {
-                items.append(&mut queue.waiting);
-                Vec::new()
-            };
-            let (context, items, mut left) = context(&node.0, items);
-            // What did not fit waits for the next batch, due as it was; what the hold kept back
-            // waits behind it.
-            left.extend(kept_back);
+            items.append(&mut queue.waiting);
+            let (context, items, left) = context(&node.0, items);
+            // What did not fit waits for the next batch, due as it was.
             queue.waiting = left;
             queue.fresh = false;
-            for key in items.iter().filter_map(Item::paced) {
-                queue.paced_last.insert(key, now);
-            }
             for item in items.iter().filter(|i| i.by == By::Outcome) {
                 if let Some(task) = item.task {
                     self.told.insert((node.clone(), task), fingerprint(item));
@@ -440,9 +369,6 @@ impl Deliveries {
             if queue.outstanding.as_ref().is_some_and(|o| o.term == term)
                 && let Some(o) = queue.outstanding.take()
             {
-                for key in o.items.iter().filter_map(Item::paced) {
-                    queue.paced_last.remove(&key);
-                }
                 // Never read, so not yet told: it is no repeat when it goes again.
                 for item in o.items.iter().filter(|i| i.by == By::Outcome) {
                     if let Some(task) = item.task {
@@ -456,11 +382,9 @@ impl Deliveries {
         }
     }
 
-    /// Drop queues with nothing in them and no block's clock still running.
+    /// Drop queues with nothing in them.
     fn prune(&mut self) {
-        self.queues.retain(|_, q| {
-            !q.waiting.is_empty() || q.outstanding.is_some() || !q.paced_last.is_empty()
-        });
+        self.queues.retain(|_, q| !q.waiting.is_empty() || q.outstanding.is_some());
     }
 
     /// How many reports wait or are outstanding, in all.
@@ -475,13 +399,9 @@ impl Deliveries {
     }
 }
 
-const fn kind_word(kind: ReportKind) -> &'static str {
-    match kind {
-        ReportKind::Checkpoint => "checkpoint",
-        ReportKind::NeedsInput => "needs input",
-        ReportKind::Stuck => "stuck",
-        ReportKind::Done => "done",
-    }
+/// `note` as a word of the server's or the person's, with no report's fields beside it.
+fn words(note: &str) -> Report {
+    Report { note: plain(note), artifacts: Vec::new(), branch: None, pr: None }
 }
 
 /// The batch as the agent reads it: one block per report, the person's words first, then the
@@ -549,7 +469,7 @@ fn block(item: &Item) -> String {
     let Some(task) = item.task.filter(|_| item.by == By::Agent) else {
         return r.note.trim().to_owned();
     };
-    let mut lines = vec![format!("task {task}: {}", kind_word(r.kind))];
+    let mut lines = vec![format!("task {task}: done")];
     lines.extend(r.note.trim().lines().map(|line| format!("  {}", plain(line))));
     lines.extend(r.branch.iter().map(|branch| format!("  branch: {}", plain(branch))));
     lines.extend(r.pr.iter().map(|pr| format!("  pull request: #{pr}")));

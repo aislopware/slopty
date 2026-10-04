@@ -14,11 +14,7 @@ workspace = true
 # Digests of keyed verbs (`hub`).
 blake3.workspace = true
 # Placement rules over the workers' facts (`placement`).
-cel.workspace = true
 hyper.workspace = true
-# Claimed paths compared as APFS compares names (`project::owned`).
-icu_normalizer.workspace = true
-icu_casemap.workspace = true
 hyper-util.workspace = true
 parking_lot.workspace = true
 rmcp = { workspace = true, features = [ "transport-streamable-http-server" ] }

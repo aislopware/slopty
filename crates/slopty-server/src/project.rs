@@ -1,12 +1,11 @@
 //! Projects on the server (`docs/decisions/projects.md`).
 //!
-//! The records the store keeps and the rules a change keeps: a task that writes owns paths no
-//! other live task holds, its dependencies never lead back to it, a merged task stays merged,
-//! and one terminal works on a task at a time. Tasks are the orchestrator's, one level: no task
-//! is split from another.
+//! The records the store keeps and the rules a change keeps: a task's dependencies never lead
+//! back to it, a merged task stays merged, and one terminal works on a task at a time. Tasks are
+//! the orchestrator's, one level: no task is split from another.
 //! How many agents run is counted from the terminals that are live, never from what a task's
-//! state says alone, so nothing that runs escapes the limits: only the agent of a task merged
-//! or given up counts no more while it rests, and counts again as soon as it works.
+//! state says alone, so nothing that runs escapes the person's bounds: only the agent of a task
+//! merged or given up counts no more while it rests, and counts again as soon as it works.
 //!
 //! Every change answers with the `Change`s it made, in order: the hub pushes each to clients
 //! as a [`ProjectUpdate`] and hands the store what it must keep ([`Kept`]). A refused change
@@ -19,21 +18,18 @@ use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentBranch, AgentStatus, BlockReason};
 use slopty_proto::orchestration::{ErrorCode, Outcome, TermRef};
 use slopty_proto::project::{
-    ARTIFACTS_MAX, AgentReport, Assignment, Budget, CHECK_NAME_MAX, CHECKS_NAMED, CHECKS_WHY_MAX,
-    Checks, ChecksState, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits, LimitsChange, Live,
-    METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange, Natives,
-    Need, NodeDetail, NodeNatives, Placed, Project, ProjectStatus, ProjectUpdate, Proposal,
-    REF_MAX, Report, ReportKind, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch,
-    TESTS_NAMED, TIMELINE_BYTES_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, Task, TaskChange, TaskId,
-    TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun,
+    ARTIFACTS_MAX, AgentReport, Assignment, BRIEF_MAX, CHECK_NAME_MAX, CHECKS_NAMED,
+    CHECKS_WHY_MAX, Checks, ChecksState, DEPENDS_MAX, GiveBacks, KIND_MAX, Limits, LimitsChange,
+    Live, METADATA_MAX, Matcher, Merge, Moment, NOTE_MAX, Native, NativeAgent, NativeChange,
+    Natives, NodeDetail, NodeNatives, PROJECTS_MAX, Project, ProjectStatus, ProjectUpdate, REF_MAX,
+    Report, RunOn, STATUS_MAX, SUMMARY_MAX, Spent, StepState, Stretch, TASKS_MAX, TESTS_NAMED,
+    TIMELINE_BYTES_KEPT, TIMELINE_KEPT, TIMELINE_PAGE, TIMELINE_PAGE_BYTES, TITLE_MAX, Task,
+    TaskChange, TaskId, TaskSpec, TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun,
 };
 /// What a [`Policy`] is made of, for the binary that reads it from the person's settings.
 pub use slopty_proto::project::{Bounds, ProjectId};
 use slopty_proto::terminal::RepoId;
-use slopty_proto::thread::{Limit, ThreadId};
-pub use tally::Tally;
-
-use crate::placement;
+use slopty_proto::thread::ThreadId;
 
 mod scripts;
 
@@ -43,8 +39,6 @@ pub const RECENT_ENTRIES: usize = 64;
 pub const NATIVES_KEPT: usize = 256;
 /// Sessions whose natives are kept until a task takes the session on, the oldest dropped first.
 const UNCLAIMED_KEPT: usize = 256;
-/// The fewest timeline entries a project may keep.
-const TIMELINE_LEAST: u32 = 16;
 
 /// A task's pull request, for its checks to be read where its agent worked.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,8 +140,6 @@ pub struct Kept {
     pub native: Option<NativeChange>,
     /// What happened, when it is worth the timeline.
     pub entry: Option<TimelineEntry>,
-    /// Every thread's figures the project's spend is tallied from, when this wrote them.
-    pub tally: Option<Box<Tally>>,
 }
 
 /// A change as the model makes it.
@@ -214,9 +206,6 @@ impl ProjectsFile {
             record.next_seq = record.next_seq.max(entry.seq.saturating_add(1));
             record.push_entry(entry.clone());
         }
-        if let Some(tally) = &kept.tally {
-            record.tally.clone_from(tally);
-        }
     }
 }
 
@@ -230,17 +219,11 @@ pub struct Record {
     pub tasks: Vec<Task>,
     /// Each node's natives, for the nodes that have any.
     pub natives: Vec<NodeNatives>,
-    /// Its latest timeline entries, oldest first, as many as its limits keep and at most
-    /// [`TIMELINE_BYTES_KEPT`] of them.
+    /// Its latest timeline entries, oldest first, at most [`TIMELINE_KEPT`] of them and
+    /// [`TIMELINE_BYTES_KEPT`] in all.
     pub timeline: VecDeque<TimelineEntry>,
     /// The next entry's number.
     pub next_seq: u64,
-    /// Every thread's figures its [`Project::spend`] is tallied from.
-    pub tally: Tally,
-    /// When the tally was last written, by the server's clock: it is pushed at every figure
-    /// and written at most once a minute unless a line of the budget is passed.
-    #[serde(skip)]
-    pub tally_kept_ms: WallMs,
     /// What [`Self::timeline`] takes, by [`TimelineEntry::approx_bytes`]; counted again when
     /// the file is read.
     #[serde(skip)]
@@ -255,22 +238,12 @@ struct Stored {
     natives: Vec<NodeNatives>,
     timeline: VecDeque<TimelineEntry>,
     next_seq: u64,
-    tally: Tally,
 }
 
 impl From<Stored> for Record {
     fn from(stored: Stored) -> Self {
-        let Stored { project, tasks, natives, timeline, next_seq, tally } = stored;
-        let mut record = Self {
-            project,
-            tasks,
-            natives,
-            timeline,
-            next_seq,
-            tally,
-            tally_kept_ms: WallMs::default(),
-            timeline_bytes: 0,
-        };
+        let Stored { project, tasks, natives, timeline, next_seq } = stored;
+        let mut record = Self { project, tasks, natives, timeline, next_seq, timeline_bytes: 0 };
         record.recount();
         record
     }
@@ -327,8 +300,6 @@ pub(crate) struct Starting {
     /// The conversation a task's agent was started under, for the task that takes it on once
     /// it shows up after a lost answer.
     pub conversation: Option<String>,
-    /// Why a task's start went to its worker, for the task that takes it on.
-    pub placed: Option<Placed>,
 }
 
 /// A new project's fields.
@@ -340,9 +311,7 @@ pub(crate) struct NewProject {
     pub repo: String,
     pub target: String,
     pub verifier: Option<String>,
-    pub review: Option<String>,
     pub push: bool,
-    pub ask_to_start: bool,
     pub orchestrator: Option<TermRef>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
@@ -354,9 +323,7 @@ pub(crate) struct ProjectChange {
     pub members: Option<Vec<Matcher>>,
     pub orchestrator: Option<TermRef>,
     pub verifier: Option<String>,
-    pub review: Option<String>,
     pub push: Option<bool>,
-    pub ask_to_start: Option<bool>,
     pub limits: LimitsChange,
     pub metadata: Option<String>,
 }
@@ -372,8 +339,6 @@ pub(crate) struct Assignee<'a> {
     pub branch: Option<&'a AgentBranch>,
     /// The Claude Code conversation it was started under, when the server chose it.
     pub conversation: Option<String>,
-    /// Why the server started it on its worker, when it did.
-    pub placed: Option<Placed>,
     /// The thread its agent runs as, for a task started as one.
     pub thread: Option<ThreadId>,
 }
@@ -420,15 +385,13 @@ fn unknown_task(project: &ProjectId, id: TaskId) -> Refused {
 }
 
 impl Record {
-    fn new(project: Project) -> Self {
+    const fn new(project: Project) -> Self {
         Self {
             project,
             tasks: Vec::new(),
             natives: Vec::new(),
             timeline: VecDeque::new(),
             next_seq: 1,
-            tally: Tally::default(),
-            tally_kept_ms: WallMs::default(),
             timeline_bytes: 0,
         }
     }
@@ -446,49 +409,12 @@ impl Record {
         self.trim_timeline();
     }
 
-    /// Drop the oldest entries past the project's `timeline_kept` or [`TIMELINE_BYTES_KEPT`].
+    /// Drop the oldest entries past [`TIMELINE_KEPT`] or [`TIMELINE_BYTES_KEPT`].
     fn trim_timeline(&mut self) {
-        let kept = usize::try_from(self.project.limits.timeline_kept).unwrap_or(usize::MAX);
-        while self.timeline.len() > kept || self.timeline_bytes > TIMELINE_BYTES_KEPT {
+        while self.timeline.len() > TIMELINE_KEPT || self.timeline_bytes > TIMELINE_BYTES_KEPT {
             let Some(gone) = self.timeline.pop_front() else { break };
             self.timeline_bytes = self.timeline_bytes.saturating_sub(gone.approx_bytes());
         }
-    }
-
-    /// Tally the spend again at `now`: pushed when it moved, with a moment for each line of the
-    /// budget it passed, and written when it passed one or the last write is
-    /// [`tally::WRITE_EVERY_MS`] old.
-    fn respend(&mut self, now: WallMs) -> Vec<Change> {
-        let spend = self.tally.spend(now);
-        if spend == self.project.spend {
-            return Vec::new();
-        }
-        let budget = self.project.limits.budget.as_ref();
-        let shares = |s: &slopty_proto::project::Spend| budget.map(|b| b.against(s));
-        let passed = tally::passed(
-            &shares(&self.project.spend).unwrap_or_default(),
-            &shares(&spend).unwrap_or_default(),
-        );
-        self.project.spend = spend;
-        let write =
-            !passed.is_empty() || now.millis_since(self.tally_kept_ms) >= tally::WRITE_EVERY_MS;
-        if write {
-            self.tally_kept_ms = now;
-        }
-        let mut changes: Vec<Change> = passed
-            .into_iter()
-            .map(|what| {
-                let entry = self.log(None, what, now);
-                self.record_update(Some(entry))
-            })
-            .collect();
-        if changes.is_empty() {
-            changes.push(Change { durable: write, ..self.record_update(None) });
-        }
-        if let Some(last) = changes.last_mut().filter(|_| write) {
-            last.kept.tally = Some(Box::new(self.tally.clone()));
-        }
-        changes
     }
 
     /// Count [`Self::timeline_bytes`] again, for a record read from the file.
@@ -510,7 +436,7 @@ impl Record {
 
     fn kept(&self) -> Kept {
         let project = self.project.id.clone();
-        Kept { project, record: None, task: None, native: None, entry: None, tally: None }
+        Kept { project, record: None, task: None, native: None, entry: None }
     }
 
     /// The change of `task`, with the entry it made if any.
@@ -561,27 +487,6 @@ impl Record {
             bounds,
             live,
         }
-    }
-
-    /// The task another of the project's live writing tasks owns a path of `paths` in, the
-    /// path it owns, and the one of `paths` it overlaps.
-    fn conflict(&self, task: Option<TaskId>, paths: &[String]) -> Option<(TaskId, &str, String)> {
-        if paths.is_empty() {
-            return None;
-        }
-        // Each path is folded once, not once per pair.
-        let ours: Vec<(String, &String)> = paths.iter().map(|p| (folded(p), p)).collect();
-        self.tasks
-            .iter()
-            .filter(|t| Some(t.id) != task && t.state.holds_paths() && !t.read_only)
-            .find_map(|t| {
-                t.owns.iter().find_map(|theirs| {
-                    let folded_theirs = folded(theirs);
-                    ours.iter()
-                        .find(|(folded_ours, _)| holds_either(&folded_theirs, folded_ours))
-                        .map(|(_, ours)| (t.id, theirs.as_str(), (*ours).clone()))
-                })
-            })
     }
 
     /// The terminals of the project that are live and count: its tasks' and its
@@ -670,44 +575,6 @@ impl Record {
             ),
         ))
     }
-
-    /// The paths of `wanted` a task takes beside what it owns, when it may take them: the
-    /// new ones, refused past `owns_max`, for a task that only reads or holds nothing, or for
-    /// a path another live task owns.
-    fn claim_for(
-        &self,
-        task: TaskId,
-        wanted: &[String],
-        owns_max: u16,
-    ) -> Result<Vec<String>, Refused> {
-        let wanted = claimable(wanted, owns_max)?;
-        let held = self.task(task)?;
-        let new: Vec<String> =
-            wanted.into_iter().filter(|w| !held.owns.iter().any(|o| same_path(o, w))).collect();
-        if new.is_empty() {
-            return Ok(new);
-        }
-        if held.owns.len().saturating_add(new.len()) > usize::from(owns_max) {
-            return Err(over_bound(
-                "owns_max",
-                held.owns.len().saturating_add(new.len()),
-                owns_max.into(),
-            ));
-        }
-        if held.read_only {
-            return Err(invalid(format!("task {task} only reads; it owns no paths")));
-        }
-        if !held.state.holds_paths() {
-            return Err(invalid(format!(
-                "task {task} is {:?} and holds nothing; plan it again or make a new task",
-                held.state
-            )));
-        }
-        if let Some((theirs, path, ours)) = self.conflict(Some(task), &new) {
-            return Err(overlapping(theirs, path, &ours));
-        }
-        Ok(new)
-    }
 }
 
 /// The terminal a task's open assignment names.
@@ -758,52 +625,6 @@ fn page<'a>(from: impl Iterator<Item = &'a TimelineEntry>) -> (Vec<TimelineEntry
     (out, false)
 }
 
-/// A path as a task owns it.
-///
-/// Relative to the repository's root, in `/`-separated components with no `.` or trailing
-/// `/`, in Unicode's composed form (NFC); the root itself is the empty path, which owns
-/// everything. A glob owns what its part before the first wildcard does, so it never owns
-/// less than it matches.
-///
-/// # Errors
-/// An absolute path, or one that climbs out with `..`.
-pub fn owned(path: &str) -> Result<String, String> {
-    let path = path.trim();
-    if path.starts_with('/') || path.starts_with('~') {
-        return Err(format!("{path:?} is not relative to the repository's root"));
-    }
-    let literal = path.find(['*', '?', '[', '{']).map_or(path, |wild| {
-        let before = path.get(..wild).unwrap_or_default();
-        before.rfind('/').map_or("", |slash| before.get(..slash).unwrap_or_default())
-    });
-    let mut parts = Vec::new();
-    for part in literal.split('/').filter(|p| !p.is_empty() && *p != ".") {
-        if part == ".." {
-            return Err(format!("{path:?} climbs out of the repository"));
-        }
-        parts.push(part);
-    }
-    let joined = parts.join("/");
-    Ok(icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&joined).into_owned())
-}
-
-/// Whether two owned paths ([`owned`]) take in any file both: one is the other or holds it,
-/// case aside, as a case-insensitive volume (APFS's default) sees them.
-#[must_use]
-pub fn overlap(a: &str, b: &str) -> bool {
-    holds_either(&folded(a), &folded(b))
-}
-
-/// Whether one of two folded owned paths is the other or holds it.
-fn holds_either(a: &str, b: &str) -> bool {
-    let holds = |outer: &str, inner: &str| {
-        outer.is_empty()
-            || inner == outer
-            || inner.strip_prefix(outer).is_some_and(|rest| rest.starts_with('/'))
-    };
-    holds(a, b) || holds(b, a)
-}
-
 /// The state an agent's status puts the task it works on in; `None` for no agent.
 const fn follows(status: &AgentStatus) -> Option<TaskState> {
     match status {
@@ -818,63 +639,15 @@ const fn follows(status: &AgentStatus) -> Option<TaskState> {
     }
 }
 
-/// `limits` changed by `change`, within `bounds`. The review limit has no bound of the
-/// person's: it is theirs alone to set ([`LimitsChange::review`]), which the hub sees to.
-fn limited(limits: Limits, change: LimitsChange, bounds: Bounds) -> Result<Limits, Refused> {
-    let within = |name: &str, value: Option<u32>, least: u32, most: u32| match value {
-        Some(v) if v < least => Err(invalid(format!("{name} is at least {least}"))),
-        Some(v) if v > most => Err(refuse(
-            ErrorCode::Limit,
-            format!(
-                "{name} {v} is over the {most} the person allows (`[server.projects] {name}` in \
-                 the server's settings.toml)"
-            ),
-        )),
-        _ => Ok(()),
-    };
-    within(
-        "live_per_worker",
-        change.live_per_worker.map(u32::from),
-        1,
-        bounds.live_per_worker.into(),
-    )?;
-    within(
-        "live_per_project",
-        change.live_per_project.map(u32::from),
-        1,
-        bounds.live_per_project.into(),
-    )?;
+/// `limits` changed by `change`. The review limit is the person's alone to set
+/// ([`LimitsChange::review`]), which the hub sees to.
+fn limited(limits: Limits, change: LimitsChange) -> Result<Limits, Refused> {
     if change.review == Some(0) {
         return Err(invalid(
             "review is at least 1: a project with nothing to review starts nothing",
         ));
     }
-    within("timeline_kept", change.timeline_kept, TIMELINE_LEAST, bounds.timeline_kept)?;
-    let clamp = |v: u16, most: u16| v.min(most);
-    Ok(Limits {
-        live_per_worker: change
-            .live_per_worker
-            .unwrap_or_else(|| clamp(limits.live_per_worker, bounds.live_per_worker)),
-        live_per_project: change
-            .live_per_project
-            .unwrap_or_else(|| clamp(limits.live_per_project, bounds.live_per_project)),
-        review: change.review.unwrap_or(limits.review),
-        timeline_kept: change
-            .timeline_kept
-            .unwrap_or_else(|| limits.timeline_kept.min(bounds.timeline_kept)),
-        budget: match change.budget {
-            Some(budget) if budget.0.is_empty() => None,
-            Some(budget) if !budget.fits() => {
-                return Err(invalid(format!(
-                    "a budget names at most {} plan windows, each a name with no space and a \
-                     cap of 1 to 10000 hundredths of a percent (the whole window)",
-                    Budget::METERS_MAX
-                )));
-            }
-            Some(budget) => Some(budget),
-            None => limits.budget,
-        },
-    })
+    Ok(Limits { review: change.review.unwrap_or(limits.review) })
 }
 
 /// A metadata document as it is kept: a JSON object, compact; `None` for an empty one.
@@ -943,31 +716,19 @@ fn verifier(text: Option<String>) -> Result<Option<String>, Refused> {
     Ok(words(text))
 }
 
-/// A reviewer's brief, trimmed: `None` for empty, which asks for no reviewer.
-fn review_brief(text: Option<String>) -> Result<Option<String>, Refused> {
-    within("a reviewer's brief", text.as_deref(), SUMMARY_MAX)?;
-    Ok(words(text))
+/// A refusal for passing one of the server's bounds: `what` is `have` of `most`.
+fn over_bound(what: &str, have: usize, most: usize) -> Refused {
+    refuse(ErrorCode::Limit, format!("{what}: {have} would pass the {most} the server allows"))
 }
 
-/// A refusal for passing one of the person's bounds.
-fn over_bound(name: &str, have: usize, most: u64) -> Refused {
-    refuse(
-        ErrorCode::Limit,
-        format!(
-            "{name}: {have} would pass the {most} the person allows (`[server.projects] {name}` in \
-             the server's settings.toml)"
-        ),
-    )
-}
-
-/// A title as it is kept: trimmed, not empty, within the person's `title_max`.
-fn titled(title: &str, bounds: Bounds) -> Result<String, Refused> {
+/// A title as it is kept: trimmed, not empty, within [`TITLE_MAX`].
+fn titled(title: &str) -> Result<String, Refused> {
     let title = title.trim();
     if title.is_empty() {
         return Err(invalid("a title is not empty"));
     }
-    if title.len() > usize::try_from(bounds.title_max).unwrap_or(usize::MAX) {
-        return Err(over_bound("title_max", title.len(), bounds.title_max.into()));
+    if title.len() > TITLE_MAX {
+        return Err(over_bound("a title's bytes", title.len(), TITLE_MAX));
     }
     Ok(title.to_owned())
 }
@@ -1033,7 +794,7 @@ impl Projects {
                         let answered = r.timeline.iter().any(|e| {
                             e.task == Some(t.id)
                                 && e.at_ms >= since
-                                && matches!(&e.what, Moment::Reported { report } if report.kind != ReportKind::Checkpoint)
+                                && matches!(&e.what, Moment::Reported { .. })
                         });
                         turns.resume(term, answered);
                     }
@@ -1063,20 +824,9 @@ impl Projects {
         &self.policy
     }
 
-    /// Take up the person's policy: every project's limits come within it.
-    pub(crate) fn set_policy(&mut self, policy: Policy) -> Vec<Change> {
+    /// Take up the person's policy.
+    pub(crate) fn set_policy(&mut self, policy: Policy) {
         self.policy = policy;
-        let bounds = self.policy.bounds;
-        let mut updates = Vec::new();
-        for record in self.records.values_mut() {
-            let within = limited(record.project.limits.clone(), LimitsChange::default(), bounds);
-            if let Some(limits) = within.ok().filter(|l| *l != record.project.limits) {
-                record.project.limits = limits;
-                record.trim_timeline();
-                updates.push(record.record_update(None));
-            }
-        }
-        updates
     }
 
     /// Every project, by name.
@@ -1129,16 +879,10 @@ impl Projects {
         terms
     }
 
-    /// Every live agent and start on `worker`, in a project or not: the person's
-    /// `live_per_worker` bounds them all.
+    /// Every live agent and start on `worker`, in a project or not: what its `live_agents` fact
+    /// says, and what placement spreads starts by.
     pub(crate) fn live_on_worker(&self, worker: WorkerId, running: &Running<'_>) -> u16 {
         count(self.fleet_terms(running).iter().filter(|t| t.worker == worker).count())
-    }
-
-    /// How many of a project's agents run on `worker`, and are being started there.
-    pub(crate) fn live_on(&self, id: &ProjectId, worker: WorkerId, running: &Running<'_>) -> u16 {
-        let Some(record) = self.records.get(id) else { return 0 };
-        count(record.occupied(running).iter().filter(|t| t.worker == worker).count())
     }
 
     /// One node in full: a task with its natives, or the orchestrator's.
@@ -1163,22 +907,6 @@ impl Projects {
             native: kept.native.clone(),
             entry: kept.entry.clone(),
         }
-    }
-
-    /// Where each of a project's tasks runs now, for `near` and `avoid`.
-    pub(crate) fn peers(
-        &self,
-        id: &ProjectId,
-        running: &Running<'_>,
-    ) -> BTreeMap<TaskId, WorkerId> {
-        let Some(record) = self.records.get(id) else { return BTreeMap::new() };
-        record
-            .tasks
-            .iter()
-            .filter_map(|t| {
-                Record::live_assignment(t, running.terminals).map(|a| (t.id, a.term.worker))
-            })
-            .collect()
     }
 
     fn record(&mut self, id: &ProjectId) -> Result<&mut Record, Refused> {
@@ -1213,11 +941,6 @@ impl Projects {
         }
     }
 
-    /// A project's limits.
-    pub(crate) fn limits(&self, id: &ProjectId) -> Result<Limits, Refused> {
-        self.records.get(id).map(|r| r.project.limits.clone()).ok_or_else(|| unknown_project(id))
-    }
-
     /// A task as it is.
     pub(crate) fn task(&self, id: &ProjectId, task: TaskId) -> Result<&Task, Refused> {
         self.records.get(id).ok_or_else(|| unknown_project(id))?.task(task)
@@ -1233,29 +956,24 @@ impl Projects {
         if self.records.contains_key(&new.id) {
             return Err(refuse(ErrorCode::Conflict, format!("project {} exists already", new.id)));
         }
-        let bounds = self.policy.bounds_for(Some(&new.id));
-        if self.records.len() >= usize::from(bounds.projects) {
-            return Err(over_bound("projects", self.records.len(), bounds.projects.into()));
+        if self.records.len() >= PROJECTS_MAX {
+            return Err(over_bound("projects", self.records.len(), PROJECTS_MAX));
         }
-        let title = titled(&new.title, bounds)?;
-        let limits = limited(Limits::default(), new.limits, bounds)?;
+        let title = titled(&new.title)?;
+        let limits = limited(Limits::default(), new.limits)?;
         within("a repository", Some(&new.repo), REF_MAX)?;
         within("a target branch", Some(&new.target), REF_MAX)?;
         let project = Project {
-            needs: Vec::new(),
             scripts: Vec::new(),
             orchestrator_spent: Spent::default(),
-            spend: slopty_proto::project::Spend::default(),
             id: new.id.clone(),
             title,
             members: members(new.members)?,
             repo: new.repo.trim().to_owned(),
             repo_id: None,
             target: new.target.trim().to_owned(),
-            review: review_brief(new.review)?,
             verifier: verifier(new.verifier)?,
             push: new.push,
-            ask_to_start: new.ask_to_start,
             orchestrator: new.orchestrator,
             limits,
             metadata: metadata(new.metadata)?,
@@ -1281,12 +999,10 @@ impl Projects {
         running: &Running<'_>,
         now: WallMs,
     ) -> Changed<ProjectStatus> {
-        let bounds = self.policy.bounds_for(Some(id));
         let record = self.record(id)?;
-        let limits = limited(record.project.limits.clone(), change.limits, bounds)?;
+        let limits = limited(record.project.limits, change.limits)?;
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let new_verifier = change.verifier.map(|v| verifier(Some(v))).transpose()?;
-        let new_review = change.review.map(|r| review_brief(Some(r))).transpose()?;
         let new_members = change.members.map(members).transpose()?;
         let mut updates = Vec::new();
         let mut quiet = false;
@@ -1298,10 +1014,6 @@ impl Projects {
             quiet |= record.project.verifier != verifier;
             record.project.verifier = verifier;
         }
-        if let Some(review) = new_review {
-            quiet |= record.project.review != review;
-            record.project.review = review;
-        }
         if let Some(metadata) = metadata {
             quiet |= record.project.metadata != metadata;
             record.project.metadata = metadata;
@@ -1310,23 +1022,10 @@ impl Projects {
             quiet |= record.project.push != push;
             record.project.push = push;
         }
-        if let Some(ask) = change.ask_to_start {
-            quiet |= record.project.ask_to_start != ask;
-            record.project.ask_to_start = ask;
-        }
         if limits != record.project.limits {
-            let shares = |l: &Limits| {
-                l.budget.as_ref().map(|b| b.against(&record.project.spend)).unwrap_or_default()
-            };
-            let passed = tally::passed(&shares(&record.project.limits), &shares(&limits));
-            record.project.limits = limits.clone();
-            record.trim_timeline();
+            record.project.limits = limits;
             let entry = record.log(None, Moment::Limits { limits }, now);
             updates.push(record.record_update(Some(entry)));
-            for what in passed {
-                let entry = record.log(None, what, now);
-                updates.push(record.record_update(Some(entry)));
-            }
             quiet = false;
         }
         if let Some(term) = change.orchestrator.filter(|t| record.project.orchestrator != Some(*t))
@@ -1341,87 +1040,20 @@ impl Projects {
         Ok((status, updates))
     }
 
-    /// Say what each kind of `id`'s work needs of its machines, in place of what was said; the
-    /// rules were compiled by the caller. A change is on the timeline, since it moves where
-    /// work goes from then on.
-    pub(crate) fn set_needs(
-        &mut self,
-        id: &ProjectId,
-        needs: Vec<Need>,
-        running: &Running<'_>,
-        now: WallMs,
-    ) -> Changed<ProjectStatus> {
-        if needs.len() > Need::MAX {
-            return Err(invalid(format!("a project names at most {} needs", Need::MAX)));
-        }
-        let mut names = BTreeSet::new();
-        for need in &needs {
-            let name = need.name.trim();
-            if name.is_empty() || name.len() > Need::NAME_MAX {
-                return Err(invalid(format!(
-                    "a need's name is 1 to {} bytes: what it is, in a few words",
-                    Need::NAME_MAX
-                )));
-            }
-            if !names.insert(name.to_owned()) {
-                return Err(invalid(format!("the need {name:?} is named twice")));
-            }
-            let items = [need.paths.len(), need.require.len(), need.prefer.len()];
-            if items.into_iter().any(|n| n > Need::ITEMS_MAX) {
-                return Err(invalid(format!(
-                    "a need names at most {} paths, rules and preferences each",
-                    Need::ITEMS_MAX
-                )));
-            }
-            if need.require.is_empty() && need.prefer.is_empty() {
-                return Err(invalid(format!("the need {name:?} requires and prefers nothing")));
-            }
-            for path in &need.paths {
-                within("a need's path", Some(path), REF_MAX)?;
-            }
-        }
-        let needs: Vec<Need> = needs
-            .into_iter()
-            .map(|need| Need { name: need.name.trim().to_owned(), ..need })
-            .collect();
-        let record = self.record(id)?;
-        let mut updates = Vec::new();
-        if record.project.needs != needs {
-            let names = needs.iter().map(|n| n.name.clone()).collect();
-            record.project.needs = needs;
-            let entry = record.log(None, Moment::Needs { names }, now);
-            updates.push(record.record_update(Some(entry)));
-        }
-        let status = self.status(id, None, running)?;
-        Ok((status, updates))
-    }
-
-    /// The needs of `id` that `task` has, by what it owns.
-    pub(crate) fn needs_of(&self, id: &ProjectId, task: TaskId) -> Result<Vec<Need>, Refused> {
-        let record = self.records.get(id).ok_or_else(|| unknown_project(id))?;
-        let owns = &record.task(task)?.owns;
-        Ok(record.project.needs.iter().filter(|n| n.applies(owns)).cloned().collect())
-    }
-
-    /// Make a task, owning `spec.owns`.
+    /// Make a task.
     pub(crate) fn create_task(
         &mut self,
         id: &ProjectId,
         spec: TaskSpec,
         now: WallMs,
     ) -> Changed<Task> {
-        let bounds = self.policy.bounds_for(Some(id));
         let record = self.record(id)?;
-        if record.tasks.len() >= usize::try_from(bounds.tasks_per_project).unwrap_or(usize::MAX) {
-            return Err(over_bound(
-                "tasks_per_project",
-                record.tasks.len(),
-                bounds.tasks_per_project.into(),
-            ));
+        if record.tasks.len() >= TASKS_MAX {
+            return Err(over_bound("a project's tasks", record.tasks.len(), TASKS_MAX));
         }
-        let title = titled(&spec.title, bounds)?;
-        if spec.brief.len() > usize::try_from(bounds.brief_max).unwrap_or(usize::MAX) {
-            return Err(over_bound("brief_max", spec.brief.len(), bounds.brief_max.into()));
+        let title = titled(&spec.title)?;
+        if spec.brief.len() > BRIEF_MAX {
+            return Err(over_bound("a brief's bytes", spec.brief.len(), BRIEF_MAX));
         }
         if spec.depends_on.len() > DEPENDS_MAX {
             return Err(invalid(format!("a task depends on at most {DEPENDS_MAX} tasks")));
@@ -1437,14 +1069,6 @@ impl Projects {
                 depends_on.push(on);
             }
         }
-        placement::check(&spec.placement, bounds.comprehension_depth)?;
-        let owns = claimable(&spec.owns, bounds.owns_max)?;
-        if spec.read_only && !owns.is_empty() {
-            return Err(invalid("a read-only task owns no paths"));
-        }
-        if let Some((theirs, path, ours)) = record.conflict(None, &owns) {
-            return Err(overlapping(theirs, path, &ours));
-        }
         let number = u32::try_from(record.tasks.len()).unwrap_or(u32::MAX).saturating_add(1);
         let task = Task {
             spent: Spent::default(),
@@ -1454,9 +1078,8 @@ impl Projects {
             kind,
             title,
             brief: spec.brief,
-            owns,
             read_only: spec.read_only,
-            placement: spec.placement,
+            pin: spec.pin,
             verifier: verifier(spec.verifier)?,
             metadata: metadata(spec.metadata)?,
             state: TaskState::Planned,
@@ -1466,13 +1089,11 @@ impl Projects {
             worktree: None,
             base: None,
             pr: None,
-            reviewed: None,
             verified: None,
             merge: None,
             created_ms: now,
             updated_ms: now,
             step: None,
-            proposal: None,
             give_backs: GiveBacks::default(),
             tests: None,
         };
@@ -1483,8 +1104,8 @@ impl Projects {
         Ok((task, vec![update]))
     }
 
-    /// Change a task: move it, set its status, dependencies, placement, verifier or metadata,
-    /// take paths for it to own, record its branch or its verifier's word, note something. The
+    /// Change a task: move it, set its status, dependencies, pin, verifier or metadata, record
+    /// its branch or its verifier's word, note something. The
     /// person's change is their word on it: a failure held past its give-backs is theirs now,
     /// and its count starts again.
     pub(crate) fn update_task(
@@ -1511,24 +1132,16 @@ impl Projects {
             }
         }
         checked_change(&change)?;
-        let bounds = self.policy.bounds_for(Some(id));
         let record = self.record(id)?;
         let before = record.task(task)?.clone();
-        let claimed = record.claim_for(task, &change.claim, bounds.owns_max)?;
-        if let Some(to) = change.state.filter(|to| *to != before.state) {
-            if !before.state.may_become(to) {
-                return Err(invalid(format!(
-                    "task {task} cannot go from {:?} to {to:?}: a merged task is final, and only \
-                     a done or verifying task merges",
-                    before.state
-                )));
-            }
-            if to.holds_paths()
-                && !before.state.holds_paths()
-                && let Some((theirs, path, ours)) = record.conflict(Some(task), &before.owns)
-            {
-                return Err(overlapping(theirs, path, &ours));
-            }
+        if let Some(to) = change.state.filter(|to| *to != before.state)
+            && !before.state.may_become(to)
+        {
+            return Err(invalid(format!(
+                "task {task} cannot go from {:?} to {to:?}: a merged task is final, and only a \
+                 done or verifying task merges",
+                before.state
+            )));
         }
         if let Some(on) = &change.depends_on {
             for dep in on {
@@ -1540,9 +1153,6 @@ impl Projects {
                     )));
                 }
             }
-        }
-        if let Some(placement) = &change.placement {
-            placement::check(placement, bounds.comprehension_depth)?;
         }
         let metadata = change.metadata.map(|m| metadata(Some(m))).transpose()?;
         let status = change.status.as_deref().map(status_text).transpose()?;
@@ -1572,17 +1182,13 @@ impl Projects {
             quiet |= t.depends_on != deduped;
             t.depends_on = deduped;
         }
-        if let Some(placement) = change.placement {
-            quiet |= t.placement != placement;
-            t.placement = placement;
-        }
         if let Some(run_on) = change.run_on {
             let pin = match run_on {
                 RunOn::Worker(worker) => Some(worker),
                 RunOn::Anywhere => None,
             };
-            quiet |= t.placement.pin != pin;
-            t.placement.pin = pin;
+            quiet |= t.pin != pin;
+            t.pin = pin;
         }
         if let Some(verifier) = change.verifier {
             let verifier = words(Some(verifier));
@@ -1607,10 +1213,6 @@ impl Projects {
         if let Some(run) = change.verified {
             moments.push(Moment::Verified(run.clone()));
             t.verified = Some(run);
-        }
-        if !claimed.is_empty() {
-            t.owns.extend(claimed.iter().cloned());
-            moments.push(Moment::Claimed { paths: claimed });
         }
         if let Some(text) = words(change.note) {
             moments.push(Moment::Note { text });
@@ -1674,7 +1276,7 @@ impl Projects {
                 record.task_update(&task_now, Some(entry))
             })
             .collect();
-        self.answered(id, task, report.kind);
+        self.answered(id, task);
         Ok((task_now, updates))
     }
 
@@ -1758,11 +1360,6 @@ impl Projects {
                 ),
             ));
         }
-        if !t.state.holds_paths()
-            && let Some((theirs, path, ours)) = record.conflict(Some(task), &t.owns)
-        {
-            return Err(overlapping(theirs, path, &ours));
-        }
         if let Some(live) = Record::live_assignment(t, running.terminals) {
             return Err(refuse(
                 ErrorCode::Conflict,
@@ -1778,26 +1375,6 @@ impl Projects {
         if t.state == TaskState::Merged {
             return Err(invalid(format!("task {task} is merged; make a new task")));
         }
-        if let Some(over) = self.over_budget(id) {
-            return Err(refuse(
-                ErrorCode::Limit,
-                format!(
-                    "{over}, so no task starts until the person raises the budget or stops the \
-                     project; turns under way finish"
-                ),
-            ));
-        }
-        let live = record.live(running);
-        let most = record.project.limits.live_per_project;
-        if live >= most {
-            return Err(refuse(
-                ErrorCode::Limit,
-                format!(
-                    "project {id} runs {live} agents, its live_per_project of {most}; wait for one \
-                     to end, or raise it with project_update within the person's bounds"
-                ),
-            ));
-        }
         Ok(())
     }
 
@@ -1811,7 +1388,7 @@ impl Projects {
         terminals: &HashSet<TermRef>,
         now: WallMs,
     ) -> Changed<Task> {
-        let Assignee { term, spawned, branch, conversation, placed, thread } = who;
+        let Assignee { term, spawned, branch, conversation, thread } = who;
         if let Some((other, on)) = self.working_in(term).filter(|(p, t)| (*p, *t) != (id, task)) {
             return Err(refuse(
                 ErrorCode::Conflict,
@@ -1835,21 +1412,12 @@ impl Projects {
         if t.state == TaskState::Merged {
             return Err(invalid(format!("task {task} is merged; make a new task")));
         }
-        if !t.state.holds_paths() {
-            let owns = t.owns.clone();
-            if let Some((theirs, path, ours)) = record.conflict(Some(task), &owns) {
-                return Err(overlapping(theirs, path, &ours));
-            }
-        }
-        let Ok(t) = record.task_mut(task) else { return Err(unknown_task(id, task)) };
         let mut moments = Vec::new();
         if let Some(gone) = open_term(t) {
             moments.push(Moment::AgentGone { term: gone });
         }
         t.assignment =
-            Some(Assignment { term, thread, since_ms: now, ended_ms: None, conversation, placed });
-        // Whatever starts it, a start proposed for it is spent.
-        t.proposal = None;
+            Some(Assignment { term, thread, since_ms: now, ended_ms: None, conversation, spawned });
         moments.push(Moment::Assigned { term, spawned });
         if !t.state.follows_the_agent() {
             moments.push(Moment::State { from: t.state, to: TaskState::Running });
@@ -1889,38 +1457,6 @@ impl Projects {
             }
         }
         Ok((task_now, updates))
-    }
-
-    /// Keep the start the orchestrator proposed for `task`, which waits for the person: a
-    /// proposal again replaces the last.
-    pub(crate) fn propose(
-        &mut self,
-        id: &ProjectId,
-        task: TaskId,
-        proposal: Proposal,
-        now: WallMs,
-    ) -> Changed<Task> {
-        let record = self.record(id)?;
-        let t = record.task_mut(task)?;
-        if t.state == TaskState::Merged {
-            return Err(invalid(format!("task {task} is merged; make a new task")));
-        }
-        if let Some(term) = open_term(t) {
-            return Err(refuse(
-                ErrorCode::Conflict,
-                format!(
-                    "task {task} has a terminal already, {}/{}; close it first",
-                    term.worker, term.session
-                ),
-            ));
-        }
-        let on = proposal.proposed.on;
-        t.proposal = Some(proposal);
-        t.updated_ms = now;
-        let task_now = t.clone();
-        let entry = record.log(Some(task), Moment::Proposed { on }, now);
-        let update = record.task_update(&task_now, Some(entry));
-        Ok((task_now, vec![update]))
     }
 
     /// Every task whose pull request's checks are worth reading: one with a pull request
@@ -2249,7 +1785,7 @@ impl Projects {
             .values()
             .flat_map(|r| {
                 r.tasks.iter().filter(|t| over(t)).filter_map(|t| {
-                    let a = t.assignment.as_ref().filter(|a| a.open() && a.placed.is_some())?;
+                    let a = t.assignment.as_ref().filter(|a| a.open() && a.spawned)?;
                     let rests = finished(t) || left_running(a.term);
                     (rests && terminals.contains(&a.term))
                         .then(|| (r.project.id.clone(), t.id, a.term))
@@ -2422,56 +1958,6 @@ impl Projects {
         updates
     }
 
-    /// How full thread `thread` of the agent in `term` read its plan windows: counted on the
-    /// project it works for, as its orchestrator or on a task, with a timeline moment for each
-    /// line of the budget it passed.
-    pub(crate) fn spent(
-        &mut self,
-        term: TermRef,
-        thread: ThreadId,
-        windows: &[Limit],
-        now: WallMs,
-    ) -> Vec<Change> {
-        let mut updates = Vec::new();
-        for record in self.records.values_mut() {
-            let works = record.project.orchestrator == Some(term)
-                || record.tasks.iter().any(|t| open_term(t) == Some(term));
-            if works && record.tally.take(thread, windows, now) {
-                updates.extend(record.respend(now));
-            }
-        }
-        updates
-    }
-
-    /// Every budgeted project's spend tallied again at `now`, as a plan window that reset
-    /// lowers it with no agent saying so, and the soonest another such window resets.
-    pub(crate) fn windows_due(&mut self, now: WallMs) -> (Vec<Change>, Option<WallMs>) {
-        let mut updates = Vec::new();
-        let mut next: Option<WallMs> = None;
-        for record in self.records.values_mut() {
-            let Some(budget) = record.project.limits.budget.clone() else { continue };
-            updates.extend(record.respend(now));
-            if let Some(at) = record.tally.next_reset(&budget, now) {
-                next = Some(next.map_or(at, |n| n.min(at)));
-            }
-        }
-        (updates, next)
-    }
-
-    /// What says project `id`'s agents have filled a plan window to its cap in the budget,
-    /// while they have: it starts no task and its agents' reports wait until the person raises
-    /// the cap.
-    #[must_use]
-    pub(crate) fn over_budget(&self, id: &ProjectId) -> Option<String> {
-        let project = &self.records.get(id)?.project;
-        let budget = project.limits.budget.as_ref()?;
-        let meter = budget.reached(&project.spend)?;
-        let cap = *budget.0.get(&meter)?;
-        let used = project.spend.windows.get(&meter).copied().map_or(0, u64::from);
-        let (used, cap) = (Budget::figure(used), Budget::figure(cap));
-        Some(format!("project {id} is at {used} of the {meter} window, its budget {cap}"))
-    }
-
     fn hold_unclaimed(&mut self, term: TermRef, report: &AgentReport, now: WallMs) {
         if !self.unclaimed.iter().any(|(t, _)| *t == term) {
             if self.unclaimed.len() >= UNCLAIMED_KEPT {
@@ -2485,36 +1971,6 @@ impl Projects {
     }
 }
 
-/// The paths as tasks own them, each once.
-/// Refused before any is read when there are more than `most` (`owns_max`): each is compared
-/// with every other.
-fn claimable(paths: &[String], most: u16) -> Result<Vec<String>, Refused> {
-    if paths.len() > usize::from(most) {
-        return Err(over_bound("owns_max", paths.len(), most.into()));
-    }
-    let mut out: Vec<String> = Vec::with_capacity(paths.len());
-    let mut seen: HashSet<String> = HashSet::with_capacity(paths.len());
-    for path in paths {
-        within("a path", Some(path), REF_MAX)?;
-        let path = owned(path).map_err(invalid)?;
-        if seen.insert(folded(&path)) {
-            out.push(path);
-        }
-    }
-    Ok(out)
-}
-
-/// Whether two owned paths name one file, case aside.
-fn same_path(a: &str, b: &str) -> bool {
-    folded(a) == folded(b)
-}
-
-/// A path under Unicode full case folding, as a case-insensitive volume compares names:
-/// `Straße` and `STRASSE` are one name, as are `ǅ` and `ǆ`.
-fn folded(path: &str) -> String {
-    icu_casemap::CaseMapper::new().fold_string(path).into_owned()
-}
-
 /// `text` cut to at most `max` bytes, at a character boundary: what a worker reports is kept
 /// to the bounds a card is held to.
 pub(crate) fn clipped(text: &str, max: usize) -> String {
@@ -2523,20 +1979,6 @@ pub(crate) fn clipped(text: &str, max: usize) -> String {
         end = end.saturating_sub(1);
     }
     text.get(..end).unwrap_or_default().to_owned()
-}
-
-fn overlapping(theirs: TaskId, path: &str, ours: &str) -> Refused {
-    let shown =
-        |p: &str| if p.is_empty() { "the whole repository".to_owned() } else { p.to_owned() };
-    refuse(
-        ErrorCode::Conflict,
-        format!(
-            "{} overlaps {}, which task {theirs} owns; split the work another way, make this task \
-             read-only, or wait until task {theirs} is merged",
-            shown(ours),
-            shown(path)
-        ),
-    )
 }
 
 /// What a report did to a node.
@@ -2651,9 +2093,8 @@ fn take_leaf(natives: &mut Natives, leaf: &Native) -> bool {
 #[cfg(test)]
 mod cost;
 mod merge;
-mod tally;
 mod turns;
-pub(crate) use merge::{Advance, Job, Queue, bounded as bounded_review};
+pub(crate) use merge::{Advance, Job, Queue};
 pub(crate) use turns::{Heard, Upshot};
 #[cfg(test)]
 mod tests;

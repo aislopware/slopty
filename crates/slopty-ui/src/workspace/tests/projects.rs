@@ -535,82 +535,6 @@ fn a_verifier_shows_on_its_task_and_opens_its_terminal(cx: &mut TestAppContext) 
     );
 }
 
-/// A reviewer shows where its task does, as a verifier does. At work, it stands under its
-/// row with "Reviewer" to open its session. Its changes asked stand under the row with what it
-/// found, what blocks first, and the session it is kept in opens without opening the agent.
-/// An approval is a word in the row, and on the board a card says it with its note. A session
-/// that has closed says so.
-#[gpui::test]
-fn a_reviewer_shows_on_its_task_and_opens_its_session(cx: &mut TestAppContext) {
-    use slopty_proto::project::{StepKind, StepState};
-
-    use crate::project::fixtures::{queued, review, run, step};
-    let (view, cx) = workspace(cx);
-    let setup = setup(&view, cx);
-    let (orchestrator_tile, orchestrator) = setup.orchestrator;
-    let worker = fixtures_worker(&view, cx, orchestrator);
-    let kept = SessionId::new();
-    let kept_tile = opens(&view, cx, &setup.fake, kept, setup.fake.me, 3);
-    let closed = SessionId::new();
-    let reviewer = TermRef { worker, session: kept };
-
-    let mut asked = card(4, "Read the snapshot", TaskState::Waiting);
-    asked.verified = Some(run(true, "4a7aa6d0"));
-    asked.reviewed = Some(review(false, "4a7aa6d0", Some(reviewer)));
-    let why = StepState::Failed { why: "Project.review has no golden".into() };
-    asked.step = Some(step(StepKind::Review, worker, why, Some(reviewer)));
-    let mut reading = card(5, "Draw the lanes", TaskState::Verifying);
-    let line = StepState::Running { phase: "Reading 5555555 over c08d4c1".into(), percent: None };
-    reading.step =
-        Some(step(StepKind::Review, worker, line, Some(TermRef { worker, session: closed })));
-    let mut approved = queued(card(6, "Hold it to goldens", TaskState::Done), 20, "6666666");
-    approved.reviewed = Some(review(true, "6666666", Some(reviewer)));
-    view.update_in(cx, |v, _w, cx| {
-        for (seq, c) in [(11, asked), (12, reading), (13, approved)] {
-            v.project_update(seq, task_changed("board", c, None), cx);
-        }
-        v.show_board(orchestrator, true, cx);
-    });
-    cx.run_until_parked();
-    let drawn = |cx: &mut VisualTestContext, s: &str| {
-        cx.debug_bounds(Box::leak(s.to_owned().into_boxed_str())).is_some()
-    };
-    for part in [
-        "project-row-project-node-4-check",
-        "project-row-project-node-4-findings",
-        "project-row-project-node-4-output",
-        "project-row-project-node-5-check",
-        "project-row-project-node-5-output",
-    ] {
-        assert!(drawn(cx, part), "{part} is drawn");
-    }
-    assert!(!drawn(cx, "project-row-project-node-6-check"), "an approval is a word in its row");
-    assert!(!drawn(cx, "project-row-project-node-5-findings"), "nothing found while it reads");
-
-    let link = cx.debug_bounds("project-row-project-node-4-output").expect("drawn").center();
-    cx.simulate_click(link, Modifiers::none());
-    cx.run_until_parked();
-    assert_eq!(focused(&view, cx), Some(kept_tile), "the reviewer's session, not the agent's");
-    assert_eq!(view.read_with(cx, |v, _| v.toast_text()), None, "the row's own click held back");
-
-    view.update_in(cx, |v, _w, cx| v.focus_tile(orchestrator_tile, cx));
-    cx.run_until_parked();
-    let link = cx.debug_bounds("project-row-project-node-5-output").expect("drawn").center();
-    cx.simulate_click(link, Modifiers::none());
-    cx.run_until_parked();
-    assert_eq!(
-        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("The reviewer's session has closed")
-    );
-
-    let b = board(&view, cx, orchestrator);
-    b.update(cx, |b, cx| b.show(Lens::Board, cx));
-    cx.run_until_parked();
-    for part in ["project-card-4-findings", "project-card-6-check", "project-card-6-findings"] {
-        assert!(drawn(cx, part), "{part} is drawn");
-    }
-}
-
 /// Letting the server go takes its projects, their boards and everything kept for them.
 #[gpui::test]
 fn forgetting_the_server_keeps_nothing_of_its_projects(cx: &mut TestAppContext) {
@@ -689,28 +613,22 @@ fn click(cx: &mut VisualTestContext, selector: &str) {
 }
 
 /// The board's actions reach the server as the person's word. A finished task's Merge and a
-/// changes-asked task's Approve are buttons on its row and its card, which send `TaskMerge`
-/// and an approving `TaskReview` without opening the agent; a refusal is said in the server's
-/// words. The header's push toggle sets the project's pushing, and its terminal button turns
-/// the tile back to the orchestrator. "Delete the project" asks twice. With no server, the
-/// board says so.
+/// merged task's Push again are buttons on its row and its card, which send `TaskMerge` and
+/// `TaskPush` without opening the agent; a refusal is said in the server's words. The header's push
+/// toggle sets the project's pushing, and its terminal button turns the tile back to the
+/// orchestrator. "Delete the project" asks twice. With no server, the board says so.
 #[gpui::test]
 fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     use slopty_proto::orchestration::ErrorCode;
 
-    use crate::project::fixtures::{review, run};
-    use crate::project::{ApproveTask, DeleteProject, MergeTask};
+    use crate::project::{DeleteProject, MergeTask};
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut asked = card(4, "Read the snapshot", TaskState::Waiting);
-    asked.verified = Some(run(true, "4a7aa6d0"));
-    asked.reviewed = Some(review(false, "4a7aa6d0", None));
     view.update_in(cx, |v, _w, cx| {
         v.set_server_caller(Some(caller));
         v.project_update(11, task_changed("board", card(5, "Land it", TaskState::Done), None), cx);
-        v.project_update(12, task_changed("board", asked, None), cx);
         v.show_board(orchestrator, true, cx);
     });
     cx.run_until_parked();
@@ -738,31 +656,24 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.project_update(13, task_changed("board", unpushed, None), cx));
     cx.run_until_parked();
     click(cx, "project-row-push-again-6");
-    assert_eq!(
-        sent(&mut queue, cx, done),
-        [Verb::TaskPush { project: project.clone(), task: TaskId(6) }]
-    );
-
-    click(cx, "project-row-approve-4");
     let refused = |_: &Verb| Outcome::Error {
         code: ErrorCode::Conflict,
-        message: "#4 changed under the board".into(),
+        message: "#6 changed under the board".into(),
     };
-    let verbs = sent(&mut queue, cx, refused);
-    let [Verb::TaskReview { task: TaskId(4), verdict, .. }] = verbs.as_slice() else {
-        panic!("an approval: {verbs:?}");
-    };
-    assert!(verdict.approved && verdict.findings.is_empty(), "{verdict:?}");
+    assert_eq!(
+        sent(&mut queue, cx, refused),
+        [Verb::TaskPush { project: project.clone(), task: TaskId(6) }]
+    );
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("#4 changed under the board"),
+        Some("#6 changed under the board"),
         "a refusal in the server's words"
     );
 
     let b = board(&view, cx, orchestrator);
     b.update(cx, |b, cx| b.show(Lens::Board, cx));
     cx.run_until_parked();
-    for part in ["project-card-merge-5", "project-card-approve-4"] {
+    for part in ["project-card-merge-5", "project-card-push-again-6"] {
         assert!(cx.debug_bounds(Box::leak(part.to_owned().into_boxed_str())).is_some(), "{part}");
     }
     b.update(cx, |b, cx| b.show(Lens::Tree, cx));
@@ -786,11 +697,11 @@ fn the_boards_actions_reach_the_server(cx: &mut TestAppContext) {
         b.select_by(1, cx);
     });
     assert_eq!(b.read_with(cx, |b, _| b.picked()), Some(Some(TaskId(1))));
-    cx.dispatch_action(ApproveTask);
+    cx.dispatch_action(MergeTask);
     cx.run_until_parked();
     assert_eq!(
         view.read_with(cx, |v, _| v.toast_text()).as_deref(),
-        Some("#1 has nothing to approve")
+        Some("#1 has nothing to merge")
     );
     assert_eq!(sent(&mut queue, cx, done), []);
 
@@ -1036,11 +947,11 @@ fn facts(worker: WorkerId, name: &str, online: bool) -> slopty_proto::project::W
 
 /// The machines lens asks the server how the workers are doing and draws each with the
 /// project's agents on it, the workers in use first and one away last, then the tasks still
-/// to start. "Run on…" opens the server's ranking under the task, with why each worker fits or
-/// not; a choice pins the task there and closes the picker.
+/// to start. "Run on…" opens the workers under the task, each with its system and its agents
+/// and one away said so; a choice pins the task there and closes the picker.
 #[gpui::test]
 fn the_machines_lens_shows_where_everything_runs_and_where_a_task_will(cx: &mut TestAppContext) {
-    use slopty_proto::project::{Reason, RunOn, Suggestion};
+    use slopty_proto::project::RunOn;
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
@@ -1073,38 +984,10 @@ fn the_machines_lens_shows_where_everything_runs_and_where_a_task_will(cx: &mut 
     assert!(y(cx, "project-machine-project-node-3".to_owned()).is_some_and(|r| r > waiting));
 
     click(cx, "project-machine-run-on-3");
-    let reason = |rule: &str, held: bool, detail: &str| Reason {
-        rule: rule.to_owned(),
-        held,
-        points: 0,
-        detail: detail.to_owned(),
-        need: None,
-    };
-    let ranked = vec![
-        Suggestion {
-            worker,
-            name: "studio".to_owned(),
-            fits: true,
-            score: 0,
-            reasons: vec![reason("online", true, ""), reason(r#"os == "macos""#, true, "")],
-        },
-        Suggestion {
-            worker: away,
-            name: "attic".to_owned(),
-            fits: false,
-            score: 0,
-            reasons: vec![reason("online", false, "not online")],
-        },
-    ];
-    let verbs = sent(&mut queue, cx, |_| Outcome::Suggestions(ranked.clone()));
-    assert_eq!(
-        verbs,
-        [Verb::PlacementSuggest {
-            project: Some(fixtures::id("board")),
-            task: Some(TaskId(3)),
-            placement: None
-        }]
-    );
+    let verbs = sent(&mut queue, cx, |_| {
+        Outcome::Facts(vec![facts(worker, "studio", true), facts(away, "attic", false)])
+    });
+    assert_eq!(verbs, [Verb::WorkerFacts { worker: None }]);
     for option in ["anywhere", "0", "1"] {
         let id = format!("project-machine-picker-3-{option}");
         assert!(y(cx, id.clone()).is_some(), "{id}");
@@ -1117,8 +1000,8 @@ fn the_machines_lens_shows_where_everything_runs_and_where_a_task_will(cx: &mut 
         .into_iter()
         .filter_map(|n| n.label)
         .collect();
-    assert!(said.iter().any(|l| l == r#"studio, os == "macos""#), "{said:?}");
-    assert!(said.iter().any(|l| l == "attic, not online"), "{said:?}");
+    assert!(said.iter().any(|l| l == "studio, macos \u{b7} 3 agents"), "{said:?}");
+    assert!(said.iter().any(|l| l == "attic, macos \u{b7} 3 agents \u{b7} offline"), "{said:?}");
 
     click(cx, "project-machine-picker-3-0");
     let verbs = sent(&mut queue, cx, |_| Outcome::Done);
@@ -1127,75 +1010,6 @@ fn the_machines_lens_shows_where_everything_runs_and_where_a_task_will(cx: &mut 
     };
     assert_eq!(change.run_on, Some(RunOn::Worker(worker)));
     assert!(y(cx, "project-machine-picker-3".to_owned()).is_none(), "the choice closes it");
-}
-
-/// Before it fans out, the plan waits for the person: the band over the lens holds each
-/// proposed task with where it would start and why and how long tasks take, and the
-/// orchestrator's row says it waits on them. Start starts one, "Start all" every one, a
-/// worker chosen in its picker starts it there, and the header's toggle says whether the
-/// project asks at all.
-#[gpui::test]
-fn a_plan_waits_for_the_person_who_starts_one_or_all(cx: &mut TestAppContext) {
-    use slopty_proto::project::Proposed;
-    let (view, cx) = workspace(cx);
-    let setup = setup(&view, cx);
-    let (_, orchestrator) = setup.orchestrator;
-    let worker = fixtures_worker(&view, cx, orchestrator);
-    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let proposed = |n, title| {
-        let mut c = card(n, title, TaskState::Planned);
-        c.proposed = Some(Proposed {
-            since_ms: fixtures::AT,
-            runs: "claude".to_owned(),
-            on: Some(worker),
-            why: r#"os == "macos""#.to_owned(),
-        });
-        c
-    };
-    view.update_in(cx, |v, _w, cx| {
-        v.set_server_caller(Some(caller));
-        v.project_update(11, task_changed("board", proposed(4, "Draw the plan"), None), cx);
-        v.project_update(12, task_changed("board", proposed(5, "Start it"), None), cx);
-        v.show_board(orchestrator, true, cx);
-    });
-    cx.run_until_parked();
-    for part in ["project-plan", "project-plan-project-node-4", "project-plan-project-node-5"] {
-        assert!(cx.debug_bounds(part).is_some(), "{part} is drawn");
-    }
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let said: Vec<String> = cx
-        .update(|window, _cx| crate::a11y::tree(window))
-        .into_iter()
-        .filter_map(|n| n.label)
-        .collect();
-    let plan_row = r#"Draw the plan, Proposed, Would start on studio: os == "macos""#;
-    assert!(said.iter().any(|l| l == plan_row), "{said:?}");
-    assert!(
-        said.iter().any(|l| l.starts_with("Orchestrator, Waits on you to start 2 tasks")),
-        "{said:?}"
-    );
-    let project = fixtures::id("board");
-    let start = |task, pin| Verb::TaskStart { project: project.clone(), task: TaskId(task), pin };
-
-    click(cx, "project-plan-start-4");
-    assert_eq!(sent(&mut queue, cx, done), [start(4, None)]);
-    click(cx, "project-plan-start-all");
-    assert_eq!(sent(&mut queue, cx, done), [start(4, None), start(5, None)]);
-
-    click(cx, "project-plan-run-on-5");
-    let verbs = sent(&mut queue, cx, |_| Outcome::Suggestions(Vec::new()));
-    assert!(matches!(verbs.as_slice(), [Verb::PlacementSuggest { .. }]), "{verbs:?}");
-    click(cx, "project-plan-picker-5-anywhere");
-    assert_eq!(sent(&mut queue, cx, done), [start(5, None)], "a proposal starts where chosen");
-
-    click(cx, "project-ask");
-    let verbs = sent(&mut queue, cx, done);
-    assert!(
-        matches!(verbs.as_slice(), [Verb::ProjectSet { ask_to_start: Some(true), push: None, .. }]),
-        "{verbs:?}"
-    );
 }
 
 /// The worker the fixtures put the project on: the orchestrator's.
@@ -1540,21 +1354,17 @@ fn the_board_talks_to_its_orchestrator(cx: &mut TestAppContext) {
 }
 
 /// Every node says where it is at a glance: the worker and its system on its row and its card,
-/// the card with why it went there. A task's place still to come moves from it ("Run on…"
-/// asks the server to rank the workers); a running one's shows the machines lens.
+/// a pinned one's card saying so. A task's place still to come moves from it ("Run on…" asks
+/// the server for the workers); a running one's shows the machines lens.
 #[gpui::test]
 fn every_node_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut TestAppContext) {
-    use slopty_proto::project::Placed;
     let (view, cx) = still_workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
     let (_, agent) = setup.agent;
     let worker = fixtures_worker(&view, cx, orchestrator);
     let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
-    let mut running = on(card(1, "Wire the board", TaskState::Running), worker, agent);
-    if let Some(a) = running.assignment.as_mut() {
-        a.placed = Some(Placed { pinned: false, score: 0, why: "Apple work".into() });
-    }
+    let running = on(card(1, "Wire the board", TaskState::Running), worker, agent);
     let mut pinned = card(3, "Golden files", TaskState::Planned);
     pinned.pin = Some(worker);
     view.update_in(cx, |v, _w, cx| {
@@ -1572,49 +1382,24 @@ fn every_node_says_where_it_runs_and_a_waiting_one_moves_from_there(cx: &mut Tes
     let row = said.iter().find(|l| l.starts_with("Wire the board")).expect("task 1's row");
     assert!(row.contains("studio \u{b7} macOS"), "{row}");
     assert!(
-        said.iter().any(|l| l.starts_with("Runs on studio, macOS. Branch slopty/board/1. Why: Apple work")),
+        said.iter().any(|l| l.starts_with("Runs on studio, macOS. Branch slopty/board/1. Click")),
         "{said:?}"
     );
     assert!(said.iter().any(|l| l.starts_with("Pinned to studio, macOS")), "{said:?}");
 
     click(cx, "project-row-project-node-3-where");
-    let verbs = sent(&mut queue, cx, |_| Outcome::Suggestions(Vec::new()));
-    assert!(
-        matches!(verbs.as_slice(), [Verb::PlacementSuggest { task: Some(TaskId(3)), .. }]),
-        "a place still to come moves: {verbs:?}"
-    );
+    let verbs = sent(&mut queue, cx, |_| Outcome::Facts(Vec::new()));
+    assert_eq!(verbs, [Verb::WorkerFacts { worker: None }], "a place still to come moves");
     let b = board(&view, cx, orchestrator);
     b.update(cx, |b, cx| b.show(Lens::Board, cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("project-card-project-node-1-where").is_some(), "on its card");
-    assert!(cx.debug_bounds("project-card-1-why").is_some(), "and why it went there");
+    assert!(cx.debug_bounds("project-card-3-why").is_some(), "a pin says why it is there");
     b.update(cx, |b, cx| b.show(Lens::Tree, cx));
     cx.run_until_parked();
     let _answered = sent(&mut queue, cx, done);
     click(cx, "project-row-project-node-1-where");
     assert_eq!(b.read_with(cx, |b, _| b.lens()), Lens::Machines, "a running one's machines");
-
-    // The machines lens says what the project's work needs of them.
-    let mut needing = project("board", Some(TermRef { worker, session: orchestrator }));
-    needing.needs = vec![slopty_proto::project::Need {
-        name: "Apple work".into(),
-        paths: vec!["apps/slopty".into()],
-        require: vec![r#"os == "macos""#.into()],
-        prefer: Vec::new(),
-    }];
-    let update = ProjectUpdate {
-        project: fixtures::id("board"),
-        record: Some(needing),
-        task: None,
-        native: None,
-        entry: None,
-    };
-    view.update_in(cx, |v, _w, cx| v.project_update(13, update, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("project-machines-needs").is_some(), "its heading");
-    let said = labels(&view, cx);
-    let need = r#"Apple work, apps/slopty, Requires os == "macos""#;
-    assert!(said.iter().any(|l| l == need), "{said:?}");
 }
 
 /// Claude Code's subagent `id` of type Explore, running under task 1.
@@ -1694,15 +1479,12 @@ fn a_click_on_a_subagent_opens_its_thread(cx: &mut TestAppContext) {
 }
 
 /// The board sets how its project's work is checked: the header's toggle opens a panel holding
-/// the verifier and the reviewer as the project has them, the keyboard in the verifier; ↩
-/// sends both as the person's word and closes it, a reviewer switched on with no brief getting
-/// the default one. Esc closes it with nothing sent, and a reviewer switched off is sent as
-/// none.
+/// the verifier as the project has it, the keyboard in it; ↩ sends it as the person's word and
+/// closes it. Esc closes it with nothing sent, and Save sends what the field holds.
 #[gpui::test]
-fn a_board_sets_its_verifier_and_review(cx: &mut TestAppContext) {
+fn a_board_sets_its_verifier(cx: &mut TestAppContext) {
     use slopty_proto::project::LimitsChange;
 
-    use crate::project::BRIEF;
     let (view, cx) = workspace(cx);
     let setup = setup(&view, cx);
     let (_, orchestrator) = setup.orchestrator;
@@ -1713,13 +1495,11 @@ fn a_board_sets_its_verifier_and_review(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     let project = fixtures::id("board");
-    let set = |verifier: &str, review: &str| Verb::ProjectSet {
+    let set = |verifier: &str| Verb::ProjectSet {
         project: project.clone(),
         orchestrator: None,
         verifier: Some(verifier.to_owned()),
-        review: Some(review.to_owned()),
         push: None,
-        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
         members: None,
@@ -1729,12 +1509,11 @@ fn a_board_sets_its_verifier_and_review(cx: &mut TestAppContext) {
     click(cx, "project-checks");
     assert!(cx.debug_bounds("project-checks-panel").is_some(), "the panel opens");
     let verifier = board(&view, cx, orchestrator).read_with(cx, ProjectView::checks_typed);
-    assert_eq!(verifier, Some(("cargo gate".to_owned(), None)), "as the project has it");
+    assert_eq!(verifier.as_deref(), Some("cargo gate"), "as the project has it");
     cx.simulate_keystrokes("cmd-a");
     cx.simulate_input("cargo test --workspace");
-    click(cx, "project-review-switch");
     cx.simulate_keystrokes("enter");
-    assert_eq!(sent(&mut queue, cx, done), [set("cargo test --workspace", BRIEF)]);
+    assert_eq!(sent(&mut queue, cx, done), [set("cargo test --workspace")]);
     assert!(cx.debug_bounds("project-checks-panel").is_none(), "saved, it closes");
 
     click(cx, "project-checks");
@@ -1744,7 +1523,7 @@ fn a_board_sets_its_verifier_and_review(cx: &mut TestAppContext) {
 
     click(cx, "project-checks");
     click(cx, "project-checks-save");
-    assert_eq!(sent(&mut queue, cx, done), [set("cargo gate", "")], "no reviewer is none");
+    assert_eq!(sent(&mut queue, cx, done), [set("cargo gate")], "what the field holds");
 }
 
 /// A moment that holds a task up is said as it lands: a notice with the app in front, unless

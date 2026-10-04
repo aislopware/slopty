@@ -23,9 +23,8 @@
 //! ([`Verb::Upload`]) and comes down in [`Verb::ReadFile`] ranges.
 //!
 //! Projects ([`crate::project`]) are the server's own: it answers the project and task verbs
-//! from its store, ranks the workers for a task by rules over their facts
-//! ([`Verb::PlacementSuggest`]), starts what runs for a task where it places it
-//! ([`Verb::TaskSpawn`]), and logs every change as a [`Happening::Project`].
+//! from its store, starts what runs for a task on the worker its orchestrator names or one with
+//! room ([`Verb::TaskSpawn`]), and logs every change as a [`Happening::Project`].
 
 use std::time::Duration;
 
@@ -36,8 +35,8 @@ use crate::agent::{AgentEvent, AgentKind, AgentStatus, SessionAgent};
 use crate::folder::FsOp;
 use crate::items::{Item, ItemKind};
 use crate::project::{
-    LimitsChange, Placement, Project, ProjectId, ProjectStatus, ProjectUpdate, Report, Suggestion,
-    TaskChange, TaskId, TaskLaunch, TaskSpec, WorkerFacts,
+    LimitsChange, Project, ProjectId, ProjectStatus, ProjectUpdate, Report, TaskChange, TaskId,
+    TaskLaunch, TaskSpec, WorkerFacts,
 };
 use crate::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use crate::search::{FileHits, SearchQuery, SearchSummary};
@@ -512,19 +511,12 @@ pub enum Verb {
         target: String,
         /// The command that says a task's work is right.
         verifier: Option<String>,
-        /// What a fresh-context reviewer looks for in each task's work before it merges
-        /// ([`crate::project::Project::review`]); only the person asks for one.
-        review: Option<String>,
         /// Push the target to its clone's `origin` after each merge ([`Project::push`]); only
         /// the person turns it on.
         push: bool,
-        /// Hold each task's start for the person ([`Project::ask_to_start`]); only the person
-        /// sets it.
-        ask_to_start: bool,
         /// The orchestrator's terminal.
         orchestrator: Option<TermRef>,
-        /// Its limits over [`crate::project::Limits::default`], within the person's
-        /// [`crate::project::Bounds`].
+        /// Its limits over [`crate::project::Limits::default`]; only the person sets them.
         limits: LimitsChange,
         /// Anything its agents keep with it: the text of a JSON object.
         metadata: Option<String>,
@@ -540,15 +532,10 @@ pub enum Verb {
         orchestrator: Option<TermRef>,
         /// The verifier command; empty for none.
         verifier: Option<String>,
-        /// The reviewer's brief ([`crate::project::Project::review`]); empty for no reviewer.
-        review: Option<String>,
         /// Whether to push the target after each merge ([`Project::push`]); only the person
         /// sets it.
         push: Option<bool>,
-        /// Whether each task's start waits for the person ([`Project::ask_to_start`]); only the
-        /// person sets it.
-        ask_to_start: Option<bool>,
-        /// Its limits, within the person's [`crate::project::Bounds`].
+        /// Its limits; only the person sets them.
         limits: LimitsChange,
         /// New metadata, in place of the old.
         metadata: Option<String>,
@@ -566,18 +553,16 @@ pub enum Verb {
         /// Wait this long for an entry past `since`; capped as [`Verb::WaitFor`] is.
         timeout_ms: u32,
     },
-    /// Make a task under the project's orchestrator; answered with [`Outcome::Task`]. Paths it
-    /// owns are claimed as by [`TaskChange::claim`]; a dependency that leads back to it is
-    /// refused.
+    /// Make a task under the project's orchestrator; answered with [`Outcome::Task`]. A
+    /// dependency that leads back to it is refused.
     TaskCreate {
         /// In which project.
         project: ProjectId,
         /// What it is.
         spec: Box<TaskSpec>,
     },
-    /// Move a task, take more paths for it to own, record its branch or its verifier's word,
-    /// or note something on its timeline; answered with [`Outcome::Task`], or
-    /// [`ErrorCode::Conflict`] for a path claimed that another live task holds.
+    /// Move a task, record its branch or its verifier's word, or note something on its
+    /// timeline; answered with [`Outcome::Task`].
     TaskUpdate {
         /// In which project.
         project: ProjectId,
@@ -586,9 +571,9 @@ pub enum Verb {
         /// What changes.
         change: Box<TaskChange>,
     },
-    /// Start what runs for a task on the worker its pin or placement chooses, with the project
-    /// and the task in its environment; answered with [`Outcome::Task`] once it runs, or
-    /// [`ErrorCode::Unplaced`] saying why each worker was passed over, or
+    /// Start what runs for a task on the worker it is pinned to, else one with room, with the
+    /// project and the task in its environment; answered with [`Outcome::Task`] once it runs,
+    /// or [`ErrorCode::Unplaced`] saying why each worker was passed over, or
     /// [`ErrorCode::Limit`] naming the limit reached: for an agent's start, among them, as
     /// many of the project's tasks waiting on the person as its [`crate::project::Limits::review`].
     TaskSpawn {
@@ -599,25 +584,14 @@ pub enum Verb {
         /// How to start it.
         launch: TaskLaunch,
     },
-    /// Rank every worker for a placement: a task's own, `placement` in its stead, or
-    /// `placement` alone. Answered with [`Outcome::Suggestions`], best first, each with the
-    /// reasons it fits or does not.
-    PlacementSuggest {
-        /// The project whose limits and tasks (for `near` and `avoid`) count.
-        project: Option<ProjectId>,
-        /// The task whose placement it is.
-        task: Option<TaskId>,
-        /// A placement to try, over the task's.
-        placement: Option<Placement>,
-    },
     /// What the workers are and have; answered with [`Outcome::Facts`].
     WorkerFacts {
         /// This worker only; every one when absent.
         worker: Option<WorkerId>,
     },
-    /// One node of a project's tree in full: a task with its brief, paths, placement and
-    /// metadata, or the orchestrator's node, each with the natives Claude Code keeps in it.
-    /// Answered with [`Outcome::Node`].
+    /// One node of a project's tree in full: a task with its brief, pin and metadata, or the
+    /// orchestrator's node, each with the natives Claude Code keeps in it. Answered with
+    /// [`Outcome::Node`].
     TaskGet {
         /// In which project.
         project: ProjectId,
@@ -764,17 +738,6 @@ pub enum Verb {
         /// Push it to `origin` after.
         push: bool,
     },
-    /// Start a task its orchestrator proposed ([`crate::project::Task::proposal`]), the
-    /// person's word: as the orchestrator asked, on `pin` when the person chose a worker.
-    /// Answered as [`Verb::TaskSpawn`] is; an agent is [`ErrorCode::Forbidden`].
-    TaskStart {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// This worker, over the proposal's and the task's placement.
-        pin: Option<WorkerId>,
-    },
     /// Tell a task's agent, or the project's orchestrator, something: the person's own words,
     /// or the orchestrator's to one of its tasks, marked as the orchestrator's. They reach the
     /// agent through its hooks as reports do (its inbox wakes it when idle), never typed into
@@ -793,43 +756,14 @@ pub enum Verb {
     },
     /// Put a task in its project's merge queue, the person's word, and the only way work
     /// merges: a task its checks passed waits in Ready to merge until then. Work not checked
-    /// yet (one given back, or done without a report) is verified and reviewed first when the
-    /// project or the task asks. Answered with [`Outcome::Task`]; an agent is
+    /// yet (one given back, or done without a report) is verified first when the project or the
+    /// task has a verifier. Answered with [`Outcome::Task`]; an agent is
     /// [`ErrorCode::Forbidden`].
     TaskMerge {
         /// In which project.
         project: ProjectId,
         /// Which.
         task: TaskId,
-    },
-    /// Say whether a task's work may merge, as its reviewer or the person: an approval puts it
-    /// in Ready to merge, a block gives it back to its agent with the findings. Only the
-    /// reviewer session the server started for the task, or the person, may; the person's word
-    /// stands over the reviewer's. Answered with [`Outcome::Task`].
-    TaskReview {
-        /// In which project.
-        project: ProjectId,
-        /// Which.
-        task: TaskId,
-        /// What it says.
-        verdict: crate::project::ReviewVerdict,
-    },
-    /// Check out `head` in the checkout named `worktree` under
-    /// [`crate::project::VERIFY_PLACES`] of the clone at `repo`, with the diff from its fork
-    /// point off the branch `target` written beside it as [`crate::project::REVIEW_DIFF`], for
-    /// a reviewer to read. The server's own, for a task's review; answered with
-    /// [`Outcome::CheckedOut`].
-    ReviewCheckout {
-        /// Where.
-        worker: WorkerId,
-        /// The clone.
-        repo: String,
-        /// The checkout's name.
-        worktree: String,
-        /// The commit or branch to check out.
-        head: String,
-        /// The branch work lands on.
-        target: String,
     },
     /// The person lets a project go: its board, its tasks and its queue. The terminals that
     /// worked in it stay, as terminals. Answered with [`Outcome::Done`].
@@ -850,18 +784,6 @@ pub enum Verb {
         number: u32,
         /// A GitLab merge request rather than a GitHub pull request.
         merge_request: bool,
-    },
-    /// Say what each kind of a project's work needs of the machine it runs on, in place of
-    /// what was said ([`crate::project::Need`]): the rules join each task's own wherever it is
-    /// ranked from then on. Answered with [`Outcome::Project`]; a rule that does not compile,
-    /// or needs that together hold more rules than one placement, are
-    /// [`ErrorCode::BadExpression`], and a name given twice or too many are
-    /// [`ErrorCode::Invalid`].
-    ProjectNeeds {
-        /// Which.
-        project: ProjectId,
-        /// Every need, at most [`crate::project::Need::MAX`].
-        needs: Vec<crate::project::Need>,
     },
     /// Push a merged task's target to its clone's `origin` again after the push that went
     /// with its merge failed, the person's word. The target goes as the merge left it, so a
@@ -1049,19 +971,15 @@ impl Verb {
             | Self::AnswerRequest { .. }
             | Self::ProjectCreate { .. }
             | Self::ProjectSet { .. }
-            | Self::ProjectNeeds { .. }
             | Self::TaskCreate { .. }
             | Self::TaskUpdate { .. }
             | Self::TaskSpawn { .. }
-            | Self::TaskStart { .. }
             | Self::TaskTell { .. }
             | Self::TaskReport { .. }
             | Self::BundleBranch { .. }
             | Self::FetchBundle { .. }
             | Self::TaskMerge { .. }
             | Self::TaskPush { .. }
-            | Self::TaskReview { .. }
-            | Self::ReviewCheckout { .. }
             | Self::ProjectDelete { .. }
             | Self::Verify { .. }
             | Self::Rebase { .. }
@@ -1099,7 +1017,6 @@ impl Verb {
             | Self::CaptureStill { .. }
             | Self::ProjectList
             | Self::ProjectStatus { .. }
-            | Self::PlacementSuggest { .. }
             | Self::WorkerFacts { .. }
             | Self::TaskGet { .. }
             | Self::WorkingOn { .. }
@@ -1335,15 +1252,14 @@ pub enum ErrorCode {
     UnknownProject,
     /// No such task in the project.
     UnknownTask,
-    /// It would take what another holds: a path another live task owns, a task another agent
-    /// works on.
+    /// It would take what another holds: a task another agent works on, a branch moved on.
     Conflict,
-    /// No worker meets the task's placement now; the message says why each was passed over.
+    /// No worker may run the task now; the message says why each was passed over.
     Unplaced,
     /// A limit the project or the person set is reached, or would be passed; the message
     /// names it and who may raise it.
     Limit,
-    /// A placement expression or a metadata document does not parse or check.
+    /// A metadata document does not parse or check.
     BadExpression,
     /// Nothing may type into the agent now: it waits on a person (a permission, a question),
     /// or a person has typed into its composer and not sent it. The message says which.
@@ -1471,8 +1387,6 @@ pub enum Outcome {
     Projects(Vec<Project>),
     /// For the task verbs: the task as it is now.
     Task(Box<crate::project::Task>),
-    /// For [`Verb::PlacementSuggest`]: every worker, best first.
-    Suggestions(Vec<Suggestion>),
     /// For [`Verb::WorkerFacts`].
     Facts(Vec<WorkerFacts>),
     /// For [`Verb::TaskGet`].
@@ -1527,15 +1441,6 @@ pub enum Outcome {
         pushed: bool,
         /// Why a push asked for did not happen; the branch moved all the same.
         push_failed: Option<String>,
-    },
-    /// For [`Verb::ReviewCheckout`]: the work is checked out at `path`.
-    CheckedOut {
-        /// Where, on the worker.
-        path: String,
-        /// The commit checked out, in hex.
-        head: String,
-        /// Where it left the target branch, in hex.
-        base: String,
     },
     /// For [`Verb::PullChecks`]: what the pull request's checks say.
     Checks(crate::project::Checks),

@@ -21,15 +21,13 @@ use slopty_proto::items::ItemKind;
 use slopty_proto::orchestration::{
     ErrorCode, EventFilter, IdempotencyKey, Input, Size, ThreadView, WaitUntil,
 };
-use slopty_proto::project::{
-    LimitsChange, Need, Preference, Report, ReportKind, Runner, TaskChange, TaskId,
-};
+use slopty_proto::project::{LimitsChange, Report, Runner, TaskChange, TaskId};
 use slopty_proto::screen::CaptureTarget;
 use slopty_proto::search::SearchQuery;
 
 use crate::ops::{
     self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS,
-    LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, Spec, Which,
+    LaunchSpec, NewTask, ProjectEdit, ProjectSpec, Spec, Which,
 };
 use crate::resolve::Resolver;
 use crate::view::{self, Encoding};
@@ -47,7 +45,7 @@ read_screen or read_output in a loop. To follow another coding agent's work, rea
 requests are the person's to answer, never an agent's, so never type its menu's digits. \
 For a goal bigger than one agent, make a project (project_create) and start its tasks with \
 task_start: each task is one agent, Claude Code, Codex or any command, working from its brief \
-in its own worktree on the worker it pins or one its placement allows. Tasks sit side by side \
+in its own worktree on the worker you name or one with room. Tasks sit side by side \
 under the project and do not nest. Follow the project with project_status (since and \
 timeout_ms wait for news), or wait for tasks' news with task_wait; task_tell says something \
 to a task's agent, and task_update changes a task. A task's agent reports with task_report. \
@@ -150,82 +148,6 @@ fn task_text(task: Option<&TaskArg>) -> Option<String> {
     task.map(TaskArg::text)
 }
 
-/// A task's placement: where it may run and where it had better.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct PlacementArgs {
-    /// This worker (name or id) and no other, whatever the rules say.
-    pin: Option<String>,
-    /// CEL rules over a worker's facts that must all hold, such as `os == "linux" && cpus >=
-    /// 16`, `has(probes.cuda)`, `"wasm32-unknown-unknown" in rust_targets`,
-    /// `labels["fast-disk"]`. `list_workers` shows every worker's `facts`.
-    #[serde(default)]
-    require: Vec<String>,
-    /// CEL rules that score a worker: each that holds adds its `weight` (1 when omitted); a
-    /// rule giving a number adds weight times it (`{"expr": "-load", "weight": 5}`).
-    #[serde(default)]
-    prefer: Vec<PreferArgs>,
-    /// Run beside these: tasks (`#3`) or workers (name or id).
-    #[serde(default)]
-    near: Vec<String>,
-    /// Keep away from these: tasks (`#3`) or workers.
-    #[serde(default)]
-    avoid: Vec<String>,
-}
-
-/// One preference.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct PreferArgs {
-    /// A CEL rule over a worker's facts.
-    expr: String,
-    /// Points when it holds; negative steers away. 1 when omitted.
-    weight: Option<i32>,
-}
-
-impl PreferArgs {
-    fn preference(self) -> Preference {
-        Preference { expr: self.expr, weight: self.weight.unwrap_or(1) }
-    }
-}
-
-impl PlacementArgs {
-    fn spec(self) -> PlacementSpec {
-        let prefer = self.prefer.into_iter().map(PreferArgs::preference).collect();
-        PlacementSpec {
-            pin: self.pin,
-            require: self.require,
-            prefer,
-            near: self.near,
-            avoid: self.avoid,
-        }
-    }
-}
-
-/// A project's limits, within the bounds the person set (`project_status` shows both).
-#[derive(Debug, Default, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct LimitsArgs {
-    /// Most of its live agents on one worker.
-    live_per_worker: Option<u16>,
-    /// Most of its live agents in all.
-    live_per_project: Option<u16>,
-    /// How many timeline entries it keeps.
-    timeline_kept: Option<u32>,
-}
-
-impl From<LimitsArgs> for LimitsChange {
-    fn from(a: LimitsArgs) -> Self {
-        Self {
-            budget: None,
-            live_per_worker: a.live_per_worker,
-            live_per_project: a.live_per_project,
-            review: None,
-            timeline_kept: a.timeline_kept,
-        }
-    }
-}
-
 /// A JSON object as the text the server keeps.
 fn metadata_text(doc: Option<Map<String, Value>>) -> Result<Option<String>, ToolError> {
     doc.map(|d| serde_json::to_string(&d).map_err(|e| ToolError::invalid(e.to_string())))
@@ -252,9 +174,6 @@ struct ProjectCreateArgs {
     verifier: Option<String>,
     /// The orchestrator's terminal (`worker/session`); yours when omitted and you run in one.
     orchestrator: Option<String>,
-    /// Its limits over the defaults, within the person's bounds.
-    #[serde(default)]
-    limits: LimitsArgs,
     /// Anything to keep with it, as a JSON object.
     metadata: Option<Map<String, Value>>,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
@@ -271,9 +190,6 @@ struct ProjectUpdateArgs {
     orchestrator: Option<String>,
     /// A new verifier command; empty for none.
     verifier: Option<String>,
-    /// New limits, within the person's bounds.
-    #[serde(default)]
-    limits: LimitsArgs,
     /// New metadata, a JSON object in place of the old.
     metadata: Option<Map<String, Value>>,
     /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
@@ -326,19 +242,13 @@ struct TaskStartArgs {
     /// `ignore_dependencies`. A dependency never leads back to it.
     #[serde(default)]
     depends_on: Vec<TaskArg>,
-    /// A new task: repository-relative paths it alone may write (`crates/slopty-server`,
-    /// `docs/x.md`); a directory owns everything under it. Refused when one overlaps a live
-    /// task's.
-    #[serde(default)]
-    owns: Vec<String>,
-    /// A new task: it only reads, so it owns nothing and overlaps nobody.
+    /// A new task: it only reads.
     #[serde(default)]
     read_only: bool,
-    /// A new task: where it may run; anywhere with room when omitted.
-    placement: Option<PlacementArgs>,
     /// A new task: anything to keep with it, as a JSON object.
     metadata: Option<Map<String, Value>>,
-    /// This worker (name or id) over the task's placement; the server places it when omitted.
+    /// This worker (name or id); one with room when omitted. `list_workers` shows each
+    /// worker's facts, and work that needs no Apple platform belongs on Linux.
     worker: Option<String>,
     /// Working directory on the worker; beside a clone of the project's repository, in a git
     /// worktree of the task's own when it writes, when omitted.
@@ -403,16 +313,14 @@ impl TaskStartArgs {
             || !self.brief.is_empty()
             || !self.kind.is_empty()
             || !self.depends_on.is_empty()
-            || !self.owns.is_empty()
             || self.read_only
-            || self.placement.is_some()
             || self.metadata.is_some();
         let which = match (self.task, self.title) {
             (Some(task), None) if !new_fields => Which::Made(task.text()),
             (Some(_), _) => {
                 return Err(ToolError::invalid(
                     "`task` starts one the project has; a new task's fields (title, brief, kind, \
-                     depends_on, owns, read_only, placement, metadata) go without it",
+                     depends_on, read_only, metadata) go without it",
                 ));
             }
             (None, Some(title)) => Which::New(Box::new(NewTask {
@@ -420,9 +328,7 @@ impl TaskStartArgs {
                 kind: self.kind,
                 title,
                 brief: self.brief,
-                owns: self.owns,
                 read_only: self.read_only,
-                placement: self.placement.map(PlacementArgs::spec).unwrap_or_default(),
                 verifier: None,
                 metadata: metadata_text(self.metadata)?,
             })),
@@ -451,18 +357,12 @@ struct TaskUpdateArgs {
     status: Option<String>,
     /// The branch its work is on.
     branch: Option<String>,
-    /// Repository-relative paths to own beside what it owns; refused, naming the task that
-    /// holds it, when one overlaps a path another live task owns.
-    #[serde(default)]
-    claim: Vec<String>,
     /// The commit its work starts from, in hex.
     base: Option<String>,
     /// Words for the project's timeline.
     note: Option<String>,
     /// New dependencies, in place of the old.
     depends_on: Option<Vec<TaskArg>>,
-    /// A new placement, in place of the old.
-    placement: Option<PlacementArgs>,
     /// Its own verifier command; empty for the project's.
     verifier: Option<String>,
     /// New metadata, a JSON object in place of the old.
@@ -479,10 +379,6 @@ struct TaskReportArgs {
     project: Option<String>,
     /// The task; yours when omitted.
     task: Option<TaskArg>,
-    /// `checkpoint` (progress; delivered with the next report), `needs_input` (you need an
-    /// answer; delivered at once), `stuck` (you cannot go on; at once) or `done` (finished;
-    /// delivered once it settles, a later report replacing it).
-    kind: ReportKindArg,
     /// What you have to say, in a few lines.
     #[serde(default)]
     note: String,
@@ -540,134 +436,15 @@ enum UntilArg {
     All,
 }
 
-/// `review_report`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReviewReportArgs {
-    /// The project; the one you were started for when omitted.
-    project: Option<String>,
-    /// The task whose work you read; the one you were started for when omitted.
-    task: Option<TaskArg>,
-    /// Whether the work may merge: true unless a finding blocks.
-    approved: bool,
-    /// The review in a few lines.
-    summary: String,
-    /// What you found that matters, the most important first; at most 8 are kept.
-    #[serde(default)]
-    findings: Vec<FindingArg>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
-}
-
-/// One finding of a review.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct FindingArg {
-    /// The file, relative to the repository's root.
-    path: Option<String>,
-    /// The line in the work's version of the file.
-    line: Option<u32>,
-    /// `blocker`, `should` or `nit`, or a word of your own.
-    severity: String,
-    /// Whether it keeps the work from merging: only a blocker does.
-    #[serde(default)]
-    blocking: bool,
-    /// What is wrong and what to do, in a few sentences.
-    body: String,
-}
-
-impl ReviewReportArgs {
-    fn verdict(self) -> slopty_proto::project::ReviewVerdict {
-        slopty_proto::project::ReviewVerdict {
-            approved: self.approved,
-            summary: self.summary,
-            findings: self
-                .findings
-                .into_iter()
-                .map(|f| slopty_proto::project::Finding {
-                    path: f.path,
-                    line: f.line,
-                    severity: f.severity,
-                    blocking: f.blocking,
-                    body: f.body,
-                })
-                .collect(),
-        }
-    }
-}
-
-/// The kinds of report.
-#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-enum ReportKindArg {
-    /// Progress worth knowing.
-    Checkpoint,
-    /// An answer is needed to go on.
-    NeedsInput,
-    /// It cannot go on.
-    Stuck,
-    /// It finished.
-    Done,
-}
-
 impl TaskReportArgs {
     fn report(&self) -> Report {
-        let kind = match self.kind {
-            ReportKindArg::Checkpoint => ReportKind::Checkpoint,
-            ReportKindArg::NeedsInput => ReportKind::NeedsInput,
-            ReportKindArg::Stuck => ReportKind::Stuck,
-            ReportKindArg::Done => ReportKind::Done,
-        };
         Report {
-            kind,
             note: self.note.clone(),
             artifacts: self.artifacts.clone(),
             branch: self.branch.clone(),
             pr: self.pr,
         }
     }
-}
-
-/// `project_needs`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ProjectNeedsArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// Every need, in place of those said before; `[]` for none.
-    needs: Vec<NeedArgs>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
-}
-
-/// One kind of work and what it needs of its machine.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct NeedArgs {
-    /// What it is, in a few words the board shows: "Apple work".
-    name: String,
-    /// The paths whose owners have it, as tasks' `owns` name them; every task when empty.
-    #[serde(default)]
-    paths: Vec<String>,
-    /// CEL rules a worker must hold for such a task, such as `os == "macos"`.
-    #[serde(default)]
-    require: Vec<String>,
-    /// CEL rules that score a worker for such a task, such as `{"expr": "os == \"linux\"",
-    /// "weight": 20}`.
-    #[serde(default)]
-    prefer: Vec<PreferArgs>,
-}
-
-/// `placement_suggest`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct PlacementSuggestArgs {
-    /// The project whose limits and tasks count; yours when omitted.
-    project: Option<String>,
-    /// The task whose placement to rank; yours when omitted and no `placement` is given.
-    task: Option<TaskArg>,
-    /// A placement to try instead of the task's.
-    placement: Option<PlacementArgs>,
 }
 
 impl TaskUpdateArgs {
@@ -686,12 +463,10 @@ impl TaskUpdateArgs {
             state,
             status: self.status.clone(),
             branch: self.branch.clone(),
-            claim: self.claim.clone(),
             verified: None,
             base: self.base.clone(),
             note: self.note.clone(),
             depends_on,
-            placement: None,
             run_on: None,
             verifier: self.verifier.clone(),
             metadata: metadata_text(self.metadata.clone())?,
@@ -1462,27 +1237,13 @@ pub fn list() -> Vec<Tool> {
             "project_create",
             "Make a project: one goal many agents work on across the workers, which every \
              person's Slopty shows as a tree. Its orchestrator is you unless you name another \
-             terminal; its `limits` (agents per worker and in all, timeline size) stay within \
-             the person's `bounds`. Returns the project with `tasks`, `timeline`, \
-             `bounds` and `live`.",
+             terminal. Returns the project with `tasks`, `timeline`, `bounds` and `live`.",
             Kind::Write,
         ),
         tool::<ProjectUpdateArgs>(
             "project_update",
-            "Change a project's orchestrator terminal, verifier, limits or metadata. Limits \
-             stay within the person's bounds, which no tool raises.",
-            Kind::Write,
-        ),
-        tool::<ProjectNeedsArgs>(
-            "project_needs",
-            "Say what each kind of the project's work needs of the machine it runs on, in place \
-             of what was said: a task owning one of a need's `paths` (every task when none) gets \
-             its `require` and `prefer` rules beside its own wherever it is placed, and the board \
-             names the need as the reason. Say the platform's needs once, such as \
-             {\"name\": \"Apple work\", \"paths\": [\"apps/ios\"], \"require\": \
-             [\"os == \\\"macos\\\"\"]} and {\"name\": \"Linux first\", \"prefer\": \
-             [{\"expr\": \"os == \\\"linux\\\"\", \"weight\": 20}]}, so work that needs \
-             no Mac goes to a Linux worker.",
+            "Change a project's orchestrator terminal, verifier or metadata. Its limits and \
+             the person's bounds are the person's, which no tool raises.",
             Kind::Write,
         ),
         tool_with(
@@ -1495,7 +1256,7 @@ pub fn list() -> Vec<Tool> {
         tool::<ProjectStatusArgs>(
             "project_status",
             "A project whole: its `tasks` (each with `state`, its agent's own `status`, \
-             `depends_on`, `kind`, the paths it `owns`, its `placement`, its terminal's `term`, \
+             `depends_on`, `kind`, the worker it is pinned to, its terminal's `term`, \
              `branch`, `pr`, `verified`), `natives` (Claude Code's own subagents and to-dos in \
              each node's session), `bounds` and `limits` with what runs now (`live`), and its \
              `timeline` from `since`, with `next` to read on from. With `timeout_ms` it waits \
@@ -1504,44 +1265,41 @@ pub fn list() -> Vec<Tool> {
         ),
         tool::<TaskGetArgs>(
             "task_get",
-            "One node of a project's tree in full: the task's brief, owned paths, placement, \
-             verifier, base commit and metadata, and the subagents and to-dos Claude Code keeps \
+            "One node of a project's tree in full: the task's brief, pin, verifier, base \
+             commit and metadata, and the subagents and to-dos Claude Code keeps \
              in it. project_status shows the tree; this shows a node.",
             Kind::Read,
         ),
         tool::<TaskStartArgs>(
             "task_start",
             "Start a task, the one way work starts: a new one made from a `title`, a `brief` \
-             its agent works from (its first prompt), a `kind`, `depends_on`, the paths it alone \
-             may write (`owns`; refused when one overlaps another live task's) or `read_only`, \
-             and where it may run (`placement`); or a `task` the project has. It runs Claude \
-             Code, another `agent` or a `command` on the `worker` you name or the best its \
-             placement and the project's needs rank, beside a clone of the project's repository \
-             in a worktree of its own unless you name a `cwd`. Start only work that runs in \
+             its agent works from (its first prompt), a `kind`, `depends_on` or `read_only`; or \
+             a `task` the project has. It runs Claude Code, another `agent` or a `command` on \
+             the `worker` you name (list_workers shows each one's facts; work that needs no \
+             Apple platform belongs on Linux) or one with room, beside a clone of the project's \
+             repository in a worktree of its own unless you name a `cwd`. Start only work that runs in \
              parallel with yours and needs no context you hold: do sequential or small work \
              yourself. A start is refused while as many tasks wait on the person as the \
-             project's review limit, saying how many and where; when the person asks to start \
-             each task themselves it is `proposed` instead, and starts once they say so. A new \
-             task refused its start is kept: start it later by its number. Returns the task \
+             project's review limit, saying how many and where. A new task refused its start is \
+             kept: start it later by its number. Returns the task \
              with its terminal's `term`.",
             Kind::Write,
         ),
         tool::<TaskUpdateArgs>(
             "task_update",
             "Change a task: its `state` (verifying, done, failed, planned again; merging is the \
-             person's), your own `status` text, more paths it owns (`claim`; refused when one \
-             overlaps another live task's), `depends_on`, `placement`, `metadata`; record its \
+             person's), your own `status` text, `depends_on`, `metadata`; record its \
              `branch` or the `base` commit its work starts from, or put a `note` on the \
              timeline. Its agent's own status moves it among running, waiting and blocked.",
             Kind::Write,
         ),
         tool::<TaskReportArgs>(
             "task_report",
-            "Report on your task's work to the project's orchestrator: `checkpoint`, \
-             `needs_input`, `stuck` or `done`, with a `note`, what you made (`artifacts`), your \
-             `branch` and `pr`. It reaches the orchestrator through its own hooks when the kind \
-             says, never typed into its terminal, and stays on the timeline. Done work is \
-             checked, then waits for the person to merge it.",
+            "Report your task done to the project's orchestrator, with a `note`, what you made \
+             (`artifacts`), your `branch` and `pr`. It reaches the orchestrator through its own \
+             hooks once your task settles, never typed into its terminal, and stays on the \
+             timeline. Done work is checked, then waits for the person to merge it. A question \
+             or a block needs no report: the orchestrator hears your turn end.",
             Kind::Write,
         ),
         tool::<TaskTellArgs>(
@@ -1556,28 +1314,11 @@ pub fn list() -> Vec<Tool> {
         tool::<TaskWaitArgs>(
             "task_wait",
             "Wait for news of tasks: a report, a move of state (its agent ending a turn without \
-             a report is one, waiting on the person another), its terminal gone, its verifier, \
-             review or checks, a step that ended. `until` any (default) or all. A task merged or \
+             a report is one, waiting on the person another), its terminal gone, its verifier \
+             or checks, a step that ended. `until` any (default) or all. A task merged or \
              failed is ready at once. Returns each task's card with its `news` and \
              `last_report`, `ready`, `timed_out`, and `next` to wait on from. Running out of time \
              cancels nothing. For agents without hooks; hooks bring the same news unasked.",
-            Kind::Read,
-        ),
-        tool::<ReviewReportArgs>(
-            "review_report",
-            "As the reviewer the server started for a task, say whether its work may merge: \
-             `approved`, a `summary`, and the `findings` that matter (path, line, severity, \
-             whether each blocks). An approval puts it in Ready to merge, for the person; changes \
-             asked go back to its agent with the findings once, and to the person after that. \
-             Only that reviewer, or the person, may.",
-            Kind::Write,
-        ),
-        tool::<PlacementSuggestArgs>(
-            "placement_suggest",
-            "Rank every worker for a task's placement, or for a `placement` you try: best \
-             first, each with `fits`, its `score` and the `reasons` (each rule, whether it held, \
-             its points, why not, and the project's `need` it comes from). Changes nothing; pin \
-             the one you like with task_start's `worker`.",
             Kind::Read,
         ),
         tool::<WakeWorkerArgs>(
@@ -1710,11 +1451,9 @@ async fn run<D: Dispatch>(
                 repo: a.repo,
                 target: a.target,
                 verifier: a.verifier,
-                review: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: a.orchestrator,
-                limits: a.limits.into(),
+                limits: LimitsChange::default(),
                 metadata: metadata_text(a.metadata)?,
             };
             json(&view::projects::status(&ops::project_create(&mut res, spec, key).await?))
@@ -1725,29 +1464,11 @@ async fn run<D: Dispatch>(
             let edit = ProjectEdit {
                 orchestrator: a.orchestrator,
                 verifier: a.verifier,
-                review: None,
                 push: None,
-                ask_to_start: None,
-                limits: a.limits.into(),
+                limits: LimitsChange::default(),
                 metadata: metadata_text(a.metadata)?,
             };
             let set = ops::project_set(&mut res, a.project.as_deref(), edit, key);
-            json(&view::projects::status(&set.await?))
-        }
-        "project_needs" => {
-            let a: ProjectNeedsArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key)?;
-            let needs = a
-                .needs
-                .into_iter()
-                .map(|n| Need {
-                    name: n.name,
-                    paths: n.paths,
-                    require: n.require,
-                    prefer: n.prefer.into_iter().map(PreferArgs::preference).collect(),
-                })
-                .collect();
-            let set = ops::project_needs(dispatch, a.project.as_deref(), needs, key);
             json(&view::projects::status(&set.await?))
         }
         "project_list" => {
@@ -1780,9 +1501,8 @@ async fn run<D: Dispatch>(
             let change = a.change()?;
             let key = checked_key(a.idempotency_key)?;
             let task = task_text(a.task.as_ref());
-            let placement = a.placement.map(PlacementArgs::spec);
             let (project, task) = (a.project.as_deref(), task.as_deref());
-            let updated = ops::task_update(&mut res, project, task, change, placement, key);
+            let updated = ops::task_update(&res, project, task, change, key);
             json(&view::projects::task(&updated.await?))
         }
         "task_report" => {
@@ -1808,23 +1528,6 @@ async fn run<D: Dispatch>(
             let waited =
                 ops::task_wait(dispatch, a.project.as_deref(), (&tasks, all), a.since, timeout);
             json(&view::projects::task_wait(&with_progress(waited, progress).await?))
-        }
-        "review_report" => {
-            let a: ReviewReportArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key.clone())?;
-            let task = task_text(a.task.as_ref());
-            let project = a.project.clone();
-            let reviewed =
-                ops::task_review(dispatch, project.as_deref(), task.as_deref(), a.verdict(), key);
-            json(&view::projects::task(&reviewed.await?))
-        }
-        "placement_suggest" => {
-            let a: PlacementSuggestArgs = args(arguments)?;
-            let task = task_text(a.task.as_ref());
-            let spec = a.placement.map(PlacementArgs::spec);
-            let ranked =
-                ops::placement_suggest(&mut res, a.project.as_deref(), task.as_deref(), spec);
-            json(&view::projects::suggestions(&ranked.await?))
         }
         "resize_terminal" => {
             let a: ResizeArgs = args(arguments)?;
@@ -2030,9 +1733,8 @@ mod tests {
         ItemRef, Outcome, TermRef, ThreadOf, ThreadRead, Verb, Waited,
     };
     use slopty_proto::project::{
-        Assignment, Bounds, Fact, Limits, Live, NativeCounts, Natives, Peer, Placement, Preference,
-        Project, ProjectId, ProjectStatus, Runner, Task, TaskId, TaskState, TimelineEntry,
-        WorkerFacts,
+        Assignment, Bounds, Fact, Limits, Live, NativeCounts, Natives, Project, ProjectId,
+        ProjectStatus, Runner, Task, TaskId, TaskState, TimelineEntry, WorkerFacts,
     };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -2074,9 +1776,8 @@ mod tests {
             kind: String::new(),
             title: title.to_owned(),
             brief: String::new(),
-            owns: Vec::new(),
             read_only: false,
-            placement: Placement::default(),
+            pin: None,
             verifier: None,
             metadata: None,
             state: if started { TaskState::Running } else { TaskState::Planned },
@@ -2087,19 +1788,17 @@ mod tests {
                 since_ms: WallMs::ZERO,
                 ended_ms: None,
                 conversation: None,
-                placed: None,
+                spawned: true,
             }),
             branch: None,
             worktree: None,
             base: None,
             pr: None,
-            reviewed: None,
             verified: None,
             merge: None,
             created_ms: WallMs::ZERO,
             updated_ms: WallMs::ZERO,
             step: None,
-            proposal: None,
             give_backs: slopty_proto::project::GiveBacks::default(),
             tests: None,
         }
@@ -2109,8 +1808,6 @@ mod tests {
     fn project_status(id: ProjectId) -> ProjectStatus {
         ProjectStatus {
             project: Project {
-                spend: slopty_proto::project::Spend::default(),
-                needs: Vec::new(),
                 scripts: Vec::new(),
                 orchestrator_spent: slopty_proto::project::Spent::default(),
                 id,
@@ -2118,10 +1815,8 @@ mod tests {
                 repo: "~/slopty".to_owned(),
                 repo_id: None,
                 target: "main".to_owned(),
-                review: None,
                 verifier: None,
                 push: false,
-                ask_to_start: false,
                 orchestrator: None,
                 limits: Limits::default(),
                 metadata: None,
@@ -2250,7 +1945,7 @@ mod tests {
                 Verb::TaskUpdate { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, "Review", true)))
                 }
-                Verb::ProjectStatus { project, .. } | Verb::ProjectNeeds { project, .. } => {
+                Verb::ProjectStatus { project, .. } => {
                     Outcome::Project(Box::new(project_status(project)))
                 }
                 Verb::WorkerFacts { .. } => {
@@ -2258,32 +1953,8 @@ mod tests {
                     let facts = BTreeMap::from([("labels".to_owned(), Fact::Map(labels))]);
                     Outcome::Facts(vec![WorkerFacts { worker: studio(), facts }])
                 }
-                Verb::TaskSpawn { task, .. } | Verb::TaskStart { task, .. } => {
+                Verb::TaskSpawn { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, "Fix the hub", true)))
-                }
-                // Task 9 has a start proposed, waiting for the person.
-                Verb::TaskGet { task: Some(TaskId(9)), .. } => {
-                    let mut proposed = made_task(9, "Proposed", false);
-                    proposed.proposal = Some(slopty_proto::project::Proposal {
-                        launch: slopty_proto::project::TaskLaunch {
-                            pin: None,
-                            cwd: String::new(),
-                            run: Runner::Claude { prompt: None, args: Vec::new() },
-                            env: Vec::new(),
-                            size: None,
-                            ignore_dependencies: false,
-                        },
-                        proposed: slopty_proto::project::Proposed {
-                            since_ms: WallMs::ZERO,
-                            runs: "claude".to_owned(),
-                            on: None,
-                            why: String::new(),
-                        },
-                    });
-                    Outcome::Node(Box::new(slopty_proto::project::NodeDetail {
-                        task: Some(proposed),
-                        natives: Natives::default(),
-                    }))
                 }
                 // The server's record of the terminal, over what its environment says.
                 Verb::FsChange { op: FsOp::Move { to, .. }, .. } if to == "/taken" => {
@@ -2317,10 +1988,10 @@ mod tests {
     }
 
     /// The orchestrator's own project is what the project tools default to: `task_start` makes a
-    /// task with the placement, kind, dependencies and metadata it gave and starts it in one
-    /// call, its brief the agent's first prompt; it starts a task made before with any agent or
-    /// a command; and a start proposed to the person is theirs to make. `spawn_agent` starts an
-    /// agent outside any task. A caller that runs for no project is told to name one.
+    /// task with the kind, dependencies and metadata it gave and starts it in one call on the
+    /// worker named, its brief the agent's first prompt; and it starts a task made before with
+    /// any agent or a command. `spawn_agent` starts an agent outside any task. A caller that runs
+    /// for no project is told to name one.
     #[tokio::test]
     async fn task_start_makes_and_starts_a_task_in_the_caller_s_own_project() {
         let scope =
@@ -2329,15 +2000,10 @@ mod tests {
         let made = json!({
             "title": "Hub",
             "brief": "Fix the hub\nThen test it",
-            "owns": ["crates/slopty-server"],
             "kind": "build",
             "depends_on": [2],
-            "placement": {
-                "require": ["os == \"linux\""],
-                "prefer": [{ "expr": "cpus", "weight": 2 }],
-                "near": ["#2"],
-            },
             "metadata": { "ticket": 12 },
+            "worker": studio().to_string(),
             "cwd": "~/w",
         });
         let (failed, text) = call_json(&fake, "task_start", made).await;
@@ -2350,12 +2016,8 @@ mod tests {
         };
         assert_eq!(project.as_str(), "slopty");
         assert_eq!((spec.kind.as_str(), spec.depends_on.as_slice()), ("build", &[TaskId(2)][..]));
-        assert_eq!(spec.owns, ["crates/slopty-server"]);
-        assert_eq!(spec.placement.require, ["os == \"linux\""]);
-        assert_eq!(spec.placement.prefer, [Preference { expr: "cpus".to_owned(), weight: 2 }]);
-        assert_eq!(spec.placement.near, [Peer::Task(TaskId(2))]);
         assert_eq!(spec.metadata.as_deref(), Some(r#"{"ticket":12}"#));
-        assert_eq!((*task, launch.pin, launch.cwd.as_str()), (TaskId(7), None, "~/w"));
+        assert_eq!((*task, launch.pin, launch.cwd.as_str()), (TaskId(7), Some(studio()), "~/w"));
         let brief = Some("Fix the hub\nThen test it".to_owned());
         assert_eq!(launch.run, Runner::Claude { prompt: brief, args: Vec::new() }, "its brief");
 
@@ -2404,54 +2066,16 @@ mod tests {
         let args = vec!["--model".to_owned(), "opus".to_owned()];
         assert_eq!(launch.run, Runner::Claude { prompt: Some("Go".to_owned()), args });
 
-        let (failed, text) = call_json(&fake, "task_start", json!({"task": 9})).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::TaskStart { task, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(task, TaskId(9), "a proposed start goes as proposed");
-
         let both = json!({"task": 7, "title": "Again"});
         let (failed, text) = call_json(&fake, "task_start", both).await;
         assert!(failed, "a task or a new one, not both: {text}");
         let (failed, text) = call_json(&fake, "task_start", json!({})).await;
         assert!(failed, "a task or a new one: {text}");
 
-        let needs = json!({"needs": [
-            {"name": "Apple work", "paths": ["apps/ios"], "require": ["os == \"macos\""]},
-            {"name": "Linux first", "prefer": [{"expr": "os == \"linux\""}]},
-        ]});
-        let (failed, text) = call_json(&fake, "project_needs", needs).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::ProjectNeeds { project, needs }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(project.as_str(), "slopty", "the caller's own");
-        assert_eq!(
-            (needs[0].paths.as_slice(), needs[1].paths.len()),
-            (&["apps/ios".to_owned()][..], 0)
-        );
-        assert_eq!(needs[1].prefer, [Preference { expr: "os == \"linux\"".to_owned(), weight: 1 }]);
-
         let bad = call_json(&fake, "task_start", json!({"title": "x", "os": "linux"})).await;
         assert!(bad.0 && bad.1.contains("unknown field `os`"), "{bad:?}");
         let (failed, text) = call_json(&Fake::default(), "task_start", json!({"title": "x"})).await;
         assert!(failed && text.contains("name the project"), "{text}");
-    }
-
-    /// A task's agent takes the paths it will write with `task_update`.
-    #[tokio::test]
-    async fn a_claim_rides_on_task_update() {
-        let scope = crate::Scope {
-            session: None,
-            project: Some("slopty".parse().unwrap()),
-            task: Some(TaskId(3)),
-        };
-        let fake = Fake { scope, ..Fake::default() };
-        let claim = json!({"claim": ["crates/slopty-server", "docs/x.md"]});
-        let (failed, text) = call_json(&fake, "task_update", claim).await;
-        assert!(!failed, "{text}");
-        let Some(Verb::TaskUpdate { task, change, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(
-            (task, change.claim.as_slice()),
-            (TaskId(3), &["crates/slopty-server".to_owned(), "docs/x.md".to_owned()][..])
-        );
     }
 
     /// The server's record of the caller's terminal says which task is its own, over the
@@ -2533,7 +2157,6 @@ mod tests {
                 "forget_worker",
                 "project_create",
                 "project_update",
-                "project_needs",
                 "project_list",
                 "project_status",
                 "task_get",
@@ -2542,8 +2165,6 @@ mod tests {
                 "task_report",
                 "task_tell",
                 "task_wait",
-                "review_report",
-                "placement_suggest",
                 "wake_worker",
             ]
         );
@@ -2980,15 +2601,9 @@ mod tests {
     /// nothing to stop, and gives the cursor to go on from. A task merged is ready at once.
     #[tokio::test(start_paused = true)]
     async fn task_wait_waits_for_news_and_cancels_nothing() {
-        use slopty_proto::project::{Moment, Report, ReportKind};
+        use slopty_proto::project::{Moment, Report};
         let report = |note: &str| Moment::Reported {
-            report: Report {
-                kind: ReportKind::Checkpoint,
-                note: note.to_owned(),
-                artifacts: Vec::new(),
-                branch: None,
-                pr: None,
-            },
+            report: Report { note: note.to_owned(), artifacts: Vec::new(), branch: None, pr: None },
         };
         let rested = Moment::State { from: TaskState::Running, to: TaskState::Waiting };
         let quiet = Moment::Note { text: "noted".to_owned() };
@@ -3005,11 +2620,7 @@ mod tests {
         );
         assert_eq!(waited.news, [at(12, 5, rested)]);
         let view = serde_json::to_value(view::projects::task_wait(&waited)).unwrap();
-        assert_eq!(
-            view["tasks"][0]["last_report"]["text"],
-            json!("checkpoint: half way"),
-            "{view}"
-        );
+        assert_eq!(view["tasks"][0]["last_report"]["text"], json!("done: half way"), "{view}");
         let sinces: Vec<Option<u64>> = timeline
             .asked
             .lock()

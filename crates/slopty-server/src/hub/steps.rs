@@ -148,10 +148,9 @@ impl Hub {
     /// Take up the steps under way on `worker` when the server stopped, now that it is back.
     ///
     /// A clone is made again (the worker answers one already there as it is), and a branch on
-    /// its way home goes again: both only set names the server alone uses. A verifier or a
-    /// reviewer whose terminal still runs there is followed as it is. Anything else, and a
-    /// verifier whose terminal is gone, is the lane's to do again from the store. A reviewer
-    /// whose terminal is gone stops, and the person says whether the work may merge.
+    /// its way home goes again: both only set names the server alone uses. A verifier whose
+    /// terminal still runs there is followed as it is. Anything else, and a verifier whose
+    /// terminal is gone, is the lane's to do again from the store.
     /// Nothing here runs a step a second time that could do harm twice: a merge and a rebase
     /// start over from the target as it is, as the lane would after any failure.
     pub(super) fn resume_steps(&self, state: &mut State, worker: WorkerId) {
@@ -193,11 +192,7 @@ impl Hub {
                             .insert((project, task), (term, commits, step.since_ms));
                     }
                 }
-                // One still waiting to start holds nothing: the lane starts it.
-                StepKind::Review if step.term.is_some() => {
-                    self.resume_review(state, (&project, task), running, step);
-                }
-                StepKind::Review | StepKind::Merge | StepKind::Rebase => {}
+                StepKind::Merge | StepKind::Rebase => {}
             }
         }
     }

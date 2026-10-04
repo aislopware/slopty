@@ -1,6 +1,5 @@
 //! Projects: the record, the task tree with Claude Code's own subagents as its leaves, the
-//! timeline, the workers' facts and where a task may run, as JSON for scripts and models and as
-//! text for a person.
+//! timeline and the workers' facts, as JSON for scripts and models and as text for a person.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -11,10 +10,9 @@ use slopty_core::{WallMs, WorkerId};
 use slopty_proto::agent::{PullRequest, Review};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Bounds, Fact, Facts, Finding, GiveBacks, Limits, Live, Moment, NativeCounts, Natives, Need,
-    NodeDetail, Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer,
-    Script, StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TestDiff,
-    TimelineEntry, VerifierRun,
+    Bounds, Fact, Facts, GiveBacks, Limits, Live, Moment, NativeCounts, Natives, NodeDetail,
+    Project, ProjectStatus, Report, Script, StepKind, StepState, Task, TaskCard, TaskState,
+    TaskStep, TestDiff, TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
 
@@ -108,9 +106,6 @@ pub struct ProjectView<'a> {
     orchestrator: Option<String>,
     limits: Limits,
     metadata: Option<Value>,
-    /// What each kind of its work needs of its machines.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    needs: Vec<NeedView<'a>>,
     /// The person's named commands for it.
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     scripts: &'a [Script],
@@ -124,18 +119,6 @@ pub fn script_text(s: &Script) -> String {
     format!("script {}{dir}: {}", s.name, s.command)
 }
 
-/// A need, for JSON.
-#[derive(Debug, Serialize)]
-pub struct NeedView<'a> {
-    name: &'a str,
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    paths: &'a [String],
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    require: &'a [String],
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    prefer: Vec<PreferView<'a>>,
-}
-
 /// A project, for JSON.
 #[must_use]
 pub fn project(p: &Project) -> ProjectView<'_> {
@@ -146,66 +129,10 @@ pub fn project(p: &Project) -> ProjectView<'_> {
         target: &p.target,
         verifier: p.verifier.as_deref(),
         orchestrator: p.orchestrator.map(term_string),
-        limits: p.limits.clone(),
+        limits: p.limits,
         metadata: metadata(p.metadata.as_deref()),
-        needs: p
-            .needs
-            .iter()
-            .map(|n| NeedView {
-                name: &n.name,
-                paths: &n.paths,
-                require: &n.require,
-                prefer: n
-                    .prefer
-                    .iter()
-                    .map(|p| PreferView { expr: &p.expr, weight: p.weight })
-                    .collect(),
-            })
-            .collect(),
         scripts: &p.scripts,
         created_ms: p.created_ms,
-    }
-}
-
-/// A task or a worker a task runs beside or away from: `#3`, or the worker's id.
-fn peer(p: &Peer) -> String {
-    match p {
-        Peer::Task(t) => format!("#{t}"),
-        Peer::Worker(w) => w.to_string(),
-    }
-}
-
-/// One preference, for JSON.
-#[derive(Debug, Serialize)]
-pub struct PreferView<'a> {
-    expr: &'a str,
-    weight: i32,
-}
-
-/// A placement, for JSON.
-#[derive(Debug, Serialize)]
-pub struct PlacementView<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pin: Option<WorkerId>,
-    #[serde(skip_serializing_if = "<[_]>::is_empty")]
-    require: &'a [String],
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    prefer: Vec<PreferView<'a>>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    near: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    avoid: Vec<String>,
-}
-
-/// A placement, for JSON.
-#[must_use]
-pub fn placement(p: &Placement) -> PlacementView<'_> {
-    PlacementView {
-        pin: p.pin,
-        require: &p.require,
-        prefer: p.prefer.iter().map(|x| PreferView { expr: &x.expr, weight: x.weight }).collect(),
-        near: p.near.iter().map(peer).collect(),
-        avoid: p.avoid.iter().map(peer).collect(),
     }
 }
 
@@ -230,53 +157,6 @@ fn verified(v: &VerifierRun) -> VerifiedView<'_> {
     VerifiedView { passed: v.passed, summary: &v.summary, head: &v.head, base: &v.base }
 }
 
-/// One thing a reviewer found, for JSON.
-#[derive(Debug, Serialize)]
-pub struct FindingView<'a> {
-    path: Option<&'a str>,
-    line: Option<u32>,
-    severity: &'a str,
-    blocking: bool,
-    body: &'a str,
-}
-
-/// A reviewer's word, for JSON: `more` counts the findings past those kept.
-#[derive(Debug, Serialize)]
-pub struct ReviewedView<'a> {
-    approved: bool,
-    by: String,
-    summary: &'a str,
-    findings: Vec<FindingView<'a>>,
-    more: u16,
-    head: &'a str,
-    base: &'a str,
-}
-
-fn finding(f: &Finding) -> FindingView<'_> {
-    FindingView {
-        path: f.path.as_deref(),
-        line: f.line,
-        severity: &f.severity,
-        blocking: f.blocking,
-        body: &f.body,
-    }
-}
-
-fn reviewed(r: &ReviewRun) -> ReviewedView<'_> {
-    ReviewedView {
-        approved: r.verdict.approved,
-        by: match r.by {
-            Reviewer::Agent(term) => term_string(term),
-            Reviewer::Person => "person".to_owned(),
-        },
-        summary: &r.verdict.summary,
-        findings: r.verdict.findings.iter().map(finding).collect(),
-        more: r.more,
-        head: &r.head,
-        base: &r.base,
-    }
-}
-
 /// A task, for JSON.
 #[derive(Debug, Serialize)]
 pub struct TaskView<'a> {
@@ -285,9 +165,10 @@ pub struct TaskView<'a> {
     kind: &'a str,
     title: &'a str,
     brief: &'a str,
-    owns: &'a [String],
     read_only: bool,
-    placement: PlacementView<'a>,
+    /// The worker it runs on and no other.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin: Option<WorkerId>,
     verifier: Option<&'a str>,
     metadata: Option<Value>,
     state: &'static str,
@@ -295,8 +176,6 @@ pub struct TaskView<'a> {
     status: Option<&'a str>,
     /// Its terminal.
     term: Option<String>,
-    /// Why its agent went to the worker it runs on, in the ranking's words.
-    placed: Option<&'a str>,
     agent_since_ms: Option<WallMs>,
     agent_ended_ms: Option<WallMs>,
     branch: Option<&'a str>,
@@ -306,12 +185,9 @@ pub struct TaskView<'a> {
     /// Its pull request's own checks, as its forge last said.
     checks: Option<ChecksView<'a>>,
     verified: Option<VerifiedView<'a>>,
-    reviewed: Option<ReviewedView<'a>>,
     /// Its time at work, as on its card.
     active_ms: u64,
     at_work_since_ms: Option<WallMs>,
-    /// Its start is proposed and waits for the person, who starts it from the board.
-    proposed: bool,
     /// Its work was checked and waits for the person's merge.
     ready_to_merge: bool,
     /// The server's automatic give-backs since the person last spoke on it.
@@ -329,17 +205,11 @@ pub struct TaskView<'a> {
 pub struct GiveBacksView {
     count: u8,
     of: u8,
-    reviews: u8,
     held: bool,
 }
 
 const fn give_backs(g: GiveBacks) -> GiveBacksView {
-    GiveBacksView {
-        count: g.count,
-        of: slopty_proto::project::GIVE_BACKS_MAX,
-        reviews: g.reviews,
-        held: g.held,
-    }
+    GiveBacksView { count: g.count, of: slopty_proto::project::GIVE_BACKS_MAX, held: g.held }
 }
 
 /// What a task's work did to the tests, for JSON: the line people read, and the paths.
@@ -375,8 +245,9 @@ pub struct CardView<'a> {
     state: &'static str,
     status: Option<&'a str>,
     term: Option<String>,
-    /// Why its agent went to the worker it runs on.
-    placed: Option<&'a str>,
+    /// The worker it is pinned to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pin: Option<WorkerId>,
     agent_since_ms: Option<WallMs>,
     agent_ended_ms: Option<WallMs>,
     branch: Option<&'a str>,
@@ -385,13 +256,10 @@ pub struct CardView<'a> {
     /// Its pull request's own checks, as its forge last said.
     checks: Option<ChecksView<'a>>,
     verified: Option<VerifiedView<'a>>,
-    reviewed: Option<ReviewedView<'a>>,
     /// Its time at work, idle waits left out: the stretches that ended, and when the one under
     /// way began.
     active_ms: u64,
     at_work_since_ms: Option<WallMs>,
-    /// Its start is proposed and waits for the person.
-    proposed: bool,
     /// Its work was checked and waits for the person's merge.
     ready_to_merge: bool,
     /// The server's automatic give-backs since the person last spoke on it.
@@ -416,7 +284,7 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         state: state_word(t.state),
         status: t.status.as_deref(),
         term: t.assignment.as_ref().map(|a| term_string(a.term)),
-        placed: t.assignment.as_ref().and_then(|a| a.placed.as_ref()).map(|p| p.why.as_str()),
+        pin: t.pin,
         agent_since_ms: t.assignment.as_ref().map(|a| a.since_ms),
         agent_ended_ms: t.assignment.as_ref().and_then(|a| a.ended_ms),
         branch: t.branch.as_deref(),
@@ -424,10 +292,8 @@ pub fn card(t: &TaskCard) -> CardView<'_> {
         pr: t.pr.as_ref().map(pr),
         checks: t.checks.as_ref().map(checks),
         verified: t.verified.as_ref().map(verified),
-        reviewed: t.reviewed.as_ref().map(reviewed),
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
-        proposed: t.proposed.is_some(),
         ready_to_merge: t.ready_to_merge(),
         give_backs: give_backs(t.give_backs),
         tests: t.tests.as_ref().map(tests),
@@ -459,15 +325,13 @@ pub fn task(t: &Task) -> TaskView<'_> {
         kind: &t.kind,
         title: &t.title,
         brief: &t.brief,
-        owns: &t.owns,
         read_only: t.read_only,
-        placement: placement(&t.placement),
+        pin: t.pin,
         verifier: t.verifier.as_deref(),
         metadata: metadata(t.metadata.as_deref()),
         state: state_word(t.state),
         status: t.status.as_deref(),
         term: t.assignment.as_ref().map(|a| term_string(a.term)),
-        placed: t.assignment.as_ref().and_then(|a| a.placed.as_ref()).map(|p| p.why.as_str()),
         agent_since_ms: t.assignment.as_ref().map(|a| a.since_ms),
         agent_ended_ms: t.assignment.as_ref().and_then(|a| a.ended_ms),
         branch: t.branch.as_deref(),
@@ -476,10 +340,8 @@ pub fn task(t: &Task) -> TaskView<'_> {
         pr: t.pr.as_ref().map(pr),
         checks: t.checks.as_ref().map(checks),
         verified: t.verified.as_ref().map(verified),
-        reviewed: t.reviewed.as_ref().map(reviewed),
         active_ms: t.spent.active_ms,
         at_work_since_ms: t.spent.since_ms,
-        proposed: t.proposal.is_some(),
         ready_to_merge: t.state == TaskState::Done && t.merge.is_none(),
         give_backs: give_backs(t.give_backs),
         tests: t.tests.as_ref().map(tests),
@@ -533,20 +395,10 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
     match what {
         Moment::Created => ("created", "project made".to_owned()),
         Moment::Orchestrator { .. } => ("orchestrator", "orchestrator named".to_owned()),
-        Moment::Limits { limits } => ("limits", format!("limits now {}", limits_text(limits))),
-        Moment::Budget { meter, share_bp } if *share_bp >= 10_000 => {
-            ("budget", format!("budget reached on {meter}: no new work until it is raised"))
-        }
-        Moment::Budget { meter, share_bp } => {
-            ("budget", format!("{}% of the {meter} budget spent", share_bp / 100))
-        }
+        Moment::Limits { limits } => ("limits", format!("limits now {}", limits_text(*limits))),
         Moment::TaskCreated { title } => ("task_created", format!("made: {title}")),
-        Moment::Claimed { paths } => ("claimed", format!("owns {}", paths_text(paths))),
-        Moment::Needs { names } if names.is_empty() => ("needs", "needs nothing".to_owned()),
-        Moment::Needs { names } => ("needs", format!("needs: {}", names.join(", "))),
         Moment::Assigned { spawned: true, .. } => ("assigned", "started for it".to_owned()),
         Moment::Assigned { spawned: false, .. } => ("assigned", "terminal put on it".to_owned()),
-        Moment::Proposed { .. } => ("proposed", "start proposed, waits for the person".to_owned()),
         Moment::State { from, to } => {
             ("state", format!("{} (was {})", state_word(*to), state_word(*from)))
         }
@@ -558,7 +410,6 @@ pub fn moment(what: &Moment) -> (&'static str, String) {
         }
         Moment::Verified(run) => ("verified", verified_text(run)),
         Moment::Checks(checks) => ("checks", checks_text(checks)),
-        Moment::Reviewed(run) => ("reviewed", reviewed_text(run)),
         Moment::AgentGone { .. } => ("agent_gone", "its terminal closed".to_owned()),
         Moment::Note { text } => ("note", text.clone()),
         Moment::Told { text } => ("told", format!("the person told its agent: {text}")),
@@ -632,7 +483,6 @@ fn step_text(step: &TaskStep) -> String {
         StepKind::Home => format!("branch brought to worker {}", step.worker),
         StepKind::Verify => format!("verifier on worker {}", step.worker),
         StepKind::Merge => format!("merge on worker {}", step.worker),
-        StepKind::Review => format!("review on worker {}", step.worker),
         StepKind::Rebase => format!("rebase onto the target on worker {}", step.worker),
     };
     match &step.state {
@@ -641,23 +491,6 @@ fn step_text(step: &TaskStep) -> String {
         StepState::Done { detail } => format!("{what} done: {detail}"),
         StepState::Failed { why } => format!("{what} failed: {why}"),
     }
-}
-
-/// What a review said, by whom and at which commits.
-fn reviewed_text(run: &ReviewRun) -> String {
-    let word = if run.verdict.approved { "approved" } else { "changes asked" };
-    let by = match run.by {
-        Reviewer::Agent(_) => "the reviewer",
-        Reviewer::Person => "the person",
-    };
-    let short = |c: &str| c.get(..7).unwrap_or(c).to_owned();
-    let blocking = run.blocking().count();
-    let found = run.verdict.findings.len().saturating_add(usize::from(run.more));
-    format!(
-        "{word} by {by} at {} over {}: {found} finding(s), {blocking} blocking",
-        short(&run.head),
-        short(&run.base)
-    )
 }
 
 /// What a verifier said, at which commits.
@@ -669,48 +502,18 @@ fn verified_text(run: &VerifierRun) -> String {
     format!("verifier {word} at {at}{exit}: {}", run.summary)
 }
 
-/// A report in a line: its kind, its note's first line, where its work is.
+/// A report in a line: its note's first line, where its work is.
 fn report_text(report: &Report) -> String {
-    let kind = report_word(report.kind);
     let note = report.note.lines().next().unwrap_or_default().trim();
-    let mut text = if note.is_empty() { kind.to_owned() } else { format!("{kind}: {note}") };
+    let mut text = if note.is_empty() { "done".to_owned() } else { format!("done: {note}") };
     if let Some(branch) = &report.branch {
         text = format!("{text} ({branch})");
     }
     text
 }
 
-/// A report kind as the tools spell it.
-#[must_use]
-pub const fn report_word(kind: ReportKind) -> &'static str {
-    match kind {
-        ReportKind::Checkpoint => "checkpoint",
-        ReportKind::NeedsInput => "needs_input",
-        ReportKind::Stuck => "stuck",
-        ReportKind::Done => "done",
-    }
-}
-
-fn limits_text(l: &Limits) -> String {
-    let budget = l.budget.as_ref().map_or_else(String::new, |b| {
-        let caps: Vec<String> =
-            b.0.iter()
-                .map(|(window, cap)| {
-                    format!("{window} {}", slopty_proto::project::Budget::figure(*cap))
-                })
-                .collect();
-        format!(", budget {}", caps.join(", "))
-    });
-    format!(
-        "{} agents per worker, {} in all, {} waiting on you at most, {} entries kept{budget}",
-        l.live_per_worker, l.live_per_project, l.review, l.timeline_kept
-    )
-}
-
-fn paths_text(paths: &[String]) -> String {
-    let shown: Vec<&str> =
-        paths.iter().map(|p| if p.is_empty() { "." } else { p.as_str() }).collect();
-    shown.join(", ")
+fn limits_text(l: Limits) -> String {
+    format!("{} waiting on you at most", l.review)
 }
 
 /// A project's tree, for JSON.
@@ -802,98 +605,6 @@ pub fn task_wait_text(w: &crate::ops::TaskWait) -> String {
     out
 }
 
-/// One rule's verdict on a worker, for JSON.
-#[derive(Debug, Serialize)]
-pub struct ReasonView<'a> {
-    rule: &'a str,
-    held: bool,
-    #[serde(skip_serializing_if = "is_zero")]
-    points: i64,
-    #[serde(skip_serializing_if = "str::is_empty")]
-    detail: &'a str,
-    /// The project's need it comes from, by name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    need: Option<&'a str>,
-}
-
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde's skip_serializing_if passes a reference"
-)]
-const fn is_zero(n: &i64) -> bool {
-    *n == 0
-}
-
-/// A worker ranked for a placement, for JSON.
-#[derive(Debug, Serialize)]
-pub struct SuggestionView<'a> {
-    worker: WorkerId,
-    name: &'a str,
-    fits: bool,
-    score: i64,
-    reasons: Vec<ReasonView<'a>>,
-}
-
-/// Workers ranked for a placement, best first, for JSON.
-#[must_use]
-pub fn suggestions(ranked: &[Suggestion]) -> Vec<SuggestionView<'_>> {
-    ranked
-        .iter()
-        .map(|s| SuggestionView {
-            worker: s.worker,
-            name: &s.name,
-            fits: s.fits,
-            score: s.score,
-            reasons: s
-                .reasons
-                .iter()
-                .map(|r| ReasonView {
-                    rule: &r.rule,
-                    held: r.held,
-                    points: r.points,
-                    detail: &r.detail,
-                    need: r.need.as_deref(),
-                })
-                .collect(),
-        })
-        .collect()
-}
-
-/// A project's need as a person reads it: `need Apple work (apps/ios): requires os ==
-/// "macos"`.
-fn need_text(need: &Need) -> String {
-    let paths = if need.paths.is_empty() { "every task".to_owned() } else { need.paths.join(", ") };
-    let mut said = Vec::new();
-    if !need.require.is_empty() {
-        said.push(format!("requires {}", need.require.join(" and ")));
-    }
-    let prefers: Vec<String> =
-        need.prefer.iter().map(|p| format!("{} {:+}", p.expr, p.weight)).collect();
-    if !prefers.is_empty() {
-        said.push(format!("prefers {}", prefers.join(", ")));
-    }
-    format!("need {} ({paths}): {}", need.name, said.join("; "))
-}
-
-/// Workers ranked for a placement, best first, as a person reads them.
-#[must_use]
-pub fn suggestions_text(ranked: &[Suggestion]) -> String {
-    let mut out = String::new();
-    for s in ranked {
-        let fits = if s.fits { "fits" } else { "no" };
-        let _infallible = writeln!(out, "{:<16} {fits:<4} {:>6}", s.name, s.score);
-        for r in &s.reasons {
-            let mark = if r.held { "+" } else { "-" };
-            let points = if r.points == 0 { String::new() } else { format!(" ({:+})", r.points) };
-            let detail =
-                if r.detail.is_empty() { String::new() } else { format!(": {}", r.detail) };
-            let need = r.need.as_ref().map_or_else(String::new, |n| format!(" [{n}]"));
-            let _infallible = writeln!(out, "  {mark} {}{need}{points}{detail}", r.rule);
-        }
-    }
-    out
-}
-
 /// Every project, for JSON.
 #[must_use]
 pub fn projects(list: &[Project]) -> Vec<ProjectView<'_>> {
@@ -935,16 +646,13 @@ pub fn status_text<S: std::hash::BuildHasher>(
         "  {} → {}  verifier: {verifier}  {}",
         p.repo,
         p.target,
-        limits_text(&p.limits)
+        limits_text(p.limits)
     );
-    if let Some(budget) = &p.limits.budget {
-        let _infallible = writeln!(out, "  budget  {}", crate::budget::text(budget, &p.spend));
-    }
     let (b, live) = (&s.bounds, &s.live);
     let _infallible = writeln!(
         out,
-        "  running {} of the project's {}, {} of the fleet's {}",
-        live.project, p.limits.live_per_project, live.fleet, b.live_agents
+        "  running {} for the project, {} of the fleet's {}",
+        live.project, live.fleet, b.live_agents
     );
     match p.orchestrator {
         Some(t) => {
@@ -953,9 +661,6 @@ pub fn status_text<S: std::hash::BuildHasher>(
         None => out.push_str("  orchestrator  none named\n"),
     }
     counts_text(&mut out, s.orchestrator_natives, 2);
-    for need in &p.needs {
-        let _infallible = writeln!(out, "  {}", need_text(need));
-    }
     for s in &p.scripts {
         let _infallible = writeln!(out, "  {}", script_text(s));
     }
@@ -982,8 +687,9 @@ pub fn status_text<S: std::hash::BuildHasher>(
         if let Some(status) = &t.status {
             let _infallible = writeln!(out, "{indent}   {status}");
         }
-        if let Some(why) = t.assignment.as_ref().and_then(|a| a.placed.as_ref()) {
-            let _infallible = writeln!(out, "{indent}   placed: {}", why.why);
+        if let Some(pin) = t.pin {
+            let worker = names.get(&pin).cloned().unwrap_or_else(|| pin.to_string());
+            let _infallible = writeln!(out, "{indent}   runs on {worker}");
         }
         if !t.depends_on.is_empty() {
             let on: Vec<String> = t.depends_on.iter().map(|d| format!("#{d}")).collect();
@@ -1019,16 +725,6 @@ pub fn status_text<S: std::hash::BuildHasher>(
             let head = v.head.get(..8).unwrap_or(&v.head);
             let _infallible = writeln!(out, "{indent}   verifier {word} at {head}: {}", v.summary);
         }
-        if let Some(r) = &t.reviewed {
-            let _infallible = writeln!(out, "{indent}   {}", reviewed_text(r));
-            for f in r.blocking() {
-                let at = f.path.as_deref().map_or_else(String::new, |p| match f.line {
-                    Some(line) => format!("{p}:{line}: "),
-                    None => format!("{p}: "),
-                });
-                let _infallible = writeln!(out, "{indent}     blocks: {at}{}", f.body);
-            }
-        }
         counts_text(&mut out, t.natives, 3);
     }
     if !s.timeline.is_empty() {
@@ -1051,8 +747,7 @@ fn counts_text(out: &mut String, n: NativeCounts, depth: usize) {
     }
 }
 
-/// One node in full as a person reads it: the task's brief, paths and placement, then its
-/// natives.
+/// One node in full as a person reads it: the task's brief, then its natives.
 #[must_use]
 pub fn node_text(n: &NodeDetail) -> String {
     let mut out = String::new();
@@ -1060,9 +755,6 @@ pub fn node_text(n: &NodeDetail) -> String {
         let _infallible = writeln!(out, "#{} {}  {}", t.id.0, state_word(t.state), t.title);
         if !t.brief.is_empty() {
             let _infallible = writeln!(out, "{}", t.brief.trim_end());
-        }
-        if !t.owns.is_empty() {
-            let _infallible = writeln!(out, "owns {}", paths_text(&t.owns));
         }
         if let Some(base) = &t.base {
             let _infallible = writeln!(out, "base {base}");
@@ -1085,55 +777,5 @@ fn natives_text(out: &mut String, natives: &Natives, depth: usize) {
     for t in &natives.tasks {
         let mark = if t.done { "x" } else { " " };
         let _infallible = writeln!(out, "{indent}[{mark}] {}", t.subject);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use slopty_core::WorkerId;
-    use slopty_proto::project::{Need, Preference, Reason, Suggestion};
-
-    /// A need reads as what it covers and what it asks, and a reason a need brought names it,
-    /// in text and in JSON.
-    #[test]
-    fn a_need_and_the_reasons_it_brings_say_its_name() {
-        let apple = Need {
-            name: "Apple work".to_owned(),
-            paths: vec!["apps/ios".to_owned(), "crates/ui".to_owned()],
-            require: vec![r#"os == "macos""#.to_owned(), "has(toolchains.xcode)".to_owned()],
-            prefer: vec![Preference { expr: "cpus".to_owned(), weight: 2 }],
-        };
-        assert_eq!(
-            super::need_text(&apple),
-            r#"need Apple work (apps/ios, crates/ui): requires os == "macos" and has(toolchains.xcode); prefers cpus +2"#
-        );
-        let linux = Need {
-            name: "Linux first".to_owned(),
-            paths: Vec::new(),
-            require: Vec::new(),
-            prefer: vec![Preference { expr: r#"os == "linux""#.to_owned(), weight: 20 }],
-        };
-        assert_eq!(
-            super::need_text(&linux),
-            r#"need Linux first (every task): prefers os == "linux" +20"#
-        );
-
-        let ranked = [Suggestion {
-            worker: WorkerId::nil(),
-            name: "box".to_owned(),
-            fits: true,
-            score: 20,
-            reasons: vec![Reason {
-                rule: r#"os == "linux""#.to_owned(),
-                held: true,
-                points: 20,
-                detail: String::new(),
-                need: Some("Linux first".to_owned()),
-            }],
-        }];
-        let text = super::suggestions_text(&ranked);
-        assert!(text.contains(r#"+ os == "linux" [Linux first] (+20)"#), "{text}");
-        let json = serde_json::to_value(super::suggestions(&ranked)).unwrap();
-        assert_eq!(json[0]["reasons"][0]["need"], "Linux first");
     }
 }

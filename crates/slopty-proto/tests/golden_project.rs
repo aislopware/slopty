@@ -15,11 +15,10 @@ mod golden_project {
         BranchBundle, ErrorCode, Happening, HubEvent, Outcome, Size, TermRef, Verb,
     };
     use slopty_proto::project::{
-        AgentReport, Assignment, Bounds, Budget, Commits, Fact, Facts, GiveBacks, Limits,
-        LimitsChange, Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives,
-        Need, NodeDetail, Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus,
-        ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Script, Spend,
-        Spent, StepKind, StepState, Suggestion, Task, TaskChange, TaskId, TaskLaunch, TaskSpec,
+        AgentReport, Assignment, Bounds, Commits, Fact, Facts, GiveBacks, Limits, LimitsChange,
+        Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives, NodeDetail,
+        Project, ProjectId, ProjectStatus, ProjectUpdate, ProjectsPart, Report, RunOn, Runner,
+        Script, Spent, StepKind, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec,
         TaskState, TaskStep, TestDiff, TimelineEntry, VerifierRun, WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
@@ -66,8 +65,6 @@ mod golden_project {
 
     fn project() -> Project {
         Project {
-            spend: Spend { windows: BTreeMap::from([("five-hour".to_owned(), 3_100)]) },
-            needs: Vec::new(),
             scripts: vec![Script {
                 name: "dev".to_owned(),
                 command: "bun run dev".to_owned(),
@@ -84,24 +81,12 @@ mod golden_project {
             }),
             target: "main".to_owned(),
             verifier: Some("cargo gate".to_owned()),
-            review: Some("A wire change comes with its goldens".to_owned()),
             push: false,
-            ask_to_start: true,
             orchestrator: Some(term()),
             limits: Limits::default(),
             metadata: Some(r#"{"goal":"open"}"#.to_owned()),
             created_ms: at(),
             members: vec![notes_on("studio", "~/notes")],
-        }
-    }
-
-    fn placement() -> Placement {
-        Placement {
-            pin: None,
-            require: vec![r#"os == "linux" && cpus >= 16"#.to_owned()],
-            prefer: vec![Preference { expr: "has(probes.cuda)".to_owned(), weight: 5 }],
-            near: vec![Peer::Task(TaskId(1))],
-            avoid: vec![Peer::Worker(term().worker)],
         }
     }
 
@@ -111,9 +96,8 @@ mod golden_project {
             kind: "build".to_owned(),
             title: "Server store".to_owned(),
             brief: "Keep projects beside workers.json.".to_owned(),
-            owns: vec!["crates/slopty-server".to_owned()],
             read_only: false,
-            placement: placement(),
+            pin: Some(term().worker),
             verifier: Some("cargo nextest run -p slopty-server".to_owned()),
             metadata: Some(r#"{"lane":"server"}"#.to_owned()),
         }
@@ -132,9 +116,8 @@ mod golden_project {
             kind: s.kind,
             title: s.title,
             brief: s.brief,
-            owns: s.owns,
             read_only: s.read_only,
-            placement: s.placement,
+            pin: s.pin,
             verifier: s.verifier,
             metadata: s.metadata,
             state: TaskState::Blocked,
@@ -145,11 +128,7 @@ mod golden_project {
                 since_ms: at(),
                 ended_ms: None,
                 conversation: Some("0199a1b1-c3d4-7000-8000-00000000c0de".to_owned()),
-                placed: Some(Placed {
-                    pinned: false,
-                    score: 110,
-                    why: "near #2 +100, os == \"macos\" +10".to_owned(),
-                }),
+                spawned: true,
             }),
             branch: Some("slopty/slopty/3".to_owned()),
             worktree: Some("/w/slopty-3".to_owned()),
@@ -161,7 +140,6 @@ mod golden_project {
                 merge_request: false,
             }),
             verified: Some(run(false, "clippy: 2 errors")),
-            reviewed: None,
             merge: Some(Merge::Queued { since_ms: at() }),
             created_ms: at(),
             updated_ms: WallMs::from_millis(1_790_000_005_000),
@@ -176,8 +154,7 @@ mod golden_project {
                 term: Some(term()),
                 commits: None,
             }),
-            proposal: None,
-            give_backs: GiveBacks { count: 2, reviews: 1, held: false },
+            give_backs: GiveBacks { count: 2, held: false },
             tests: Some(TestDiff {
                 head: commit('a'),
                 deleted: vec!["crates/slopty-server/tests/store.rs".to_owned()],
@@ -360,13 +337,7 @@ mod golden_project {
 
     #[test]
     fn project_verbs() {
-        let limits = LimitsChange {
-            live_per_worker: Some(2),
-            live_per_project: Some(6),
-            review: Some(4),
-            timeline_kept: Some(1024),
-            budget: Some(Budget(BTreeMap::from([("five-hour".to_owned(), 8_000)]))),
-        };
+        let limits = LimitsChange { review: Some(4) };
         snap(
             "project_create",
             &request(Verb::ProjectCreate {
@@ -375,9 +346,7 @@ mod golden_project {
                 repo: "~/src/slopty".to_owned(),
                 target: "main".to_owned(),
                 verifier: Some("cargo gate".to_owned()),
-                review: Some("A wire change comes with its goldens".to_owned()),
                 push: false,
-                ask_to_start: false,
                 orchestrator: Some(term()),
                 limits,
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
@@ -390,10 +359,8 @@ mod golden_project {
                 project: project_id(),
                 orchestrator: None,
                 verifier: None,
-                review: Some(String::new()),
                 push: Some(true),
-                ask_to_start: None,
-                limits: LimitsChange { review: Some(2), ..LimitsChange::default() },
+                limits: LimitsChange { review: Some(2) },
                 metadata: None,
                 members: Some(vec![notes_on("studio", "~/notes"), notes_on("devbox", "/w/notes")]),
             }),
@@ -422,12 +389,10 @@ mod golden_project {
             state: Some(TaskState::Done),
             status: Some("gate passed; ready".to_owned()),
             branch: Some("slopty/slopty/3".to_owned()),
-            claim: vec!["docs/decisions/projects.md".to_owned()],
             verified: Some(run(true, "gate passed")),
             base: Some(commit('b')),
             note: Some("ready".to_owned()),
             depends_on: Some(vec![TaskId(1), TaskId(2)]),
-            placement: Some(placement()),
             run_on: Some(RunOn::Worker(term().worker)),
             verifier: Some(String::new()),
             metadata: Some("{}".to_owned()),
@@ -549,33 +514,9 @@ mod golden_project {
             since_ms: at(),
             ended_ms: None,
             conversation: None,
-            placed: None,
+            spawned: true,
         };
         snap("assignment_thread", &seated);
-        let apple = Need {
-            name: "Apple work".to_owned(),
-            paths: vec!["apps/slopty-ios".to_owned()],
-            require: vec!["os == \"macos\"".to_owned()],
-            prefer: Vec::new(),
-        };
-        let linux = Need {
-            name: "Linux first".to_owned(),
-            paths: Vec::new(),
-            require: Vec::new(),
-            prefer: vec![Preference { expr: "os == \"linux\"".to_owned(), weight: 20 }],
-        };
-        snap(
-            "project_needs",
-            &request(Verb::ProjectNeeds { project: project_id(), needs: vec![apple, linux] }),
-        );
-        snap(
-            "placement_suggest",
-            &request(Verb::PlacementSuggest {
-                project: Some(project_id()),
-                task: Some(TaskId(3)),
-                placement: Some(placement()),
-            }),
-        );
         snap("worker_facts", &request(Verb::WorkerFacts { worker: Some(term().worker) }));
         snap("task_get", &request(Verb::TaskGet { project: project_id(), task: Some(TaskId(3)) }));
         snap("working_on", &request(Verb::WorkingOn { session: term().session }));
@@ -709,48 +650,9 @@ mod golden_project {
         snap("project_delete", &request(Verb::ProjectDelete { project: project_id() }));
     }
 
-    /// A start the orchestrator proposed, as the store keeps it and a card shows it, and the
-    /// person starting it on a worker of their choice.
-    #[test]
-    fn proposed_start() {
-        use slopty_proto::project::{Proposal, Proposed};
-        let launch = TaskLaunch {
-            pin: None,
-            cwd: String::new(),
-            run: Runner::Claude { prompt: Some("Read your brief.".to_owned()), args: Vec::new() },
-            env: Vec::new(),
-            size: None,
-            ignore_dependencies: false,
-        };
-        let proposed = Proposed {
-            since_ms: at(),
-            runs: "claude".to_owned(),
-            on: Some(term().worker),
-            why: r#"os == "macos""#.to_owned(),
-        };
-        let task = Task {
-            state: TaskState::Planned,
-            assignment: None,
-            step: None,
-            merge: None,
-            verified: None,
-            proposal: Some(Proposal { launch, proposed }),
-            ..task()
-        };
-        snap("task_proposed", &task);
-        snap("task_proposed_card", &task.card(&Natives::default()));
-        snap(
-            "task_start",
-            &request(Verb::TaskStart {
-                project: project_id(),
-                task: TaskId(3),
-                pin: Some(term().worker),
-            }),
-        );
-    }
-
     /// The person's next step for a task's agent, as they said it, on the timeline; and a
-    /// rebase that conflicts, the step that gives the work back to be resolved.
+    /// rebase that conflicts, the step that gives the work back to be resolved; and a
+    /// verification that names the commits it reads.
     #[test]
     fn told_and_conflicted() {
         snap(
@@ -777,18 +679,18 @@ mod golden_project {
             commits: None,
         };
         snap("step_rebase_failed", &step);
-        let reading = TaskStep {
-            kind: StepKind::Review,
+        let verifying = TaskStep {
+            kind: StepKind::Verify,
             worker: term().worker,
             state: StepState::Running {
-                phase: "Reading aaaaaaa over bbbbbbb".to_owned(),
+                phase: "Verifying aaaaaaa over bbbbbbb".to_owned(),
                 percent: None,
             },
             since_ms: at(),
             term: Some(term()),
             commits: Some(Commits { head: commit('a'), base: commit('b') }),
         };
-        snap("step_review_commits", &reading);
+        snap("step_verify_commits", &verifying);
     }
 
     /// A task's pull request's own checks: the read the server asks of the worker its agent
@@ -823,69 +725,6 @@ mod golden_project {
             what: Moment::Checks(checks),
         };
         snap("moment_checks", &entry);
-    }
-
-    /// A task's fresh-context review: the checkout the reviewer reads, its verdict, and the
-    /// card that carries it.
-    #[test]
-    fn review() {
-        use slopty_proto::project::{Finding, ReviewRun, ReviewVerdict, Reviewer};
-        snap(
-            "review_checkout",
-            &request(Verb::ReviewCheckout {
-                worker: term().worker,
-                repo: "/w/slopty".to_owned(),
-                worktree: "slopty-review-3".to_owned(),
-                head: "slopty/slopty/3".to_owned(),
-                target: "main".to_owned(),
-            }),
-        );
-        snap(
-            "checked_out",
-            &reply(Outcome::CheckedOut {
-                path: "/home/c/slopty/verify/slopty-review-3".to_owned(),
-                head: commit('a'),
-                base: commit('b'),
-            }),
-        );
-        let verdict = ReviewVerdict {
-            approved: false,
-            summary: "The wire change has no golden.".to_owned(),
-            findings: vec![
-                Finding {
-                    path: Some("crates/slopty-proto/src/project.rs".to_owned()),
-                    line: Some(431),
-                    severity: "blocker".to_owned(),
-                    blocking: true,
-                    body: "A new field on Project with no golden for it.".to_owned(),
-                },
-                Finding {
-                    path: None,
-                    line: None,
-                    severity: "nit".to_owned(),
-                    blocking: false,
-                    body: "The doc says 'verifier' where it means the reviewer.".to_owned(),
-                },
-            ],
-        };
-        snap(
-            "task_review",
-            &request(Verb::TaskReview {
-                project: project_id(),
-                task: TaskId(3),
-                verdict: verdict.clone(),
-            }),
-        );
-        let run = ReviewRun {
-            verdict,
-            more: 1,
-            head: commit('a'),
-            base: commit('b'),
-            by: Reviewer::Agent(term()),
-            took_ms: 95_000,
-        };
-        let card = Task { reviewed: Some(run), state: TaskState::Waiting, ..task() };
-        snap("task_reviewed_card", &card.card(&Natives::default()));
     }
 
     /// What the server asks of workers for a task around its agent: a clone, a branch
@@ -950,44 +789,6 @@ mod golden_project {
         snap("project_reply_status", &reply(Outcome::Project(Box::new(status(timeline, 10)))));
         snap("project_reply_list", &reply(Outcome::Projects(vec![project()])));
         snap("project_reply_task", &reply(Outcome::Task(Box::new(task()))));
-        let ranked = vec![
-            Suggestion {
-                worker: term().worker,
-                name: "box".to_owned(),
-                fits: true,
-                score: 105,
-                reasons: vec![
-                    Reason {
-                        need: None,
-                        rule: "online".to_owned(),
-                        held: true,
-                        points: 0,
-                        detail: String::new(),
-                    },
-                    Reason {
-                        need: Some("GPU work".to_owned()),
-                        rule: "has(probes.cuda)".to_owned(),
-                        held: true,
-                        points: 5,
-                        detail: String::new(),
-                    },
-                ],
-            },
-            Suggestion {
-                worker: WorkerId::from_uuid(Uuid::from_u128(2)),
-                name: "studio".to_owned(),
-                fits: false,
-                score: 0,
-                reasons: vec![Reason {
-                    need: None,
-                    rule: r#"os == "linux" && cpus >= 16"#.to_owned(),
-                    held: false,
-                    points: 0,
-                    detail: "false here".to_owned(),
-                }],
-            },
-        ];
-        snap("project_reply_suggestions", &reply(Outcome::Suggestions(ranked)));
         snap(
             "project_reply_facts",
             &reply(Outcome::Facts(vec![WorkerFacts { worker: term().worker, facts: facts() }])),
@@ -1019,7 +820,6 @@ mod golden_project {
 
     fn report() -> Report {
         Report {
-            kind: ReportKind::Done,
             note: "Store keeps a log; gate passed.".to_owned(),
             artifacts: vec!["docs/decisions/projects.md".to_owned()],
             branch: Some("slopty/slopty/3".to_owned()),
@@ -1048,9 +848,7 @@ mod golden_project {
             Moment::Created,
             Moment::Orchestrator { term: term() },
             Moment::Limits { limits: Limits::default() },
-            Moment::Budget { meter: "five-hour".to_owned(), share_bp: 10_000 },
             Moment::TaskCreated { title: "Server store".to_owned() },
-            Moment::Claimed { paths: vec!["crates/slopty-server".to_owned()] },
             Moment::Assigned { term: term(), spawned: false },
             Moment::State { from: TaskState::Planned, to: TaskState::Running },
             Moment::Branch { branch: Some("slopty/slopty/3".to_owned()), pr: Some(42) },
@@ -1059,7 +857,6 @@ mod golden_project {
             Moment::Reported { report: report() },
             Moment::Delivered { term: term(), reports: 3 },
             Moment::Note { text: "ready".to_owned() },
-            Moment::Needs { names: vec!["Apple work".to_owned()] },
             Moment::Step(TaskStep {
                 kind: StepKind::Clone,
                 worker: term().worker,

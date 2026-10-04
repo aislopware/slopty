@@ -110,7 +110,7 @@ pub enum VerbCmd {
         #[command(subcommand)]
         cmd: Box<crate::projects::ProjectCmd>,
     },
-    /// A project's tasks: make, claim paths, update, and start their agents.
+    /// A project's tasks: make, update, and start their agents.
     Task {
         #[command(subcommand)]
         cmd: Box<crate::projects::TaskCmd>,

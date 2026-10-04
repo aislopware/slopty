@@ -370,12 +370,10 @@ mod tests {
                 title: "Projects".to_owned(),
                 repo: "~/src/slopty".to_owned(),
                 target: "main".to_owned(),
-                review: None,
                 verifier: Some("cargo gate".to_owned()),
                 push: false,
-                ask_to_start: false,
                 orchestrator: None,
-                limits: LimitsChange { live_per_worker: Some(2), ..LimitsChange::default() },
+                limits: LimitsChange { review: Some(2) },
                 metadata: Some(r#"{"goal":"open"}"#.to_owned()),
                 members: Vec::new(),
             })
@@ -384,7 +382,6 @@ mod tests {
         let spec = TaskSpec {
             title: "Store".to_owned(),
             brief: "Keep it.".to_owned(),
-            owns: vec!["crates/slopty-server".to_owned()],
             ..TaskSpec::default()
         };
         let task = Verb::TaskCreate { project: id.clone(), spec: Box::new(spec) };
@@ -488,10 +485,8 @@ mod tests {
             title: "Projects".to_owned(),
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
-            review: None,
             verifier: None,
             push: false,
-            ask_to_start: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,

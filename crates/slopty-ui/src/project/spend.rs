@@ -10,7 +10,6 @@
 use std::collections::HashMap;
 
 use slopty_core::{SessionId, WallMs};
-use slopty_proto::project::Budget;
 use slopty_proto::thread::{Limit, Meters};
 
 use super::model::{Board, Node};
@@ -124,31 +123,8 @@ impl Board {
                 }
             }
         }
-        for (name, used_bp) in &self.project.spend.windows {
-            match limits.iter_mut().find(|l| l.name == *name) {
-                Some(held) => held.used_bp = held.used_bp.max(*used_bp),
-                None => {
-                    limits.push(Limit { name: name.clone(), used_bp: *used_bp, resets_ms: None });
-                }
-            }
-        }
         spend.limits = limits;
         spend
-    }
-
-    /// What says the project's agents spent a cap of its budget, while they have, by the
-    /// server's tally: no task starts until the person raises it.
-    #[must_use]
-    pub fn over_budget(&self) -> Option<String> {
-        let (budget, spend) = (self.project.limits.budget.as_ref()?, &self.project.spend);
-        let meter = budget.reached(spend)?;
-        let cap = Budget::figure(*budget.0.get(&meter)?);
-        let used = spend.windows.get(&meter).copied().map_or(0, u64::from);
-        Some(format!(
-            "At {} of the {}, its budget {cap}: no task starts until you raise it",
-            Budget::figure(used),
-            meter_words(&meter)
-        ))
     }
 }
 
@@ -169,24 +145,6 @@ pub fn worked(ms: u64) -> String {
         0 => "under 1m".to_owned(),
         1..60 => format!("{mins}m"),
         _ => crate::kit::duration(std::time::Duration::from_secs(mins.saturating_mul(60))),
-    }
-}
-
-/// A budget's meter in words: a plan window by its name ("five-hour").
-#[must_use]
-pub fn meter_words(meter: &str) -> String {
-    format!("{} window", meter.replace(['-', '_'], " "))
-}
-
-/// A budget moment in words: how much of a cap is spent, or that it was reached and no new work
-/// starts until the person raises it.
-#[must_use]
-pub fn budget_line(meter: &str, share_bp: u64) -> String {
-    let what = meter_words(meter);
-    if share_bp >= 10_000 {
-        format!("Reached its {what} budget: no new work starts until it is raised")
-    } else {
-        format!("Spent {}% of its {what} budget", share_bp / 100)
     }
 }
 

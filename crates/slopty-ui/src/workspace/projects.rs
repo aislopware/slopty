@@ -17,8 +17,8 @@ use slopty_proto::agent::AgentStatus;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::orchestration::{Outcome, TermRef, Verb};
 use slopty_proto::project::{
-    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, ReviewVerdict, RunOn, TaskChange, TaskId,
-    TaskState, TimelineEntry,
+    LimitsChange, ProjectId, ProjectUpdate, ProjectsPart, RunOn, TaskChange, TaskId, TaskState,
+    TimelineEntry,
 };
 use slopty_proto::thread::AgentId;
 
@@ -46,8 +46,6 @@ pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project the
 const RECAP_PAGES: usize = 8;
 /// What a project's orchestrator's terminal is called.
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
-/// What the person says approving a task's work from the board.
-pub(crate) const APPROVED_HERE: &str = "Approved by the person";
 /// What the timeline says of a task the person cancelled from the board.
 pub(crate) const CANCELLED: &str = "Cancelled by the person";
 /// What "Start a project here" and "Make this agent … orchestrator" say in a plain shell.
@@ -126,31 +124,27 @@ pub const fn worker_key(id: WorkerId) -> WorkerKey {
     WorkerKey::new(id.as_uuid().as_u128())
 }
 
-/// The person's change to `project`'s pushing or its asking before each start.
-fn set_project(project: &ProjectId, push: Option<bool>, ask_to_start: Option<bool>) -> Verb {
+/// The person's change to `project`'s pushing.
+fn set_push(project: &ProjectId, push: bool) -> Verb {
     Verb::ProjectSet {
         project: project.clone(),
         orchestrator: None,
         verifier: None,
-        review: None,
-        push,
-        ask_to_start,
+        push: Some(push),
         limits: LimitsChange::default(),
         metadata: None,
         members: None,
     }
 }
 
-/// The person's change to how `project`'s work is checked: its verifier command and the
-/// reviewer's brief, each empty for none.
-fn set_checks(project: &ProjectId, verifier: String, review: String) -> Verb {
+/// The person's change to how `project`'s work is checked: its verifier command, empty for
+/// none.
+fn set_checks(project: &ProjectId, verifier: String) -> Verb {
     Verb::ProjectSet {
         project: project.clone(),
         orchestrator: None,
         verifier: Some(verifier),
-        review: Some(review),
         push: None,
-        ask_to_start: None,
         limits: LimitsChange::default(),
         metadata: None,
         members: None,
@@ -357,7 +351,7 @@ impl WorkspaceView {
         self.show_board(session, true, cx);
     }
 
-    /// A board asked for a terminal the server runs for a task, a verifier's or a reviewer's:
+    /// A board asked for a terminal the server runs for a task, its verifier's:
     /// its tile, focused, or `gone` when there is none.
     fn open_output(&mut self, session: SessionId, gone: &str, cx: &mut Context<Self>) {
         if self.tile_of_session(session).is_none() {
@@ -529,9 +523,7 @@ impl WorkspaceView {
             members: None,
             orchestrator: Some(TermRef { worker, session }),
             verifier: None,
-            review: None,
             push: None,
-            ask_to_start: None,
             limits: LimitsChange::default(),
             metadata: None,
         };
@@ -618,9 +610,8 @@ impl WorkspaceView {
                 let orchestrator = b.project.orchestrator.map(|t| t.worker);
                 let tasks = b.tasks.values().flat_map(|c| {
                     let ran = c.assignment.as_ref().map(|a| a.term.worker);
-                    let proposed = c.proposed.as_ref().and_then(|p| p.on);
                     let step = c.step.as_ref().map(|s| s.worker);
-                    [ran, c.pin, proposed, step].into_iter().flatten()
+                    [ran, c.pin, step].into_iter().flatten()
                 });
                 orchestrator.into_iter().chain(tasks).collect::<Vec<_>>()
             })
@@ -797,37 +788,13 @@ impl WorkspaceView {
                 ProjectEvent::Output(term) => {
                     this.open_output(term.session, "The verifier's terminal has closed", cx);
                 }
-                ProjectEvent::Reviewer(term) => {
-                    this.open_output(term.session, "The reviewer's session has closed", cx);
-                }
                 ProjectEvent::Act(task, action) => this.act_on_task(&asked, *task, *action, cx),
-                ProjectEvent::SetChecks { verifier, review } => {
-                    let verb = set_checks(&asked, verifier.clone(), review.clone());
-                    this.send_to_server(verb, |_, _| (), cx);
+                ProjectEvent::SetChecks { verifier } => {
+                    this.send_to_server(set_checks(&asked, verifier.clone()), |_, _| (), cx);
                 }
                 ProjectEvent::SetPush(push) => {
-                    this.send_to_server(set_project(&asked, Some(*push), None), |_, _| (), cx);
+                    this.send_to_server(set_push(&asked, *push), |_, _| (), cx);
                 }
-                ProjectEvent::SetAsk(ask) => {
-                    this.send_to_server(set_project(&asked, None, Some(*ask)), |_, _| (), cx);
-                }
-                ProjectEvent::SetBudget(budget) => {
-                    let limits =
-                        LimitsChange { budget: Some(budget.clone()), ..LimitsChange::default() };
-                    let verb = Verb::ProjectSet {
-                        project: asked.clone(),
-                        orchestrator: None,
-                        review: None,
-                        verifier: None,
-                        push: None,
-                        ask_to_start: None,
-                        limits,
-                        metadata: None,
-                        members: None,
-                    };
-                    this.send_to_server(verb, |_, _| (), cx);
-                }
-                ProjectEvent::StartAll => this.start_all(&asked, cx),
                 ProjectEvent::Delete => {
                     this.send_to_server(
                         Verb::ProjectDelete { project: asked.clone() },
@@ -855,8 +822,8 @@ impl WorkspaceView {
     }
 
     /// A board's action on a task, as the person's word to the server: a merge and a retry
-    /// both put the task in the merge queue, which checks it afresh; an approval stands over
-    /// the reviewer's; a next step is said to the task's agent, as the person. A cancel gives
+    /// both put the task in the merge queue, which checks it afresh; a next step is said to the
+    /// task's agent, as the person. A cancel gives
     /// the task up with the person's word on the timeline, and a stop ends its agent's
     /// terminal, whose session its agent can take up again.
     fn act_on_task(
@@ -870,17 +837,7 @@ impl WorkspaceView {
         let verb = match action {
             TaskAction::Merge | TaskAction::Retry => Verb::TaskMerge { project, task },
             TaskAction::PushAgain => Verb::TaskPush { project, task },
-            TaskAction::Approve => Verb::TaskReview {
-                project,
-                task,
-                verdict: ReviewVerdict {
-                    approved: true,
-                    summary: APPROVED_HERE.to_owned(),
-                    findings: Vec::new(),
-                },
-            },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
-            TaskAction::Start => Verb::TaskStart { project, task, pin: None },
             TaskAction::Cancel => {
                 let change = TaskChange {
                     state: Some(TaskState::Failed),
@@ -942,20 +899,16 @@ impl WorkspaceView {
         }
     }
 
-    /// Open the "Run on" picker on `task`, and ask the server to rank the workers for it.
+    /// Open the "Run on" picker on `task`, and ask the server for the workers' facts.
     fn open_run_on(&mut self, project: &ProjectId, task: TaskId, cx: &mut Context<Self>) {
-        let picker = RunOnPicker { task, ranked: None };
+        let picker = RunOnPicker { task, workers: None };
         self.projects.run_on.insert(project.clone(), picker);
         self.projects_moved(cx);
-        let verb = Verb::PlacementSuggest {
-            project: Some(project.clone()),
-            task: Some(task),
-            placement: None,
-        };
+        let verb = Verb::WorkerFacts { worker: None };
         let asked = project.clone();
         self.ask_server(verb, cx, move |this, outcome, cx| {
-            let ranked = match outcome {
-                Outcome::Suggestions(ranked) => ranked,
+            let workers = match outcome {
+                Outcome::Facts(workers) => workers,
                 Outcome::Error { message, .. } => {
                     this.projects.run_on.remove(&asked);
                     this.show_notice(message, cx);
@@ -965,7 +918,7 @@ impl WorkspaceView {
                 _ => return,
             };
             if let Some(picker) = this.projects.run_on.get_mut(&asked).filter(|p| p.task == task) {
-                picker.ranked = Some(ranked);
+                picker.workers = Some(workers);
                 this.projects_moved(cx);
             }
         });
@@ -981,34 +934,9 @@ impl WorkspaceView {
     ) {
         self.projects.run_on.remove(project);
         self.projects_moved(cx);
-        let proposed = self
-            .projects
-            .mirror
-            .get(project)
-            .and_then(|b| b.tasks.get(&task))
-            .is_some_and(|c| c.proposed.is_some());
-        // A proposed task starts where the person chose; any other is pinned there for its
-        // start to come.
-        let verb = if proposed {
-            let pin = match run_on {
-                RunOn::Worker(worker) => Some(worker),
-                RunOn::Anywhere => None,
-            };
-            Verb::TaskStart { project: project.clone(), task, pin }
-        } else {
-            let change = TaskChange { run_on: Some(run_on), ..TaskChange::default() };
-            Verb::TaskUpdate { project: project.clone(), task, change: Box::new(change) }
-        };
+        let change = TaskChange { run_on: Some(run_on), ..TaskChange::default() };
+        let verb = Verb::TaskUpdate { project: project.clone(), task, change: Box::new(change) };
         self.send_to_server(verb, |_, _| (), cx);
-    }
-
-    /// Start every task of `project` whose start is proposed, each where the server places it.
-    fn start_all(&mut self, project: &ProjectId, cx: &mut Context<Self>) {
-        let proposed = self.projects.mirror.get(project).map(|b| b.proposed()).unwrap_or_default();
-        for task in proposed {
-            let verb = Verb::TaskStart { project: project.clone(), task, pin: None };
-            self.send_to_server(verb, |_, _| (), cx);
-        }
     }
 
     /// Ask the server how the workers are doing, for the machines lens: one question at a
@@ -1145,11 +1073,7 @@ impl WorkspaceView {
             repo: new.repo,
             target,
             verifier: new.verifier,
-            review: None,
             push: new.push,
-            // The person directs from the board, so a project made there asks before each
-            // task starts.
-            ask_to_start: true,
             orchestrator: Some(term),
             limits: LimitsChange::default(),
             metadata: None,

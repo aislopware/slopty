@@ -21,11 +21,6 @@ fn projects(verifier: Option<&str>) -> Projects {
 
 /// [`projects`], with every change it made kept in `log` as the store keeps them.
 fn logged(verifier: Option<&str>, log: &mut Vec<Change>) -> Projects {
-    reviewed(verifier, None, log)
-}
-
-/// [`logged`], with a reviewer's brief when there is one.
-fn reviewed(verifier: Option<&str>, review: Option<&str>, log: &mut Vec<Change>) -> Projects {
     let mut p = Projects::default();
     let none = HashSet::new();
     let running = Running { terminals: &none, agents: &none, starting: &[] };
@@ -34,10 +29,8 @@ fn reviewed(verifier: Option<&str>, review: Option<&str>, log: &mut Vec<Change>)
         title: "Demo".to_owned(),
         repo: "demo".to_owned(),
         target: "main".to_owned(),
-        review: review.map(str::to_owned),
         verifier: verifier.map(str::to_owned),
         push: false,
-        ask_to_start: false,
         orchestrator: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),
         limits: LimitsChange::default(),
         metadata: None,
@@ -171,84 +164,6 @@ fn the_person_asks_for_a_merge_and_the_queue_takes_only_what_is_done() {
     let spec = TaskSpec { title: "Look".to_owned(), read_only: true, ..TaskSpec::default() };
     let look = bare.create_task(&id(), spec, at(8)).unwrap().0.id;
     assert!(bare.ask_merge(&id(), look, at(9)).is_err(), "a reader has nothing to merge");
-}
-
-/// With a reviewer asked for, a task's verifier passing leaves it to be read next, at once
-/// for a task with no verifier. A reviewer at work holds only its own task, and the lane
-/// verifies the next beside it. A review under way when the server stopped holds its task
-/// until its worker is back to take it up, never started again on its own. A review keeps at
-/// most a card's worth:
-/// what blocks first, the rest counted.
-#[test]
-fn a_reviewer_reads_each_task_after_its_verifier_and_holds_only_its_own() {
-    use slopty_proto::project::{FINDINGS_MAX, Finding, ReviewRun, ReviewVerdict, Reviewer};
-    let mut log = Vec::new();
-    let mut p = reviewed(Some("cargo gate"), Some("goldens"), &mut log);
-    let a = task_logged(&mut p, "A", &mut log);
-    let b = task_logged(&mut p, "B", &mut log);
-    log.extend(p.advance(&id(), a, verifying(), at(1)).unwrap().1);
-    assert_eq!(p.next_job(&id()), Some(Job::Verify(a)));
-    let pass = VerifierRun {
-        passed: true,
-        summary: String::new(),
-        head: "a".repeat(40),
-        base: "b".repeat(40),
-        exit: Some(0),
-        took_ms: 1,
-    };
-    let passed = Advance { verified: Some(pass), ..Advance::default() };
-    log.extend(p.advance(&id(), a, passed, at(2)).unwrap().1);
-    assert_eq!(p.next_job(&id()), Some(Job::Review(a)), "read once verified");
-    let reading = TaskStep {
-        kind: StepKind::Review,
-        worker: WorkerId::new(),
-        state: StepState::Running { phase: "Reading".to_owned(), percent: None },
-        since_ms: at(3),
-        term: Some(TermRef { worker: WorkerId::new(), session: SessionId::new() }),
-        commits: None,
-    };
-    let at_work = Advance { step: Some(reading), ..Advance::default() };
-    log.extend(p.advance(&id(), a, at_work, at(3)).unwrap().1);
-    assert_eq!(p.next_job(&id()), None, "nothing for the lane while it reads");
-    log.extend(p.advance(&id(), b, verifying(), at(4)).unwrap().1);
-    assert_eq!(p.next_job(&id()), Some(Job::Verify(b)), "the lane goes on beside it");
-
-    let mut replayed = ProjectsFile::default();
-    for change in log.iter().filter(|c| c.durable) {
-        replayed.apply(&Keep::Project(Box::new(change.kept.clone())));
-    }
-    let back = Projects::restore(replayed);
-    let step = back.task(&id(), a).unwrap().step.clone().unwrap();
-    let resuming = StepState::Running { phase: RESUMING.to_owned(), percent: None };
-    assert_eq!(step.state, resuming);
-    assert_eq!(back.next_job(&id()), Some(Job::Verify(b)), "held, not read again");
-
-    let mut bare = reviewed(None, Some("goldens"), &mut Vec::new());
-    let c = task(&mut bare, "C");
-    bare.advance(&id(), c, verifying(), at(5)).unwrap();
-    assert_eq!(bare.next_job(&id()), Some(Job::Review(c)), "nothing to verify first");
-
-    let finding = |n: usize, blocking: bool| Finding {
-        path: Some(format!("src/{n}.rs")),
-        line: None,
-        severity: if blocking { "blocker" } else { "nit" }.to_owned(),
-        blocking,
-        body: "x".repeat(2000),
-    };
-    let findings = (0..10).map(|n| finding(n, n >= 8)).collect();
-    let verdict = ReviewVerdict { approved: false, summary: "y".repeat(5000), findings };
-    let run = ReviewRun {
-        verdict,
-        more: 0,
-        head: String::new(),
-        base: String::new(),
-        by: Reviewer::Person,
-        took_ms: 0,
-    };
-    let kept = bounded(run);
-    assert_eq!((kept.verdict.findings.len(), kept.more), (FINDINGS_MAX, 2));
-    assert!(kept.verdict.findings[..2].iter().all(|f| f.blocking), "what blocks is kept first");
-    assert!(kept.approx_bytes() <= ReviewRun::MAX_BYTES, "{}", kept.approx_bytes());
 }
 
 /// Work judged afresh forgets the step that judged the old work, and keeps the trip that

@@ -20,8 +20,6 @@ pub mod recap;
 pub mod spend;
 mod view;
 
-#[cfg(test)]
-pub(crate) use view::BRIEF;
 pub use view::{AgentSeen, CTX, Node, ProjectEvent, ProjectView, Seen, WorkerSeen};
 
 use crate::icons::IconName;
@@ -45,18 +43,10 @@ gpui::actions!(
         ShowMachines,
         /// Choose the worker the task the keyboard stands on runs on.
         RunTaskOn,
-        /// Start the proposed task the keyboard stands on.
-        StartTask,
-        /// Start every task whose start is proposed.
-        StartProposed,
-        /// Hold each task's start for the person, or let the orchestrator start them.
-        ToggleAskToStart,
         /// Ask for the merge of the task the keyboard stands on.
         MergeTask,
         /// Check the task the keyboard stands on again from the start.
         RetryTask,
-        /// Approve the work of the task the keyboard stands on over its reviewer.
-        ApproveTask,
         /// Tell the agent of the task the keyboard stands on to make its verifier pass.
         FixCi,
         /// Tell the agent of the task the keyboard stands on to address its review.
@@ -77,10 +67,8 @@ gpui::actions!(
         DeleteProject,
         /// Put the keyboard on the line to the orchestrator.
         TellOrchestrator,
-        /// Set the project's verifier command and whether a reviewer reads each task's work.
+        /// Set the project's verifier command.
         EditChecks,
-        /// Set what the project's agents may spend.
-        EditBudget,
         /// Make a project of the focused terminal's directory, with that terminal as its
         /// orchestrator.
         StartProject,
@@ -101,7 +89,6 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
     vec![
         Command::new(Scope::Project, "merge_task", MergeTask, &["m"], BOARD),
         Command::new(Scope::Project, "retry_task", RetryTask, &["r"], BOARD),
-        Command::new(Scope::Project, "approve_task", ApproveTask, &["a"], BOARD),
         Command::new(Scope::Project, "fix_ci", FixCi, &[], BOARD),
         Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
         Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
@@ -112,13 +99,9 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
         Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
         Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
-        Command::new(Scope::Project, "start_task", StartTask, &["s"], BOARD),
-        Command::new(Scope::Project, "start_proposed", StartProposed, &[], BOARD),
-        Command::new(Scope::Project, "toggle_ask_to_start", ToggleAskToStart, &[], BOARD),
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
         Command::new(Scope::Project, "edit_checks", EditChecks, &[], BOARD),
-        Command::new(Scope::Project, "edit_budget", EditBudget, &[], BOARD),
         Command::new(Scope::Workspace, "start_project", StartProject, &[], WORKSPACE),
     ]
 }
@@ -133,7 +116,6 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Start a project here", IconName::Workflow, Box::new(StartProject)),
         line("Merge the task", IconName::GitBranch, Box::new(MergeTask)),
         line("Retry the task", IconName::RotateCw, Box::new(RetryTask)),
-        line("Approve the task's work", IconName::Check, Box::new(ApproveTask)),
         line("Tell the task's agent to fix CI", IconName::Wrench, Box::new(FixCi)),
         line(
             "Tell the task's agent to address the comments",
@@ -149,15 +131,11 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Cancel the task", IconName::X, Box::new(CancelTask)),
         line("Stop the task's agent", IconName::Square, Box::new(StopTaskAgent)),
         line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
-        line("Start the task", IconName::CircleDot, Box::new(StartTask)),
-        line("Start every proposed task", IconName::ListChecks, Box::new(StartProposed)),
-        line("Ask before each task starts", IconName::Hand, Box::new(ToggleAskToStart)),
         line("Show the machines", IconName::Server, Box::new(ShowMachines)),
         line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
         line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
         line("Tell the orchestrator\u{2026}", IconName::MessageSquare, Box::new(TellOrchestrator)),
-        line("Verifier and review\u{2026}", IconName::ListChecks, Box::new(EditChecks)),
-        line("Budget\u{2026}", IconName::Activity, Box::new(EditBudget)),
+        line("Verifier\u{2026}", IconName::ListChecks, Box::new(EditChecks)),
         line("Delete the project", IconName::X, Box::new(DeleteProject)),
     ]
 }

@@ -5,17 +5,15 @@
 use std::time::Duration;
 
 use slopty_proto::agent::{AgentBranch, BlockReason, Worktree};
-use slopty_proto::project::{
-    LimitsChange, Moment, Placement, Report, ReportKind, TaskChange, TaskState, TimelineEntry,
-};
+use slopty_proto::project::{Moment, Report, TaskChange, TaskState, TimelineEntry};
 use slopty_proto::server::Os;
 use slopty_proto::thread::Phase;
 use slopty_proto::thread::attention::Seat;
 
 use super::ladder::tests::{Client, asking, row, snapshot};
 use super::project_tests::{
-    agent, announce, answer, claude, create, create_with, new_task, opened, project, refused,
-    request, spawn, status, worker_again, worker_on,
+    agent, announce, answer, claude, create, new_task, opened, project, refused, request, spawn,
+    status, worker_again, worker_on,
 };
 use super::settle::SETTLE_AFTER;
 use super::tests::summary;
@@ -66,7 +64,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     };
     let role = next_batch(&mut rx).await;
     ack(&role);
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let term = TermRef { worker, session: working };
     let assigned = hub.assign_for_test(&project(), task, term);
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
@@ -108,8 +106,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     lease.handle(snapshot(vec![thread]));
     lease.handle(agent(working, AgentStatus::Working));
     let report = Report {
-        kind: ReportKind::NeedsInput,
-        note: "Which crate owns the store?".to_owned(),
+        note: "The store keeps every project.".to_owned(),
         artifacts: Vec::new(),
         branch: None,
         pr: None,
@@ -119,7 +116,7 @@ async fn a_task_s_outcome_reaches_the_orchestrator_without_a_report() {
     assert!(matches!(said, Outcome::Task(_)), "{said:?}");
     lease.handle(agent(working, AgentStatus::Idle));
     let own = next_batch(&mut rx).await;
-    assert!(own.2.contains("task 1: needs input"), "{}", own.2);
+    assert!(own.2.contains("task 1: done\n  The store keeps every project."), "{}", own.2);
     assert!(!own.2.contains("waits on the person"), "taken back: {}", own.2);
     ack(&own);
     assert_eq!(a_batch_within(&mut rx, Duration::from_mins(5)).await, None, "its own word");
@@ -149,7 +146,7 @@ async fn a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator() 
     let delivering = tokio::spawn(Hub::deliver_reports(hub.downgrade()));
     let role = next_batch(&mut rx).await;
     lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session: working });
     assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");
     lease.handle(agent(working, AgentStatus::Working));
@@ -178,9 +175,8 @@ async fn a_turn_that_ended_while_the_server_was_away_reaches_the_orchestrator() 
 async fn a_finished_task_s_agent_stops_counting_and_is_closed_once_it_rests() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
-    let one = LimitsChange { live_per_project: Some(1), ..LimitsChange::default() };
-    create_with(&hub, None, one).await;
-    let task = new_task(&hub, Placement::default()).await;
+    create(&hub, None).await;
+    let task = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let start = request(&mut rx).await;
     let term = opened(&lease, &start);
@@ -229,7 +225,7 @@ async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
     let hub = Hub::new("server".to_owned(), Vec::new());
     let (_worker, lease, mut rx) = worker_on(&hub, "studio", Os::MacOs, Vec::new());
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
     let term = opened(&lease, &request(&mut rx).await);
     assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -293,7 +289,7 @@ async fn a_merged_task_s_worktree_goes_once_its_agent_is_closed() {
         message: "a terminal works in /w/demo/.claude/worktrees/slopty-demo-2".to_owned(),
     };
     for (n, worker_says) in [(1, removed), (2, kept)] {
-        let task = new_task(&hub, Placement::default()).await;
+        let task = new_task(&hub, None).await;
         let asked = spawn(&hub, Verb::TaskSpawn { project: project(), task, launch: claude(&[]) });
         let term = opened(&lease, &request(&mut rx).await);
         assert!(matches!(asked.await.unwrap(), Outcome::Task(_)));
@@ -371,8 +367,7 @@ async fn only_the_orchestrator_tells_a_task_in_its_own_words() {
     create(&hub, Some(TermRef { worker, session: orchestrating })).await;
     let role = next_batch(&mut rx).await;
     lease.handle(ToServer::Report(AgentReport::Delivered { session: role.0, batch: role.1 }));
-    let (first, second) =
-        (new_task(&hub, Placement::default()).await, new_task(&hub, Placement::default()).await);
+    let (first, second) = (new_task(&hub, None).await, new_task(&hub, None).await);
     for (task, session) in [(first, one), (second, two)] {
         let assigned = hub.assign_for_test(&project(), task, TermRef { worker, session });
         assert!(matches!(assigned, Outcome::Task(_)), "{assigned:?}");

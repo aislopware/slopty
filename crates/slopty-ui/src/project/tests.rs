@@ -253,11 +253,6 @@ fn every_moment_reads_as_a_sentence() {
     );
     assert_eq!(say(Moment::Assigned { term, spawned: true }), "Started on studio");
     assert_eq!(
-        say(Moment::Needs { names: vec!["Apple work".into(), "Linux first".into()] }),
-        "Needs: Apple work, Linux first"
-    );
-    assert_eq!(say(Moment::Needs { names: Vec::new() }), "Needs nothing of its workers");
-    assert_eq!(
         say(Moment::State { from: TaskState::Running, to: TaskState::Blocked }),
         "Needs you"
     );
@@ -275,10 +270,6 @@ fn every_moment_reads_as_a_sentence() {
     assert_eq!(
         say(Moment::Branch { branch: Some("slopty/board/1".into()), pr: Some(7) }),
         "On slopty/board/1, pull request #7"
-    );
-    assert_eq!(
-        say(Moment::Claimed { paths: vec!["crates/a".into(), "crates/b".into(), "docs".into()] }),
-        "Owns crates/a and 2 more"
     );
     let step = |kind, state| {
         Moment::Step(slopty_proto::project::TaskStep {
@@ -476,64 +467,11 @@ fn the_queue_runs_in_its_order_and_a_verdict_speaks_while_it_holds() {
     assert!(board(&again).verdict(TaskId(1)).is_none(), "a pass for work since moved on");
 }
 
-/// A reviewer's word speaks as a verifier's does: an approval while its task waits to merge,
-/// changes asked until the work is checked again or merged. Each says the commits it read,
-/// who spoke when it was the person, what it found and how long it read; a finding points at
-/// its path and line as a compiler does.
-#[test]
-fn a_review_speaks_while_it_holds_and_says_what_it_found() {
-    use super::fixtures::{queued, review};
-    use super::model::{finding_place, review_detail, review_line};
-    let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
-    let approved = {
-        let mut c = queued(card(1, "a", TaskState::Done), 5, "1111111");
-        c.reviewed = Some(review(true, "1111111", Some(term)));
-        c
-    };
-    let asked = {
-        let mut c = card(2, "b", TaskState::Waiting);
-        c.reviewed = Some(review(false, "2222222", Some(term)));
-        c
-    };
-    let again = {
-        let mut c = card(3, "c", TaskState::Verifying);
-        c.reviewed = Some(review(false, "3333333", Some(term)));
-        c
-    };
-    let mirror = one(vec![approved, asked, again]);
-    let b = board(&mirror);
-    assert!(b.review(TaskId(1)).is_some_and(|r| r.verdict.approved), "while it waits to merge");
-    assert!(b.review(TaskId(2)).is_some_and(|r| !r.verdict.approved), "until it is read again");
-    assert!(b.review(TaskId(3)).is_none(), "checked again, the old word is gone");
-
-    let asked = review(false, "4a7aa6d0", Some(term));
-    assert_eq!(review_detail(&asked), "4a7aa6d over c08d4c1 \u{b7} 1 blocking of 2 \u{b7} 1m 35s");
-    let mut yours = review(true, "4a7aa6d0", None);
-    yours.verdict.findings.clear();
-    yours.took_ms = 0;
-    assert_eq!(review_detail(&yours), "4a7aa6d over c08d4c1 \u{b7} by you");
-    assert_eq!(
-        review_line(&asked),
-        "Reviewer asked for changes at 4a7aa6d: Project.review has no golden, so a wire change \
-         would pass unseen."
-    );
-    assert_eq!(review_line(&yours), "You approved 4a7aa6d");
-    let places: Vec<Option<String>> = asked.verdict.findings.iter().map(finding_place).collect();
-    assert_eq!(
-        places,
-        [
-            Some("crates/slopty-proto/src/project.rs:431".to_owned()),
-            Some("docs/decisions/projects.md".to_owned())
-        ]
-    );
-}
-
 /// What the person can do to a task from the board: merge what is done and not queued, retry
-/// a step that failed on the way to the target, approve over a reviewer that asked for changes
-/// or said nothing once the verifier passed, and nothing to a task that reads or has merged.
+/// a step that failed on the way to the target, and nothing to a task that reads or has merged.
 #[test]
 fn a_task_offers_what_moves_it_on() {
-    use super::fixtures::{queued, review, run, step};
+    use super::fixtures::{queued, run, step};
     use super::model::TaskAction;
 
     let worker = WorkerId::new();
@@ -543,14 +481,6 @@ fn a_task_offers_what_moves_it_on() {
     let mut verify = card(3, "Its verifier failed", TaskState::Waiting);
     verify.verified = Some(run(false, "3333333"));
     verify.step = Some(step(StepKind::Verify, worker, failed(StepKind::Verify), None));
-    let mut asked = card(4, "Changes asked", TaskState::Waiting);
-    asked.verified = Some(run(true, "4444444"));
-    asked.reviewed = Some(review(false, "4444444", None));
-    let mut silent = card(5, "The reviewer said nothing", TaskState::Waiting);
-    silent.verified = Some(run(true, "5555555"));
-    silent.step = Some(step(StepKind::Review, worker, failed(StepKind::Review), None));
-    let mut unverified = card(6, "Changes asked, not verified", TaskState::Waiting);
-    unverified.reviewed = Some(review(false, "6666666", None));
     let mut reads = card(7, "Reads only", TaskState::Done);
     reads.read_only = true;
     let merged = card(8, "Merged", TaskState::Merged);
@@ -559,65 +489,18 @@ fn a_task_offers_what_moves_it_on() {
     let mut merge = card(10, "Its merge failed", TaskState::Done);
     merge.step = Some(step(StepKind::Merge, worker, failed(StepKind::Merge), None));
     merge.merge = Some(slopty_proto::project::Merge::Queued { since_ms: AT });
-    let mirror =
-        one(vec![done, in_queue, verify, asked, silent, unverified, reads, merged, clone, merge]);
+    let mirror = one(vec![done, in_queue, verify, reads, merged, clone, merge]);
     let b = board(&mirror);
     let of = |n| b.actions(TaskId(n));
     assert_eq!(of(1), [TaskAction::Merge]);
     assert_eq!(of(2), [], "the queue already holds it");
     assert_eq!(of(3), [TaskAction::Retry]);
-    assert_eq!(of(4), [TaskAction::Approve]);
-    assert_eq!(of(5), [TaskAction::Retry, TaskAction::Approve]);
-    assert_eq!(of(6), [], "the project's verifier has not passed it");
     assert_eq!(of(7), [], "a task that only reads has nothing to land");
     assert_eq!(of(8), []);
     assert_eq!(of(9), [], "a clone is the worker's to make again, not the merge queue's");
     assert_eq!(of(10), [TaskAction::Retry]);
     assert_eq!(of(99), [], "no such task");
     assert_eq!(TaskAction::Merge.selector("project-card", TaskId(1)), "project-card-merge-1");
-}
-
-/// A plan's estimate is the median time at work of the project's finished tasks of the kind
-/// when there are any, else of every kind; with none finished there is no estimate. A proposed task
-/// offers its start, and choosing where it starts.
-#[test]
-fn a_plan_is_estimated_from_the_tasks_that_finished() {
-    use slopty_proto::project::{Proposed, Spent};
-
-    use super::model::{Estimate, TaskAction};
-    let term = TermRef { worker: WorkerId::new(), session: SessionId::new() };
-    let worked = |mut c: slopty_proto::project::TaskCard, min: u64| {
-        c.spent = Spent { active_ms: min * 60_000, since_ms: None };
-        c
-    };
-    let mut review = worked(card(3, "Read it", TaskState::Done), 90);
-    review.kind = "review".to_owned();
-    let mut proposed = card(4, "Next", TaskState::Planned);
-    proposed.proposed = Some(Proposed {
-        since_ms: AT,
-        runs: "claude".to_owned(),
-        on: Some(term.worker),
-        why: String::new(),
-    });
-    let tasks = vec![
-        worked(card(1, "Build a", TaskState::Done), 10),
-        worked(card(2, "Build b", TaskState::Merged), 20),
-        review,
-        proposed,
-        worked(card(5, "Still going", TaskState::Running), 500),
-    ];
-    let mut mirror = Projects::default();
-    mirror.apply_part(snapshot(10, vec![status(project("board", None), tasks, Vec::new())]));
-    let b = board(&mirror);
-    let build = b.estimate("build").expect("two builds finished");
-    assert_eq!(build, Estimate { each_ms: 20 * 60_000, from: 2, same_kind: true });
-    assert_eq!(build.line(), "about 20 min of work each, from 2 finished of the kind");
-    let bench = b.estimate("bench").expect("from every kind");
-    assert_eq!((bench.each_ms, bench.from, bench.same_kind), (20 * 60_000, 3, false));
-    assert_eq!(b.proposed(), [TaskId(4)]);
-    assert_eq!(b.actions(TaskId(4)), [TaskAction::Start, TaskAction::RunOn]);
-    let empty = one(Vec::new());
-    assert_eq!(board(&empty).estimate("build"), None);
 }
 
 /// A recap reads only what came after the last look, tells each kind once with its tasks in
@@ -756,15 +639,14 @@ fn time_and_cost_add_up_with_the_orchestrator_apart() {
 }
 
 /// While a task's agent runs, its next step is the person's word to it, first on its row: fix
-/// CI for a failed verifier, address the comments a review or its pull request asked for,
+/// CI for a failed verifier, address the comments its pull request asked for,
 /// resolve the conflicts its rebase met. Checking it again unchanged would fail the same way,
 /// so Retry waits for an agent that is gone. What is said names what failed and what to do.
 #[test]
 fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     use slopty_proto::agent::{PullRequest, Review};
-    use slopty_proto::project::Finding;
 
-    use super::fixtures::{review, run, step};
+    use super::fixtures::{run, step};
     use super::model::TaskAction;
 
     let worker = WorkerId::new();
@@ -773,17 +655,6 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     ci.verified = Some(run(false, "9c1e2f3"));
     ci.step =
         Some(step(StepKind::Verify, worker, StepState::Failed { why: "2 errors".into() }, None));
-    let mut asked = live(2, "Changes asked", TaskState::Waiting);
-    asked.verified = Some(run(true, "4444444"));
-    let mut said = review(false, "4444444", None);
-    said.verdict.findings = vec![Finding {
-        path: Some("crates/a.rs".into()),
-        line: Some(12),
-        severity: "high".into(),
-        blocking: true,
-        body: "This unwraps a None.".into(),
-    }];
-    asked.reviewed = Some(said);
     let mut pr = live(3, "Its pull request", TaskState::Waiting);
     pr.pr = Some(PullRequest {
         number: 9,
@@ -796,11 +667,10 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     conflict.step = Some(step(StepKind::Rebase, worker, why.clone(), None));
     let mut gone = card(5, "Does not rebase, nobody on it", TaskState::Planned);
     gone.step = Some(step(StepKind::Rebase, worker, why, None));
-    let mirror = one(vec![ci, asked, pr, conflict, gone]);
+    let mirror = one(vec![ci, pr, conflict, gone]);
     let b = board(&mirror);
     let of = |n| b.actions(TaskId(n));
     assert_eq!(of(1), [TaskAction::FixCi], "no Retry while an agent can fix it");
-    assert_eq!(of(2), [TaskAction::AddressComments, TaskAction::Approve]);
     assert_eq!(of(3), [TaskAction::AddressComments]);
     assert_eq!(of(4), [TaskAction::ResolveConflicts]);
     assert_eq!(of(5), [TaskAction::Retry, TaskAction::RunOn], "nobody to tell");
@@ -810,8 +680,6 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
     let fix = told(1, TaskAction::FixCi);
     assert!(fix.starts_with("Fix CI. `cargo gate` failed on your work at 9c1e2f3"), "{fix}");
     assert!(fix.ends_with("report done again with task_report."), "{fix}");
-    let address = told(2, TaskAction::AddressComments);
-    assert!(address.contains("- blocking, crates/a.rs:12: This unwraps a None."), "{address}");
     let pull = told(3, TaskAction::AddressComments);
     assert!(pull.contains("Pull request #9 has changes requested"), "{pull}");
     let resolve = told(4, TaskAction::ResolveConflicts);
@@ -821,7 +689,7 @@ fn a_running_agent_is_told_its_next_step_in_the_person_s_words() {
 }
 
 /// Once a task's work is on its way, one row says each stage of it: its branch, what its
-/// verifier and reviewer said, its place in the queue, its pull request with its own checks,
+/// verifier said, its place in the queue, its pull request with its own checks,
 /// and the to-dos still open, said beside its Merge rather than holding it back. Failing
 /// checks are CI to fix.
 #[test]
@@ -829,14 +697,13 @@ fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
     use slopty_proto::agent::PullRequest;
     use slopty_proto::project::{Checks, ChecksState, NativeCounts};
 
-    use super::fixtures::{queued, review};
+    use super::fixtures::queued;
     use super::model::{StageKind, TaskAction};
 
     let worker = WorkerId::new();
     let mut ahead = queued(card(1, "Ahead", TaskState::Done), 10, "1111111");
     ahead.branch = Some("worktree-ahead".into());
     let mut piped = queued(card(2, "Its pull request", TaskState::Done), 20, "2222222");
-    piped.reviewed = Some(review(true, "2222222", None));
     piped.pr = Some(PullRequest {
         number: 42,
         url: "https://github.com/o/r/pull/42".into(),
@@ -868,7 +735,6 @@ fn a_task_s_pipeline_says_each_stage_and_its_open_to_dos() {
         [
             (StageKind::Branch, "slopty/board/2".to_owned(), false),
             (StageKind::Verifier, "Verified".to_owned(), false),
-            (StageKind::Reviewer, "Approved".to_owned(), false),
             (StageKind::Queue, "2nd to merge".to_owned(), false),
             (StageKind::Pull, "PR #42".to_owned(), false),
             (StageKind::Checks, "1 of 6 checks fail".to_owned(), true),
@@ -931,37 +797,25 @@ fn a_merge_whose_push_failed_says_so() {
 }
 
 /// Each node says where it is: the orchestrator and a running task where their agents run, an
-/// ended one where it ran, then a pin, then a proposal, with the worktree, branch and reason;
-/// only a task not started yet can move.
+/// ended one where it ran, then a pin, with the worktree and branch; only a task not started
+/// yet can move.
 #[test]
-fn a_node_says_where_it_runs_and_why_and_whether_it_can_move() {
-    use slopty_proto::project::{Placed, Proposed};
-
+fn a_node_says_where_it_runs_and_whether_it_can_move() {
     use super::model::{Place, PlaceHow, os_name};
 
     let (studio, linux) = (WorkerId::new(), WorkerId::new());
     let orchestrator = TermRef { worker: studio, session: SessionId::new() };
     let mut running = on(card(1, "Ship the app", TaskState::Running), studio, SessionId::new());
     running.worktree = Some("/w/board-1".into());
-    if let Some(a) = running.assignment.as_mut() {
-        a.placed = Some(Placed { pinned: false, score: 0, why: "Apple work".into() });
-    }
     let mut ended = on(card(2, "Write docs", TaskState::Done), linux, SessionId::new());
     if let Some(a) = ended.assignment.as_mut() {
         a.ended_ms = Some(AT);
     }
     let mut pinned = card(3, "Pinned", TaskState::Planned);
     pinned.pin = Some(linux);
-    let mut proposed = card(4, "Proposed", TaskState::Planned);
-    proposed.proposed = Some(Proposed {
-        since_ms: AT,
-        runs: "codex".into(),
-        on: Some(linux),
-        why: "Linux first +20".into(),
-    });
-    let loose = card(5, "Anywhere", TaskState::Planned);
+    let loose = card(4, "Anywhere", TaskState::Planned);
     let mut mirror = Projects::default();
-    let tasks = vec![running, ended, pinned, proposed, loose];
+    let tasks = vec![running, ended, pinned, loose];
     mirror.apply_part(snapshot(
         10,
         vec![status(project("board", Some(orchestrator)), tasks, Vec::new())],
@@ -977,52 +831,16 @@ fn a_node_says_where_it_runs_and_why_and_whether_it_can_move() {
             how: PlaceHow::Runs,
             worktree: Some("/w/board-1".into()),
             branch: Some("slopty/board/1".into()),
-            why: Some("Apple work".into()),
+            why: None,
         })
     );
     assert_eq!(place(Some(TaskId(2))), Some((linux, PlaceHow::Ran, None)));
     assert_eq!(place(Some(TaskId(3))), Some((linux, PlaceHow::Pinned, Some("pinned".into()))));
-    assert_eq!(
-        place(Some(TaskId(4))),
-        Some((linux, PlaceHow::Proposed, Some("Linux first +20".into())))
-    );
-    assert_eq!(place(Some(TaskId(5))), None, "nowhere yet: no place to show");
-    let movable: Vec<u32> = (1..=5).filter(|t| board.movable(TaskId(*t))).collect();
-    assert_eq!(movable, [3, 4, 5]);
+    assert_eq!(place(Some(TaskId(4))), None, "nowhere yet: no place to show");
+    let movable: Vec<u32> = (1..=4).filter(|t| board.movable(TaskId(*t))).collect();
+    assert_eq!(movable, [3, 4]);
     assert_eq!(os_name(slopty_proto::server::Os::Linux), "Linux");
     assert_eq!(os_name(slopty_proto::server::Os::MacOs), "macOS");
-}
-
-/// A need says the paths it covers, or every task, and what it asks of a worker.
-#[test]
-fn a_need_says_what_it_covers_and_what_it_asks() {
-    use slopty_proto::project::{Need, Preference};
-
-    use super::model::need_words;
-
-    let apple = Need {
-        name: "Apple work".into(),
-        paths: vec!["apps/ios".into(), "crates/ui".into()],
-        require: vec![r#"os == "macos""#.into(), "has(toolchains.xcode)".into()],
-        prefer: vec![Preference { expr: "cpus".into(), weight: 2 }],
-    };
-    assert_eq!(
-        need_words(&apple),
-        (
-            "apps/ios, crates/ui".to_owned(),
-            r#"Requires os == "macos" and has(toolchains.xcode); prefers cpus +2"#.to_owned()
-        )
-    );
-    let linux = Need {
-        name: "Linux first".into(),
-        paths: Vec::new(),
-        require: Vec::new(),
-        prefer: vec![Preference { expr: r#"os == "linux""#.into(), weight: -5 }],
-    };
-    assert_eq!(
-        need_words(&linux),
-        ("Every task".to_owned(), r#"Prefers os == "linux" -5"#.to_owned())
-    );
 }
 
 /// Checks that could not be read say why on the pull request's stage, in the first line, and
@@ -1071,14 +889,11 @@ fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
     );
 }
 
-/// What lands on the timeline is said to the person only when it holds a task up or waits on
-/// them: failed checks, a failed verifier, a conflict, a stopped step, a stuck agent, a start
-/// proposed, a budget near or at its cap. The rest is the board's to show.
+/// What lands on the timeline is said to the person only when it holds a task up: failed
+/// checks, a failed verifier, a conflict, a stopped step. The rest is the board's to show.
 #[test]
-fn only_what_holds_a_task_up_or_waits_on_the_person_is_news() {
-    use slopty_proto::project::{
-        Checks, ChecksState, Report, ReportKind, StepKind, StepState, TaskStep,
-    };
+fn only_what_holds_a_task_up_is_news() {
+    use slopty_proto::project::{Checks, ChecksState, Report, StepKind, StepState, TaskStep};
 
     use super::fixtures::run;
     use super::model::news_line;
@@ -1123,29 +938,12 @@ fn only_what_holds_a_task_up_or_waits_on_the_person_is_news() {
         say(step(StepKind::Merge, "the worker is away\nmore")).as_deref(),
         Some("#1 Lock the refresh row: its merge stopped: the worker is away")
     );
-    let report = |kind| Report {
-        kind,
-        note: "The schema is not mine to change".into(),
+    let report = Report {
+        note: "Done: the refresh row locks".into(),
         artifacts: Vec::new(),
         branch: None,
         pr: None,
     };
-    assert_eq!(
-        say(Moment::Reported { report: report(ReportKind::Stuck) }).as_deref(),
-        Some("#1 Lock the refresh row: its agent is stuck: The schema is not mine to change")
-    );
-    assert_eq!(say(Moment::Reported { report: report(ReportKind::Checkpoint) }), None);
-    assert_eq!(
-        say(Moment::Proposed { on: None }).as_deref(),
-        Some("#1 Lock the refresh row: waits for you to start it")
-    );
-    let budget = |share_bp| {
-        news_line(b, &entry(9, None, Moment::Budget { meter: "five-hour".into(), share_bp }))
-    };
-    assert_eq!(budget(8_100).as_deref(), Some("81% of its five-hour window budget is spent"));
-    assert_eq!(
-        budget(10_000).as_deref(),
-        Some("its five-hour window budget is spent; no task starts until it is raised")
-    );
+    assert_eq!(say(Moment::Reported { report }), None, "a report is the orchestrator's");
     assert_eq!(say(Moment::Note { text: "hello".into() }), None);
 }

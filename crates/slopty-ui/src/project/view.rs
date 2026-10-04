@@ -22,30 +22,28 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Budget, Moment, NativeCounts, ProjectId, ReportKind, ReviewRun, RunOn, StepKind, StepState,
-    TaskCard, TaskId, TaskState, TaskStep, VerifierRun,
+    Moment, NativeCounts, ProjectId, RunOn, StepKind, StepState, TaskCard, TaskId, TaskState,
+    TaskStep, VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
     Board, Lane, Machine, Place, PlaceHow, RunOnPicker, Stage, StageKind, TaskAction, TreeRow,
-    finding_place, need_words, os_name, pull_words, queue_words, review_detail, short_commit,
-    state_status, state_word, verdict_detail, verdict_tail,
+    os_name, pull_words, queue_words, run_on_words, short_commit, state_status, state_word,
+    verdict_detail, verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
-    AddressComments, ApproveTask, CancelTask, DeleteProject, EditBudget, EditChecks, FixCi, Lens,
-    MergeTask, OpenNode, PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext,
-    SelectPrevious, ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed,
-    StartTask, StopTaskAgent, TellOrchestrator, ToggleAskToStart, TogglePush,
+    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask, OpenNode,
+    PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard,
+    ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StopTaskAgent, TellOrchestrator,
+    TogglePush,
 };
 use crate::a11y::tab_stop;
-
-mod budget;
 use crate::colors::{hsla, hsla_alpha};
 use crate::icons::{IconName, IconSize, Status, icon, status_icon};
-use crate::palette::{Plate, age_label, dotted, sentence_case};
+use crate::palette::{Plate, age_label, dotted};
 
 /// The key context of a board; its keys are bound in it.
 pub const CTX: &str = "ProjectBoard";
@@ -72,14 +70,12 @@ pub(crate) const NO_MACHINES_HINT: &str =
 pub(crate) const AWAY: &str = "Away";
 /// The machines lens's heading over the tasks still to start.
 pub(crate) const NOT_STARTED: &str = "Not started";
-/// The machines lens's heading over what the project's work needs of its machines.
-pub(crate) const NEEDS: &str = "What the work needs";
 /// The "Run on" picker's first choice.
 pub(crate) const ANYWHERE: &str = "Anywhere";
 /// What "Anywhere" means.
 pub(crate) const ANYWHERE_LINE: &str = "Wherever its placement chooses";
-/// The "Run on" picker while the server ranks the workers.
-pub(crate) const RANKING: &str = "Ranking the workers\u{2026}";
+/// The "Run on" picker while the server reads the workers.
+pub(crate) const RANKING: &str = "Reading the workers\u{2026}";
 /// The "Run on" picker's close button.
 pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
@@ -121,21 +117,14 @@ pub enum ProjectEvent {
     },
     /// Show a terminal the server runs for a task, its verifier's, in its tile.
     Output(TermRef),
-    /// Open the Claude Code session a task's reviewer reads its work in.
-    Reviewer(TermRef),
     /// Do this to a task ([`Board::actions`]).
     Act(TaskId, TaskAction),
     /// Push the target after each merge, or stop.
     SetPush(bool),
-    /// Cap what the project's agents may spend; an empty budget takes it away.
-    SetBudget(Budget),
-    /// Check each task's work by this command, and have a reviewer read it with this brief;
-    /// an empty one is none.
+    /// Check each task's work by this command; an empty one is none.
     SetChecks {
         /// The verifier command.
         verifier: String,
-        /// The reviewer's brief.
-        review: String,
     },
     /// Let the project go; the person pressed for it twice.
     Delete,
@@ -149,10 +138,6 @@ pub enum ProjectEvent {
     CloseRunOn,
     /// Tell the orchestrator this, as the person.
     Tell(String),
-    /// Start every task whose start is proposed.
-    StartAll,
-    /// Hold each task's start for the person, or let the orchestrator start them.
-    SetAsk(bool),
     /// The person read the recap: close it.
     CloseRecap,
 }
@@ -165,30 +150,21 @@ const COMPOSE_LABEL: &str = "Tell the orchestrator";
 /// How long a first "Delete the project" waits for the second that does it.
 const DELETE_CONFIRM: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// What a task's checks show on its card and its row: its verifier or its reviewer at work,
-/// or the last word that still speaks.
+/// What a task's check shows on its card and its row: its verifier at work, or the last word
+/// that still speaks.
 #[derive(Clone, Debug, PartialEq)]
 enum Check<'a> {
-    /// A verifier or a reviewer at work, with its last line.
-    Running { line: String, term: Option<TermRef>, review: bool },
+    /// The verifier at work, with its last line.
+    Running { line: String, term: Option<TermRef> },
     /// What the verifier said, and the terminal a failed run is kept in.
     Verdict { run: &'a VerifierRun, term: Option<TermRef> },
-    /// What the reviewer said, and its session, kept when it asked for changes.
-    Review { run: &'a ReviewRun, term: Option<TermRef> },
 }
 
 impl Check<'_> {
     const fn term(&self) -> Option<TermRef> {
         match self {
-            Self::Running { term, .. } | Self::Verdict { term, .. } | Self::Review { term, .. } => {
-                *term
-            }
+            Self::Running { term, .. } | Self::Verdict { term, .. } => *term,
         }
-    }
-
-    /// A reviewer's, whose terminal is a Claude Code session to open rather than output.
-    const fn is_review(&self) -> bool {
-        matches!(self, Self::Review { .. } | Self::Running { review: true, .. })
     }
 
     /// Whether this block says what `step` would: the check it is, at work or with its word.
@@ -196,15 +172,13 @@ impl Check<'_> {
         match self {
             Self::Running { .. } => true,
             Self::Verdict { .. } => step.kind == StepKind::Verify,
-            Self::Review { .. } => step.kind == StepKind::Review,
         }
     }
 
-    /// A word that lets the work go on: a pass, an approval.
+    /// A word that lets the work go on: a pass.
     const fn cleared(&self) -> bool {
         match self {
             Self::Verdict { run, .. } => run.passed,
-            Self::Review { run, .. } => run.verdict.approved,
             Self::Running { .. } => false,
         }
     }
@@ -247,7 +221,7 @@ pub struct Seen {
     /// The project, or `None` once the server has let it go.
     pub board: Option<Arc<Board>>,
     /// The workers the board names: the orchestrator's, and every one a task runs on, ran on,
-    /// is pinned or proposed to, or takes a step on.
+    /// is pinned to, or takes a step on.
     pub workers: BTreeMap<WorkerId, WorkerSeen>,
     /// The agents this client sees, by session.
     pub agents: HashMap<SessionId, AgentSeen>,
@@ -271,14 +245,10 @@ enum Pick {
     Entry(u64),
 }
 
-/// How a project's work is checked, as the person sets it on the board: the verifier command,
-/// and whether a reviewer with fresh eyes reads each task's work before it merges, by what
-/// brief.
+/// How a project's work is checked, as the person sets it on the board: the verifier command.
 struct Checks {
     verifier: Entity<InputState>,
-    brief: Entity<InputState>,
-    review: bool,
-    _enter: [Subscription; 2],
+    _enter: Subscription,
 }
 
 /// One project's board.
@@ -309,8 +279,6 @@ pub struct ProjectView {
     refused: Option<String>,
     /// The project's checks being set, while that panel is open.
     checks: Option<Checks>,
-    /// The project's budget being set, while that panel is open.
-    budget: Option<budget::BudgetPanel>,
     /// How many times it was drawn: the proof that an unchanged hand-over draws nothing.
     #[cfg(test)]
     renders: usize,
@@ -355,7 +323,6 @@ impl ProjectView {
             composer: None,
             refused: None,
             checks: None,
-            budget: None,
             #[cfg(test)]
             renders: 0,
         }
@@ -490,9 +457,10 @@ impl ProjectView {
     /// Give the board the keyboard.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         // The checks panel keeps the keyboard it has: a click that opened it focused its tile.
-        let typing = self.checks.as_ref().is_some_and(|c| {
-            [&c.verifier, &c.brief].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
-        });
+        let typing = self
+            .checks
+            .as_ref()
+            .is_some_and(|c| c.verifier.read(cx).focus_handle(cx).is_focused(window));
         if !typing {
             window.focus(&self.focus, cx);
         }
@@ -547,23 +515,6 @@ impl ProjectView {
             cx.emit(ProjectEvent::Act(task, action));
         } else {
             cx.emit(ProjectEvent::Say(format!("#{task} has nothing to {}", verb_of(action))));
-        }
-    }
-
-    /// Start every proposed task, or say there is none.
-    pub fn start_all(&self, cx: &mut Context<Self>) {
-        let Some(board) = &self.seen.board else { return };
-        if board.proposed().is_empty() {
-            cx.emit(ProjectEvent::Say(NOTHING_PROPOSED.to_owned()));
-        } else {
-            cx.emit(ProjectEvent::StartAll);
-        }
-    }
-
-    /// Hold each task's start for the person, or stop, as the project does not now.
-    pub fn toggle_ask(&self, cx: &mut Context<Self>) {
-        if let Some(board) = &self.seen.board {
-            cx.emit(ProjectEvent::SetAsk(!board.project.ask_to_start));
         }
     }
 
@@ -702,7 +653,6 @@ impl ProjectView {
             PlaceHow::Runs => format!("Runs on {on}"),
             PlaceHow::Ran => format!("Ran on {on}"),
             PlaceHow::Pinned => format!("Pinned to {on}"),
-            PlaceHow::Proposed => format!("Would start on {on}"),
         }];
         lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
         lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
@@ -730,7 +680,6 @@ impl ProjectView {
             PlaceHow::Runs => (IconName::Server, s.text_secondary),
             PlaceHow::Ran => (IconName::Server, s.text_muted),
             PlaceHow::Pinned => (IconName::Lock, s.text_muted),
-            PlaceHow::Proposed => (IconName::MoveRight, s.text_muted),
         };
         let movable = node.filter(|t| board.movable(*t));
         let id = format!("{prefix}-{}-where", node_key(node));
@@ -888,18 +837,6 @@ const fn lane_tone(theme: &Theme, lane: Lane) -> Rgb {
 
 /// The push toggle's one name, said as pressed or not.
 pub(crate) const PUSH: &str = "Push after each merge";
-/// The header's toggle for holding each task's start for the person.
-pub(crate) const ASK_TO_START: &str = "Ask before each task starts";
-/// The plan band's heading.
-pub(crate) const PROPOSED: &str = "Proposed";
-/// The plan band's button.
-pub(crate) const START_ALL: &str = "Start all";
-/// A proposal's word in its row, for a task its orchestrator would start.
-pub(crate) const PROPOSED_WORD: &str = "Proposed";
-/// The plan band with no finished task to estimate from.
-pub(crate) const NO_ESTIMATE: &str = "No finished task to estimate from yet";
-/// "Start all" with nothing proposed.
-pub(crate) const NOTHING_PROPOSED: &str = "No task waits for you to start it";
 /// The recap's heading when the person looked a moment ago.
 pub(crate) const RECAP: &str = "Since you last looked";
 /// The recap's button that closes it.
@@ -913,28 +850,18 @@ pub(crate) const MACHINES_HINT: &str = "Click to see the machines";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 /// The header's toggle for the panel that sets how the work is checked, and the panel's name.
-pub(crate) const CHECKS: &str = "Verifier and review";
+pub(crate) const CHECKS: &str = "Verifier";
 /// The verifier field's label.
 pub(crate) const VERIFIER: &str = "Verifier";
 /// What the verifier field says while empty.
 pub(crate) const VERIFIER_HINT: &str = "A command that passes when a task's work is right";
-/// The review switch's words.
-pub(crate) const REVIEW: &str = "A reviewer reads each task's work before it merges";
-/// What the brief field says while empty.
-pub(crate) const BRIEF_HINT: &str = "What the reviewer looks for";
-/// The brief a reviewer turned on with none written is given.
-pub(crate) const BRIEF: &str =
-    "Bugs, missed cases, and anything the task asked for that the work leaves out";
-
 /// Where a project's work lands and how it is checked, as one sentence: "slopty → main,
-/// verified by cargo gate and reviewed".
+/// verified by cargo gate".
 fn place_line(project: &slopty_proto::project::Project) -> String {
     let place = format!("{} \u{2192} {}", project.repo, project.target);
-    match (&project.verifier, project.review.is_some()) {
-        (Some(verifier), true) => format!("{place}, verified by {verifier} and reviewed"),
-        (Some(verifier), false) => format!("{place}, verified by {verifier}"),
-        (None, true) => format!("{place}, reviewed"),
-        (None, false) => place,
+    match &project.verifier {
+        Some(verifier) => format!("{place}, verified by {verifier}"),
+        None => place,
     }
 }
 
@@ -988,9 +915,7 @@ const fn verb_of(action: TaskAction) -> &'static str {
     match action {
         TaskAction::Merge => "merge",
         TaskAction::Retry => "retry",
-        TaskAction::Approve => "approve",
         TaskAction::RunOn => "choose where it runs",
-        TaskAction::Start => "start",
         TaskAction::FixCi => "fix",
         TaskAction::AddressComments => "address",
         TaskAction::ResolveConflicts => "resolve",
@@ -1035,8 +960,8 @@ impl ProjectView {
     }
 
     /// The name, where the work lands and how it is checked, how far along it is and how
-    /// many of its agents run, and its controls: how the work is checked, asking before each
-    /// start, pushing, and the way back to the orchestrator's terminal. The readouts are columns,
+    /// many of its agents run, and its controls: how the work is checked, pushing, and the way
+    /// back to the orchestrator's terminal. The readouts are columns,
     /// so the line under the title is a sentence and not a string of facts.
     fn header(&self, board: &Board, cx: &Context<Self>) -> Div {
         let theme = &self.theme;
@@ -1045,7 +970,7 @@ impl ProjectView {
         let project = &board.project;
         let (merged, total) = board.progress();
         let progress = (total > 0).then(|| format!("{merged} of {total} merged"));
-        let live = format!("{} of {} live", board.live(), project.limits.live_per_project);
+        let live = format!("{} live", board.live());
         let place = place_line(project);
         let readout = |id: &'static str, text: String| {
             crate::kit::tabular(div())
@@ -1070,18 +995,6 @@ impl ProjectView {
             self.zoom,
         )
         .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::Open(None))));
-        let ask = project.ask_to_start;
-        let ask_toggle = crate::kit::icon_toggle(
-            theme,
-            "project-ask",
-            IconName::Hand,
-            ASK_TO_START,
-            ask,
-            self.zoom,
-        )
-        .on_click(cx.listener(move |_this, _ev, _w, cx| {
-            cx.emit(ProjectEvent::SetAsk(!ask));
-        }));
         let checks_open = self.checks.is_some();
         let checks_toggle = crate::kit::icon_toggle(
             theme,
@@ -1130,7 +1043,6 @@ impl ProjectView {
                 ),
             )
             .child(checks_toggle)
-            .child(ask_toggle)
             .child(push_toggle)
             .child(terminal);
         let meta = div()
@@ -1341,8 +1253,7 @@ impl ProjectView {
         if self.lens != Lens::Board {
             nodes.extend(board.needs_you().into_iter().map(Some));
         }
-        let spent = self.budget_row(board, cx);
-        if nodes.is_empty() && spent.is_none() {
+        if nodes.is_empty() {
             return None;
         }
         let theme = &self.theme;
@@ -1364,7 +1275,6 @@ impl ProjectView {
                 .pb(self.z(theme.spacing.xxs))
                 .map(|el| crate::kit::raised(el, theme))
                 .child(self.heading("project-needs-heading", NEEDS_YOU))
-                .children(spent)
                 .children(rows),
         )
     }
@@ -1474,99 +1384,6 @@ impl ProjectView {
             )
     }
 
-    /// The plan before it fans out, over the lens: the tasks the orchestrator proposed, each
-    /// with where it would start and why, how long they take as the project's finished tasks
-    /// say, and a button to start them all.
-    fn plan(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
-        let proposed = board.proposed();
-        if proposed.is_empty() {
-            return None;
-        }
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let kind = proposed
-            .first()
-            .and_then(|t| board.tasks.get(t))
-            .map_or(String::new(), |c| c.kind.clone());
-        let tasks = if proposed.len() == 1 {
-            "1 task".to_owned()
-        } else {
-            format!("{} tasks", proposed.len())
-        };
-        let estimate = board
-            .estimate(&kind)
-            .map_or_else(|| NO_ESTIMATE.to_owned(), |e| sentence_case(&e.line()));
-        let summary = format!("{tasks}. {estimate}.");
-        let start_all = div()
-            .id("project-plan-start-all")
-            .debug_selector(|| "project-plan-start-all".to_owned())
-            .role(Role::Button)
-            .aria_label(START_ALL)
-            .flex_none()
-            .px(self.z(sp.sm))
-            .rounded(self.z(theme.radii.sm))
-            .border(crate::kit::hair(theme))
-            .border_color(hsla(s.border))
-            .text_size(self.z(theme.typography.small()))
-            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-            .text_color(hsla(s.text))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.selected)))
-            .child(START_ALL);
-        let start_all = tab_stop(start_all, s.accent)
-            .on_click(cx.listener(|_this, _ev, _w, cx| cx.emit(ProjectEvent::StartAll)));
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(self.z(sp.xs))
-            .pr(self.z(sp.inset()))
-            .child(self.heading("project-plan-heading", PROPOSED).flex_none())
-            .child(
-                div()
-                    .id("project-plan-summary")
-                    .debug_selector(|| "project-plan-summary".to_owned())
-                    .flex_1()
-                    .min_w_0()
-                    .pt(self.z(sp.xs))
-                    .pb(self.z(sp.xxs))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(summary)),
-            )
-            .child(start_all);
-        let rows = proposed.into_iter().map(|task| {
-            let said =
-                board.tasks.get(&task).and_then(|c| c.proposed.as_ref()).map(|p| match p.on {
-                    Some(worker) if p.why.is_empty() => {
-                        format!("Would start on {}", self.worker_name(worker))
-                    }
-                    Some(worker) => {
-                        format!("Would start on {}: {}", self.worker_name(worker), p.why)
-                    }
-                    None => sentence_case(&p.why),
-                });
-            let line = Line { asking: None, said, depth: 0, prefix: "project-plan" };
-            self.node_row(board, Some(task), line, cx)
-        });
-        Some(
-            div()
-                .id("project-plan")
-                .debug_selector(|| "project-plan".to_owned())
-                .role(Role::Group)
-                .aria_label(PROPOSED)
-                .flex_none()
-                .mb(self.z(sp.xs))
-                .pb(self.z(sp.xxs))
-                .map(|el| crate::kit::raised(el, theme))
-                .child(head)
-                .children(rows),
-        )
-    }
-
     /// A quiet label over a group of rows, on the column their marks stand in.
     fn heading(&self, id: &'static str, text: &'static str) -> Stateful<Div> {
         let theme = &self.theme;
@@ -1658,10 +1475,9 @@ impl ProjectView {
         let status = mark.or_else(|| self.node_status(board, node));
         let title = card.map_or_else(|| ORCHESTRATOR.to_owned(), |c| c.title.clone());
         // A row under "Needs you" says no word its heading says.
-        let word = card.filter(|_| mark.is_none()).map(|c| {
-            let word = if c.proposed.is_some() { PROPOSED_WORD } else { state_word(c.state) };
-            (word, board_tone(theme, state_status(c.state)))
-        });
+        let word = card
+            .filter(|_| mark.is_none())
+            .map(|c| (state_word(c.state), board_tone(theme, state_status(c.state))));
         let actions = node.and_then(|task| self.actions(board, task, prefix, cx));
         let run_on = node.and_then(|task| self.run_on_block(task, prefix, cx));
         let spend = board.spend(node, self.seen.now, &self.seen.meters);
@@ -1675,8 +1491,7 @@ impl ProjectView {
         // A row that says its own line, and the machines lens's, which groups by worker, show
         // no place.
         let placed = second.is_none() && prefix != "project-machine";
-        let meta =
-            second.unwrap_or_else(|| self.node_meta(board, node, card, check.as_ref(), false));
+        let meta = second.unwrap_or_else(|| self.node_meta(board, card, check.as_ref(), false));
         // The place sits at the end of a line it shares, so the rows' places read as one
         // column; alone, it stands where the line's words would.
         let place = placed
@@ -1886,18 +1701,11 @@ impl ProjectView {
     fn node_meta(
         &self,
         board: &Board,
-        node: Node,
         card: Option<&TaskCard>,
         check: Option<&Check<'_>>,
         piped: bool,
     ) -> String {
         let mut parts: Vec<String> = Vec::new();
-        let proposed = board.proposed().len();
-        if node.is_none() && proposed > 0 {
-            let tasks =
-                if proposed == 1 { "1 task".to_owned() } else { format!("{proposed} tasks") };
-            parts.push(format!("Waits on you to start {tasks}"));
-        }
         if let Some(card) = card {
             let waits = board.waiting_on(card.id);
             if !waits.is_empty() && matches!(card.state, TaskState::Planned) {
@@ -1920,12 +1728,11 @@ impl ProjectView {
             if let Some((place, _)) = board.queue_place(card.id).filter(|_| !merging && !piped) {
                 parts.push(queue_words(place));
             }
-            if check.is_none() && !piped {
-                if let Some(run) = board.review(card.id).filter(|r| r.verdict.approved) {
-                    parts.push(format!("Approved at {}", short_commit(&run.head)));
-                } else if let Some(run) = board.verdict(card.id).filter(|r| r.passed) {
-                    parts.push(format!("Passed at {}", short_commit(&run.head)));
-                }
+            if check.is_none()
+                && !piped
+                && let Some(run) = board.verdict(card.id).filter(|r| r.passed)
+            {
+                parts.push(format!("Passed at {}", short_commit(&run.head)));
             }
             if let Some(words) =
                 card.merge.as_ref().and_then(|m| super::model::merged_words(m, piped))
@@ -1953,30 +1760,26 @@ impl ProjectView {
         parts.join(" \u{b7} ")
     }
 
-    /// What `card`'s checks show: a verifier or a reviewer at work, else the reviewer's word
-    /// and then the verifier's while it still speaks to the task as it is now
-    /// ([`Board::review`], [`Board::verdict`]). An approval stands for the pass it followed.
+    /// What `card`'s check shows: the verifier at work, else its word while it still speaks
+    /// to the task as it is now ([`Board::verdict`]).
     fn check<'a>(board: &'a Board, card: &'a TaskCard) -> Option<Check<'a>> {
-        let checks = |s: &TaskStep| matches!(s.kind, StepKind::Verify | StepKind::Review);
-        let running = card.step.as_ref().filter(|s| s.running() && (checks(s) || s.term.is_some()));
+        let running = card
+            .step
+            .as_ref()
+            .filter(|s| s.running() && (s.kind == StepKind::Verify || s.term.is_some()));
         if let Some(step) = running
             && let StepState::Running { phase, .. } = &step.state
         {
             let line = crate::kit::first_line(phase).to_owned();
-            let review = step.kind == StepKind::Review;
-            return Some(Check::Running { line, term: step.term, review });
+            return Some(Check::Running { line, term: step.term });
         }
-        let kept = |kind: StepKind| {
-            card.step
-                .as_ref()
-                .filter(|s| s.kind == kind && matches!(s.state, StepState::Failed { .. }))
-                .and_then(|s| s.term)
-        };
-        if let Some(run) = board.review(card.id) {
-            return Some(Check::Review { run, term: kept(StepKind::Review) });
-        }
+        let term = card
+            .step
+            .as_ref()
+            .filter(|s| s.kind == StepKind::Verify && matches!(s.state, StepState::Failed { .. }))
+            .and_then(|s| s.term);
         let run = board.verdict(card.id)?;
-        Some(Check::Verdict { run, term: kept(StepKind::Verify) })
+        Some(Check::Verdict { run, term })
     }
 
     /// A verifier's run or verdict under a task: its mark and word, the commits it judged and
@@ -1985,17 +1788,12 @@ impl ProjectView {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
-        // Red is for a run that failed; a reviewer asking for changes is a word, not an alarm. A
-        // verdict names the verifier: a task its failure sent back is Up next, and a bare "Failed"
-        // there read as the Failed lane, which is a task given up.
+        // A verdict names the verifier: a task its failure sent back is Up next, and a bare
+        // "Failed" there read as the Failed lane, which is a task given up.
         let (glyph, tone, word, detail, tail) = match check {
-            Check::Running { line, review: false, .. } => {
+            Check::Running { line, .. } => {
                 let status = Status::Working;
                 (status.icon(), board_tone(theme, status), "Verifying", line.clone(), Vec::new())
-            }
-            Check::Running { line, review: true, .. } => {
-                let status = Status::Working;
-                (status.icon(), board_tone(theme, status), "Reviewing", line.clone(), Vec::new())
             }
             Check::Verdict { run, .. } if run.passed => (
                 IconName::CircleCheck,
@@ -2011,26 +1809,6 @@ impl ProjectView {
                 verdict_detail(run),
                 verdict_tail(run, TAIL_LINES),
             ),
-            Check::Review { run, .. } if run.verdict.approved => (
-                IconName::CircleCheck,
-                s.text_secondary,
-                "Approved",
-                review_detail(run),
-                Vec::new(),
-            ),
-            Check::Review { run, .. } => (
-                IconName::MessageSquareWarning,
-                s.text_secondary,
-                "Changes asked",
-                review_detail(run),
-                Vec::new(),
-            ),
-        };
-        let review = check.is_review();
-        let (link_word, link_label) = if review {
-            ("Reviewer", "Open the reviewer's session")
-        } else {
-            ("Output", "Show the verifier's output")
         };
         let output = check.term().map(|term| {
             let id = format!("{key}-output");
@@ -2039,7 +1817,7 @@ impl ProjectView {
                 .id(SharedString::from(id))
                 .debug_selector(move || selector)
                 .role(Role::Link)
-                .aria_label(link_label)
+                .aria_label("Show the verifier's output")
                 .flex_none()
                 .flex()
                 .items_center()
@@ -2053,14 +1831,10 @@ impl ProjectView {
                     icon(theme, IconName::SquareTerminal, IconSize::Inline, hsla(s.text_muted))
                         .size(self.z(theme.typography.icon())),
                 )
-                .child(link_word);
+                .child("Output");
             tab_stop(link, s.accent).on_click(cx.listener(move |_this, _ev, _w, cx| {
                 cx.stop_propagation();
-                cx.emit(if review {
-                    ProjectEvent::Reviewer(term)
-                } else {
-                    ProjectEvent::Output(term)
-                });
+                cx.emit(ProjectEvent::Output(term));
             }))
         });
         let head = div()
@@ -2111,10 +1885,6 @@ impl ProjectView {
                         .child(SharedString::from(line.to_owned()))
                 }))
         });
-        let findings = match check {
-            Check::Review { run, .. } => self.findings(key, run),
-            _ => None,
-        };
         let selector = format!("{key}-check");
         div()
             .debug_selector(move || selector)
@@ -2126,104 +1896,6 @@ impl ProjectView {
             .text_size(self.z(theme.typography.small()))
             .child(head)
             .children(tail)
-            .children(findings)
-    }
-
-    /// What a reviewer found, a line each, what blocks first as the server keeps them: its
-    /// severity, where it points in the face a path is read in, and what it says from its
-    /// first line, with a count of the rest. The session holds the review whole.
-    fn findings(&self, key: &str, run: &ReviewRun) -> Option<Stateful<Div>> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        if run.verdict.findings.is_empty() {
-            return None;
-        }
-        let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
-        let shown = run.verdict.findings.iter().take(TAIL_LINES);
-        let rest = run
-            .verdict
-            .findings
-            .len()
-            .saturating_sub(TAIL_LINES)
-            .saturating_add(usize::from(run.more));
-        let rows = shown.map(|f| {
-            // What blocks reads at the default ink with its ✕, the rest muted: no red, which
-            // says a run failed.
-            let tone = if f.blocking { s.text } else { s.text_muted };
-            let severity = div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xxs))
-                .text_color(hsla(tone))
-                .when(f.blocking, |el| {
-                    el.child(
-                        icon(theme, IconName::X, IconSize::Inline, hsla(tone))
-                            .size(self.z(theme.typography.icon())),
-                    )
-                })
-                .child(sentence_case(&f.severity));
-            let place = finding_place(f).map(|place| {
-                // The file's own name and line, as narrow as a card is: the path is in the
-                // session and in what the agent was told.
-                let short = place.rsplit('/').next().unwrap_or(&place).to_owned();
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .font_family(mono.clone())
-                    .text_size(self.z(theme.typography.caption()))
-                    .text_color(hsla(s.text_muted))
-                    .child(short)
-            });
-            // Its words under its severity and place, the lane's width and two lines of it:
-            // the reviewer's session holds the rest.
-            let body = div()
-                .min_w_0()
-                .overflow_hidden()
-                .line_clamp(2)
-                .text_ellipsis()
-                .text_color(hsla(s.text_secondary))
-                .child(crate::kit::first_line(&f.body).to_owned());
-            div()
-                .flex()
-                .flex_col()
-                .min_w_0()
-                .child(
-                    div()
-                        .flex()
-                        .items_baseline()
-                        .gap(self.z(sp.xs))
-                        .min_w_0()
-                        .child(severity)
-                        .children(place),
-                )
-                .child(body)
-        });
-        let more = (rest > 0).then(|| {
-            let word = if rest == 1 { "finding" } else { "findings" };
-            div().text_color(hsla(s.text_muted)).child(format!("{rest} more {word}"))
-        });
-        let id = format!("{key}-findings");
-        let selector = id.clone();
-        Some(
-            div()
-                .id(SharedString::from(id))
-                .debug_selector(move || selector)
-                .role(Role::List)
-                .flex()
-                .flex_col()
-                .gap(self.z(sp.xxs))
-                .px(self.z(sp.sm))
-                .py(self.z(sp.xs))
-                .rounded(self.z(theme.radii.sm))
-                .bg(hsla(s.panel))
-                .children(rows)
-                .children(more),
-        )
     }
 
     /// Claude Code's own subagents running under `node`, as leaves of the tree; one opens its
@@ -2351,12 +2023,10 @@ impl ProjectView {
     fn card_facts<'a>(&self, board: &'a Board, card: &'a TaskCard) -> CardFacts<'a> {
         let check = Self::check(board, card);
         let mut stages = board.pipeline(card.id);
-        if let Some(check) = &check {
-            let spoken = if check.is_review() { StageKind::Reviewer } else { StageKind::Verifier };
-            stages.retain(|stage| stage.kind != spoken);
+        if check.is_some() {
+            stages.retain(|stage| stage.kind != StageKind::Verifier);
         }
-        let meta =
-            self.node_meta(board, Some(card.id), Some(card), check.as_ref(), !stages.is_empty());
+        let meta = self.node_meta(board, Some(card), check.as_ref(), !stages.is_empty());
         CardFacts { check, stages, meta }
     }
 
@@ -2370,11 +2040,6 @@ impl ProjectView {
             Some(Check::Verdict { run, .. }) if !run.passed => {
                 // The head, then the tail in its well, which pads by about a line.
                 2_usize.saturating_add(verdict_tail(run, TAIL_LINES).len())
-            }
-            Some(Check::Review { run, .. }) if !run.verdict.findings.is_empty() => {
-                // The head, then each finding's head and two lines of its words, in a well.
-                let shown = run.verdict.findings.len().min(TAIL_LINES);
-                2_usize.saturating_add(shown.saturating_mul(3))
             }
             Some(_) => 1,
         };
@@ -2447,12 +2112,8 @@ impl ProjectView {
         let key = format!("project-card-{}", card.id);
         let CardFacts { check, stages, meta } = self.card_facts(board, card);
         let place = self.where_chip(board, node, "project-card", cx);
-        // A reason that says only that the worker had room tells the card nothing.
         let placed = board.place(node);
-        let reason = placed
-            .as_ref()
-            .and_then(|p| p.why.clone())
-            .filter(|why| why != slopty_proto::project::Suggestion::UNDECIDED);
+        let reason = placed.as_ref().and_then(|p| p.why.clone());
         let place_words =
             self.where_words(board, node).map_or_else(String::new, |(_, short, _)| short);
         let pipeline = self.pipeline_row(&key, &stages);
@@ -2624,36 +2285,23 @@ impl ProjectView {
     /// the project has now, the keyboard in the verifier's.
     fn open_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let project = self.seen.board.as_ref().map(|b| &b.project);
-        let verifier = project.and_then(|p| p.verifier.clone()).unwrap_or_default();
-        let brief = project.and_then(|p| p.review.clone());
-        let review = brief.is_some();
-        let field =
-            |text: String, hint: &'static str, window: &mut Window, cx: &mut Context<Self>| {
-                let input = cx.new(|cx| InputState::new(window, cx).placeholder(hint));
-                input.update(cx, |input, cx| input.set_value(text, window, cx));
-                input
-            };
-        let verifier = field(verifier, VERIFIER_HINT, window, cx);
-        let brief = field(brief.unwrap_or_default(), BRIEF_HINT, window, cx);
-        let enter = |input: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>| {
-            cx.subscribe_in(input, window, |this, _input, event, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.save_checks(window, cx);
-                }
-            })
-        };
-        let enters = [enter(&verifier, window, cx), enter(&brief, window, cx)];
+        let text = project.and_then(|p| p.verifier.clone()).unwrap_or_default();
+        let verifier = cx.new(|cx| InputState::new(window, cx).placeholder(VERIFIER_HINT));
+        verifier.update(cx, |input, cx| input.set_value(text, window, cx));
+        let enter = cx.subscribe_in(&verifier, window, |this, _input, event, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.save_checks(window, cx);
+            }
+        });
         verifier.update(cx, |input, cx| input.focus(window, cx));
-        self.checks = Some(Checks { verifier, brief, review, _enter: enters });
+        self.checks = Some(Checks { verifier, _enter: enter });
         cx.notify();
     }
 
-    /// What the open checks panel holds: the verifier, and the brief while a reviewer is on.
+    /// What the open checks panel holds: the verifier.
     #[cfg(test)]
-    pub(crate) fn checks_typed(&self, cx: &gpui::App) -> Option<(String, Option<String>)> {
-        let checks = self.checks.as_ref()?;
-        let verifier = checks.verifier.read(cx).value().to_string();
-        Some((verifier, checks.review.then(|| checks.brief.read(cx).value().to_string())))
+    pub(crate) fn checks_typed(&self, cx: &gpui::App) -> Option<String> {
+        Some(self.checks.as_ref()?.verifier.read(cx).value().to_string())
     }
 
     /// Close the checks panel unsaved; the keyboard goes back to the board.
@@ -2664,33 +2312,16 @@ impl ProjectView {
         }
     }
 
-    /// Turn the reviewer on or off in the open panel; on, the keyboard goes to its brief.
-    fn flip_review(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(checks) = self.checks.as_mut() else { return };
-        checks.review = !checks.review;
-        if checks.review {
-            checks.brief.update(cx, |input, cx| input.focus(window, cx));
-        }
-        cx.notify();
-    }
-
-    /// Say the panel's checks to the server and close it. A reviewer turned on with no brief
-    /// gets [`BRIEF`].
+    /// Say the panel's checks to the server and close it.
     fn save_checks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(checks) = self.checks.as_ref() else { return };
         let verifier = checks.verifier.read(cx).value().trim().to_owned();
-        let review = if checks.review {
-            let brief = checks.brief.read(cx).value().trim().to_owned();
-            if brief.is_empty() { BRIEF.to_owned() } else { brief }
-        } else {
-            String::new()
-        };
-        cx.emit(ProjectEvent::SetChecks { verifier, review });
+        cx.emit(ProjectEvent::SetChecks { verifier });
         self.close_checks(window, cx);
     }
 
     /// The panel under the header that sets how the work is checked, while it is open: the
-    /// verifier command, the reviewer's switch and its brief, and Save beside Cancel.
+    /// verifier command, and Save beside Cancel.
     fn checks_panel(&self, cx: &Context<Self>) -> Option<Stateful<Div>> {
         let checks = self.checks.as_ref()?;
         let theme = &self.theme;
@@ -2702,21 +2333,10 @@ impl ProjectView {
                 .text_color(hsla(s.text_muted))
                 .child(text)
         };
-        // A command and a brief: what is typed is code or close to it.
+        // A command: what is typed is code.
         let mono = theme.typography.mono_families.first().cloned().unwrap_or_default();
-        let field = |input: &Entity<InputState>, name: &'static str| {
-            div().font_family(mono.clone()).child(Input::new(input).aria_label(name))
-        };
-        let on = checks.review;
-        let switch = self.review_switch(on).on_click(cx.listener(|this, _ev, window, cx| {
-            this.flip_review(window, cx);
-        }));
-        let review = div()
-            .flex()
-            .items_center()
-            .gap(self.z(sp.sm))
-            .child(switch)
-            .child(div().min_w_0().text_color(hsla(s.text_secondary)).child(REVIEW));
+        let field =
+            div().font_family(mono).child(Input::new(&checks.verifier).aria_label(VERIFIER));
         let button = |id: &'static str, text: &'static str| {
             div()
                 .id(id)
@@ -2757,9 +2377,7 @@ impl ProjectView {
             .bg(hsla(s.panel))
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.close_checks(window, cx)))
             .child(label(VERIFIER))
-            .child(field(&checks.verifier, VERIFIER))
-            .child(div().pt(self.z(sp.xs)).child(review))
-            .when(on, |el| el.child(field(&checks.brief, BRIEF_HINT)))
+            .child(field)
             .child(
                 div()
                     .flex()
@@ -2770,11 +2388,6 @@ impl ProjectView {
                     .child(save),
             );
         Some(panel)
-    }
-
-    /// The reviewer's switch.
-    fn review_switch(&self, on: bool) -> Stateful<Div> {
-        switch(&self.theme, self.zoom, "project-review-switch", REVIEW, on)
     }
 
     /// The line at the board's foot that talks to the orchestrator, while it has one.
@@ -2955,8 +2568,7 @@ impl ProjectView {
 
     /// A lens with nothing in it: one line, and what will land there.
     /// The machines lens: each worker with how it is doing and the project's agents on it,
-    /// each with why the server put it there, then the tasks still to start, each with a way
-    /// to choose where it runs.
+    /// then the tasks still to start, each with a way to choose where it runs.
     fn machines(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
         let theme = &self.theme;
         let s = &theme.surfaces;
@@ -2966,18 +2578,11 @@ impl ProjectView {
         if groups.is_empty() && waiting.is_empty() {
             return vec![self.empty(NO_MACHINES, NO_MACHINES_HINT)];
         }
-        let per_worker = board.project.limits.live_per_worker;
         let mut out = Vec::new();
-        if !board.project.needs.is_empty() {
-            out.push(self.heading("project-machines-needs", NEEDS).into_any_element());
-            for (at, need) in board.project.needs.iter().enumerate() {
-                out.push(self.need_row(at, need).into_any_element());
-            }
-        }
         for group in groups {
             let key = format!("project-host-{}", group.worker);
             let online = group.machine.as_ref().is_none_or(|m| m.online);
-            let live = format!("{} of {per_worker} live", board.live_on(group.worker));
+            let live = format!("{} live", board.live_on(group.worker));
             let load = group.machine.as_ref().and_then(|m| m.load).map(|l| format!("load {l:.1}"));
             let kind = group.machine.as_ref().map(Machine::kind_line).filter(|k| !k.is_empty());
             let away = (!online).then_some(AWAY);
@@ -3040,11 +2645,7 @@ impl ProjectView {
                 .child(readout(live));
             out.push(head.into_any_element());
             for node in group.nodes {
-                let said = node
-                    .and_then(|t| board.tasks.get(&t))
-                    .and_then(|c| c.assignment.as_ref()?.placed.as_ref())
-                    .map(|p| p.why.clone());
-                let line = Line { asking: None, said, depth: 1, prefix: "project-machine" };
+                let line = Line { asking: None, said: None, depth: 1, prefix: "project-machine" };
                 out.push(self.node_row(board, node, line, cx));
             }
         }
@@ -3062,47 +2663,8 @@ impl ProjectView {
         out
     }
 
-    /// One of the project's needs: its name, then the paths it covers and what it asks of a
-    /// worker, cut to the line; the label says it all.
-    fn need_row(&self, at: usize, need: &slopty_proto::project::Need) -> Stateful<Div> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let (covers, asks) = need_words(need);
-        let key = format!("project-need-{at}");
-        let selector = key.clone();
-        div()
-            .id(SharedString::from(key))
-            .debug_selector(move || selector)
-            .role(Role::ListItem)
-            .aria_label(said(&[&need.name, &covers, &asks]))
-            .flex()
-            .items_baseline()
-            .gap(self.z(sp.xs))
-            .px(self.z(sp.inset()))
-            .py(self.z(sp.xxs))
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(hsla(s.text))
-                    .child(SharedString::from(need.name.clone())),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(dotted(theme, format!("{covers} \u{b7} {asks}"))),
-            )
-    }
-
     /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",
-    /// then every worker as the server ranks them, each with what decides it, the one the
-    /// task is pinned to marked.
+    /// then every worker with its system and its agents, the one the task is pinned to marked.
     fn run_on_block(
         &self,
         task: TaskId,
@@ -3112,7 +2674,6 @@ impl ProjectView {
         let picker = self.seen.run_on.as_ref().filter(|p| p.task == task)?;
         let board = self.seen.board.as_ref()?;
         let pin = board.tasks.get(&task).and_then(|c| c.pin);
-        let proposing = board.tasks.get(&task).is_some_and(|c| c.proposed.is_some());
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
@@ -3177,9 +2738,12 @@ impl ProjectView {
             .flex()
             .items_center()
             .gap(self.z(sp.xs))
-            .child(div().flex_1().text_color(hsla(s.text_secondary)).child(SharedString::from(
-                if proposing { format!("Start #{task} on") } else { format!("Run #{task} on") },
-            )))
+            .child(
+                div()
+                    .flex_1()
+                    .text_color(hsla(s.text_secondary))
+                    .child(SharedString::from(format!("Run #{task} on"))),
+            )
             .child(close);
         let mut options = vec![option(
             format!("{key}-anywhere"),
@@ -3189,7 +2753,7 @@ impl ProjectView {
             true,
             RunOn::Anywhere,
         )];
-        let ranking = match &picker.ranked {
+        let ranking = match &picker.workers {
             None => Some(
                 div()
                     .px(self.z(sp.xs))
@@ -3197,15 +2761,16 @@ impl ProjectView {
                     .child(RANKING)
                     .into_any_element(),
             ),
-            Some(ranked) => {
-                options.extend(ranked.iter().enumerate().map(|(i, r)| {
+            Some(workers) => {
+                options.extend(workers.iter().enumerate().map(|(i, w)| {
+                    let (name, line, online) = run_on_words(w);
                     option(
                         format!("{key}-{i}"),
-                        r.name.clone(),
-                        r.why(),
-                        pin == Some(r.worker),
-                        r.fits,
-                        RunOn::Worker(r.worker),
+                        name,
+                        line,
+                        pin == Some(w.worker),
+                        online,
+                        RunOn::Worker(w.worker),
                     )
                 }));
                 None
@@ -3327,14 +2892,11 @@ fn spent_words(spend: &NodeSpend) -> String {
 /// The word a recap line's selector ends in.
 const fn recap_word(kind: RecapKind) -> &'static str {
     match kind {
-        RecapKind::ChangesAsked => "changes",
         RecapKind::VerifyFailed => "verify-failed",
         RecapKind::Conflicts => "conflicts",
         RecapKind::ChecksFailed => "checks-failed",
         RecapKind::StepFailed => "step-failed",
-        RecapKind::Stuck => "stuck",
         RecapKind::AgentEnded => "ended",
-        RecapKind::Proposed => "proposed",
         RecapKind::Merged => "merged",
         RecapKind::Verified => "verified",
         RecapKind::Started => "started",
@@ -3345,13 +2907,10 @@ const fn recap_word(kind: RecapKind) -> &'static str {
 /// A recap line's mark: the one its timeline entries draw.
 const fn recap_icon(kind: RecapKind) -> IconName {
     match kind {
-        RecapKind::ChangesAsked => IconName::MessageSquareWarning,
         RecapKind::VerifyFailed | RecapKind::StepFailed => IconName::CircleX,
         RecapKind::Conflicts => IconName::GitBranch,
         RecapKind::ChecksFailed => IconName::GitPullRequest,
-        RecapKind::Stuck => IconName::CircleAlert,
         RecapKind::AgentEnded => IconName::Power,
-        RecapKind::Proposed => IconName::Hand,
         RecapKind::Merged => IconName::GitMerge,
         RecapKind::Verified => IconName::CircleCheck,
         RecapKind::Started => IconName::SquareTerminal,
@@ -3364,12 +2923,8 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
     let (glyph, tone) = match what {
         Moment::Created | Moment::TaskCreated { .. } => (IconName::Plus, s.text_muted),
         Moment::Orchestrator { .. } => (IconName::Sparkles, s.text_secondary),
-        Moment::Limits { .. } | Moment::Needs { .. } => (IconName::ListFilter, s.text_muted),
-        Moment::Claimed { .. } => (IconName::Lock, s.text_muted),
-        Moment::Budget { share_bp, .. } if *share_bp >= 10_000 => (IconName::Hand, s.warn),
-        Moment::Budget { .. } => (IconName::Activity, s.text_secondary),
+        Moment::Limits { .. } => (IconName::ListFilter, s.text_muted),
         Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
-        Moment::Proposed { .. } => (IconName::Hand, s.text_secondary),
         Moment::State { to, .. } => {
             let status = state_status(*to);
             (status.icon(), board_tone(theme, status))
@@ -3385,16 +2940,9 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
             }
             _ => (IconName::GitPullRequest, s.text_secondary),
         },
-        Moment::Reviewed(run) if run.verdict.approved => (IconName::CircleCheck, s.text_secondary),
-        Moment::Reviewed(_) => (IconName::MessageSquareWarning, s.text_secondary),
         Moment::AgentGone { .. } => (IconName::Power, s.text_muted),
         Moment::Note { .. } | Moment::Told { .. } => (IconName::MessageSquare, s.text_secondary),
-        Moment::Reported { report } => match report.kind {
-            ReportKind::Checkpoint => (IconName::Flag, s.text_secondary),
-            ReportKind::NeedsInput => (IconName::MessageSquareWarning, s.warn),
-            ReportKind::Stuck => (IconName::CircleAlert, s.error),
-            ReportKind::Done => (IconName::CircleCheck, s.text_secondary),
-        },
+        Moment::Reported { .. } => (IconName::CircleCheck, s.text_secondary),
         Moment::Delivered { .. } => (IconName::Inbox, s.text_muted),
         Moment::Step(step) => match (step.kind, &step.state) {
             (_, StepState::Failed { .. }) => (IconName::CircleX, s.error),
@@ -3405,7 +2953,6 @@ fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
             (StepKind::Home, _) => (IconName::Download, s.text_secondary),
             (StepKind::Verify, _) => (IconName::ListChecks, s.text_secondary),
             (StepKind::Merge, _) => (IconName::GitMerge, s.text_secondary),
-            (StepKind::Review, _) => (IconName::Eye, s.text_secondary),
         },
     };
     (glyph, hsla(tone))
@@ -3436,19 +2983,11 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &RunTaskOn, _w, cx| {
                 this.act_on_picked(TaskAction::RunOn, cx);
             }))
-            .on_action(cx.listener(|this, _: &StartTask, _w, cx| {
-                this.act_on_picked(TaskAction::Start, cx);
-            }))
-            .on_action(cx.listener(|this, _: &StartProposed, _w, cx| this.start_all(cx)))
-            .on_action(cx.listener(|this, _: &ToggleAskToStart, _w, cx| this.toggle_ask(cx)))
             .on_action(cx.listener(|this, _: &MergeTask, _w, cx| {
                 this.act_on_picked(TaskAction::Merge, cx);
             }))
             .on_action(cx.listener(|this, _: &RetryTask, _w, cx| {
                 this.act_on_picked(TaskAction::Retry, cx);
-            }))
-            .on_action(cx.listener(|this, _: &ApproveTask, _w, cx| {
-                this.act_on_picked(TaskAction::Approve, cx);
             }))
             .on_action(cx.listener(|this, _: &FixCi, _w, cx| {
                 this.act_on_picked(TaskAction::FixCi, cx);
@@ -3478,9 +3017,6 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &EditChecks, window, cx| {
                 this.open_checks(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &EditBudget, window, cx| {
-                this.open_budget(window, cx);
             }))
             .flex_1()
             .min_h_0()
@@ -3515,7 +3051,6 @@ impl Render for ProjectView {
         let keys = keys
             .children(self.recap(&board, cx))
             .children(self.needs_you(&board, cx))
-            .children(self.plan(&board, cx))
             .child(self.lenses(cx))
             .child(
                 self.scroll_fade(
@@ -3542,7 +3077,6 @@ impl Render for ProjectView {
         // orchestrator sits under them: a letter typed into a field there is a letter.
         root.child(self.header(&board, cx))
             .children(self.checks_panel(cx))
-            .children(self.budget_panel(cx))
             .child(keys)
             .children(composer)
     }

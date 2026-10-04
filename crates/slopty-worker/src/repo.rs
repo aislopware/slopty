@@ -15,7 +15,6 @@ pub mod checks;
 pub mod cloning;
 pub mod commit;
 pub mod pull;
-pub mod review;
 pub mod script;
 pub mod snapshot;
 pub mod verify;

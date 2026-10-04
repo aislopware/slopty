@@ -1,16 +1,13 @@
 //! What the projects cost at a large fleet's state (10 projects of 200 tasks, every timeline
 //! full): the keeper's work for one change off the hub's lock (its log line and its replica),
 //! a compaction's write of the whole file, one change to a task and one agent report under the
-//! lock, the snapshot a new client link is sent, and one placement over 32 workers' facts in
-//! CEL. `cargo xtask bench` runs them;
-//! the numbers are in `docs/MEASUREMENTS.md`.
+//! lock, and the snapshot a new client link is sent. `cargo xtask bench` runs them; the numbers
+//! are in `docs/MEASUREMENTS.md`.
 
 use slopty_core::SessionId;
-use slopty_proto::project::{Fact, Facts, Placement, Preference};
 use slopty_testkit::bench::Bench;
 
 use super::*;
-use crate::placement::{Candidate, Ranking, rank};
 
 const PROJECTS: usize = 10;
 const TASKS: u32 = 200;
@@ -56,10 +53,8 @@ fn large() -> Large {
             title: format!("Project {p}"),
             repo: "~/src/slopty".to_owned(),
             target: "main".to_owned(),
-            review: None,
             verifier: Some("cargo gate".to_owned()),
             push: false,
-            ask_to_start: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: Some(r#"{"ticket":"SLOP-1234","owner":"platform"}"#.to_owned()),
@@ -73,7 +68,6 @@ fn large() -> Large {
                 kind: "build".to_owned(),
                 title: format!("Task {t}: move the hub's state onto deltas"),
                 brief: "Read the hub, find where whole tasks go out, send what changed. ".repeat(3),
-                owns: vec![format!("crates/p{p}/t{t}"), format!("docs/p{p}/t{t}.md")],
                 ..TaskSpec::default()
             };
             let (task, _) = large.projects.create_task(&id, spec, now()).unwrap();
@@ -87,7 +81,6 @@ fn large() -> Large {
                     spawned: true,
                     branch: None,
                     conversation: None,
-                    placed: None,
                     thread: None,
                 };
                 large.projects.assign(&id, task.id, who, &HashSet::from([term]), now()).unwrap();
@@ -98,8 +91,7 @@ fn large() -> Large {
                 }
             }
         }
-        let kept = large.projects.limits(&id).unwrap().timeline_kept;
-        for n in 0..kept {
+        for n in 0..TIMELINE_KEPT {
             let note = TaskChange { note: Some(format!("note {n}")), ..TaskChange::default() };
             large.projects.update_task(&id, TaskId(1), note, Caller::Person, now()).unwrap();
         }
@@ -203,64 +195,4 @@ fn projects_cost() {
     }
     snapshot.report().unwrap();
     eprintln!("a new link's snapshot: {} bytes", bytes(&sent));
-}
-
-/// A worker as the server sees it: its built-in facts, a label and a probe.
-fn candidate(n: u8) -> Candidate {
-    let text = |t: &str| Fact::Text(t.to_owned());
-    let os = if n.is_multiple_of(3) { "macos" } else { "linux" };
-    let facts: Facts = BTreeMap::from([
-        ("name".to_owned(), text(&format!("worker-{n}"))),
-        ("os".to_owned(), text(os)),
-        ("arch".to_owned(), text("aarch64")),
-        ("cpus".to_owned(), Fact::Int([8, 16, 24, 32][usize::from(n % 4)])),
-        ("memory_mb".to_owned(), Fact::Int(65_536)),
-        ("load".to_owned(), Fact::Float(f64::from(n % 5))),
-        ("live_agents".to_owned(), Fact::Int(i64::from(n % 3))),
-        ("agents".to_owned(), Fact::List(vec![text("claude_code")])),
-        ("labels".to_owned(), Fact::Map(BTreeMap::from([("rack".to_owned(), text("b2"))]))),
-        ("probes".to_owned(), Fact::Map(BTreeMap::from([("cuda".to_owned(), text("12.8"))]))),
-    ]);
-    Candidate {
-        worker: WorkerId::new(),
-        name: format!("worker-{n}"),
-        online: true,
-        reported: true,
-        facts,
-        live: 0,
-        fleet_live: 0,
-    }
-}
-
-#[test]
-#[ignore = "measurement"]
-fn placement_cost() {
-    let fleet: Vec<Candidate> = (0..32).map(candidate).collect();
-    let placement = Placement {
-        require: vec![
-            r#"os == "linux" && cpus >= 16"#.to_owned(),
-            r#"labels.rack == "b2" && "claude_code" in agents"#.to_owned(),
-        ],
-        prefer: vec![
-            Preference { expr: "cpus".to_owned(), weight: 1 },
-            Preference { expr: "load / double(cpus)".to_owned(), weight: -20 },
-        ],
-        ..Placement::default()
-    };
-    let ranking = Ranking { per_worker: Some(4), comprehensions: 2, ..Ranking::default() };
-    let bench = Bench::new("server.placement_cost");
-    let mut compiled = bench.series("compile_4_rules");
-    for _ in 0..SAMPLES {
-        compiled.time(|| placement::check(&placement, ranking.comprehensions)).unwrap();
-    }
-    compiled.report().unwrap();
-    let mut ranked = bench.series("rank_32_workers");
-    for _ in 0..SAMPLES {
-        let suggestions = ranked.time(|| rank(&placement, &fleet, &BTreeMap::new(), &ranking));
-        assert!(
-            suggestions.as_ref().is_ok_and(|s| s.first().is_some_and(|w| w.fits)),
-            "{suggestions:?}"
-        );
-    }
-    ranked.report().unwrap();
 }

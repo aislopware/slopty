@@ -8,55 +8,28 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use slopty_proto::orchestration::IdempotencyKey;
 use slopty_proto::project::{
-    LimitsChange, Preference, ProjectStatus, Report, ReportKind, RunOn, Runner, Script, Task,
-    TaskChange, TaskState, VerifierRun,
+    LimitsChange, ProjectStatus, Report, RunOn, Runner, Script, Task, TaskChange, TaskState,
+    VerifierRun,
 };
-use slopty_tools::ops::{
-    self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, Which,
-};
+use slopty_tools::ops::{self, LaunchSpec, NewTask, ProjectEdit, ProjectSpec, Which};
 use slopty_tools::resolve::Resolver;
 use slopty_tools::view::projects as view;
 
 use crate::link::Link;
 use crate::verbs::{SizeArgs, key_value, print_json};
 
-/// A project's limits, within the bounds the person set in the server's settings.
+/// A project's limits.
 #[derive(Args, Debug, Default)]
 pub struct LimitArgs {
-    /// Most of its live agents on one worker.
-    #[arg(long)]
-    live_per_worker: Option<u16>,
-    /// Most of its live agents in all.
-    #[arg(long)]
-    live_per_project: Option<u16>,
     /// How many of its tasks may wait on you, ready to merge or asking you something, before
     /// its agents start no more work; at least 1. Yours to set: an agent's is refused.
     #[arg(long)]
     review_limit: Option<u16>,
-    /// How many timeline entries it keeps.
-    #[arg(long)]
-    timeline_kept: Option<u32>,
-    /// What its agents may spend of their plans, a window at a time: `five-hour=80%` caps the
-    /// plan's five-hour window. At a cap it starts no task until it is raised. `none` takes
-    /// the budget away. Yours to set: an agent's is refused.
-    #[arg(long, value_name = "METER=CAP")]
-    budget: Vec<String>,
 }
 
 impl LimitArgs {
-    fn change(&self) -> Result<LimitsChange> {
-        let budget = if self.budget.is_empty() {
-            None
-        } else {
-            Some(slopty_tools::budget::parse(&self.budget)?)
-        };
-        Ok(LimitsChange {
-            live_per_worker: self.live_per_worker,
-            live_per_project: self.live_per_project,
-            review: self.review_limit,
-            timeline_kept: self.timeline_kept,
-            budget,
-        })
+    const fn change(&self) -> LimitsChange {
+        LimitsChange { review: self.review_limit }
     }
 }
 
@@ -79,16 +52,9 @@ pub enum ProjectCmd {
         /// The command that says a task's work is right (`cargo gate`).
         #[arg(long)]
         verifier: Option<String>,
-        /// Have a fresh-context reviewer read each task's work before it merges, looking for
-        /// this as well as for what would be wrong to merge.
-        #[arg(long)]
-        review: Option<String>,
         /// Push the target branch to the orchestrator's clone's `origin` after each merge.
         #[arg(long)]
         push: bool,
-        /// Hold each task's start until you start it: the orchestrator's starts only propose.
-        #[arg(long)]
-        ask_to_start: bool,
         /// The orchestrator's terminal; this one when run inside a Slopty terminal.
         #[arg(long)]
         orchestrator: Option<String>,
@@ -108,41 +74,14 @@ pub enum ProjectCmd {
         /// A new verifier command; empty for none.
         #[arg(long)]
         verifier: Option<String>,
-        /// A new reviewer's brief; empty for no reviewer.
-        #[arg(long)]
-        review: Option<String>,
         /// Push the target after each merge (`true`), or stop (`false`).
         #[arg(long)]
         push: Option<bool>,
-        /// Hold each task's start until you start it (`true`), or let the orchestrator start
-        /// them (`false`).
-        #[arg(long)]
-        ask_to_start: Option<bool>,
         #[command(flatten)]
         limits: LimitArgs,
         /// New metadata, a JSON object.
         #[arg(long)]
         metadata: Option<String>,
-    },
-    /// Say what one kind of a project's work needs of the machine it runs on, in place of
-    /// what it was said to need: tasks owning its paths (every task with none) get its rules.
-    Need {
-        /// The project.
-        project: String,
-        /// The need's name, in a few words: "Apple work".
-        name: String,
-        /// A path whose owners have it; repeatable. Every task when none.
-        #[arg(long = "path")]
-        paths: Vec<String>,
-        /// A CEL rule a worker must hold, such as `os == "macos"`; repeatable.
-        #[arg(long)]
-        require: Vec<String>,
-        /// A CEL rule that scores a worker, `WEIGHT:CEL` or `CEL`; repeatable.
-        #[arg(long, value_parser = preference)]
-        prefer: Vec<Preference>,
-        /// Take the need away instead.
-        #[arg(long, conflicts_with_all = ["paths", "require", "prefer"])]
-        remove: bool,
     },
     /// Tell a project's orchestrator something, as the person: the words reach it through its
     /// hooks, and wake it when it is idle.
@@ -271,79 +210,21 @@ pub struct TaskRef {
     task: Option<String>,
 }
 
-/// Where a task may run: rules in CEL over the workers' facts (`slopty workers --json` shows
-/// them).
-#[derive(Args, Debug, Default)]
-pub struct PlacementArgs {
-    /// Run it on this worker (name or id) and no other.
-    #[arg(long)]
-    pin: Option<String>,
-    /// A rule every worker must meet, such as `os == "linux" && cpus >= 16`; repeatable.
-    #[arg(long = "require", value_name = "CEL")]
-    require: Vec<String>,
-    /// A rule that scores a worker, `WEIGHT:CEL` or `CEL` (weight 1); repeatable.
-    #[arg(long = "prefer", value_name = "[WEIGHT:]CEL", value_parser = preference)]
-    prefer: Vec<Preference>,
-    /// Run beside this task (`#3`) or worker; repeatable.
-    #[arg(long = "near")]
-    near: Vec<String>,
-    /// Keep away from this task (`#3`) or worker; repeatable.
-    #[arg(long = "avoid")]
-    avoid: Vec<String>,
-}
-
-impl PlacementArgs {
-    const fn is_empty(&self) -> bool {
-        self.pin.is_none()
-            && self.require.is_empty()
-            && self.prefer.is_empty()
-            && self.near.is_empty()
-            && self.avoid.is_empty()
-    }
-
-    fn spec(self) -> PlacementSpec {
-        PlacementSpec {
-            pin: self.pin,
-            require: self.require,
-            prefer: self.prefer,
-            near: self.near,
-            avoid: self.avoid,
-        }
-    }
-}
-
-/// `WEIGHT:CEL` or `CEL`.
-fn preference(s: &str) -> Result<Preference, String> {
-    let (weight, expr) = match s.split_once(':') {
-        Some((w, e)) if w.trim().parse::<i32>().is_ok() => {
-            (w.trim().parse().map_err(|e: std::num::ParseIntError| e.to_string())?, e)
-        }
-        _ => (1, s),
-    };
-    if expr.trim().is_empty() {
-        return Err("a preference needs a rule".to_owned());
-    }
-    Ok(Preference { expr: expr.trim().to_owned(), weight })
-}
-
 /// `slopty task …`.
 #[derive(Subcommand, Debug)]
 pub enum TaskCmd {
     /// Start a task, the one way work starts: a new one made from `--title` and the flags after
-    /// it, or one the project has with `--task` (made before and refused its start, stopped,
-    /// given back, or proposed to you). Claude Code runs it, or another `--agent`, or with
-    /// `--command` the program after `--`, where the server places it or on `--worker`.
+    /// it, or one the project has with `--task` (made before and refused its start, stopped, or
+    /// given back). Claude Code runs it, or another `--agent`, or with `--command` the program
+    /// after `--`, on `--worker` or where the server places it.
     Start(Box<StartTask>),
     /// Change a task: move it, say what it is doing, record its branch or verifier, or note
     /// something on the timeline.
     Update(Box<UpdateTask>),
-    /// Report on a task's work to the project's orchestrator, through its hooks.
+    /// Report a task's work done to the project's orchestrator, through its hooks.
     Report {
         #[command(flatten)]
         which: TaskRef,
-        /// What it is: progress, a question, a block or the finish.
-        #[arg(long, value_enum)]
-        kind: KindArg,
         /// What there is to say, in a few lines.
         #[arg(long, default_value = "")]
         note: String,
@@ -373,8 +254,8 @@ pub enum TaskCmd {
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
     },
-    /// Wait for news of tasks: a report, a move of state, a terminal gone, a verdict, checks,
-    /// a step ended. Running out of time cancels nothing.
+    /// Wait for news of tasks: a report, a move of state, a terminal gone, checks, a step
+    /// ended. Running out of time cancels nothing.
     Wait {
         /// The project (this session's own when omitted).
         #[arg(long)]
@@ -392,39 +273,11 @@ pub enum TaskCmd {
         #[arg(long, default_value_t = 50)]
         timeout: u32,
     },
-    /// Say whether a task's work may merge, as the person, over its reviewer's word or in its
-    /// place: `--approve` puts verified work in the merge queue, `--changes` gives it back to
-    /// its agent with the summary and findings.
-    Review {
-        #[command(flatten)]
-        which: TaskRef,
-        /// The work may merge.
-        #[arg(long, conflicts_with = "changes", required_unless_present = "changes")]
-        approve: bool,
-        /// The work needs changes first.
-        #[arg(long)]
-        changes: bool,
-        /// The review in a few lines.
-        #[arg(long, default_value = "")]
-        summary: String,
-        /// A finding that blocks, as `path:line: words`, `path: words` or just words; again
-        /// for more.
-        #[arg(long = "finding")]
-        findings: Vec<String>,
-    },
     /// One node in full: a task with its brief and Claude Code's own subagents and to-dos, or
     /// with `--task orchestrator` the orchestrator's.
     Get {
         #[command(flatten)]
         which: TaskRef,
-    },
-    /// Rank every worker for a task's placement, or for the rules given, with the reasons.
-    Suggest {
-        #[command(flatten)]
-        which: TaskRef,
-        /// Rules to try in place of the task's.
-        #[command(flatten)]
-        placement: PlacementArgs,
     },
 }
 
@@ -442,10 +295,6 @@ pub struct UpdateTask {
     /// The branch its work is on.
     #[arg(long)]
     branch: Option<String>,
-    /// A repository-relative path to own beside what it owns; repeatable. Refused, naming
-    /// the task that holds it, when it overlaps a path another live task owns.
-    #[arg(long = "claim", value_name = "PATH")]
-    claim: Vec<String>,
     /// The verifier passed on `--head` over `--base`.
     #[arg(long, conflicts_with = "failed", requires_all = ["head", "base"])]
     passed: bool,
@@ -470,10 +319,7 @@ pub struct UpdateTask {
     /// It depends on nothing now.
     #[arg(long, conflicts_with = "depends_on")]
     no_dependencies: bool,
-    /// A placement in place of the old, when any of its flags is given.
-    #[command(flatten)]
-    placement: PlacementArgs,
-    /// Run it on this worker over its placement's rules, or `anywhere` to let them choose.
+    /// Run it on this worker, or `anywhere` to let the server choose.
     #[arg(long, value_name = "WORKER")]
     run_on: Option<String>,
     /// Its own verifier; empty for the project's.
@@ -492,8 +338,7 @@ pub struct StartTask {
     project: Option<String>,
     /// A task the project has, by its number, in place of a new one.
     #[arg(long, conflicts_with_all = [
-        "title", "brief", "kind", "depends_on", "owns", "read_only", "verifier", "metadata",
-        "require", "prefer", "near", "avoid", "pin",
+        "title", "brief", "kind", "depends_on", "read_only", "verifier", "metadata",
     ])]
     task: Option<String>,
     /// A new task: what it is, in a line.
@@ -509,21 +354,17 @@ pub struct StartTask {
     /// A new task: a task it needs first; repeatable.
     #[arg(long = "depends-on", value_name = "TASK")]
     depends_on: Vec<String>,
-    /// A new task: a repository-relative path it alone may write; repeatable.
-    #[arg(long = "owns", value_name = "PATH")]
-    owns: Vec<String>,
-    /// A new task: it only reads, so it owns nothing.
-    #[arg(long, conflicts_with = "owns")]
+    /// A new task: it only reads, and has nothing to merge.
+    #[arg(long)]
     read_only: bool,
-    #[command(flatten)]
-    placement: PlacementArgs,
     /// A new task: its own verifier, over the project's.
     #[arg(long)]
     verifier: Option<String>,
     /// A new task: anything to keep with it, as a JSON object.
     #[arg(long)]
     metadata: Option<String>,
-    /// This worker over the task's placement (name or id); the server places it when omitted.
+    /// This worker (name or id), over the one the task names; the server places it when
+    /// omitted.
     #[arg(long)]
     worker: Option<String>,
     /// Working directory on the worker; beside a clone of the project's repository, in a git
@@ -579,38 +420,12 @@ impl StartTask {
                 kind: self.kind,
                 title: title.unwrap_or_default(),
                 brief: self.brief,
-                owns: self.owns,
                 read_only: self.read_only,
-                placement: self.placement.spec(),
                 verifier: self.verifier,
                 metadata: self.metadata,
             })),
         };
         (self.project, which, launch)
-    }
-}
-
-/// What a report is.
-#[derive(clap::ValueEnum, Clone, Copy, Debug)]
-pub enum KindArg {
-    /// Progress worth knowing.
-    Checkpoint,
-    /// An answer is needed to go on.
-    NeedsInput,
-    /// It cannot go on.
-    Stuck,
-    /// It finished.
-    Done,
-}
-
-impl KindArg {
-    const fn kind(self) -> ReportKind {
-        match self {
-            Self::Checkpoint => ReportKind::Checkpoint,
-            Self::NeedsInput => ReportKind::NeedsInput,
-            Self::Stuck => ReportKind::Stuck,
-            Self::Done => ReportKind::Done,
-        }
     }
 }
 
@@ -629,9 +444,7 @@ pub async fn project(
             repo,
             target,
             verifier,
-            review,
             push,
-            ask_to_start,
             orchestrator,
             limits,
             metadata,
@@ -642,60 +455,19 @@ pub async fn project(
                 repo,
                 target: Some(target),
                 verifier,
-                review,
                 push,
-                ask_to_start,
                 orchestrator,
-                limits: limits.change()?,
+                limits: limits.change(),
                 metadata,
             };
             let status = ops::project_create(&mut res, spec, key).await?;
             print_status(&mut res, &status, json).await
         }
-        ProjectCmd::Update {
-            project,
-            orchestrator,
-            verifier,
-            review,
-            push,
-            ask_to_start,
-            limits,
-            metadata,
-        } => {
-            let limits = limits.change()?;
-            let edit = ProjectEdit {
-                orchestrator,
-                verifier,
-                review,
-                push,
-                ask_to_start,
-                limits,
-                metadata,
-            };
+        ProjectCmd::Update { project, orchestrator, verifier, push, limits, metadata } => {
+            let limits = limits.change();
+            let edit = ProjectEdit { orchestrator, verifier, push, limits, metadata };
             let status = ops::project_set(&mut res, project.as_deref(), edit, key).await?;
             print_status(&mut res, &status, json).await
-        }
-        ProjectCmd::Need { project, name, paths, require, prefer, remove } => {
-            let mut needs = ops::project_status(link, Some(&project), None, 0).await?.project.needs;
-            let had = needs.len();
-            needs.retain(|n| n.name != name.trim());
-            if remove && needs.len() == had {
-                bail!("{project} has no need named {name:?}");
-            }
-            if !remove {
-                needs.push(slopty_proto::project::Need { name, paths, require, prefer });
-            }
-            let status = ops::project_needs(link, Some(&project), needs, key).await?;
-            if json {
-                return print_json(&view::status(&status));
-            }
-            let names: Vec<&str> = status.project.needs.iter().map(|n| n.name.as_str()).collect();
-            if names.is_empty() {
-                println!("{project} needs nothing of its machines");
-            } else {
-                println!("{project} needs: {}", names.join(", "));
-            }
-            Ok(())
         }
         ProjectCmd::Tell { project, words } => {
             ops::orchestrator_tell(link, &project, words.join(" "), key).await?;
@@ -755,7 +527,6 @@ pub async fn task(
                 state: word,
                 status,
                 branch,
-                claim,
                 passed,
                 failed,
                 summary,
@@ -764,7 +535,6 @@ pub async fn task(
                 note,
                 depends_on,
                 no_dependencies,
-                placement,
                 run_on,
                 verifier,
                 metadata,
@@ -791,12 +561,10 @@ pub async fn task(
                 state: state(word.as_deref())?,
                 status,
                 branch,
-                claim,
                 verified,
                 base,
                 note,
                 depends_on,
-                placement: None,
                 run_on: match run_on.as_deref() {
                     None => None,
                     Some("anywhere") => Some(RunOn::Anywhere),
@@ -805,12 +573,11 @@ pub async fn task(
                 verifier,
                 metadata,
             };
-            let placement = (!placement.is_empty()).then(|| placement.spec());
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
-            ops::task_update(&mut res, project, task, change, placement, key).await?
+            ops::task_update(&res, project, task, change, key).await?
         }
-        TaskCmd::Report { which, kind, note, artifacts, branch, pr } => {
-            let report = Report { kind: kind.kind(), note, artifacts, branch, pr };
+        TaskCmd::Report { which, note, artifacts, branch, pr } => {
+            let report = Report { note, artifacts, branch, pr };
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             ops::task_report(link, project, task, report, key).await?
         }
@@ -835,13 +602,6 @@ pub async fn task(
                 Ok(())
             };
         }
-        TaskCmd::Review { which, approve, summary, findings, .. } => {
-            let findings = findings.iter().map(|f| finding(f)).collect();
-            let verdict =
-                slopty_proto::project::ReviewVerdict { approved: approve, summary, findings };
-            let (project, task) = (which.project.as_deref(), which.task.as_deref());
-            ops::task_review(link, project, task, verdict, key).await?
-        }
         TaskCmd::Get { which } => {
             let (project, task) = (which.project.as_deref(), which.task.as_deref());
             let node = ops::task_get(link, project, task).await?;
@@ -849,17 +609,6 @@ pub async fn task(
                 print_json(&view::node(&node))
             } else {
                 print!("{}", view::node_text(&node));
-                Ok(())
-            };
-        }
-        TaskCmd::Suggest { which, placement } => {
-            let spec = (!placement.is_empty()).then(|| placement.spec());
-            let (project, task) = (which.project.as_deref(), which.task.as_deref());
-            let ranked = ops::placement_suggest(&mut res, project, task, spec).await?;
-            return if json {
-                print_json(&view::suggestions(&ranked))
-            } else {
-                print!("{}", view::suggestions_text(&ranked));
                 Ok(())
             };
         }
@@ -891,25 +640,4 @@ async fn print_status(
         res.workers().await?.iter().map(|w| (w.worker, w.name.clone())).collect();
     print!("{}", view::status_text(status, &names));
     Ok(())
-}
-
-/// A finding the person writes, `path:line: words`, `path: words` or just words, as one that
-/// blocks.
-fn finding(text: &str) -> slopty_proto::project::Finding {
-    let blocker =
-        |path: Option<&str>, line: Option<u32>, body: &str| slopty_proto::project::Finding {
-            path: path.map(str::to_owned),
-            line,
-            severity: "blocker".to_owned(),
-            blocking: true,
-            body: body.trim().to_owned(),
-        };
-    let Some((place, body)) = text.split_once(": ") else { return blocker(None, None, text) };
-    match place.rsplit_once(':') {
-        Some((path, line)) if line.parse::<u32>().is_ok() => {
-            blocker(Some(path), line.parse().ok(), body)
-        }
-        _ if place.contains(char::is_whitespace) => blocker(None, None, text),
-        _ => blocker(Some(place), None, body),
-    }
 }

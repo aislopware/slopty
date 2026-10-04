@@ -3,9 +3,9 @@
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Assignment, Bounds, Finding, Limits, Live, Merge, NativeCounts, Project, ProjectId,
-    ProjectStatus, ProjectUpdate, ProjectsPart, ReviewRun, ReviewVerdict, Reviewer, StepKind,
-    StepState, TaskCard, TaskId, TaskState, TaskStep, TimelineEntry, VerifierRun,
+    Assignment, Bounds, Limits, Live, Merge, NativeCounts, Project, ProjectId, ProjectStatus,
+    ProjectUpdate, ProjectsPart, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
+    TimelineEntry, VerifierRun,
 };
 
 /// The server's clock for every fixture: a fixed instant, so ages read the same every run.
@@ -19,21 +19,17 @@ pub(crate) fn id(name: &str) -> ProjectId {
 /// A project whose orchestrator runs in `orchestrator`, when it has one.
 pub(crate) fn project(name: &str, orchestrator: Option<TermRef>) -> Project {
     Project {
-        spend: slopty_proto::project::Spend::default(),
         orchestrator_spent: slopty_proto::project::Spent::default(),
         id: id(name),
         title: "Ship the project board".to_owned(),
         repo: "slopty".to_owned(),
         repo_id: None,
         target: "main".to_owned(),
-        review: None,
         verifier: Some("cargo gate".to_owned()),
         push: false,
-        ask_to_start: false,
         orchestrator,
         limits: Limits::default(),
         metadata: None,
-        needs: Vec::new(),
         scripts: Vec::new(),
         created_ms: AT,
         members: Vec::new(),
@@ -56,12 +52,10 @@ pub(crate) fn card(n: u32, title: &str, state: TaskState) -> TaskCard {
         branch: None,
         worktree: None,
         pr: None,
-        reviewed: None,
         verified: None,
         merge: None,
         step: None,
         pin: None,
-        proposed: None,
         natives: NativeCounts::default(),
         created_ms: AT,
         updated_ms: AT,
@@ -78,7 +72,7 @@ pub(crate) fn on(mut card: TaskCard, worker: WorkerId, session: SessionId) -> Ta
         since_ms: AT,
         ended_ms: None,
         conversation: None,
-        placed: None,
+        spawned: true,
     });
     card.branch = Some(format!("slopty/board/{}", card.id));
     card
@@ -157,46 +151,4 @@ pub(crate) fn queued(mut card: TaskCard, after: u64, head: &str) -> TaskCard {
     card.merge =
         Some(Merge::Queued { since_ms: WallMs::from_millis(AT.as_millis().saturating_add(after)) });
     card
-}
-
-/// A review of `head` over the [`run`]s' base: an approval, or changes asked over a missing
-/// golden with a note beside it, by a reviewer of its own in `term`, else by the person.
-pub(crate) fn review(approved: bool, head: &str, term: Option<TermRef>) -> ReviewRun {
-    let finding = |blocking: bool, path: Option<&str>, line, body: &str| Finding {
-        path: path.map(str::to_owned),
-        line,
-        severity: if blocking { "blocker" } else { "nit" }.to_owned(),
-        blocking,
-        body: body.to_owned(),
-    };
-    let findings = if approved {
-        vec![finding(false, None, None, "The commit message could say why.")]
-    } else {
-        vec![
-            finding(
-                true,
-                Some("crates/slopty-proto/src/project.rs"),
-                Some(431),
-                "Project.review has no golden, so a wire change would pass unseen.",
-            ),
-            finding(
-                false,
-                Some("docs/decisions/projects.md"),
-                None,
-                "Says verifier where it means reviewer.",
-            ),
-        ]
-    };
-    ReviewRun {
-        verdict: ReviewVerdict {
-            approved,
-            summary: if approved { "Reads well." } else { "One blocker." }.to_owned(),
-            findings,
-        },
-        more: 0,
-        head: head.to_owned(),
-        base: "c08d4c1a9f".to_owned(),
-        by: term.map_or(Reviewer::Person, Reviewer::Agent),
-        took_ms: 95_000,
-    }
 }

@@ -1,7 +1,6 @@
 //! The hub's side of projects (`docs/decisions/projects.md`): the verbs the store answers,
-//! placement over the workers' facts, every start of an agent or a task's terminal counted
-//! against the person's bounds and the project's limits from the moment it is placed, and the
-//! reports on their way up the tree.
+//! where each start goes, every start of an agent or a task's terminal counted against the
+//! person's bounds from the moment it is placed, and the reports on their way up the tree.
 //!
 //! A start's terminal id is the hub's to choose (the start's token): the worker opens the
 //! terminal under it, and a start asked again under it answers that terminal instead of
@@ -9,7 +8,6 @@
 //! its task when the worker announces it. A caller never chooses the id.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 use std::time::Duration;
 
 use slopty_core::{SessionId, WallMs, WorkerId};
@@ -17,9 +15,8 @@ use slopty_proto::agent::{AgentBranch, AgentKind};
 use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Outcome, TermRef, ThreadOf, Verb};
 use slopty_proto::project::{
     Bounds, Fact, Facts, LOOSENED_ITEM_MAX, LOOSENED_MAX, PERMISSION_MODE_FLAG, PROJECT_ENV,
-    Placed, Placement, Project, ProjectId, ProjectStatus, ProjectsPart, Proposal, Proposed, Report,
-    ReportKind, Runner, SAFE_MODES, Suggestion, TASK_ENV, Task, TaskId, TaskLaunch, TimelineEntry,
-    WorkerFacts,
+    Project, ProjectId, ProjectStatus, ProjectsPart, Runner, SAFE_MODES, TASK_ENV, Task, TaskId,
+    TaskLaunch, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::VideoCodec;
 use slopty_proto::server::{FromServer, Liveness, Os};
@@ -34,7 +31,7 @@ use super::{
 use crate::deliver::{Batch, plain};
 
 mod scripts;
-use crate::placement::{self, Candidate, Installed, Ranking};
+use crate::placement::{self, Candidate, Installed, Wanted};
 use crate::project::{
     Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,
     Watched, clipped,
@@ -44,10 +41,6 @@ use crate::project::{
 /// terminal counts on its own: past it, the terminal is gone or never came.
 pub(super) const STARTED_GRACE: Duration = Duration::from_secs(30);
 
-/// How long ranking may judge rules before it stops: a rule not judged by then does not hold.
-const RANK_DEADLINE: Duration = Duration::from_secs(2);
-/// Rankings run at once on the blocking pool; more wait their turn, up to the deadline.
-pub(super) const RANKERS: usize = 2;
 /// The most bytes of projects one [`FromServer::Projects`] part carries, well within a frame.
 const PART_BYTES: usize = 8 << 20;
 /// The longest rules text a project's metadata gives its agents or its orchestrator, in bytes.
@@ -214,7 +207,6 @@ pub(super) fn agent_scope(
         verb,
         Verb::ProjectCreate { .. }
             | Verb::ProjectSet { .. }
-            | Verb::ProjectNeeds { .. }
             | Verb::TaskCreate { .. }
             | Verb::TaskUpdate { .. }
             | Verb::TaskSpawn { .. }
@@ -270,12 +262,6 @@ pub(super) fn agent_scope(
             }
             if let Some(term) = orchestrator {
                 named(project, *term)?;
-            }
-        }
-        Verb::ProjectNeeds { project, .. } => {
-            in_own(project)?;
-            if task_of.is_some() {
-                return refuse("only the person or the project's orchestrator says what it needs");
             }
         }
         Verb::TaskCreate { project, .. }
@@ -364,49 +350,11 @@ fn names_verifier(verb: &Verb) -> bool {
     }
 }
 
-/// Every rule of `needs` compiles, within the comprehensions the person allows, and all of
-/// them together fit one placement, as they do for a task that has every need.
-fn needs_compile(needs: &[slopty_proto::project::Need], depth: u8) -> Result<(), Outcome> {
-    let mut all = Placement::default();
-    for need in needs {
-        let rules = Placement {
-            require: need.require.clone(),
-            prefer: need.prefer.clone(),
-            ..Placement::default()
-        };
-        placement::check(&rules, depth).map_err(|refused| match refused {
-            Outcome::Error { code, message } => {
-                Outcome::Error { code, message: format!("the need {:?}: {message}", need.name) }
-            }
-            other => other,
-        })?;
-        all.require.extend(rules.require);
-        all.prefer.extend(rules.prefer);
-    }
-    placement::check(&all, depth).map_err(|refused| match refused {
-        Outcome::Error { code, message } => Outcome::Error {
-            code,
-            message: format!("the needs together, as a task with all of them has them: {message}"),
-        },
-        other => other,
-    })
-}
-
 /// Whether `verb` turns pushing a project's target on or off: publishing is the person's.
 const fn names_push(verb: &Verb) -> bool {
     match verb {
         Verb::ProjectCreate { push, .. } => *push,
         Verb::ProjectSet { push, .. } => push.is_some(),
-        _ => false,
-    }
-}
-
-/// Whether `verb` says whether a project's starts wait for the person: how far a project runs
-/// on its own is the person's to say. An agent's new project starts as it asks, as before.
-const fn names_ask_to_start(verb: &Verb) -> bool {
-    match verb {
-        Verb::ProjectCreate { ask_to_start, .. } => *ask_to_start,
-        Verb::ProjectSet { ask_to_start, .. } => ask_to_start.is_some(),
         _ => false,
     }
 }
@@ -417,16 +365,6 @@ const fn names_review_limit(verb: &Verb) -> bool {
     match verb {
         Verb::ProjectCreate { limits, .. } | Verb::ProjectSet { limits, .. } => {
             limits.review.is_some()
-        }
-        _ => false,
-    }
-}
-
-/// Whether `verb` sets a project's budget: what its agents may spend is the person's to say.
-const fn names_budget(verb: &Verb) -> bool {
-    match verb {
-        Verb::ProjectCreate { limits, .. } | Verb::ProjectSet { limits, .. } => {
-            limits.budget.is_some()
         }
         _ => false,
     }
@@ -487,13 +425,11 @@ pub(super) fn started_args(
     (first, conversation)
 }
 
-/// Refused when the fleet runs as many agents as the person allows, or `worker` as many as
-/// one worker may.
+/// Refused when the fleet runs as many agents as the person allows.
 pub(super) fn fleet_room(
     state: &State,
     running: &Running<'_>,
     bounds: Bounds,
-    worker: Option<WorkerId>,
 ) -> Result<(), Outcome> {
     let fleet = state.projects.fleet(running);
     if fleet >= bounds.live_agents {
@@ -506,19 +442,6 @@ pub(super) fn fleet_room(
             ),
         ));
     }
-    if let Some(worker) = worker {
-        let here = state.projects.live_on_worker(worker, running);
-        if here >= bounds.live_per_worker {
-            return Err(error(
-                ErrorCode::Limit,
-                &format!(
-                    "that worker runs {here} agents, the {} the person allows one worker \
-                     (`[server.projects] live_per_worker`); choose another or wait",
-                    bounds.live_per_worker
-                ),
-            ));
-        }
-    }
     Ok(())
 }
 
@@ -527,11 +450,6 @@ const fn os_word(os: Os) -> &'static str {
         Os::MacOs => "macos",
         Os::Linux => "linux",
     }
-}
-
-/// Why `worker` was chosen, from its place in `ranked`.
-fn placed_on(ranked: &[Suggestion], worker: WorkerId) -> Option<Placed> {
-    ranked.iter().find(|s| s.worker == worker).map(Placed::of)
 }
 
 /// A worker's facts: its own, with what the server knows of it over them.
@@ -674,17 +592,6 @@ enum Worktree {
     Codex,
 }
 
-/// The placement rule that holds on a worker with a clone of `id`: either key of it in its
-/// `repos`. `None` for an identity with no key.
-fn beside_a_clone(id: &RepoId) -> Option<String> {
-    let held: Vec<String> = id
-        .keys()
-        .filter_map(|key| serde_json::to_string(key).ok())
-        .map(|key| format!("{key} in repos"))
-        .collect();
-    (!held.is_empty()).then(|| held.join(" || "))
-}
-
 /// Where `worker` has a clone of `project`'s repository.
 pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Option<String> {
     let id = project.repo_id.as_ref()?;
@@ -698,13 +605,6 @@ pub(super) fn clone_on(state: &State, project: &Project, worker: WorkerId) -> Op
 
 /// What an agent started for `task` is told of its role, beside Claude Code's own prompt.
 fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
-    let owns = if task.read_only {
-        "none: it only reads".to_owned()
-    } else if task.owns.is_empty() {
-        "none yet; claim what you will write with task_update's claim first".to_owned()
-    } else {
-        task.owns.join(", ")
-    };
     let mut lines = vec![
         format!(
             "You are the agent of task {} (\"{}\") of the Slopty project {} ({}, work lands \
@@ -718,13 +618,8 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
         "Slopty's tools are the `slopty` MCP server; with no project or task named they act on \
          your own."
             .to_owned(),
-        format!(
-            "- You alone may write the paths your task owns: {owns}. Other tasks own the rest."
-        ),
-        "- Report to the project's orchestrator with task_report: checkpoint for progress, \
-         needs_input for an answer, stuck when you cannot go on, done when finished (with the \
-         branch and what you made). Say done; never merge: the server checks your work and the \
-         person merges it."
+        "- When the task is done, say so with task_report, with the branch and what you made. \
+         Never merge: the server checks your work and the person merges it."
             .to_owned(),
         "- Do the whole task yourself: you start no other agents or tasks. Work you find that is \
          not yours goes in your report, for the orchestrator to plan."
@@ -733,6 +628,9 @@ fn agent_role(project: &Project, task: &Task, at: Option<&Place>) -> String {
          they are."
             .to_owned(),
     ];
+    if task.read_only {
+        lines.push("- Your task only reads: write no files, and report what you found.".to_owned());
+    }
     if let Some(Place { path, worktree }) = at {
         lines.push(match worktree {
             Some(Worktree::Codex) => format!(
@@ -765,8 +663,7 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
             plain(&project.target)
         ),
         "- Do sequential and small work yourself. Start a task only for a part that runs in \
-         parallel with the rest and owns paths no other task does: task_start makes it and \
-         starts its agent in one call (placement_suggest shows where it would go), and \
+         parallel with the rest: task_start makes it and starts its agent in one call, and \
          project_status follows them all. Tasks are one level: their agents start nothing \
          themselves."
             .to_owned(),
@@ -782,28 +679,10 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
          person as the project's review limit, no new task starts: wait for them rather than \
          piling up more."
             .to_owned(),
-        "- When the person asks to start each task themselves, task_start proposes it \
-         (`proposed` on the task) and it starts once they say so: propose the whole plan, then \
-         wait for the starts and reports rather than starting again."
+        "- list_workers shows each worker's facts; name the worker in task_start. Work that \
+         needs no Apple platform belongs on Linux."
             .to_owned(),
     ];
-    if project.needs.is_empty() {
-        lines.push(
-            "- Work that needs no Apple platform belongs on a Linux worker. Say so once with \
-             project_needs before you split the goal: a need such as \"Apple work\" over the \
-             paths that build only on a Mac requires `os == \"macos\"`, and one such as \
-             \"Linux first\" over every path prefers `os == \"linux\"`. The board then names \
-             the need as the reason each task went where it did."
-                .to_owned(),
-        );
-    } else {
-        let names: Vec<String> = project.needs.iter().map(|n| plain(&n.name)).collect();
-        lines.push(format!(
-            "- Its needs place every task by the paths it owns ({}); project_status shows them, \
-             and project_needs says them anew.",
-            names.join(", ")
-        ));
-    }
     lines.push(
         "- task_start runs Claude Code; `agent: \"codex\"` runs the person's Codex instead, \
          with the same tools, on a worker that has it."
@@ -821,16 +700,15 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
             format!("clones of it are on {}", on.join(", "))
         };
         let cloned = if project.repo_id.as_ref().is_some_and(|id| id.url.is_some()) {
-            " A worker your placement picks that has none gets one cloned first, which the \
-             task's step shows."
+            " A worker you name that has none gets one cloned first, which the task's step \
+             shows."
         } else {
             ""
         };
         lines.push(format!(
             "- Its repository is {key} on every worker; {on}. A task started with no cwd goes \
-             beside a clone, in a git worktree of its own when its agent writes.{cloned} For a \
-             placement of your own, `\"{key}\" in repos` holds on a worker with a clone and \
-             `repos[\"{key}\"]` is its path there."
+             beside a clone, in a git worktree of its own when its agent writes.{cloned} A \
+             worker's `repos` fact names where its clones are."
         ));
         lines.push(format!(
             "- When a task done on another machine reports its branch, the server fetches it \
@@ -922,11 +800,7 @@ const fn maybe_done(outcome: &Outcome) -> bool {
 impl Hub {
     /// Take up the person's policy: the bounds on every project and on the fleet.
     pub fn set_policy(&self, policy: Policy) {
-        let mut state = self.inner.state.lock();
-        let updates = state.projects.set_policy(policy);
-        self.projects_moved(&mut state, updates);
-        // Pushed under the lock, so every link hears changes in the order they were made.
-        drop(state);
+        self.inner.state.lock().projects.set_policy(policy);
     }
 
     pub(super) fn status_of(
@@ -939,23 +813,15 @@ impl Hub {
         state.projects.status(project, since, &running)
     }
 
-    /// Every project whole, with what runs now.
-    /// The person lets `project` go: its record, its lane's work, a reviewer reading for it
-    /// and the reports waiting in it. Every client is sent the projects afresh, which a
-    /// snapshot's first part replaces whole, as no change says a project is gone.
+    /// The person lets `project` go: its record, its lane's work and the reports waiting in
+    /// it. Every client is sent the projects afresh, which a snapshot's first part replaces
+    /// whole, as no change says a project is gone.
     pub(super) fn project_delete(&self, project: &ProjectId) -> Outcome {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
         if let Err(refused) = state.projects.delete(project) {
             return refused;
         }
-        let readers: Vec<TermRef> = state
-            .reviews
-            .iter()
-            .filter(|((p, _), _)| p == project)
-            .map(|(_, reading)| reading.term())
-            .collect();
-        state.reviews.retain(|(p, _), _| p != project);
         keep(state, Keep::Forget(project.clone()));
         let projects = Self::projects_snapshot(state);
         let seq = self.inner.log.lock().next.saturating_sub(1);
@@ -963,9 +829,6 @@ impl Hub {
             self.announce(FromServer::Projects(Box::new(part)));
         }
         drop(guard);
-        for term in readers {
-            self.close_soon(term);
-        }
         tracing::info!(%project, "project let go");
         Outcome::Done
     }
@@ -1030,25 +893,11 @@ impl Hub {
                  person sets it",
             );
         }
-        if caller == Caller::Agent && names_budget(verb) {
-            return error(
-                ErrorCode::Forbidden,
-                "what a project's agents may spend is the person's to say, so only the person \
-                 sets its budget",
-            );
-        }
         if caller == Caller::Agent && names_review_limit(verb) {
             return error(
                 ErrorCode::Forbidden,
                 "how many tasks may wait on the person is theirs to say, so only the person sets \
                  the review limit",
-            );
-        }
-        if caller == Caller::Agent && names_ask_to_start(verb) {
-            return error(
-                ErrorCode::Forbidden,
-                "whether each task waits for the person to start it is the person's choice, so \
-                 only the person sets it",
             );
         }
         let mut guard = self.inner.state.lock();
@@ -1076,9 +925,7 @@ impl Hub {
                 repo,
                 target,
                 verifier,
-                review,
                 push,
-                ask_to_start,
                 orchestrator,
                 limits,
                 metadata,
@@ -1090,9 +937,7 @@ impl Hub {
                     repo,
                     target,
                     verifier,
-                    review,
                     push,
-                    ask_to_start,
                     orchestrator,
                     limits,
                     metadata,
@@ -1105,23 +950,13 @@ impl Hub {
                 members,
                 orchestrator,
                 verifier,
-                review,
                 push,
-                ask_to_start,
                 limits,
                 metadata,
             } => known_term(state, orchestrator).and_then(|()| {
                 let before = state.projects.status(&project, None, &running).ok();
-                let change = ProjectChange {
-                    members,
-                    orchestrator,
-                    verifier,
-                    review,
-                    push,
-                    ask_to_start,
-                    limits,
-                    metadata,
-                };
+                let change =
+                    ProjectChange { members, orchestrator, verifier, push, limits, metadata };
                 let set = state.projects.set(&project, change, &running, now)?;
                 let was = before.and_then(|b| b.project.orchestrator);
                 if orchestrator.is_some() && set.0.project.orchestrator != was {
@@ -1129,13 +964,6 @@ impl Hub {
                 }
                 Ok((status(set.0), set.1))
             }),
-            Verb::ProjectNeeds { project, needs } => {
-                let depth = state.projects.policy().bounds_for(Some(&project)).comprehension_depth;
-                needs_compile(&needs, depth).and_then(|()| {
-                    let set = state.projects.set_needs(&project, needs, &running, now)?;
-                    Ok((status(set.0), set.1))
-                })
-            }
             Verb::TaskCreate { project, spec } => {
                 state.projects.create_task(&project, *spec, now).map(|(t, u)| (task(t), u))
             }
@@ -1156,7 +984,7 @@ impl Hub {
                 .map(|(t, u)| (task(t), u)),
             Verb::TaskReport { project, task: id, report } => {
                 let reported = state.projects.report_task(&project, id, &report, now);
-                if reported.is_ok() && report.kind == ReportKind::Done {
+                if reported.is_ok() {
                     self.bring_home_soon(state, (project.clone(), id), report.branch.clone());
                 }
                 reported.map(|(t, u)| {
@@ -1216,14 +1044,7 @@ impl Hub {
         {
             let clones = clones_of(state, record);
             let role = orchestrator_role(record, &clones);
-            let words = Report {
-                kind: ReportKind::NeedsInput,
-                note: role,
-                artifacts: Vec::new(),
-                branch: None,
-                pr: None,
-            };
-            state.deliveries.add((project, None), None, words, tokio::time::Instant::now());
+            state.deliveries.instructions((project, None), &role, tokio::time::Instant::now());
             self.inner.deliver.notify_one();
         }
         if let Some(key) = key {
@@ -1250,7 +1071,6 @@ impl Hub {
             spawned: false,
             branch: branch.as_ref(),
             conversation: None,
-            placed: None,
             thread: None,
         };
         let (mut open, _) = live(state);
@@ -1334,14 +1154,13 @@ impl Hub {
         Outcome::Facts(out.into_iter().map(|(_, f)| f).collect())
     }
 
-    /// The candidates for a start in `project`, read together: every worker with its facts,
-    /// the project's and the fleet's live agents on it, where the project's tasks run, and the
-    /// caps a ranking is held to.
-    fn candidates(state: &mut State, project: Option<&ProjectId>) -> Gathered {
+    /// Every worker as a start in `project` sees it: its facts, the fleet's live agents on it,
+    /// and whether it has a clone of the project's repository.
+    fn candidates(state: &mut State, project: &ProjectId) -> Vec<Candidate> {
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
-        let bounds = state.projects.policy().bounds_for(project);
-        let candidates = state
+        let record = state.projects.project(project).ok();
+        state
             .workers
             .values()
             .map(|e| {
@@ -1353,101 +1172,11 @@ impl Hub {
                     online: e.info.liveness == Liveness::Online && e.link.is_some(),
                     reported: !e.facts.is_empty(),
                     facts: facts_of(e, fleet_live, made_on(state, worker)),
-                    live: project.map_or(0, |p| state.projects.live_on(p, worker, &running)),
                     fleet_live,
+                    clone: record.is_some_and(|r| clone_on(state, r, worker).is_some()),
                 }
             })
-            .collect();
-        let peers = project.map(|p| state.projects.peers(p, &running)).unwrap_or_default();
-        let per_worker =
-            project.and_then(|p| state.projects.limits(p).ok()).map(|l| l.live_per_worker);
-        let ranking = Ranking {
-            per_worker,
-            fleet_per_worker: Some(bounds.live_per_worker),
-            comprehensions: bounds.comprehension_depth,
-            until: None,
-            agent: None,
-        };
-        Gathered { candidates, peers, ranking, named: Vec::new() }
-    }
-
-    /// Rank `gathered` for `placement` on the blocking pool, [`RANKERS`] at a time, judging
-    /// for at most [`RANK_DEADLINE`]: the rules are agents' own and take their time, never the
-    /// hub's lock or a runtime thread.
-    async fn rank(
-        &self,
-        placement: Placement,
-        gathered: Gathered,
-    ) -> Result<Vec<Suggestion>, Outcome> {
-        let start = std::time::Instant::now();
-        let busy = || {
-            error(ErrorCode::Limit, "placement is busy with other rankings; ask again in a moment")
-        };
-        let turn = Arc::clone(&self.inner.rankers).acquire_owned();
-        let Ok(Ok(permit)) = tokio::time::timeout(RANK_DEADLINE, turn).await else {
-            return Err(busy());
-        };
-        let Gathered { candidates, peers, mut ranking, named } = gathered;
-        ranking.until = start.checked_add(RANK_DEADLINE);
-        let ranked = tokio::task::spawn_blocking(move || {
-            let _turn = permit;
-            placement::rank(&placement, &candidates, &peers, &ranking)
-        })
-        .await;
-        let mut ranked = ranked
-            .unwrap_or_else(|e| Err(error(ErrorCode::Failed, &format!("ranking ended: {e}"))))?;
-        // A rule a need brought says the need's name.
-        for reason in ranked.iter_mut().flat_map(|s| s.reasons.iter_mut()) {
-            reason.need =
-                named.iter().find(|(rule, _)| *rule == reason.rule).map(|(_, need)| need.clone());
-        }
-        Ok(ranked)
-    }
-
-    /// Rank every worker for a placement.
-    pub(super) async fn placement_suggest(
-        &self,
-        project: Option<&ProjectId>,
-        task: Option<TaskId>,
-        placement: Option<Placement>,
-    ) -> Outcome {
-        let inputs =
-            Self::suggestion_inputs(&mut self.inner.state.lock(), project, task, placement);
-        let (placement, gathered) = match inputs {
-            Ok(inputs) => inputs,
-            Err(refused) => return refused,
-        };
-        match self.rank(placement, gathered).await {
-            Ok(ranked) => Outcome::Suggestions(ranked),
-            Err(refused) => refused,
-        }
-    }
-
-    /// The placement to rank and what it is ranked over.
-    fn suggestion_inputs(
-        state: &mut State,
-        project: Option<&ProjectId>,
-        task: Option<TaskId>,
-        placement: Option<Placement>,
-    ) -> Result<(Placement, Gathered), Outcome> {
-        let wanted = match (project, task, placement) {
-            (_, _, Some(placement)) => Wanted { placement, ..Wanted::default() },
-            (Some(p), Some(t), None) => {
-                // A start already proposed says which agent it runs.
-                let proposed = state.projects.task(p, t)?.proposal.as_ref();
-                let agent = proposed.and_then(|proposal| agent_of(&proposal.launch.run));
-                Wanted { agent, ..Self::needed(state, p, t)? }
-            }
-            (None, Some(_), None) => {
-                return Err(error(ErrorCode::Invalid, "a task is named within its project"));
-            }
-            (_, None, None) => Wanted::default(),
-        };
-        if let Some(p) = project {
-            state.projects.limits(p)?;
-        }
-        let gathered = Self::candidates(state, project).wanting(&wanted);
-        Ok((wanted.placement, gathered))
+            .collect()
     }
 
     /// Start a plain agent under an id the hub chooses: checked against the person's bounds
@@ -1537,8 +1266,8 @@ impl Hub {
         }
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
-        fleet_room(state, &running, bounds, Some(worker))?;
-        let (id, term) = Self::place(state, worker, None, true, None);
+        fleet_room(state, &running, bounds)?;
+        let (id, term) = Self::place(state, worker, None, true);
         Ok((id, term, allowed))
     }
 
@@ -1596,8 +1325,8 @@ impl Hub {
         let bounds = state.projects.policy().bounds_for(None);
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
-        fleet_room(state, &running, bounds, Some(worker))?;
-        Ok(Self::place(state, worker, None, true, None))
+        fleet_room(state, &running, bounds)?;
+        Ok(Self::place(state, worker, None, true))
     }
 
     /// Note a terminal's start about to be forwarded: an agent's is driven by it, and a keyed
@@ -1648,7 +1377,6 @@ impl Hub {
         worker: WorkerId,
         task: Option<(ProjectId, TaskId)>,
         agent: bool,
-        placed: Option<Placed>,
     ) -> (u64, TermRef) {
         state.next_start = state.next_start.wrapping_add(1);
         let id = state.next_start;
@@ -1663,14 +1391,13 @@ impl Hub {
             since,
             answered: false,
             conversation,
-            placed,
         });
         (id, term)
     }
 
-    /// Start what runs for a task where its pin or placement says, and put its terminal on
-    /// the task. The start goes on if its caller leaves, so what the worker opens is always
-    /// counted and assigned.
+    /// Start what runs for a task on the worker it names or the one [`placement::choose`]
+    /// finds, and put its terminal on the task. The start goes on if its caller leaves, so what the
+    /// worker opens is always counted and assigned.
     pub(super) async fn task_spawn(
         &self,
         caller: Caller,
@@ -1687,120 +1414,14 @@ impl Hub {
         }
         let hub = self.clone();
         let started = tokio::spawn(async move {
-            let (asks, room) = {
-                let state = hub.inner.state.lock();
-                let asks = state.projects.project(&project).is_ok_and(|p| p.ask_to_start);
-                (asks, state.projects.room_to_review(&project))
-            };
-            // An agent's start waits while the person has as much to look at as they allow;
-            // a proposal is theirs to start, so it is not held.
+            let room = hub.inner.state.lock().projects.room_to_review(&project);
+            // An agent's start waits while the person has as much to look at as they allow.
             let outcome = match room {
-                Err(refused) if caller == Caller::Agent && !asks => refused,
-                _ if caller == Caller::Agent && asks => hub.propose(&project, task, launch).await,
+                Err(refused) if caller == Caller::Agent => refused,
                 _ => hub.start_task_once(key.clone(), &project, task, launch).await,
             };
             if let Some(key) = key {
                 remember(&mut hub.inner.state.lock(), caller, key, &verb, &outcome);
-            }
-            outcome
-        });
-        started.await.unwrap_or_else(|e| error(ErrorCode::Failed, &format!("the start ended: {e}")))
-    }
-
-    /// A start the person must say yes to: kept on the task with where the server would put
-    /// it now and why, and answered with the task. Nothing is reserved: the start is checked
-    /// in full when the person makes it.
-    async fn propose(&self, project: &ProjectId, task: TaskId, launch: TaskLaunch) -> Outcome {
-        let inputs = {
-            let mut state = self.inner.state.lock();
-            Self::loosens(&state, project, &launch)
-                .and_then(|()| Self::placement_for(&state, project, task, &launch))
-                .map(|wanted| {
-                    let gathered = Self::candidates(&mut state, Some(project)).wanting(&wanted);
-                    (wanted.placement, gathered)
-                })
-        };
-        let (placement, gathered) = match inputs {
-            Ok(inputs) => inputs,
-            Err(refused) => return refused,
-        };
-        let (on, why) = match self.rank(placement.clone(), gathered).await {
-            Ok(ranked) => match placement::choose(&placement, &ranked) {
-                Ok(worker) => (Some(worker), placed_on(&ranked, worker).map(|p| p.why)),
-                Err(why) => (None, Some(format!("no worker fits now: {why}"))),
-            },
-            Err(Outcome::Error { message, .. }) => (None, Some(message)),
-            Err(_) => (None, None),
-        };
-        let runs = match &launch.run {
-            Runner::Claude { .. } => CLAUDE.to_owned(),
-            Runner::Codex { .. } => codex::PROGRAM.to_owned(),
-            Runner::Agent { agent, .. } => agent.0.clone(),
-            Runner::Command { argv } => {
-                argv.first().map_or("a shell", |p| p.rsplit('/').next().unwrap_or(p)).to_owned()
-            }
-        };
-        let mut why = why.unwrap_or_default();
-        if why.len() > Suggestion::WHY_MAX {
-            let mut cut = Suggestion::WHY_MAX;
-            while !why.is_char_boundary(cut) {
-                cut = cut.saturating_sub(1);
-            }
-            why.truncate(cut);
-        }
-        let proposed = Proposed { since_ms: WallMs::now(), runs, on, why };
-        let mut state = self.inner.state.lock();
-        let proposal = Proposal { launch, proposed };
-        match state.projects.propose(project, task, proposal, WallMs::now()) {
-            Ok((task, updates)) => {
-                self.projects_moved(&mut state, updates);
-                Outcome::Task(Box::new(task))
-            }
-            Err(refused) => refused,
-        }
-    }
-
-    /// Start a task its orchestrator proposed, as the person asks: as proposed, on `pin` when
-    /// they chose a worker.
-    pub(super) async fn task_start(
-        &self,
-        key: Option<IdempotencyKey>,
-        project: ProjectId,
-        task: TaskId,
-        pin: Option<WorkerId>,
-    ) -> Outcome {
-        let verb = Verb::TaskStart { project: project.clone(), task, pin };
-        if let Some(key) = &key
-            && let Some(answer) = keyed(&mut self.inner.state.lock(), Caller::Person, key, &verb)
-        {
-            return answer;
-        }
-        let proposed = {
-            let state = self.inner.state.lock();
-            state
-                .projects
-                .task(&project, task)
-                .map(|t| t.proposal.as_ref().map(|p| p.launch.clone()))
-        };
-        let mut launch = match proposed {
-            Ok(Some(launch)) => launch,
-            Ok(None) => {
-                return error(
-                    ErrorCode::Invalid,
-                    &format!(
-                        "task {task} has no start proposed; its orchestrator proposes one with \
-                         task_spawn"
-                    ),
-                );
-            }
-            Err(refused) => return refused,
-        };
-        launch.pin = pin.or(launch.pin);
-        let hub = self.clone();
-        let started = tokio::spawn(async move {
-            let outcome = hub.start_task_once(key.clone(), &project, task, launch).await;
-            if let Some(key) = key {
-                remember(&mut hub.inner.state.lock(), Caller::Person, key, &verb, &outcome);
             }
             outcome
         });
@@ -1826,71 +1447,23 @@ impl Hub {
         flag.map_or(Ok(()), |flag| Err(loosened(&flag, Some(project))))
     }
 
-    /// What a start of `task` asks: the task's placement with its needs', pinned where the
-    /// start says, beside a clone of the project's repository when it names no directory, on
-    /// a worker with the agent it runs.
+    /// What a start of `task` asks: the worker the start or the task names, one with a clone
+    /// of the project's repository first when it names no directory, and the agent it runs.
     fn placement_for(
         state: &State,
         project: &ProjectId,
         task: TaskId,
         launch: &TaskLaunch,
     ) -> Result<Wanted, Outcome> {
-        let mut wanted = Self::needed(state, project, task)?;
-        wanted.placement.pin = launch.pin.or(wanted.placement.pin);
-        wanted.agent = agent_of(&launch.run);
-        // With no directory named, it goes beside a clone of the project's repository.
+        let pin = launch.pin.or(state.projects.task(project, task)?.pin);
         let repo = state.projects.project(project)?.repo_id.as_ref();
-        if launch.cwd.trim().is_empty()
-            && let Some(rule) = repo.and_then(beside_a_clone)
-        {
-            wanted.placement.require.push(rule);
-        }
-        Ok(wanted)
+        let clone =
+            launch.cwd.trim().is_empty() && repo.is_some_and(|id| id.keys().next().is_some());
+        Ok(Wanted { pin, agent: agent_of(&launch.run), clone })
     }
 
-    /// `task`'s own placement with the rules of each of its project's needs it has
-    /// ([`slopty_proto::project::Need`]), each named after its need. A rule the task holds
-    /// already is not added twice.
-    ///
-    /// # Errors
-    /// Refused when the task's own rules and its needs' come to more than a placement holds.
-    fn needed(state: &State, project: &ProjectId, task: TaskId) -> Result<Wanted, Outcome> {
-        let mut placement = state.projects.task(project, task)?.placement.clone();
-        let needs = state.projects.needs_of(project, task)?;
-        let mut named = Vec::new();
-        for need in &needs {
-            for rule in &need.require {
-                if !placement.require.iter().any(|r| r.trim() == rule.trim()) {
-                    placement.require.push(rule.clone());
-                }
-                named.push((rule.trim().to_owned(), need.name.clone()));
-            }
-            for preference in &need.prefer {
-                if !placement.prefer.iter().any(|p| p.expr.trim() == preference.expr.trim()) {
-                    placement.prefer.push(preference.clone());
-                }
-                named.push((preference.expr.trim().to_owned(), need.name.clone()));
-            }
-        }
-        let counts = [("require", placement.require.len()), ("prefer", placement.prefer.len())];
-        let most = slopty_proto::project::RULES_MAX;
-        if let Some((kind, n)) = counts.into_iter().find(|(_, n)| *n > most) {
-            let names: Vec<&str> = needs.iter().map(|n| n.name.as_str()).collect();
-            return Err(error(
-                ErrorCode::BadExpression,
-                &format!(
-                    "task {task}'s own rules and those of its needs ({}) make {n} {kind} rules, \
-                     over the {most} a placement may hold: fewer rules on the task or its \
-                     needs",
-                    names.join(", ")
-                ),
-            ));
-        }
-        Ok(Wanted { placement, named, agent: None })
-    }
-
-    /// Everything a start checks before it is placed, read together: the placement it ranks,
-    /// and whether the person lets it loosen its permissions.
+    /// Everything a start checks before it is placed, read together: what it asks of its
+    /// worker, and whether the person lets it loosen its permissions.
     fn may_start(
         state: &mut State,
         project: &ProjectId,
@@ -1902,35 +1475,22 @@ impl Hub {
         let (terminals, agents) = live(state);
         let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
         state.projects.may_start(project, task, launch.ignore_dependencies, &running)?;
-        fleet_room(state, &running, bounds, None)?;
+        fleet_room(state, &running, bounds)?;
         let wanted = Self::placement_for(state, project, task, launch)?;
         Ok((wanted, bounds.permission_flags))
     }
 
-    /// Hold a place on `worker` for a start, read again: others may have started while the
-    /// rules ran.
+    /// Hold a place on `worker` for a start, checked again: others may have started while
+    /// a clone was made for it.
     fn reserve(
         state: &mut State,
         (project, task): (&ProjectId, TaskId),
         launch: &TaskLaunch,
-        (worker, placed): (WorkerId, Option<Placed>),
+        worker: WorkerId,
     ) -> Result<(u64, TermRef), Outcome> {
         Self::may_start(state, project, task, launch)?;
-        let (terminals, agents) = live(state);
-        let running = Running { terminals: &terminals, agents: &agents, starting: &state.starting };
-        let bounds = state.projects.policy().bounds_for(Some(project));
-        let here = state.projects.live_on(project, worker, &running);
-        let per_worker = state.projects.limits(project)?.live_per_worker;
-        if here >= per_worker {
-            let message = format!(
-                "no worker can take task {task} now: the one chosen filled up to the project's \
-                 live_per_worker meanwhile"
-            );
-            return Err(error(ErrorCode::Unplaced, &message));
-        }
-        fleet_room(state, &running, bounds, Some(worker))?;
         let agent = !matches!(launch.run, Runner::Command { .. });
-        Ok(Self::place(state, worker, Some((project.clone(), task)), agent, placed))
+        Ok(Self::place(state, worker, Some((project.clone(), task)), agent))
     }
 
     /// Put the terminal a start opened on its task, and push the change.
@@ -1945,50 +1505,12 @@ impl Hub {
         terminals.insert(term);
         let (thread, made) = thread.map_or((None, None), |(id, made)| (Some(id), made));
         let branch = made.or_else(|| branch_of(state, term));
-        let placed = state.starting.iter().find(|s| s.term == term).and_then(|s| s.placed.clone());
-        let who =
-            Assignee { term, spawned: true, branch: branch.as_ref(), conversation, placed, thread };
+        let who = Assignee { term, spawned: true, branch: branch.as_ref(), conversation, thread };
         let (task, updates) =
             state.projects.assign(project, task, who, &terminals, WallMs::now())?;
         state.starting.retain(|s| s.term != term);
         self.projects_moved(state, updates);
         Ok(task)
-    }
-
-    /// Where a task with no directory goes when no worker with a clone of its repository fits:
-    /// the worker its rules would choose but for the clone, when there is an address to clone
-    /// from.
-    async fn placed_for_a_clone(
-        &self,
-        project: &ProjectId,
-        launch: &TaskLaunch,
-        wanted: &Wanted,
-    ) -> Option<(WorkerId, Option<Placed>)> {
-        if !launch.cwd.trim().is_empty() {
-            return None;
-        }
-        let (bare, gathered) = self.without_the_clone_rule(project, wanted)?;
-        let ranked = self.rank(bare.clone(), gathered).await.ok()?;
-        let worker = placement::choose(&bare, &ranked).ok()?;
-        Some((worker, placed_on(&ranked, worker)))
-    }
-
-    /// `placement` without the rule a task with no directory gets, and the workers to rank it
-    /// over; `None` when there is no address to clone the project's repository from.
-    fn without_the_clone_rule(
-        &self,
-        project: &ProjectId,
-        wanted: &Wanted,
-    ) -> Option<(Placement, Gathered)> {
-        let mut state = self.inner.state.lock();
-        let id = state.projects.project(project).ok()?.repo_id.clone()?;
-        id.url.as_ref()?;
-        let rule = beside_a_clone(&id)?;
-        let mut bare = wanted.placement.clone();
-        bare.require.retain(|r| *r != rule);
-        let gathered = Self::candidates(&mut state, Some(project)).wanting(wanted);
-        drop(state);
-        Some((bare, gathered))
     }
 
     /// The address to clone the project's repository from onto `worker`, when a task with no
@@ -2017,44 +1539,37 @@ impl Hub {
         task: TaskId,
         launch: TaskLaunch,
     ) -> Outcome {
-        let inputs = {
+        let chosen = {
             let mut state = self.inner.state.lock();
-            Self::may_start(&mut state, project, task, &launch).map(|(wanted, _)| {
-                let gathered = Self::candidates(&mut state, Some(project)).wanting(&wanted);
-                (wanted, gathered)
+            Self::may_start(&mut state, project, task, &launch).and_then(|(wanted, _)| {
+                let candidates = Self::candidates(&mut state, project);
+                let unplaced = |why: &str| {
+                    error(
+                        ErrorCode::Unplaced,
+                        &format!("no worker can take task {task} now: {why}"),
+                    )
+                };
+                let worker =
+                    placement::choose(&candidates, &wanted).map_err(|why| unplaced(&why))?;
+                let beside = candidates.iter().any(|c| c.worker == worker && c.clone);
+                let repo = state.projects.project(project)?.repo_id.as_ref();
+                // Named, a worker is taken as it is; chosen, it gets a clone or has one.
+                match repo.filter(|id| {
+                    wanted.clone && wanted.pin.is_none() && !beside && id.url.is_none()
+                }) {
+                    Some(id) => Err(unplaced(&format!(
+                        "with no cwd it goes beside a clone of {}, no worker that fits has one, \
+                         and no address to clone it from is known: clone it on a worker, name \
+                         the worker, or name a cwd",
+                        id.keys().next().unwrap_or_default()
+                    ))),
+                    None => Ok(worker),
+                }
             })
         };
-        let (wanted, gathered) = match inputs {
-            Ok(inputs) => inputs,
+        let worker = match chosen {
+            Ok(worker) => worker,
             Err(refused) => return refused,
-        };
-        let placement = &wanted.placement;
-        let ranked = match self.rank(placement.clone(), gathered).await {
-            Ok(ranked) => ranked,
-            Err(refused) => return refused,
-        };
-        let chosen = match placement::choose(placement, &ranked) {
-            Ok(worker) => Ok((worker, placed_on(&ranked, worker))),
-            Err(why) => self.placed_for_a_clone(project, &launch, &wanted).await.ok_or(why),
-        };
-        let (worker, placed) = match chosen {
-            Ok(chosen) => chosen,
-            Err(why) => {
-                let message = format!("no worker can take task {task} now: {why}");
-                let repo = self.inner.state.lock().projects.project(project).ok().and_then(|p| {
-                    let id = p.repo_id.as_ref()?;
-                    Some((id.origin.clone().or_else(|| id.root.clone())?, beside_a_clone(id)?))
-                });
-                let message = match repo.filter(|_| launch.cwd.trim().is_empty()) {
-                    Some((key, rule)) => format!(
-                        "{message}. With no cwd it must go beside a clone of {key} ({rule}), and \
-                         no address to clone it from is known: clone it on a worker that fits, \
-                         or name a cwd"
-                    ),
-                    None => message,
-                };
-                return error(ErrorCode::Unplaced, &message);
-            }
         };
         // A task with no directory on a worker with no clone of its repository gets one there.
         if let Some(url) = self.clone_needed(project, &launch, worker)
@@ -2064,36 +1579,33 @@ impl Hub {
         }
         let reserved = {
             let mut state = self.inner.state.lock();
-            Self::reserve(&mut state, (project, task), &launch, (worker, placed)).and_then(
-                |placed| {
-                    let permission_flags =
-                        state.projects.policy().bounds_for(Some(project)).permission_flags;
-                    let (record, card) =
-                        (state.projects.project(project)?, state.projects.task(project, task)?);
-                    let clone =
-                        launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
-                    let at = clone.flatten().map(|path| {
-                        let worktree = match &launch.run {
-                            _ if card.read_only => None,
-                            Runner::Claude { args, .. } if !names(args, &WORKTREE_FLAGS) => {
-                                Some(Worktree::Named(format!("slopty-{project}-{task}")))
-                            }
-                            Runner::Codex { .. } => Some(Worktree::Codex),
-                            // The worker makes it, where Claude Code makes its own.
-                            Runner::Agent { .. } => {
-                                Some(Worktree::Named(format!("slopty-{project}-{task}")))
-                            }
-                            Runner::Claude { .. } | Runner::Command { .. } => None,
-                        };
-                        Place { path, worktree }
-                    });
-                    let role = agent_role(record, card, at.as_ref());
-                    if !permission_flags && matches!(launch.run, Runner::Claude { .. }) {
-                        watch(&mut state, placed.1, |w| w.locked = true);
-                    }
-                    Ok((placed, permission_flags, role, at))
-                },
-            )
+            Self::reserve(&mut state, (project, task), &launch, worker).and_then(|placed| {
+                let permission_flags =
+                    state.projects.policy().bounds_for(Some(project)).permission_flags;
+                let (record, card) =
+                    (state.projects.project(project)?, state.projects.task(project, task)?);
+                let clone = launch.cwd.trim().is_empty().then(|| clone_on(&state, record, worker));
+                let at = clone.flatten().map(|path| {
+                    let worktree = match &launch.run {
+                        _ if card.read_only => None,
+                        Runner::Claude { args, .. } if !names(args, &WORKTREE_FLAGS) => {
+                            Some(Worktree::Named(format!("slopty-{project}-{task}")))
+                        }
+                        Runner::Codex { .. } => Some(Worktree::Codex),
+                        // The worker makes it, where Claude Code makes its own.
+                        Runner::Agent { .. } => {
+                            Some(Worktree::Named(format!("slopty-{project}-{task}")))
+                        }
+                        Runner::Claude { .. } | Runner::Command { .. } => None,
+                    };
+                    Place { path, worktree }
+                });
+                let role = agent_role(record, card, at.as_ref());
+                if !permission_flags && matches!(launch.run, Runner::Claude { .. }) {
+                    watch(&mut state, placed.1, |w| w.locked = true);
+                }
+                Ok((placed, permission_flags, role, at))
+            })
         };
         let ((id, term), permission_flags, role, at) = match reserved {
             Ok(reserved) => reserved,
@@ -2252,25 +1764,17 @@ impl Hub {
     pub(super) fn deliver_due(&self) -> Option<tokio::time::Instant> {
         let mut guard = self.inner.state.lock();
         let state = &mut *guard;
-        let wall = WallMs::now();
-        let (respent, reset) = state.projects.windows_due(wall);
-        self.projects_moved(state, respent);
         let (terminals, _) = live(state);
         Self::reword_outcomes(state);
         let projects = &state.projects;
         let now = tokio::time::Instant::now();
-        let batches = state.deliveries.take(
-            now,
-            |(project, node)| projects.node_term(project, *node, &terminals),
-            |project| projects.over_budget(project).is_some(),
-        );
+        let batches = state
+            .deliveries
+            .take(now, |(project, node)| projects.node_term(project, *node, &terminals));
         for batch in batches {
             Self::push_batch(state, &batch);
         }
-        // A plan window that resets may lift a budget's hold with no agent saying so.
-        let reset =
-            reset.and_then(|at| now.checked_add(Duration::from_millis(at.millis_since(wall))));
-        let next = [state.deliveries.next_due(), reset].into_iter().flatten().min();
+        let next = state.deliveries.next_due();
         drop(guard);
         next
     }
@@ -2361,36 +1865,6 @@ impl Hub {
             let _closed = hub.forward(None, Verb::Close { term }).await;
         });
     }
-}
-
-/// What a ranking reads, gathered under the lock.
-pub(super) struct Gathered {
-    candidates: Vec<Candidate>,
-    peers: BTreeMap<TaskId, WorkerId>,
-    ranking: Ranking,
-    /// Each rule the task's needs brought, and the need's name, for the reasons to say.
-    named: Vec<(String, String)>,
-}
-
-impl Gathered {
-    /// Ranked for `wanted`: the agent it runs must be installed, and its needs' rules say
-    /// their names.
-    fn wanting(mut self, wanted: &Wanted) -> Self {
-        self.ranking.agent.clone_from(&wanted.agent);
-        self.named.clone_from(&wanted.named);
-        self
-    }
-}
-
-/// What a start asks of the worker it goes to.
-#[derive(Clone, Debug, Default)]
-pub(super) struct Wanted {
-    /// The task's own placement, with the rules of each of its project's needs it has.
-    placement: Placement,
-    /// Each rule a need brought, trimmed as a reason names it, and that need's name.
-    named: Vec<(String, String)>,
-    /// The agent it runs, as a worker's facts name it.
-    agent: Option<Installed>,
 }
 
 /// The agent `run` starts, as a worker's facts name it: a worker must have it installed to be
@@ -2576,8 +2050,8 @@ mod tests {
         }
     }
 
-    /// One repository cloned on two workers is found on both by either key, and a rule
-    /// places a task beside a clone of it; a worker with none has an empty `repos`.
+    /// One repository cloned on two workers is found on both by each key it has there; a
+    /// worker with none has an empty `repos`.
     #[test]
     fn a_repository_is_a_fact_of_every_worker_with_a_clone() {
         let (origin, root) =
@@ -2597,29 +2071,10 @@ mod tests {
         assert_eq!(on_studio.get(root), on_studio.get(origin));
         assert_eq!(on_studio.len(), 2, "a shell in no known repository adds nothing");
 
-        let candidate = |name: &str, sessions: &[SessionSummary]| Candidate {
-            worker: WorkerId::new(),
-            name: name.to_owned(),
-            online: true,
-            reported: true,
-            facts: Facts::from([("repos".to_owned(), repos_of(sessions, &[]))]),
-            live: 0,
-            fleet_live: 0,
-        };
-        let fleet =
-            [candidate("studio", &studio), candidate("linux", &linux), candidate("bare", &[])];
-        let fits = |rule: &str| {
-            let placement = Placement { require: vec![rule.to_owned()], ..Placement::default() };
-            let ranking = Ranking { comprehensions: 2, ..Ranking::default() };
-            let ranked = placement::rank(&placement, &fleet, &BTreeMap::new(), &ranking).unwrap();
-            let mut fit: Vec<String> =
-                ranked.into_iter().filter(|s| s.fits).map(|s| s.name).collect();
-            fit.sort();
-            fit
-        };
-        assert_eq!(fits(&format!("{root:?} in repos")), ["linux", "studio"]);
-        assert_eq!(fits(&format!("{origin:?} in repos")), ["studio"]);
-        assert_eq!(fits(&format!("repos[{origin:?}] == \"/w/slopty\"")), ["studio"]);
+        let Fact::Map(on_linux) = repos_of(&linux, &[]) else { panic!("a map") };
+        assert_eq!(on_linux.get(root), Some(&Fact::Text("/home/c/slopty".to_owned())));
+        assert_eq!(on_linux.get(origin), None, "known there by its root alone");
+        assert_eq!(repos_of(&[], &[]), Fact::Map(BTreeMap::new()));
     }
 
     #[test]
@@ -2716,10 +2171,8 @@ mod tests {
             title: "Big".to_owned(),
             repo: "~/src/big".to_owned(),
             target: "main".to_owned(),
-            review: None,
             verifier: None,
             push: false,
-            ask_to_start: false,
             orchestrator: None,
             limits: LimitsChange::default(),
             metadata: None,

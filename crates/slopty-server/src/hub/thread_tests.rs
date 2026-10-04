@@ -3,7 +3,7 @@
 //! state following its thread's row, and ended when the row goes. Its thread is read where it
 //! is, by its task, its seat or its id.
 
-use slopty_proto::project::{Placement, Runner, SEAT_FACT, TASK_ENV, TaskLaunch, TaskState};
+use slopty_proto::project::{Runner, SEAT_FACT, TASK_ENV, TaskLaunch, TaskState};
 use slopty_proto::server::Os;
 use slopty_proto::thread::wire::TableFrame;
 use slopty_proto::thread::{AgentId, Cursor, Phase, ThreadId};
@@ -44,7 +44,7 @@ async fn any_agent_runs_a_task_as_a_thread() {
     mac_lease.handle(ToServer::Facts(installed(&["claude"])));
     linux_lease.handle(ToServer::Facts(installed(&["pi"])));
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let spawn_verb = |launch| Verb::TaskSpawn { project: project(), task, launch };
     let pi = || AgentId::named(AgentId::PI);
 
@@ -156,7 +156,7 @@ async fn a_thread_s_subagents_are_its_task_s_natives() {
     let (_linux, lease, mut rx) = worker_on(&hub, "box", Os::Linux, Vec::new());
     lease.handle(ToServer::Facts(installed(&["pi"])));
     create(&hub, None).await;
-    let task = new_task(&hub, Placement::default()).await;
+    let task = new_task(&hub, None).await;
     let pi = AgentId::named(AgentId::PI);
     let asked = spawn(
         &hub,
