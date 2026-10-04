@@ -14621,3 +14621,23 @@ on the test process after a 64 MiB drop shows one live 4 MiB block and 8 MiB of 
 blocks still dirty. The live block is most likely the input queue's buffer, which keeps the
 capacity a drop or a paste grew it to (not traced to its allocation). The rest is the allocator
 keeping freed pages. Neither grows with the type.
+
+**The keystroke path.** The input queue's write (`write_input`) now asks once per write whether
+a drop stream's chunk was taken: one look at the front of an empty deque when nothing is being
+dropped. The echo of a key into `/bin/cat` (`echo_beside_a_followed_thread`, release, loopback,
+1 000 keys a run, quiet arm), with that call and with it removed, interleaved, under other
+lanes' builds (load average 4–8):
+
+| | p50 per run | p90 per run |
+|---|---|---|
+| with the call | 0.37, 0.54, 0.35, 0.45, 0.72, 0.47 ms | 0.85, 1.46, 0.95, 1.14, 1.72, 0.94 ms |
+| without it (as before) | 0.80, 0.78, 0.42, 0.36 ms | 1.81, 1.76, 1.58, 1.06 ms |
+
+Unchanged: the runs spread with the machine's load by far more than any difference between
+the arms, and the arm with the call is no slower.
+
+```sh
+cargo build --release -p slopty-ptyd -p slopty-cli
+SLOPTY_BINS_FRESH=1 cargo test -p slopty-workerd --release --test e2e \
+  echo_beside_a_followed_thread -- --ignored --nocapture
+```
