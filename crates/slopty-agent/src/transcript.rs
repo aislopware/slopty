@@ -120,6 +120,17 @@ pub struct Progress {
     pub detail: Option<String>,
 }
 
+/// The detail of the [`Progress`] the person's Esc leaves: the turn ended by their stop.
+pub const INTERRUPTED: &str = "interrupted";
+
+impl Progress {
+    /// Whether this is the person's stop of the turn (Esc), which only the transcript says.
+    #[must_use]
+    pub fn is_interrupt(&self) -> bool {
+        self.status == AgentStatus::Idle && self.detail.as_deref() == Some(INTERRUPTED)
+    }
+}
+
 impl Tail {
     /// The progress of what was appended since the last read. A missing file is an empty read, not
     /// an error (the agent may not have written it yet); other I/O errors are returned.
@@ -220,7 +231,7 @@ fn record_progress(record: &Value) -> Option<Progress> {
             if prompt.as_deref().is_some_and(is_interrupt) {
                 return Some(Progress {
                     status: AgentStatus::Idle,
-                    detail: Some("interrupted".to_owned()),
+                    detail: Some(INTERRUPTED.to_owned()),
                 });
             }
             Some(Progress {

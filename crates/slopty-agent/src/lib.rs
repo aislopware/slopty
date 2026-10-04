@@ -704,6 +704,8 @@ pub struct Tracker {
     /// When the status line's full usage windows reset, as it last said: what a turn a limit
     /// stopped waits for.
     limit_resets: Option<WallMs>,
+    /// The person stopped the last turn (Esc) and has not prompted since.
+    interrupted: bool,
 }
 
 /// `found` cut to what one [`AgentReport::Loosened`] carries.
@@ -753,6 +755,7 @@ impl Default for Tracker {
             loosened: None,
             unwritten: None,
             limit_resets: None,
+            interrupted: false,
         }
     }
 }
@@ -817,6 +820,10 @@ impl Tracker {
         }
         self.hooked = true;
         self.unwritten = (hook.event == HookEvent::UserPromptSubmit).then_some(0);
+        // The person speaks again: a prompt, or a conversation they started or took up.
+        if matches!(hook.event, HookEvent::UserPromptSubmit | HookEvent::SessionStart) {
+            self.interrupted = false;
+        }
         if hook.session_id.is_some() {
             self.agent_session.clone_from(&hook.session_id);
         }
@@ -940,6 +947,7 @@ impl Tracker {
     /// interrupt: Esc ends the turn with no `Stop` hook, and the transcript's
     /// "[Request interrupted by user]" record is the only signal of it, so it takes a busy
     /// hooked agent to `Idle` (quietly: the human did it) and clears what it was waiting on.
+    /// The stop is kept ([`Self::interrupted`]) until the person prompts again.
     pub fn observe_progress(
         &mut self,
         session: SessionId,
@@ -956,8 +964,21 @@ impl Tracker {
                 return None;
             }
             self.blocks.clear();
+            self.interrupted = progress.is_interrupt();
+        } else if progress.is_interrupt() {
+            self.interrupted = true;
+        } else if progress.status != AgentStatus::Idle {
+            // With no hooks, a prompt or a call in the transcript is the turn going on.
+            self.interrupted = false;
         }
         self.set(session, progress.status.clone(), progress.detail.clone(), AgentSource::Transcript)
+    }
+
+    /// Whether the person stopped the agent's last turn (Esc) and has not prompted it since:
+    /// nothing in their name started it again.
+    #[must_use]
+    pub const fn interrupted(&self) -> bool {
+        self.interrupted
     }
 
     /// A prompt Claude Code took back: Esc right after Enter puts it back in its input, writes
@@ -1356,6 +1377,13 @@ impl AgentTable {
     #[must_use]
     pub fn ended(&self, session: SessionId) -> bool {
         self.ended.contains(&session)
+    }
+
+    /// Whether the person stopped the last turn of the agent in `session` and has not prompted
+    /// it since ([`Tracker::interrupted`]).
+    #[must_use]
+    pub fn interrupted(&self, session: SessionId) -> bool {
+        self.sessions.get(&session).is_some_and(Tracker::interrupted)
     }
 
     /// The permission mode `session`'s agent is in, as the server's tree takes it, when it is
@@ -2207,7 +2235,7 @@ mod tests {
 
     /// Esc ends a turn with no hook at all: the transcript's interrupt record takes a hooked
     /// agent from working, a tool or a block to idle without an alert, and nothing else the
-    /// transcript says gets past the hooks.
+    /// transcript says gets past the hooks. The person's stop stands until they prompt again.
     #[test]
     fn an_interrupted_turn_goes_idle_from_the_transcript() {
         let sid = SessionId::new();
@@ -2217,21 +2245,59 @@ mod tests {
             &hook(r#"{"session_id":"abc","hook_event_name":"UserPromptSubmit","prompt":"go"}"#),
         );
         t.apply(sid, &hook(r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"ls"},"tool_use_id":"b1"}"#));
-        let idle = Progress { status: AgentStatus::Idle, detail: Some("interrupted".to_owned()) };
+        assert!(!t.interrupted(), "working");
+        let idle = Progress {
+            status: AgentStatus::Idle,
+            detail: Some(transcript::INTERRUPTED.to_owned()),
+        };
         let e = t.observe_progress(sid, &idle).expect("interrupted");
         assert_eq!(e.status, AgentStatus::Idle);
         assert_eq!(e.detail.as_deref(), Some("interrupted"));
         assert!(!e.attention, "the human did it");
         assert!(t.blocks.is_empty(), "the permission it waited on is gone with the turn");
+        assert!(t.interrupted(), "the person's stop stands");
         assert_eq!(t.observe_progress(sid, &idle), None, "already idle");
 
         let working = Progress { status: AgentStatus::Working, detail: Some("x".to_owned()) };
         assert_eq!(t.observe_progress(sid, &working), None, "the hooks still decide the rest");
+        assert!(t.interrupted(), "the transcript alone does not lift it from a hooked agent");
+        t.apply(
+            sid,
+            &hook(r#"{"hook_event_name":"Notification","notification_type":"idle_prompt"}"#),
+        );
+        assert!(t.interrupted(), "only the person's prompt lifts it");
         let e = t
             .apply(sid, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"again"}"#))
             .expect("the next turn");
         assert_eq!(e.status, AgentStatus::Working);
         assert_eq!(e.source, AgentSource::Hook);
+        assert!(!t.interrupted(), "they spoke again");
+    }
+
+    /// The table says the person stopped a session's agent until they prompt it again, and
+    /// says no of a session it does not know; an agent no hook speaks for is lifted by the
+    /// transcript's next prompt.
+    #[test]
+    fn the_table_keeps_the_persons_stop_until_their_next_prompt() {
+        let (hooked, bare) = (SessionId::new(), SessionId::new());
+        let mut table = AgentTable::default();
+        table.apply(hooked, &hook(r#"{"session_id":"one","hook_event_name":"UserPromptSubmit"}"#));
+        let stop = Progress {
+            status: AgentStatus::Idle,
+            detail: Some(transcript::INTERRUPTED.to_owned()),
+        };
+        table.observe_progress(hooked, &stop);
+        assert!(table.interrupted(hooked));
+        assert!(!table.interrupted(bare), "nothing known");
+        table.apply(hooked, &hook(r#"{"session_id":"one","hook_event_name":"UserPromptSubmit"}"#));
+        assert!(!table.interrupted(hooked));
+
+        table.observe(bare, &seen("claude", None)).expect("the process");
+        table.observe_progress(bare, &stop);
+        assert!(table.interrupted(bare), "the transcript says it with no hooks");
+        let prompt = Progress { status: AgentStatus::Working, detail: Some("go on".to_owned()) };
+        table.observe_progress(bare, &prompt);
+        assert!(!table.interrupted(bare));
     }
 
     #[test]

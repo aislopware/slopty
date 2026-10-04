@@ -1039,6 +1039,66 @@ mod tests {
         assert!(content.contains("task 7: done"), "only the batch after the answer: {content}");
     }
 
+    /// Reports do not start an agent the person just stopped: after their Esc (the transcript's
+    /// interrupt record, the only word of it), what arrives is kept for the hooks and not
+    /// posted, even once a hook says the agent waits at its prompt, so nothing starts a turn in
+    /// nobody's name. Once the person prompts again, the next batch is posted at once.
+    #[tokio::test]
+    async fn reports_wait_for_the_person_after_they_stop_the_agent() {
+        use serde_json::json;
+        use slopty_proto::agent::AgentStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut peer, session, _record, posted, kept, _daemons) =
+            resting_agent_with_an_inbox(dir.path(), &[]).await;
+        let transcript = dir.path().join("transcript.jsonl");
+        let prompt = json!({
+            "hook_event_name": "UserPromptSubmit",
+            "prompt": "go",
+            "transcript_path": transcript,
+        });
+        hook(dir.path(), session, prompt.clone()).await;
+        let stop = json!({
+            "type": "user", "uuid": "esc", "timestamp": "2026-10-04T07:00:00.000Z",
+            "message": { "role": "user", "content": "[Request interrupted by user]" },
+        });
+        let mut file =
+            std::fs::OpenOptions::new().create(true).append(true).open(&transcript).unwrap();
+        std::io::Write::write_all(&mut file, format!("{stop}\n").as_bytes()).unwrap();
+        peer.heard(|m| {
+            matches!(m, ToServer::Agent(e)
+                if e.session == session
+                    && e.status == AgentStatus::Idle
+                    && e.detail.as_deref() == Some("interrupted"))
+        })
+        .await;
+        // A minute on, Claude Code says it waits at its prompt: a hook, but not the person.
+        let waiting = json!({
+            "hook_event_name": "Notification",
+            "notification_type": "idle_prompt",
+            "transcript_path": transcript,
+        });
+        hook(dir.path(), session, waiting).await;
+
+        let context = |n: u64| {
+            format!("<slopty-reports project=\"demo\">\ntask {n}: done\n</slopty-reports>")
+        };
+        // The link takes one message at a time, so the batch after one is kept only once the
+        // one before was judged.
+        for batch in [5, 6] {
+            let deliver = FromServer::Deliver { session, batch, context: context(batch) };
+            peer.tx.send(&deliver).await.unwrap();
+            kept_batch(&kept, session, batch).await;
+        }
+        hook(dir.path(), session, prompt).await;
+        let deliver = FromServer::Deliver { session, batch: 7, context: context(7) };
+        peer.tx.send(&deliver).await.unwrap();
+        let got = inbox_notes(&posted, 1).await;
+        let [note] = got.as_slice() else { panic!("one message: {got:?}") };
+        let content = note["content"].as_str().unwrap();
+        assert!(content.contains("task 7: done"), "only the batch after the prompt: {content}");
+    }
+
     /// A kept batch is its own session's to take, by the token the worker made for it: asked
     /// for or acknowledged under another session's token, nothing is handed over or dropped.
     /// Under its own it is handed over, and dropped only once the hook says it printed it.

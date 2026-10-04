@@ -93,6 +93,10 @@ impl Agents for DaemonAgents {
     fn ended(&self, session: SessionId) -> bool {
         self.0.lock().ended(session)
     }
+
+    fn interrupted(&self, session: SessionId) -> bool {
+        self.0.lock().interrupted(session)
+    }
 }
 
 /// What a registration keeps sending as it changes.
@@ -496,15 +500,16 @@ async fn hand_over(deliveries: PathBuf, inboxes: PathBuf, session: SessionId) {
     }
 }
 
-/// Whether reports kept for `session` may be posted to its agent's inbox now: only when the
-/// agent could take typed input ([`slopty_worker::orchestrate::may_type`]). Not while a prompt
-/// is the person's to answer or a draft of theirs is in its prompt, nor before its hooks say it
-/// is at its prompt or after it is gone. The batch then waits for the hook that follows once
-/// that clears: the person's prompt, the turn's end, the agent's start.
+/// Whether reports kept for `session` may be posted to its agent's inbox now
+/// ([`slopty_worker::orchestrate::may_deliver`]): only when the agent could take typed input,
+/// and not while the person's stop of its last turn stands. Not while a prompt is the person's
+/// to answer or a draft of theirs is in its prompt, nor before its hooks say it is at its
+/// prompt or after it is gone. The batch then waits for the hook that follows once that
+/// clears: the person's prompt, the turn's end, the agent's start.
 fn may_post(daemon: &Daemon, session: SessionId) -> Result<(), String> {
     let handle = daemon.worker.get(session).map_err(|e| e.to_string())?;
     let agents = DaemonAgents(Arc::clone(&daemon.agents));
-    slopty_worker::orchestrate::may_type(&handle, &agents, true).map_err(|f| f.message)
+    slopty_worker::orchestrate::may_deliver(&handle, &agents).map_err(|f| f.message)
 }
 
 /// Write `text` to the Unix socket at `socket` and close it.
