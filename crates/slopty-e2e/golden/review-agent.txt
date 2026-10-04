@@ -1,0 +1,80 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Button │ e2e-worker
+Button │ New shell on e2e-worker
+Button │ Machine actions, e2e-worker
+Button │ Retry the refresh
+Image │ Done
+Button │ Close tile
+Button │ Terminal
+Button │ Close tile
+Button │ Review
+Button │ Close tile
+Button │ Navigator
+Group │ Where
+Button │ e2e-worker
+Button │ New
+Button │ Needs you
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Button │ Fullscreen tile
+Button │ Close tile
+Group
+Terminal │ shell │ ~ %
+Group │ Retry the refresh
+Heading │ terminal Retry the refresh
+Image │ Done
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Article │ You: Make the refresh retry with one idempotency key
+Button │ Branch from here
+Button │ Copy message
+Button │ Worked 31 s: Edited refresh.rs
+Article │ The refresh now retries three times with one key, and saves the token.
+Button │ Copy message
+Article │ You: /code-review b8c7aacf9d647c2d2a1d896323f9ff05a05247be...51483d52aed3ca6f696c22bbf01a36a61831b05c
+Button │ Branch from here
+Button │ Copy message
+Article │ I reviewed the change and found two things to fix.
+Button │ Copy message
+MultilineTextInput │ Message
+Button │ Attach files
+Button │ Ask aside
+Button │ Model, Claude
+Button │ Commit
+Button │ Review the changes
+Button │ Send
+Group │ Review
+Heading │ review Review
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Review (focused)
+TabList
+Tab │ Last turn
+Tab │ Since reviewed
+Tab │ All turns
+Button │ Review with Claude Code
+Button │ Commit…
+List │ The agent's review
+Status │ Claude Code raised 2 findings
+Button │ Dismiss
+ListItem │ The README still says refresh never retries. README.md:12
+Button │ Let the finding go
+Button │ Revert
+Button │ Keep
+Button │ Revert
+Button │ Keep
+Button │ Remove comment
+Button │ Add to message
+Button │ Send 2 comments
+Button │ Mark reviewed
+Group │ Status
+Status │ e2e-worker
+Group │ Agents
+Button │ Claude Code · Turn finished

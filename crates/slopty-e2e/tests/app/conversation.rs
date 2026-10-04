@@ -421,8 +421,13 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
     assert!(done.success(), "the relay ran");
     stack.driver.wait_for("the thread", STEP, thread_shows).await.unwrap();
 
-    // The first step as the model writes it: its answer, then the Bash call's input.
+    // Claude Code writes the prompt before the model answers it; then the first step as the
+    // model writes it: its answer, then the Bash call's input.
     let (batches, records) = recorded_mod("bash", &session);
+    let prompt = records.iter().position(|l| l.contains(r#""role":"user""#)).unwrap();
+    let mut asked = records[..=prompt].join("\n");
+    asked.push('\n');
+    std::fs::write(&main, asked).unwrap();
     let stop = |b: &Value| b["events"].as_array().unwrap().iter().any(|e| e["kind"] == "stop");
     let first_stop = batches.iter().position(stop).unwrap();
     for batch in &batches[..first_stop] {
@@ -1020,4 +1025,273 @@ mod frame_time {
         }
         dump
     }
+}
+
+/// A git repository at `dir` holding one source file, with Claude Code's `code-review` among
+/// its project's commands, so the agent there reviews through its own door.
+fn review_repo(dir: &Path) {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=Mira", "-c", "user.email=mira@localhost"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join(".claude/commands")).unwrap();
+    std::fs::write(dir.join(".claude/commands/code-review.md"), "Review the diff\n").unwrap();
+    std::fs::write(dir.join("src/refresh.rs"), REFRESH_BEFORE).unwrap();
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "refresh tokens"]);
+}
+
+const REFRESH_BEFORE: &str = "pub fn refresh(client: &Client, token: &Token) -> Result<Token> {\n    let fresh = client.post(\"/refresh\", token)?;\n    Ok(fresh)\n}\n";
+
+const REFRESH_AFTER: &str = "pub fn refresh(client: &Client, token: &Token) -> Result<Token> {\n    let key = IdempotencyKey::new();\n    let fresh = retry(3, || client.post_with(\"/refresh\", token, &key))?;\n    store.save(&fresh)?;\n    Ok(fresh)\n}\n";
+
+/// The ref names under `repo`'s private refs that end with `end`.
+fn refs_ending(repo: &Path, end: &str) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["for-each-ref", "--format=%(refname) %(objectname)", "refs/slopty/"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.split(' ').next().is_some_and(|r| r.ends_with(end)))
+        .map(|l| l.split(' ').nth(1).unwrap_or_default().to_owned())
+        .collect()
+}
+
+/// Wait until `repo` holds a private ref ending with `end`, and give its commit.
+async fn private_ref(repo: &Path, end: &str) -> String {
+    let started = tokio::time::Instant::now();
+    loop {
+        if let Some(found) = refs_ending(repo, end).into_iter().next() {
+            return found;
+        }
+        assert!(started.elapsed() < STEP, "no ref ending {end}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// One record of the session's transcript, as Claude Code writes it.
+fn record(uuid: &str, parent: Option<&str>, at: &str, body: Value) -> String {
+    let mut record = body;
+    record["uuid"] = json!(uuid);
+    record["parentUuid"] = parent.map_or(Value::Null, |p| json!(p));
+    record["timestamp"] = json!(format!("2026-10-04T09:{at}.000Z"));
+    record["sessionId"] = json!("s1");
+    record["isSidechain"] = json!(false);
+    format!("{record}\n")
+}
+
+/// The record Claude Code closes a turn with.
+fn turn_ended() -> Value {
+    json!({ "type": "system", "subtype": "turn_duration", "durationMs": 30_000, "level": "info" })
+}
+
+fn said_by_claude(text: &str) -> Value {
+    json!({ "type": "assistant", "message": {
+        "role": "assistant", "model": "claude-opus-5-5", "content": [{ "type": "text", "text": text }],
+        "stop_reason": "end_turn",
+        "usage": { "input_tokens": 12, "cache_read_input_tokens": 41_000, "output_tokens": 420 },
+    }})
+}
+
+fn append(path: &Path, text: &str) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(text.as_bytes()).unwrap();
+}
+
+/// Claude Code's own review from the review tile: the agent changes a file in a turn, the
+/// review tile shows it, and "Review with Claude Code" sends its `/code-review` over the
+/// change as the person's turn, typed into the agent's terminal (a stand-in that only keeps
+/// what it is given). Its answer, played into the transcript as Claude Code writes one, puts
+/// a finding on its line in the diff and keeps one about a file not on show as a note above
+/// it. Light and dark.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+#[expect(clippy::too_many_lines, reason = "one review, from the turn to its findings")]
+async fn the_agents_own_review_puts_its_findings_on_the_diff() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let repo = stack.path("repo");
+    review_repo(&repo);
+    first_shell(&mut stack.driver).await;
+    let drv = &mut stack.driver;
+    let before: Vec<String> =
+        drv.dump().await.unwrap().terminals.into_iter().map(|t| t.session).collect();
+    drv.open(&["sh", "-c", "printf '\\033]0;Retry the refresh\\007'; exec cat"], 1).await.unwrap();
+    let dump = drv
+        .wait_for("the agent's terminal", STEP, |d| {
+            d.terminals.iter().any(|t| !before.contains(&t.session))
+        })
+        .await
+        .unwrap();
+    let session =
+        dump.terminals.iter().find(|t| !before.contains(&t.session)).unwrap().session.clone();
+    drv.reveal(&session).await.unwrap();
+
+    let main = stack.path("projects").join("s1.jsonl");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    let transcript = main.to_string_lossy().into_owned();
+    let hook = |event: &str, more: Value| {
+        let mut payload = json!({
+            "hook_event_name": event, "session_id": "s1", "transcript_path": transcript,
+            "cwd": repo,
+        });
+        if let (Some(payload), Some(more)) = (payload.as_object_mut(), more.as_object()) {
+            payload.extend(more.clone());
+        }
+        payload
+    };
+    let relay = async |stack: &Stack, payload: Value| {
+        let done = stack.relay_hook(&session, &[], &payload).unwrap().wait().await.unwrap();
+        assert!(done.success(), "the relay ran");
+    };
+    std::fs::write(&main, "").unwrap();
+    relay(&stack, hook("SessionStart", json!({ "source": "startup" }))).await;
+
+    // The agent's turn: snapshotted as it begins, the file changed, and snapshotted as it ends.
+    let prompt = "Make the refresh retry with one idempotency key";
+    relay(&stack, hook("UserPromptSubmit", json!({ "prompt": prompt }))).await;
+    append(
+        &main,
+        &record(
+            "u1",
+            None,
+            "00:00",
+            json!({ "type": "user", "message": { "role": "user", "content": prompt } }),
+        ),
+    );
+    private_ref(&repo, "/1-before").await;
+    std::fs::write(repo.join("src/refresh.rs"), REFRESH_AFTER).unwrap();
+    let file = repo.join("src/refresh.rs").to_string_lossy().into_owned();
+    let (old, new) = (
+        REFRESH_BEFORE.lines().nth(1).unwrap(),
+        REFRESH_AFTER.lines().skip(1).take(3).collect::<Vec<_>>().join("\n"),
+    );
+    append(
+        &main,
+        &record(
+            "e1",
+            Some("u1"),
+            "00:10",
+            json!({ "type": "assistant", "message": {
+                "role": "assistant", "model": "claude-opus-5-5", "stop_reason": "tool_use",
+                "content": [{ "type": "tool_use", "id": "toolu_e1", "name": "Edit",
+                    "input": { "file_path": file, "old_string": old, "new_string": new } }],
+                "usage": { "input_tokens": 12, "cache_read_input_tokens": 41_000, "output_tokens": 220 },
+            }}),
+        ),
+    );
+    let patch: Vec<String> =
+        std::iter::once(format!(" {}", REFRESH_BEFORE.lines().next().unwrap()))
+            .chain(std::iter::once(format!("-{old}")))
+            .chain(new.lines().map(|l| format!("+{l}")))
+            .chain(REFRESH_BEFORE.lines().skip(2).map(|l| format!(" {l}")))
+            .collect();
+    append(
+        &main,
+        &record(
+            "r1",
+            Some("e1"),
+            "00:11",
+            json!({ "type": "user",
+                "message": { "role": "user", "content": [{ "type": "tool_result",
+                    "tool_use_id": "toolu_e1", "content": "The file has been updated." }] },
+                "toolUseResult": { "filePath": file, "oldString": old, "newString": new,
+                    "originalFile": REFRESH_BEFORE, "replaceAll": false, "userModified": false,
+                    "structuredPatch": [{ "oldStart": 1, "oldLines": 4, "newStart": 1,
+                        "newLines": 6, "lines": patch }] } }),
+        ),
+    );
+    append(
+        &main,
+        &record(
+            "a1",
+            Some("r1"),
+            "00:30",
+            said_by_claude(
+                "The refresh now retries three times with one key, and saves the token.",
+            ),
+        ),
+    );
+    append(&main, &record("d1", Some("a1"), "00:31", turn_ended()));
+    relay(&stack, hook("Stop", json!({ "stop_hook_active": false }))).await;
+    private_ref(&repo, "/1-after").await;
+
+    let drv = &mut stack.driver;
+    drv.wait_for("the thread", STEP, |d| thread_shows(d) && button_starts(d, "Review"))
+        .await
+        .unwrap();
+    click(drv, "Button", "Review").await;
+    drv.wait_for("the review tile with its door", STEP, |d| {
+        d.items.iter().any(|i| i.kind == "review") && has(d, "Button", "Review with Claude Code")
+    })
+    .await
+    .unwrap();
+    click(drv, "Button", "Review with Claude Code").await;
+    drv.wait_for("the review running", STEP, |d| any_label(d, "Claude Code is reviewing"))
+        .await
+        .unwrap();
+
+    // What the composer typed is Claude Code's own command over the change, as two commits.
+    let (base, head) =
+        (private_ref(&repo, "/review-base").await, private_ref(&repo, "/review-head").await);
+    let range = format!("{base}...{head}");
+    let typed = format!("/code-review {range}");
+    stack
+        .driver
+        .wait_for("the command in the agent's terminal", STEP, |d| {
+            d.terminal(&session).is_some_and(|t| t.rows.concat().contains(&typed))
+        })
+        .await
+        .unwrap();
+    relay(&stack, hook("UserPromptSubmit", json!({ "prompt": typed }))).await;
+    let command = format!(
+        "<command-name>/code-review</command-name>\n<command-message>code-review</command-message>\n<command-args>{range}</command-args>"
+    );
+    append(
+        &main,
+        &record(
+            "u2",
+            Some("d1"),
+            "01:00",
+            json!({ "type": "user", "message": { "role": "user", "content": command } }),
+        ),
+    );
+    let findings = "I reviewed the change and found two things to fix.\n\n\
+        1. **The store is not in scope** (`src/refresh.rs:4`)\n   `store` is never passed in, so this does not build. Take it as a parameter.\n\n\
+        2. **The README still says refresh never retries** (`README.md:12`)\n   Say that it retries three times with one key.";
+    append(&main, &record("a2", Some("u2"), "01:40", said_by_claude(findings)));
+    append(&main, &record("d2", Some("a2"), "01:41", turn_ended()));
+    relay(&stack, hook("Stop", json!({ "stop_hook_active": false }))).await;
+
+    let drv = &mut stack.driver;
+    let dump = drv
+        .wait_for("the findings", STEP, |d| any_label(d, "Claude Code raised 2 findings"))
+        .await
+        .unwrap();
+    assert!(
+        any_label(&dump, "The README still says refresh never retries"),
+        "a note above the diff: {:#?}",
+        dump.a11y
+    );
+    assert!(has(&dump, "Button", "Send 2 comments"), "{:#?}", labels(&dump, "Button"));
+    drv.ok(&Command::Move { x: 1.0, y: 1.0 }).await.unwrap();
+    golden(drv, &dir, "review-agent").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(drv, &dir, "review-agent-dark").await;
+    stack.shutdown().await;
 }
