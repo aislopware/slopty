@@ -2,7 +2,7 @@ name: Deep
 
 # The bug-catching checks too slow for every commit (`cargo xtask deep`, docs/TESTING.md "Beyond
 # the layers"). They run here and not on the Mac someone works on. Every night at 02:00 Bangkok
-# time, when nobody pushes; mutation testing once a week; and on demand
+# time; mutation testing once a week; and on demand
 # (`gh workflow run deep.yml`, `-f mutants=true` to add mutation testing). Each check is a job of
 # its own, so a slow one holds no other, on Linux where its crates build there and on macOS where
 # they need Apple's frameworks. A failure opens (or adds to) the "Deep checks failing" issue.
@@ -37,6 +37,9 @@ jobs:
     timeout-minutes: 240
     strategy:
       fail-fast: false
+      # The account runs five macOS jobs at once, and these take hours: two at a time leaves three
+      # for the gate's lanes, which pushes through the night would otherwise wait on for hours.
+      max-parallel: 2
       matrix:
         include:
           - { check: sanitize address, run: deep sanitize address, slug: asan }
