@@ -105,7 +105,16 @@ impl TerminalView {
     /// they went up as a drag's. A drop the program took gets their `file://` URLs, and so
     /// does a drag still over it; otherwise, or once the program stopped asking, their paths
     /// are typed.
-    pub fn files_landed(&mut self, drag: Option<DragId>, paths: &[String], cx: &Context<Self>) {
+    pub fn files_landed(
+        &mut self,
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_variables, reason = "only a Mac carries a drag through the drop sink")
+        )]
+        drag: Option<DragId>,
+        paths: &[String],
+        cx: &Context<Self>,
+    ) {
         // A drag's files are its program's alone: a drag it is done with types nothing.
         #[cfg(target_os = "macos")]
         if let Some(drag) = drag {
@@ -114,8 +123,6 @@ impl TerminalView {
             }
             return;
         }
-        #[cfg(not(target_os = "macos"))]
-        let _no_sink = drag;
         let dropped = self.file_drag.take().filter(|d| d.dropped);
         let req = if let Some(FileDrag { drag, .. }) = dropped
             && self.state.drop_target()
@@ -129,7 +136,15 @@ impl TerminalView {
 
     /// Files uploaded for this shell will not land, for `drag` when they went up as a drag's:
     /// a drop the program waits for is told they will not come.
-    pub fn files_failed(&mut self, drag: Option<DragId>, cx: &Context<Self>) {
+    pub fn files_failed(
+        &mut self,
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(unused_variables, reason = "only a Mac carries a drag through the drop sink")
+        )]
+        drag: Option<DragId>,
+        cx: &Context<Self>,
+    ) {
         #[cfg(target_os = "macos")]
         if let Some(drag) = drag {
             if self.sink_drags.has(drag) {
@@ -137,8 +152,6 @@ impl TerminalView {
             }
             return;
         }
-        #[cfg(not(target_os = "macos"))]
-        let _no_sink = drag;
         if let Some(FileDrag { drag, .. }) = self.file_drag.take().filter(|d| d.dropped) {
             self.send(TermRequest::DropFiles { drag, landed: None }, cx);
         }

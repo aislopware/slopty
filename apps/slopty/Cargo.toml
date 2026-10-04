@@ -15,9 +15,11 @@ default = [  ]
 # Renderer access for the self-test socket; see `slopty-app`.
 e2e = [ "slopty-app/e2e" ]
 
+# Its documentation would land where the `slopty-app` library's does.
 [[bin]]
 name = "slopty-app"
 path = "src/main.rs"
+doc = false
 
 # The app as `cargo xtask e2e` drives it, under a name a plain build never makes: a build of
 # the workspace's tests rebuilds `slopty-app` without the self-test (`tests/crash.rs` runs it),

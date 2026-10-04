@@ -428,7 +428,7 @@ impl WorkspaceView {
             self.upload_term_drag(waiting.tile, waiting.drag, &files, scratch, cx);
             return;
         }
-        let Waiting { tile, drag, at, items, .. } = waiting;
+        let (tile, drag, at, items) = (waiting.tile, waiting.drag, waiting.at, waiting.items);
         let promised = items
             .iter()
             .enumerate()
