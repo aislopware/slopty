@@ -14673,3 +14673,22 @@ pty. The 24 MiB upload in the same runs takes about 0.6 s.
 ```sh
 cargo xtask e2e app --filter 'test(texts_dropped_on_a_program_asking_for_drops_reach_it_pushed_or_fetched)'
 ```
+
+## 2026-10-05 — giving back the input queue's buffer: not taken
+
+The paced drop's entry above found a live 4 MiB block after a drop, most likely the input
+queue's `BytesMut` keeping the capacity a drop or a paste grew it to. The idea was to give it
+back: once the queue is empty with more than 64 KiB of capacity, replace it with an empty one.
+Measured with the change and with it switched off, three runs each:
+
+- `heap` after a 64 MiB drop: with the change, the 4 MiB live block is gone, and the "Malloc
+  Large (empty)" regions hold 12.1 MiB dirty, against 8.1 MiB without it.
+- The footprint once the session is quiet, 500 ms after the drop's answer ended, against
+  before the drop: +16.2 to +16.3 MiB either way (8 or 64 MiB streamed), +55.0 MiB for 8 MiB
+  given whole.
+- Four `cat > /dev/null` sessions, each written 6 MiB at once, 3 s later: +32.3 to +32.4 MiB
+  with the change, +32.3 to +32.5 MiB without.
+
+So macOS's allocator keeps the freed buffer as dirty pages in its large cache, which the process
+reuses and the system reclaims under pressure. The footprint does not move. With no number to
+show for it, the change was not taken, and the two measurement additions were not kept.
