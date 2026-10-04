@@ -2,9 +2,9 @@
 //! it in, or the thread when another did; a press opens that thread at that turn.
 //!
 //! Each file's authors are asked of the worker for the file as the diff ends
-//! ([`Stamp::Blob`]): a file that has moved on since says nothing, since its lines would be
-//! numbered otherwise. The first files are asked as the review comes; the rest as the pointer
-//! first crosses one of their lines.
+//! ([`Stamp::Blob`](slopty_client::threads::Stamp::Blob)): a file that has moved on since says
+//! nothing, since its lines would be numbered otherwise. The first files are asked as the review
+//! comes; the rest as the pointer first crosses one of their lines.
 
 use std::sync::Arc;
 
