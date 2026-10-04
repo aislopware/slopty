@@ -1044,6 +1044,9 @@ impl Peer<'_> {
             ClientMsg::FsOp { request, op } => {
                 let _gone = self.saves.send(crate::files::Save::Fs { request, op });
             }
+            ClientMsg::Git { request, repo, op } => {
+                let _gone = self.saves.send(crate::files::Save::Git { request, repo, op });
+            }
             ClientMsg::WatchFiles { paths } => {
                 self.watch_files.send_replace(paths);
             }

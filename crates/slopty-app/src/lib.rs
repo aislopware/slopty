@@ -3229,7 +3229,8 @@ fn apply_link_event(
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
         // read (`LinkEvent::Handoff`). A folder tile asks for no page past its first and no
-        // folder op until its rows do (`slopty_client::folders`).
+        // folder op until its rows do (`slopty_client::folders`), and no git op until the commit
+        // sheet does.
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
@@ -3237,7 +3238,8 @@ fn apply_link_event(
             | WorkerMsg::Handoff(_)
             | WorkerMsg::Sessions(_)
             | WorkerMsg::FolderPage { .. }
-            | WorkerMsg::FsDone { .. },
+            | WorkerMsg::FsDone { .. }
+            | WorkerMsg::GitDone { .. },
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));

@@ -882,6 +882,11 @@ impl Hub {
                 error(ErrorCode::Forbidden, "a project is the person's to let go, never an agent's")
             }
             Verb::ProjectDelete { project } => self.project_delete(&project),
+            Verb::Git { .. } if caller == Caller::Agent => error(
+                ErrorCode::Forbidden,
+                "the commit sheet is the person's; an agent commits, pushes and opens pull \
+                 requests with its own git and gh",
+            ),
             Verb::PullChecks { .. } => error(
                 ErrorCode::Forbidden,
                 "the server reads each task's pull request checks itself, onto its card; \
@@ -1748,6 +1753,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::ListDir { worker, .. }
         | Verb::Stat { worker, .. }
         | Verb::FsChange { worker, .. }
+        | Verb::Git { worker, .. }
         | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }
         | Verb::ListItems { worker }

@@ -13,6 +13,7 @@
 pub mod bundle;
 pub mod checks;
 pub mod cloning;
+pub mod commit;
 pub mod review;
 pub mod snapshot;
 pub mod verify;

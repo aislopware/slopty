@@ -5825,6 +5825,76 @@ mod tests {
         );
     }
 
+    /// The commit sheet's ops straight to a real worker: a file saved and then committed is
+    /// committed as saved, since a commit waits for the saves sent before it; the status
+    /// after it shows only what was not chosen; and a push with no remote is refused in words.
+    #[tokio::test]
+    async fn a_file_saved_then_committed_is_committed_as_saved() {
+        use slopty_proto::git::{GitDone, GitOp, GitOutcome};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (_guard, worker) = connect(dir.path()).await;
+        let mut link = slopty_client::WorkerLink::start(worker);
+        let mut events = link.events().unwrap();
+        let repo = std::fs::canonicalize(dir.path()).unwrap().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let ran = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+            String::from_utf8_lossy(&ran.stdout).trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Person"]);
+        git(&["config", "user.email", "person@example.com"]);
+        std::fs::write(repo.join("a.txt"), "first\n").unwrap();
+        std::fs::write(repo.join("b.txt"), "left\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "first"]);
+        std::fs::write(repo.join("b.txt"), "changed, not chosen\n").unwrap();
+        let at = repo.to_string_lossy().into_owned();
+
+        link.send(ClientMsg::WriteFile {
+            path: repo.join("a.txt").to_string_lossy().into_owned(),
+            text: "saved\n".to_owned(),
+            base_modified_ms: None,
+        })
+        .await
+        .unwrap();
+        let message = "Save it".to_owned();
+        let commit = GitOp::Commit { paths: vec!["a.txt".to_owned()], message };
+        for (request, op) in [(1, commit), (2, GitOp::Status), (3, GitOp::Push)] {
+            link.send(ClientMsg::Git { request, repo: at.clone(), op }).await.unwrap();
+        }
+        let mut answers = Vec::new();
+        while answers.len() < 3 {
+            let answer = next_control(&mut events, |msg| match msg {
+                WorkerMsg::GitDone { request, outcome } => Some((request, outcome)),
+                _other => None,
+            })
+            .await;
+            answers.push(answer);
+        }
+        answers.sort_by_key(|(request, _)| *request);
+        let [(_, committed), (_, status), (_, push)] = <[_; 3]>::try_from(answers).unwrap();
+        let GitOutcome::Done(GitDone::Committed { files: 1, .. }) = committed else {
+            panic!("{committed:?}")
+        };
+        assert_eq!(git(&["show", "HEAD:a.txt"]), "saved");
+        let GitOutcome::Done(GitDone::Status(status)) = status else { panic!("{status:?}") };
+        let files: Vec<(&str, &str)> =
+            status.files.iter().map(|f| (f.path.as_str(), f.xy.as_str())).collect();
+        assert_eq!(files, [("b.txt", ".M")]);
+        let GitOutcome::Refused { why } = push else { panic!("{push:?}") };
+        assert!(why.contains("no remote"), "{why}");
+    }
+
     /// A folder past one listing's cap is paged through a real worker: the first listing holds
     /// the cap and the whole count, and the pages after it hold the rest, each entry once.
     #[tokio::test]

@@ -10,6 +10,7 @@ use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::RequestId;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::folder::{After, FsOp, FsOutcome, Listing};
+use slopty_proto::git::{GitOp, GitOutcome};
 use slopty_proto::transfer::{BulkHeader, Purpose};
 use slopty_worker::file::Rewrite;
 use tokio::sync::{mpsc, watch};
@@ -106,8 +107,9 @@ pub async fn write(
     let _sent = out.send(WorkerMsg::Written { path, result }).await;
 }
 
-/// A save, a folder op, or the end of a waiting edit, in the order its client sent them: a file
-/// saved and then moved is moved with what was saved.
+/// A save, a folder op, a git op, or the end of a waiting edit, in the order its client sent
+/// them: a file saved and then moved is moved with what was saved, and one saved and then
+/// committed is committed as saved.
 #[derive(Debug)]
 pub enum Save {
     /// A file tile's save ([`write()`]).
@@ -129,6 +131,15 @@ pub enum Save {
         /// What to do.
         op: FsOp,
     },
+    /// The person's commit sheet asking of a folder's repository ([`git_op`]).
+    Git {
+        /// The client's number for it.
+        request: RequestId,
+        /// A folder in the repository.
+        repo: String,
+        /// What to do.
+        op: GitOp,
+    },
 }
 
 /// Take one client's saves and edit ends in order until the connection goes and the last one
@@ -146,6 +157,15 @@ pub async fn save_in_order(
             }
             Save::Edited(reply) => handoffs.lock().replied(client, reply),
             Save::Fs { request, op } => fs_op(client, &out, request, op).await,
+            // A status or a commit is the disk's, in order with the saves around it; a push or a
+            // pull request waits on the network, so it runs beside them, after what came before.
+            Save::Git { request, repo, op: op @ (GitOp::Status | GitOp::Commit { .. }) } => {
+                git_op(client, &out, request, repo, op).await;
+            }
+            Save::Git { request, repo, op } => {
+                let out = out.clone();
+                tokio::spawn(async move { git_op(client, &out, request, repo, op).await });
+            }
         }
     }
 }
@@ -159,6 +179,27 @@ pub async fn fs_op(client: ClientId, out: &mpsc::Sender<WorkerMsg>, request: Req
         .unwrap_or_else(|_| FsOutcome::Failed { error: "folder op failed".to_owned() });
     tracing::info!(%client, request, op = %what, ?outcome, "folder op");
     let _sent = out.send(WorkerMsg::FsDone { request, outcome }).await;
+}
+
+/// Do a git op in a folder's repository for the person's commit sheet and answer how it went.
+pub async fn git_op(
+    client: ClientId,
+    out: &mpsc::Sender<WorkerMsg>,
+    request: RequestId,
+    repo: String,
+    op: GitOp,
+) {
+    let what = match &op {
+        GitOp::Status => "status",
+        GitOp::Commit { .. } => "commit",
+        GitOp::Push => "push",
+        GitOp::PullRequest { .. } => "pull request",
+    };
+    let outcome =
+        slopty_worker::repo::commit::apply(slopty_worker::changes::git(), &repo, op).await;
+    let done = matches!(outcome, GitOutcome::Done(_));
+    tracing::info!(%client, request, %repo, op = what, done, "git op");
+    let _sent = out.send(WorkerMsg::GitDone { request, outcome }).await;
 }
 
 /// Answer a page of a folder past its first.

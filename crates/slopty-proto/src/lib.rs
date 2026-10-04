@@ -44,6 +44,7 @@ pub mod dnd;
 pub mod drag;
 pub mod file;
 pub mod folder;
+pub mod git;
 pub mod handoff;
 pub mod handshake;
 pub mod input;
@@ -185,6 +186,16 @@ pub enum ClientMsg {
         /// What to do.
         op: folder::FsOp,
     },
+    /// Do something in the git repository at `repo` (`git`): its status, a commit, a push, a
+    /// pull request. Answered with `WorkerMsg::GitDone`.
+    Git {
+        /// This client's number for it.
+        request: RequestId,
+        /// A folder in the repository: absolute, or `~/…`.
+        repo: String,
+        /// What to do.
+        op: git::GitOp,
+    },
 }
 
 impl ClientMsg {
@@ -215,6 +226,7 @@ impl ClientMsg {
             Self::Thread(_) => "Thread",
             Self::FolderPage { .. } => "FolderPage",
             Self::FsOp { .. } => "FsOp",
+            Self::Git { .. } => "Git",
         }
     }
 }
@@ -362,6 +374,13 @@ pub enum WorkerMsg {
         /// How it went.
         outcome: folder::FsOutcome,
     },
+    /// The answer to `ClientMsg::Git`.
+    GitDone {
+        /// The request's number.
+        request: RequestId,
+        /// How it went.
+        outcome: git::GitOutcome,
+    },
 }
 
 impl WorkerMsg {
@@ -399,6 +418,7 @@ impl WorkerMsg {
             Self::Sessions(_) => "Sessions",
             Self::FolderPage { .. } => "FolderPage",
             Self::FsDone { .. } => "FsDone",
+            Self::GitDone { .. } => "GitDone",
         }
     }
 }

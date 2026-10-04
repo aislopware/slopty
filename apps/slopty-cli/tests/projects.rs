@@ -497,6 +497,109 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// The person's commit sheet on a real worker through `slopty git`, over a real repository
+    /// with a bare remote: its status in git's letters, a commit of exactly the files named
+    /// with the person's message, a push that sets the upstream, and a pull request opened by
+    /// the `gh` on the worker's `PATH`. That `gh` is a stand-in the test writes, which says
+    /// what it was asked: the real one would reach for the person's GitHub sign-in. What git
+    /// refuses comes back in its words (a commit hook that fails), and an agent is refused the
+    /// sheet, since it commits with its own git.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thread_s_changes_are_committed_pushed_and_proposed_from_the_cli() {
+        use slopty_proto::git::GitOp;
+        use slopty_server::Speaker;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let (server, _daemons, worker) = fleet(&root, "").await;
+        let addr = server.quic_addr();
+        let (repo, bare) = (root.join("demo"), root.join("demo.git"));
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&root, &["init", "-q", "--bare", "-b", "main", "demo.git"]);
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Person"]);
+        git(&repo, &["config", "user.email", "person@example.com"]);
+        git(&repo, &["remote", "add", "origin", &bare.to_string_lossy()]);
+        std::fs::write(repo.join("kept.txt"), "kept\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "first"]);
+        std::fs::write(repo.join("kept.txt"), "changed\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "new\n").unwrap();
+        std::fs::write(repo.join("later.txt"), "not yet\n").unwrap();
+        let at = repo.to_string_lossy().into_owned();
+
+        let status = slopty(&root, addr, &["git", "status", &at]).await;
+        assert_eq!(
+            status, "## main (no upstream)\n M kept.txt\n?? later.txt\n?? new.txt\n",
+            "{status}"
+        );
+
+        let committed = slopty(
+            &root,
+            addr,
+            &["--json", "git", "commit", &at, "-m", "Keep it", "-m", "Why.", "kept.txt", "new.txt"],
+        )
+        .await;
+        let committed: Value = serde_json::from_str(&committed).unwrap();
+        assert_eq!((&committed["branch"], &committed["files"]), (&json!("main"), &json!(2)));
+        assert_eq!(git_out(&repo, &["log", "-1", "--format=%B"]), "Keep it\n\nWhy.");
+        let commit = git_out(&repo, &["rev-parse", "HEAD"]);
+        assert_eq!(committed["commit"], json!(commit));
+        let left = slopty(&root, addr, &["git", "status", &at]).await;
+        assert!(left.ends_with("\n?? later.txt\n"), "only what was not chosen is left: {left}");
+
+        let pushed = slopty(&root, addr, &["git", "push", &at]).await;
+        assert_eq!(pushed, "pushed main to origin, its upstream set\n");
+        assert_eq!(git_out(&bare, &["rev-parse", "main"]), commit);
+        let level = slopty(&root, addr, &["git", "status", &at]).await;
+        assert!(level.starts_with("## main...origin/main (ahead 0, behind 0)\n"), "{level}");
+
+        let gh = root.join("programs").join("gh");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.asked\"\n\
+             echo 'Creating pull request for main into trunk in o/demo' >&2\n\
+             echo 'https://github.com/o/demo/pull/7'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let opened = slopty(
+            &root,
+            addr,
+            &[
+                "git", "pr", &at, "--title", "Keep it", "--body", "Why.", "--base", "trunk",
+                "--draft",
+            ],
+        )
+        .await;
+        assert_eq!(opened, "https://github.com/o/demo/pull/7\n");
+        let asked = std::fs::read_to_string(root.join("programs").join("gh.asked")).unwrap();
+        let asked: Vec<&str> = asked.lines().collect();
+        let expected =
+            ["pr", "create", "--title", "Keep it", "--body", "Why.", "--base", "trunk", "--draft"];
+        assert_eq!(asked, expected);
+
+        let hook = repo.join(".git").join("hooks").join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho 'lint: later.txt is not formatted' >&2\nexit 1\n")
+            .unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let said =
+            slopty_refused(&root, addr, &["git", "commit", &at, "-m", "Later", "--all"]).await;
+        assert!(said.contains("lint: later.txt is not formatted"), "{said}");
+        let unmade = slopty_refused(&root, addr, &["git", "commit", &at, "-m", " ", "--all"]).await;
+        assert!(unmade.contains("none is made up"), "{unmade}");
+
+        let by_agent = Verb::Git { worker, repo: at.clone(), op: GitOp::Status };
+        let refused = server.hub().dispatch_as(Speaker::Agent, None, by_agent).await;
+        assert!(
+            matches!(&refused, Outcome::Error { message, .. } if message.contains("its own git")),
+            "{refused:?}"
+        );
+
+        server.shutdown().await;
+    }
+
     /// A schedule the person sets with the CLI is kept with its next run in the zone named;
     /// run on their word it makes its task and starts its command on the worker, with its
     /// project and task in its environment; a run while that task is under way is skipped,

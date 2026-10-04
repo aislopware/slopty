@@ -269,6 +269,12 @@ pub enum VerbCmd {
         #[arg(long)]
         worker: Option<String>,
     },
+    /// A repository on a worker as the person works it: its status, a commit of the files
+    /// they name with their message, a push, a pull request through the worker's own `gh`.
+    Git {
+        #[command(subcommand)]
+        cmd: crate::git::GitCmd,
+    },
     /// Items on a worker's workspace: the tiles every client shows.
     Item {
         #[command(subcommand)]
@@ -911,6 +917,7 @@ async fn execute(cmd: VerbCmd, link: &Link, json: bool, key: Option<IdempotencyK
             let moved = bulk::download(&mut res, worker.as_deref(), path, &local).await?;
             print_moved(&moved, json)?;
         }
+        VerbCmd::Git { cmd } => crate::git::git(cmd, link, json, key).await?,
         VerbCmd::Project { cmd } => crate::projects::project(*cmd, link, json, key).await?,
         VerbCmd::Task { cmd } => crate::projects::task(*cmd, link, json, key).await?,
     }

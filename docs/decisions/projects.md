@@ -2157,3 +2157,60 @@ follow-up)
   - The goldens `schedule_set`, `schedule_delete` and `schedule_run`, with a schedule on the
     golden project.
 - Left for later: the board showing the schedules (lane D).
+
+**The person commits, pushes and opens a pull request from any thread.** ✅ 2026-10-04
+- Before: only a project's task had a way to its branch's end (`TaskPush`, the merge queue).
+  A thread outside any project left its changes in the working tree, so the person went to a
+  terminal to commit them.
+- Prior art: T3 Code's thread-level commit dialog (`.research/t3code-ui-2026-10-03.md`,
+  "Larger, unranked"). The person picks files, writes the message, and chooses commit, commit
+  and push, or open a pull request.
+- `slopty_proto::git` carries it, over two routes to the same worker code
+  (`slopty_worker::repo::commit`):
+  - the app's commit sheet asks the worker straight, with `ClientMsg::Git { request, repo, op }`
+    answered by `WorkerMsg::GitDone`. It rides the client's save queue, so a file saved and
+    then committed is committed as saved. A status or a commit runs in that order. A push or a
+    pull request waits on the network, so it runs beside later saves, after what came before;
+  - the CLI goes through the server, with `Verb::Git { worker, repo, op }` and `Outcome::Git`.
+    It is `slopty git status|commit|push|pr`. `push` and `pull` were already the file transfer
+    verbs, so git gets its own noun.
+- `GitOp` is `Status`, `Commit { paths, message }`, `Push` and `PullRequest { title, body,
+  base, draft }`.
+  - A status is `git status --porcelain=v2 --branch -z`. Each file keeps git's own two letters
+    (`GitFile::xy`), so no state is invented beyond git's. The branch, upstream, ahead and
+    behind come with it, and at most `FILES_MAX` files, with the rest counted.
+  - A commit takes exactly the chosen paths. It runs `git add --all -- <paths>`, then
+    `git commit --file=- --only -- <paths>` with the message on stdin, so anything else staged
+    stays staged. A path new to git is added, and a path gone is removed.
+  - A push goes to the upstream. With none, it sets one on the repository's only remote, or on
+    `origin` among several. With several remotes and no `origin`, it refuses and says which
+    remotes there are.
+  - A pull request is `gh pr create`. An empty title becomes `--fill`, so gh writes it from the
+    commits, never Slopty. The URL is the one gh prints.
+- **The person's binaries, their words.** git is found as everywhere else (`changes::git`).
+  gh is found on `PATH` or where Homebrew and the system put it. Each runs with the person's
+  config, hooks and credential helpers as they are. `GIT_TERMINAL_PROMPT=0`,
+  `GH_PROMPT_DISABLED=1` and `GIT_EDITOR=true` make whatever would prompt fail instead. Slopty
+  reads no credential.
+  - A refusal comes back as `GitOutcome::Failed { said }`: the end of git's or gh's own words,
+    at most `SAID_MAX`, such as a rejected push or a hook that failed.
+  - What Slopty itself refuses is `Refused { why }`: no files chosen, an empty message,
+    a path outside the repository, a folder in no repository, no remote, or a detached HEAD.
+  - A missing program is `Unavailable { program, why }`. With no gh, the answer says so and
+    opens nothing.
+  - No message is ever made up. An empty one is refused, since a commit takes the person's.
+- **Not an agent's.** An agent commits, pushes and opens pull requests with its own git and
+  gh in its own terminal, so it gets no MCP tool. The server refuses `Verb::Git` from an agent
+  as the person's commit sheet.
+- The sheet in the thread and review tiles is lane D's (`target/lanes/ui-queue.md`).
+- Tests:
+  - `repo::commit` (`slopty-worker`): git's records parsed; the chosen files committed with
+    the message, other staged files left staged, a push that sets the upstream and then one
+    that does not; and refusals in git's words, from a failing hook to a rejected push.
+  - `a_file_saved_then_committed_is_committed_as_saved` (`slopty-workerd` e2e, the direct
+    route).
+  - `a_thread_s_changes_are_committed_pushed_and_proposed_from_the_cli` (CLI e2e, a real
+    server, worker, repository and bare remote). The `gh` there is a stand-in the test writes
+    on the worker's `PATH`, which records what it was asked. A real gh would reach for the
+    person's GitHub sign-in, and a test never runs anything signed in.
+  - The goldens in `golden_git`.
