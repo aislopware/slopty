@@ -367,6 +367,8 @@ pub enum WorkerMsg {
     },
     /// What was said in the worker's threads (`ClientMsg::Thread`'s `Search`).
     ThreadHits(thread::wire::ThreadHits),
+    /// Which threads wrote a file's lines (`ClientMsg::Thread`'s `Authors`).
+    Authors(thread::wire::Authors),
 }
 
 impl WorkerMsg {
@@ -405,6 +407,7 @@ impl WorkerMsg {
             Self::FsDone { .. } => "FsDone",
             Self::GitDone { .. } => "GitDone",
             Self::ThreadHits(_) => "ThreadHits",
+            Self::Authors(_) => "Authors",
         }
     }
 }

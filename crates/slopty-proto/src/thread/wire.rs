@@ -115,6 +115,54 @@ pub enum ThreadRequest {
         /// The most threads to answer with, up to [`SEARCH_THREADS`].
         limit: u32,
     },
+    /// Which threads wrote the lines of a file as it is on the worker now; answered with
+    /// [`Authors`] on the control stream.
+    Authors {
+        /// The thread whose repository a relative `path` is in; `None` for an absolute one.
+        thread: Option<ThreadId>,
+        /// The file: absolute, or relative to `thread`'s repository.
+        path: String,
+    },
+}
+
+/// What wrote the lines of a file, as a [`ThreadRequest::Authors`] asked.
+///
+/// A line is a thread's when the worker's snapshots of one of its turns show that turn bring it
+/// in, or, past what the snapshots keep, when the commit that brought it carries the thread in a
+/// `Slopty-Thread` trailer. A client keeps the answer for the file as it was read
+/// ([`Authors::modified_ms`], [`Authors::blob`]) and asks again only once it changes.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct Authors {
+    /// The thread, as asked.
+    pub thread: Option<ThreadId>,
+    /// The file, as asked.
+    pub path: String,
+    /// When the file read was last changed.
+    pub modified_ms: Option<WallMs>,
+    /// The id git gives the file read, as a review's [`FileDiff`] names its sides.
+    pub blob: Option<String>,
+    /// Runs of lines and who wrote them, in order; a line no thread is known to have written
+    /// is in none.
+    pub runs: Vec<AuthorRun>,
+    /// Why nothing could be said of the file, in words: not in git, unreadable.
+    pub absent: Option<String>,
+}
+
+/// Lines of a file that one thread wrote ([`Authors`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AuthorRun {
+    /// The first line, from 1.
+    pub start: u32,
+    /// How many lines.
+    pub lines: u32,
+    /// The thread that wrote them. It may be another worker's, known from a commit.
+    pub thread: ThreadId,
+    /// Its turn that brought them in, while the worker keeps that turn's snapshots.
+    pub turn: Option<TurnId>,
+    /// The commit that brought them in, where only its trailer names the thread.
+    pub commit: Option<String>,
+    /// When they were written: the turn's end, or the commit's.
+    pub at_ms: WallMs,
 }
 
 /// The most threads a [`ThreadRequest::Search`] answers with.

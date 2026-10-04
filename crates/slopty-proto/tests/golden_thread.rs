@@ -16,9 +16,9 @@ mod golden_thread {
         WriteDetail,
     };
     use slopty_proto::thread::wire::{
-        Expanded, FileDiff, Intent, IntentDone, ItemHit, Outcome, Page, PastSession, PastSessions,
-        Pick, PromptHit, Review, ReviewScope, Start, TableFrame, ThreadFrame, ThreadHit,
-        ThreadHits, ThreadRequest,
+        AuthorRun, Authors, Expanded, FileDiff, Intent, IntentDone, ItemHit, Outcome, Page,
+        PastSession, PastSessions, Pick, PromptHit, Review, ReviewScope, Start, TableFrame,
+        ThreadFrame, ThreadHit, ThreadHits, ThreadRequest,
     };
     use slopty_proto::thread::{
         Action, AgentId, AgentScreen, Answerer, AskId, BackgroundTask, Cap, Changed, Choice,
@@ -338,6 +338,10 @@ mod golden_thread {
         snap(
             "client_thread_search",
             &ThreadRequest::Search { query: "flaky login".to_owned(), limit: 20 },
+        );
+        snap(
+            "client_thread_authors",
+            &ThreadRequest::Authors { thread: Some(thread()), path: "src/auth.rs".to_owned() },
         );
         snap(
             "client_start",
@@ -908,6 +912,34 @@ mod golden_thread {
                     more: 2,
                 }],
                 more: 1,
+            }),
+        );
+        snap(
+            "link_worker_authors",
+            &WorkerMsg::Authors(Authors {
+                thread: None,
+                path: "/Users/mira/atlas/src/auth.rs".to_owned(),
+                modified_ms: Some(ms(1_900_000)),
+                blob: Some("3b18e512dba79e4c8300dd08aeb37f8e728b8dad".to_owned()),
+                runs: vec![
+                    AuthorRun {
+                        start: 4,
+                        lines: 3,
+                        thread: thread(),
+                        turn: Some(TurnId(2)),
+                        commit: None,
+                        at_ms: ms(1_880_000),
+                    },
+                    AuthorRun {
+                        start: 12,
+                        lines: 1,
+                        thread: thread(),
+                        turn: None,
+                        commit: Some("9d1e7aa".to_owned()),
+                        at_ms: ms(1_700_000),
+                    },
+                ],
+                absent: None,
             }),
         );
         snap("link_uni_thread", &UniHead::Thread { thread: thread() });
