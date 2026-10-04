@@ -212,6 +212,7 @@ fn pick_item(worker: WorkerId, items: &[Item], prefix: &str) -> Result<ItemRef, 
 #[cfg(test)]
 mod tests {
     use slopty_core::WallMs;
+    use slopty_proto::items::ItemKind;
     use slopty_proto::server::{Os, WorkerCaps};
     use slopty_proto::terminal::SessionState;
 
@@ -353,5 +354,27 @@ mod tests {
         let err = pick_session(&list, "ffff").unwrap_err();
         assert!(err.message.contains("no terminal matches"), "{err}");
         assert_eq!(err.code, ErrorCode::UnknownTerminal);
+    }
+
+    /// An item answers to a unique id prefix, as a terminal does.
+    #[test]
+    fn an_item_prefix_must_be_unique() {
+        let item = |id: &str| Item {
+            id: id.parse().unwrap(),
+            kind: ItemKind::Note { text: String::new() },
+            name: None,
+            facts: std::collections::BTreeMap::new(),
+        };
+        let worker: WorkerId = STUDIO.parse().unwrap();
+        let items = [
+            item("0199a1b1-0000-7000-8000-00000000aaaa"),
+            item("0199a1b2-0000-7000-8000-00000000bbbb"),
+        ];
+        let hit = pick_item(worker, &items, "0199A1B1").unwrap();
+        assert_eq!(hit, ItemRef { worker, item: items[0].id });
+        let err = pick_item(worker, &items, "0199a1b").unwrap_err();
+        assert!(err.message.contains("matches 2 items"), "{err}");
+        let err = pick_item(worker, &items, "ffff").unwrap_err();
+        assert_eq!(err.code, ErrorCode::UnknownItem);
     }
 }
