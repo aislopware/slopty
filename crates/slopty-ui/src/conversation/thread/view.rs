@@ -1008,7 +1008,8 @@ impl ThreadView {
     }
 
     /// The quiet actions under a message, shown while the pointer is on it (always under a
-    /// finger): when it was written, said for today ([`figures::stamp`]), and a copy of its
+    /// finger): when it was written, said for today
+    /// ([`stamp`](crate::conversation::figures::stamp)), and a copy of its
     /// words that says "Copied" in place for a moment. `end` lines them up at the right, under
     /// the person's bubble.
     fn message_actions(
