@@ -18,6 +18,11 @@
 //!
 //! The checkouts live under the main checkout of this repository (shared by every worktree),
 //! cloned with `--filter=blob:none` on first use.
+//!
+//! `check` also names the newest Claude Code on npm beside the one Slopty's mod was recorded on
+//! (`crates/slopty-agent/tests/fixtures/mod/recorded.json`, which a test holds to
+//! `MOD_CLAUDE_VERSIONS`): a newer one is trusted only provisionally until
+//! `cargo xtask fixtures claude-mod --version <it>` records it.
 
 mod ghostty;
 mod watch;
@@ -341,6 +346,7 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
                     )?;
                 }
             }
+            claude_check(&root);
             Ok(())
         }
         UpstreamCmd::Watch { interval, once } => {
@@ -349,6 +355,30 @@ pub fn run(sh: &Shell, cmd: &UpstreamCmd) -> Result<()> {
         UpstreamCmd::Sync { only, no_push } => {
             sync_all(sh, &root, &main, &config, only.as_deref(), *no_push)
         }
+    }
+}
+
+/// Print the newest Claude Code on npm beside the one the mod was recorded on. A registry that
+/// does not answer is said, not failed on: the forks' report stands without it.
+fn claude_check(root: &Utf8Path) {
+    let recorded =
+        std::fs::read_to_string(root.join("crates/slopty-agent/tests/fixtures/mod/recorded.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|doc| doc.get("claude")?.as_str().map(str::to_owned));
+    let Some(recorded) = recorded else {
+        println!("claude-code: no recording of the mod found");
+        return;
+    };
+    match crate::claude::latest() {
+        Ok(latest) if latest == recorded => {
+            println!("claude-code: {latest} on npm, the mod recorded on it");
+        }
+        Ok(latest) => println!(
+            "claude-code: {latest} on npm, the mod recorded on {recorded}; record it with \
+             `cargo xtask fixtures claude-mod --version {latest}`"
+        ),
+        Err(e) => println!("claude-code: npm did not say its latest ({e:#}); recorded {recorded}"),
     }
 }
 

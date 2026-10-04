@@ -476,7 +476,8 @@ impl Worker {
         }
         let shells = crate::restore::system_shells();
         let mut launch = self.agent_launch();
-        launch.background = crate::restore::background("claude", lost.iter().map(|(_, r)| r)).await;
+        let sessions = slopty_agent::roster::sessions_dir(&slopty_platform::dirs::home());
+        launch.background = crate::restore::background(sessions, lost.iter().map(|(_, r)| r)).await;
         let mut reopened = Vec::with_capacity(lost.len());
         for (id, recipe) in lost {
             match self.reopen(id, &recipe, &shells, &launch).await {

@@ -235,21 +235,12 @@ pub struct Seen {
     pub catalog: Option<live::Catalog>,
 }
 
-/// Whether a session's mod is heard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Trust {
-    /// It passed the gate.
-    Trusted,
-    /// It was refused, and the log said why.
-    Refused,
-}
-
 /// Every session's [`Seen`], each behind a watch its observer waits on.
 #[derive(Debug, Default)]
 pub struct Board {
     sessions: HashMap<SessionId, watch::Sender<Seen>>,
-    /// Each session's mod, once it said hello.
-    mods: HashMap<SessionId, Trust>,
+    /// Each session's mod, once it said hello ([`live::admit`]).
+    mods: HashMap<SessionId, live::Trust>,
 }
 
 impl Board {
@@ -275,8 +266,9 @@ impl Board {
     }
 
     /// The mod in `session` reported `events`, at `now`. A `hello` decides whether it is heard
-    /// ([`live::gate`]); nothing else counts until one passed. Watchers wake only when the
-    /// blocks, the meters or the catalog changed.
+    /// and how far ([`live::admit`]); nothing else counts until one passed, nor after a
+    /// provisional mod is dropped, when its blocks in flight go and the transcript is the whole
+    /// picture. Watchers wake only when the blocks, the meters or the catalog changed.
     pub fn reported(&mut self, session: SessionId, events: &[ModEvent], now: Instant) {
         let mut trust = self.mods.get(&session).copied();
         let seen =
@@ -284,21 +276,29 @@ impl Board {
         seen.send_if_modified(|seen| {
             let mut changed = false;
             for event in events {
-                match event {
-                    ModEvent::Hello(hello) => {
-                        trust = Some(match live::gate(hello) {
-                            Ok(()) => Trust::Trusted,
-                            Err(refusal) if trust == Some(Trust::Refused) => {
-                                tracing::debug!(%session, %refusal, "the mod is still refused");
-                                Trust::Refused
-                            }
-                            Err(refusal) => {
-                                tracing::warn!(%session, %refusal, "the Claude Code mod is not heard; following the transcript");
-                                Trust::Refused
-                            }
-                        });
+                match live::admit(&mut trust, event) {
+                    live::Admitted::Use => {}
+                    live::Admitted::Trusted(live::Trust::Provisional) => {
+                        tracing::info!(%session, "the Claude Code mod is heard on a Claude Code it was not recorded with; dropped at its first unreadable event");
+                        continue;
                     }
-                    _ if trust != Some(Trust::Trusted) => {}
+                    live::Admitted::Skip | live::Admitted::Trusted(_) => continue,
+                    live::Admitted::Refused { why, again: true } => {
+                        tracing::debug!(%session, %why, "the mod is still refused");
+                        continue;
+                    }
+                    live::Admitted::Refused { why, again: false } => {
+                        tracing::warn!(%session, %why, "the Claude Code mod is not heard; following the transcript");
+                        continue;
+                    }
+                    live::Admitted::Dropped(kind) => {
+                        tracing::warn!(%session, %kind, "the Claude Code mod sent an event this build cannot read; following the transcript");
+                        changed |= seen.live != live::Board::default();
+                        seen.live = live::Board::default();
+                        continue;
+                    }
+                }
+                match event {
                     ModEvent::Measure(measure) => {
                         let meters = measure.onto(seen.meters.take());
                         seen.meters = Some(meters);
@@ -597,11 +597,34 @@ mod tests {
         assert!(!other.has_changed().unwrap_or(true), "a refused mod wakes nobody");
         assert!(texts(&other).is_empty() && other.borrow().meters.is_none());
         assert!(other.borrow().catalog.is_none(), "nor lists anything");
-        assert_eq!(board.mods.get(&refused), Some(&Trust::Refused));
+        assert_eq!(board.mods.get(&refused), Some(&live::Trust::Refused));
         board.reported(refused, &[hello(verified), piece("heard")], now);
         assert_eq!(texts(&other), ["heard"], "a later hello that passes is heard");
         board.forget(refused);
         assert!(!board.mods.contains_key(&refused));
         assert!(other.has_changed().is_err(), "the watch closes with the session");
+    }
+
+    /// A mod on an unrecorded release of a recorded line is heard until it sends an event this
+    /// build cannot read; then its blocks in flight go, and it is not heard again.
+    #[test]
+    fn a_provisional_mod_is_dropped_with_its_blocks() {
+        let mut board = Board::default();
+        let now = Instant::now();
+        let provisional = session(3);
+        let mut seen = board.watch(provisional);
+        let recorded = slopty_agent::claude_mod::MOD_CLAUDE_VERSIONS[0];
+        let (line, _patch) = recorded.rsplit_once('.').expect("major.minor.patch");
+        board.reported(provisional, &[hello(&format!("{line}.99999")), piece("Sun")], now);
+        assert_eq!(texts(&seen), ["Sun"]);
+        assert_eq!(board.mods.get(&provisional), Some(&live::Trust::Provisional));
+        seen.mark_unchanged();
+        let unreadable = mod_event(&serde_json::json!({"kind": "text", "turnId": 7}));
+        board.reported(provisional, &[unreadable, piece("day")], now);
+        assert!(seen.has_changed().unwrap_or(false), "the dropped blocks wake the thread");
+        assert_eq!(texts(&seen), Vec::<String>::new());
+        board.reported(provisional, &[hello(recorded), piece("again")], now);
+        assert_eq!(texts(&seen), Vec::<String>::new(), "a dropped mod stays dropped");
+        assert_eq!(board.mods.get(&provisional), Some(&live::Trust::Dropped));
     }
 }

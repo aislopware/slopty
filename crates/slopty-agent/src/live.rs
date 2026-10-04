@@ -2,9 +2,12 @@
 //! it makes: the answer, thinking and tool input as the model writes them, ahead of the
 //! transcript.
 //!
-//! The mod posts batches ([`Batch`]) of events ([`ModEvent`]), which are decoded leniently: an
-//! event this build does not know, or one whose fields moved, is [`ModEvent::Other`]. A session
-//! is heard only after its `hello` passes [`gate`].
+//! The mod posts batches ([`Batch`]) of events ([`ModEvent`]). An event this build does not
+//! know is [`ModEvent::Other`]; one it knows whose fields moved is [`ModEvent::Malformed`]. A
+//! session is heard only after its `hello` passes [`gate`], and [`admit`] keeps what the worker
+//! makes of it, event by event ([`Trust`]): a Claude Code the mod was verified against is heard
+//! as before, a newer release of the same line is heard provisionally, and the first event of a
+//! known kind it sends in a shape this build cannot read drops the mod for that session.
 //!
 //! Two halves keep the blocks. The worker keeps one [`Board`] per session, fed by the events:
 //! the blocks in flight and those that stopped a moment ago. Each observed thread keeps an
@@ -123,16 +126,26 @@ pub enum ModEvent {
     /// `session.end`.
     #[serde(rename = "bye")]
     Bye,
-    /// Anything else: an event this build does not use, or one whose shape it does not know.
+    /// An event of a kind this build reads (named), in a shape it cannot: the Claude Code under
+    /// the mod moved a field the mod passes on.
+    #[serde(skip)]
+    Malformed(String),
+    /// Anything else: an event of a kind this build does not use.
     #[serde(other)]
     Other,
 }
 
 impl ModEvent {
-    /// Decode one event; [`ModEvent::Other`] when it is not one this build reads.
+    /// Decode one event: [`ModEvent::Malformed`] when its kind is one this build reads and the
+    /// rest does not decode, [`ModEvent::Other`] when it is no event this build reads.
     #[must_use]
     pub fn decode(value: &Value) -> Self {
-        Self::deserialize(value).unwrap_or(Self::Other)
+        Self::deserialize(value).unwrap_or_else(|_shape| {
+            match value.get("kind").and_then(Value::as_str) {
+                Some(kind) => Self::Malformed(kind.to_owned()),
+                None => Self::Other,
+            }
+        })
     }
 }
 
@@ -253,7 +266,7 @@ impl Measure {
 pub enum Refusal {
     /// A mod of another protocol.
     Protocol(u32),
-    /// A Claude Code the mod was not verified against.
+    /// A Claude Code of a line the mod was not verified on.
     Version(String),
 }
 
@@ -262,26 +275,111 @@ impl std::fmt::Display for Refusal {
         match self {
             Self::Protocol(p) => write!(f, "mod protocol {p}, not {MOD_PROTOCOL}"),
             Self::Version(v) => {
-                write!(f, "Claude Code {v} is not one the mod was verified against")
+                write!(f, "Claude Code {v} is of no line the mod was verified on")
             }
         }
     }
 }
 
-/// Whether a `hello` makes the session's mod trusted: this mod's protocol, on a Claude Code
-/// in [`MOD_CLAUDE_VERSIONS`].
+/// How far the worker hears a session's mod.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    /// Its `hello` named a Claude Code the mod was verified against ([`MOD_CLAUDE_VERSIONS`]).
+    Verified,
+    /// Its `hello` named an unrecorded release of a verified line (`2.1.x`): heard while every
+    /// event of a kind this build reads decodes.
+    Provisional,
+    /// Its `hello` was refused ([`Refusal`]); a later one may pass.
+    Refused,
+    /// It was provisional and sent an event this build could not read: not heard again in this
+    /// session, whatever it says.
+    Dropped,
+}
+
+impl Trust {
+    /// Whether the mod's events are used.
+    #[must_use]
+    pub const fn heard(self) -> bool {
+        matches!(self, Self::Verified | Self::Provisional)
+    }
+}
+
+/// How trusted a `hello` makes the session's mod: this mod's protocol, on a Claude Code in
+/// [`MOD_CLAUDE_VERSIONS`] ([`Trust::Verified`]) or of the same `major.minor` line as one
+/// ([`Trust::Provisional`]).
 ///
 /// # Errors
 ///
 /// Why not.
-pub fn gate(hello: &Hello) -> Result<(), Refusal> {
+pub fn gate(hello: &Hello) -> Result<Trust, Refusal> {
     if hello.protocol != MOD_PROTOCOL {
         return Err(Refusal::Protocol(hello.protocol));
     }
-    if !MOD_CLAUDE_VERSIONS.contains(&hello.claude.as_str()) {
-        return Err(Refusal::Version(hello.claude.clone()));
+    if MOD_CLAUDE_VERSIONS.contains(&hello.claude.as_str()) {
+        return Ok(Trust::Verified);
     }
-    Ok(())
+    let line = |version: &str| {
+        let mut parts = version.split('.');
+        let (major, minor, patch) = (parts.next()?, parts.next()?, parts.next()?);
+        let number = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+        (number(major) && number(minor) && number(patch) && parts.next().is_none())
+            .then(|| (major.to_owned(), minor.to_owned()))
+    };
+    match line(&hello.claude) {
+        Some(theirs) if MOD_CLAUDE_VERSIONS.iter().any(|v| line(v).as_ref() == Some(&theirs)) => {
+            Ok(Trust::Provisional)
+        }
+        _ => Err(Refusal::Version(hello.claude.clone())),
+    }
+}
+
+/// What [`admit`] made of one event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admitted {
+    /// Use it: the mod is heard.
+    Use,
+    /// Leave it: the mod is not heard (yet, or any more), or it says nothing to use.
+    Skip,
+    /// A `hello` made the mod heard, this far.
+    Trusted(Trust),
+    /// A `hello` was refused, for this reason; `again` when the mod was refused already.
+    Refused {
+        /// Why.
+        why: Refusal,
+        /// It was refused before.
+        again: bool,
+    },
+    /// A provisional mod sent this kind of event in a shape this build cannot read, and is
+    /// dropped for the session.
+    Dropped(String),
+}
+
+/// Take `event` into the session's `trust` (`None` before any `hello`), and say what to do.
+///
+/// A worker falls back to the transcript, the hooks and the status line for a session
+/// whose mod is never heard, says no `hello`, or is dropped.
+pub fn admit(trust: &mut Option<Trust>, event: &ModEvent) -> Admitted {
+    match event {
+        ModEvent::Hello(_) if *trust == Some(Trust::Dropped) => Admitted::Skip,
+        ModEvent::Hello(hello) => match gate(hello) {
+            Ok(heard) => {
+                *trust = Some(heard);
+                Admitted::Trusted(heard)
+            }
+            Err(why) => {
+                let again = *trust == Some(Trust::Refused);
+                *trust = Some(Trust::Refused);
+                Admitted::Refused { why, again }
+            }
+        },
+        ModEvent::Malformed(kind) if *trust == Some(Trust::Provisional) => {
+            *trust = Some(Trust::Dropped);
+            Admitted::Dropped(kind.clone())
+        }
+        ModEvent::Malformed(_) | ModEvent::Other => Admitted::Skip,
+        _ if trust.is_some_and(Trust::heard) => Admitted::Use,
+        _ => Admitted::Skip,
+    }
 }
 
 /// A block on the board.
@@ -342,6 +440,7 @@ impl Board {
             | ModEvent::StepStart(_)
             | ModEvent::Measure(_)
             | ModEvent::Catalog(_)
+            | ModEvent::Malformed(_)
             | ModEvent::Other => false,
         };
         let before = self.blocks.len();

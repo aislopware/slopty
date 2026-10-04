@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+use crate::managed::ManagedSettings;
 use crate::{HOOK_EVENTS, HookEvent, permission, reports, statusline};
 
 /// Hook `timeout` written to settings (seconds).
@@ -80,11 +81,29 @@ pub fn mcp_config(command: &str) -> Value {
 }
 
 /// `claude` arguments that also serve Slopty's tools through `<command> mcp`, for that run
-/// alone. The caller's own `--mcp-config`s are kept, as Claude Code merges every one it is given.
+/// alone, as far as this machine's managed settings let them ([`with_mcp_under`]).
 #[must_use]
 pub fn with_mcp(args: Vec<String>, command: &str) -> Vec<String> {
+    with_mcp_under(args, command, &ManagedSettings::current())
+}
+
+/// [`with_mcp`] under `managed`.
+///
+/// The caller's own `--mcp-config`s are kept, as Claude Code merges every one it is given.
+/// Where the managed settings would refuse the run for the flag (sideloading off) or drop the
+/// server (an MCP list, or MCP from plugins only), `args` stay as they are.
+#[must_use]
+pub fn with_mcp_under(args: Vec<String>, command: &str, managed: &ManagedSettings) -> Vec<String> {
+    if !admits_tools(command, managed) {
+        return args;
+    }
     let flag = format!("{MCP_CONFIG_FLAG}={}", mcp_config(command));
     std::iter::once(flag).chain(args).collect()
+}
+
+/// Whether `managed` lets Slopty's tools, served by `<command> mcp`, into a run.
+fn admits_tools(command: &str, managed: &ManagedSettings) -> bool {
+    managed.admits_mcp(MCP_SERVER_NAME, &[command, "mcp"])
 }
 
 /// `claude` arguments that also register the relay at `command`, for that run alone, so an
@@ -122,16 +141,37 @@ fn with_relay_for(args: Vec<String>, command: &str, cwd: &Path, user: &Path) -> 
 /// run that is wired already, or that prints and exits (`--print`): it stays as it was given.
 ///
 /// One rule for every door: a tile opened on `claude`, ⌘⇧T, a project task's thread, and a
-/// `claude` typed in a Slopty shell (`slopty hook wire`).
+/// `claude` typed in a Slopty shell (`slopty hook wire`). This machine's managed settings are
+/// read for each ([`wired_under`]).
 #[must_use]
 pub fn wired(args: Vec<String>, relay: &str, cwd: &Path, project: bool) -> Option<Vec<String>> {
+    wired_under(args, relay, cwd, project, &ManagedSettings::current())
+}
+
+/// [`wired`] under `managed`.
+///
+/// A project's agent whose tools the managed settings keep out (or whose run they would refuse
+/// for the flag) gets the pointer to Slopty's CLI instead. The relay's `--settings` stays
+/// whatever they say: it is no sideload flag, and its status line runs where its hooks may not.
+#[must_use]
+pub fn wired_under(
+    args: Vec<String>,
+    relay: &str,
+    cwd: &Path,
+    project: bool,
+    managed: &ManagedSettings,
+) -> Option<Vec<String>> {
     let given = crate::resume::invocation(&args);
     if given.relay || given.print {
         return None;
     }
     let (args, _conversation) = crate::resume::with_session_id(args);
     let args = with_relay(args, relay, cwd);
-    Some(if project { with_mcp(args, relay) } else { with_pointer(args) })
+    Some(if project && admits_tools(relay, managed) {
+        with_mcp_under(args, relay, managed)
+    } else {
+        with_pointer(args)
+    })
 }
 
 /// What an agent Slopty starts outside a project is told of Slopty, in place of its tools: one
@@ -502,9 +542,10 @@ mod tests {
     /// a prompt after it stays a prompt, and the caller's own MCP servers stay beside them.
     #[test]
     fn a_started_agent_is_handed_slopty_mcp() {
-        let args = with_mcp(
+        let args = with_mcp_under(
             vec!["--mcp-config".to_owned(), "mine.json".to_owned(), "fix it".to_owned()],
             "/opt/slopty",
+            &ManagedSettings::default(),
         );
         let (ours, rest) = args.split_first().expect("the flag");
         assert_eq!(rest, ["--mcp-config", "mine.json", "fix it"]);
@@ -526,8 +567,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
         let relay = "/opt/Slopty/slopty";
+        let none = ManagedSettings::default();
         let given = || words(&["--model", "opus", "fix it"]);
-        let out = wired(given(), relay, dir.path(), false).expect("wired");
+        let out = wired_under(given(), relay, dir.path(), false, &none).expect("wired");
         assert!(out.ends_with(&words(&["--model", "opus", "fix it"])), "{out:?}");
         assert!(!out.iter().any(|a| a.starts_with("--mcp-config")), "no tools: {out:?}");
         assert_eq!(out.first(), Some(&format!("--append-system-prompt={POINTER}")));
@@ -535,14 +577,45 @@ mod tests {
         let started = crate::resume::invocation(&out);
         assert!(started.relay && !started.mcp, "{out:?}");
         assert_eq!(started.role.as_deref(), Some(POINTER), "a restart keeps the pointer");
-        assert_eq!(wired(out, relay, dir.path(), false), None, "wired once");
-        let task = wired(given(), relay, dir.path(), true).expect("wired");
+        assert_eq!(wired_under(out, relay, dir.path(), false, &none), None, "wired once");
+        let task = wired_under(given(), relay, dir.path(), true, &none).expect("wired");
         let started = crate::resume::invocation(&task);
         assert!(started.relay && started.mcp && started.role.is_none(), "{task:?}");
-        let alone = wired(words(&["--resume", "abc"]), relay, dir.path(), false).expect("wired");
+        let alone = wired_under(words(&["--resume", "abc"]), relay, dir.path(), false, &none)
+            .expect("wired");
         assert!(!alone.iter().any(|a| a == "--session-id"));
         assert!(alone.ends_with(&words(&["--resume", "abc"])), "{alone:?}");
-        assert_eq!(wired(words(&["-p", "hi"]), relay, dir.path(), true), None, "a print run");
+        assert_eq!(
+            wired_under(words(&["-p", "hi"]), relay, dir.path(), true, &none),
+            None,
+            "a print run"
+        );
+    }
+
+    /// Under managed settings that refuse a run with `--mcp-config` (sideloading off) or keep
+    /// Slopty's server out, a project's agent gets the pointer in place of the tools, and the
+    /// relay's `--settings` all the same.
+    #[test]
+    fn managed_settings_keep_the_tools_out_and_the_relay_in() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let words = |args: &[&str]| args.iter().map(|&a| a.to_owned()).collect::<Vec<_>>();
+        let relay = "/opt/Slopty/slopty";
+        for policy in [
+            json!({ "disableSideloadFlags": true }),
+            json!({ "deniedMcpServers": [{ "serverName": "slopty" }] }),
+            json!({ "allowedMcpServers": [{ "serverName": "github" }] }),
+            json!({ "strictPluginOnlyCustomization": ["mcp"] }),
+        ] {
+            let mut managed = ManagedSettings::default();
+            managed.add(&policy);
+            let task = wired_under(words(&["fix it"]), relay, dir.path(), true, &managed);
+            let task = task.expect("wired");
+            let started = crate::resume::invocation(&task);
+            assert!(started.relay && !started.mcp, "{policy}: {task:?}");
+            assert_eq!(started.role.as_deref(), Some(POINTER), "{policy}");
+            let plain = with_mcp_under(words(&["x"]), relay, &managed);
+            assert_eq!(plain, words(&["x"]), "{policy}");
+        }
     }
 
     /// A system prompt the person appends keeps its place and gets the pointer after it, in

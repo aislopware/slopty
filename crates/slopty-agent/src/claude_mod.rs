@@ -6,24 +6,29 @@
 //! named by their digest, so an agent that is running keeps the files it loaded while a newer
 //! worker writes its own beside them. An agent gets the mod with [`Installed::args`] and [`env()`].
 //!
-//! Nothing it says is trusted until its `hello` passes [`crate::live::gate`], which names the
-//! Claude Code versions the mod was verified against ([`MOD_CLAUDE_VERSIONS`]); everywhere else
-//! the hooks, the transcript and the status line are the whole picture, as they are for a
-//! `claude` the mod cannot load in.
+//! Nothing it says is trusted until its `hello` passes [`crate::live::gate`]: on a Claude Code
+//! the mod was recorded on ([`MOD_CLAUDE_VERSIONS`]) it is verified, on another release of the
+//! same line heard provisionally, until an event does not decode; on another line it is
+//! refused. Everywhere it is not heard the hooks, the transcript and the status line are the
+//! whole picture, as they are for a `claude` the mod cannot load in, or whose managed settings
+//! keep it out ([`crate::managed`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::managed::ManagedSettings;
 
 /// The mod's own protocol, which its `hello` names. It changes with the events' shapes.
 pub const MOD_PROTOCOL: u32 = 1;
 
 /// The Claude Code versions the mod was verified against.
 ///
-/// `cargo xtask fixtures claude-mod` verifies one: it records
+/// `cargo xtask fixtures claude-mod --version <it>` verifies one: it records
 /// `crates/slopty-agent/tests/fixtures/mod` with the official build. A version joins this list
 /// only with a new recording, because the plugin API is early access and changes between
-/// releases.
-pub const MOD_CLAUDE_VERSIONS: &[&str] = &["2.1.286"];
+/// releases; until then a release of the same `major.minor` line is heard provisionally
+/// ([`crate::live::Trust::Provisional`]).
+pub const MOD_CLAUDE_VERSIONS: &[&str] = &["2.1.289"];
 
 /// Where the mod posts its events: the worker's mod socket.
 pub const SOCKET_ENV: &str = "SLOPTY_MOD_SOCKET";
@@ -31,7 +36,11 @@ pub const SOCKET_ENV: &str = "SLOPTY_MOD_SOCKET";
 /// The installed mod's directory, for the shell integration's `claude` function.
 pub const DIR_ENV: &str = "SLOPTY_CLAUDE_MOD";
 
-/// Claude Code loads a plugin's function hooks (`hooks.json` `modules`) only with this set.
+/// The switch Claude Code 2.1.286 loads a plugin's function hooks (`hooks.json` `modules`) with.
+///
+/// From 2.1.289 it is not read: a rollout flag that defaults on decides, under the hooks
+/// switches of the managed settings ([`ManagedSettings::hears_mod`]). Set all the same, for
+/// the builds that read it.
 pub const FUNCTION_HOOKS_ENV: &str = "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS";
 
 /// The switch that silences the mod.
@@ -113,9 +122,21 @@ pub struct Installed {
 }
 
 impl Installed {
-    /// `claude` arguments that load the mod too, unless they already do.
+    /// `claude` arguments that load the mod too, unless they already do, as far as this
+    /// machine's managed settings let it be heard ([`Self::args_under`]).
     #[must_use]
     pub fn args(&self, args: Vec<String>) -> Vec<String> {
+        self.args_under(args, &ManagedSettings::current())
+    }
+
+    /// [`Self::args`] under `managed`: none where it would make Claude Code refuse the run
+    /// (sideloading off), or where the mod could not load or be heard (hooks off or managed
+    /// only, the plugin network blocked).
+    #[must_use]
+    pub fn args_under(&self, args: Vec<String>, managed: &ManagedSettings) -> Vec<String> {
+        if !managed.hears_mod() {
+            return args;
+        }
         with_mod(args, &self.dir)
     }
 
@@ -213,6 +234,27 @@ mod tests {
         assert_eq!(with_mod(out.clone(), dir), out, "already loaded");
         let prompt = words(&["--", flag]);
         assert_eq!(with_mod(prompt, dir), words(&[flag, "--", flag]), "a prompt that names it");
+    }
+
+    /// Under managed settings that would refuse the run for `--plugin-dir`, or keep the mod
+    /// from loading or being heard, no mod flag is added; with none, it is.
+    #[test]
+    fn managed_settings_decide_whether_the_mod_is_added() {
+        let installed = Installed {
+            dir: PathBuf::from("/data/claude-mod/0123"),
+            socket: PathBuf::from("/tmp/mod.sock"),
+        };
+        let given = words(&["fix it"]);
+        let none = ManagedSettings::default();
+        assert_eq!(installed.args_under(given.clone(), &none).len(), 2);
+        for key in ["disableSideloadFlags", "disableAllHooks", "allowManagedHooksOnly"] {
+            let mut managed = ManagedSettings::default();
+            managed.add(&serde_json::json!({ key: true }));
+            assert_eq!(installed.args_under(given.clone(), &managed), given, "{key}");
+        }
+        let mut quiet = ManagedSettings::default();
+        quiet.add(&serde_json::json!({ "env": { NONESSENTIAL_TRAFFIC_ENV: "1" } }));
+        assert_eq!(installed.args_under(given.clone(), &quiet), given);
     }
 
     /// The mod loads, reaches the socket, and is never silenced by an inherited switch.

@@ -12,9 +12,8 @@
 //! after a reboot"). The daemon's agent tick tells the keeper which conversation each session
 //! holds ([`Keeper::agent`]); a tile opened on `claude` runs it again resumed, and a shell the
 //! person typed `claude` into gets the resuming line typed at its first prompt.
-//! A conversation Claude Code still runs in the background (`claude --bg`, listed by
-//! `claude agents --json`) is opened with `claude attach <id>` instead: `--resume` refuses it
-//! while it runs.
+//! A conversation Claude Code still runs in the background (`claude --bg`, in its session
+//! registry) is opened with `claude attach <id>` instead: `--resume` refuses it while it runs.
 //!
 //! The checkpoints reach the keeper as ptyd gets them, and each session's is written at most
 //! every [`KEEP_EVERY`], off the session's thread: a state is megabytes, and the formatter
@@ -250,32 +249,24 @@ impl Recipe {
     }
 }
 
-/// How long `claude agents --json` may take.
-pub const ROSTER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// The conversations of `recipes` that Claude Code runs in the background now, as
-/// `claude agents --json` lists them.
+/// The conversations of `recipes` that Claude Code runs in the background now, as its session
+/// registry in `sessions` lists them ([`slopty_agent::roster::registered`]).
 ///
-/// `claude` is found as the person's terminal finds it, or is the program at that path. Claude
-/// Code is asked only when a recipe holds a conversation; a list that cannot be had is none.
+/// The registry is read only when a recipe holds a conversation; one that cannot be read is
+/// none.
 pub async fn background<'a>(
-    claude: &str,
+    sessions: PathBuf,
     recipes: impl IntoIterator<Item = &'a Recipe>,
 ) -> Vec<String> {
     if !recipes.into_iter().any(|recipe| recipe.agent.is_some()) {
         return Vec::new();
     }
-    let args = slopty_agent::roster::ARGS;
-    let Some(out) = crate::caps::agent_output(claude, &args, ROSTER_WAIT).await else {
-        return Vec::new();
-    };
-    match slopty_agent::roster::parse(&String::from_utf8_lossy(&out)) {
-        Ok(listed) => slopty_agent::roster::background(&listed).map(str::to_owned).collect(),
-        Err(e) => {
-            tracing::debug!("claude agents --json did not read: {e}");
-            Vec::new()
-        }
-    }
+    tokio::task::spawn_blocking(move || {
+        let listed = slopty_agent::roster::registered(&sessions, crate::ports::alive);
+        slopty_agent::roster::background(&listed).map(str::to_owned).collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// `dir` (a leading `~` being this worker's home) when it is a directory now.
@@ -704,23 +695,21 @@ mod tests {
         assert!(resumed.launch.unwrap().contains("--resume abc"), "resumed as before");
     }
 
-    /// Claude Code is asked which conversations run in the background only when a lost session
-    /// held one, and its list is read; a `claude` that fails or is not there lists none.
+    /// Claude Code's registry is read for the conversations it runs in the background only when
+    /// a lost session held one; a session whose process ended, and a registry that is not
+    /// there, list none.
     #[tokio::test]
     async fn the_background_conversations_are_claude_codes_own_list() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
-        let asked = dir.path().join("asked");
-        let claude = dir.path().join("claude");
-        let list = r#"[{"pid": 7, "sessionId": "abc", "kind": "background"},
-            {"pid": 8, "sessionId": "tty", "kind": "interactive"}]"#;
-        let script = format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncat <<'EOF'\n{list}\nEOF\n",
-            asked.display()
-        );
-        std::fs::write(&claude, script).unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let claude = claude.to_string_lossy().into_owned();
+        let live = std::process::id();
+        let gone = i32::MAX;
+        for (pid, kind, session) in
+            [(live.to_string(), "bg", "abc"), (gone.to_string(), "bg", "ended")]
+        {
+            let file = dir.path().join(format!("{pid}.json"));
+            std::fs::write(file, format!(r#"{{"sessionId":"{session}","kind":"{kind}"}}"#))
+                .unwrap();
+        }
         let held = Recipe {
             agent: Some(Resume {
                 session: "abc".to_owned(),
@@ -734,12 +723,12 @@ mod tests {
             }),
             ..recipe(&["/bin/zsh"])
         };
-        assert_eq!(background(&claude, [&recipe(&["/bin/zsh"])]).await, Vec::<String>::new());
-        assert!(!asked.exists(), "not asked for shells alone");
-        assert_eq!(background(&claude, [&held]).await, ["abc"]);
-        assert_eq!(std::fs::read_to_string(&asked).unwrap(), "agents --json\n");
-        let gone = dir.path().join("gone").to_string_lossy().into_owned();
-        assert_eq!(background(&gone, [&held]).await, Vec::<String>::new());
+        let sessions = dir.path().to_path_buf();
+        let shells = background(sessions.clone(), [&recipe(&["/bin/zsh"])]).await;
+        assert_eq!(shells, Vec::<String>::new(), "not read for shells alone");
+        assert_eq!(background(sessions, [&held]).await, ["abc"], "the ended one is passed over");
+        let none = dir.path().join("none");
+        assert_eq!(background(none, [&held]).await, Vec::<String>::new());
     }
 
     /// A project's agent comes back wired as Slopty started it: its relay, its tools, the lock

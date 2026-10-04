@@ -287,7 +287,8 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
         HookCmd::Wire { args } => {
             let cwd = std::env::current_dir().context("current directory")?;
             let var = |name: &str| std::env::var(name).ok();
-            let (env, args) = wire(args, &relay_command()?, &cwd, var);
+            let managed = slopty_agent::managed::ManagedSettings::current();
+            let (env, args) = wire(args, &relay_command()?, &cwd, var, &managed);
             let mut out = Vec::new();
             for word in env.iter().map(|(k, v)| format!("{k}={v}")).chain([String::new()]) {
                 out.extend_from_slice(word.as_bytes());
@@ -350,18 +351,23 @@ pub async fn run(cmd: HookCmd, data_dir: &Path) -> Result<()> {
 /// hooks and status line, Slopty's tools in a project's session and the pointer to Slopty's
 /// CLI in any other, and a pinned conversation. Wherever the worker named its mod, it also loads
 /// the mod, with the switch that lets it run, unless the person loads it already. An inherited
-/// switch that silences the mod's traffic is the person's, and is left alone.
+/// switch that silences the mod's traffic is the person's, and is left alone, and the mod with
+/// it: it could not be heard ([`slopty_agent::managed::ManagedSettings::mod_off`]). What the
+/// organization's `managed` settings forbid, or would refuse the run for, is left out.
 fn wire(
     args: Vec<String>,
     relay: &str,
     cwd: &Path,
     var: impl Fn(&str) -> Option<String>,
+    managed: &slopty_agent::managed::ManagedSettings,
 ) -> (Vec<(String, String)>, Vec<String>) {
     use slopty_agent::claude_mod::{self, Installed};
     let set = |name: &str| var(name).filter(|v| !v.is_empty());
     let project = set(slopty_proto::project::PROJECT_ENV).is_some();
     let args = match set(SESSION_ENV) {
-        Some(_session) => hooks::wired(args.clone(), relay, cwd, project).unwrap_or(args),
+        Some(_session) => {
+            hooks::wired_under(args.clone(), relay, cwd, project, managed).unwrap_or(args)
+        }
         None => args,
     };
     let installed = set(claude_mod::DIR_ENV)
@@ -369,7 +375,10 @@ fn wire(
         .map(|(dir, socket)| Installed { dir: PathBuf::from(dir), socket: PathBuf::from(socket) })
         .filter(|installed| installed.dir.is_dir());
     let Some(installed) = installed else { return (Vec::new(), args) };
-    let with_mod = installed.args(args.clone());
+    if managed.mod_off(var(claude_mod::NONESSENTIAL_TRAFFIC_ENV).as_deref()).is_some() {
+        return (Vec::new(), args);
+    }
+    let with_mod = installed.args_under(args.clone(), managed);
     if with_mod == args {
         return (Vec::new(), args);
     }
@@ -422,22 +431,87 @@ mod tests {
             (slopty_agent::claude_mod::SOCKET_ENV, "/tmp/mod.sock"),
         ];
         let switch = vec![("CLAUDE_CODE_ENABLE_FUNCTION_HOOKS".to_owned(), "1".to_owned())];
+        let none = slopty_agent::managed::ManagedSettings::default();
 
-        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&modded));
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&modded), &none);
         assert_eq!((env, args), (switch.clone(), words(&[&flag, "x"])), "outside a session");
 
         let inside = [modded[0], modded[1], (SESSION_ENV, session.as_str())];
-        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&inside));
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&inside), &none);
         assert_eq!(env, switch);
         assert!(args.iter().any(|a| a == "--settings") && args.ends_with(&words(&["x"])));
         assert!(!args.iter().any(|a| a.starts_with("--mcp-config")), "no server: {args:?}");
 
-        let (env, args) = wire(words(&[&flag, "x"]), "/s/slopty", dir.path(), vars(&modded));
+        let (env, args) = wire(words(&[&flag, "x"]), "/s/slopty", dir.path(), vars(&modded), &none);
         assert_eq!((env, args), (Vec::new(), words(&[&flag, "x"])), "the person's own flag");
 
         let gone = [(slopty_agent::claude_mod::DIR_ENV, "/nowhere"), modded[1]];
-        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&gone));
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), vars(&gone), &none);
         assert_eq!((env, args), (Vec::new(), words(&["x"])), "no mod on disk");
+    }
+
+    /// Under managed settings that refuse `--plugin-dir` and `--mcp-config`, a typed `claude`
+    /// in a project's session gets neither the mod nor the tools, and still the relay's hooks
+    /// and status line on its `--settings`, read from the managed file in the person's home.
+    #[test]
+    fn a_typed_claude_honours_the_managed_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(home.join(".claude")).expect("home");
+        std::fs::write(
+            home.join(".claude").join("remote-settings.json"),
+            r#"{"disableSideloadFlags": true}"#,
+        )
+        .expect("policy");
+        let managed = slopty_agent::managed::ManagedSettings::read(&home);
+        let module = dir.path().join("mod");
+        std::fs::create_dir_all(&module).expect("mod dir");
+        let module = module.to_string_lossy().into_owned();
+        let session = SessionId::new().to_string();
+        let vars = [
+            (slopty_agent::claude_mod::DIR_ENV, module.as_str()),
+            (slopty_agent::claude_mod::SOCKET_ENV, "/tmp/mod.sock"),
+            (SESSION_ENV, session.as_str()),
+            (slopty_proto::project::PROJECT_ENV, "p1"),
+        ];
+        let var = |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned());
+        let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), var, &managed);
+        assert!(env.is_empty(), "{env:?}");
+        assert!(!args.iter().any(|a| a.starts_with("--plugin-dir")), "{args:?}");
+        assert!(!args.iter().any(|a| a.starts_with("--mcp-config")), "{args:?}");
+        let settings = args.iter().position(|a| a == "--settings").expect("the relay's settings");
+        let doc: serde_json::Value = serde_json::from_str(&args[settings + 1]).expect("json");
+        assert!(doc.get("hooks").is_some() && doc.get("statusLine").is_some(), "{doc}");
+    }
+
+    /// A typed `claude` whose environment silences a plugin's requests gets no mod, which could
+    /// never say hello, and keeps the switch as the person set it; set empty, it is unset and
+    /// the mod is loaded.
+    #[test]
+    fn a_typed_claude_with_the_quiet_switch_gets_no_mod() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let module = dir.path().join("mod");
+        std::fs::create_dir_all(&module).expect("mod dir");
+        let module = module.to_string_lossy().into_owned();
+        let session = SessionId::new().to_string();
+        let none = slopty_agent::managed::ManagedSettings::default();
+        for (quiet, loaded) in [("1", false), ("", true)] {
+            let vars = [
+                (slopty_agent::claude_mod::DIR_ENV, module.as_str()),
+                (slopty_agent::claude_mod::SOCKET_ENV, "/tmp/mod.sock"),
+                (SESSION_ENV, session.as_str()),
+                (slopty_agent::claude_mod::NONESSENTIAL_TRAFFIC_ENV, quiet),
+            ];
+            let var =
+                |name: &str| vars.iter().find(|(k, _)| *k == name).map(|(_, v)| (*v).to_owned());
+            let (env, args) = wire(words(&["x"]), "/s/slopty", dir.path(), var, &none);
+            let has_mod = args.iter().any(|a| a.starts_with("--plugin-dir"));
+            assert_eq!((has_mod, !env.is_empty()), (loaded, loaded), "{quiet:?}: {args:?}");
+            assert!(
+                env.iter().all(|(k, _)| k != slopty_agent::claude_mod::NONESSENTIAL_TRAFFIC_ENV)
+            );
+            assert!(args.iter().any(|a| a == "--settings"), "the relay stays: {args:?}");
+        }
     }
 
     /// A tool's output of several megabytes is cut, not into invalid JSON: what goes on reads

@@ -54,6 +54,7 @@ pub mod history;
 pub mod hooks;
 pub mod live;
 pub mod loosening;
+pub mod managed;
 pub mod observed;
 pub mod permission;
 pub mod pi;
@@ -1453,15 +1454,28 @@ impl AgentTable {
         self.branches.values().cloned().collect()
     }
 
-    /// Fold in Claude Code's own list of its live sessions (`claude agents --json`), read once
-    /// after the worker started: each agent whose process it lists by pid gets its
-    /// conversation back, and when `hooked` (the relay is registered), the status the hooks it
-    /// sent before the restart had said. The events to broadcast, all quiet.
-    pub fn recover(&mut self, listed: &[roster::Listed], hooked: bool) -> Vec<AgentEvent> {
+    /// Fold in Claude Code's own registry of its live sessions ([`roster::registered`]), read
+    /// once after the worker started: each agent whose process it lists gets its conversation
+    /// back, and when `hooked` (the relay is registered), the status the hooks it sent before
+    /// the restart had said. The events to broadcast, all quiet.
+    ///
+    /// An agent's process is the one the registry names, or its parent: a managed launcher
+    /// runs Claude Code as its child, so the terminal's foreground process is the launcher's.
+    /// `children` lists a process's direct children.
+    pub fn recover(
+        &mut self,
+        listed: &[roster::Listed],
+        hooked: bool,
+        children: impl Fn(i32) -> Vec<i32>,
+    ) -> Vec<AgentEvent> {
         let mut events = Vec::new();
         for (session, tracker) in &mut self.sessions {
             let Some((pid, _started)) = tracker.process else { continue };
-            let Some(entry) = listed.iter().find(|l| l.pid == Some(pid)) else { continue };
+            let named = |pid: i32| listed.iter().find(|l| l.pid == Some(pid));
+            let Some(entry) = named(pid).or_else(|| children(pid).into_iter().find_map(named))
+            else {
+                continue;
+            };
             events.extend(tracker.recover(*session, entry, hooked));
         }
         events
@@ -2872,13 +2886,13 @@ mod tests {
         table.observe(b, &process("claude", None, 22));
         table.observe(c, &process("claude", None, 33));
         table.apply(b, &hook(r#"{"hook_event_name":"UserPromptSubmit","prompt":"go"}"#));
-        let listed = roster::parse(
+        let listed: Vec<roster::Listed> = serde_json::from_str(
             r#"[{"pid":11,"sessionId":"s-a","status":"waiting","waitingFor":"permission prompt"},
                {"pid":22,"sessionId":"s-b","status":"idle"},
                {"pid":99,"sessionId":"s-x","status":"busy"}]"#,
         )
         .expect("json");
-        let events = table.recover(&listed, true);
+        let events = table.recover(&listed, true, |_| Vec::new());
         assert_eq!(events.len(), 1, "{events:?}");
         let event = &events[0];
         assert_eq!(event.session, a);
@@ -2895,10 +2909,38 @@ mod tests {
 
         let mut unhooked = AgentTable::default();
         unhooked.observe(a, &process("claude", None, 11));
-        assert_eq!(unhooked.recover(&listed, false), Vec::<AgentEvent>::new());
+        assert_eq!(unhooked.recover(&listed, false, |_| Vec::new()), Vec::<AgentEvent>::new());
         let kept = unhooked.snapshot();
         assert_eq!(kept[0].status, AgentStatus::Idle, "the process's word stands");
         assert_eq!(kept[0].agent_session.as_deref(), Some("s-a"), "the conversation is known");
+    }
+
+    /// A managed launcher runs Claude Code as its child: the registry names the child, and the
+    /// terminal's agent (the launcher) is matched through it. A grandchild, or another
+    /// process's child, is not its agent.
+    #[test]
+    fn a_launchers_agent_is_found_by_its_child() {
+        let (launched, other, deep) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let mut table = AgentTable::default();
+        table.observe(launched, &process("claude", None, 100));
+        table.observe(other, &process("claude", None, 200));
+        table.observe(deep, &process("claude", None, 300));
+        let listed: Vec<roster::Listed> = serde_json::from_str(
+            r#"[{"pid":101,"sessionId":"s-launched","status":"waiting","waitingFor":"input needed"},
+               {"pid":302,"sessionId":"s-grandchild","status":"busy"}]"#,
+        )
+        .expect("json");
+        let processes = |pid: i32| match pid {
+            100 => vec![105, 101],
+            300 => vec![301],
+            301 => vec![302],
+            _ => Vec::new(),
+        };
+        let events = table.recover(&listed, true, processes);
+        let found: Vec<_> =
+            events.iter().map(|e| (e.session, e.agent_session.as_deref())).collect();
+        assert_eq!(found, [(launched, Some("s-launched"))]);
+        assert_eq!(events[0].status, AgentStatus::Blocked(BlockReason::Question));
     }
 
     /// An agent that ends leaves its terminal marked until another starts there, whether its

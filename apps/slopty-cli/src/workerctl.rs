@@ -81,6 +81,9 @@ pub async fn run(cmd: WorkerCmd, server: Option<&str>, data_dir: &Path, json: bo
         CtlReply::Doctor(health) if json => println!("{}", serde_json::to_string(&health)?),
         CtlReply::Doctor(health) => {
             print!("{}", doctor_report(&health, DESKTOP));
+            let quiet = std::env::var(slopty_agent::claude_mod::NONESSENTIAL_TRAFFIC_ENV).ok();
+            let managed = slopty_agent::managed::ManagedSettings::current();
+            println!("{}", mod_line(managed.mod_off(quiet.as_deref())));
             if DESKTOP && !(health.caps.can_capture && health.caps.can_inject) {
                 bail!("permissions missing; see above");
             }
@@ -250,6 +253,19 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     out
 }
 
+/// Whether Claude Code here can run Slopty's mod, whose live stream (text as it streams, the
+/// command list, the model aliases) the threads add to the hooks and the transcript: under this
+/// machine's managed settings, and for a `claude` typed in this shell, its environment.
+fn mod_line(off: Option<slopty_agent::managed::ModOff>) -> String {
+    match off {
+        None => "✔ Claude Code's live stream (Slopty's mod) can be heard".to_owned(),
+        Some(why) => format!(
+            "✘ Claude Code's live stream is off: {why}\n  → its threads follow the hooks and the \
+             transcript"
+        ),
+    }
+}
+
 /// What follows a clipboard read that is not free: what the worker does meanwhile.
 const CLIPBOARD_WAITS: &str =
     "\n  → until then the worker's copies stay on it; pastes from clients still land";
@@ -302,6 +318,16 @@ mod tests {
         std::fs::write(&installed, b"").unwrap();
         assert_eq!(socket_in(None, data.path()), installed);
         assert_eq!(socket_in(Some("/x.sock".into()), data.path()), PathBuf::from("/x.sock"));
+    }
+
+    /// The doctor says whether Claude Code's live stream can be heard, and if not, why.
+    #[test]
+    fn the_doctor_says_why_the_mod_is_off() {
+        use slopty_agent::managed::ModOff;
+        assert!(mod_line(None).starts_with('✔'));
+        let quiet = mod_line(Some(ModOff::QuietByEnvironment));
+        assert!(quiet.starts_with('✘') && quiet.contains("NONESSENTIAL_TRAFFIC"), "{quiet}");
+        assert!(mod_line(Some(ModOff::SideloadingOff)).contains("disableSideloadFlags"));
     }
 
     #[test]

@@ -15,13 +15,15 @@
 //! at utility priority in a process group of its own, which a timeout kills whole. A tool
 //! that is missing or does not answer in time is only absent.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, SystemTime};
 
+use parking_lot::Mutex;
 use slopty_agent::acp::registry;
+use slopty_agent::managed::{self, Launcher};
 use slopty_proto::project::{Fact, Facts};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::watch;
@@ -195,9 +197,14 @@ async fn versions(search: &Arc<SearchPath>, stand_ins: &StandIns, tools: &'stati
         };
         let search = Arc::clone(search);
         running.spawn(async move {
-            let ran =
-                run(search.command(&program, tool.args), VERSION_WAIT, VERSION_OUTPUT_MAX).await?;
-            let version = ran.ok.then(|| version_in(&ran.out, tool.after)).flatten()?;
+            let version = if tool.program == CLAUDE {
+                claude_version(&search, &program, &managed_data()).await?
+            } else {
+                let ran =
+                    run(search.command(&program, tool.args), VERSION_WAIT, VERSION_OUTPUT_MAX)
+                        .await?;
+                ran.ok.then(|| version_in(&ran.out, tool.after)).flatten()?
+            };
             Some((tool.name.to_owned(), Fact::Text(version)))
         });
     }
@@ -452,9 +459,68 @@ pub async fn installed(program: &str, path: Option<OsString>) -> Option<Installe
         None => SearchPath::of(std::env::var_os("PATH").into_iter().chain(login_path().await)),
     };
     let found = search.resolve(program)?;
-    let ran = run(search.command(&found, &["--version"]), VERSION_WAIT, VERSION_OUTPUT_MAX).await;
-    let version = ran.filter(|ran| ran.ok).and_then(|ran| version_in(&ran.out, None));
+    let version = if program == CLAUDE {
+        claude_version(&search, &found, &managed_data()).await
+    } else {
+        let ran =
+            run(search.command(&found, &["--version"]), VERSION_WAIT, VERSION_OUTPUT_MAX).await;
+        ran.filter(|ran| ran.ok).and_then(|ran| version_in(&ran.out, None))
+    };
     Some(Installed { program: found, path: search.joined, version })
+}
+
+/// Claude Code's program.
+const CLAUDE: &str = "claude";
+
+/// A `claude` found: its real path and when it was last written.
+type Found = (PathBuf, Option<SystemTime>);
+
+/// What each `claude` found is: asked once for the worker's life, and again only when it is
+/// replaced ([`launcher`]).
+static LAUNCHERS: LazyLock<Mutex<HashMap<Found, Launcher>>> = LazyLock::new(Mutex::default);
+
+/// Where a managed launcher keeps its clients: the person's data directory.
+fn managed_data() -> PathBuf {
+    slopty_platform::dirs::home().join(".local").join("share")
+}
+
+/// The version of the `claude` at `program`, never by running a managed launcher
+/// ([`slopty_agent::managed`]): a launcher's client says it in its path, a launcher by the
+/// newest client under `data`; any other `claude` is asked `--version`.
+async fn claude_version(search: &SearchPath, program: &Path, data: &Path) -> Option<String> {
+    let real = tokio::fs::canonicalize(program).await.unwrap_or_else(|_| program.to_path_buf());
+    if let Some(version) = managed::artifact_version(&real) {
+        return Some(version);
+    }
+    if launcher(search, &real).await.is_managed() {
+        let data = data.to_path_buf();
+        return tokio::task::spawn_blocking(move || managed::newest_artifact(&data))
+            .await
+            .ok()
+            .flatten();
+    }
+    let ran = run(search.command(program, &["--version"]), VERSION_WAIT, VERSION_OUTPUT_MAX).await;
+    ran.filter(|ran| ran.ok).and_then(|ran| version_in(&ran.out, None))
+}
+
+/// Whether the `claude` at `program` (its real path) is a managed launcher, from its answer to
+/// [`managed::MANAGED_HELP`], which such a launcher gives before any I/O and Claude Code
+/// refuses at once. One that does not answer in time is taken for a launcher this once: it is
+/// not asked anything else, and is asked again next time.
+async fn launcher(search: &SearchPath, program: &Path) -> Launcher {
+    let written = tokio::fs::metadata(program).await.and_then(|meta| meta.modified()).ok();
+    let key = (program.to_path_buf(), written);
+    let known = LAUNCHERS.lock().get(&key).copied();
+    if let Some(known) = known {
+        return known;
+    }
+    let asked = search.command(program, &[managed::MANAGED_HELP]);
+    let Some(ran) = run(asked, VERSION_WAIT, VERSION_OUTPUT_MAX).await else {
+        return Launcher::Managed;
+    };
+    let launcher = Launcher::from_managed_help(ran.ok, &ran.out);
+    LAUNCHERS.lock().insert(key, launcher);
+    launcher
 }
 
 /// The person's login shell's `PATH`, as it stands once their profile and rc files ran.
@@ -800,5 +866,143 @@ mod tests {
         for server_filled in ["os", "os_version", "arch", "memory_mb", "encoders", "displays"] {
             assert!(!facts.contains_key(server_filled), "{server_filled}");
         }
+    }
+
+    /// A program that starts a child of its own, says the child's pid in `pidfile`, and waits
+    /// on it: hung, as a command stuck on the network.
+    fn hung(dir: &Path) -> (PathBuf, PathBuf) {
+        let program = dir.join("hung");
+        let pidfile = dir.join("child.pid");
+        let script = format!(
+            "#!/bin/sh\nsleep 600 &\necho $! > {}\nwait\n",
+            slopty_core::shell_quote(&pidfile.to_string_lossy())
+        );
+        script_at(&program, &script);
+        (program, pidfile)
+    }
+
+    fn script_at(path: &Path, script: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The pid a hung program wrote, once it has.
+    async fn child_of(pidfile: &Path) -> rustix::process::Pid {
+        let written = async {
+            loop {
+                let text = tokio::fs::read_to_string(pidfile).await.unwrap_or_default();
+                if let Ok(pid) = text.trim().parse::<i32>() {
+                    return rustix::process::Pid::from_raw(pid).unwrap();
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), written).await.expect("it started")
+    }
+
+    /// Whether `pid` is gone within a few seconds.
+    async fn gone(pid: rustix::process::Pid) -> bool {
+        for _ in 0..500 {
+            if rustix::process::test_kill_process(pid).is_err() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// A command that hangs past the wait is killed with everything it started.
+    #[tokio::test]
+    async fn a_hung_command_dies_with_its_children_after_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, pidfile) = hung(dir.path());
+        let waited = Instant::now();
+        let command = tokio::process::Command::new(&program);
+        let ran = tokio::join!(
+            run(command, Duration::from_millis(1500), VERSION_OUTPUT_MAX),
+            child_of(&pidfile)
+        );
+        assert!(ran.0.is_none(), "no answer past the wait");
+        assert!(waited.elapsed() < Duration::from_secs(10));
+        assert!(gone(ran.1).await, "its child outlived the wait");
+    }
+
+    /// A command the worker stops waiting on (it shuts down, the task is aborted) takes its
+    /// whole group with it.
+    #[tokio::test]
+    async fn an_abandoned_command_dies_with_its_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let (program, pidfile) = hung(dir.path());
+        let command = tokio::process::Command::new(&program);
+        let polling = tokio::spawn(run(command, Duration::from_secs(600), VERSION_OUTPUT_MAX));
+        let child = child_of(&pidfile).await;
+        polling.abort();
+        assert!(matches!(polling.await, Err(e) if e.is_cancelled()));
+        assert!(gone(child).await, "its child outlived the poll");
+    }
+
+    /// A stand-in `claude` in `dir` that logs every word it is given and answers
+    /// `--managed-help` as a managed launcher does (`managed`) or as Claude Code does.
+    fn stand_in_claude(dir: &Path, managed: bool) -> (PathBuf, PathBuf) {
+        let program = dir.join("claude");
+        let log = dir.join("asked");
+        let help = if managed {
+            "echo 'Usage: claude managed <COMMAND>'; exit 0"
+        } else {
+            "echo \"error: unknown option '--managed-help'\" >&2; exit 1"
+        };
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> {log}\nif [ \"$1\" = --managed-help ]; then {help}; fi\n\
+             echo '2.1.300 (Claude Code)'\n",
+            log = slopty_core::shell_quote(&log.to_string_lossy()),
+        );
+        script_at(&program, &script);
+        (program, log)
+    }
+
+    fn asked(log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log).unwrap_or_default().lines().map(str::to_owned).collect()
+    }
+
+    /// A managed launcher is asked only whether it is one, once, and its version is its newest
+    /// client's; Claude Code itself is asked its version; a launcher's client is asked nothing,
+    /// its version being in its path.
+    #[tokio::test]
+    async fn a_managed_launcher_is_never_asked_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let search = SearchPath::of(None);
+        let data = dir.path().join("share");
+        let artifacts = data.join("claude-managed").join("artifacts");
+        for version in ["2.1.9", "2.1.289", "2.1.30"] {
+            std::fs::create_dir_all(artifacts.join(version).join("darwin-arm64")).unwrap();
+        }
+
+        let launcher_dir = dir.path().join("launcher");
+        std::fs::create_dir_all(&launcher_dir).unwrap();
+        let (launcher, log) = stand_in_claude(&launcher_dir, true);
+        for _ in 0..2 {
+            let version = claude_version(&search, &launcher, &data).await;
+            assert_eq!(version.as_deref(), Some("2.1.289"));
+        }
+        assert_eq!(asked(&log), ["--managed-help"], "asked once, and nothing else");
+
+        let plain_dir = dir.path().join("plain");
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        let (plain, log) = stand_in_claude(&plain_dir, false);
+        for _ in 0..2 {
+            let version = claude_version(&search, &plain, &data).await;
+            assert_eq!(version.as_deref(), Some("2.1.300"));
+        }
+        assert_eq!(asked(&log), ["--managed-help", "--version", "--version"]);
+
+        let client_dir = artifacts.join("2.1.289").join("darwin-arm64");
+        let (client, log) = stand_in_claude(&client_dir, false);
+        let linked = dir.path().join("bin");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&client, linked.join("claude")).unwrap();
+        let version = claude_version(&search, &linked.join("claude"), &data).await;
+        assert_eq!(version.as_deref(), Some("2.1.289"));
+        assert_eq!(asked(&log), Vec::<String>::new());
     }
 }

@@ -677,12 +677,13 @@ fn tools_lane(
 pub const BINS_FRESH: &str = "SLOPTY_BINS_FRESH";
 
 /// `slopty_testkit::bins::NAMES`, each with the package that builds it.
-const SPAWNED_BINS: [(&str, &str); 7] = [
+const SPAWNED_BINS: [(&str, &str); 8] = [
     ("slopty-ptyd", "slopty-ptyd"),
     ("slopty-worker", "slopty-workerd"),
     ("slopty-server", "slopty-serverd"),
     ("slopty", "slopty-cli"),
     ("slopty-stub-claude", "slopty-testkit"),
+    ("slopty-stub-managed-claude", "slopty-testkit"),
     ("slopty-stub-pi", "slopty-testkit"),
     ("slopty-stub-acp", "slopty-testkit"),
 ];

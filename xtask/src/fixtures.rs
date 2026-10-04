@@ -35,6 +35,9 @@ pub enum FixturesCmd {
         /// Capture only this scenario.
         #[arg(long)]
         only: Option<String>,
+        /// The Claude Code release to capture with.
+        #[arg(long, default_value = crate::claude::VERSION)]
+        version: String,
     },
     /// Validate Slopty's Claude Code mod and record what it sends, with the official build
     /// against a canned API: no account, no model.
@@ -42,6 +45,10 @@ pub enum FixturesCmd {
         /// Record only this scenario.
         #[arg(long)]
         only: Option<String>,
+        /// The Claude Code release to record on; the mod is then verified on it alone
+        /// (`slopty_agent::claude_mod::MOD_CLAUDE_VERSIONS`).
+        #[arg(long, default_value = crate::claude::VERSION)]
+        version: String,
     },
     /// The hook a capture registers: saves the payload on stdin and answers permission
     /// requests. Not for people.
@@ -54,8 +61,10 @@ pub enum FixturesCmd {
 
 pub fn run(cmd: &FixturesCmd) -> Result<()> {
     match cmd {
-        FixturesCmd::Claude { only } => capture_all(only.as_deref()),
-        FixturesCmd::ClaudeMod { only } => crate::claude_mod::capture_all(only.as_deref()),
+        FixturesCmd::Claude { only, version } => capture_all(only.as_deref(), version),
+        FixturesCmd::ClaudeMod { only, version } => {
+            crate::claude_mod::capture_all(only.as_deref(), version)
+        }
         FixturesCmd::HookSink { dir } => hook_sink(dir),
     }
 }
@@ -74,8 +83,8 @@ struct Scenario {
     /// Files the run must leave in the scratch directory, and files it must not.
     expect: &'static [&'static str],
     absent: &'static [&'static str],
-    /// After the first turn's `result`, record `claude agents --json` for the scratch directory
-    /// (`agents.json`): the session is alive, its background work still out.
+    /// After the first turn's `result`, record the run's session registry file
+    /// (`sessions/<pid>.json`): the session is alive, its background work still out.
     roster: bool,
     /// Turns the session starts on its own after the last prompt's (a finished background task
     /// wakes it), whose `result` is waited for too.
@@ -201,12 +210,15 @@ const SINK_EVENTS: [&str; 14] = [
     "StopFailure",
 ];
 
+/// The pid a recorded session registry file is named and says, whatever the run's was.
+const REGISTRY_PID: u32 = 4321;
+
 /// How long one scenario may run.
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
 
-fn capture_all(only: Option<&str>) -> Result<()> {
-    let claude = crate::claude::official()?;
-    println!("claude {} at {}", crate::claude::VERSION, claude.display());
+fn capture_all(only: Option<&str>, version: &str) -> Result<()> {
+    let claude = crate::claude::official(version)?;
+    println!("claude {version} at {}", claude.display());
     let out = repo_root()?.join("crates/slopty-agent/tests/fixtures/conversation");
     let mut ran = 0_usize;
     for scenario in SCENARIOS.iter().filter(|s| only.is_none_or(|name| name == s.name)) {
@@ -226,7 +238,7 @@ fn capture_all(only: Option<&str>) -> Result<()> {
 struct Captured {
     /// Transcript records by the file Claude Code wrote them to, in order.
     files: Vec<(String, Vec<Value>)>,
-    /// What `claude agents --json` listed mid-run ([`Scenario::roster`]).
+    /// The run's own session registry file, mid-run ([`Scenario::roster`]).
     roster: Option<Value>,
 }
 
@@ -303,12 +315,14 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
         .stderr(Stdio::inherit())
         .spawn()
         .context("spawn claude")?;
-    let roster = |work: &Path| {
-        let mut command = Command::new(claude);
-        place(&mut command);
-        roster(&mut command, work)
+    let registered = canned
+        .as_ref()
+        .map(|(home, _api)| home.join(".claude/sessions").join(format!("{}.json", child.id())));
+    let roster = || match &registered {
+        Some(file) => registry_file(file),
+        None => bail!("a roster is read only from a canned run's scratch home"),
     };
-    let captured = drive(scenario, &roster, &work, &mut child);
+    let captured = drive(scenario, &roster, &mut child);
     let _killed = child.kill();
     let status = child.wait()?;
     let captured = captured?;
@@ -336,8 +350,7 @@ fn capture(claude: &Path, scenario: &Scenario, out: &Path) -> Result<()> {
 /// Feed the turns and collect the mirrored records until `claude` exits.
 fn drive(
     scenario: &Scenario,
-    roster: &dyn Fn(&Path) -> Result<Value>,
-    work: &Path,
+    roster: &dyn Fn() -> Result<Value>,
     child: &mut Child,
 ) -> Result<Captured> {
     let stdout = child.stdout.take().context("stdout")?;
@@ -387,7 +400,7 @@ fn drive(
             Some("control_request") => bail!("claude asked the host: {line}"),
             Some("result") => {
                 if scenario.roster && captured.roster.is_none() {
-                    captured.roster = Some(roster(work)?);
+                    captured.roster = Some(roster()?);
                 }
                 match (stdin.as_mut(), turns.next()) {
                     (Some(input), Some(turn)) => send_prompt(input, turn)?,
@@ -402,17 +415,12 @@ fn drive(
     Ok(captured)
 }
 
-/// `claude agents --json` (as `command` runs `claude`) for the sessions started under `work`.
-fn roster(command: &mut Command, work: &Path) -> Result<Value> {
-    let out = command
-        .args(["agents", "--json", "--cwd"])
-        .arg(work)
-        .stdin(Stdio::null())
-        .stderr(Stdio::inherit())
-        .output()
-        .context("run claude agents --json")?;
-    ensure!(out.status.success(), "claude agents --json exited {}", out.status);
-    serde_json::from_slice(&out.stdout).context("claude agents --json printed no JSON")
+/// The run's session registry file (`<home>/.claude/sessions/<pid>.json`), as `claude agents`
+/// and the worker read it. Only ever a scratch home's.
+fn registry_file(file: &Path) -> Result<Value> {
+    let text = std::fs::read_to_string(file)
+        .with_context(|| format!("claude registered no session at {}", file.display()))?;
+    serde_json::from_str(&text).context("the session registry file is no JSON")
 }
 
 /// Whether an assistant frame calls `tool`.
@@ -508,28 +516,31 @@ fn write_fixture(
         let lines: Vec<String> = records.into_iter().map(|r| scrub.record(r).to_string()).collect();
         std::fs::write(dir.join(name), format!("{}\n", lines.join("\n")))?;
     }
-    if let Some(Value::Array(sessions)) = captured.roster {
-        // The process, the clock and the generated name differ each run: fixed, so the file
-        // only moves with Claude Code's shape.
+    if let Some(mut session) = captured.roster {
+        // The process, the clocks, the socket and the generated name differ each run: fixed,
+        // so the file only moves with Claude Code's shape.
+        let clock = json!(1_790_000_000_000_u64);
         let fixed = [
-            ("pid", json!(4321)),
-            ("startedAt", json!(1_790_000_000_000_u64)),
+            ("pid", json!(REGISTRY_PID)),
+            ("procStart", json!("fixed")),
+            ("startedAt", clock.clone()),
+            ("updatedAt", clock.clone()),
+            ("statusUpdatedAt", clock.clone()),
+            ("nameSince", clock),
+            ("messagingSocketPath", json!("/tmp/claude.sock")),
             ("name", json!(scenario.name)),
         ];
-        let sessions: Vec<Value> = sessions
-            .into_iter()
-            .map(|mut session| {
-                if let Some(entry) = session.as_object_mut() {
-                    for (key, value) in &fixed {
-                        if entry.contains_key(*key) {
-                            entry.insert((*key).to_owned(), value.clone());
-                        }
-                    }
+        if let Some(entry) = session.as_object_mut() {
+            for (key, value) in &fixed {
+                if entry.contains_key(*key) {
+                    entry.insert((*key).to_owned(), value.clone());
                 }
-                scrub.value(session, "")
-            })
-            .collect();
-        std::fs::write(dir.join("agents.json"), format!("{}\n", Value::Array(sessions)))?;
+            }
+        }
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions)?;
+        let file = sessions.join(format!("{REGISTRY_PID}.json"));
+        std::fs::write(file, format!("{}\n", scrub.value(session, "")))?;
     }
     let hooks: Vec<String> = hooks.into_iter().map(|h| scrub.value(h, "").to_string()).collect();
     std::fs::write(dir.join("hooks.jsonl"), format!("{}\n", hooks.join("\n")))?;

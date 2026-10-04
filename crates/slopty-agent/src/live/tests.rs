@@ -95,20 +95,73 @@ fn the_recording_is_of_this_mod_on_a_trusted_version() {
     );
     for scenario in SCENARIOS {
         let [(_, ModEvent::Hello(hello)), ..] = &*events(scenario) else { panic!("{scenario}") };
-        assert_eq!(gate(hello), Ok(()), "{scenario}");
+        assert_eq!(gate(hello), Ok(Trust::Verified), "{scenario}");
     }
 }
 
-/// Only this protocol on a verified Claude Code is trusted.
+/// This protocol on a recorded Claude Code is verified, on another release of a recorded line
+/// provisional; another protocol or another line is refused.
 #[test]
 fn the_gate_names_what_it_refuses() {
     let hello =
         |protocol, claude: &str| Hello { protocol, claude: claude.to_owned(), session_id: None };
-    assert_eq!(gate(&hello(MOD_PROTOCOL, MOD_CLAUDE_VERSIONS[0])), Ok(()));
-    assert_eq!(gate(&hello(MOD_PROTOCOL + 1, MOD_CLAUDE_VERSIONS[0])), Err(Refusal::Protocol(2)));
-    assert_eq!(gate(&hello(MOD_PROTOCOL, "2.1.284")), Err(Refusal::Version("2.1.284".to_owned())));
+    let recorded = MOD_CLAUDE_VERSIONS[0];
+    assert_eq!(gate(&hello(MOD_PROTOCOL, recorded)), Ok(Trust::Verified));
+    assert_eq!(gate(&hello(MOD_PROTOCOL + 1, recorded)), Err(Refusal::Protocol(2)));
+    let (line, _patch) = recorded.rsplit_once('.').expect("major.minor.patch");
+    let unrecorded = format!("{line}.99999");
+    assert_eq!(gate(&hello(MOD_PROTOCOL, &unrecorded)), Ok(Trust::Provisional));
+    for other in ["2.0.0", "3.1.1", "2.1", "2.1.x", "2.1.1-beta", ""] {
+        assert_eq!(gate(&hello(MOD_PROTOCOL, other)), Err(Refusal::Version(other.to_owned())));
+    }
     let decoded = ModEvent::decode(&json!({"kind": "hello", "protocol": "one", "claude": "x"}));
-    assert_eq!(decoded, ModEvent::Other, "a hello of another shape is no hello");
+    assert_eq!(decoded, ModEvent::Malformed("hello".to_owned()), "a hello of another shape");
+    assert_eq!(ModEvent::decode(&json!({"kind": "news"})), ModEvent::Other);
+    assert_eq!(ModEvent::decode(&json!([1])), ModEvent::Other);
+}
+
+/// A verified mod is heard and shrugs off an event it cannot read; a provisional one is heard
+/// until it sends one, and is then dropped for the session, a new `hello` included; a refused
+/// one is heard once a later `hello` passes; nothing is heard before a `hello`.
+#[test]
+fn a_provisional_mod_is_dropped_at_its_first_unreadable_event() {
+    let hello = |claude: &str| {
+        ModEvent::Hello(Hello {
+            protocol: MOD_PROTOCOL,
+            claude: claude.to_owned(),
+            session_id: None,
+        })
+    };
+    let text = ModEvent::decode(&json!({
+        "kind": "text", "turnId": "t", "step": 0, "block": 0, "text": "hi"
+    }));
+    let moved = ModEvent::decode(&json!({"kind": "text", "turnId": "t", "step": 0, "block": 0}));
+    assert_eq!(moved, ModEvent::Malformed("text".to_owned()));
+    let recorded = MOD_CLAUDE_VERSIONS[0];
+    let (line, _patch) = recorded.rsplit_once('.').expect("major.minor.patch");
+    let newer = format!("{line}.99999");
+
+    let mut trust = None;
+    assert_eq!(admit(&mut trust, &text), Admitted::Skip, "no hello yet");
+    assert_eq!(admit(&mut trust, &hello(recorded)), Admitted::Trusted(Trust::Verified));
+    assert_eq!(admit(&mut trust, &moved), Admitted::Skip);
+    assert_eq!(admit(&mut trust, &text), Admitted::Use, "a verified mod stays heard");
+
+    let mut trust = None;
+    assert_eq!(admit(&mut trust, &hello(&newer)), Admitted::Trusted(Trust::Provisional));
+    assert_eq!(admit(&mut trust, &text), Admitted::Use);
+    assert_eq!(admit(&mut trust, &moved), Admitted::Dropped("text".to_owned()));
+    assert_eq!(admit(&mut trust, &text), Admitted::Skip);
+    assert_eq!(admit(&mut trust, &hello(&newer)), Admitted::Skip, "no second chance");
+    assert_eq!(trust, Some(Trust::Dropped));
+
+    let mut trust = None;
+    let refused = Admitted::Refused { why: Refusal::Version("9.9.9".to_owned()), again: false };
+    assert_eq!(admit(&mut trust, &hello("9.9.9")), refused);
+    let again = Admitted::Refused { why: Refusal::Version("9.9.9".to_owned()), again: true };
+    assert_eq!(admit(&mut trust, &hello("9.9.9")), again);
+    assert_eq!(admit(&mut trust, &text), Admitted::Skip);
+    assert_eq!(admit(&mut trust, &hello(recorded)), Admitted::Trusted(Trust::Verified));
 }
 
 /// Replayed whole, the recorded events leave the blocks the model wrote, and reading the

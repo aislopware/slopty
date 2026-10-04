@@ -158,6 +158,23 @@ pub fn descendants_cpu(root: u32) -> u64 {
     tree(root).into_iter().skip(1).map(cpu).fold(0, u64::wrapping_add)
 }
 
+/// The live direct children of `pid`: a managed launcher's Claude Code is its child
+/// (`slopty_agent::AgentTable::recover`).
+#[must_use]
+pub fn child_pids(pid: i32) -> Vec<i32> {
+    let Ok(pid) = u32::try_from(pid) else { return Vec::new() };
+    children(pid).into_iter().filter_map(|child| i32::try_from(child).ok()).collect()
+}
+
+/// Whether a process with this id exists. Signal 0 checks without sending anything; another
+/// user's process answers "not permitted", and is alive.
+#[must_use]
+pub fn alive(pid: i32) -> bool {
+    rustix::process::Pid::from_raw(pid).is_some_and(|pid| {
+        !matches!(rustix::process::test_kill_process(pid), Err(rustix::io::Errno::SRCH))
+    })
+}
+
 /// `root` and its descendants, breadth first.
 fn tree(root: u32) -> Vec<u32> {
     let mut seen = HashSet::from([root]);

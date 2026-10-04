@@ -113,8 +113,14 @@ mod tests {
 
     /// Start ptyd on `dir`'s socket, once it listens.
     async fn spawn_ptyd(dir: &std::path::Path) -> Child {
+        spawn_ptyd_with(dir, &[]).await
+    }
+
+    /// [`spawn_ptyd`] with `env` over its scrubbed environment.
+    async fn spawn_ptyd_with(dir: &std::path::Path, env: &[(&str, std::ffi::OsString)]) -> Child {
         let ptyd_sock = dir.join("ptyd.sock");
         let mut ptyd = scrubbed(bin("slopty-ptyd"), dir)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .arg("--socket")
             .arg(&ptyd_sock)
             .stdout(Stdio::null())
@@ -128,9 +134,18 @@ mod tests {
 
     /// Start the worker on `dir`'s ptyd socket and data dir and read the address it prints.
     async fn spawn_worker(dir: &std::path::Path) -> (Child, SocketAddr) {
+        spawn_worker_with(dir, &[]).await
+    }
+
+    /// [`spawn_worker`] with `env` over its scrubbed environment.
+    async fn spawn_worker_with(
+        dir: &std::path::Path,
+        env: &[(&str, std::ffi::OsString)],
+    ) -> (Child, SocketAddr) {
         let ptyd_sock = dir.join("ptyd.sock");
         let ctl_sock = dir.join("worker.sock");
         let mut worker = scrubbed(bin("slopty-worker"), dir)
+            .envs(env.iter().map(|(k, v)| (k, v)))
             .arg("--ptyd-socket")
             .arg(&ptyd_sock)
             .arg("--ctl-socket")
@@ -4889,6 +4904,184 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(stream).read_line(&mut reply).await.unwrap();
         serde_json::from_str(reply.trim()).unwrap()
+    }
+
+    /// A managed launcher in `claude`'s place (the stand-in `slopty-stub-managed-claude`,
+    /// which runs the stand-in `claude` as its child, as such a launcher does). The worker asks
+    /// it nothing but `--managed-help` and takes its version from its newest client; a tile on
+    /// `claude` is wired through it, and a hook from the test is heard in it. A worker that
+    /// starts again under it finds the agent's status in Claude Code's registry, which names
+    /// the launcher's child, not the terminal's foreground process.
+    #[tokio::test]
+    async fn a_managed_claude_is_followed_through_its_launcher() {
+        use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason};
+        use slopty_proto::ctl::{CtlReply, CtlRequest};
+        use slopty_proto::thread::AgentId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(dir.path()).unwrap();
+        let home = home_of(&dir);
+        let programs = dir.join("programs");
+        std::fs::create_dir_all(&programs).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-managed-claude"), programs.join("claude"))
+            .unwrap();
+        let client = home.join(".local/share/claude-managed/artifacts/2.1.289/darwin-arm64");
+        std::fs::create_dir_all(&client).unwrap();
+        std::os::unix::fs::symlink(bin("slopty-stub-claude"), client.join("claude")).unwrap();
+        let log = dir.join("launcher.log");
+        let env = [
+            ("PATH", slopty_testkit::env::path_with(&programs)),
+            ("STUB_MANAGED_LOG", log.clone().into_os_string()),
+        ];
+        let ptyd = spawn_ptyd_with(&dir, &env).await;
+        let (first, addr) = spawn_worker_with(&dir, &env).await;
+        let mut guard = Guard(vec![ptyd, first], None);
+        let (endpoint, mut worker) = dial(addr).await;
+        guard.1 = Some(endpoint);
+
+        let claude_code = |agents: &[slopty_proto::server::InstalledAgent]| {
+            agents
+                .iter()
+                .find(|a| a.agent == AgentId::named(AgentId::CLAUDE_CODE))
+                .map(|a| a.version.clone())
+        };
+        let version = next_caps_version(&mut worker, &claude_code).await;
+        assert_eq!(version, "2.1.289", "its newest client's, read off the disk");
+
+        let record = dir.join("record.json");
+        let open = OpenSession {
+            size: TermSize { cols: 120, rows: 30, ..TermSize::default() },
+            cwd: Some(dir.to_string_lossy().into_owned()),
+            command: vec!["claude".to_owned()],
+            env: vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())],
+            title: None,
+            attach: false,
+        };
+        worker.tx.send(&ClientMsg::OpenSession { request: 1, spec: open }).await.unwrap();
+        let session = next_msg(&mut worker, |m| match m {
+            WorkerMsg::SessionOpened { summary, .. } => Some(summary.id),
+            _ => None,
+        })
+        .await;
+        let seen = until_json(&record).await;
+        let argv: Vec<&str> =
+            seen["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+        assert!(argv.contains(&"--settings"), "wired through the launcher: {argv:?}");
+        let launched = tokio::time::timeout(STEP, async {
+            loop {
+                let found = launcher_log(&log)
+                    .into_iter()
+                    .find_map(|line| Some((line["pid"].as_i64()?, line["client"].as_i64()?)));
+                if let Some(found) = found {
+                    return found;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the launcher started its client");
+        let (_launcher, child) = launched;
+
+        let sock = dir.join("worker.sock");
+        let conversation = "6d3f1c2a-8b7e-4f10-9c2d-5e4a3b2c1d0e";
+        let transcript = dir.join(format!("{conversation}.jsonl"));
+        std::fs::write(&transcript, b"").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "session_id": conversation, "source": "startup",
+            "transcript_path": transcript, "cwd": dir,
+        });
+        let hook = CtlRequest::Hook { session, payload: start.to_string() };
+        assert!(matches!(ctl(&sock, &hook).await, CtlReply::Ok { .. }));
+        let agent_of = async |sock: &std::path::Path| match ctl(sock, &CtlRequest::Status).await {
+            CtlReply::Status { sessions, .. } => {
+                sessions.into_iter().find(|s| s.id == session).and_then(|s| s.agent)
+            }
+            other => panic!("{other:?}"),
+        };
+        let heard = agent_of(&sock).await.expect("the hook gave the tile an agent");
+        assert_eq!((heard.kind, heard.source), (AgentKind::ClaudeCode, AgentSource::Hook));
+
+        // Claude Code's registry names the client, the launcher's child, as waiting on a
+        // permission prompt: what a restarted worker can only learn from it.
+        let sessions = home.join(".claude/sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let entry = serde_json::json!({
+            "pid": child, "sessionId": conversation, "cwd": dir, "kind": "interactive",
+            "status": "waiting", "waitingFor": "permission prompt", "version": "2.1.289",
+        });
+        std::fs::write(sessions.join(format!("{child}.json")), entry.to_string()).unwrap();
+        std::fs::write(sessions.join(format!("{child}.key")), "never read").unwrap();
+
+        let mut old = guard.0.pop().unwrap();
+        old.start_kill().unwrap();
+        old.wait().await.unwrap();
+        drop(worker);
+        let (next, _addr) = spawn_worker_with(&dir, &env).await;
+        guard.0.push(next);
+        let blocked = AgentStatus::Blocked(BlockReason::Permission { tool: String::new() });
+        tokio::time::timeout(STEP, async {
+            loop {
+                if agent_of(&sock).await.is_some_and(|a| a.status == blocked) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the restarted worker recovered the status the registry gives the child");
+
+        for line in launcher_log(&log) {
+            let argv: Vec<&str> =
+                line["argv"].as_array().unwrap().iter().filter_map(|a| a.as_str()).collect();
+            let asked = argv == ["--managed-help"];
+            assert!(asked || !line["client"].is_null(), "only asked if it is a launcher: {line}");
+            assert!(!argv.contains(&"--version") && argv.first() != Some(&"agents"), "{line}");
+        }
+        let asked = launcher_log(&log)
+            .iter()
+            .filter(|l| l["argv"] == serde_json::json!(["--managed-help"]))
+            .count();
+        assert!((1..=2).contains(&asked), "once by each worker, at most: {asked}");
+    }
+
+    /// The version of Claude Code the worker's capabilities list, once they list it.
+    async fn next_caps_version(
+        worker: &mut WorkerConn,
+        claude_code: &impl Fn(&[slopty_proto::server::InstalledAgent]) -> Option<String>,
+    ) -> String {
+        if let Some(version) = claude_code(&worker.ack.caps.agents) {
+            return version;
+        }
+        next_msg(worker, |m| match m {
+            WorkerMsg::Caps(caps) => claude_code(&caps.agents),
+            _ => None,
+        })
+        .await
+    }
+
+    /// The JSON document at `path`, once it is there whole.
+    async fn until_json(path: &std::path::Path) -> serde_json::Value {
+        tokio::time::timeout(STEP, async {
+            loop {
+                if let Some(seen) =
+                    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
+                {
+                    return seen;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("the document is written")
+    }
+
+    /// Every run the stand-in launcher logged.
+    fn launcher_log(log: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
     }
 
     /// The greeting names the daemon's home, which a client writes as `~`, and what the worker

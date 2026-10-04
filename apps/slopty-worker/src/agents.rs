@@ -27,7 +27,7 @@
 //!
 //! Once, shortly after the daemon starts, the agents it found already running (a worker
 //! restarted under its shells) get back what only hooks had said before the restart, from
-//! Claude Code's own list of its sessions (`slopty_agent::roster`, `AgentTable::recover`).
+//! Claude Code's own registry of its sessions (`slopty_agent::roster`, `AgentTable::recover`).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -46,12 +46,9 @@ use crate::Daemon;
 /// How often every session's foreground process and title are read.
 const TICK: Duration = Duration::from_millis(750);
 
-/// The tick after which the agents already running are recovered from Claude Code's own list:
-/// by then every session's foreground process has been read.
+/// The tick after which the agents already running are recovered from Claude Code's own
+/// registry: by then every session's foreground process has been read.
 const RECOVER_AT_TICK: u64 = 2;
-
-/// How long `claude agents --json` may take, login shell included.
-const ROSTER_WAIT: Duration = Duration::from_secs(10);
 
 /// Every how many ticks an agent whose transcript is already known is looked up again:
 /// `/clear` and `/resume` start a new file, and the tail has to move with it. Finding one for
@@ -187,33 +184,29 @@ async fn sample(
 }
 
 /// Put back what only the hooks had said of the agents already running when the daemon
-/// started, from `claude agents --json`.
+/// started, from Claude Code's session registry: read, never asked of `claude`, which a managed
+/// launcher would answer only after checking in with its control plane.
 async fn recover(daemon: Daemon, home: PathBuf) {
-    let Some(out) =
-        slopty_worker::caps::agent_output("claude", &slopty_agent::roster::ARGS, ROSTER_WAIT).await
-    else {
-        tracing::debug!("claude agents --json gave nothing; agents recover from their next hook");
+    let read = tokio::task::spawn_blocking(move || {
+        let sessions = slopty_agent::roster::sessions_dir(&home);
+        let listed = slopty_agent::roster::registered(&sessions, slopty_worker::ports::alive);
+        let settings = slopty_agent::hooks::settings_path(&home);
+        let hooked = slopty_agent::hooks::registered(&settings).is_ok_and(|e| !e.is_empty());
+        (listed, hooked)
+    });
+    let Ok((listed, hooked)) = read.await else { return };
+    if listed.is_empty() {
+        tracing::debug!(
+            "Claude Code registers no live session; agents recover from their next hook"
+        );
         return;
-    };
-    let listed = match slopty_agent::roster::parse(&String::from_utf8_lossy(&out)) {
-        Ok(listed) => listed,
-        Err(e) => {
-            tracing::warn!(error = %e, "claude agents --json did not read");
-            return;
-        }
-    };
-    let settings = slopty_agent::hooks::settings_path(&home);
-    let hooked = tokio::task::spawn_blocking(move || {
-        slopty_agent::hooks::registered(&settings).is_ok_and(|events| !events.is_empty())
-    })
-    .await
-    .unwrap_or(false);
+    }
     let mut agents = daemon.agents.lock();
-    let events = agents.recover(&listed, hooked);
+    let events = agents.recover(&listed, hooked, slopty_worker::ports::child_pids);
     tracing::info!(
         listed = listed.len(),
         recovered = events.len(),
-        "agents recovered from Claude Code's list"
+        "agents recovered from Claude Code's registry"
     );
     broadcast(&daemon, &agents, events);
     drop(agents);

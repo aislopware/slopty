@@ -4,7 +4,8 @@
 //! wrapper. Fixtures pin what Anthropic ships, so the build is fetched from the npm registry
 //! (`@anthropic-ai/claude-code-darwin-arm64@<version>`), its tarball checked against the
 //! registry's SHA-512 `integrity`, and unpacked under `target/claude/<version>`.
-//! `SLOPTY_CLAUDE` names another binary instead.
+//! `SLOPTY_CLAUDE` names another binary instead. [`latest`] asks the registry which release is
+//! newest, for `cargo xtask upstream check`.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -16,10 +17,10 @@ use xshell::{Shell, cmd};
 
 use crate::tools::repo_root;
 
-/// The Claude Code version the fixtures are recorded with: the newest the mod was verified
-/// against (`slopty_agent::claude_mod::MOD_CLAUDE_VERSIONS`, which a test holds to the
-/// recording).
-pub const VERSION: &str = "2.1.286";
+/// The Claude Code version fixtures are recorded with unless another is named: the newest the
+/// mod was verified against (`slopty_agent::claude_mod::MOD_CLAUDE_VERSIONS`, which a test holds
+/// to the recording).
+pub const VERSION: &str = "2.1.289";
 
 /// Names a `claude` binary to use instead of the downloaded one.
 const OVERRIDE: &str = "SLOPTY_CLAUDE";
@@ -27,12 +28,16 @@ const OVERRIDE: &str = "SLOPTY_CLAUDE";
 const PACKAGE: &str = "@anthropic-ai/claude-code-darwin-arm64";
 const REGISTRY: &str = "https://registry.npmjs.org";
 
-/// The `claude` to record with: `SLOPTY_CLAUDE`, else the official [`VERSION`], downloaded and
-/// verified on first use. Either way it must say it is [`VERSION`].
-pub fn official() -> Result<PathBuf> {
+/// The `claude` to record with: `SLOPTY_CLAUDE`, else the official build of `version`,
+/// downloaded and verified on first use. Either way it must say it is `version`.
+pub fn official(version: &str) -> Result<PathBuf> {
+    ensure!(
+        !version.is_empty() && version.split('.').all(|p| p.parse::<u32>().is_ok()),
+        "{version} is no Claude Code version"
+    );
     let binary = match std::env::var_os(OVERRIDE) {
         Some(path) => PathBuf::from(path),
-        None => download(VERSION)?,
+        None => download(version)?,
     };
     let out = Command::new(&binary)
         .arg("--version")
@@ -42,12 +47,21 @@ pub fn official() -> Result<PathBuf> {
         .with_context(|| format!("run {}", binary.display()))?;
     let said = String::from_utf8_lossy(&out.stdout);
     ensure!(
-        said.split_whitespace().next() == Some(VERSION),
-        "{} is Claude Code {}, not {VERSION}",
+        said.split_whitespace().next() == Some(version),
+        "{} is Claude Code {}, not {version}",
         binary.display(),
         said.trim()
     );
     Ok(binary)
+}
+
+/// The newest Claude Code release on the npm registry (its `latest` tag).
+pub fn latest() -> Result<String> {
+    let sh = Shell::new()?;
+    let url = format!("{REGISTRY}/{PACKAGE}/latest");
+    let meta: Value = serde_json::from_str(&cmd!(sh, "curl -fsSL {url}").read()?)
+        .context("the registry's answer")?;
+    meta.get("version").and_then(Value::as_str).map(str::to_owned).context("no version")
 }
 
 /// The official build of `version`, from `target/claude/<version>` or fetched there.

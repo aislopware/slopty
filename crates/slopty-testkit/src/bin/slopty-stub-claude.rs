@@ -3,8 +3,8 @@
 //!
 //! It does what Slopty needs of Claude Code and nothing more:
 //!
-//! - `--version` answers as Claude Code does, so a worker lists it as installed, and `agents
-//!   --json` lists no live session.
+//! - `--version` answers as Claude Code does, so a worker lists it as installed, and
+//!   `--managed-help` is refused as Claude Code refuses it: it is no managed launcher.
 //! - It fires the hooks its `--settings` registers, as Claude Code runs them: every command
 //!   registered for the payload's event, with the payload on stdin (naming the session it was
 //!   started on with `--session-id`, unless the payload names one) and the session's environment,
@@ -61,10 +61,9 @@ fn main() -> ExitCode {
         println!("{VERSION}");
         return ExitCode::SUCCESS;
     }
-    // The worker asks for Claude Code's live sessions when it starts: none run here.
-    if args.first().is_some_and(|a| a == "agents") {
-        println!("[]");
-        return ExitCode::SUCCESS;
+    if args.first().is_some_and(|a| a == "--managed-help") {
+        eprintln!("error: unknown option '--managed-help'");
+        return ExitCode::FAILURE;
     }
     match run(&args) {
         Ok(()) => ExitCode::SUCCESS,

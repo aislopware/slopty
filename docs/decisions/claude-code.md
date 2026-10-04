@@ -1222,11 +1222,24 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     - The mod's first event is a `hello` naming its protocol (`MOD_PROTOCOL`) and Claude Code's
       version. Nothing else is heard until a hello passes `slopty_agent::live::gate`: this
       protocol, and a version in `MOD_CLAUDE_VERSIONS`, which holds exactly the versions
-      recorded (today `["2.1.286"]`, re-recorded 2026-10-01 with the mod unchanged: 2.1.286 batches
-      and interleaves a subagent's events differently, and the recordings still decode and settle).
-    - The person follows upstream version by version, so a new Claude Code is not trusted until
-      it is recorded. A refused hello is logged once per session (warn), and that session is
-      followed from the transcript alone.
+      recorded (today `["2.1.289"]`, recorded 2026-10-05 with the mod unchanged; 2.1.286 before
+      it).
+    - A newer release is heard provisionally (2026-10-05, ruled; see "A managed `claude`"
+      below). A fleet moves to a new release before anyone records it, and refusing it left the
+      face without its live stream on the very machines that most need it. So the gate has
+      three answers (`live::Trust`):
+      - **Verified**: a recorded version.
+      - **Provisional**: an unrecorded release of a recorded `major.minor` line (2.1.290 while
+        2.1.289 is recorded), in strict `x.y.z` digits. Its events are decoded strictly: an
+        event of a known kind that does not decode (`ModEvent::Malformed`) drops the mod for
+        the session (`Trust::Dropped`, logged once), its blocks in flight go, and no later
+        `hello` revives it. The transcript, the hooks and the status line carry on alone. An
+        unknown kind is skipped as before, which a newer mod's additions need.
+      - **Refused**: another line (2.2, 3.0) or another protocol, logged once (warn).
+      A session whose mod never says hello is followed from the fallback as before; nothing
+      is surfaced as an error. `cargo xtask upstream check` names the newest Claude Code on
+      npm beside the recorded one, and `cargo xtask fixtures claude-mod --version <it>`
+      records it.
   - **What catches a break on update.** `cargo xtask fixtures claude-mod` downloads the official
     build (`@anthropic-ai/claude-code-darwin-arm64@<version>` from the npm registry, its tarball
     checked against the registry's SHA-512, into `target/claude/<version>`; `SLOPTY_CLAUDE`
@@ -1245,11 +1258,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The fallback stays first-class.** Hooks, the transcript and the status line carry the face
     everywhere the mod is not heard:
     - on a Claude Code not recorded;
-    - in the person's daily `claude`, a patched managed launcher that reports 2.1.283 but is
-      another build. Run once with the mod, the hooks switch and two command hooks (2026-09-27),
-      it read the plugin's `hooks.json` and never loaded the module: no hello and no event, while
-      both command hooks fired and the answer came back. So the mod and the switch that a
-      Slopty shell's `claude` function adds leave the relay working there;
+    - in the person's daily `claude`, a managed launcher, until its egress lets the mod's
+      requests reach the worker's socket ("A managed `claude`", below). The relay works there;
     - with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set, which loads the mod but blocks its
       `fetch` (Unix socket included), so no hello ever comes.
     The mod only adds liveness. Every entry, prompt and meter still comes from the fallback
@@ -1257,8 +1267,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **Launch.** An agent the worker starts (`orchestrate::Launch`) gets:
     - `--plugin-dir=<dir>`, always in the `=` form: the spaced form is variadic in 2.1.283 and
       swallows the words after it, a prompt or a subcommand;
-    - `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, without which Claude Code does not load the
-      module;
+    - `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`, without which Claude Code 2.1.286 does not load
+      the module. 2.1.289 no longer reads it: a rollout flag that defaults on decides, under the
+      managed hooks switches. It is set all the same, for the builds that read it;
     - `SLOPTY_MOD_SOCKET`;
     - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` set empty. The worker cannot unset a variable
       in a session it spawns, and Claude Code reads empty as unset: the recorder runs with it
@@ -1270,7 +1281,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     is already there, as in an agent the worker started through a login shell), never over a
     `claude` alias or function of the person's own, and not at all with
     `SLOPTY_NO_CLAUDE_MOD=1`. An inherited nonessential-traffic switch is left alone there: the
-    person set it.
+    person set it. The mod is then left out too (2026-10-05): Claude Code's plugin network gate
+    refuses a sideloaded plugin's every request while the switch is set to anything but empty,
+    so it could never say hello (`managed::ModOff`).
   - **The mod socket: hyper, not a parser of our own.** The mod can only `fetch`, so it posts
     `{session, events}` as HTTP/1.1 to `POST /v1/events` on a Unix socket beside the control
     socket (`worker.sock` → `worker.mod.sock`, in the same user-only directory). Each post is
@@ -1907,20 +1920,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     prints the variable, and the file follows a real client's focus, disconnect and
     reconnect, then goes when the worker is sent SIGTERM.
 
-- ✅ **After a worker restart, Claude Code's own list puts the agents back** (2026-09-30). A
-  restarted worker finds its agents again by process, but it loses what only hooks had said: a
-  permission prompt, a question, the conversation id. Those came back only with the next hook.
-  `claude agents --json` lists every live session with `pid`, `sessionId`, `cwd`,
-  `kind` and `status`:
-  - `busy`, `idle`, or `waiting`;
+- ✅ **After a worker restart, Claude Code's own registry puts the agents back** (2026-09-30;
+  read from the registry since 2026-10-05). A restarted worker finds its agents again by
+  process, but it loses what only hooks had said: a permission prompt, a question, the
+  conversation id. Those came back only with the next hook. Each live Claude Code keeps
+  `~/.claude/sessions/<pid>.json` (under `CLAUDE_CONFIG_DIR` when set), which `claude agents`
+  lists, with `sessionId`, `cwd`, `kind`, `version` and `status`:
+  - `busy`, `idle`, `shell` or `waiting`;
   - while waiting, `waitingFor`: a permission prompt, input needed, a sandbox request, a
     worker request, or an open dialog.
 
   How it is read:
-  - The worker runs it once, on the second agents tick after starting, and only when agents
-    were found. It waits 10 s for the answer, and runs it through the login shell when
-    `claude` is not on its own `PATH`.
-  - Each tracker is matched by pid and gets its conversation id back.
+  - The worker reads the files itself (`roster::registered`), once, on the second agents tick
+    after starting. It used to run `claude agents --json`, which cost a process and, through a
+    managed launcher, a full managed launch. Claude Code 2.1.286's own lister reads the same
+    files (only names that are a pid in canonical decimal, the pid taken from the name), so
+    nothing is lost. A file whose process is gone is passed over; the `.key` beside each file
+    is never read.
+  - Each tracker is matched by pid, or by a direct child of its pid: a managed launcher runs
+    Claude Code as its child, so the terminal's foreground process is the launcher's. It gets
+    its conversation id back.
   - It gets its status back only when hooks will keep that status current: the relay is
     registered in `~/.claude/settings.json`, or the agent's own command line carries it.
     Otherwise a restored `Blocked` would never be cleared.
@@ -1929,10 +1948,12 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `roster::Listed::status` maps `busy` to `Working` and `idle` to `Idle`. A permission
     prompt or sandbox request maps to `Blocked(Permission)`, and any other wait to
     `Blocked(Question)`.
-  - Tests: `statuses_read_as_the_hooks_would_say_them`,
-    `claude_codes_own_list_restores_what_the_hooks_had_said`, and
-    `claude_codes_session_list_reads_as_a_status` on the recorded `agents.json`. The xtask
-    background capture records it with `pid`, `startedAt` and `name` fixed.
+  - Tests: `statuses_read_as_the_hooks_would_say_them`, `the_registry_lists_the_live_sessions`,
+    `claude_codes_own_list_restores_what_the_hooks_had_said`,
+    `a_launchers_agent_is_found_by_its_child`, and `claude_codes_session_registry_reads_as_a_status`
+    on the recorded `sessions/4321.json`. The xtask background capture copies the run's own
+    registry file out of its scratch home, with the pid, the clocks, the socket and the name
+    fixed.
 
 - ✅ **The mode chip follows the mode the agent is in now** (2026-10-01). Shift-Tab in the TUI
   moves the permission mode, and fires no hook of its own. The chip used to show the mode the
@@ -2024,14 +2045,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
 - ✅ **A conversation running in the background comes back attached, not resumed**
   (2026-10-04). `claude --resume <id>` refuses a conversation that still runs in the
   background (`claude --bg`), so a session lost to a reboot fell back to a bare shell. The
-  worker now asks Claude Code's own list (`claude agents --json`) once it restores sessions,
-  and only when one of them held a conversation. A conversation listed as a live background
-  session opens with `claude attach <id>`: as the tile's command, or typed at the first
+  worker now reads Claude Code's own registry (above) once it restores sessions, and only when
+  one of them held a conversation. A conversation registered as a live session of any kind
+  but `interactive` (`bg`, `daemon`, `daemon-worker`, as Claude Code itself tells background
+  ones) opens with `claude attach <id>`: as the tile's command, or typed at the first
   prompt of the shell it ran in. Nothing Slopty gives a new agent is given again, since the
   session already runs with it. Any other conversation is resumed as before. Tests:
   `a_conversation_running_in_the_background_is_attached_not_resumed`,
-  `the_background_conversations_are_claude_codes_own_list` (a stand-in `claude` the test
-  writes) and `background_sessions_are_the_live_ones_run_with_bg`.
+  `the_background_conversations_are_claude_codes_own_list` (a registry the test writes) and
+  `background_sessions_are_the_live_ones_run_with_bg`.
 
 - ✅ **A prompt Claude Code takes back settles the agent and comes back to the list**
   (2026-10-04). An Esc just after Enter puts the prompt back in Claude Code's input. Nothing
@@ -2104,3 +2126,71 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     locally.
   - The command list and model aliases above needed no private door: the published plugin API
     has both.
+
+- ✅ **A managed `claude`** (2026-10-05, ruled; research in
+  `.research/managed-claude-2026-10-05.md`). Some organizations put a managed launcher in
+  `claude`'s place: it checks in with its control plane on every run, checks out a credential,
+  and starts the real client (`~/.local/share/claude-managed/artifacts/<version>/<platform>/claude`)
+  as its child. Slopty treats it as generic Claude Code managed settings plus a launcher it
+  never runs in the background. No passthrough is asked of the launcher, and nothing changes in
+  the organization's repository.
+  - **Managed settings are read before every wiring** (`slopty_agent::managed`). The system file
+    (`/Library/Application Support/ClaudeCode/managed-settings.json` on macOS,
+    `/etc/claude-code/managed-settings.json` on Linux) and the server-delivered cache
+    `~/.claude/remote-settings.json`, every time, since a policy can change any day. Only these
+    keys are kept: `disableSideloadFlags`, `disableAllHooks`, `allowManagedHooksOnly`,
+    `strictPluginOnlyCustomization`, `allowManagedMcpServersOnly`, `allowedMcpServers`,
+    `deniedMcpServers`, `disableAgentView`, `availableModels`, `enforceAvailableModels`,
+    `permissions.defaultMode`, and of `env` only whether `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
+    and `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` are set. A switch either file turns on is on; a
+    file missing or broken says nothing. What follows:
+    - **No `--plugin-dir` or `--mcp-config`** under `disableSideloadFlags`: Claude Code refuses
+      the run for them. `--settings` is no sideload flag, so the relay and its status line stay.
+    - **No mod** where it could not load or be heard: hooks off or managed-only, or the plugin
+      network blocked by `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, whether the managed
+      settings set it or a typed `claude`'s own environment does (`ManagedSettings::mod_off`,
+      which names the first reason). Slopty clears the switch only for the agents it starts,
+      and only where no policy sets it. No hello is then expected, and the thread follows the
+      fallback with no error; `slopty worker doctor` names the reason ("Claude Code's live
+      stream is off: …").
+    - **No `slopty` MCP server** where a deny names it, an allow list does not, managed-only MCP
+      has no list, or MCP comes from plugins only; the project's agent gets the pointer to the
+      CLI instead (`hooks::wired_under`).
+    - `hooks::wired`, `hooks::with_mcp` and `claude_mod::Installed::args` read the settings
+      themselves, so every caller (a tile, a restore, a project's agent, `slopty hook wire` in a
+      typed `claude`) honours them; the `_under` forms take them for tests.
+  - **The launcher is asked one thing.** `claude --managed-help` prints the launcher's usage
+    before any I/O, and Claude Code refuses the flag at once (checked on the official 2.1.286 in
+    a sandbox: `error: unknown option`, nothing written). The worker asks it once per `claude`
+    found (by real path and modification time), under the version time-out
+    (`facts::launcher`). On a launcher it never runs `--version` (a control-plane round trip,
+    maybe a 230 MB download, and on a machine not enrolled a browser window) or `agents`:
+    - the version is the newest client's directory name under
+      `~/.local/share/claude-managed/artifacts`, or the client's own path when `claude`
+      resolves to one (`managed::artifact_version`);
+    - the live sessions come from the registry above, read, never asked;
+    - an agent in a tile is matched to its registry entry through the launcher's direct child.
+    A launcher that does not answer in time is taken for one that once, and asked again next
+    time.
+  - **The mod posts to `http://slopty.localhost/v1/events`** over its Unix socket: a reserved
+    name every egress proxy exempts (`the_mod_posts_to_a_host_no_proxy_takes`). The owner is
+    also narrowing the managed egress to Anthropic's own domains.
+  - On the organization's side (report section 11): the launcher no longer proxies socket
+    requests (0.1.70), and the hooks worker is realm-safe (its plugin scenario passes on 2.1.289
+    on darwin-arm64, darwin-x64 and linux-x64), not yet published to devices. Until a device
+    has them, the mod says no hello there and the face follows the hooks and the transcript,
+    with nothing surfaced as an error.
+  - Tests use stand-ins only, never an enrolled or signed-in `claude`, and no request to
+    Anthropic or a control plane: `slopty-stub-managed-claude` (`slopty-testkit`) keeps the
+    launcher's observable contract (answers `--managed-help`, strips the credential, TLS,
+    loader and `SCC_*` names, sets `DISABLE_TELEMETRY` and `SCC_MANAGED_ARTIFACT`, drops
+    `--bare`, runs the stand-in `claude` as its child, logs every run). Tests:
+    `a_managed_claude_is_followed_through_its_launcher` (`slopty-workerd`: wired through the
+    launcher, a hook heard, recovery through the child after a restart, and nothing asked but
+    `--managed-help`), `a_managed_launcher_is_never_asked_its_version` (`slopty-worker`), the
+    `managed` unit tests and `managed_settings_keep_the_tools_out_and_the_relay_in`,
+    `managed_settings_decide_whether_the_mod_is_added`,
+    `a_typed_claude_honours_the_managed_settings`, `a_typed_claude_with_the_quiet_switch_gets_no_mod`,
+    `the_mod_is_off_for_its_first_reason`, `the_doctor_says_why_the_mod_is_off`,
+    `a_provisional_mod_is_dropped_at_its_first_unreadable_event` and
+    `a_provisional_mod_is_dropped_with_its_blocks`.

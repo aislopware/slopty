@@ -13,7 +13,7 @@ mod hooks {
     use slopty_agent::permission::hook_output;
     use slopty_agent::{AgentTable, HOOK_EVENTS, HOOK_JSON_BUDGET, Hook, HookEvent, roster};
     use slopty_core::SessionId;
-    use slopty_proto::agent::{AgentStatus, BlockReason};
+    use slopty_proto::agent::AgentStatus;
     use slopty_proto::ctl::Decision;
 
     fn fixture(scenario: &str, file: &str) -> String {
@@ -204,21 +204,19 @@ mod hooks {
         );
     }
 
-    /// `claude agents --json`, as the recorded Claude Code printed it, reads back as a status.
+    /// The session registry file the recorded Claude Code wrote mid-run reads back as its
+    /// session, its release and its status.
     #[test]
-    fn claude_codes_session_list_reads_as_a_status() {
-        let listed = roster::parse(&fixture("background", "agents.json")).expect("the list");
+    fn claude_codes_session_registry_reads_as_a_status() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/conversation/background/sessions");
+        let listed = roster::registered(&dir, |_| true);
         let [one] = listed.as_slice() else { panic!("{listed:?}") };
         assert_eq!(one.pid, Some(4321));
         assert_eq!(one.session_id.as_deref(), Some("00000000-0000-4000-8000-000000000001"));
-        assert_eq!(one.status(), Some(AgentStatus::Idle));
-        let blocked = roster::parse(
-            r#"[{"pid":1,"sessionId":"s","cwd":"/w","kind":"interactive","status":"waiting","waitingFor":"permission prompt"}]"#,
-        )
-        .expect("a waiting session");
-        assert!(matches!(
-            blocked.first().and_then(roster::Listed::status),
-            Some(AgentStatus::Blocked(BlockReason::Permission { .. }))
-        ));
+        assert_eq!(one.kind.as_deref(), Some("interactive"));
+        assert!(one.version.is_some());
+        assert_eq!(one.status(), Some(AgentStatus::Working), "its background work is out");
+        assert_eq!(roster::background(&listed).count(), 0);
     }
 }

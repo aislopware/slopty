@@ -497,7 +497,8 @@ mod tests {
     #[test]
     fn slopty_s_own_wiring_is_noted_and_its_role_kept() {
         let dir = Path::new("/nowhere");
-        let ours = crate::hooks::with_mcp(words("--model x"), "/bin/slopty");
+        let none = crate::managed::ManagedSettings::default();
+        let ours = crate::hooks::with_mcp_under(words("--model x"), "/bin/slopty", &none);
         let ours = crate::hooks::without_bypass(ours, dir);
         let mut args = ours;
         args.push("--append-system-prompt=You work on task 3.\nReport with task_report.".into());

@@ -55,9 +55,9 @@ const SCENARIO_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long the sink waits for the mod's last request after `claude` exits.
 const DRAIN: Duration = Duration::from_millis(500);
 
-pub fn capture_all(only: Option<&str>) -> Result<()> {
-    let claude = claude::official()?;
-    println!("claude {} at {}", claude::VERSION, claude.display());
+pub fn capture_all(only: Option<&str>, version: &str) -> Result<()> {
+    let claude = claude::official(version)?;
+    println!("claude {version} at {}", claude.display());
     let root = repo_root()?.into_std_path_buf();
     let plugin = root.join("crates/slopty-agent/assets/claude-mod");
     validate(&claude, &plugin)?;
@@ -74,7 +74,7 @@ pub fn capture_all(only: Option<&str>) -> Result<()> {
     }
     ensure!(ran > 0, "no scenario is named {only:?}");
     record_plugin(&plugin, &out)?;
-    let recorded = json!({ "claude": claude::VERSION });
+    let recorded = json!({ "claude": version });
     std::fs::write(out.join("recorded.json"), format!("{recorded:#}\n"))?;
     Ok(())
 }
