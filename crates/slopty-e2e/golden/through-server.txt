@@ -51,7 +51,6 @@ Button │ Deny…
 Button │ Deny and stop
 MultilineTextInput │ Message
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Send

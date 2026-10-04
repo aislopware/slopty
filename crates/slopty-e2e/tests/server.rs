@@ -515,7 +515,8 @@ mod tests {
     async fn agent_reached(stack: &ServerStack, worker: &str) -> Result<()> {
         let term = open_bash(stack, "e2e agent").await?;
         let session = term.rsplit('/').next().context("a session in the term")?.to_owned();
-        let transcript = stack.path("agent.jsonl");
+        // Named for its session, as Claude Code names a transcript.
+        let transcript = stack.path("e2e.jsonl");
         let records = [
             json!({
                 "type": "user", "uuid": "u1", "parentUuid": null,

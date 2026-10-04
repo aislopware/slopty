@@ -638,7 +638,7 @@ async fn a_paused_agent_says_what_it_waits_on_and_wears_its_pull_request() {
         .unwrap();
     let status = serde_json::json!({
         "session_id": slopty_e2e::harness::agent_session(&session),
-        "transcript_path": stack.transcript_path(),
+        "transcript_path": stack.transcript_path(&session),
         "model": { "id": "claude-opus-5-5", "display_name": "Opus 5.5" },
         "pr": {
             "number": 1234,

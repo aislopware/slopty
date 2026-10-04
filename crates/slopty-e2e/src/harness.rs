@@ -595,6 +595,14 @@ stage() {
 [ "$1" = "--version" ] && exit 1
 if [ "$1" = "agents" ]; then echo '[]'; exit 0; fi
 echo "fake claude in $PWD"
+# Its conversation's file is named for its session, as Claude Code's is: the id Slopty pinned
+# with `--session-id`, when it did.
+id=fake-session
+pinned=
+for arg in "$@"; do
+    [ "$pinned" = "--session-id" ] && id="$arg"
+    pinned="$arg"
+done
 stage working
 # OSC 2 with U+25D0 CIRCLE WITH LEFT HALF BLACK, one of the frames Claude Code paints into
 # the title while a turn runs (`slopty_agent::title::WORKING`).
@@ -602,9 +610,9 @@ printf '\033]2;\342\227\220 Claude Code\007'
 stage transcript
 project="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
 mkdir -p "$project"
-cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript.jsonl" > "$project/fake-session.jsonl"
+cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript.jsonl" > "$project/$id.jsonl"
 stage done
-cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript-done.jsonl" >> "$project/fake-session.jsonl"
+cat "$SLOPTY_FAKE_CLAUDE_DIR/transcript-done.jsonl" >> "$project/$id.jsonl"
 # U+2733 EIGHT SPOKED ASTERISK and the conversation's summary: the title between turns.
 printf '\033]2;\342\234\263 fix the tests\007'
 stage quit
@@ -1215,10 +1223,12 @@ impl Stack {
         self.children.get(1).and_then(Child::id)
     }
 
-    /// The transcript a played agent writes ([`Self::play_hook`]).
+    /// The transcript a played agent in `session` writes ([`Self::play_hook`]): named for the
+    /// agent's session, `<session id>.jsonl`, as Claude Code names its own, since the worker
+    /// takes a session's id from either and two that differ would be two sessions.
     #[must_use]
-    pub fn transcript_path(&self) -> PathBuf {
-        self.path("agent.jsonl")
+    pub fn transcript_path(&self, session: &str) -> PathBuf {
+        self.path(&format!("{}.jsonl", agent_session(session)))
     }
 
     /// Run the real relay, `slopty hook` (with `args`, such as `statusline --command true`),
@@ -1300,7 +1310,7 @@ impl Stack {
     ///
     /// When the transcript cannot be written or the worker refuses the hook.
     pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
-        let transcript = self.transcript_path();
+        let transcript = self.transcript_path(session);
         std::fs::write(&transcript, TRANSCRIPT)?;
         let payload = format!(
             r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,
@@ -1876,10 +1886,10 @@ impl SecondWorker {
     }
 
     /// Play a Claude Code hook in `session` (the id from the dump) through the real relay:
-    /// write [`TRANSCRIPT`] under the root, then run `slopty hook` with the session and the
-    /// worker's control socket in its environment and the payload for `event` (plus `fields`,
-    /// more JSON members) on its stdin, exactly what Claude Code does. Nothing is typed into a
-    /// shell and no agent is started.
+    /// write [`TRANSCRIPT`] under the root as the session's transcript, then run `slopty hook`
+    /// with the session and the worker's control socket in its environment and the payload for
+    /// `event` (plus `fields`, more JSON members) on its stdin, exactly what Claude Code does.
+    /// Nothing is typed into a shell and no agent is started.
     ///
     /// # Errors
     ///
@@ -1906,9 +1916,11 @@ impl SecondWorker {
         self.spawn_hook(session, event, fields).await
     }
 
-    /// `slopty hook` started with the payload for `event` written to its stdin.
+    /// `slopty hook` started with the payload for `event` written to its stdin. The transcript
+    /// is named for the agent's session, `<session id>.jsonl`, as Claude Code names its own:
+    /// the worker takes a session's id from either, and two that differ would be two sessions.
     async fn spawn_hook(&self, session: &str, event: &str, fields: &str) -> Result<Child> {
-        let transcript = self.dir.path().join("agent.jsonl");
+        let transcript = self.dir.path().join(format!("{}.jsonl", agent_session(session)));
         std::fs::write(&transcript, TRANSCRIPT)?;
         let payload = format!(
             r#"{{"hook_event_name":"{event}","session_id":"{}","transcript_path":"{}"{fields}}}"#,

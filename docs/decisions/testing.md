@@ -1104,3 +1104,12 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
     one more give-up for each that stayed inside at least half the patience (a healthy turn
     takes milliseconds), with one session built for each. A replacement turn made to wait 2.6 s
     passes with three sessions; the same wait hidden from the timing fails.
+
+- ✅ **A stand-in agent's transcript is named for its session** (2026-10-05). Claude Code writes
+  `<session id>.jsonl`, and the worker takes a session's id from a hook's `session_id` or from
+  the transcript's file name, whichever reaches the thread first. Every stand-in now names its
+  transcript that way: the relay's and the stack's played hooks, the fake `claude`, which uses
+  the `--session-id` Slopty pinned, and the server e2e. One named `agent.jsonl` made two ids
+  for one agent. A held `PermissionRequest` landing before its status then began a thread under
+  the file's name and ended it when the status named the other, so the through-server golden
+  showed "Claude exited" in some runs and the message box in others.
