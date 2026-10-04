@@ -586,12 +586,7 @@ mod frame_time {
     #[tokio::test]
     #[ignore = "live: cargo xtask e2e smooth"]
     async fn drawn_frames_reach_the_glass_on_loopback() {
-        // A display that reports no scan-out (Parsec's) needs the presented handler taken as
-        // the glass, or the app times nothing (`docs/MEASUREMENTS.md`, "Drawn frames to the
-        // glass"): passed on to the app when the run sets it.
-        let callback = std::env::var("GPUI_PRESENTED_AT_CALLBACK").unwrap_or_default();
-        let env = [SYNTHETIC, ("GPUI_PRESENTED_AT_CALLBACK", callback.as_str())];
-        let mut stack = Stack::launch_with("e2e-worker", &env).await.unwrap();
+        let mut stack = Stack::launch_with("e2e-worker", &[SYNTHETIC]).await.unwrap();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         first_shell(drv).await;

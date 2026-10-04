@@ -644,6 +644,11 @@ async fn spawn_app(
         .env("SLOPTY_PREDICT", "never")
         .env(crate::TAILNET_STATUS_ENV, &tailnet)
         .env(crate::WORKER_GRANTS_ENV, ALL_GRANTED)
+        // A display that reports no scan-out (a remote-desktop host's virtual one, such as
+        // Parsec's) gives every frame a zero presentation time, so a glass-timed wait never
+        // ends; GPUI then takes the presented handler as the glass. A display that reports
+        // scan-out keeps its own times.
+        .env("GPUI_PRESENTED_AT_CALLBACK", "1")
         .envs(env.iter().copied())
         .env(PASTEBOARD_ENV, pasteboard_name(root, name))
         .stdin(Stdio::null())

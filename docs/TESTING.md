@@ -65,7 +65,10 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    (`snapshot::luma_distance`), so the chrome, the overlay and the still parts of the picture are
    compared pixel for pixel while the page moves. Its `frame_time` case, under
    `cargo xtask e2e smooth`, times drawn frames from their capture stamp to the paint that
-   shows them. Its `showcase` module, under `cargo xtask e2e showcase` only, renders every
+   shows them. Every app the harness starts takes GPUI's presented handler as the glass when
+   the display reports no scan-out (`GPUI_PRESENTED_AT_CALLBACK=1`): this Mac is reached over
+   Parsec, whose virtual display gives every frame a zero presentation time, and a keystroke
+   or frame timed at the glass would otherwise never count. Its `showcase` module, under `cargo xtask e2e showcase` only, renders every
    surface with a busy day's data (stand-in programs and agents, light and dark) into
    `target/e2e/artifacts/showcase/` for a person's design review; nothing in it passes or fails
    on pixels.
