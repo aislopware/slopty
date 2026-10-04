@@ -1209,6 +1209,12 @@ impl Workspace {
                 if terminal.focus_handle(cx).is_focused(window) {
                     focused = format!("terminal:{session}");
                 }
+                if view
+                    .thread_face(session)
+                    .is_some_and(|t| t.read(cx).focus_handle(cx).contains_focused(window, cx))
+                {
+                    focused = format!("thread:{session}");
+                }
                 let size = terminal.size();
                 let cursor = terminal.cursor();
                 dump.terminals.push(TerminalInfo {

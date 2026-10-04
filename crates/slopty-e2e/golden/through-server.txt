@@ -1,0 +1,61 @@
+Window │ Slopty
+Group │ Workspace
+Navigation │ Navigator
+TextInput │ Filter
+Heading │ Needs you
+Button │ Claude Code, Wants to run a command, Needs you
+Button │ Deny
+Button │ Allow
+Heading │ Machines
+Button │ studio
+Button │ New shell on studio
+Button │ Machine actions, studio
+Button │ Terminal
+Button │ Close tile
+Button │ remote
+Button │ New shell on remote
+Button │ Machine actions, remote
+Button │ Claude Code, Needs approval
+Image │ Needs you
+Button │ Close tile
+Button │ Navigator
+Group │ Where
+Button │ studio
+Button │ New
+Button │ Needs you
+Status │ 1 new
+Button │ More
+Group │ Terminal
+Heading │ terminal Terminal
+Label │ ~
+Label │ studio
+Button │ Fullscreen tile
+Button │ Close tile
+Group (focused)
+Terminal │ shell │ ~ %
+Group │ Claude Code
+Heading │ terminal Claude Code
+Label │ ~
+Label │ remote
+Button │ Show terminal
+Button │ Fullscreen tile
+Button │ Close tile
+Group │ Thread
+Status │ Nothing here yet
+Group │ Activity
+Dialog │ Allow Bash?
+Button │ Answer in the terminal
+Button │ Allow
+Button │ Deny
+Button │ Deny…
+Button │ Deny and stop
+MultilineTextInput │ Message
+Button │ Attach files
+Button │ Ask aside
+Button │ Model, Claude
+Button │ Commit
+Button │ Send
+Group │ Status
+Status │ studio
+Group │ Agents
+Button │ Claude Code · Needs approval: Bash

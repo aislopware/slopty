@@ -1887,6 +1887,27 @@ impl SecondWorker {
     /// exits 0 even when the worker refuses (it must never block an agent), so the effect is
     /// the app's to show.
     pub async fn play_hook(&self, session: &str, event: &str, fields: &str) -> Result<()> {
+        let mut hook = self.spawn_hook(session, event, fields).await?;
+        let status = tokio::time::timeout(STARTUP, hook.wait())
+            .await
+            .context("slopty hook did not finish")??;
+        ensure!(status.success(), "slopty hook failed: {status}");
+        Ok(())
+    }
+
+    /// Play a hook the worker holds for the person's answer (a `PermissionRequest`), as
+    /// [`Self::play_hook`] does, and hand back the relay still waiting: dropping it kills it,
+    /// as Claude Code's own hook timeout would.
+    ///
+    /// # Errors
+    ///
+    /// When the transcript cannot be written or the relay does not start.
+    pub async fn hold_hook(&self, session: &str, event: &str, fields: &str) -> Result<Child> {
+        self.spawn_hook(session, event, fields).await
+    }
+
+    /// `slopty hook` started with the payload for `event` written to its stdin.
+    async fn spawn_hook(&self, session: &str, event: &str, fields: &str) -> Result<Child> {
         let transcript = self.dir.path().join("agent.jsonl");
         std::fs::write(&transcript, TRANSCRIPT)?;
         let payload = format!(
@@ -1908,11 +1929,7 @@ impl SecondWorker {
         stdin.write_all(payload.as_bytes()).await?;
         stdin.shutdown().await?;
         drop(stdin);
-        let status = tokio::time::timeout(STARTUP, hook.wait())
-            .await
-            .context("slopty hook did not finish")??;
-        ensure!(status.success(), "slopty hook failed: {status}");
-        Ok(())
+        Ok(hook)
     }
 
     /// Kill both daemons; the relay stops and the root goes as the rest drops, after them.

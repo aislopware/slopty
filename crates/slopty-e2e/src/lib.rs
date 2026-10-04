@@ -553,9 +553,10 @@ pub struct Dump {
     pub notice: Option<String>,
     /// Which kind of tile holds the keyboard (the workspace's own notion).
     pub focus: Option<String>,
-    /// Who has the keyboard: `workspace`, `terminal:<session>`, `screen:<stream>`,
-    /// `file:<item>` (its editor), `browser:<item>` (the page itself), `project:<name>` (a
-    /// board), `other`, or `none`.
+    /// Who has the keyboard: `workspace`, `terminal:<session>`, `thread:<session>` (its
+    /// agent's thread, shown in place of the TUI), `screen:<stream>`, `file:<item>` (its
+    /// editor), `browser:<item>` (the page itself), `project:<name>` (a board), `other`, or
+    /// `none`.
     pub focused: String,
     /// The active workspace's name.
     #[serde(default)]

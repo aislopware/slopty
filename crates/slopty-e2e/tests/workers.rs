@@ -181,8 +181,13 @@ mod tests {
 
         // (3) Cross-worker attention. Focus worker A's shell, then badge a session on worker B.
         let session_a = focus_shell_on(&mut stack, A).await;
-        worker_b
-            .play_hook(&session_b, "PermissionRequest", r#","tool_name":"Bash""#)
+        // B's agent waits on the person, so its tile shows the thread: the session holds the
+        // keyboard in either face.
+        let faces = [format!("terminal:{session_b}"), format!("thread:{session_b}")];
+        let on_b = |d: &Dump| faces.contains(&d.focused);
+        // The worker holds the request for the person, so the relay stays up while the test runs.
+        let held = worker_b
+            .hold_hook(&session_b, "PermissionRequest", r#","tool_name":"Bash""#)
             .await
             .unwrap();
         let badged = Instant::now();
@@ -217,7 +222,7 @@ mod tests {
         stack
             .driver
             .wait_for("the row to reveal B's session", STEP, |d| {
-                focused_worker(d) == Some(B) && d.focused == format!("terminal:{session_b}")
+                focused_worker(d) == Some(B) && on_b(d)
             })
             .await
             .unwrap();
@@ -225,13 +230,7 @@ mod tests {
         // ⌘⇧A does the same from A's shell.
         focus_shell_on(&mut stack, A).await;
         stack.driver.keys("cmd-shift-a").await.unwrap();
-        stack
-            .driver
-            .wait_for("⌘⇧A to reach B's session", STEP, |d| {
-                d.focused == format!("terminal:{session_b}")
-            })
-            .await
-            .unwrap();
+        stack.driver.wait_for("⌘⇧A to reach B's session", STEP, |d| on_b(d)).await.unwrap();
 
         // The banner's tag is the session UUID: a notification response for it finds worker B's
         // session and reveals it, from worker A's shell.
@@ -240,8 +239,15 @@ mod tests {
         stack
             .driver
             .wait_for("the notification response to route to worker B", STEP, |d| {
-                focused_worker(d) == Some(B) && d.focused == format!("terminal:{session_b}")
+                focused_worker(d) == Some(B) && on_b(d)
             })
+            .await
+            .unwrap();
+
+        // B's agent quits as the person's /exit does, so its tile shows the shell again for (4).
+        drop(held);
+        worker_b
+            .play_hook(&session_b, "SessionEnd", r#","reason":"prompt_input_exit""#)
             .await
             .unwrap();
 
@@ -308,7 +314,7 @@ mod tests {
         stack.driver.reveal(&session_b).await.unwrap();
         stack
             .driver
-            .wait_for("B's session focused", STEP, |d| d.focused == format!("terminal:{session_b}"))
+            .wait_for("B's shell focused", STEP, |d| d.focused == format!("terminal:{session_b}"))
             .await
             .unwrap();
         stack.driver.type_text("echo RE-$((6*7))\n").await.unwrap();

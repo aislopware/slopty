@@ -184,9 +184,10 @@ mod tests {
         // near's shell has the focus.
         let session_far = shell_on(&fleet.driver.dump().await.unwrap(), FAR).unwrap().to_owned();
         focus_shell_on(&mut fleet, NEAR).await;
-        fleet
+        // The worker holds the request for the person, so the relay stays up while the test runs.
+        let held = fleet
             .far
-            .play_hook(&session_far, "PermissionRequest", r#","tool_name":"Bash""#)
+            .hold_hook(&session_far, "PermissionRequest", r#","tool_name":"Bash""#)
             .await
             .unwrap();
         let hooked = Instant::now();
@@ -216,9 +217,28 @@ mod tests {
             .wait_for("the carets at their prompts", STEP, Dump::prompts_settled)
             .await
             .unwrap();
+        // Far's tile shows the agent's thread, its request held with the message box under it.
+        let has = |d: &Dump, role: &str, label: &str| {
+            d.a11y.iter().any(|n| n.role == role && n.label.as_deref() == Some(label))
+        };
+        fleet
+            .driver
+            .wait_for("far's thread holding its request", STEP, |d| {
+                has(d, "Button", "Allow") && has(d, "MultilineTextInput", "Message")
+            })
+            .await
+            .unwrap();
         let path = fleet.dir.path().join("through-server.png");
         let frame = fleet.driver.render(&path).await.unwrap();
         assert_matches("through-server", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+        // Far's agent quits as the person's /exit does, so its tile shows the shell again.
+        drop(held);
+        fleet
+            .far
+            .play_hook(&session_far, "SessionEnd", r#","reason":"prompt_input_exit""#)
+            .await
+            .unwrap();
+        focus_shell_on(&mut fleet, FAR).await;
 
         // (4a) Killed, then restarted the moment the app shows it down: the app's own link
         // finds it (its pings draw the new process's reset), before the server has even noticed.
