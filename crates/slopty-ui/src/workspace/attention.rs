@@ -651,8 +651,13 @@ impl WorkspaceView {
             Some(_) | None => None,
         };
         if let Some(allow) = allow {
-            if let (Some(route), Some(ask)) = (route, tap.info.get(ASK)) {
-                self.verdict_tapped(route, AskId(ask.clone()), allow, cx);
+            match (route, tap.info.get(ASK)) {
+                (Some(route), Some(ask)) => {
+                    self.verdict_tapped(route, AskId(ask.clone()), allow, cx);
+                }
+                // Nothing to answer, but the tap still settles: the system waits on the app's
+                // word that it is done with it.
+                _ => self.settle_taps(cx),
             }
             return;
         }

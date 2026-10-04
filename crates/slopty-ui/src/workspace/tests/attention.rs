@@ -692,6 +692,7 @@ fn a_request_whose_terminal_is_in_front_goes_back_to_it(cx: &mut TestAppContext)
 /// new and the worker's table has not come) waits for it and answers it once it is here. One
 /// whose request never comes says so once the table has had time to come: a toast in front,
 /// the app's own note while it is away. One whose worker is not reached gives up after a while.
+/// One that names no request settles at once.
 #[gpui::test]
 fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
     use crate::workspace::approvals::{HOLD_VERDICT, NOT_REACHED, SYNCED};
@@ -772,6 +773,16 @@ fn a_notes_answer_waits_for_its_request(cx: &mut TestAppContext) {
         [WorkspaceEvent::Unanswered { route: far, why: NOT_REACHED }, WorkspaceEvent::TapsSettled],
         "until it is given up on"
     );
+
+    // A button on a note that names no request answers nothing, and settles at once: the
+    // system waits on the app's word that it is done with the tap.
+    events.borrow_mut().clear();
+    let bare =
+        Tap { id: "stray".to_owned(), info: route.info(), action: Some(notify::DENY.into()) };
+    view.update_in(cx, |v, _window, cx| v.open_notification(&bare, cx));
+    cx.run_until_parked();
+    assert_eq!(events.borrow().as_slice(), [WorkspaceEvent::TapsSettled]);
+    assert_eq!(intents(&thread_sent(&mut link)), []);
 }
 
 /// Claude Code waiting on a yes or no in `session`.

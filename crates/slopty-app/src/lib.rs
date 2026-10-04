@@ -126,9 +126,8 @@ fn hardware_keyboard_attached() -> bool {
 
 /// Link events applied per foreground turn at most (see the link loop).
 const LINK_BATCH: usize = 256;
-/// How long an answer sent from a note is given to leave the link before the grace that woke
-/// the app for it goes.
-#[cfg(target_os = "ios")]
+/// How long an answer sent from a note is given to leave the link before the system hears the
+/// app is done with the tap, and the grace that woke the app for it goes.
 const ANSWER_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The key bar's keys: label, GPUI key name, and the character it types (`None` for
@@ -540,8 +539,8 @@ pub struct Workspace {
     /// so it is not suspended while the answer waits for its link.
     #[cfg(target_os = "ios")]
     answer_grace: Option<slopty_platform::notify::BackgroundGrace>,
-    /// Lets [`Self::answer_grace`] go once the answer has had time to leave.
-    #[cfg(target_os = "ios")]
+    /// Tells the system the taps are done, and lets [`Self::answer_grace`] go, once the
+    /// answers have had time to leave.
     answer_flush: Option<gpui::Task<()>>,
     /// The system's paste button over the key bar's Paste, made with the first key bar, so a
     /// paste there needs no permission alert.
@@ -611,10 +610,7 @@ impl Workspace {
                     ws.attention.project_news(&news);
                 }
             }
-            WorkspaceEvent::TapsSettled => {
-                #[cfg(target_os = "ios")]
-                ws.answers_out(cx);
-            }
+            WorkspaceEvent::TapsSettled => ws.answers_out(cx),
         });
         // The key bar follows the focused tile: the app's own build is drawn again only when
         // the tile it sends keys to moves, never for the rest of the view's news.
@@ -679,7 +675,6 @@ impl Workspace {
             grace: None,
             #[cfg(target_os = "ios")]
             answer_grace: None,
-            #[cfg(target_os = "ios")]
             answer_flush: None,
             #[cfg(target_os = "ios")]
             paste_key: None,
@@ -1053,19 +1048,13 @@ impl Workspace {
     }
 
     /// A note was tapped: its tile comes forward, on whichever worker it lives. A note's
-    /// "Allow" or "Deny" may have woken the app in the background on iOS: it holds the grace
-    /// the system grants until the answer is out.
-    #[cfg_attr(
-        not(target_os = "ios"),
-        expect(
-            clippy::needless_pass_by_ref_mut,
-            reason = "the answer's background grace is held only on iOS"
-        )
-    )]
+    /// "Allow" or "Deny" may have woken the app in the background: the system is told the tap
+    /// is done only once the answer is out ([`Self::answers_out`]), and on iOS the app holds
+    /// the grace the system grants until then too.
     fn open_notification(&mut self, tap: &Tap, cx: &mut Context<Self>) {
-        #[cfg(target_os = "ios")]
         if slopty_ui::workspace::attention::answers(tap) {
             self.answer_flush = None;
+            #[cfg(target_os = "ios")]
             if self.answer_grace.is_none() {
                 self.answer_grace =
                     slopty_platform::notify::BackgroundGrace::begin("Slopty sends your answer");
@@ -1074,16 +1063,18 @@ impl Workspace {
         self.view.update(cx, |v, cx| v.open_notification(tap, cx));
     }
 
-    /// Every tapped answer is out, or said to have found nothing: the grace held for it goes
-    /// once the last has had [`ANSWER_FLUSH`] to leave the link.
-    #[cfg(target_os = "ios")]
+    /// Every tapped answer is out, or said to have found nothing: once the last has had
+    /// [`ANSWER_FLUSH`] to leave the link, the system hears the taps are done and the grace
+    /// held for them goes.
     fn answers_out(&mut self, cx: &Context<Self>) {
-        if self.answer_grace.is_some() {
-            self.answer_flush = Some(cx.spawn(async |ws, cx| {
-                cx.background_executor().timer(ANSWER_FLUSH).await;
-                let _gone = ws.update(cx, |ws, _cx| ws.answer_grace = None);
-            }));
-        }
+        self.answer_flush = Some(cx.spawn(async |ws, cx| {
+            cx.background_executor().timer(ANSWER_FLUSH).await;
+            slopty_platform::notify::taps_finished();
+            #[cfg(target_os = "ios")]
+            let _gone = ws.update(cx, |ws, _cx| ws.answer_grace = None);
+            #[cfg(not(target_os = "ios"))]
+            let _unused = ws;
+        }));
     }
 
     /// Start (or refresh) a worker: its tiles wait in the workspace and a connect loop of its
@@ -3632,14 +3623,9 @@ pub fn open_workspace(
     let settings_path = slopty_settings::path();
     let settings_seen = settings::Seen::of(&settings_path);
     let loaded = Settings::load(&settings_path);
-    // Under the self-test a frame is a step, not a moment: the layout lands at once so a
-    // `dump` reads where things went, not where they were passing through. Each run starts
-    // from an empty layout there, so no test depends on the last one's.
-    let read = if cfg!(feature = "e2e") {
-        Ok(None)
-    } else {
-        slopty_ui::workspace::read_layout(&layout_path())
-    };
+    // The self-test gives each stack a data directory of its own, so a test starts from an
+    // empty layout and a relaunch within it puts its layout back as a person's would.
+    let read = slopty_ui::workspace::read_layout(&layout_path());
     let unreadable = read.is_err();
     let view = cx.new(|cx| {
         let mut view = WorkspaceView::new(Theme::default(), read.ok().flatten(), cx);

@@ -17,6 +17,12 @@
 //! the tile. The categories are registered with the centre when [`System`] is made, which does
 //! not prompt either. A pressed button comes back as a [`Tap`] with its [`Tap::action`].
 //!
+//! A button answered in the background ([`Tap::finished_later`]) may have woken a suspended
+//! app, and the system lets it run until the delegate says it is done with the response. So
+//! the delegate holds that word until the app says its answers are out or given up
+//! ([`taps_finished`]), rather than saying it the moment the tap is handed on, when the answer
+//! has not even found its link.
+//!
 //! `BackgroundGrace` keeps an iOS app running for the short time the system grants after it
 //! leaves the screen, so the links stay up and what arrives just after the phone is pocketed
 //! still notifies.
@@ -55,6 +61,21 @@ pub struct Tap {
     pub info: BTreeMap<String, String>,
     /// The button pressed ([`Action::id`]); `None` for the note itself.
     pub action: Option<String>,
+}
+
+impl Tap {
+    /// Whether the app works on this tap after the delegate has handed it on: a button that
+    /// answers where the note is ([`ActionKind::Unlocked`], [`ActionKind::Destructive`]), with
+    /// the app left in the background. The note itself and a button that brings the app
+    /// forward are done once handed on.
+    #[must_use]
+    pub fn finished_later(&self) -> bool {
+        let Some(action) = self.action.as_deref() else { return false };
+        CATEGORIES
+            .iter()
+            .find_map(|category| category.action(action))
+            .is_some_and(|action| action.kind != ActionKind::Foreground)
+    }
 }
 
 /// A button on a note.
@@ -196,7 +217,7 @@ impl Notifier for Memory {
 }
 
 #[cfg(target_vendor = "apple")]
-pub use apple::{System, install, taps};
+pub use apple::{System, install, taps, taps_finished};
 #[cfg(target_os = "ios")]
 pub use ios::BackgroundGrace;
 
@@ -275,6 +296,59 @@ mod apple {
         match &mut *inbox {
             Inbox::Held(held) => held.push(tap),
             Inbox::Listening(_) => *inbox = Inbox::Held(vec![tap]),
+        }
+    }
+
+    /// What tells the system the app is done with one response.
+    pub(super) struct Finish(Box<dyn FnOnce() + Send>);
+
+    impl Finish {
+        /// `finish` is what says it.
+        pub(super) fn new(finish: impl FnOnce() + Send + 'static) -> Self {
+            Self(Box::new(finish))
+        }
+    }
+
+    /// The word owed to the system for each tap the app still works on ([`Tap::finished_later`]),
+    /// oldest first. The delegate may run off the main thread, the app says it on the main one.
+    static UNFINISHED: Mutex<Vec<Finish>> = Mutex::new(Vec::new());
+
+    /// Owe the system `finish` until [`taps_finished`].
+    pub(super) fn finish_later(finish: Finish) {
+        UNFINISHED.lock().push(finish);
+    }
+
+    /// The app's answers to every tap handed on so far are out, or given up: tell the system it
+    /// is done with each response it was owed, so it may suspend the app again. Nothing when
+    /// nothing is owed.
+    pub fn taps_finished() {
+        let owed = std::mem::take(&mut *UNFINISHED.lock());
+        if !owed.is_empty() {
+            tracing::debug!(taps = owed.len(), "taps finished");
+        }
+        for Finish(finish) in owed {
+            finish();
+        }
+    }
+
+    /// A response's completion handler, kept past the delegate call that was handed it.
+    struct Owed(RcBlock<dyn Fn()>);
+
+    #[expect(
+        clippy::non_send_fields_in_send_ty,
+        reason = "the block is called once, from one thread at a time, as the safety comment says"
+    )]
+    // SAFETY: Blocks runtime rule: a heap block's retain and release (`Block_copy`,
+    // `Block_release`) are atomic. UserNotifications rule: the centre calls its delegate, and
+    // so hands it this handler, on a queue of its own choosing ("possibly off the main thread"
+    // above), so the handler is one the framework expects to be called from another thread.
+    // It is moved once into the ledger and called once, by whoever takes it out.
+    unsafe impl Send for Owed {}
+
+    impl Owed {
+        /// Tell the system the app is done with the response.
+        fn say(&self) {
+            self.0.call(());
         }
     }
 
@@ -628,6 +702,13 @@ mod apple {
                 );
                 if let Some(tap) = tap {
                     tracing::debug!(id = tap.id, action = ?tap.action, "note opened");
+                    if tap.finished_later() {
+                        // Owed before the tap goes, so the app's word cannot come first.
+                        let owed = Owed(done.copy());
+                        finish_later(Finish::new(move || owed.say()));
+                        deliver(tap);
+                        return;
+                    }
                     deliver(tap);
                 }
                 done.call(());
@@ -763,6 +844,44 @@ mod tests {
         assert_eq!(APPROVAL.action("maybe"), None);
         let ids: std::collections::BTreeSet<&str> = CATEGORIES.iter().map(|c| c.id).collect();
         assert_eq!(ids.len(), CATEGORIES.len(), "category identifiers are unique");
+    }
+
+    /// Only a button answered in the background keeps the system waiting on the app: the note
+    /// itself, "Show", and a button no category has are done once handed on.
+    #[test]
+    fn only_an_answer_in_the_background_is_finished_later() {
+        let tap = |action: Option<&str>| Tap {
+            id: "n".into(),
+            info: BTreeMap::new(),
+            action: action.map(str::to_owned),
+        };
+        assert!(tap(Some(ALLOW)).finished_later());
+        assert!(tap(Some(DENY)).finished_later());
+        assert!(!tap(Some(SHOW)).finished_later());
+        assert!(!tap(None).finished_later());
+        assert!(!tap(Some("maybe")).finished_later());
+    }
+
+    /// What the system is owed is said once each, when the app's answers are out, and only
+    /// then; with nothing owed, nothing is said.
+    #[cfg(target_vendor = "apple")]
+    #[test]
+    fn the_system_hears_a_tap_is_done_once_the_answers_are_out() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let said = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let said = Arc::clone(&said);
+            apple::finish_later(apple::Finish::new(move || {
+                said.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        assert_eq!(said.load(Ordering::SeqCst), 0, "owed, not said");
+        taps_finished();
+        assert_eq!(said.load(Ordering::SeqCst), 2, "each said once");
+        taps_finished();
+        assert_eq!(said.load(Ordering::SeqCst), 2, "nothing more owed");
     }
 
     /// The delegate's routing: the system's default identifier is the note itself, its dismiss
