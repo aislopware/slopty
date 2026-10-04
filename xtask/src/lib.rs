@@ -43,6 +43,7 @@ mod tailnet;
 mod tools;
 mod upstream;
 mod vm;
+mod watchdog;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

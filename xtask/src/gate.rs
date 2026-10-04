@@ -27,7 +27,7 @@ mod pass;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -769,8 +769,8 @@ fn test_lane(
     let (tests, doctests) = std::thread::scope(|scope| {
         let doctests =
             scope.spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test {libs...} --doc")));
-        let tests = quiet_step(
-            "nextest",
+        let tests = nextest_step(
+            profile,
             cmd!(sh, "cargo nextest run {p...} --profile {profile} {filter...}")
                 .env(crate::runner::RUNNER_VAR, &runner),
         );
@@ -779,6 +779,26 @@ fn test_lane(
     let ptys = ptys.finish();
     print!("{}", ptys.report());
     both(both(tests, doctests), ptys.verdict())
+}
+
+/// How long the CI nextest run goes before [`crate::watchdog`] reports what it waits on. The
+/// slowest shard's run takes under 10 minutes, and its job ends at 45.
+const NEXTEST_HANG_AFTER: Duration = Duration::from_mins(15);
+
+/// The tests lane's nextest run. On a runner it prints as it goes, so the profile's SLOW and
+/// TERMINATING lines are in the log while it runs, and the watchdog names what a run that
+/// outlives [`NEXTEST_HANG_AFTER`] waits on: a hung run once ended with the job's cancel and
+/// not a line about the test (run 37173900555). Here its output comes as one block, as the
+/// doctests' beside it does.
+fn nextest_step(profile: &str, command: xshell::Cmd<'_>) -> Result<()> {
+    if profile != NEXTEST_CI_PROFILE {
+        return quiet_step("nextest", command);
+    }
+    let watchdog =
+        crate::watchdog::Watchdog::start("nextest", std::process::id(), NEXTEST_HANG_AFTER);
+    let result = crate::tools::step("nextest", &command);
+    watchdog.finish();
+    result
 }
 
 /// The [`LINUX_CRATES`] whose tests build and run on Linux: all but [`LINUX_UNTESTED`].
@@ -818,7 +838,7 @@ fn linux_lane(sh: &Shell, doc_sh: Shell, profile: &str) -> Result<()> {
     let (tests, doctests) = std::thread::scope(|scope| {
         let doctests =
             scope.spawn(move || quiet_step("doctests", cmd!(doc_sh, "cargo test {libs...} --doc")));
-        let tests = quiet_step("nextest", cmd!(sh, "cargo nextest run {p...} --profile {profile}"));
+        let tests = nextest_step(profile, cmd!(sh, "cargo nextest run {p...} --profile {profile}"));
         (tests, join(doctests))
     });
     both(tests, doctests)
