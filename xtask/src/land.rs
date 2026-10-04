@@ -62,6 +62,11 @@ pub fn run(sh: &Shell, opts: &LandOpts) -> Result<()> {
         "HEAD is not on top of origin/main, and main only fast-forwards: `git rebase origin/main` \
          (then the quick gate again) and land"
     );
+    // The gate checks the one message it is given, but a gated batch split into several commits
+    // writes the others after it, and CI's tools lane then failed on one (run 37194759190).
+    cmd!(sh, "committed origin/main..HEAD --no-merge-commit")
+        .run()
+        .context("a commit to land breaks Conventional Commits: reword it, then land")?;
     if !opts.no_tests {
         crate::gate::land_tests("origin/main")?;
     }
