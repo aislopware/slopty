@@ -16,7 +16,10 @@
 //!   intent stays until the thread's own state shows what it did, so nothing flickers back between
 //!   the worker's answer and the agent's record.
 //! - **Blobs** ([`Blobs`]): the whole of clipped content, by recency under a byte budget.
+//! - **Authors** ([`Authorships`]): who wrote each line of the files shown, kept until a file
+//!   changes, so a hover over a line asks the worker nothing.
 
+pub mod authors;
 pub mod blobs;
 pub mod cache;
 mod mirror;
@@ -25,6 +28,7 @@ mod outbox;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub use authors::{Authorships, Stamp};
 pub use blobs::Blobs;
 pub use cache::{Cache, Cached};
 pub use mirror::Mirror;
@@ -32,7 +36,8 @@ use mirror::Took;
 pub use outbox::{Outbox, Sent};
 use slopty_net::ClientMsg;
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Review, ReviewScope, TableFrame, ThreadFrame, ThreadRequest,
+    Authors, Expanded, Intent, IntentDone, Review, ReviewScope, TableFrame, ThreadFrame,
+    ThreadRequest,
 };
 use slopty_proto::thread::{AskId, ContentRef, IntentId, TableState, ThreadId};
 
@@ -70,6 +75,8 @@ pub struct Threads {
     reviews: HashMap<ThreadId, Arc<Review>>,
     /// Expansions asked for and not come yet.
     asked: HashSet<ContentRef>,
+    /// Who wrote the lines of the files shown.
+    authors: Authorships,
     linked: bool,
     outbox_changed: bool,
 }
@@ -161,6 +168,7 @@ impl Threads {
         self.linked = false;
         // What was asked and not answered is lost with the link.
         self.asked.clear();
+        self.authors.forget_asked();
         for mirror in self.mirrors.values_mut() {
             mirror.lost();
         }
@@ -314,6 +322,35 @@ impl Threads {
             return None;
         }
         Some(ClientMsg::Thread(ThreadRequest::Expand { thread, content: content.clone() }))
+    }
+
+    /// Who wrote the lines of `path` (absolute, or in `thread`'s repository) as `stamp` read it,
+    /// when the worker has said: made the most recent of the files held.
+    pub fn authors(
+        &mut self,
+        thread: Option<ThreadId>,
+        path: &str,
+        stamp: &Stamp,
+    ) -> Option<Arc<Authors>> {
+        self.authors.get(thread, path, stamp)
+    }
+
+    /// What to send to learn who wrote the lines of `path` as `stamp` read it: nothing when
+    /// that is held, on its way already, or the link is down. The answer comes to
+    /// [`Self::heard_authors`].
+    pub fn ask_authors(
+        &mut self,
+        thread: Option<ThreadId>,
+        path: &str,
+        stamp: &Stamp,
+    ) -> Option<ClientMsg> {
+        (self.linked && self.authors.ask(thread, path, stamp))
+            .then(|| ClientMsg::Thread(ThreadRequest::Authors { thread, path: path.to_owned() }))
+    }
+
+    /// The worker said who wrote the lines of a file.
+    pub fn heard_authors(&mut self, authors: Authors) {
+        self.authors.heard(authors);
     }
 
     /// Ask for the turns of `thread` before the first one held.
