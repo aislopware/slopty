@@ -15,7 +15,7 @@ use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::{Outcome, Page, TableFrame};
 use slopty_proto::thread::{
     Action, AgentId, Cap, Cursor, Delivery, Edge, Fork, IntentId, ItemBody, ItemId, Pending,
-    PendingState, Phase, ThreadId, ThreadMeta, ThreadState, TreeRef, TurnId,
+    PendingState, Phase, ThreadId, ThreadMeta, ThreadState, ToolCall, ToolState, TreeRef, TurnId,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -49,6 +49,27 @@ pub enum Moment {
     Began(TurnId),
     /// A turn ended, as the thread's last.
     Ended(TurnId),
+}
+
+/// Tool calls a slow listener may fall behind by; one that lags misses those calls.
+const TOOLS: usize = 256;
+
+/// A tool call of a thread's agent, running or run ([`Host::tools`]).
+#[derive(Clone, Debug)]
+pub struct ToolSeen {
+    /// The thread.
+    pub thread: ThreadId,
+    /// The call as it stands.
+    pub call: Arc<ToolCall>,
+}
+
+/// What the host tells beside the actions themselves.
+#[derive(Debug)]
+struct Heard {
+    /// Turn edges ([`Host::edges`]).
+    edges: broadcast::Sender<TurnEdge>,
+    /// Tool calls ([`Host::tools`]).
+    tools: broadcast::Sender<ToolSeen>,
 }
 
 /// Actions applied together, as every follower of the thread hears them.
@@ -86,7 +107,7 @@ struct Inner {
     table: Table,
     /// Intents that start a thread, which have no thread of their own to be kept with yet.
     starts: Intents,
-    edges: broadcast::Sender<TurnEdge>,
+    heard: Heard,
     /// What the worker adds to a seat's variables, once the daemon says.
     seat_env: Option<EnvOf>,
     /// Told whenever a scheduled message is added or changed ([`Host::schedule_changed`]).
@@ -312,7 +333,10 @@ impl Host {
                 threads,
                 table,
                 starts,
-                edges: broadcast::Sender::new(EDGES),
+                heard: Heard {
+                    edges: broadcast::Sender::new(EDGES),
+                    tools: broadcast::Sender::new(TOOLS),
+                },
                 seat_env: None,
                 scheduling: Arc::default(),
             })),
@@ -361,7 +385,7 @@ impl Host {
         let mut guard = self.inner.lock();
         let inner = &mut *guard;
         let hosted = inner.threads.get_mut(&thread)?;
-        Some(apply(hosted, &mut inner.table, &inner.edges, actions))
+        Some(apply(hosted, &mut inner.table, &inner.heard, actions))
     }
 
     /// The thread held of agent `agent`'s session `native`, and its title, when one is.
@@ -386,7 +410,7 @@ impl Host {
         let hosted = inner.threads.get_mut(&thread)?;
         let (actions, out) = change(hosted.log.state());
         if !actions.is_empty() {
-            apply(hosted, &mut inner.table, &inner.edges, actions);
+            apply(hosted, &mut inner.table, &inner.heard, actions);
         }
         Some(out)
     }
@@ -527,7 +551,13 @@ impl Host {
     /// Every turn edge any thread reaches from now on.
     #[must_use]
     pub fn edges(&self) -> broadcast::Receiver<TurnEdge> {
-        self.inner.lock().edges.subscribe()
+        self.inner.lock().heard.edges.subscribe()
+    }
+
+    /// Every tool call any thread's agent makes from now on, as it runs and once it ran.
+    #[must_use]
+    pub fn tools(&self) -> broadcast::Receiver<ToolSeen> {
+        self.inner.lock().heard.tools.subscribe()
     }
 
     /// The outcome intent `id` for `thread` had, if it was acted on.
@@ -596,7 +626,7 @@ impl Host {
         }
         let (outcome, actions) = act(hosted.log.state());
         if !actions.is_empty() {
-            apply(hosted, &mut inner.table, &inner.edges, actions);
+            apply(hosted, &mut inner.table, &inner.heard, actions);
         }
         if let Err(e) = hosted.intents.record(id, outcome.clone()) {
             tracing::warn!(%thread, "an intent could not be recorded: {e}");
@@ -622,7 +652,7 @@ impl Host {
         if scheduled != hosted.own.scheduled {
             hosted.own.scheduled = scheduled;
             let pending = hosted.log.state().pending.clone();
-            apply(hosted, &mut inner.table, &inner.edges, vec![Action::PendingSet(pending)]);
+            apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
             inner.scheduling.notify_one();
         }
         if let Err(e) = hosted.intents.record(id, outcome.clone()) {
@@ -767,7 +797,7 @@ fn set_scheduled(
         change(pending);
     }
     let pending = hosted.log.state().pending.clone();
-    apply(hosted, &mut inner.table, &inner.edges, vec![Action::PendingSet(pending)]);
+    apply(hosted, &mut inner.table, &inner.heard, vec![Action::PendingSet(pending)]);
 }
 
 /// Keep `seated` in thread directory `dir`, whole or not at all: it goes to a sibling that is
@@ -792,12 +822,26 @@ fn create(inner: &mut Inner, meta: ThreadMeta) -> io::Result<Cursor> {
 /// What the threads' logs are called when they cannot be written.
 const LOGS: &str = "Thread logs";
 
+/// The tool call `action` tells of, when it runs or has run in the thread's last turn: a log
+/// read again from the start tells every old call too.
+fn live_call(action: &Action, last: Option<TurnId>) -> Option<&ToolCall> {
+    let (Action::ItemStarted(item) | Action::ItemUpdated(item) | Action::ItemCompleted(item)) =
+        action
+    else {
+        return None;
+    };
+    let ItemBody::Tool(call) = &item.body else { return None };
+    let ran = matches!(call.state, ToolState::Running | ToolState::Completed);
+    (ran && Some(item.turn) == last).then_some(&**call)
+}
+
 fn apply(
     hosted: &mut Hosted,
     table: &mut Table,
-    edges: &broadcast::Sender<TurnEdge>,
+    heard: &Heard,
     mut actions: Vec<Action>,
 ) -> Cursor {
+    let edges = &heard.edges;
     hosted.own.mark(&mut actions);
     let first = hosted.log.cursor();
     let was_working = hosted.log.state().status.phase == Phase::Working;
@@ -828,6 +872,11 @@ fn apply(
             moment.filter(|m| matches!(m, Moment::Began(t) | Moment::Ended(t) if live(*t)))
         {
             let _nobody = edges.send(TurnEdge { thread, moment });
+        }
+    }
+    if heard.tools.receiver_count() > 0 {
+        for call in actions.iter().filter_map(|action| live_call(action, last)) {
+            let _nobody = heard.tools.send(ToolSeen { thread, call: Arc::new(call.clone()) });
         }
     }
     let _no_follower =

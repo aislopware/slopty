@@ -14,7 +14,8 @@
 //! started by opening the person's `claude` in one of the worker's [`terminals`] and observing
 //! it ([`claude::start`]); a Codex thread by asking the person's Codex daemon for one. The
 //! person's past prompts, as the agents record them, are searched by [`history`], and what was
-//! said in the threads held here by [`search`].
+//! said in the threads held here by [`search`]. The windows and displays an agent drives are
+//! named from its tool calls by [`screens`].
 
 pub mod acp;
 pub mod attach;
@@ -32,6 +33,7 @@ pub mod pi;
 pub mod review;
 pub mod rewind;
 pub mod schedule;
+pub mod screens;
 pub mod search;
 pub mod table;
 pub mod terminals;

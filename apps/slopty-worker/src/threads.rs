@@ -37,6 +37,7 @@ use slopty_worker::thread::compose::Terminals;
 use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
+use slopty_worker::thread::screens::Screens;
 use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
 use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule};
 use tokio::sync::{mpsc, watch};
@@ -232,10 +233,11 @@ pub struct Observing {
 
 /// Observe every Claude Code session and follow every Codex thread into the daemon's
 /// threads, start Claude Code threads in its terminals, serve the pi and ACP threads it starts,
-/// and snapshot each turn.
+/// snapshot each turn, and name the screens each agent drives.
 pub fn start(daemon: &Daemon, asks: Observing) {
     let Some(threads) = &daemon.threads else { return };
     drop(threads.snapshots.spawn());
+    drop(Screens::new(threads.host.clone()).spawn());
     threads.composer.resume();
     let sources: Arc<dyn Sources> = Arc::new(Observed(daemon.clone()));
     drop(claude::spawn(threads.host.clone(), daemon.events.subscribe(), sources, asks.claude));
