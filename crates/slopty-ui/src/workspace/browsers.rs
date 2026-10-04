@@ -156,14 +156,11 @@ impl WorkspaceView {
         self.remember_closed(tile, page, None, cx);
     }
 
-    /// "Inspect page": Web Inspector on the focused page, while `[web] inspector` is on.
+    /// "Inspect page": Web Inspector on the focused page.
     pub fn inspect_page(&mut self, _: &InspectPage, _window: &mut Window, cx: &mut Context<Self>) {
         let opened = self.focused_page().is_some_and(|v| v.read(cx).inspect());
         if !opened {
-            self.show_notice(
-                "Web Inspector needs a page in front, with Web Inspector on in Settings".into(),
-                cx,
-            );
+            self.show_notice("Web Inspector needs a page in front".into(), cx);
         }
     }
 

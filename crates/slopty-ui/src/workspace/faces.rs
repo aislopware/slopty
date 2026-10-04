@@ -25,16 +25,18 @@ use std::path::PathBuf;
 use gpui::{App, AppContext as _, Context, Entity, Focusable as _, Keystroke, Window};
 use slopty_client::layout::{TileRef, WorkerKey};
 use slopty_core::{ClientId, ItemId, SessionId};
-use slopty_proto::ClientMsg;
 use slopty_proto::agent::{AgentKind, AgentStatus};
 use slopty_proto::conversation::{ConversationEvent, ConversationRequest, PermissionEvent};
+use slopty_proto::git::GitOutcome;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::terminal::TermRequest;
 use slopty_proto::thread::attention::{Ladder, Rung};
 use slopty_proto::thread::wire::{
-    IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadRequest, ThreadRow,
+    IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadHits, ThreadRequest,
+    ThreadRow,
 };
 use slopty_proto::thread::{AgentId, IntentId, Meters, ThreadId};
+use slopty_proto::{ClientMsg, RequestId};
 
 use super::WorkspaceView;
 use super::actions::ToggleConversation;
@@ -372,12 +374,31 @@ impl WorkspaceView {
                 }
             }
             HubEvent::Table => this.threads_of_sessions(key, cx),
+            HubEvent::Started { thread, .. } => this.open_thread(key, *thread, cx),
             _ => {}
         });
         self.faces.threads.hearing.insert(key, hearing);
         self.faces.threads.hubs.insert(key, hub.clone());
         self.hub_agents(key, cx);
         hub
+    }
+
+    /// What `key` found in its threads for the words its hub last asked.
+    pub fn thread_hits(&mut self, key: WorkerKey, hits: ThreadHits, cx: &mut Context<Self>) {
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, |hub, cx| hub.thread_hits(hits, cx));
+    }
+
+    /// `key`'s answer to a git op its hub asked (the commit sheet, the pull request view).
+    pub fn git_done(
+        &mut self,
+        key: WorkerKey,
+        request: RequestId,
+        outcome: GitOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        let hub = self.thread_hub(key, cx);
+        hub.update(cx, |hub, cx| hub.git_done(request, outcome, cx));
     }
 
     /// The link to `key` is up: its threads catch up from where they stand.

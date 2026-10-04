@@ -3233,22 +3233,25 @@ fn apply_link_event(
         LinkEvent::Thread { thread, frame } => {
             view.update(cx, |v, cx| v.thread_frame(key, thread, frame, cx));
         }
+        LinkEvent::Control(WorkerMsg::ThreadHits(hits)) => {
+            view.update(cx, |v, cx| v.thread_hits(key, hits, cx));
+        }
+        LinkEvent::Control(WorkerMsg::GitDone { request, outcome }) => {
+            view.update(cx, |v, cx| v.git_done(key, request, outcome, cx));
+        }
         // The handshake's ack was read when the link connected; the tick pings to draw a
         // restarted worker's reset, so the pong carries nothing; the app's link forwards
         // ports itself (`LinkEvent::Ports`), and hands a handoff on stamped with when it was
         // read (`LinkEvent::Handoff`). A folder tile asks for no page past its first and no
-        // folder op until its rows do (`slopty_client::folders`), and no git op until the commit
-        // sheet does.
+        // folder op until its rows do (`slopty_client::folders`).
         LinkEvent::Control(
             WorkerMsg::HelloAck(_)
             | WorkerMsg::Pong { .. }
             | WorkerMsg::Ports { .. }
             | WorkerMsg::Handoff(_)
             | WorkerMsg::Sessions(_)
-            | WorkerMsg::ThreadHits(_)
             | WorkerMsg::FolderPage { .. }
-            | WorkerMsg::FsDone { .. }
-            | WorkerMsg::GitDone { .. },
+            | WorkerMsg::FsDone { .. },
         ) => {}
         LinkEvent::Disconnected(why) => {
             let status = WorkerStatus::Reconnecting(format!("disconnected: {why}"));
