@@ -103,8 +103,6 @@ mod actions {
             CopyLastOutput,
             /// Run the last command again: a paste of what was typed, then ↩.
             RerunLast,
-            /// Save the last command and its output as a note tile beside the shell.
-            NoteLastBlock,
             /// Copy the output of the selected command block (the last one with none selected).
             CopyBlockOutput,
             /// Attach the selected command block (the last one with none selected) to an
@@ -120,8 +118,8 @@ mod actions {
 }
 pub use actions::{
     AttachBlock, AttachSelection, ClearScreen, CloseFind, Copy, CopyBlockOutput, CopyLastOutput,
-    Find, FindNext, FindPrev, NextPrompt, NoteLastBlock, Paste, PrevPrompt, RerunLast,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
+    Find, FindNext, FindPrev, NextPrompt, Paste, PrevPrompt, RerunLast, ScrollPageDown,
+    ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll,
 };
 
 /// The terminal's key bindings in effect: the keymap's terminal scope ([`crate::keymap`], where
@@ -246,9 +244,6 @@ pub enum TerminalViewEvent {
         /// How long it ran.
         elapsed: Duration,
     },
-    /// "Save as note" on a block's menu: the block as a note's Markdown (`block_note`); the
-    /// workspace puts a note tile with it beside the shell.
-    NoteBlock(String),
     /// Context for an agent's message, Markdown, for the workspace to put in the draft of the
     /// agent it picks: a block from "Attach to agent" on its menu or the palette's "Attach block
     /// to agent" (`block_context`), or the selection from "Attach selection to agent"
@@ -1422,7 +1417,6 @@ impl TerminalView {
             if block.command.is_some() {
                 items.push(BlockMenuItem::Rerun);
             }
-            items.push(BlockMenuItem::Note);
             if can_attach {
                 items.push(BlockMenuItem::Attach);
             }
@@ -1432,9 +1426,6 @@ impl TerminalView {
             items.push(BlockMenuItem::Copy);
             if can_attach {
                 items.push(BlockMenuItem::AttachSelection);
-            }
-            if block.is_none() {
-                items.push(BlockMenuItem::Note);
             }
         }
         items.push(BlockMenuItem::Paste);
@@ -1458,16 +1449,6 @@ impl TerminalView {
             BlockMenuItem::Find => self.find(&Find, window, cx),
             BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
             BlockMenuItem::AttachSelection => self.attach_selection(&AttachSelection, window, cx),
-            BlockMenuItem::Note => {
-                let text = match block {
-                    Some(block) => block_note(&block),
-                    None => match self.selected_text().filter(|t| !t.trim().is_empty()) {
-                        Some(t) => format!("```\n{t}\n```\n"),
-                        None => return,
-                    },
-                };
-                cx.emit(TerminalViewEvent::NoteBlock(text));
-            }
             BlockMenuItem::CopyCommand
             | BlockMenuItem::CopyOutput
             | BlockMenuItem::Rerun
@@ -1518,8 +1499,7 @@ impl TerminalView {
             | BlockMenuItem::AttachSelection
             | BlockMenuItem::Paste
             | BlockMenuItem::Find
-            | BlockMenuItem::ClearScreen
-            | BlockMenuItem::Note => {}
+            | BlockMenuItem::ClearScreen => {}
         }
     }
 
@@ -1915,19 +1895,6 @@ impl TerminalView {
     pub fn rerun_last(&mut self, _: &RerunLast, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(command) = self.state.last_command() {
             self.run_text(command, cx);
-        }
-    }
-
-    /// The palette's "Keep last block as a note": the last finished command's block (the one
-    /// before the newest prompt) as a note tile beside the shell; nothing without one.
-    pub fn note_last_block(
-        &mut self,
-        _: &NoteLastBlock,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(block) = self.state.last_block() {
-            cx.emit(TerminalViewEvent::NoteBlock(block_note(&block)));
         }
     }
 
@@ -4138,7 +4105,6 @@ impl Render for TerminalView {
             .on_action(cx.listener(Self::next_prompt))
             .on_action(cx.listener(Self::copy_last_output))
             .on_action(cx.listener(Self::rerun_last))
-            .on_action(cx.listener(Self::note_last_block))
             .on_action(cx.listener(Self::copy_block_output))
             .on_action(cx.listener(Self::attach_block))
             .on_action(cx.listener(Self::attach_selection))
@@ -4352,8 +4318,6 @@ enum BlockMenuItem {
     CopyOutput,
     /// Type the command again and press ↩.
     Rerun,
-    /// The block as a note tile beside the shell: the command runnable, the output under it.
-    Note,
     /// The block into an agent's draft as context.
     Attach,
     /// The selection into an agent's draft as context.
@@ -4415,36 +4379,12 @@ pub(super) fn selection_context(text: &str, block: Option<&CommandBlock>) -> Str
     format!("{from}\n{fence}\n{text}\n{fence}\n")
 }
 
-/// A command block as a note: the command as a heading and a runnable `sh` fence, the
-/// output as a plain fence under it; either half alone when the block has only that.
-#[must_use]
-pub(super) fn block_note(block: &CommandBlock) -> String {
-    let mut text = String::new();
-    if let Some(command) = &block.command {
-        text.push_str("# ");
-        text.push_str(command.lines().next().unwrap_or_default());
-        text.push_str("\n\n```sh\n");
-        text.push_str(command);
-        text.push_str("\n```\n");
-    }
-    if !block.output.is_empty() {
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str("```\n");
-        text.push_str(&block.output);
-        text.push_str("\n```\n");
-    }
-    text
-}
-
 impl BlockMenuItem {
     const fn key(self) -> &'static str {
         match self {
             Self::CopyCommand => "copy-command",
             Self::CopyOutput => "copy-output",
             Self::Rerun => "rerun",
-            Self::Note => "note",
             Self::Attach => "attach",
             Self::AttachSelection => "attach-selection",
             Self::SelectBlock => "select-block",
@@ -4460,7 +4400,6 @@ impl BlockMenuItem {
             Self::CopyCommand => "Copy command",
             Self::CopyOutput => "Copy output",
             Self::Rerun => "Rerun",
-            Self::Note => "Save as note",
             Self::Attach => "Attach to agent",
             Self::AttachSelection => "Attach selection to agent",
             Self::SelectBlock => "Select block",
@@ -5954,7 +5893,6 @@ mod tests {
             "Copy command",
             "Copy output",
             "Rerun",
-            "Save as note",
             "Select block",
             "Paste",
             "Find…",
@@ -5980,26 +5918,6 @@ mod tests {
         assert_eq!(drain_input(&mut rx), ["paste:seq 2", "enter"]);
         view.update(cx, |view, cx| view.paste("seq 3".to_owned(), cx));
         assert_eq!(drain_input(&mut rx), ["paste:seq 3"], "typed, not run");
-
-        let notes = Rc::new(RefCell::new(Vec::new()));
-        let seen = Rc::clone(&notes);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::NoteBlock(text) = event {
-                    seen.borrow_mut().push(text.clone());
-                }
-            })
-            .detach();
-        });
-        right_click(cx);
-        pick(cx, "note");
-        assert_eq!(notes.borrow().as_slice(), ["# seq 2\n\n```sh\nseq 2\n```\n\n```\n1\n2\n```\n"]);
-        assert!(drain_input(&mut rx).is_empty(), "a note is not typed into the shell");
-        // The palette's line needs no click on a row: the last finished block.
-        cx.update(|window, cx| window.dispatch_action(Box::new(NoteLastBlock), cx));
-        cx.run_until_parked();
-        assert_eq!(notes.borrow().len(), 2);
-        assert_eq!(notes.borrow()[1], "# seq 2\n\n```sh\nseq 2\n```\n\n```\n1\n2\n```\n");
 
         right_click(cx);
         pick(cx, "select-block");
@@ -6307,25 +6225,10 @@ mod tests {
         let tree = cx.update(|window, _cx| crate::a11y::tree(window));
         let items: Vec<_> =
             tree.iter().filter(|n| n.role == "MenuItem").filter_map(|n| n.label.clone()).collect();
-        assert_eq!(items, ["Copy", "Save as note", "Paste", "Find…", "Clear screen"]);
+        assert_eq!(items, ["Copy", "Paste", "Find…", "Clear screen"]);
         pick(cx, "copy");
         let text = cx.update(|_, cx| cx.read_from_clipboard().and_then(|i| i.text()));
         assert_eq!(text.as_deref(), Some("second"));
-
-        // The selection, fenced, is what the note keeps.
-        let events = Rc::new(RefCell::new(Vec::new()));
-        let seen = Rc::clone(&events);
-        cx.update(|_window, cx| {
-            cx.subscribe(&view, move |_view, event, _cx| {
-                if let TerminalViewEvent::NoteBlock(text) = event {
-                    seen.borrow_mut().push(format!("note:{text}"));
-                }
-            })
-            .detach();
-        });
-        right_click(cx);
-        pick(cx, "note");
-        assert_eq!(events.borrow().as_slice(), ["note:```\nsecond\n```\n"]);
 
         // ⇧-arrows move the selection's head; the shell sees none of them. Without a
         // selection the same keys are the shell's.
@@ -6409,25 +6312,6 @@ mod tests {
         });
         assert_eq!(view.read_with(cx, |v, _| v.took(LineIndex(4))), None, "a new epoch forgets");
         assert_eq!(captions(cx), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_block_note_keeps_the_half_it_has() {
-        let block = |command: Option<&str>, output: &str| CommandBlock {
-            prompt: LineIndex(0),
-            end: LineIndex(1),
-            exit: None,
-            command: command.map(str::to_owned),
-            output: output.to_owned(),
-        };
-        assert_eq!(block_note(&block(Some("ls"), "")), "# ls\n\n```sh\nls\n```\n");
-        assert_eq!(block_note(&block(None, "a\nb")), "```\na\nb\n```\n");
-        assert_eq!(
-            block_note(&block(Some("for x in 1 2\ndo echo $x\ndone"), "1\n2")),
-            "# for x in 1 2\n\n```sh\nfor x in 1 2\ndo echo $x\ndone\n```\n\n```\n1\n2\n```\n",
-            "a multi-line command is headed by its first line"
-        );
-        assert_eq!(block_note(&block(None, "")), "");
     }
 
     /// A block as an agent's context says what ran and how it ended, then fences its output

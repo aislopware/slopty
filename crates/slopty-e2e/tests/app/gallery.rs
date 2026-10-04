@@ -356,22 +356,25 @@ fn pdf(pages: &[&str]) -> Vec<u8> {
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_workspace_of_columns_in_both_themes() {
-    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let mut stack = Stack::launch_at_home("e2e-worker").await.unwrap();
     let dir = stack.dir.path().to_path_buf();
+    let home = std::path::PathBuf::from(stack.home().unwrap());
     let drv = &mut stack.driver;
     drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(drv).await;
 
-    drv.keys("cmd-shift-n").await.unwrap();
-    drv.wait_for("the note", STEP, |d| d.item("note").is_some()).await.unwrap();
-    drv.type_text("Release\n\n- [x] build the bundle\n- [ ] notarise\n- [ ] tag").await.unwrap();
-    drv.open(&["cat"], 1).await.unwrap();
-    // The note commits its text on a timer; its title follows the first line.
-    drv.wait_for("a third column, the note titled", STEP, |d| {
-        d.items.len() == 3 && d.a11y_node("Heading", Some("note Release")).is_some()
+    // A Markdown checklist at home, opened on its preview: like the shell, it names no folder.
+    let release = home.join("RELEASE.md");
+    let checklist = "# Release\n\n- [x] build the bundle\n- [ ] notarise\n- [ ] tag\n";
+    std::fs::write(&release, checklist).unwrap();
+    drv.open_file(&release.display().to_string(), None).await.unwrap();
+    drv.wait_for("the checklist, previewed", STEP, |d| {
+        d.item("file").and_then(|i| i.file.as_ref()).is_some_and(|f| f.previewing)
     })
     .await
     .unwrap();
+    drv.open(&["cat"], 1).await.unwrap();
+    drv.wait_for("a third column", STEP, |d| d.items.len() == 3).await.unwrap();
     drv.keys("cmd-alt-left").await.unwrap();
     drv.keys("cmd-alt-left").await.unwrap();
     let dump = drv

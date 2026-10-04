@@ -834,13 +834,6 @@ mod golden {
             }),
         );
         snap(
-            "client_item_set_note",
-            &ClientMsg::Items(slopty_proto::items::ItemOp::SetNote {
-                id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7a)),
-                text: "# Plan\n".to_owned(),
-            }),
-        );
-        snap(
             "client_item_set_url",
             &ClientMsg::Items(slopty_proto::items::ItemOp::SetUrl {
                 id: slopty_core::ItemId::from_uuid(Uuid::from_u128(0x7b)),

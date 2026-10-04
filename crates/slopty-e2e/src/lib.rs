@@ -772,9 +772,6 @@ pub struct ItemInfo {
     pub bounds: [f32; 4],
     /// The focused tile.
     pub active: bool,
-    /// A note's text, as the document holds it.
-    #[serde(default)]
-    pub note: Option<String>,
     /// A file tile's path and what it shows.
     #[serde(default)]
     pub file: Option<FileItemInfo>,
@@ -825,6 +822,9 @@ pub struct FileItemInfo {
     /// The editor's text, when it is short ([`FILE_TEXT_SHOWN`] bytes or fewer).
     #[serde(default)]
     pub text: Option<String>,
+    /// A Markdown file shows its preview, not its source.
+    #[serde(default)]
+    pub previewing: bool,
 }
 
 /// The longest file text a dump carries: enough for a test's file, and no dump of a large one.

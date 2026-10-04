@@ -181,8 +181,7 @@ impl WorkspaceView {
                     .map(|(dir, _)| if dir.is_empty() { "/" } else { dir }.to_owned())
             }),
             ItemKind::Folder { path } => Some(path.clone()),
-            ItemKind::Note { .. }
-            | ItemKind::Window { .. }
+            ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
             | ItemKind::Review { .. }
@@ -254,7 +253,6 @@ impl WorkspaceView {
                     }
                     continue;
                 }
-                ItemKind::Note { text } => (lines(text), TileOpen::Item(id)),
                 ItemKind::File { .. } => {
                     let Some(view) = self.files.get(&id) else { continue };
                     (lines(&view.read(cx).text(cx)), TileOpen::File(id))
@@ -320,7 +318,6 @@ impl WorkspaceView {
                 self.go_to(item, cx);
                 self.pending_find_file = Some((item, query));
             }
-            TileOpen::Item(item) => self.go_to(item, cx),
         }
     }
 }

@@ -7,7 +7,7 @@ Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
 Button │ Terminal
 Button │ Close tile
-Button │ Release
+Button │ RELEASE.md
 Button │ Close tile
 Button │ Terminal 2
 Button │ Close tile
@@ -24,12 +24,15 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group (focused)
 Terminal │ shell │ ~ %
-Group │ Release
-Heading │ note Release
-Status │ 1 of 3 done
+Group │ RELEASE.md
+Heading │ file RELEASE.md
+Button │ Drag the file out
+Label │ home
+Button │ Show source
 Button │ Fullscreen tile
 Button │ Close tile
-Document │ Note │ Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
+Document │ File $SCRATCH/home/RELEASE.md │ 5 lines, Markdown
+Document │ Preview of $SCRATCH/home/RELEASE.md │ # Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
 CheckBox │ Done: build the bundle
 CheckBox │ To do: notarise
 CheckBox │ To do: tag

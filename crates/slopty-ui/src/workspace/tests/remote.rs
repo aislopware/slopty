@@ -390,7 +390,7 @@ fn the_worker_clipboard_is_watched_only_while_its_tile_has_the_keyboard(cx: &mut
     view.update_in(cx, |v, window, cx| v.new_note(&NewNote, window, cx));
     cx.run_until_parked();
     let sent = studio.drain();
-    assert_eq!(watches(&sent), [false], "a note is not the worker's");
+    assert_eq!(watches(&sent), [false], "a file tile is not the worker's");
 
     view.update_in(cx, |v, _window, cx| v.focus_tile(tile, cx));
     cx.run_until_parked();
@@ -929,7 +929,7 @@ fn an_upload_outlives_its_workers_link(cx: &mut TestAppContext) {
 fn a_drop_goes_where_the_tile_can_take_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (studio, mut calls, _board) = connect_remote(&view, cx);
-    let note = arrives(&view, cx, &studio, ItemKind::Note { text: "n".to_owned() }, 1);
+    let note = arrives(&view, cx, &studio, ItemKind::File { path: "/w/n.md".to_owned() }, 1);
     let window =
         arrives(&view, cx, &studio, ItemKind::Window { window: slopty_core::WindowId(9) }, 2);
     let dir = tempfile::tempdir().unwrap();
@@ -1075,7 +1075,7 @@ fn a_page_on_any_other_host_loads_through_the_workers_proxy(cx: &mut TestAppCont
 fn a_drops_landing_goes_once_nothing_uploads_from_it(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let (studio, mut calls, _board) = connect_remote(&view, cx);
-    let note = arrives(&view, cx, &studio, ItemKind::Note { text: "n".to_owned() }, 1);
+    let note = arrives(&view, cx, &studio, ItemKind::File { path: "/w/n.md".to_owned() }, 1);
     let window =
         arrives(&view, cx, &studio, ItemKind::Window { window: slopty_core::WindowId(9) }, 2);
     let landing = |name: &str| {

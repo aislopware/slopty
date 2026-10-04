@@ -53,7 +53,7 @@ litemap = { version = "0.8", default-features = false, features = ["alloc"] }
 log = { version = "0.4", default-features = false, features = ["kv_unstable_serde"] }
 memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFByteOrder", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFError", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFURL", "std"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["CFArray", "CFBase", "CFByteOrder", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFError", "CFMachPort", "CFNumber", "CFRunLoop", "CFString", "CFTimeZone", "CFURL", "std"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGAffineTransform", "CGBase", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataConsumer", "CGDataProvider", "CGDirectDisplay", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry", "CGImage", "CGPDFDocument", "CGPDFPage", "CGRemoteOperation", "CGWindow", "CGWindowLevel", "libc", "std"] }
 once_cell = { version = "1" }
 potential_utf = { version = "0.1", default-features = false, features = ["alloc", "zerovec"] }

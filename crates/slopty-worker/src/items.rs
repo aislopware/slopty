@@ -19,8 +19,6 @@ use slopty_proto::items::{FACTS_MAX, Item, ItemKind, ItemOp, ItemSync, NAME_MAX,
 
 use crate::WorkerError;
 
-/// The longest note text accepted, in bytes.
-pub const NOTE_MAX: usize = 64 * 1024;
 /// The longest file path accepted, in bytes.
 pub const PATH_MAX: usize = 4096;
 /// The longest browser address accepted, in bytes.
@@ -56,10 +54,17 @@ struct Inner {
 
 impl ItemStore {
     /// Load from `path`, or start empty when it does not exist.
+    ///
+    /// One item that does not decode (a kind this build no longer has, a field out of shape)
+    /// is dropped with a warning and the rest are kept; the next write saves only those. A
+    /// file that is not a registry at all is renamed aside, never deleted, and the store starts
+    /// empty: a worker never refuses to start over what it holds.
+    ///
+    /// # Errors
+    /// The file is there and cannot be read.
     pub fn open(path: &Path) -> Result<Self, WorkerError> {
         let registry = match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice::<Registry>(&bytes)
-                .map_err(|e| WorkerError::Items(format!("parse {}: {e}", path.display())))?,
+            Ok(bytes) => read_registry(path, &bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Registry::default(),
             Err(e) => return Err(WorkerError::Items(format!("read {}: {e}", path.display()))),
         };
@@ -224,6 +229,49 @@ impl Inner {
     }
 }
 
+/// The registry as kept on disk, each item still undecoded.
+#[derive(Deserialize)]
+struct Kept {
+    #[serde(default)]
+    version: u64,
+    #[serde(default)]
+    items: BTreeMap<String, serde_json::Value>,
+}
+
+/// The registry in `bytes`, read from `path`: every item that decodes, and a warning for each
+/// that does not. Bytes that are no registry at all are moved aside to
+/// `<path>.unreadable-<wall ms>`, and the registry starts empty.
+fn read_registry(path: &Path, bytes: &[u8]) -> Registry {
+    let kept = match serde_json::from_slice::<Kept>(bytes) {
+        Ok(kept) => kept,
+        Err(error) => {
+            let mut aside = path.as_os_str().to_owned();
+            aside.push(format!(".unreadable-{}", slopty_core::WallMs::now().as_millis()));
+            let moved = std::fs::rename(path, &aside);
+            tracing::warn!(
+                path = %path.display(),
+                aside = %Path::new(&aside).display(),
+                %error,
+                moved = moved.is_ok(),
+                "items unreadable: moved aside, starting empty"
+            );
+            return Registry::default();
+        }
+    };
+    let items = kept
+        .items
+        .into_iter()
+        .filter_map(|(id, value)| match serde_json::from_value::<Item>(value) {
+            Ok(item) => Some((item.id, item)),
+            Err(error) => {
+                tracing::warn!(%id, %error, "an item that does not decode is dropped");
+                None
+            }
+        })
+        .collect();
+    Registry { version: kept.version, items }
+}
+
 /// Reject nonsense before it reaches the registry.
 fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
     Ok(match op {
@@ -242,10 +290,6 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
             ItemOp::SetFact { id, key, value }
         }
         ItemOp::Rename { id, name } => ItemOp::Rename { id, name: clean_name(name)? },
-        ItemOp::SetNote { id, text } => {
-            check_note(&text)?;
-            ItemOp::SetNote { id, text }
-        }
         ItemOp::SetUrl { url, .. } if !web_address(&url) => {
             return Err(WorkerError::Items("bad url".to_owned()));
         }
@@ -258,7 +302,6 @@ fn sanitize(op: ItemOp) -> Result<ItemOp, WorkerError> {
 
 fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
     match kind {
-        ItemKind::Note { text } => check_note(text),
         ItemKind::File { path } if !good_path(path) => {
             Err(WorkerError::Items("bad file path".to_owned()))
         }
@@ -282,13 +325,6 @@ fn check_kind(kind: &ItemKind) -> Result<(), WorkerError> {
 /// A path a file or folder item may name: something, [`PATH_MAX`] bytes at most.
 const fn good_path(path: &str) -> bool {
     !path.is_empty() && path.len() <= PATH_MAX
-}
-
-fn check_note(text: &str) -> Result<(), WorkerError> {
-    if text.len() > NOTE_MAX {
-        return Err(WorkerError::Items("note too long".to_owned()));
-    }
-    Ok(())
 }
 
 /// A name is what the human typed, trimmed; blank is no name at all.
@@ -340,7 +376,6 @@ fn apply_in(registry: &mut Registry, op: &ItemOp) -> Result<(), WorkerError> {
         // An edit that changes nothing is still taken and broadcast: the delta is how the
         // proposer hears its op went through.
         ItemOp::Rename { id, .. }
-        | ItemOp::SetNote { id, .. }
         | ItemOp::SetUrl { id, .. }
         | ItemOp::SetFolder { id, .. }
         | ItemOp::SetFact { id, .. } => {
@@ -419,41 +454,41 @@ mod tests {
         assert!(matches!(err, WorkerError::Items(_)), "{err:?}");
         assert_eq!(store.get(id).unwrap().name.as_deref(), Some(long.as_str()), "kept");
 
-        let note = |name: &str| Item {
+        let file = |name: &str| Item {
             id: ItemId::new(),
-            kind: ItemKind::Note { text: String::new() },
+            kind: ItemKind::File { path: "/w/PLAN.md".to_owned() },
             name: Some(name.to_owned()),
             facts: BTreeMap::new(),
         };
-        let fresh = added(store.apply(ItemOp::Add(note(" plan ")), by).unwrap());
+        let fresh = added(store.apply(ItemOp::Add(file(" plan ")), by).unwrap());
         assert_eq!(fresh.name.as_deref(), Some("plan"));
-        let err = store.apply(ItemOp::Add(note(&"n".repeat(NAME_MAX + 1))), by).unwrap_err();
+        let err = store.apply(ItemOp::Add(file(&"n".repeat(NAME_MAX + 1))), by).unwrap_err();
         assert!(matches!(err, WorkerError::Items(_)), "{err:?}");
     }
 
-    /// Two clients each holding the same stale copy of a note, one renaming it and the other
-    /// editing its text, both land: each op carries only its own field.
+    /// Two clients each holding the same stale copy of a page, one renaming it and the other
+    /// pointing it elsewhere, both land: each op carries only its own field.
     #[test]
-    fn a_rename_and_a_note_edit_from_two_clients_both_survive() {
+    fn a_rename_and_an_address_from_two_clients_both_survive() {
         let (_dir, store) = store();
         let (mac, ipad) = (ClientId::new(), ClientId::new());
-        let note = Item {
+        let page = Item {
             id: ItemId::new(),
-            kind: ItemKind::Note { text: "draft".to_owned() },
+            kind: ItemKind::Browser { url: "http://localhost:3000/".to_owned() },
             name: None,
             facts: BTreeMap::new(),
         };
-        let _added = store.apply(ItemOp::Add(note.clone()), mac).unwrap();
-        let stale = note;
+        let _added = store.apply(ItemOp::Add(page.clone()), mac).unwrap();
+        let stale = page;
         let rename = ItemOp::Rename { id: stale.id, name: Some("plan".to_owned()) };
         let renamed = store.apply(rename, ipad).unwrap();
         assert!(matches!(renamed, ItemSync::Delta { by, .. } if by == ipad));
-        let edit = ItemOp::SetNote { id: stale.id, text: "draft, then more".to_owned() };
+        let edit = ItemOp::SetUrl { id: stale.id, url: "http://localhost:3000/docs".to_owned() };
         let edited = store.apply(edit, mac).unwrap();
         assert!(matches!(edited, ItemSync::Delta { version: 3, by, .. } if by == mac));
         let now = store.get(stale.id).unwrap();
         assert_eq!(now.name.as_deref(), Some("plan"));
-        assert_eq!(now.kind, ItemKind::Note { text: "draft, then more".to_owned() });
+        assert_eq!(now.kind, ItemKind::Browser { url: "http://localhost:3000/docs".to_owned() });
     }
 
     /// An id the registry holds cannot be added again, so a stale copy put back never
@@ -551,36 +586,6 @@ mod tests {
         assert_eq!(reopened.get(shown.id), Some(shown));
     }
 
-    /// A note's text is set only on a note, is bounded like a new note's, and an unknown item
-    /// is refused.
-    #[test]
-    fn a_note_edit_takes_only_a_note_and_is_bounded() {
-        let (_dir, store) = store();
-        let by = ClientId::new();
-        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
-        let set = |id, text: String| ItemOp::SetNote { id, text };
-        let err = store.apply(set(shell.id, "hi".to_owned()), by).unwrap_err();
-        assert!(matches!(&err, WorkerError::Items(m) if m == "not a note"), "{err:?}");
-        assert_eq!(store.get(shell.id), Some(shell), "untouched");
-        let err = store.apply(set(ItemId::new(), String::new()), by).unwrap_err();
-        assert!(matches!(err, WorkerError::NoSuchItem), "{err:?}");
-
-        let note = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Note { text: String::new() },
-            name: None,
-            facts: BTreeMap::new(),
-        };
-        let _added = store.apply(ItemOp::Add(note.clone()), by).unwrap();
-        store.apply(set(note.id, "n".repeat(NOTE_MAX)), by).unwrap();
-        let err = store.apply(set(note.id, "n".repeat(NOTE_MAX + 1)), by).unwrap_err();
-        assert!(matches!(&err, WorkerError::Items(m) if m == "note too long"), "{err:?}");
-        let kept = store.get(note.id).unwrap().kind;
-        assert_eq!(kept, ItemKind::Note { text: "n".repeat(NOTE_MAX) });
-        let err = store.apply(ItemOp::Rename { id: ItemId::new(), name: None }, by).unwrap_err();
-        assert!(matches!(err, WorkerError::NoSuchItem), "{err:?}");
-    }
-
     #[test]
     fn an_unknown_item_is_refused() {
         let (_dir, store) = store();
@@ -597,19 +602,72 @@ mod tests {
         assert_eq!(items[0].name.as_deref(), Some("dev"));
     }
 
-    /// A store is unreadable when its path is a directory and refused when its registry
-    /// does not parse; only a missing file starts empty.
+    /// A path that cannot be read is refused; only a missing file starts empty without a word.
     #[test]
-    fn an_unreadable_path_and_a_bad_registry_are_refused() {
+    fn an_unreadable_path_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let err = ItemStore::open(dir.path()).unwrap_err();
         assert!(matches!(&err, WorkerError::Items(m) if m.starts_with("read ")), "{err:?}");
-        let bad = dir.path().join("bad.json");
-        std::fs::write(&bad, b"{ not json").unwrap();
-        let err = ItemStore::open(&bad).unwrap_err();
-        assert!(matches!(&err, WorkerError::Items(m) if m.starts_with("parse ")), "{err:?}");
         let fresh = ItemStore::open(&dir.path().join("none.json")).unwrap();
         assert_eq!(fresh.version(), 0);
+    }
+
+    /// A file that is no registry at all is moved aside, kept whole, and the store starts
+    /// empty and writes a fresh one.
+    #[test]
+    fn a_registry_that_does_not_parse_is_moved_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("items.json");
+        std::fs::write(&path, b"{ not json").unwrap();
+        let store = ItemStore::open(&path).unwrap();
+        assert_eq!((store.version(), store.items().len()), (0, 0));
+        let aside: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with("items.json.unreadable-"))
+            .collect();
+        assert_eq!(aside.len(), 1, "{aside:?}");
+        let kept = std::fs::read(dir.path().join(&aside[0])).unwrap();
+        assert_eq!(kept, b"{ not json", "never deleted");
+        let shell = added(store.ensure_terminal(SessionId::new(), ClientId::new()).unwrap());
+        store.flush();
+        assert_eq!(ItemStore::open(&path).unwrap().get(shell.id), Some(shell));
+    }
+
+    /// An item this build cannot decode (a note, from before notes were files) is dropped;
+    /// the items beside it, and the version, are kept, and the next write holds only them.
+    #[test]
+    fn an_item_that_does_not_decode_is_dropped_and_the_rest_kept() {
+        let (dir, store) = store();
+        let by = ClientId::new();
+        let shell = added(store.ensure_terminal(SessionId::new(), by).unwrap());
+        let page = Item {
+            id: ItemId::new(),
+            kind: ItemKind::Browser { url: "http://localhost:3000/".to_owned() },
+            name: Some("docs".to_owned()),
+            facts: BTreeMap::new(),
+        };
+        let _added = store.apply(ItemOp::Add(page.clone()), by).unwrap();
+        store.flush();
+        let path = dir.path().join("items.json");
+        let mut on_disk: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let note = ItemId::new();
+        on_disk["items"][note.to_string()] = serde_json::json!({
+            "id": note, "kind": { "Note": { "text": "plan" } }, "name": null, "facts": {}
+        });
+        std::fs::write(&path, serde_json::to_vec(&on_disk).unwrap()).unwrap();
+
+        let reopened = ItemStore::open(&path).unwrap();
+        assert_eq!(reopened.version(), store.version(), "the version kept");
+        assert_eq!(reopened.get(shell.id), Some(shell));
+        assert_eq!(reopened.get(page.id), Some(page.clone()));
+        assert_eq!(reopened.get(note), None, "the note dropped");
+        let renamed = ItemOp::Rename { id: page.id, name: None };
+        let _renamed = reopened.apply(renamed, by).unwrap();
+        reopened.flush();
+        let written = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+        assert!(!written.contains("Note"), "the next write holds only the good items: {written}");
     }
 
     /// Without a runtime every change is on disk before the call returns, a removal too.
@@ -663,17 +721,13 @@ mod tests {
         assert_eq!(store.inner.writes.load(Ordering::SeqCst), 1, "nothing left to flush");
     }
 
-    /// A note and a file path have their byte limits.
+    /// A file path has its byte limit.
     #[test]
-    fn notes_and_paths_are_bounded() {
+    fn paths_are_bounded() {
         let (_dir, store) = store();
         let by = ClientId::new();
         let item =
             |kind: ItemKind| Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() };
-        let note = |text: String| item(ItemKind::Note { text });
-        store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX))), by).unwrap();
-        let err = store.apply(ItemOp::Add(note("n".repeat(NOTE_MAX + 1))), by).unwrap_err();
-        assert!(matches!(&err, WorkerError::Items(m) if m == "note too long"), "{err:?}");
         let file = |path: String| item(ItemKind::File { path });
         store.apply(ItemOp::Add(file("/".repeat(PATH_MAX))), by).unwrap();
         for path in [String::new(), "/".repeat(PATH_MAX + 1)] {

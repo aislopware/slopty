@@ -379,7 +379,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   windows opened later. First reading on loopback: a 450×250 @0.50 idle Ghostty window ran
   54 fps at 0.11 Mb/s, RTT 1.7 ms, zero loss.
 
-- ✅ **Notes are shared text, last writer wins.** `ItemKind::Note { text }` was already in the
+- ❌ **Notes are shared text, last writer wins** (superseded 2026-10-05 by "A note is a
+  Markdown file"). `ItemKind::Note { text }` was already in the
   document; the client now edits it in place with gpui-kit's `TextareaState` (`NoteView`).
   Edits go to the host after a 400 ms typing pause and on blur (as `SetNote`, the text alone,
   since 2026-09-27: multi-client.md, "An item change carries only the field it changes"); a remote change is applied only while this client is not editing. No merge: notes are
@@ -6580,3 +6581,21 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   file facts and never from the view. Reading the view would rebuild the strip at each caret
   blink, which `a_file_tiles_caret_blinks_without_building_the_strip` caught. This is the base
   the notes merge into.
+- ✅ **A note is a Markdown file** (2026-10-05). After the feature audit (merge notes into file
+  tiles), `ItemKind::Note`, `ItemOp::SetNote`, `slopty-ui::note` and its last-writer-wins sync
+  are gone, with "Keep last block as a note" and the block menu's "Save as note". A note is now
+  a Markdown file on the worker in a file tile, read in its preview ("A Markdown file opens on
+  its preview"): one editor and one sync model, and an agent reads and writes a note as the file
+  it is. ⌘⇧N, "+"'s "New note" and the palette open a new file in the focused shell's directory
+  on the target worker, else the worker's home, named for the moment on this device's clock
+  (`note-2026-10-05-143210.md`; to the second, so two notes never share a file). It opens on its
+  source with the keyboard, and nothing is on disk until ⌘S, as with any new file. The time is
+  read through `CFTimeZone`'s offset and `slopty_core::WallMs::civil`. The project's directory
+  was weighed against a notes folder in the worker's data directory. Beside the work, an agent
+  and the person find the note where they are working, and a note that is not wanted is one
+  delete in a folder tile. A checklist's progress no longer shows in the header and the
+  navigator, since that was read from the note's text in the registry. A file's text is not in
+  the registry, and working it out for every Markdown tile on each change was not worth a
+  readout. No migration: a worker whose `items.json` still holds a note drops that one item
+  with a warning on its next start and keeps every other ("A worker starts over any item store"
+  in `workers.md`).

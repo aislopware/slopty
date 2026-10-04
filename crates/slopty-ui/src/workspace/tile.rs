@@ -1,5 +1,5 @@
 //! One tile: the header (kind, title, place, status, the actions shown on hover or focus) and
-//! the body (a terminal, a remote window or display, a note, a file tile), with the pill that
+//! the body (a terminal, a remote window or display, a file tile), with the pill that
 //! says when the body cannot show what it should.
 
 use std::collections::HashMap;
@@ -130,14 +130,8 @@ pub const PAUSED: &str = "Paused off screen";
 pub const OPENING: &str = "Opening…";
 /// A file tile waiting for its text.
 pub const READING: &str = crate::file::READING;
-/// A note whose editor is not made yet.
-pub const NOTE: &str = "Note";
-
 /// What a review tile's header says, and its body while the review is on its way.
 pub const REVIEW: &str = "Review";
-
-/// How much of a note's first line the header shows.
-pub const NOTE_TITLE_CHARS: usize = 40;
 
 /// How the chrome is scaled this frame: `k`, the overview's zoom, and whether that zoom is
 /// in motion (chrome text then paints from the raster ladder).
@@ -165,60 +159,6 @@ struct Edges {
     right: bool,
     /// A tile is stacked below it in its column: it draws the divider on its bottom edge.
     below: bool,
-}
-
-/// A note's title, "note" while it is empty.
-///
-/// Its first non-empty line with Markdown's heading, list, quote and task marks stripped, cut
-/// to [`NOTE_TITLE_CHARS`]. How far its tasks got is context, not title: the header says it
-/// after the title, the navigator on the second line.
-#[must_use]
-pub fn note_title(text: &str) -> String {
-    let line = text
-        .lines()
-        .map(|l| l.trim().trim_start_matches(['#', '-', '*', '>', ' ']).trim())
-        .map(|l| {
-            ["[ ] ", "[x] ", "[X] "]
-                .iter()
-                .find_map(|mark| l.strip_prefix(mark))
-                .unwrap_or(l)
-                .trim()
-        })
-        .find(|l| !l.is_empty());
-    match line {
-        None => UNTITLED_NOTE.to_owned(),
-        Some(line) if line.chars().count() > NOTE_TITLE_CHARS => {
-            let cut: String = line.chars().take(NOTE_TITLE_CHARS).collect();
-            format!("{}…", cut.trim_end())
-        }
-        Some(line) => line.to_owned(),
-    }
-}
-
-/// An empty note's title.
-pub const UNTITLED_NOTE: &str = "Untitled note";
-
-/// How many of a note's task lines are ticked, and how many there are; `None` without any.
-#[must_use]
-pub fn note_progress(text: &str) -> Option<(usize, usize)> {
-    let (done, total) = crate::markdown::task_counts(text);
-    (total > 0).then_some((done, total))
-}
-
-/// What a note's header, row and palette line say of it, worked out once per text rather than
-/// once per frame: a note holds up to 64 KiB.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub(super) struct NoteFacts {
-    /// [`note_title`].
-    pub title: String,
-    /// [`note_progress`].
-    pub progress: Option<(usize, usize)>,
-}
-
-impl NoteFacts {
-    pub(super) fn of(text: &str) -> Self {
-        Self { title: note_title(text), progress: note_progress(text) }
-    }
 }
 
 /// A file tile's title: the file's name.
@@ -538,7 +478,6 @@ pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
         ItemKind::Thread { .. } => Glyph::Agent(AgentMark::Other),
         ItemKind::Window { .. } => Glyph::Icon(IconName::AppWindow),
         ItemKind::Display { .. } => Glyph::Icon(IconName::Monitor),
-        ItemKind::Note { .. } => Glyph::Icon(IconName::StickyNote),
         ItemKind::File { path } => Glyph::file(path),
         ItemKind::Folder { .. } => Glyph::Icon(IconName::Folder),
         ItemKind::Browser { .. } => Glyph::Icon(IconName::Globe),
@@ -546,26 +485,13 @@ pub(super) fn kind_icon(item: &Item, agent: Option<&str>) -> Glyph {
     }
 }
 
-/// A note's progress as its header counts it after the name: `1/3`.
-#[must_use]
-pub(super) fn note_count(done: usize, total: usize) -> String {
-    format!("{done}/{total}")
-}
-
-/// A note's progress as every list says it: `1 of 3 done`.
-#[must_use]
-pub(super) fn note_done(done: usize, total: usize) -> String {
-    format!("{done} of {total} done")
-}
-
-/// The word for what an item is: `terminal`, `window`, `display`, `note`, `file`, `folder`,
+/// The word for what an item is: `terminal`, `window`, `display`, `file`, `folder`,
 /// `browser`, `review`.
 pub(super) const fn kind_name(item: &Item) -> &'static str {
     match item.kind {
         ItemKind::Terminal { .. } => "terminal",
         ItemKind::Window { .. } => "window",
         ItemKind::Display { .. } => "display",
-        ItemKind::Note { .. } => "note",
         ItemKind::File { .. } => "file",
         ItemKind::Folder { .. } => "folder",
         ItemKind::Browser { .. } => "browser",
@@ -577,7 +503,7 @@ pub(super) const fn kind_name(item: &Item) -> &'static str {
 impl WorkspaceView {
     /// What a tile's title is placed by, the same in its header, its navigator row and its
     /// palette line: where a shell is, the folder a file is in, a page's address when the
-    /// title is not it, how far a note's tasks got. A window or display has none. Kept with
+    /// title is not it. A window or display has none. Kept with
     /// the titles ([`Self::number_twins`]).
     pub(super) fn tile_place(&self, item: &Item) -> Option<String> {
         match self.places.get(&item.id) {
@@ -596,9 +522,6 @@ impl WorkspaceView {
                 let host = page.short_url.split('/').next().unwrap_or_default();
                 (!host.is_empty() && (item.name.is_some() || page.titled)).then(|| host.to_owned())
             }),
-            ItemKind::Note { text } => {
-                self.note_progress_of(item.id, text).map(|(done, total)| note_done(done, total))
-            }
             ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Review { .. }
@@ -607,7 +530,7 @@ impl WorkspaceView {
     }
 
     /// What a header says without a name: the shell's title, the window's, "Display N", a
-    /// note's first line, a file's `name · parent`.
+    /// file's `name · parent`.
     pub(super) fn derived_title(&self, item: &Item) -> String {
         match &item.kind {
             ItemKind::Terminal { session } => self.terminal_title(*session),
@@ -615,10 +538,6 @@ impl WorkspaceView {
                 self.titles.get(&item.id).cloned().unwrap_or_else(|| format!("Window {}", window.0))
             }
             ItemKind::Display { display } => format!("Display {}", display.0),
-            ItemKind::Note { text } => self
-                .note_facts
-                .get(&item.id)
-                .map_or_else(|| note_title(text), |facts| facts.title.clone()),
             ItemKind::File { path } => file_title(path),
             ItemKind::Folder { path } => folder_title(path),
             ItemKind::Browser { url } => self
@@ -710,11 +629,6 @@ impl WorkspaceView {
         if self.derived.get(&item.id) != Some(&title) {
             cx.notify();
         }
-    }
-
-    /// How far note `id`'s tasks got, from its facts when they are worked out.
-    pub(super) fn note_progress_of(&self, id: ItemId, text: &str) -> Option<(usize, usize)> {
-        self.note_facts.get(&id).map_or_else(|| note_progress(text), |facts| facts.progress)
     }
 
     /// A terminal's title, the first that says something: the command it runs, a title its
@@ -1185,37 +1099,19 @@ impl WorkspaceView {
                 .child(text)
                 .into_any_element()
         });
-        // How far a note's tasks got, as a count after its name.
-        let tasks = match &item.kind {
-            ItemKind::Note { text } => self.note_progress_of(id, text),
-            _ => None,
-        };
-        let tasks = tasks.map(|(done, total)| {
-            kit::tabular(div())
-                .id("tasks")
-                .debug_selector(move || format!("tasks-{}", id.as_uuid()))
-                .role(Role::Status)
-                .aria_label(SharedString::from(format!("{done} of {total} done")))
-                .flex_none()
-                .text_size(px(theme.typography.small() * k))
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(note_count(done, total)))
-                .into_any_element()
-        });
         let readouts: Vec<gpui::AnyElement> =
-            badge.into_iter().chain(running).chain(finished).chain(tasks).collect();
+            badge.into_iter().chain(running).chain(finished).collect();
         let strip = self.trailing_strip(placed, readouts, face, k, cx);
         // The title's context: where a shell or a file is, a page's address when the title is
-        // not it, how far a note's tasks got. Muted, in the UI face as every header's context
+        // not it. Muted, in the UI face as every header's context
         // is, with no separator: the colour tells it from the title.
         let place = match &item.kind {
             ItemKind::Terminal { .. } => {
                 self.tile_place(item).and_then(|p| place_beside(p, &title))
             }
-            // How far a note's tasks got is a readout at the end, as a command's time is. The
-            // path bar right under a folder's header is where it is, every folder above it a
-            // click away; the parent beside the title said it twice, 20 pt apart.
-            ItemKind::Note { .. } | ItemKind::Folder { .. } => None,
+            // The path bar right under a folder's header is where it is, every folder above it
+            // a click away; the parent beside the title said it twice, 20 pt apart.
+            ItemKind::Folder { .. } => None,
             _ => self.tile_place(item),
         };
         // A directory keeps the folder it ends in.
@@ -1944,10 +1840,7 @@ impl WorkspaceView {
                     );
                 }
             }
-            ItemKind::Note { .. }
-            | ItemKind::File { .. }
-            | ItemKind::Review { .. }
-            | ItemKind::Thread { .. } => {}
+            ItemKind::File { .. } | ItemKind::Review { .. } | ItemKind::Thread { .. } => {}
         }
         actions
     }
@@ -2718,28 +2611,6 @@ impl WorkspaceView {
                     None => self.opening_body(placed.tile, item, k),
                 }
             }
-            ItemKind::Note { .. } => match self.notes.get(&item.id) {
-                Some(view) => {
-                    let (pad, text_size) = (theme.spacing.inset(), theme.typography.ui_size);
-                    let handed = Handed::Text { zoom: k, pad, size: text_size };
-                    self.hand_over(cx, view, handed, move |v, cx| {
-                        v.set_layout(k, pad, text_size, cx);
-                    });
-                    // Cached as a file tile is: a note's Markdown is laid out again only when
-                    // the note changes, not on every frame a shell or a stream draws. Focused,
-                    // the keyboard is in its editor, which the note watches.
-                    let body = self.body_view(view, placed, cx);
-                    div()
-                        .flex_1()
-                        .w_full()
-                        .overflow_hidden()
-                        .font_family(theme.typography.ui_family.clone())
-                        .text_color(hsla(theme.surfaces.text))
-                        .child(body)
-                        .into_any_element()
-                }
-                None => self.waiting_body(item, Wait::Loading(NOTE.into()), k),
-            },
             ItemKind::Browser { .. } => match self.browsers.get(&item.id) {
                 Some(view) => {
                     // Scaled, the page would lay itself out small: its picture shows instead.

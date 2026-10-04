@@ -1110,16 +1110,11 @@ impl Workspace {
                 ItemKind::Terminal { session } => ("terminal", Some(session.to_string())),
                 ItemKind::Window { .. } => ("window", None),
                 ItemKind::Display { .. } => ("display", None),
-                ItemKind::Note { .. } => ("note", None),
                 ItemKind::File { .. } => ("file", None),
                 ItemKind::Folder { .. } => ("folder", None),
                 ItemKind::Browser { .. } => ("browser", None),
                 ItemKind::Review { .. } => ("review", None),
                 ItemKind::Thread { .. } => ("thread", None),
-            };
-            let note = match &item.kind {
-                ItemKind::Note { text } => Some(text.clone()),
-                _ => None,
             };
             let file = match &item.kind {
                 ItemKind::File { path } => Some(FileItemInfo {
@@ -1146,6 +1141,7 @@ impl Workspace {
                         .file(item.id)
                         .map(|v| v.read(cx).text(cx))
                         .filter(|t| t.len() <= slopty_e2e::FILE_TEXT_SHOWN),
+                    previewing: view.file(item.id).is_some_and(|v| v.read(cx).previewing()),
                 }),
                 _ => None,
             };
@@ -1185,7 +1181,6 @@ impl Workspace {
                 pos: [pos.workspace, pos.column, pos.tile],
                 bounds,
                 active: view.focused() == Some(tile),
-                note,
                 file,
                 browser,
             });

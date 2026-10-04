@@ -536,7 +536,6 @@ mod tests {
     #[ignore = "live: cargo xtask e2e app"]
     async fn notes_and_the_width_keys_change_the_workspace_as_dumped() {
         let mut stack = Stack::launch("e2e-worker").await.unwrap();
-        let render_path = stack.path("note.png");
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         // A key sent before the first shell holds the keyboard reaches no action.
@@ -565,13 +564,17 @@ mod tests {
         drv.keys("enter").await.unwrap();
         let dump = drv
             .wait_for("a note, drawn", STEP, |d| {
-                d.item("note").is_some_and(|n| n.bounds[2] > 0.0)
+                d.item("file").is_some_and(|n| n.bounds[2] > 0.0)
                     && d.a11y_node("Dialog", Some("Commands")).is_none()
             })
             .await
             .unwrap();
-        // The note opened in a column right of the shell and has the focus.
-        let note = dump.item("note").unwrap().clone();
+        // The note, a Markdown file not on disk yet, opened in a column right of the shell and
+        // has the focus, in its source.
+        let note = dump.item("file").unwrap().clone();
+        let file = note.file.as_ref().unwrap();
+        let md = std::path::Path::new(&file.path).extension().is_some_and(|e| e == "md");
+        assert!(md && !file.previewing, "{file:?}");
         let shell = dump.item("terminal").unwrap().clone();
         assert!(note.active, "{dump:#?}");
         assert_eq!(note.pos[1], shell.pos[1] + 1, "{dump:#?}");
@@ -581,28 +584,20 @@ mod tests {
         drv.keys("cmd-r").await.unwrap();
         let dump = drv
             .wait_for("a wider note", STEP, |d| {
-                d.item("note").is_some_and(|n| n.bounds[2] > before[2] + 50.0)
+                d.item("file").is_some_and(|n| n.bounds[2] > before[2] + 50.0)
             })
             .await
             .unwrap();
-        let after = dump.item("note").unwrap().bounds;
+        let after = dump.item("file").unwrap().bounds;
         assert!((after[3] - before[3]).abs() < 1.0, "only the width moved: {before:?} → {after:?}");
         drv.keys("cmd-r").await.unwrap();
         drv.keys("cmd-r").await.unwrap();
         let dump = drv
             .wait_for("the note back at half", STEP, |d| {
-                d.item("note").is_some_and(|n| (n.bounds[2] - before[2]).abs() < 1.0)
+                d.item("file").is_some_and(|n| (n.bounds[2] - before[2]).abs() < 1.0)
             })
             .await
             .unwrap();
-
-        drv.wait_for("the first round trip", STEP, slopty_e2e::Dump::rtt_sampled).await.unwrap();
-
-        drv.wait_for("the carets at their prompts", STEP, slopty_e2e::Dump::prompts_settled)
-            .await
-            .unwrap();
-        let frame = drv.render(&render_path).await.unwrap();
-        assert_matches("note", &frame, TOLERANCE, &artifacts_dir()).unwrap();
 
         // The shell, a column left of the note, takes a name: ⌘E puts a field in its header,
         // ↩ keeps the name, the heading says it, and the shell has the keyboard back (⌘W

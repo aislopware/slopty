@@ -24,7 +24,7 @@ gpui-kit.workspace = true
 # already builds these decoders, so the binary grows by nothing.
 image = { workspace = true, features = [ "gif", "jpeg", "webp" ] }
 # A file tile's picture or PDF, decoded or drawn at the size the tile shows it (`file::decode`).
-objc2-core-foundation = { workspace = true, features = [ "CFData" ] }
+objc2-core-foundation = { workspace = true, features = [ "CFData", "CFDate", "CFTimeZone" ] }
 objc2-core-graphics = { workspace = true, features = [
     "CGAffineTransform",
     "CGBitmapContext",

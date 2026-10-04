@@ -1163,3 +1163,15 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   `slopty-workerd` `the_doctor_names_the_worker_and_whether_its_server_answers` (a stand-in
   server welcomes it, then drops it); `slopty-cli`
   `doctor_report_names_the_binary_and_flags_missing_permissions`.
+
+- ✅ **A worker starts over any item store** (2026-10-05). The item registry (`items.json`) was
+  read whole, so one item the build could not decode (a kind since removed, as notes were)
+  stopped the worker. `ItemStore::open` now reads the file as a version and a map of raw items
+  and decodes each item on its own. An item that does not decode is dropped with a warning that
+  names its id and the error. Every other item is kept with the version, and the next write
+  saves only those. Bytes that are not a registry at all are renamed aside to
+  `items.json.unreadable-<wall ms>`, never deleted, and the worker starts with an empty store.
+  Only a file that is there and cannot be read (a directory, no permission) still stops it. This
+  is resilience for the store in general, not a migration: nothing is converted. Tests:
+  `slopty-worker` `an_item_that_does_not_decode_is_dropped_and_the_rest_kept`,
+  `a_registry_that_does_not_parse_is_moved_aside`, `an_unreadable_path_is_refused`.

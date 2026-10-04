@@ -340,10 +340,10 @@ fn the_shell_in_front_is_reported_once_each_way(cx: &mut TestAppContext) {
     view.update_in(cx, |v, _w, cx| v.focus_tile(tile_a, cx));
     cx.run_until_parked();
     assert_eq!(focus_reports(&studio.drain()), [(b, false), (a, true)]);
-    let note = arrives(&view, cx, &studio, ItemKind::Note { text: String::new() }, 3);
+    let note = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w".into() }, 3);
     view.update_in(cx, |v, _w, cx| v.focus_tile(note, cx));
     cx.run_until_parked();
-    assert_eq!(focus_reports(&studio.drain()), [(a, false)], "a note is no shell");
+    assert_eq!(focus_reports(&studio.drain()), [(a, false)], "a folder is no shell");
 }
 
 /// A new link starts focused on nothing, so the shell in front is told again on it.

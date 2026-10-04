@@ -153,8 +153,8 @@ async fn a_multi_item_copy_arrives_as_its_items() {
 
 /// What this client copied is on the worker's pasteboard once a tile of the worker takes the
 /// focus, for anything there that reads the pasteboard rather than pastes with ⌘V: `pbpaste`,
-/// a menu's Paste, a program reading it itself. Copied while a note had the focus (so the
-/// worker was not watched), it is mirrored as the shell takes the focus back.
+/// a menu's Paste, a program reading it itself. Copied while a new note had the focus (a file
+/// tile: the worker was not watched), it is mirrored as the shell takes the focus back.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn the_focused_clients_copy_is_on_the_workers_pasteboard() {
@@ -165,7 +165,7 @@ async fn the_focused_clients_copy_is_on_the_workers_pasteboard() {
     watched(drv).await;
     drv.keys("cmd-shift-n").await.unwrap();
     drv.wait_for("a note focused, the worker no longer watched", STEP, |d| {
-        d.items.iter().any(|i| i.kind == "note" && i.active)
+        d.items.iter().any(|i| i.kind == "file" && i.active)
             && d.workers.iter().all(|w| !w.clipboard_watched)
     })
     .await

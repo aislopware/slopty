@@ -16,4 +16,4 @@ mod time;
 
 pub use id::{ClientId, DisplayId, ItemId, SessionId, StreamId, WindowId, WorkerId, XferId};
 pub use shell::shell_quote;
-pub use time::{Duration, MonoTime, WallMs};
+pub use time::{Civil, Duration, MonoTime, WallMs};

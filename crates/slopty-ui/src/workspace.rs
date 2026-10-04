@@ -100,12 +100,10 @@ use slopty_theme::Theme;
 pub(crate) use strip::{ADD_WORKER, NEW_AGENT, NEW_WORKSPACE, NO_WORKERS, NO_WORKERS_NEXT};
 #[cfg(test)]
 pub(crate) use tile::{
-    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, NOTE, OPENING, PAUSED,
-    READING, RECONNECTING, SESSION_ENDED, TAKE, TAKE_OVER,
+    ATTACHING, CLOSE_TILE, FULLSCREEN_TILE, HOOKS, INSTALL_HOOKS, MUTE, OPENING, PAUSED, READING,
+    RECONNECTING, SESSION_ENDED, TAKE, TAKE_OVER,
 };
-pub use tile::{
-    COPY_COMMAND, NOTE_TITLE_CHARS, UNTITLED_NOTE, file_title, note_progress, note_title,
-};
+pub use tile::{COPY_COMMAND, file_title};
 
 /// Chrome words the modules keep to themselves, for the sentence-case check: a waiting
 /// badge's description and what "+" is called.
@@ -116,7 +114,6 @@ use tokio::sync::mpsc;
 
 use crate::file::FileView;
 use crate::folder::FolderView;
-use crate::note::NoteView;
 use crate::palette::{CommandPalette, PaletteItem};
 use crate::picker::WindowPicker;
 use crate::screen::{ScreenFactory, ScreenView};
@@ -513,7 +510,7 @@ impl Worker {
 
     /// Send what the human did to the worker's items (an item op, a session closed): now if
     /// the worker is linked and has sent its snapshot, else when it next has, replayed over
-    /// that snapshot so the tile closed or the note written meanwhile stays as it was left.
+    /// that snapshot so the tile closed or the page moved meanwhile stays as it was left.
     fn send_or_queue(&mut self, msg: ClientMsg) {
         if self.is_linked() && !self.awaiting_snapshot {
             self.send(msg);
@@ -679,7 +676,6 @@ pub struct WorkspaceView {
     // each serves every worker.
     terminals: HashMap<SessionId, Entity<TerminalView>>,
     screens: HashMap<ItemId, Entity<ScreenView>>,
-    notes: HashMap<ItemId, Entity<NoteView>>,
     files: HashMap<ItemId, Entity<FileView>>,
     folders: HashMap<ItemId, Entity<FolderView>>,
     /// Paths asked of a worker to learn whether they are folders before a tile opens for them
@@ -690,7 +686,7 @@ pub struct WorkspaceView {
     browser_links: HashMap<ItemId, std::sync::Weak<dyn slopty_client::remote::Remote>>,
     /// The line a file tile opened at, for a view not made yet.
     file_focus: HashMap<ItemId, u32>,
-    /// A registry or a link changed since the notes, file tiles and pages were last matched
+    /// A registry or a link changed since the file tiles and pages were last matched
     /// to the items: the next frame matches them. Only then, since a frame comes with every
     /// terminal and video update, and the matching walks every item.
     items_dirty: bool,
@@ -722,8 +718,6 @@ pub struct WorkspaceView {
     /// own notify), a shell's command started or ended, a window was named. A frame another
     /// tile causes (an echo, a video frame) changes no title, and works nothing out.
     titles_dirty: bool,
-    /// Each note's title and task count, worked out when its text changes.
-    note_facts: HashMap<ItemId, tile::NoteFacts>,
     /// What the strip drew, for the handlers to read ([`strip::Drawn`]).
     drawn: Rc<strip::Drawn>,
     /// The navigator, the title bar and the status bar, each a view of its own.
@@ -849,7 +843,6 @@ pub struct WorkspaceView {
     faces: faces::Faces,
     /// The server's projects and their boards.
     projects: projects::ProjectsState,
-    pending_focus_note: Option<ItemId>,
     /// The number the next `OpenSession` goes under, for its answer to name.
     next_open: std::cell::Cell<slopty_proto::RequestId>,
     /// A file tile whose editor takes the keyboard on the next frame.
@@ -981,7 +974,6 @@ impl WorkspaceView {
             workers: BTreeMap::new(),
             terminals: HashMap::new(),
             screens: HashMap::new(),
-            notes: HashMap::new(),
             files: HashMap::new(),
             folders: HashMap::new(),
             probes: Vec::new(),
@@ -1000,7 +992,6 @@ impl WorkspaceView {
             derived: HashMap::new(),
             places: HashMap::new(),
             titles_dirty: true,
-            note_facts: HashMap::new(),
             drawn: Rc::default(),
             chrome: Chrome::new(cx),
             strip_host: {
@@ -1084,7 +1075,6 @@ impl WorkspaceView {
                     .collect(),
                 ..projects::ProjectsState::default()
             },
-            pending_focus_note: None,
             next_open: std::cell::Cell::new(1),
             pending_focus_file: None,
             pending_focus_folder: None,
@@ -1426,7 +1416,7 @@ impl WorkspaceView {
     }
 
     /// Swap the theme everywhere: every terminal (which re-fits its grid to the new font on
-    /// its next frame), every window's chrome, every note, file tile and the picker.
+    /// its next frame), every window's chrome, every file tile and the picker.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.base_theme = theme;
         self.apply_font(cx);
@@ -1448,9 +1438,6 @@ impl WorkspaceView {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.screens.values() {
-            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
-        }
-        for view in self.notes.values() {
             view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         for view in self.files.values() {
@@ -1568,7 +1555,6 @@ impl WorkspaceView {
             ("workers.queued", per_worker(|w| w.queued.len())),
             ("terminals", self.terminals.len()),
             ("screens", self.screens.len()),
-            ("notes", self.notes.len()),
             ("files", self.files.len()),
             ("folders", self.folders.len()),
             ("probes", self.probes.len()),
@@ -1580,7 +1566,6 @@ impl WorkspaceView {
             ("twins", self.twins.len()),
             ("derived", self.derived.len()),
             ("places", self.places.len()),
-            ("note_facts", self.note_facts.len()),
             ("titles", self.titles.len()),
             ("agents", self.agents.len()),
             ("server_agents", self.server_agents.len()),
@@ -1792,11 +1777,6 @@ impl WorkspaceView {
         for run in std::mem::take(&mut self.pending_runs) {
             cx.defer_in(window, move |_this, window, cx| run(window, cx));
         }
-        if let Some(id) = self.pending_focus_note.take()
-            && let Some(view) = self.notes.get(&id)
-        {
-            view.update(cx, |v, cx| v.focus(window, cx));
-        }
         if let Some(id) = self.pending_focus_file.take()
             && let Some(view) = self.files.get(&id)
         {
@@ -1845,7 +1825,7 @@ impl gpui::Render for WorkspaceView {
             self.layout.set_animate(animate);
         }
         if std::mem::take(&mut self.items_dirty) {
-            self.reconcile_notes_and_files(window, cx);
+            self.reconcile_files(window, cx);
             self.reconcile_browsers(cx);
             self.reconcile_reviews();
         }

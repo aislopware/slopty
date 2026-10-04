@@ -261,8 +261,7 @@ impl WorkspaceView {
             ItemKind::File { .. } => {
                 self.files.get(&active.id).and_then(|v| v.read(cx).query().cloned())
             }
-            ItemKind::Note { .. }
-            | ItemKind::Window { .. }
+            ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
             | ItemKind::Folder { .. }

@@ -203,7 +203,7 @@ const RING: Option<&str> = Some("Workspace");
 /// A remote window or display that has the keyboard: its app takes every chord, so the few of
 /// ours a remote view needs (the palette, the sound, the stats) take ⌃ on top of their own.
 const REMOTE: Option<&str> = Some("Workspace > Screen");
-/// Any focused field (a find bar, the palette, a note): a gpui-kit input, whose own ⌘⇧F is
+/// Any focused field (a find bar, the palette, a file's text): a gpui-kit input, whose own ⌘⇧F is
 /// replace; ours is bound after it, so it wins there too.
 const INPUT: Option<&str> = Some("Input");
 /// Inside a file tile's editor, gpui-kit's input binds some of the workspace's chords to
@@ -499,7 +499,6 @@ pub fn defaults() -> Vec<Command> {
         c(Terminal, "copy_last_output", t::CopyLastOutput, &["cmd-shift-c"], &[TERMINAL]),
         // ⌘⇧↩ is the workspace's maximize-column; "Rerun last command" is in the palette.
         c(Terminal, "rerun_last", t::RerunLast, &[], &[TERMINAL]),
-        c(Terminal, "note_last_block", t::NoteLastBlock, &[], &[TERMINAL]),
         c(Terminal, "copy_block_output", t::CopyBlockOutput, &[], &[TERMINAL]),
         c(Terminal, "attach_block", t::AttachBlock, &[], &[TERMINAL]),
         c(Terminal, "attach_selection", t::AttachSelection, &[], &[TERMINAL]),

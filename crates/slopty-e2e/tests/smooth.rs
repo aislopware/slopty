@@ -590,7 +590,7 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
     /// How long one spring is given to land before its frames are read: past its zoom and the
     /// words' fade.
     const SPRING: Duration = Duration::from_millis(500);
-    /// The mixed scenario's tiles besides its twelve shells: files, then notes.
+    /// The mixed scenario's tiles besides its twelve shells: code files, then Markdown notes.
     const MIXED_FILES: usize = 4;
     const MIXED_NOTES: usize = 4;
 
@@ -644,6 +644,15 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
                 path.to_str().unwrap().to_owned()
             })
             .collect();
+        let notes: Vec<String> = (0..MIXED_NOTES)
+            .map(|n| {
+                let path = stack.dir.path().join(format!("release_{n}.md"));
+                let body =
+                    format!("# Release {n}\n\n- [x] build the bundle\n- [ ] notarise\n- [ ] tag\n");
+                std::fs::write(&path, body).unwrap();
+                path.to_str().unwrap().to_owned()
+            })
+            .collect();
         let drv = &mut stack.driver;
         drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
         ready(drv).await;
@@ -667,27 +676,13 @@ sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p></body></h
         })
         .await
         .unwrap();
-        for n in 0..MIXED_NOTES {
-            let notes = n.saturating_add(1);
-            drv.keys("cmd-shift-n").await.unwrap();
-            drv.wait_for("a new note", STEP, |d| {
-                d.items.iter().filter(|i| i.kind == "note").count() == notes
-            })
-            .await
-            .unwrap();
-            drv.type_text(&format!(
-                "Release {n}\n\n- [x] build the bundle\n- [ ] notarise\n- [ ] tag"
-            ))
-            .await
-            .unwrap();
+        for path in &notes {
+            drv.open_file(path, None).await.unwrap();
         }
         let tiles = shells.saturating_add(MIXED_FILES).saturating_add(MIXED_NOTES);
-        drv.wait_for("twenty tiles, the notes written", STEP, |d| {
+        drv.wait_for("twenty tiles, the notes previewed", STEP, |d| {
             d.items.len() == tiles
-                && d.items
-                    .iter()
-                    .filter(|i| i.note.as_deref().is_some_and(|t| t.ends_with("tag")))
-                    .count()
+                && d.items.iter().filter(|i| i.file.as_ref().is_some_and(|f| f.previewing)).count()
                     == MIXED_NOTES
         })
         .await

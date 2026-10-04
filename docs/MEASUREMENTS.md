@@ -14423,3 +14423,14 @@ under 5 % of a stack's start, and no test step waits on it beyond the launch.
 ```sh
 cargo xtask e2e app --filter 'test(~a_stack_comes_up)'
 ```
+
+## 2026-10-05 — the workspace measurements without notes
+
+Notes became Markdown files (`docs/decisions/ui.md`, "A note is a Markdown file"), so the
+measurements that filled the workspace with notes changed with them. They were not run again
+here, since the change takes no frame work away from what they still measure.
+`measure_an_echo_frame_beside_long_notes` is deleted, because its subject is gone; a Markdown
+file's preview draws its rows from a gpui `list` the way the notes did. In
+`measure_a_frame_over_a_large_registry` (120 notes × 4 KiB) and
+`measure_a_stream_frame_beside_the_chrome` (60 notes), folder tiles now stand where the notes
+did. Figures from either before this entry do not compare with a run after it.

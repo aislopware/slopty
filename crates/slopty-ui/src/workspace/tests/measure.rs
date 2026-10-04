@@ -6,11 +6,10 @@ use std::time::Instant;
 
 use super::*;
 
-/// Notes, file tiles and shells on one worker; a note's text is this many bytes.
-const NOTES: usize = 120;
+/// Folders, file tiles and shells on one worker.
+const FOLDERS: usize = 120;
 const FILES: usize = 60;
 const SHELLS: usize = 12;
-const NOTE_BYTES: usize = 4096;
 /// Frames drawn for the numbers, after a few to warm the caches.
 const FRAMES: usize = 400;
 const WARM: usize = 20;
@@ -20,12 +19,10 @@ const WARM: usize = 20;
 fn measure_a_frame_over_a_large_registry(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
-    let line = "- [ ] a line of a long note, to be cloned or not\n";
-    let text = line.repeat(NOTE_BYTES.checked_div(line.len()).unwrap_or(1));
     let mut items: Vec<Item> = Vec::new();
     let mut sessions = Vec::new();
-    for _ in 0..NOTES {
-        let kind = ItemKind::Note { text: text.clone() };
+    for n in 0..FOLDERS {
+        let kind = ItemKind::Folder { path: format!("/w/dir_{n}") };
         items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     for n in 0..FILES {
@@ -60,60 +57,8 @@ fn measure_a_frame_over_a_large_registry(cx: &mut TestAppContext) {
     let terminal = view.read_with(cx, |v, _| v.terminal(shell).cloned()).expect("attached");
     let echo = time(cx, |cx| terminal.update(cx, |_, cx| cx.notify()));
     println!(
-        "MEASURE workspace frame, {NOTES} notes × {NOTE_BYTES} B, {FILES} files, {SHELLS} shells, \
+        "MEASURE workspace frame, {FOLDERS} folders, {FILES} files, {SHELLS} shells, \
          {FRAMES} frames: {own}; echo {echo}"
-    );
-}
-
-/// A few long notes of task lines beside a shell, all near the view: what a frame another tile
-/// causes (a shell's echo) costs in the notes' headers.
-#[gpui::test]
-#[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
-fn measure_an_echo_frame_beside_long_notes(cx: &mut TestAppContext) {
-    const LONG_NOTES: usize = 3;
-    const LONG_BYTES: usize = 64 * 1024;
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let lines = ["- [ ] a task in a long note\n", "- [x] one done\n", "some prose between\n"];
-    let mut text = String::new();
-    for line in lines.iter().cycle() {
-        if text.len().saturating_add(line.len()) > LONG_BYTES {
-            break;
-        }
-        text.push_str(line);
-    }
-    let notes: Vec<Item> = std::iter::repeat_with(|| Item {
-        id: ItemId::new(),
-        kind: ItemKind::Note { text: text.clone() },
-        name: None,
-        facts: BTreeMap::new(),
-    })
-    .take(LONG_NOTES)
-    .collect();
-    let session = SessionId::new();
-    let shell = Item {
-        id: ItemId::new(),
-        kind: ItemKind::Terminal { session },
-        name: None,
-        facts: BTreeMap::new(),
-    };
-    let ids: Vec<ItemId> = notes.iter().map(|n| n.id).collect();
-    let key = studio.key;
-    view.update_in(cx, |v, _window, cx| {
-        v.session_opened(key, summary(session, Some("/w")), cx);
-        let items = notes.into_iter().chain([shell]).collect();
-        v.apply_sync(key, ItemSync::Snapshot { version: 1, items }, cx);
-    });
-    cx.run_until_parked();
-    let tile = view.read_with(cx, |v, _| v.tile_of_session(session)).expect("the shell's tile");
-    view.update_in(cx, |v, _w, cx| v.focus_tile(tile, cx));
-    cx.run_until_parked();
-    let near = ids.iter().filter(|id| cx.debug_bounds(selector("item", **id)).is_some()).count();
-    assert!(near >= 1, "a note is drawn beside the shell: {near}");
-    let terminal = view.read_with(cx, |v, _| v.terminal(session).cloned()).expect("attached");
-    let echo = time(cx, |cx| terminal.update(cx, |_, cx| cx.notify()));
-    println!(
-        "MEASURE echo frame beside {near} drawn notes of {LONG_BYTES} B, {FRAMES} frames: {echo}"
     );
 }
 
@@ -183,7 +128,7 @@ fn time(cx: &mut VisualTestContext, frame: impl Fn(&mut VisualTestContext)) -> S
     )
 }
 
-/// A remote window's frame beside the chrome: 60 shells and 60 notes, the navigator docked, the
+/// A remote window's frame beside the chrome: 60 shells and 60 folders, the navigator docked, the
 /// window focused with a picture up and the last shell drawn beside it. Each stream frame is a
 /// `notify` of its view, as the pump sends one, and GPUI marks every ancestor view dirty with
 /// it, so the workspace root renders for every frame of video. This times that frame, counts
@@ -193,7 +138,7 @@ fn time(cx: &mut VisualTestContext, frame: impl Fn(&mut VisualTestContext)) -> S
 #[ignore = "a measurement, run by hand: see docs/MEASUREMENTS.md"]
 fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
     const CROWD_SHELLS: usize = 60;
-    const CROWD_NOTES: usize = 60;
+    const CROWD_FOLDERS: usize = 60;
     let (view, cx) = workspace(cx);
     let studio = connect(&view, cx, 1, "studio");
     let mut items: Vec<Item> = Vec::new();
@@ -208,7 +153,7 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
             facts: BTreeMap::new(),
         });
     }
-    // The window sits between the shells and the notes, so the last shell is drawn beside it.
+    // The window sits between the shells and the folders, so the last shell is drawn beside it.
     let window = slopty_core::WindowId(7);
     let streamed = ItemId::new();
     items.push(Item {
@@ -217,8 +162,8 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
         name: None,
         facts: BTreeMap::new(),
     });
-    for _ in 0..CROWD_NOTES {
-        let kind = ItemKind::Note { text: "a note\n".into() };
+    for n in 0..CROWD_FOLDERS {
+        let kind = ItemKind::Folder { path: format!("/w/dir_{n}") };
         items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     let shell = sessions.last().map(|s| s.id).expect("a shell");
@@ -271,7 +216,7 @@ fn measure_a_stream_frame_beside_the_chrome(cx: &mut TestAppContext) {
     let echo = time(cx, |cx| terminal.update(cx, |_, cx| cx.notify()));
     let own = time(cx, |cx| view.update(cx, |_, cx| cx.notify()));
     println!(
-        "MEASURE stream frame beside the chrome, {CROWD_SHELLS} shells + {CROWD_NOTES} notes, \
+        "MEASURE stream frame beside the chrome, {CROWD_SHELLS} shells + {CROWD_FOLDERS} folders, \
          {FRAMES} frames after {WARM}: stream {stream}; the root rendered {root_renders} and \
          the view {screen_renders} times; echo {echo}; workspace {own}"
     );

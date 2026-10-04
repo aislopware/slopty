@@ -292,12 +292,13 @@ mod tests {
         let (_guard, mut worker) = connect(dir.path()).await;
         let note = Item {
             id: ItemId::new(),
-            kind: ItemKind::Note { text: "kept".to_owned() },
+            kind: ItemKind::File { path: "/w/kept.md".to_owned() },
             name: None,
             facts: std::collections::BTreeMap::new(),
         };
         worker.tx.send(&ClientMsg::Items(ItemOp::Add(note.clone()))).await.unwrap();
-        let stale = Item { kind: ItemKind::Note { text: "stale".to_owned() }, ..note.clone() };
+        let stale =
+            Item { kind: ItemKind::File { path: "/w/stale.md".to_owned() }, ..note.clone() };
         worker.tx.send(&ClientMsg::Items(ItemOp::Add(stale))).await.unwrap();
         // The greeting's snapshot is empty; the one that holds an item is the refusal's answer.
         loop {
@@ -782,7 +783,7 @@ mod tests {
         let (b_send, b_tasks) = split(b);
         // As in `a_client_that_falls_behind_gets_the_items_again`: several times what the
         // client's stream window, the worker's queue and its broadcast hold together.
-        let (note, rename) = churned_note();
+        let (note, rename) = churned_item();
         b_send.send(note).await.unwrap();
         for _ in 0..300_000 {
             b_send.send(rename.clone()).await.unwrap();
@@ -901,7 +902,7 @@ mod tests {
         // Several times what the client's stream window, the worker's queue and its broadcast
         // hold together (about 30 000 renames), well past what the worker's own receive window
         // lets this loop buffer ahead of it.
-        let (note, rename) = churned_note();
+        let (note, rename) = churned_item();
         b_tx.send(&note).await.unwrap();
         for _ in 0..300_000 {
             b_tx.send(&rename).await.unwrap();
@@ -1076,12 +1077,12 @@ mod tests {
     }
 
     /// The next item sync `wanted` on `worker`'s control stream, skipping everything else.
-    /// A note to add, and a rename of it to send over and over: each rename is a delta the
+    /// A file tile to add, and a rename of it to send over and over: each rename is a delta the
     /// worker hands every client, the cheapest way to flood their events.
-    fn churned_note() -> (ClientMsg, ClientMsg) {
+    fn churned_item() -> (ClientMsg, ClientMsg) {
         let note = Item {
             id: ItemId::new(),
-            kind: ItemKind::Note { text: String::new() },
+            kind: ItemKind::File { path: "/w/PLAN.md".to_owned() },
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

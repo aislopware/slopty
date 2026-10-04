@@ -286,8 +286,7 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 #[must_use]
 pub fn palette_items() -> Vec<PaletteItem> {
     use crate::terminal::{
-        ClearScreen, CopyBlockOutput, CopyLastOutput, Find, NextPrompt, NoteLastBlock, PrevPrompt,
-        RerunLast,
+        ClearScreen, CopyBlockOutput, CopyLastOutput, Find, NextPrompt, PrevPrompt, RerunLast,
     };
     let workspace = key_bindings();
     let terminal = crate::terminal::key_bindings();
@@ -380,7 +379,6 @@ pub fn palette_items() -> Vec<PaletteItem> {
         t("Copy last output", IconName::Copy, Box::new(CopyLastOutput)),
         t("Copy block output", IconName::Copy, Box::new(CopyBlockOutput)),
         t("Rerun last command", IconName::RotateCw, Box::new(RerunLast)),
-        t("Keep last block as a note", IconName::NotebookPen, Box::new(NoteLastBlock)),
         t("Clear the screen and history", IconName::Eraser, Box::new(ClearScreen)),
     ];
     items.extend(crate::folder::files_palette_items(crate::folder::FILES_PICKER, &workspace));

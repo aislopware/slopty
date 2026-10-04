@@ -411,9 +411,6 @@ pub struct KindArgs {
     /// A text file on the worker to edit, absolute.
     #[arg(long)]
     file: Option<String>,
-    /// A note's Markdown.
-    #[arg(long)]
-    note: Option<String>,
     /// A window to stream, by its id from `slopty windows`.
     #[arg(long)]
     window: Option<u32>,
@@ -424,16 +421,15 @@ pub struct KindArgs {
 
 impl KindArgs {
     fn kind(self) -> Result<ItemKind> {
-        let Self { url, file, note, window, display } = self;
-        match (url, file, note, window, display) {
-            (Some(url), None, None, None, None) => Ok(ItemKind::Browser { url }),
-            (None, Some(path), None, None, None) => Ok(ItemKind::File { path }),
-            (None, None, Some(text), None, None) => Ok(ItemKind::Note { text }),
-            (None, None, None, Some(id), None) => Ok(ItemKind::Window { window: WindowId(id) }),
-            (None, None, None, None, Some(display)) => {
+        let Self { url, file, window, display } = self;
+        match (url, file, window, display) {
+            (Some(url), None, None, None) => Ok(ItemKind::Browser { url }),
+            (None, Some(path), None, None) => Ok(ItemKind::File { path }),
+            (None, None, Some(id), None) => Ok(ItemKind::Window { window: WindowId(id) }),
+            (None, None, None, Some(display)) => {
                 Ok(ItemKind::Display { display: DisplayId(display) })
             }
-            _ => bail!("give one of --url, --file, --note, --window, --display"),
+            _ => bail!("give one of --url, --file, --window, --display"),
         }
     }
 }

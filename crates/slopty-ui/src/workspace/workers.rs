@@ -9,7 +9,7 @@ use slopty_proto::ClientMsg;
 use slopty_proto::agent::AgentStatus;
 use slopty_proto::file::{FileRead, WriteResult};
 use slopty_proto::handshake::HelloAck;
-use slopty_proto::items::{Item, ItemKind, ItemSync};
+use slopty_proto::items::{ItemKind, ItemSync};
 use slopty_proto::screen::{
     CaptureTarget, OpenAsk, Quality, ScreenEvent, ScreenFailure, ScreenRequest,
 };
@@ -19,7 +19,6 @@ use slopty_proto::terminal::{SessionState, SessionSummary, TermEvent, TermReques
 
 use super::{Finished, Worker, WorkerLink, WorkerStatus, WorkspaceEvent, WorkspaceView, desktop};
 use crate::file::{FileView, FileViewEvent};
-use crate::note::{NoteView, NoteViewEvent};
 use crate::screen::ScreenView;
 use crate::terminal::{AttachProbe, TerminalView, TerminalViewEvent};
 
@@ -147,7 +146,6 @@ impl WorkspaceView {
                 self.items_dirty = true;
             }
             self.workers.insert(key, w);
-            self.note_changed(key, ItemChange::Reset);
         }
         // The settings share the clipboard by the worker's name.
         self.clip_sharing_changed();
@@ -540,7 +538,6 @@ impl WorkspaceView {
     ) {
         self.items_dirty = true;
         self.tick();
-        self.note_changed(key, change);
         match change {
             ItemChange::Reset => {
                 let Some(w) = self.workers.get(&key) else { return };
@@ -565,9 +562,8 @@ impl WorkspaceView {
                 let kept = self.recency.iter().copied().filter(|id| self.tile_of(*id).is_some());
                 self.recency = kept.collect();
                 let gone: Vec<ItemId> = self
-                    .notes
+                    .files
                     .keys()
-                    .chain(self.files.keys())
                     .chain(self.folders.keys())
                     .chain(self.screens.keys())
                     .copied()
@@ -609,30 +605,6 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Keep the notes' facts with their texts: every change to a registry comes through
-    /// [`Self::item_changed`].
-    fn note_changed(&mut self, key: WorkerKey, change: ItemChange) {
-        let Some(w) = self.workers.get(&key) else { return };
-        let facts = |item: &Item| match &item.kind {
-            ItemKind::Note { text } => Some((item.id, super::tile::NoteFacts::of(text))),
-            _ => None,
-        };
-        match change {
-            // What the snapshot dropped goes with the next reconcile.
-            ItemChange::Reset => self.note_facts.extend(w.doc.items().filter_map(facts)),
-            ItemChange::Added { id, .. } | ItemChange::Changed(id) => {
-                match w.doc.get(id).and_then(facts) {
-                    Some((id, facts)) => self.note_facts.insert(id, facts),
-                    None => self.note_facts.remove(&id),
-                };
-            }
-            ItemChange::Removed(id) => {
-                self.note_facts.remove(&id);
-            }
-            ItemChange::Echo => {}
-        }
-    }
-
     /// A worker's first snapshot since its link came up: a worker with nothing on it gets one
     /// shell, once per run, so a newly added worker has something to type into (there is no
     /// other way to open the first tile on a worker, since a new tile goes to the focused
@@ -647,7 +619,6 @@ impl WorkspaceView {
     }
 
     fn drop_item_views(&mut self, id: ItemId, cx: &mut Context<Self>) {
-        self.notes.remove(&id);
         if let Some(view) = self.files.remove(&id) {
             self.file_tile_gone(&view, cx);
         }
@@ -854,7 +825,6 @@ impl WorkspaceView {
                 // The row's last command and the tile's state changed with the new prompt.
                 this.chrome.notify(cx);
             }
-            TerminalViewEvent::NoteBlock(text) => this.note_beside(sid, text.clone(), cx),
             TerminalViewEvent::Attach(text) => this.attach_block(sid, text.clone(), cx),
             TerminalViewEvent::ViewFile { path, line } => {
                 let path = this.absolute_in_session(sid, path);
@@ -973,7 +943,6 @@ impl WorkspaceView {
                     ItemKind::Window { window } => Some((i.id, CaptureTarget::Window(window))),
                     ItemKind::Display { display } => Some((i.id, CaptureTarget::Display(display))),
                     ItemKind::Terminal { .. }
-                    | ItemKind::Note { .. }
                     | ItemKind::File { .. }
                     | ItemKind::Folder { .. }
                     | ItemKind::Browser { .. }
@@ -1300,34 +1269,14 @@ impl WorkspaceView {
             .collect()
     }
 
-    /// Editors for note items and views for file items; the ones whose items are gone go.
-    /// Needs the window (a note's editor does), so it runs from `render`, and only on a frame
-    /// after a registry or a link changed ([`WorkspaceView::items_dirty`]).
-    pub(super) fn reconcile_notes_and_files(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let mut notes: Vec<ItemId> = Vec::new();
-        let mut files: Vec<(WorkerKey, ItemId, &str)> = Vec::new();
-        for (key, item) in self.items() {
-            match &item.kind {
-                ItemKind::Note { text } => {
-                    notes.push(item.id);
-                    // A note another client changed: taken now, or once this one stops editing.
-                    if let Some(view) = self.notes.get(&item.id) {
-                        view.update(cx, |v, cx| v.offer_text(text, window, cx));
-                    }
-                }
-                ItemKind::File { path } => files.push((key, item.id, path)),
-                _ => {}
-            }
-        }
-        let new_notes: Vec<(ItemId, String)> = notes
-            .iter()
-            .filter(|id| !self.notes.contains_key(id))
-            .filter_map(|id| match self.tile_of(*id).and_then(|t| self.item(t)).map(|i| &i.kind) {
-                Some(ItemKind::Note { text }) => Some((*id, text.clone())),
+    /// Views for file items; the ones whose items are gone go. Needs the window (a file's
+    /// editor does), so it runs from `render`, and only on a frame after a registry or a link
+    /// changed ([`WorkspaceView::items_dirty`]).
+    pub(super) fn reconcile_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let files: Vec<(WorkerKey, ItemId, &str)> = self
+            .items()
+            .filter_map(|(key, item)| match &item.kind {
+                ItemKind::File { path } => Some((key, item.id, path.as_str())),
                 _ => None,
             })
             .collect();
@@ -1360,11 +1309,6 @@ impl WorkspaceView {
                 w.send(ClientMsg::WatchFiles { paths });
             }
         }
-        for (id, text) in new_notes {
-            self.make_note(id, &text, window, cx);
-        }
-        self.notes.retain(|id, _| notes.contains(id));
-        self.note_facts.retain(|id, _| notes.contains(id));
         for (key, id, path) in new_files {
             self.make_file(key, id, path, window, cx);
         }
@@ -1376,23 +1320,6 @@ impl WorkspaceView {
             }
         }
         self.reconcile_folders(cx);
-    }
-
-    /// The editor of note `id`.
-    fn make_note(&mut self, id: ItemId, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let theme = self.theme.clone();
-        let view = cx.new(|cx| NoteView::new(id, text, theme, window, cx));
-        // Detached: GPUI drops a subscription with the view it listens to.
-        cx.subscribe(&view, move |this, _view, event, cx| {
-            match event {
-                NoteViewEvent::Commit(text) => this.commit_note(id, text.clone(), cx),
-                NoteViewEvent::Run(code) => this.run_in_shell(code.clone(), cx),
-            }
-            cx.notify();
-        })
-        .detach();
-        view.update(cx, |n, cx| n.set_can_run(self.run_target().is_some(), cx));
-        self.notes.insert(id, view);
     }
 
     /// The view of file item `id` at `path` on `worker`, which it asks for the text.

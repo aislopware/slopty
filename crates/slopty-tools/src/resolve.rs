@@ -362,7 +362,7 @@ mod tests {
     fn an_item_prefix_must_be_unique() {
         let item = |id: &str| Item {
             id: id.parse().unwrap(),
-            kind: ItemKind::Note { text: String::new() },
+            kind: ItemKind::File { path: "/w/PLAN.md".to_owned() },
             name: None,
             facts: std::collections::BTreeMap::new(),
         };

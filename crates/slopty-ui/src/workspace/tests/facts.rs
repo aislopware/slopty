@@ -263,10 +263,10 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
 fn the_status_bar_always_says_something(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
-    arrives(&view, cx, &fake, ItemKind::Note { text: "plan".into() }, 1);
+    arrives(&view, cx, &fake, ItemKind::Window { window: slopty_core::WindowId(7) }, 1);
     view.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("status-worker").is_some(), "a note says nowhere: the worker");
+    assert!(cx.debug_bounds("status-worker").is_some(), "a window says nowhere: the worker");
     let page =
         arrives(&view, cx, &fake, ItemKind::Browser { url: "http://localhost:5173/app".into() }, 2);
     view.update_in(cx, |v, _w, cx| v.focus_tile(page, cx));

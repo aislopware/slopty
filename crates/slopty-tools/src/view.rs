@@ -1164,8 +1164,6 @@ pub struct ItemView<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     display: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     path: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<&'a str>,
@@ -1213,7 +1211,6 @@ const fn kind_word(kind: &ItemKind) -> &'static str {
         ItemKind::Terminal { .. } => "terminal",
         ItemKind::Window { .. } => "window",
         ItemKind::Display { .. } => "display",
-        ItemKind::Note { .. } => "note",
         ItemKind::File { .. } => "file",
         ItemKind::Folder { .. } => "folder",
         ItemKind::Browser { .. } => "browser",
@@ -1234,7 +1231,6 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 term: None,
                 window: None,
                 display: None,
-                text: None,
                 path: None,
                 url: None,
                 thread: None,
@@ -1245,7 +1241,6 @@ pub fn items(worker: WorkerId, items: &[Item]) -> Vec<ItemView<'_>> {
                 }
                 ItemKind::Window { window } => view.window = Some(window.0),
                 ItemKind::Display { display } => view.display = Some(display.0),
-                ItemKind::Note { text } => view.text = Some(text),
                 ItemKind::File { path } | ItemKind::Folder { path } => view.path = Some(path),
                 ItemKind::Browser { url } => view.url = Some(url),
                 ItemKind::Review { thread } | ItemKind::Thread { thread } => {
@@ -1271,7 +1266,6 @@ pub fn items_text(worker: WorkerId, items: &[Item]) -> String {
                 }
                 ItemKind::Window { window } => window.0.to_string(),
                 ItemKind::Display { display } => display.to_string(),
-                ItemKind::Note { text } => text.lines().next().unwrap_or_default().to_owned(),
                 ItemKind::File { path } | ItemKind::Folder { path } => path.clone(),
                 ItemKind::Browser { url } => url.clone(),
                 ItemKind::Review { thread } | ItemKind::Thread { thread } => thread.to_string(),

@@ -11,9 +11,10 @@ Group │ Terminal
 Heading │ terminal Terminal
 Group (focused)
 Terminal │ shell │ ~ %
-Group │ Release
-Heading │ note Release
-Document │ Note │ Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
+Group │ RELEASE.md
+Heading │ file RELEASE.md
+Document │ File $SCRATCH/home/RELEASE.md │ 5 lines, Markdown
+Document │ Preview of $SCRATCH/home/RELEASE.md │ # Release⏎⏎- [x] build the bundle⏎- [ ] notarise⏎- [ ] tag
 CheckBox │ Done: build the bundle
 CheckBox │ To do: notarise
 CheckBox │ To do: tag

@@ -196,7 +196,7 @@ mod tests {
         .unwrap();
         drv.keys("enter").await.unwrap();
         drv.wait_for("a note from the palette", STEP, |d| {
-            d.item("note").is_some() && d.a11y_node("Dialog", Some("Commands")).is_none()
+            d.item("file").is_some() && d.a11y_node("Dialog", Some("Commands")).is_none()
         })
         .await
         .unwrap();
@@ -266,7 +266,7 @@ mod tests {
         drv.ui_insert_text("scratch").await.unwrap();
         drv.keys("enter").await.unwrap();
         drv.wait_for("the note named", STEP, |d| {
-            d.a11y_node("Heading", Some("note scratch")).is_some()
+            d.a11y_node("Heading", Some("file scratch")).is_some()
                 && d.a11y_node("TextInput", Some("Tile name")).is_none()
         })
         .await

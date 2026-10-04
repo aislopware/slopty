@@ -2,7 +2,7 @@
 //!
 //! With the "Open tiles" chip on, the query goes to every tile open in the workspace, as each
 //! tile's own ⌘F would take it, toggles included. The workspace asks the shells (their history
-//! is on the worker) and counts the files and notes it holds
+//! is on the worker) and counts the files it holds
 //! ([`super::ProjectSearchEvent::FindTiles`]), then hands the tiles with a match back here
 //! ([`ProjectSearch::set_tiles`]). A row is a tile and how many matches it holds; ↩ or a click goes
 //! to that tile with its find bar open on the query.
@@ -35,7 +35,7 @@ pub enum SearchScope {
 pub struct TileHit {
     /// The tile's title.
     pub title: String,
-    /// How many matches it holds: lines for a file or a note, hits for a shell.
+    /// How many matches it holds: lines for a file, hits for a shell.
     pub total: u32,
     /// Where ↩ goes.
     pub open: TileOpen,
@@ -48,8 +48,6 @@ pub enum TileOpen {
     Session(SessionId),
     /// A file tile, its find bar opened on the query.
     File(ItemId),
-    /// A tile with no find bar of its own (a note): the tile itself.
-    Item(ItemId),
 }
 
 /// The tiles found for the query, and the one selected.
@@ -236,7 +234,6 @@ impl ProjectSearch {
         let icon = match hit.open {
             TileOpen::Session(_) => crate::icons::IconName::SquareTerminal,
             TileOpen::File(_) => crate::icons::IconName::FileText,
-            TileOpen::Item(_) => crate::icons::IconName::StickyNote,
         };
         let total = usize::try_from(hit.total).unwrap_or(usize::MAX);
         let label = format!("{}, {}", hit.title, super::count_label(total));

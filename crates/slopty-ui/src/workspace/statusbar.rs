@@ -291,7 +291,6 @@ impl WorkspaceView {
             }
             // A page's host is its header's place: said there, not twice.
             ItemKind::Terminal { .. }
-            | ItemKind::Note { .. }
             | ItemKind::Browser { .. }
             | ItemKind::Folder { .. }
             | ItemKind::Review { .. }

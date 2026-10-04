@@ -388,15 +388,22 @@ fn swipe(
 
 // ----- the pure pieces ---------------------------------------------------------------------
 
+/// A new note is named for the moment on this device's clock, in the directory given, else
+/// the home; a directory's trailing slash and the root are kept whole.
 #[test]
-fn a_note_is_titled_by_its_first_line() {
-    assert_eq!(note_title(""), "Untitled note");
-    assert_eq!(note_title("\n\n  # Plan  \nmore"), "Plan");
-    assert_eq!(note_title("- [ ] ship it\n- [x] test it"), "ship it", "progress is context");
-    assert_eq!(note_progress("- [ ] ship it\n- [x] test it"), Some((1, 2)));
-    let long = "a".repeat(NOTE_TITLE_CHARS + 5);
-    assert_eq!(note_title(&long).chars().count(), NOTE_TITLE_CHARS + 1, "cut, with an ellipsis");
-    assert_eq!(note_progress("no tasks"), None);
+fn a_new_note_is_named_for_its_moment() {
+    use super::commands::note_path;
+    // 2024-02-29 12:34:56 UTC.
+    let at = WallMs::from_millis(1_709_210_096_000);
+    assert_eq!(note_path(None, at, 0).as_deref(), Some("~/note-2024-02-29-123456.md"));
+    assert_eq!(
+        note_path(Some("/w/app/"), at, 7 * 3_600).as_deref(),
+        Some("/w/app/note-2024-02-29-193456.md")
+    );
+    assert_eq!(
+        note_path(Some("/"), at, -13 * 3_600).as_deref(),
+        Some("/note-2024-02-28-233456.md")
+    );
 }
 
 /// A file's title is its name; the directory it is in is the header's context after it.
@@ -1230,7 +1237,9 @@ fn the_command_palette_runs_an_action_by_name(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     let notes = view.read_with(cx, |v, _| {
-        v.items().filter(|(_, i)| matches!(i.kind, ItemKind::Note { .. })).count()
+        let md = |p: &str| std::path::Path::new(p).extension().is_some_and(|e| e == "md");
+        let note = |i: &Item| matches!(&i.kind, ItemKind::File { path } if md(path));
+        v.items().filter(|(_, i)| note(i)).count()
     });
     assert_eq!(notes, 1, "the action ran");
 
@@ -1265,8 +1274,9 @@ fn a_tile_is_named_from_its_header(cx: &mut TestAppContext) {
     assert_eq!(title, "api");
 }
 
-/// A note opened here goes to the focused tile's worker, lands beside the focus, and holds
-/// the keyboard for typing.
+/// A note opened here is a new Markdown file on the focused tile's worker, in its home while
+/// the shell's directory is not known, named for the moment; it lands beside the focus with
+/// its source holding the keyboard, and nothing is written until it is saved.
 #[gpui::test]
 fn a_new_note_opens_beside_the_focus_on_its_worker(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -1276,94 +1286,37 @@ fn a_new_note_opens_beside_the_focus_on_its_worker(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-shift-n");
     cx.run_until_parked();
     let sent = fake.drain();
-    let note = sent
+    let (note, path) = sent
         .iter()
         .find_map(|m| match m {
-            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
-                Some(i.id)
+            ClientMsg::Items(ItemOp::Add(Item { id, kind: ItemKind::File { path }, .. })) => {
+                Some((*id, path.clone()))
             }
             _ => None,
         })
         .expect("the note went to the worker");
+    let md = std::path::Path::new(&path).extension().is_some_and(|e| e == "md");
+    assert!(path.starts_with("~/note-") && md, "{path}");
+    assert!(
+        !sent.iter().any(|m| matches!(m, ClientMsg::WriteFile { .. })),
+        "nothing is written yet"
+    );
     let tile = TileRef { worker: fake.key, item: note };
     assert_eq!(focused(&view, cx), Some(tile));
     assert_eq!(column_of(&view, cx, tile), column_of(&view, cx, shell).saturating_add(1));
-}
-
-/// Another client's text for a note is taken on the frame after it arrives while the note is
-/// read, and kept back while it is being edited, then taken once the editor lets go with
-/// nothing typed: the notes are matched to the registry when it changes, not every frame.
-#[gpui::test]
-fn a_note_written_elsewhere_lands_now_or_when_the_editing_stops(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    // Focus and blur are only reported in an active window.
-    cx.update(|window, _| window.activate_window());
-    let mut fake = connect(&view, cx, 1, "studio");
-    let shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    let note = fake
-        .drain()
-        .iter()
-        .find_map(|m| match m {
-            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
-                Some(i.clone())
-            }
-            _ => None,
-        })
-        .expect("the note went to the worker");
-    let shown = |view: &Entity<WorkspaceView>, cx: &mut VisualTestContext| {
-        view.read_with(cx, |v, cx| v.notes.get(&note.id).map(|n| n.read(cx).live_text(cx)))
-    };
-    let (key, other) = (fake.key, ClientId::new());
-    let written = |text: &str, version: u64| {
-        let op = ItemOp::SetNote { id: note.id, text: text.to_owned() };
-        ItemSync::Delta { version, by: other, op }
-    };
-    view.update_in(cx, |v, _w, cx| v.apply_sync(key, written("from the phone", 3), cx));
-    cx.run_until_parked();
-    assert_eq!(shown(&view, cx).as_deref(), Some(""), "kept back while it is edited");
-    view.update_in(cx, |v, _w, cx| v.focus_tile(shell, cx));
-    cx.run_until_parked();
-    assert_eq!(shown(&view, cx).as_deref(), Some("from the phone"), "taken when editing stops");
-    view.update_in(cx, |v, _w, cx| v.apply_sync(key, written("and again", 4), cx));
-    cx.run_until_parked();
-    assert_eq!(shown(&view, cx).as_deref(), Some("and again"), "taken at once while read");
-}
-
-/// A note's committed text goes to the worker as the text alone, so a name another client
-/// gave the note meanwhile is neither sent back nor lost here.
-#[gpui::test]
-fn a_note_commit_sends_only_its_text(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let mut fake = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &fake, SessionId::new(), fake.me, 1);
-    cx.simulate_keystrokes("cmd-shift-n");
-    cx.run_until_parked();
-    let note = fake
-        .drain()
-        .iter()
-        .find_map(|m| match m {
-            ClientMsg::Items(ItemOp::Add(i)) if matches!(i.kind, ItemKind::Note { .. }) => {
-                Some(i.id)
-            }
-            _ => None,
-        })
-        .expect("the note went to the worker");
-    let (key, other) = (fake.key, ClientId::new());
-    let renamed = ItemOp::Rename { id: note, name: Some("plan".to_owned()) };
+    let key = fake.key;
     view.update_in(cx, |v, _w, cx| {
-        v.apply_sync(key, ItemSync::Delta { version: 3, by: other, op: renamed }, cx);
-        v.commit_note(note, "first line".to_owned(), cx);
+        v.file_read(
+            key,
+            &path,
+            &slopty_proto::file::FileRead::Absent { editorconfig: Vec::new() },
+            cx,
+        );
     });
     cx.run_until_parked();
-    let sent = fake.drain();
-    let edit = ItemOp::SetNote { id: note, text: "first line".to_owned() };
-    assert_eq!(sent, vec![ClientMsg::Items(edit)]);
-    let tile = TileRef { worker: key, item: note };
-    let item = view.read_with(cx, |v, _| v.item(tile).cloned()).expect("still there");
-    assert_eq!(item.name.as_deref(), Some("plan"));
-    assert_eq!(item.kind, ItemKind::Note { text: "first line".to_owned() });
+    let previewing =
+        view.read_with(cx, |v, cx| v.files.get(&note).map(|f| f.read(cx).previewing()));
+    assert_eq!(previewing, Some(false), "a new note is written in its source");
 }
 
 // ----- agents ------------------------------------------------------------------------------

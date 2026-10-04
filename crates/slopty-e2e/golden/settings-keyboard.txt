@@ -241,8 +241,6 @@ ListItem │ Copy last output │ ⇧⌘C
 Button │ Keys for Copy last output │ ⇧⌘C
 ListItem │ Rerun last command
 Button │ Keys for Rerun last command
-ListItem │ Keep last block as a note
-Button │ Keys for Keep last block as a note
 ListItem │ Copy block output
 Button │ Keys for Copy block output
 ListItem │ Attach block

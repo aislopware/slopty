@@ -12,7 +12,7 @@ use super::*;
 fn notes(view: &Entity<WorkspaceView>, cx: &mut VisualTestContext, fake: &Fake, n: usize) {
     let note = || Item {
         id: ItemId::new(),
-        kind: ItemKind::Note { text: "a note\nits second line\n".into() },
+        kind: ItemKind::Folder { path: "/w/notes".into() },
         name: None,
         facts: BTreeMap::new(),
     };

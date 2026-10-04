@@ -2,7 +2,7 @@
 //!
 //! The worker is authoritative: the client applies every [`ItemSync`] it receives and proposes
 //! changes as [`ItemOp`]s, each carrying only the field it changes. So that a rename or a new
-//! note shows at once, the client applies its own proposals immediately (optimistic) and
+//! tile shows at once, the client applies its own proposals immediately (optimistic) and
 //! recognises the worker's echo of them.
 //!
 //! The list as last seen is kept on this device ([`ItemCache`]), so a cold launch draws each
@@ -39,7 +39,7 @@ pub enum ItemChange {
         /// This client caused it.
         by_me: bool,
     },
-    /// An item it had changed (a rename, a note's text, sleep).
+    /// An item it had changed (a rename, a page's address, a folder's path).
     Changed(ItemId),
     /// One item disappeared.
     Removed(ItemId),
@@ -115,7 +115,7 @@ impl ItemDoc {
 
     /// Apply an op locally (the optimistic path with `by_me`, and the worker's deltas). An op
     /// on an item this registry does not have, one that sets what is already there, or one
-    /// the item's kind does not take (a note's text on a terminal) changes nothing.
+    /// the item's kind does not take (an address on a terminal) changes nothing.
     pub fn apply_op(&mut self, op: &ItemOp, by_me: bool) -> ItemChange {
         let id = op.id();
         match op {
@@ -129,7 +129,6 @@ impl ItemDoc {
                 None => ItemChange::Echo,
             },
             ItemOp::Rename { .. }
-            | ItemOp::SetNote { .. }
             | ItemOp::SetUrl { .. }
             | ItemOp::SetFolder { .. }
             | ItemOp::SetFact { .. } => match self.items.get_mut(&id).map(|item| item.apply(op)) {
@@ -153,7 +152,8 @@ pub enum ItemCacheError {
 
 /// Each worker's items as this device last saw them, a file per worker under one directory.
 ///
-/// The directory and files are the user's alone (0700 and 0600, as a note's text is in them),
+/// The directory and files are the user's alone (0700 and 0600, as the paths and names of what
+/// is open are in them),
 /// in postcard, replaced whole so a crash mid-write leaves the one before. A file from another
 /// build, or cut short, reads as nothing and goes.
 #[derive(Clone, Debug)]
@@ -248,7 +248,7 @@ mod tests {
         let delta = ItemSync::Delta { version: 4, by: other, op: ItemOp::Add(c.clone()) };
         assert_eq!(doc.apply_sync(delta, me), ItemChange::Added { id: c.id, by_me: false });
 
-        let note = Item { kind: ItemKind::Note { text: String::new() }, ..term() };
+        let note = Item { kind: ItemKind::File { path: "/w/PLAN.md".to_owned() }, ..term() };
         assert_eq!(
             doc.apply_op(&ItemOp::Add(note.clone()), true),
             ItemChange::Added { id: note.id, by_me: true }
@@ -288,34 +288,34 @@ mod tests {
         assert_eq!(doc.version(), 10);
     }
 
-    /// Another client's note edit changes only the text: the name this client just gave the
-    /// note stays. An edit or a rename of an item this registry lacks, and a note's text for
-    /// a shell, change nothing.
+    /// Another client's move of a folder changes only its path: the name this client just
+    /// gave it stays. An edit or a rename of an item this registry lacks, and a folder's path
+    /// for a shell, change nothing.
     #[test]
-    fn a_note_edit_keeps_the_name_and_a_stray_op_changes_nothing() {
+    fn a_folder_move_keeps_the_name_and_a_stray_op_changes_nothing() {
         let me = ClientId::new();
         let other = ClientId::new();
         let mut doc = ItemDoc::default();
         let shell = term();
-        let note = Item { kind: ItemKind::Note { text: "draft".to_owned() }, ..term() };
-        let items = vec![shell.clone(), note.clone()];
+        let folder = Item { kind: ItemKind::Folder { path: "~/".to_owned() }, ..term() };
+        let items = vec![shell.clone(), folder.clone()];
         assert_eq!(doc.apply_sync(ItemSync::Snapshot { version: 1, items }, me), ItemChange::Reset);
 
-        let named = ItemOp::Rename { id: note.id, name: Some("plan".to_owned()) };
-        assert_eq!(doc.apply_op(&named, true), ItemChange::Changed(note.id));
-        let text = "draft, then more".to_owned();
-        let edit = ItemOp::SetNote { id: note.id, text: text.clone() };
-        let delta = ItemSync::Delta { version: 2, by: other, op: edit };
-        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(note.id));
-        let now = doc.get(note.id).cloned();
-        assert_eq!(now.as_ref().and_then(|i| i.name.as_deref()), Some("plan"));
-        assert_eq!(now.map(|i| i.kind), Some(ItemKind::Note { text }));
+        let named = ItemOp::Rename { id: folder.id, name: Some("code".to_owned()) };
+        assert_eq!(doc.apply_op(&named, true), ItemChange::Changed(folder.id));
+        let path = "~/src".to_owned();
+        let into = ItemOp::SetFolder { id: folder.id, path: path.clone() };
+        let delta = ItemSync::Delta { version: 2, by: other, op: into };
+        assert_eq!(doc.apply_sync(delta, me), ItemChange::Changed(folder.id));
+        let now = doc.get(folder.id).cloned();
+        assert_eq!(now.as_ref().and_then(|i| i.name.as_deref()), Some("code"));
+        assert_eq!(now.map(|i| i.kind), Some(ItemKind::Folder { path }));
 
-        let stray = ItemOp::SetNote { id: shell.id, text: "no".to_owned() };
+        let stray = ItemOp::SetFolder { id: shell.id, path: "~/no".to_owned() };
         assert_eq!(doc.apply_op(&stray, false), ItemChange::Echo);
         assert_eq!(doc.get(shell.id), Some(&shell));
         let gone = ItemId::new();
-        let edit = ItemOp::SetNote { id: gone, text: String::new() };
+        let edit = ItemOp::SetFolder { id: gone, path: "~/".to_owned() };
         assert_eq!(doc.apply_op(&edit, false), ItemChange::Echo);
         let rename = ItemOp::Rename { id: gone, name: None };
         assert_eq!(doc.apply_op(&rename, false), ItemChange::Echo);
@@ -390,8 +390,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let cache = ItemCache::new(dir.path().join("items"));
-        let note = Item { kind: ItemKind::Note { text: "plan".to_owned() }, ..term() };
-        let items = [term(), note];
+        let file = Item { kind: ItemKind::File { path: "/w/PLAN.md".to_owned() }, ..term() };
+        let items = [term(), file];
         let bytes = ItemCache::encode(items.iter()).unwrap();
         cache.write("w1", &bytes).unwrap();
         assert_eq!(cache.items("w1"), items);

@@ -160,10 +160,10 @@ mod tests {
         // ⌘⇧N: command and shift from the press's flags, `n` from its usage; ⌘W takes the
         // note away again and the shell has the keyboard back.
         drv.ui_key("cmd-shift-n").await.unwrap();
-        drv.wait_for("a note tile", STEP, |d| d.item("note").is_some()).await.unwrap();
+        drv.wait_for("a note tile", STEP, |d| d.item("file").is_some()).await.unwrap();
         drv.ui_key("cmd-w").await.unwrap();
         drv.wait_for("the note gone and the shell focused", STEP, |d| {
-            d.item("note").is_none() && d.focused == format!("terminal:{session}")
+            d.item("file").is_none() && d.focused == format!("terminal:{session}")
         })
         .await
         .unwrap();

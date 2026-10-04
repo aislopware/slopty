@@ -227,6 +227,72 @@ impl WallMs {
     pub const fn millis_since(self, earlier: Self) -> u64 {
         self.0.saturating_sub(earlier.0)
     }
+
+    /// The date and time of day it reads `offset_s` seconds east of UTC (a time zone's offset
+    /// then), on the proleptic Gregorian calendar.
+    #[must_use]
+    pub fn civil(self, offset_s: i64) -> Option<Civil> {
+        const DAY_S: i64 = 86_400;
+        let seconds = i64::try_from(self.0.checked_div(1_000)?).ok()?.checked_add(offset_s)?;
+        let (days, of_day) = (seconds.div_euclid(DAY_S), seconds.rem_euclid(DAY_S));
+        let (year, month, day) = civil_from_days(days)?;
+        let part = |n: i64| u8::try_from(n).ok();
+        Some(Civil {
+            year,
+            month: part(month)?,
+            day: part(day)?,
+            hour: part(of_day.checked_div(3_600)?)?,
+            minute: part(of_day.checked_rem(3_600)?.checked_div(60)?)?,
+            second: part(of_day.checked_rem(60)?)?,
+        })
+    }
+}
+
+/// A wall time as a calendar and a clock read it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Civil {
+    /// The year, proleptic Gregorian.
+    pub year: i64,
+    /// 1 to 12.
+    pub month: u8,
+    /// 1 to 31.
+    pub day: u8,
+    /// 0 to 23.
+    pub hour: u8,
+    /// 0 to 59.
+    pub minute: u8,
+    /// 0 to 59.
+    pub second: u8,
+}
+
+/// The proleptic Gregorian date `days` after 1970-01-01 (Howard Hinnant's `civil_from_days`).
+fn civil_from_days(days: i64) -> Option<(i64, i64, i64)> {
+    let z = days.checked_add(719_468)?;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.checked_sub(era.checked_mul(146_097)?)?;
+    let year_of_era = day_of_era
+        .checked_sub(day_of_era.checked_div(1_460)?)?
+        .checked_add(day_of_era.checked_div(36_524)?)?
+        .checked_sub(day_of_era.checked_div(146_096)?)?
+        .checked_div(365)?;
+    let day_of_year = day_of_era.checked_sub(
+        year_of_era
+            .checked_mul(365)?
+            .checked_add(year_of_era.checked_div(4)?)?
+            .checked_sub(year_of_era.checked_div(100)?)?,
+    )?;
+    let shifted_month = day_of_year.checked_mul(5)?.checked_add(2)?.checked_div(153)?;
+    let day = day_of_year
+        .checked_sub(shifted_month.checked_mul(153)?.checked_add(2)?.checked_div(5)?)?
+        .checked_add(1)?;
+    let month = if shifted_month < 10 {
+        shifted_month.checked_add(3)?
+    } else {
+        shifted_month.checked_sub(9)?
+    };
+    let year = year_of_era.checked_add(era.checked_mul(400)?)?;
+    let year = if month <= 2 { year.checked_add(1)? } else { year };
+    Some((year, month, day))
 }
 
 impl fmt::Debug for WallMs {
@@ -238,6 +304,21 @@ impl fmt::Debug for WallMs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The calendar reads the epoch, a leap day and the turn of a year, east and west of UTC.
+    #[test]
+    fn a_wall_time_reads_as_its_calendar_date() {
+        let civil = |ms: u64, offset: i64| {
+            let c = WallMs::from_millis(ms).civil(offset).unwrap();
+            (c.year, c.month, c.day, c.hour, c.minute, c.second)
+        };
+        assert_eq!(civil(0, 0), (1970, 1, 1, 0, 0, 0));
+        // 2024-02-29 12:34:56 UTC.
+        assert_eq!(civil(1_709_210_096_000, 0), (2024, 2, 29, 12, 34, 56));
+        assert_eq!(civil(1_709_210_096_000, 7 * 3_600), (2024, 2, 29, 19, 34, 56));
+        // 2026-01-01 00:30:00 UTC is still the old year five hours west.
+        assert_eq!(civil(1_767_227_400_000, -5 * 3_600), (2025, 12, 31, 19, 30, 0));
+    }
 
     #[test]
     fn monotonic_time_never_goes_backwards() {

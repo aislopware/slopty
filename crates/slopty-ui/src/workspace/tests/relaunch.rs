@@ -212,7 +212,7 @@ fn a_relaunch_keeps_how_far_each_board_was_read(cx: &mut TestAppContext) {
 fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppContext) {
     let (dir, path) = layout_file();
     let items = dir.join("items");
-    let (shell, note) = {
+    let (shell, page) = {
         let (view, vcx) = workspace(cx);
         view.update(vcx, |v, _| {
             v.set_layout_path(path.clone());
@@ -220,10 +220,11 @@ fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppC
         });
         let studio = connect(&view, vcx, 1, "studio");
         let shell = opens(&view, vcx, &studio, SessionId::new(), studio.me, 1);
-        let note = arrives(&view, vcx, &studio, ItemKind::Note { text: "plan".into() }, 2);
+        let page = ItemKind::Browser { url: "http://localhost:3000/".into() };
+        let page = arrives(&view, vcx, &studio, page, 2);
         vcx.executor().advance_clock(SAVE_AFTER);
         vcx.run_until_parked();
-        (shell, note)
+        (shell, page)
     };
 
     let (view, cx) = relaunched(cx, &path);
@@ -233,18 +234,18 @@ fn a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back(cx: &mut TestAppC
         v.add_worker(key, "studio".to_owned(), cx);
     });
     cx.run_until_parked();
-    for tile in [shell, note] {
+    for tile in [shell, page] {
         let id = tile.item.as_uuid();
         assert!(cx.debug_bounds(format!("item-{id}").leak()).is_some(), "drawn, not a hole");
         assert!(cx.debug_bounds(format!("state-{id}").leak()).is_some(), "saying it is away");
     }
 
-    let kept = view.read_with(cx, |v, _| v.item(note).cloned()).expect("the note, kept");
+    let kept = view.read_with(cx, |v, _| v.item(page).cloned()).expect("the page, kept");
     let _studio = back(&view, cx, 1, Vec::new(), vec![kept]);
-    let (shell_gone, note_kept) =
-        view.read_with(cx, |v, _| (!v.layout.contains(shell), v.layout.contains(note)));
+    let (shell_gone, page_kept) =
+        view.read_with(cx, |v, _| (!v.layout.contains(shell), v.layout.contains(page)));
     assert!(shell_gone, "the snapshot no longer has the shell: its tile leaves");
-    assert!(note_kept);
+    assert!(page_kept);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

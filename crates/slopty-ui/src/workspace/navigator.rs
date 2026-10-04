@@ -491,20 +491,6 @@ pub(super) fn slow_rtt(rtt: Option<Duration>) -> Option<String> {
     rtt.filter(|rtt| *rtt >= RTT_SHOWN_FROM).map(rtt_label)
 }
 
-/// A note's second line: its progress (its [`super::tile::note_progress`]) when it has tasks,
-/// else its first line after the title, else nothing (its icon says it is a note).
-pub(super) fn note_meta(text: &str, progress: Option<(usize, usize)>) -> String {
-    if let Some((done, total)) = progress {
-        return super::tile::note_done(done, total);
-    }
-    text.lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .nth(1)
-        .map(|l| l.trim_start_matches(['#', '-', '*', '>', ' ']).trim().to_owned())
-        .unwrap_or_default()
-}
-
 /// Whether `query` (already lowercase) is in any of `hay`; an empty query is in everything.
 pub(super) fn matches(query: &str, hay: &[&str]) -> bool {
     query.is_empty() || hay.iter().any(|h| h.to_lowercase().contains(query))
@@ -1236,9 +1222,6 @@ impl WorkspaceView {
             | ItemKind::Review { .. }
             | ItemKind::Thread { .. } => (self.tile_place(item).unwrap_or_default(), None),
             ItemKind::Window { .. } | ItemKind::Display { .. } => (String::new(), None),
-            ItemKind::Note { text } => {
-                (note_meta(text, self.note_progress_of(item.id, text)), None)
-            }
         }
     }
 
@@ -3529,16 +3512,6 @@ mod tests {
         assert_eq!(rest_words("  done  "), None);
         assert_eq!(rest_words("Fixed the build").as_deref(), Some("Fixed the build"));
         assert_eq!(rest_words("  "), None);
-    }
-
-    /// A note's second line is its progress, else its next line, else nothing: its icon says
-    /// it is a note, and its row is one line.
-    #[test]
-    fn a_notes_second_line_says_how_far_it_got() {
-        let meta = |text: &str| note_meta(text, super::super::tile::note_progress(text));
-        assert_eq!(meta("# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n"), "1 of 3 done");
-        assert_eq!(meta("Groceries\n- milk\n"), "milk");
-        assert_eq!(meta("Just a title\n"), "");
     }
 
     /// A report with a figure reads it against its sign; its line covers that share in its

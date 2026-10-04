@@ -45,8 +45,8 @@ pub struct Frame {
 impl Frame {
     /// What the frame says ([`crate::frame_text`]), leaving out the nodes centred inside
     /// `masks`: what a masked region says moves as its picture does. A path in the run's scratch
-    /// directory starts `$SCRATCH`, and a port on loopback is `$PORT`, because each machine and
-    /// each run has its own.
+    /// directory starts `$SCRATCH`, a port on loopback is `$PORT`, and a new note's moment is
+    /// `$MOMENT`, because each machine and each run has its own.
     #[must_use]
     pub fn text(&self, masks: &[PixelRect]) -> String {
         let kept: Vec<crate::A11yNode> = self
@@ -68,8 +68,32 @@ impl Frame {
             })
             .cloned()
             .collect();
-        scrub_ports(&scrub_scratch(&crate::frame_text(&kept)))
+        scrub_moments(&scrub_ports(&scrub_scratch(&crate::frame_text(&kept))))
     }
+}
+
+/// `text` with the moment in each new note's name (`note-2026-10-05-143210`) spelled
+/// `note-$MOMENT`: a note is named for when it was made.
+fn scrub_moments(text: &str) -> String {
+    const NOTE: &str = "note-";
+    const MOMENT: &[u8] = b"dddd-dd-dd-dddddd";
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(NOTE) {
+        let (before, found) = rest.split_at(at.saturating_add(NOTE.len()));
+        out.push_str(before);
+        let moment = found.as_bytes().get(..MOMENT.len()).is_some_and(|b| {
+            b.iter().zip(MOMENT).all(|(c, m)| if *m == b'd' { c.is_ascii_digit() } else { c == m })
+        });
+        rest = if moment {
+            out.push_str("$MOMENT");
+            found.get(MOMENT.len()..).unwrap_or_default()
+        } else {
+            found
+        };
+    }
+    out.push_str(rest);
+    out
 }
 
 /// `text` with the port after each loopback host spelled `$PORT`: the tests' own servers bind
@@ -599,6 +623,25 @@ mod tests {
         assert_eq!(
             frame.text(&[]),
             "Label \u{2502} File $SCRATCH/project/main.rs\nLabel \u{2502} In $SCRATCH. Done\n"
+        );
+    }
+
+    /// A new note's name, which is the moment it was made, reads the same in every run; any
+    /// other name with "note-" in it stays.
+    #[test]
+    fn a_new_notes_moment_reads_the_same_in_every_run() {
+        let frame = Frame {
+            image: solid(1, 1, [0, 0, 0]),
+            a11y: vec![
+                node("Document", "File ~/note-2026-10-05-034645.md", [0.0, 0.0, 1.0, 1.0]),
+                node("Label", "note-taking, note-2026-10 and note-", [0.0, 0.0, 1.0, 1.0]),
+            ],
+            scale: 1.0,
+        };
+        assert_eq!(
+            frame.text(&[]),
+            "Document \u{2502} File ~/note-$MOMENT.md\n\
+             Label \u{2502} note-taking, note-2026-10 and note-\n"
         );
     }
 

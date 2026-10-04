@@ -6,7 +6,7 @@ use std::time::Duration;
 use gpui::{App, AppContext as _, Context, Entity, Window};
 use gpui_kit::component::input::{InputEvent, InputState};
 use slopty_client::layout::{DropTarget, TileRef, WorkerKey};
-use slopty_core::{ItemId, SessionId};
+use slopty_core::{ItemId, SessionId, WallMs};
 use slopty_proto::ClientMsg;
 use slopty_proto::items::{Item, ItemKind, ItemOp};
 use slopty_proto::screen::{CaptureTarget, ScreenRequest};
@@ -452,12 +452,9 @@ impl WorkspaceView {
         })
     }
 
-    /// Tell every note and file whether there is a shell to run a fenced block in.
+    /// Tell every file whether there is a shell to run a fenced block in.
     pub(super) fn update_run_targets(&self, cx: &mut Context<Self>) {
         let can = self.run_target().is_some();
-        for note in self.notes.values() {
-            note.update(cx, |n, cx| n.set_can_run(can, cx));
-        }
         for file in self.files.values() {
             file.update(cx, |f, cx| f.set_can_run(can, cx));
         }
@@ -573,40 +570,14 @@ impl WorkspaceView {
         }
     }
 
-    /// ⌘⇧N: an empty note right of the focused column, focused and editing.
+    /// ⌘⇧N: a new note, which is a Markdown file: in the focused shell's directory on the
+    /// target worker (else the worker's home), named for this moment, right of the focused
+    /// column with its source taking the keys. Nothing is on disk until it is saved.
     pub fn new_note(&mut self, _: &NewNote, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some((key, _)) = self.new_tile_target() else { return };
-        let id = self.put_note(key, String::new(), cx);
-        self.pending_focus_note = Some(id);
-    }
-
-    fn put_note(&mut self, key: WorkerKey, text: String, cx: &mut Context<Self>) -> ItemId {
-        let item = Item {
-            id: ItemId::new(),
-            kind: ItemKind::Note { text },
-            name: None,
-            facts: std::collections::BTreeMap::new(),
-        };
-        let id = item.id;
-        self.propose(key, ItemOp::Add(item), cx);
-        id
-    }
-
-    /// A block saved as a note: a note with `text` beside the shell, focused but not editing,
-    /// since its content is what was saved, not what is about to be typed.
-    pub(super) fn note_beside(&mut self, session: SessionId, text: String, cx: &mut Context<Self>) {
-        let Some(shell) = self.tile_of_session(session) else { return };
-        // A new tile opens right of the focused column: the shell's, once it has the focus.
-        self.tick();
-        self.layout.focus(shell);
-        self.put_note(shell.worker, text, cx);
-    }
-
-    /// A note's editor settled: write its text into the registry.
-    pub(super) fn commit_note(&mut self, id: ItemId, text: String, cx: &mut Context<Self>) {
-        let Some(tile) = self.tile_of(id) else { return };
-        if self.item(tile).is_some() {
-            self.propose(tile.worker, ItemOp::SetNote { id, text }, cx);
+        let Some((key, cwd)) = self.new_tile_target() else { return };
+        let Some(path) = note_path(cwd.as_deref(), WallMs::now(), local_offset()) else { return };
+        if let Some(id) = self.show_file(Some(key), &path, None, cx) {
+            self.pending_focus_file = Some(id);
         }
     }
 
@@ -813,14 +784,6 @@ impl WorkspaceView {
             }
             // An ended shell has no session to keep and nothing a worker could replay.
             ItemKind::Terminal { .. } => self.propose(tile.worker, ItemOp::Remove(tile.item), cx),
-            // A note's editor commits on a timer: take the last keystrokes from the field.
-            ItemKind::Note { .. } => {
-                let mut item = item;
-                if let Some(text) = self.notes.get(&tile.item).map(|v| v.read(cx).live_text(cx)) {
-                    item.kind = ItemKind::Note { text };
-                }
-                self.remember_closed(tile, item, None, cx);
-            }
             ItemKind::Window { .. }
             | ItemKind::Display { .. }
             | ItemKind::Browser { .. }
@@ -1148,4 +1111,26 @@ impl WorkspaceView {
         }
         cx.notify();
     }
+}
+
+/// Where a new note goes: `dir` (else the home), as `note-2026-10-05-143210.md` for `now` read
+/// `offset_s` east of UTC. To the second, so two notes made apart never share a file.
+pub(super) fn note_path(dir: Option<&str>, now: WallMs, offset_s: i64) -> Option<String> {
+    let at = now.civil(offset_s)?;
+    let dir = dir.map_or("~", |d| d.trim_end_matches('/'));
+    let dir = if dir.is_empty() { "" } else { dir };
+    Some(format!(
+        "{dir}/note-{:04}-{:02}-{:02}-{:02}{:02}{:02}.md",
+        at.year, at.month, at.day, at.hour, at.minute, at.second
+    ))
+}
+
+/// How far east of UTC this device's clock reads now, in seconds.
+fn local_offset() -> i64 {
+    use objc2_core_foundation::{CFAbsoluteTimeGetCurrent, CFTimeZone};
+    let Some(zone) = CFTimeZone::system() else { return 0 };
+    // Whole seconds east of UTC: no zone's offset has a fraction.
+    #[expect(clippy::cast_possible_truncation, reason = "an offset is a few hours of seconds")]
+    let offset = zone.seconds_from_gmt(CFAbsoluteTimeGetCurrent()) as i64;
+    offset
 }

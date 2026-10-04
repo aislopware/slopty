@@ -495,7 +495,7 @@ pub enum PaletteRun {
     Action(Box<dyn Action>),
     /// Reveal and focus this session's terminal in the workspace.
     Session(SessionId),
-    /// Reveal this item (a file tile, a note) in the workspace.
+    /// Reveal this item (a file tile, a folder) in the workspace.
     Item(slopty_core::ItemId),
     /// Go to this worker's tiles, or give it a shell when it has none.
     Worker(slopty_client::layout::WorkerKey),
@@ -678,8 +678,8 @@ pub struct PaletteItem {
     pub worker: Option<String>,
     /// Where the tile is: its directory, as the headers print it.
     pub cwd: Option<String>,
-    /// What the tile's header places its title by (a note's progress, a file's folder, a
-    /// page's address), after the directory.
+    /// What the tile's header places its title by (a file's folder, a page's address), after the
+    /// directory.
     pub place: Option<String>,
     /// How long the tile's session has run.
     pub age: Option<Duration>,
@@ -2707,11 +2707,11 @@ mod tests {
         assert_eq!(done.trailing(), Some(("12m".to_owned(), None)), "done: the dot, then the age");
         let fresh = PaletteItem::session("zsh", SessionId::new()).aged(minutes(0));
         assert_eq!(fresh.trailing(), None, "no age under a minute");
-        let note = PaletteItem::item("Release", IconName::StickyNote.into(), ItemId::new())
-            .placed(Some("1 of 3 done".to_owned()))
+        let file = PaletteItem::item("PLAN.md", IconName::FileText.into(), ItemId::new())
+            .placed(Some("docs".to_owned()))
             .on_worker(Some("studio".to_owned()));
-        assert_eq!(note.context(), "studio · 1 of 3 done");
-        assert_eq!(note.trailing(), None);
+        assert_eq!(file.context(), "studio · docs");
+        assert_eq!(file.trailing(), None);
         let command = PaletteItem::new("New note", IconName::StickyNote, Box::new(MoveUp), &[]);
         assert_eq!(command.icon, Glyph::Icon(IconName::StickyNote), "a command shows what it does");
         let away =

@@ -177,7 +177,6 @@ fn a_closed_page_note_and_folder_leave_nothing(cx: &mut TestAppContext) {
     closes_clean(&view, cx, |cx| {
         let kinds = [
             ItemKind::Browser { url: format!("http://127.0.0.1:5173/{}", version.get()) },
-            ItemKind::Note { text: "Release\n- [ ] tag".into() },
             ItemKind::Folder { path: "/w/proj".into() },
         ];
         for kind in kinds {
@@ -284,7 +283,7 @@ fn a_removed_worker_with_open_tiles_leaves_nothing(cx: &mut TestAppContext) {
             };
             v.screen_event(key, opened, cx);
         });
-        arrives(&view, cx, &laptop, ItemKind::Note { text: "plan".into() }, 3);
+        arrives(&view, cx, &laptop, ItemKind::Folder { path: "/w/plan".into() }, 3);
         arrives(&view, cx, &laptop, ItemKind::File { path: "/w/main.rs".into() }, 4);
         let page = arrives(
             &view,

@@ -5,7 +5,6 @@ use gpui::Modifiers;
 use slopty_core::WallMs;
 
 use super::*;
-use crate::palette::PaletteRun;
 
 fn leak(selector: String) -> &'static str {
     Box::leak(selector.into_boxed_str())
@@ -79,35 +78,6 @@ fn a_waiting_row_says_what_it_asks_and_since_when(cx: &mut TestAppContext) {
         names.iter().any(|l| l.contains("Wants to run a command")),
         "a bare tool says what it asks, not \"Bash\": {names:#?}"
     );
-}
-
-/// The Tiles section lists every tile the navigator does, an unnamed note included, by its
-/// title. Its context says how far the note got in the words the header's count and the
-/// navigator's second line use: one way of saying it, not three.
-#[gpui::test]
-fn the_palette_finds_an_unnamed_note(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let _shell = opens(&view, cx, &studio, SessionId::new(), studio.me, 1);
-    let kind = ItemKind::Note { text: "Release\n- [x] tag\n- [ ] notes\n".into() };
-    let note = arrives(&view, cx, &studio, kind, 2);
-    let lines = view.update(cx, |v, cx| v.palette_lines(cx));
-    let line = lines
-        .iter()
-        .find(|l| matches!(l.run, PaletteRun::Item(id) if id == note.item))
-        .unwrap_or_else(|| panic!("the note is listed: {lines:#?}"));
-    assert_eq!(line.section, crate::palette::Section::Tiles);
-    assert!(line.label.starts_with("Release"), "{line:?}");
-    assert_eq!(line.place.as_deref(), Some("1 of 2 done"), "{line:?}");
-    assert_eq!(line.trailing(), None, "the place is not the right edge's");
-    cx.update(|window, _cx| window.set_a11y_active(true));
-    view.update(cx, |_, cx| cx.notify());
-    cx.run_until_parked();
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Heading", Some("note Release"))), "named: {tree:#?}");
-    assert!(tree.iter().any(|n| n.is("Status", Some("1 of 2 done"))), "counted: {tree:#?}");
-    let rows = view.read_with(cx, WorkspaceView::navigator_lines);
-    assert!(rows.iter().any(|(_, meta, _)| meta == "1 of 2 done"), "the navigator: {rows:#?}");
 }
 
 /// On a phone the drawer and the palette never stack: opening the palette puts the drawer

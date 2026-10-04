@@ -1427,14 +1427,18 @@ async fn studio(stack: &mut Stack, home: &Path, port: Option<u16>) -> Studio {
     working_agent(stack, home, &repo).await;
 
     if port.is_some() {
-        let drv = &mut stack.driver;
-        drv.keys("cmd-shift-n").await.unwrap();
-        wait(drv, "the note", |d| d.item("note").is_some()).await;
-        drv.type_text(
-            "Release 0.4.3\n\n- [x] lock the refresh row\n- [x] revoke the family on a replay\n- [ ] keep the idempotency key on a retry\n- [ ] ws-gateway: why degraded since 09:00?\n- [ ] tag and push the images",
+        let release = repo.join("RELEASE.md");
+        std::fs::write(
+            &release,
+            "# Release 0.4.3\n\n- [x] lock the refresh row\n- [x] revoke the family on a replay\n- [ ] keep the idempotency key on a retry\n- [ ] ws-gateway: why degraded since 09:00?\n- [ ] tag and push the images\n",
         )
-        .await
         .unwrap();
+        let drv = &mut stack.driver;
+        drv.open_file(&release.display().to_string(), None).await.unwrap();
+        wait(drv, "the release notes, previewed", |d| {
+            d.items.iter().any(|i| i.file.as_ref().is_some_and(|f| f.previewing))
+        })
+        .await;
     }
 
     tokio::time::sleep(SLOW.saturating_sub(tested.elapsed())).await;
@@ -1783,7 +1787,10 @@ async fn showcase_the_studio_workspace() {
     wait(drv, "the overview closed", |d| !d.overview).await;
 
     drv.keys("cmd-9").await.unwrap();
-    wait(drv, "the note focused", |d| d.items.iter().any(|i| i.kind == "note" && i.active)).await;
+    wait(drv, "the note focused", |d| {
+        d.items.iter().any(|i| i.file.as_ref().is_some_and(|f| f.previewing) && i.active)
+    })
+    .await;
     drv.keys("cmd-w").await.unwrap();
     wait(drv, "the take-back offer", |d| d.notice.is_some()).await;
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();

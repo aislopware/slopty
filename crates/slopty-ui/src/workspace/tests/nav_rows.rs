@@ -298,17 +298,6 @@ fn a_worker_with_no_tile_says_so_quietly(cx: &mut TestAppContext) {
     assert!(shown(cx, selector("nav-tile", tile.item)) && !shown(cx, vacant), "a tile takes it");
 }
 
-/// A note's row says how far its tasks got, not that it is a note.
-#[gpui::test]
-fn a_note_row_says_its_progress(cx: &mut TestAppContext) {
-    let (view, cx) = workspace(cx);
-    let studio = connect(&view, cx, 1, "studio");
-    let text = "# Release\n- [x] tag\n- [ ] notes\n- [ ] ship\n".to_owned();
-    let _note = arrives(&view, cx, &studio, ItemKind::Note { text }, 1);
-    let lines = view.read_with(cx, WorkspaceView::navigator_lines);
-    assert!(lines.iter().any(|(_, meta, _)| meta == "1 of 3 done"), "{lines:#?}");
-}
-
 /// Folded, a worker's header shows what its tiles add up to in its slot: the warn mark while
 /// one waits on the human, the working mark while one works, the unseen dot for a command
 /// that finished unwatched, and nothing at rest. Unfolded, the rows say it themselves.
@@ -422,7 +411,7 @@ fn measure_the_navigator_over_many_tiles(cx: &mut TestAppContext) {
         });
     }
     for _ in 0..NOTES {
-        let kind = ItemKind::Note { text: "a note\n".into() };
+        let kind = ItemKind::Folder { path: "/w/notes".into() };
         items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     let key = studio.key;
@@ -929,7 +918,7 @@ fn any_fact_a_tile_has_is_a_grouping(cx: &mut TestAppContext) {
     let studio = connect(&view, cx, 1, "studio");
     let main = in_repo(&view, cx, &studio, 1, ("/w/a", "/w/a", "main"));
     let fix = in_repo(&view, cx, &studio, 2, ("/w/b", "/w/b", "fix"));
-    let note = arrives(&view, cx, &studio, ItemKind::Note { text: "plan\n".into() }, 3);
+    let note = arrives(&view, cx, &studio, ItemKind::Folder { path: "/w/plan".into() }, 3);
     let labels: Vec<String> =
         view.read_with(cx, |v, _| v.group_lines().into_iter().map(|l| l.label).collect());
     assert!(labels.iter().any(|l| l == "Group the navigator by branch"), "{labels:?}");

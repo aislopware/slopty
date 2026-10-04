@@ -24,9 +24,9 @@ fn cycles() -> usize {
     std::env::var(CYCLES_ENV).ok().and_then(|n| n.parse().ok()).unwrap_or(GATE_CYCLES)
 }
 
-/// Views a cycle holds on to: a terminal, an agent, its thread, a file, a folder, a note, a
-/// screen and a page.
-const KINDS: usize = 8;
+/// Views a cycle holds on to: a terminal, an agent, its thread, a file, a folder, a screen and
+/// a page.
+const KINDS: usize = 7;
 
 /// The views the closed tiles had, by kind, to be asked whether any is still held.
 type Held = RefCell<Vec<(&'static str, AnyWeakEntity)>>;
@@ -111,11 +111,6 @@ fn items(
 
     let tile = arrives(view, cx, fake, ItemKind::Folder { path: "/w/proj".into() }, next(version));
     view.read_with(cx, |v, _| hold(held, "folder", v.folders.get(&tile.item)));
-    close(view, cx, tile);
-
-    let note = ItemKind::Note { text: "Release\n- [ ] tag".into() };
-    let tile = arrives(view, cx, fake, note, next(version));
-    view.read_with(cx, |v, _| hold(held, "note", v.notes.get(&tile.item)));
     close(view, cx, tile);
 
     let n = next(version);

@@ -34,7 +34,7 @@ fn crowd(
         });
     }
     for _ in 0..notes {
-        let kind = ItemKind::Note { text: "a note\n".into() };
+        let kind = ItemKind::Folder { path: "/w/notes".into() };
         items.push(Item { id: ItemId::new(), kind, name: None, facts: BTreeMap::new() });
     }
     let sessions = summaries.iter().map(|s| s.id).collect();

@@ -1,5 +1,5 @@
 //! The worker's item registry: what exists on a worker for its clients to show (terminals, streamed
-//! windows and displays, notes, files, folders, pages and reviews). Worker-authoritative, snapshot
+//! windows and displays, files, folders, pages and reviews). Worker-authoritative, snapshot
 //! + deltas.
 //!
 //! Where an item is shown is not here: each client arranges the items of every worker it reaches
@@ -28,11 +28,6 @@ pub enum ItemKind {
     Display {
         /// Display.
         display: DisplayId,
-    },
-    /// Free text.
-    Note {
-        /// Markdown.
-        text: String,
     },
     /// A text file on the worker, open to edit: the text comes over `WorkerMsg::File`, not the
     /// registry, and goes back as `ClientMsg::WriteFile`.
@@ -77,7 +72,7 @@ pub struct Item {
     /// Content.
     pub kind: ItemKind,
     /// The name the human gave the item, shown as its title over whatever its content would
-    /// say (a shell's title, a window's, a note's first line, a file's name); trimmed and at
+    /// say (a shell's title, a window's, a file's name); trimmed and at
     /// most [`NAME_MAX`] characters, or none.
     pub name: Option<String>,
     /// What the person said of the item, as open key and value: `project` pins it to a
@@ -129,13 +124,6 @@ pub enum ItemOp {
         /// The name as typed; the worker trims it, and a blank one is none.
         name: Option<String>,
     },
-    /// Replace a note's text. Refused for any other kind of item.
-    SetNote {
-        /// Item.
-        id: ItemId,
-        /// Markdown.
-        text: String,
-    },
     /// Point a browser item at another address, as typed in its header. Refused for any
     /// other kind of item and for anything but an `http` or `https` address.
     SetUrl {
@@ -173,7 +161,6 @@ impl ItemOp {
             Self::Add(item) => item.id,
             Self::Remove(id)
             | Self::Rename { id, .. }
-            | Self::SetNote { id, .. }
             | Self::SetUrl { id, .. }
             | Self::SetFolder { id, .. }
             | Self::SetFact { id, .. } => *id,
@@ -184,7 +171,7 @@ impl ItemOp {
 /// Why an [`ItemOp`] does not apply to an item.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, thiserror::Error)]
 pub enum Refused {
-    /// The op edits a field this kind of item does not have (a note's text on a terminal).
+    /// The op edits a field this kind of item does not have (an address on a terminal).
     #[error("not a {0}")]
     WrongKind(&'static str),
     /// [`ItemOp::Add`] and [`ItemOp::Remove`] act on the registry, not on an item.
@@ -204,7 +191,7 @@ impl Item {
     /// still broadcasts such an op, since the echo is how the proposer hears it was taken.
     ///
     /// # Errors
-    /// [`Refused::WrongKind`] for a note's text, an address or a folder on another kind of
+    /// [`Refused::WrongKind`] for an address or a folder on another kind of
     /// item, [`Refused::NotAnEdit`] for an add or a remove, and [`Refused::FactBounds`] for a
     /// fact out of bounds.
     pub fn apply(&mut self, op: &ItemOp) -> Result<bool, Refused> {
@@ -218,7 +205,6 @@ impl Item {
         Ok(match (op, &mut self.kind) {
             (ItemOp::Add(_) | ItemOp::Remove(_), _) => return Err(Refused::NotAnEdit),
             (ItemOp::Rename { name, .. }, _) => set(&mut self.name, name),
-            (ItemOp::SetNote { text, .. }, ItemKind::Note { text: at }) => set(at, text),
             (ItemOp::SetUrl { url, .. }, ItemKind::Browser { url: at }) => set(at, url),
             (ItemOp::SetFolder { path, .. }, ItemKind::Folder { path: at }) => set(at, path),
             (ItemOp::SetFact { key, value: None, .. }, _) => self.facts.remove(key).is_some(),
@@ -229,7 +215,6 @@ impl Item {
                 }
                 self.facts.insert(key.clone(), value.clone()).as_ref() != Some(value)
             }
-            (ItemOp::SetNote { .. }, _) => return Err(Refused::WrongKind("note")),
             (ItemOp::SetUrl { .. }, _) => return Err(Refused::WrongKind("browser")),
             (ItemOp::SetFolder { .. }, _) => return Err(Refused::WrongKind("folder")),
         })
@@ -281,21 +266,17 @@ mod tests {
         let rename = ItemOp::Rename { id, name: Some("dev".to_owned()) };
         assert_eq!((page.apply(&rename), page.apply(&rename)), (Ok(true), Ok(false)));
 
-        let mut note = item(ItemKind::Note { text: String::new() });
-        let text = ItemOp::SetNote { id, text: "plan".to_owned() };
-        assert_eq!((note.apply(&text), note.apply(&text)), (Ok(true), Ok(false)));
         let mut folder = item(ItemKind::Folder { path: "~/".to_owned() });
         let into = ItemOp::SetFolder { id, path: "~/src".to_owned() };
         assert_eq!((folder.apply(&into), folder.apply(&into)), (Ok(true), Ok(false)));
 
         let before = page.clone();
-        assert_eq!(page.apply(&text), Err(Refused::WrongKind("note")));
         assert_eq!(page.apply(&into), Err(Refused::WrongKind("folder")));
-        assert_eq!(note.apply(&moved), Err(Refused::WrongKind("browser")));
+        assert_eq!(folder.apply(&moved), Err(Refused::WrongKind("browser")));
         assert_eq!(page.apply(&ItemOp::Remove(id)), Err(Refused::NotAnEdit));
         assert_eq!(page.apply(&ItemOp::Add(before.clone())), Err(Refused::NotAnEdit));
         assert_eq!(page, before, "a refused op leaves the item as it was");
-        assert_eq!(Refused::WrongKind("note").to_string(), "not a note");
+        assert_eq!(Refused::WrongKind("folder").to_string(), "not a folder");
     }
 
     /// A fact is said, said again to no change, and taken back; one out of bounds, or a new

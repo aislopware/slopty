@@ -902,9 +902,9 @@ advertise `WorkerCaps::virtual_displays`; Linux says no.
 ## 4. Workspace
 
 Every worker's items in one scrollable tiling workspace, niri's model
-(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, note, file, browser
+(`docs/decisions/workspace.md`). Items: terminal, remote window, remote display, file, folder, browser
 (`ItemKind` in `crates/slopty-proto/src/items.rs`). The worker keeps only the registry
-(`slopty-worker::items::ItemStore`: the items, their names and sleep; `Add`/`Rename`/`SetNote`/
+(`slopty-worker::items::ItemStore`: the items, their names and sleep; `Add`/`Rename`/
 `Sleep`/`Remove`, each op carrying only the field it changes, a refused one answered with a snapshot,
 a session's item made and removed with it); `slopty-client::items::ItemDoc` mirrors it with
 optimistic local ops and recognises its own echo by `by == me`. Where each item sits is this
@@ -942,7 +942,7 @@ decision), bound in `Workspace && !Screen`: a focused remote window gets them al
 way back. The titlebar is the workspace name (the one given, else the project most of its tiles are
 in, else "New workspace"), a dot per column (none for one column), "+" (a menu: with
 several workers, first the worker a new tile goes to; then new terminal, agent, window or
-display, note, then a new workspace), the bell and "…"; the status bar under the strip holds
+display, note (a new Markdown file), then a new workspace), the bell and "…"; the status bar under the strip holds
 the readouts. The status bar is never empty: the focused shell's place, branch and working-tree
 changes (`+12 −3`), else the worker's name, and on the right what the focused tile is (a file's
 language and caret, a stream's size and rate, a page's host, a command's running time). A
@@ -958,27 +958,19 @@ back for `UNDO_CLOSE` (5 s): ⌘Z, the palette's "Undo close" or the toast's "Un
 item back as it was (`remember_closed`, `take_back`), else `forget_closed` lets go. An idle
 shell keeps its session and its attached view through the wait, so its rows come back
 untouched and `forget_closed` sends the worker `Close`; every other tile is its item, so the
-document restores it (a note's editor commits on a timer, and the close reads the field
-directly so the last keystrokes come back too). An ended shell is the one exception: it has
-no session to keep and no rows the worker could replay, so it goes at once. Notes (⌘⇧N) are edited
-in place (`slopty-ui::note`) and their text lives in the document; a note nobody is editing
-draws that text as Markdown (`slopty-ui::markdown`), its
-fenced blocks as a block element with "copy" and, given a shell, "run"
-(`markdown::code_block`, `NoteViewEvent::Run` → `run_in_shell`), its task lines
-(`- [ ] …`, `markdown::task_row`) as rows whose box ticks the line in the text on a click
-without opening the editor (`NoteView::toggle_task`, committed at once), and a
-click on it puts the caret back in the editor; its header reads the first non-empty
-line (`workspace::note_title`, heading, list and task marks stripped, 40 chars, a checklist's
-ticks counted after it as `1 of 3 done`, the same words the navigator and the palette use,
-through `tile_place`), "Untitled note" while empty. A ticked task is struck through and set
-back to `alpha::STRONG`.
+document restores it (a file tile's editor waits with it, so its edit comes back too). An ended
+shell is the one exception: it has no session to keep and no rows the worker could replay, so it
+goes at once. A note (⌘⇧N) is a Markdown file on the worker, opened as a file tile: the focused
+shell's directory, else the worker's home, and a name for the moment on this device's clock
+(`note-2026-10-05-143210.md`, `workspace::commands::note_path`). It opens on its source and
+is written to disk by ⌘S like any file, so agents read and write notes as the files they are.
 Any tile takes a **name** (⌘E, or a double-click on its header; `Item.name`,
 protocol 37, worker-sanitised to 128 characters): document state every client shows in place
 of the derived title until it is cleared, and what the palette's "Go to" line says. A
 **file tile** (`ItemKind::File { path }`, `slopty-ui::file`) is an editor on a file on the
 worker: the item names the absolute path and lives in the shared document, the text does
 not. Each client asks `ClientMsg::ReadFile` when the tile appears (`workspace
-reconcile_notes_and_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: the
+reconcile_files`, which also sends the set of paths as `ClientMsg::WatchFiles`: the
 worker follows each one on the kernel's events and re-sends a changed file unasked) and puts the `WorkerMsg::File` answer (`slopty-worker::file::read`: the whole
 text up to 16 MiB, `FileRead::Text | Streamed | Binary | Missing | TooLarge`) into gpui-kit's code
 editor (`EditorState`, line numbers, no folding or wrap) in the theme's mono font, or one line
@@ -1048,7 +1040,14 @@ A file tile whose read is `FileRead::Media` shows it instead of the editor
 frames animated unless Reduce Motion is on, and a PDF as a virtualized list of pages that
 CoreGraphics draws at the tile's width on a background thread, the pages near the view kept
 (`file::decode`). The pages take Preview's scroll keys in the key context
-`FileEditor FilePages`.
+`FileEditor FilePages`. A Markdown file (`.md`, `.markdown`, `.mdown`, `.mkd`) opens on its
+preview once its text is in (`slopty-ui::file::reading`): the editor's text in segments
+(`markdown::segments`) in a gpui `list`, prose through `markdown::style`, task lines as rows
+whose box ticks the line in the editor (`FileView::toggle_task`, saved at once when nothing
+else is unsaved), fenced blocks with "Copy" and, given a shell, "Run"
+(`FileViewEvent::RunBlock` → `run_in_shell`). ⌘⇧V, the header's toggle and the palette swap
+the preview and the source; a tile opened to edit (a new or empty file, one opened at a line,
+one a program waits on, one with a kept edit) opens on the source, and ⌘F swaps to it.
 
 **Search in files** (⌘⇧F, `slopty-ui::search::ProjectSearch`) runs on the worker next to the
 files: `ClientMsg::Search(SearchRequest::Start)` → pages of `WorkerMsg::Search(SearchEvent::Hits)`
@@ -1059,7 +1058,7 @@ lays out the rows: a file, then its matches and context in line order. It finds 
 replace: a match opens its file tile at the line, where ⌘⇧H replaces in that file. Its scope
 chip turns the same query on the open tiles (`search::tiles`): the workspace asks each shell for
 the query as one pattern (`TermRequest::Search`, the toggles written in by `Query::source`) and
-counts the file tiles and notes itself, and a row goes to its tile with that tile's find bar open
+counts the file tiles itself, and a row goes to its tile with that tile's find bar open
 on the query. Scripts and
 agents reach the same search through `Verb::Search` (`slopty search`), one capped reply in path
 order.
@@ -1413,7 +1412,7 @@ fill of their tone with the tone as text; buttons are `radii.sm` with `raised` �
 hover/pressed, and the one primary action on a surface is `accent_fill` with `accent_ink` text.
 gpui-kit's widgets (inputs, Markdown `TextView`) read gpui-kit's own theme, which
 `slopty_ui::kit::sync` rewrites from the same tokens on every theme change, and the Markdown in
-a note gets `markdown_line_height`, paragraph gaps of one base unit, headings
+a file's preview gets `markdown_line_height`, paragraph gaps of one base unit, headings
 stepping down from `title()` and code in the terminal mono at `small()` on `raised`. Headless
 tests read the tokens back through `painted_quads()`: the accent vs hairline item frame, the
 `warn` outline of a blocked agent in both variants, the `error` separator tone, and gpui-kit's
@@ -1474,13 +1473,8 @@ integration). A right click on any row opens the context menu (`block-menu`; on 
 the block's items come first, protocol 28:
 the marks carry the input column, `TermState::command_block` reads the command and the
 output from any row): "Copy command", "Copy output", "Rerun" (a paste of the command, then
-↩ as a key), "Save as note" (the
-block as a note tile beside the shell: the command as a heading and a runnable `sh` fence,
-the output as a plain fence, `block_note`; `TerminalViewEvent::NoteBlock` →
-`WorkspaceView::note_beside`, a new column right of the shell's; the palette's "Keep
-last block as a note" does the same for the block before the newest prompt,
-`TermState::last_block`) and "Select block"; then, on every row, the terminal's own: "Copy"
-(only with a selection; off a block a selection also offers "Save as note", fenced), "Paste", "Find…" and "Clear screen", each what its shortcut does. ⇧-arrows move
+↩ as a key) and "Select block"; then, on every row, the terminal's own: "Copy"
+(only with a selection), "Paste", "Find…" and "Clear screen", each what its shortcut does. ⇧-arrows move
 a selection's head (`adjusted_head`: a cell sideways wrapping at the row's ends, a row up or
 down), the shell never sees them; without a selection they are the shell's. The
 menu is `Menu "Command block"` on a block, `Menu "Terminal"` elsewhere; the armed tap on the

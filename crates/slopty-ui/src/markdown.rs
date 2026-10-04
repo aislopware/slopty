@@ -1,7 +1,7 @@
 //! One markdown look for every surface that draws it with gpui-kit's `TextView`.
 //!
-//! A note tile ([`crate::note`]) and a file tile read the same, because both take
-//! their sizes, colours and corners from the theme through [`style`].
+//! A Markdown file's preview and a conversation read the same, because both take their sizes,
+//! colours and corners from the theme through [`style`].
 
 use std::rc::Rc;
 
@@ -254,7 +254,8 @@ pub type Toggle = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// A task-list line as its own row: a box, ticked when `done`, before the line's Markdown.
 ///
-/// With `toggle` the box is a button that flips the line (a note); without, it only shows
+/// With `toggle` the box is a button that flips the line (a Markdown file's
+/// preview); without, it only shows
 /// (an answer). `id` names the box's element id and debug selector; `scale` as for [`style`].
 #[must_use]
 pub fn task_row(
@@ -357,8 +358,8 @@ pub fn task_row(
 /// code in the terminal mono at `small()` on the raised surface with `radii.xs` corners.
 /// Colours come from the gpui-kit theme, which [`crate::kit::sync`] keeps on the same tokens.
 ///
-/// `scale` multiplies every size, for a surface that is drawn at a zoom of its own (a note
-/// in the overview); the chrome passes `1.0`.
+/// `scale` multiplies every size, for a surface that is drawn at a zoom of its own (a file's
+/// preview in the overview); the chrome passes `1.0`.
 #[must_use]
 pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
     let small = theme.typography.small() * scale;

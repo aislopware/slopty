@@ -68,8 +68,8 @@ fn a_place_is_its_last_two_directories_with_home_as_a_tilde() {
 }
 
 /// A header is its title, then its context, muted with no separator: a file's directory, a
-/// shell's (none when the title already names it: the status bar has the path), a note's
-/// progress as a count at the end. A note with no tasks has none. (That the context is in the UI
+/// shell's (none when the title already names it: the status bar has the path). (That the
+/// context is in the UI
 /// face is `kit`'s `the_mono_face_is_for_ports_and_the_settings_file`: the test platform
 /// shapes every family alike.)
 #[gpui::test]
@@ -80,28 +80,12 @@ fn a_header_is_its_title_then_its_context_in_the_ui_face(cx: &mut TestAppContext
         opens_in(&view, cx, &fake, SessionId::new(), fake.me, 1, Some("/Users/w/src/slopty"));
     let main = "/Users/w/src/slopty/src/main.rs".to_owned();
     let file = arrives(&view, cx, &fake, ItemKind::File { path: main }, 2);
-    let tasks = "# Release\n- [x] tag\n- [ ] ship\n".to_owned();
-    let release = arrives(&view, cx, &fake, ItemKind::Note { text: tasks }, 3);
     let nodes = tree(cx);
     assert!(nodes.iter().any(|n| n.is("Heading", Some("terminal slopty"))), "{nodes:#?}");
     assert!(nodes.iter().any(|n| n.is("Label", Some("src"))), "the file's: {nodes:#?}");
     assert!(!nodes.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains(" · "))));
     assert!(cx.debug_bounds(selector("place", file.item)).is_some(), "{file:?}");
     assert!(cx.debug_bounds(selector("place", shell.item)).is_none(), "named by its title");
-    // A note keeps its name, and counts its tasks at the end as a command's time is said.
-    assert!(nodes.iter().any(|n| n.is("Heading", Some("note Release"))), "{nodes:#?}");
-    assert!(cx.debug_bounds(selector("place", release.item)).is_none(), "said once");
-    assert!(nodes.iter().any(|n| n.is("Status", Some("1 of 2 done"))), "{nodes:#?}");
-    let (name, count) = (
-        cx.debug_bounds(selector("name", release.item)).expect("the name"),
-        cx.debug_bounds(selector("tasks", release.item)).expect("the count"),
-    );
-    assert!(count.left() > name.right(), "after the name: {name:?} {count:?}");
-    let note = arrives(&view, cx, &fake, ItemKind::Note { text: "plan".into() }, 4);
-    view.update(cx, |v, cx| v.focus_tile(note, cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds(selector("title", note.item)).is_some(), "its header is drawn");
-    assert!(cx.debug_bounds(selector("place", note.item)).is_none(), "a note has no place");
 }
 
 /// A narrow tile keeps its name whole and lets where it is give way.
@@ -901,26 +885,6 @@ fn a_finished_command_reads_as_its_time_alone(cx: &mut TestAppContext) {
     let pad = px(2.0 * theme.spacing.xs);
     assert!(readout.size.width <= took + pad + px(0.5), "the time alone: {readout:?}");
     assert!(cx.debug_bounds(selector("unseen", tile.item)).is_none(), "no dot on screen");
-}
-
-/// A note has one name, in its header as in every list: its title, with how far its tasks
-/// got as a count after it ("1/3"), never the count in the name's place.
-#[gpui::test]
-fn a_note_keeps_its_name_and_counts_its_tasks(cx: &mut TestAppContext) {
-    use crate::workspace::tile::note_count;
-    assert_eq!(note_count(1, 3), "1/3");
-    let (view, cx) = workspace(cx);
-    let fake = connect(&view, cx, 1, "studio");
-    let text = "# Release\n- [x] build\n- [ ] tag\n- [ ] ship".to_owned();
-    let note = arrives(&view, cx, &fake, ItemKind::Note { text }, 1);
-    let title = view.update(cx, |v, _| {
-        let item = v.item(note).expect("the note").clone();
-        v.tile_title(&item)
-    });
-    assert_eq!(title, "Release");
-    let nodes = tree(cx);
-    assert!(nodes.iter().any(|n| n.is("Status", Some("1 of 3 done"))), "{nodes:#?}");
-    assert!(!nodes.iter().any(|n| n.label.as_deref() == Some("note 1 of 3 done")), "no count");
 }
 
 /// In the overview the words line up with the panes: a workspace's name and the "New

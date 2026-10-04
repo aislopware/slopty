@@ -11,7 +11,7 @@ fn an_open_overview_draws_a_miniature_per_tile_and_none_while_closed(cx: &mut Te
     let (view, cx) = workspace(cx);
     let fake = connect(&view, cx, 1, "studio");
     let shells = three_shells(&view, cx, &fake);
-    let note = arrives(&view, cx, &fake, ItemKind::Note { text: "Release\n- [ ] tag".into() }, 4);
+    let note = arrives(&view, cx, &fake, ItemKind::Folder { path: "/w/release".into() }, 4);
     let file = arrives(&view, cx, &fake, ItemKind::File { path: "/w/src/main.rs".into() }, 5);
     for (session, _) in &shells {
         view.update_in(cx, |v, _w, cx| v.term_event(*session, frame(&["~ % cargo test", ""]), cx));

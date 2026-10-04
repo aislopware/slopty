@@ -255,16 +255,24 @@ mod tests {
         );
         assert_eq!(item_ids(&da), item_ids(&db), "the same items on both");
 
-        // (g) A note typed on A is on B once the editor commits it.
+        // (g) A note written on A and saved is on B: it is a file on the worker, which B's tile
+        // reads again when it changes on disk.
         a.keys("cmd-shift-n").await.unwrap();
-        a.wait_for("a note on A", STEP, |d| d.item("note").is_some()).await.unwrap();
+        a.wait_for("a note on A, its source focused", STEP, |d| {
+            d.item("file").and_then(|i| i.file.as_ref()).is_some_and(|f| !f.previewing)
+                && d.focused.starts_with("file:")
+        })
+        .await
+        .unwrap();
         a.type_text("shared note").await.unwrap();
-        let text = |d: &Dump| d.item("note").and_then(|n| n.note.clone());
-        b.wait_for("the note's text on B", STEP, |d| text(d).as_deref() == Some("shared note"))
-            .await
-            .unwrap();
-        let da = a.dump().await.unwrap();
-        assert_eq!(text(&da).as_deref(), Some("shared note"));
+        a.keys("cmd-s").await.unwrap();
+        let text = |d: &Dump| d.item("file").and_then(|i| i.file.as_ref()?.text.clone());
+        let saved = |d: &Dump| {
+            d.item("file").and_then(|i| i.file.as_ref()).is_some_and(|f| !f.edited)
+                && text(d).as_deref() == Some("shared note")
+        };
+        a.wait_for("the note saved on A", STEP, saved).await.unwrap();
+        b.wait_for("the note's text on B", STEP, saved).await.unwrap();
 
         // (g) ⌘W on A closes the new shell for both.
         focus_session(a, &session).await;

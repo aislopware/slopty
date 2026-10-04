@@ -11,8 +11,6 @@
 //!   broken.
 //! * [`conversation`] — a Claude Code terminal's conversation face: the transcript as a list, the
 //!   composer that types into the same PTY, the permission card.
-//! * [`note`] — a sticky note read as Markdown and edited in place, text shared through the
-//!   document.
 //! * [`folder`] — a directory on a worker, browsed in place: files open beside it, rows drag out,
 //!   drops go up into it.
 //! * [`markdown`] — the one `TextView` style every Markdown surface draws by.
@@ -60,7 +58,6 @@ pub mod keymap;
 pub mod keys;
 pub mod kit;
 pub mod markdown;
-pub mod note;
 pub mod palette;
 pub mod paste_key;
 pub mod picker;
