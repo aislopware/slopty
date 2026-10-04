@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
 use slopty_e2e::snapshot::{
-    PixelRect, assert_matches_masked, golden_dir, luma_distance, luma_histogram,
+    PixelRect, assert_matches_apart, assert_matches_masked, golden_dir, luma_distance,
+    luma_histogram,
 };
 use slopty_e2e::{Command, Driver, Dump, ScreenInfo, Stack};
 
@@ -159,8 +160,9 @@ async fn golden_stream(
     }
     let existing = golden_dir().join(format!("{name}.png"));
     let before = image::open(&existing).ok().map(image::DynamicImage::into_rgba8);
-    let masks: Vec<PixelRect> = [page, status].into_iter().chain(live_readouts(&dump)).collect();
-    assert_matches_masked(name, &frame, TOLERANCE, &artifacts_dir(), &masks).unwrap();
+    let words: Vec<PixelRect> = [page, status].into_iter().chain(live_readouts(&dump)).collect();
+    let pixels: Vec<PixelRect> = words.iter().copied().chain(overlay_band(&dump, body)).collect();
+    assert_matches_apart(name, &frame, TOLERANCE, &artifacts_dir(), (&pixels, &words)).unwrap();
     let golden = before.unwrap_or_else(|| frame.image.clone());
     let distance = luma_distance(&luma_histogram(&frame, page), &luma_histogram(&golden, page));
     println!("MEASURE {name}: page luma distance {distance:.4}");
@@ -205,6 +207,20 @@ fn live_readouts(dump: &Dump) -> Vec<PixelRect> {
             [px(x), px(y), px(w), px(h)]
         })
         .collect()
+}
+
+/// The stats overlay's band across the body, when it shows: its pixels are masked and its
+/// words ("Details") held.
+///
+/// The overlay keeps to the body's right edge and widens with its figures ("– to glass", then
+/// "21 ms to glass"), so its left edge falls anywhere along the band from one run to the next.
+fn overlay_band(dump: &Dump, body: PixelRect) -> Option<PixelRect> {
+    let [x, y, w, h] = dump.a11y_node("Status", Some("Stream stats"))?.bounds;
+    let scale = dump.window.scale;
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
+    let px = |points: f32| (points * scale).round().max(0.0) as u32;
+    let right = px(x + w);
+    Some([body[0], px(y), right.saturating_sub(body[0]), px(h)])
 }
 
 /// A label made of figures that move: one of its parts, as the readouts join them with " · ",

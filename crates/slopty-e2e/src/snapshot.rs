@@ -376,8 +376,27 @@ pub fn assert_matches_masked(
     artifacts: &Path,
     masks: &[PixelRect],
 ) -> Result<Diff> {
-    let pixels = pixels_match(name, &actual.image, tolerance, artifacts, masks);
-    let words = text_matches(name, &actual.text(masks), artifacts);
+    assert_matches_apart(name, actual, tolerance, artifacts, (masks, masks))
+}
+
+/// [`assert_matches`] with the pixels outside `pixels` and the words of the nodes outside
+/// `words`.
+///
+/// A region masked in pixels alone says words that hold still, or that the text already scrubs
+/// (a test server's port in an address), while its glyphs or its edge move from run to run.
+///
+/// # Errors
+///
+/// As [`assert_matches`].
+pub fn assert_matches_apart(
+    name: &str,
+    actual: &Frame,
+    tolerance: f64,
+    artifacts: &Path,
+    (pixels, words): (&[PixelRect], &[PixelRect]),
+) -> Result<Diff> {
+    let pixels = pixels_match(name, &actual.image, tolerance, artifacts, pixels);
+    let words = text_matches(name, &actual.text(words), artifacts);
     match (pixels, words) {
         (Ok(diff), Ok(())) => Ok(diff),
         (Err(e), Ok(())) | (Ok(_), Err(e)) => Err(e),
@@ -432,6 +451,14 @@ fn pixels_match(
             Ok(diff)
         }
         GoldenAction::Keep => {
+            // Within the tolerance still leaves its picture: a golden that drifts is found
+            // by where it differs, and one that matches leaves no older run's.
+            let diff_path = artifacts.join(format!("{name}.diff.png"));
+            if diff.differing > 0 {
+                image.save(&diff_path)?;
+            } else if diff_path.exists() {
+                std::fs::remove_file(&diff_path)?;
+            }
             eprintln!(
                 "snapshot {name}: {} of {} pixels differ ({:.3}%)",
                 diff.differing,

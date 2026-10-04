@@ -1130,3 +1130,23 @@ file card beside five shells (`open_file`, 2026-09-12), and types 60 letters at 
   run after run. The same drift hid a real change: the composer's help button is gone, and every
   composer golden still drew it under the tolerance. They are taken again.
 
+
+- ✅ **The goldens that moved run to run hold still** (2026-10-05). Four goldens differed
+  under their tolerance in every run. Each now matches to the pixel, with no tolerance changed.
+  - `terminal-failed-block(-dark)` said how long `ls` took (9 to 17 ms). A command's duration
+    is measured by `slopty_ui::clock::since`, which counts nothing while the clock is pinned,
+    and the test pins it. The failing command sleeps 0.3 s first: the app learns a command ran
+    only from a frame showing it running, so a command over between two frames is never timed
+    and its block says no duration at all, which moved the golden too.
+  - `browser` drew the test server's port, which the system picks each run, in the address.
+    The text already scrubs it to `$PORT`. Pixels masked alone, words still held
+    (`snapshot::assert_matches_apart`), cover the address's room up to the reload button,
+    since its figures are not all one width.
+  - `stream-window-stats`: the stats overlay keeps to the body's right edge and widens with its
+    figures, so its left edge moved. The overlay's band across the body is masked in pixels,
+    its words held.
+  - `stream-display` and the light `editor` goldens were not moving but stale. The first
+    predated the warm neutral surfaces, and the editor's keyword colour changed with the light
+    palette generated from the dark hues (ANSI 5 kept its hue). They are taken again.
+  - A golden within its tolerance now leaves its diff picture in the artifacts, so a drift is
+    found by where it differs.

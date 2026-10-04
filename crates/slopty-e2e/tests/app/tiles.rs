@@ -9,7 +9,7 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
+use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches_apart};
 use slopty_e2e::{Command, Driver, Dump, FileItemInfo, Stack};
 
 /// How long a worker round trip may take.
@@ -21,6 +21,22 @@ const WINDOW: (f32, f32) = (900.0, 600.0);
 /// caret there and two dumps agree on every tile's place, and hold it against
 /// `golden/<name>.png`.
 async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
+    golden_scrubbed(drv, stack_dir, name, &[]).await;
+}
+
+/// A node of the accessibility tree by its role and label.
+type Node<'a> = (&'a str, &'a str);
+
+/// [`golden`] with the pixels of the room each node `scrubbed` names may take left out (its role
+/// and label, up to where the node after it, named the same way, begins), its words still held:
+/// the words the text scrubs, such as the test server's port in a page's address, which the
+/// system picks anew each run, and whose figures are not all one width.
+async fn golden_scrubbed(
+    drv: &mut Driver,
+    stack_dir: &std::path::Path,
+    name: &str,
+    scrubbed: &[(Node<'_>, Node<'_>)],
+) {
     drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
     let mut last =
         drv.wait_for("the carets at their prompts", STEP, Dump::prompts_settled).await.unwrap();
@@ -39,7 +55,20 @@ async fn golden(drv: &mut Driver, stack_dir: &std::path::Path, name: &str) {
         }
     }
     let frame = drv.render(&stack_dir.join(format!("{name}.png"))).await.unwrap();
-    assert_matches(name, &frame, TOLERANCE, &artifacts_dir()).unwrap();
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
+    let px = |points: f32| (points * frame.scale).round().max(0.0) as u32;
+    let bounds = |(role, label): Node<'_>| {
+        let node = frame.a11y.iter().find(|n| n.role == role && n.label.as_deref() == Some(label));
+        node.unwrap_or_else(|| panic!("no {role} {label}")).bounds
+    };
+    let masks: Vec<PixelRect> = scrubbed
+        .iter()
+        .map(|&(node, after)| {
+            let ([x, y, _, h], [end, ..]) = (bounds(node), bounds(after));
+            [px(x), px(y), px(end).saturating_sub(px(x)), px(h)]
+        })
+        .collect();
+    assert_matches_apart(name, &frame, TOLERANCE, &artifacts_dir(), (&masks, &[])).unwrap();
 }
 
 /// The first shell, connected and prompted.
@@ -353,7 +382,7 @@ async fn a_page_on_localhost_opens_in_a_browser_tile() {
     assert!(local.starts_with("http://127.0.0.1:") && local != url, "served elsewhere: {local}");
     assert_eq!(page.page_url, url, "the web view's address, on the worker's port");
     assert!(page.failed.is_none(), "{page:?}");
-    golden(drv, &dir, "browser").await;
+    golden_scrubbed(drv, &dir, "browser", &[(("Button", "Address"), ("Button", "Reload"))]).await;
 
     drv.keys("cmd-shift-p").await.unwrap();
     drv.wait_for("the palette over the page, which stays", STEP, |d| {

@@ -2635,7 +2635,7 @@ impl TerminalView {
                 }
                 Effect::CommandFinished { prompt, command, exit } => {
                     let started = self.command_started.take();
-                    let elapsed = started.map_or(Duration::ZERO, |t| t.elapsed());
+                    let elapsed = started.map_or(Duration::ZERO, |t| crate::clock::since(t, cx));
                     tracing::info!(
                         session = %self.session,
                         %command,

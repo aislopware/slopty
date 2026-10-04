@@ -26,6 +26,9 @@ const WINDOW: (f32, f32) = (900.0, 600.0);
 /// buttons, over nothing that answers a hover. The bottom-left corner is the status bar, which
 /// shows the round trip under the pointer.
 const PARK: (f32, f32) = (1.0, 1.0);
+/// Where a golden that shows a time pins the readouts ([`Command::PinClock`]): 2026-10-04 at
+/// 09:00 UTC, in Unix milliseconds.
+const PINNED_AT: u64 = 1_791_104_400_000;
 
 /// Wait until nothing moves, every link has its round trip and every shell at a prompt has its
 /// caret there: two dumps a frame apart place every tile alike, so a spring still running
@@ -793,9 +796,13 @@ async fn a_failed_command_block_says_so_under_the_pointer() {
     stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
     first_shell(&mut stack.driver).await;
     let drv = &mut stack.driver;
+    // Pinned, the clock stands still, so the failed command says it took no time in every run.
+    // It sleeps first, so the app sees it running in a frame of its own: a command over between
+    // two frames is never seen running, and says no time at all.
+    drv.ok(&Command::PinClock { at_ms: Some(PINNED_AT) }).await.unwrap();
     drv.type_text("echo fine").await.unwrap();
     drv.keys("enter").await.unwrap();
-    drv.type_text("ls /e2e-missing").await.unwrap();
+    drv.type_text("sleep 0.3; ls /e2e-missing").await.unwrap();
     drv.keys("enter").await.unwrap();
     let failure = "No such file or directory";
     let dump = drv
