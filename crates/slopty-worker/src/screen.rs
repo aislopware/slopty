@@ -1598,6 +1598,55 @@ fn micros(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
 }
 
+/// How long the replacement of a lost session waits when the replacement before it was lost
+/// too without coding a frame. Doubles for each such replacement in a row, up to
+/// [`LOST_RETRY_MAX`]. A session the system took away once is replaced at once.
+///
+/// Built at once every time, a stream on an encoder that answers every frame with
+/// `kVTVideoEncoderNotAvailableNowErr` built sessions as fast as VideoToolbox made them: 13 301
+/// in one test run on a virtual Mac whose encoder had stopped (`docs/decisions/video.md`, "A
+/// virtual Mac's encoder stops for good past its 1020th client").
+const LOST_RETRY: Duration = Duration::from_millis(250);
+/// The longest [`LOST_RETRY`] grows to: the same bound as a stuck encode's patience.
+const LOST_RETRY_MAX: Duration = ENCODE_STUCK_MAX;
+
+/// When the next replacement of a lost session may be built ([`Pipeline::follow_lost`]).
+#[derive(Debug, Default)]
+struct LostRetry {
+    /// When the last replacement was started, `0` before one.
+    started_us: u64,
+    /// The stream's encoded frames then.
+    encoded_at: u64,
+    /// The wait that replacement kept after the one before it; `0` when it was the first in a
+    /// row.
+    waited_us: u64,
+}
+
+impl LostRetry {
+    /// The wait the next replacement keeps after the last: none once a frame was coded since.
+    fn next_wait(&self, encoded: u64) -> u64 {
+        if self.started_us == 0 || encoded > self.encoded_at {
+            0
+        } else if self.waited_us == 0 {
+            micros(LOST_RETRY)
+        } else {
+            self.waited_us.saturating_mul(2).min(micros(LOST_RETRY_MAX))
+        }
+    }
+
+    /// When a replacement may be started, with the stream at `encoded` frames.
+    fn due_us(&self, encoded: u64) -> u64 {
+        self.started_us.saturating_add(self.next_wait(encoded))
+    }
+
+    /// A replacement starts at `now_us`, with the stream at `encoded` frames.
+    fn started(&mut self, now_us: u64, encoded: u64) {
+        self.waited_us = self.next_wait(encoded);
+        self.started_us = now_us.max(1);
+        self.encoded_at = encoded;
+    }
+}
+
 struct Shared<P: Platform = Native> {
     id: StreamId,
     /// The sessions in force and what they were last told. Only an encode takes it, in its
@@ -1679,6 +1728,9 @@ struct Shared<P: Platform = Native> {
     gate: Gate,
     /// The beat's watch on the encode inside the encoder ([`StuckWatch`]).
     stuck: Mutex<StuckWatch>,
+    /// When the next replacement of a lost session may be built ([`LostRetry`]), and the moment
+    /// the beat last woke the geometry tick for (`0` for none).
+    lost_retry: Mutex<(LostRetry, u64)>,
     /// The encode thread that takes the mailbox now; one numbered otherwise ends at its next
     /// capture ([`start_encode_thread`]).
     encode_thread: AtomicU64,
@@ -1799,6 +1851,7 @@ impl<P: Platform> Shared<P> {
             held: Mutex::new(None),
             gate: Gate::default(),
             stuck: Mutex::new(StuckWatch::new(now::<P>())),
+            lost_retry: Mutex::new((LostRetry::default(), 0)),
             encode_thread: AtomicU64::new(0),
             unstuck: tokio::sync::Notify::new(),
             held_us: AtomicU64::new(0),
@@ -2540,7 +2593,9 @@ impl<P: Platform> Shared<P> {
         drop(held);
         drop(replaced);
         self.gate.enter(turn);
+        let inside = engines::ENGINES.enter();
         let outcomes = self.submit(&handed, &image, pts, &options);
+        drop(inside);
         if !self.gate.back(turn) {
             tracing::debug!(stream = %self.id, pts, "an encode given up on came back: dropped");
             return Attempt::GivenUp;
@@ -2742,6 +2797,23 @@ impl<P: Platform> Shared<P> {
         let stuck = self.stuck.lock();
         (inside != 0)
             .then(|| (if stuck.seen == inside { stuck.charged_us } else { 0 }, stuck.patience_us))
+    }
+
+    /// The beat's look at a lost session still in force at `now`: once its replacement may be
+    /// built ([`LostRetry`]), the geometry tick is woken for it, once for each moment.
+    fn retry_lost(&self, now: u64) {
+        let lost = self.encoder_lost.load(Ordering::Relaxed);
+        if lost == 0 || self.top.session.load(Ordering::Relaxed) != lost {
+            return;
+        }
+        let encoded = self.counters.encoded.load(Ordering::Relaxed);
+        let mut retry = self.lost_retry.lock();
+        let due = retry.0.due_us(encoded);
+        if now >= due && retry.1 != due {
+            retry.1 = due;
+            drop(retry);
+            self.geometry_wake.notify_one();
+        }
     }
 
     /// The beat's look at the encode inside the encoder at `now` ([`StuckWatch`]): one that has
@@ -3324,6 +3396,7 @@ fn open_session<P: Platform>(
         }
         shared.on_session_packet(index, session, &packet);
     };
+    let _inside = engines::ENGINES.enter();
     match stripe {
         None => P::Video::new(config, sink),
         Some(stripe) => P::Video::stripe(config, stripe, sink),
@@ -3456,9 +3529,11 @@ fn start_encode_thread<P: Platform>(shared: &Arc<Shared<P>>) -> Result<(), Scree
 /// keyframe ([`Shared::put_in`]), or the runtime's ([`Shared::install`]).
 fn retire<V: Send + 'static>(old: Option<V>) {
     let Some(old) = old else { return };
-    let spawned = std::thread::Builder::new()
-        .name("slopty-retire-encoder".to_owned())
-        .spawn(move || drop(old));
+    let spawned =
+        std::thread::Builder::new().name("slopty-retire-encoder".to_owned()).spawn(move || {
+            let _inside = engines::ENGINES.enter();
+            drop(old);
+        });
     if let Err(e) = spawned {
         tracing::warn!(error = %e, "no thread to retire an encoder session on: dropped in place");
     }
@@ -4543,6 +4618,16 @@ impl<P: Platform> Pipeline<P> {
         if !(lost != 0 && in_force || given_up) || self.shared.staged.lock().is_some() {
             return None;
         }
+        // A session given up on inside the encoder already waited out its patience, which
+        // doubles in a row the same way ([`StuckWatch::gave_up`]).
+        if !given_up {
+            let encoded = self.shared.counters.encoded.load(Ordering::Relaxed);
+            let mut retry = self.shared.lost_retry.lock();
+            if now::<P>() < retry.0.due_us(encoded) {
+                return None;
+            }
+            retry.0.started(now::<P>(), encoded);
+        }
         tracing::info!(stream = %self.id, given_up, "rebuilding for a lost encoder session");
         Some(self.start_rebuild(self.native, self.desired, self.encoder_config))
     }
@@ -5133,6 +5218,7 @@ async fn beat_loop<P: Platform>(shared: Arc<Shared<P>>) {
     while !shared.sink.is_closed() {
         let now = now::<P>();
         shared.unstick(now);
+        shared.retry_lost(now);
         // The beat itself counts as traffic even when the transport refused it, so a refusal is
         // retried a period later instead of spun on.
         let silence = silence_us(now, shared.last_push_us.load(Ordering::Relaxed), last_beat_us);
@@ -7258,6 +7344,33 @@ mod tests {
         }
         assert_eq!(shared.stats().encoded, 4_000, "every capture went out");
         series.report().unwrap();
+    }
+
+    /// A lost session is replaced at once; a replacement lost too without coding a frame is
+    /// replaced after [`LOST_RETRY`], doubling in a row up to [`LOST_RETRY_MAX`]; and a frame
+    /// coded since the last replacement brings the next back to at once.
+    #[test]
+    fn replacements_lost_without_a_frame_are_rebuilt_ever_more_slowly() {
+        let mut retry = LostRetry::default();
+        let (first, max) = (micros(LOST_RETRY), micros(LOST_RETRY_MAX));
+        assert_eq!(retry.due_us(0), 0, "the first loss: at once");
+        retry.started(10_000_000, 5);
+        assert_eq!(retry.due_us(6), 10_000_000, "the replacement coded: at once");
+        assert_eq!(retry.due_us(5), 10_000_000 + first, "it coded nothing");
+        let mut at = 10_000_000 + first;
+        let mut waits = Vec::new();
+        for _ in 0..10 {
+            retry.started(at, 5);
+            let due = retry.due_us(5);
+            waits.push(due - at);
+            at = due;
+        }
+        assert_eq!(&waits[..4], &[2 * first, 4 * first, 8 * first, 16 * first]);
+        assert_eq!(waits.last(), Some(&max), "held at the most");
+        retry.started(at, 5);
+        assert_eq!(retry.due_us(7), at, "a frame since: at once again");
+        retry.started(at + 1, 7);
+        assert_eq!(retry.due_us(7), at + 1 + first, "and the doubling starts over");
     }
 
     /// The watch charges an encode inside the encoder only the time the beat ran on time: a

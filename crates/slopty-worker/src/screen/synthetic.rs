@@ -1472,6 +1472,88 @@ mod tests {
         });
     }
 
+    /// The drawn screen on an encoder that has stopped: every session builds, and refuses every
+    /// frame as not available now ([`Unavailable`]).
+    enum NoEncoder {}
+
+    impl Platform for NoEncoder {
+        type Audio = slopty_codec::Opus;
+        type Capture = Studio;
+        type Input = Poke;
+        type Video = Unavailable;
+    }
+
+    /// Sessions built for [`NoEncoder`].
+    static UNAVAILABLE_BUILT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+    /// A VideoToolbox session that takes its settings but answers every frame with
+    /// `kVTVideoEncoderNotAvailableNowErr`, as every session did on a virtual Mac whose encoder
+    /// had stopped.
+    struct Unavailable(slopty_codec::VideoToolbox);
+
+    impl slopty_codec::VideoEncoder for Unavailable {
+        type Image = PixelBuffer;
+
+        fn new(
+            config: slopty_codec::EncoderConfig,
+            sink: impl Fn(slopty_codec::EncodedPacket) + Send + Sync + 'static,
+        ) -> Result<Self, slopty_codec::CodecError> {
+            UNAVAILABLE_BUILT.fetch_add(1, Ordering::Relaxed);
+            slopty_codec::VideoToolbox::new(config, sink).map(Self)
+        }
+
+        fn encode(
+            &self,
+            _image: &PixelBuffer,
+            _pts_us: u64,
+            _options: &slopty_codec::FrameOptions,
+        ) -> Result<(), slopty_codec::CodecError> {
+            let status = objc2_video_toolbox::kVTVideoEncoderNotAvailableNowErr;
+            Err(slopty_codec::CodecError::EncoderLost { status })
+        }
+
+        fn set_bitrate(&self, bps: u32) -> Result<(), slopty_codec::CodecError> {
+            self.0.set_bitrate(bps)
+        }
+
+        fn set_frame_rate(&self, fps: u16) -> Result<(), slopty_codec::CodecError> {
+            self.0.set_frame_rate(fps)
+        }
+    }
+
+    /// A stream whose every session is lost at its first frame keeps replacing them, ever more
+    /// slowly: after the first replacement, each waits twice the one before (`LOST_RETRY`), so
+    /// three seconds build a handful of sessions where they built one as fast as the geometry
+    /// tick could put them in (13 301 in one run on a virtual Mac whose encoder had stopped).
+    #[test]
+    fn sessions_lost_one_after_another_are_replaced_ever_more_slowly() {
+        let runtime =
+            tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        runtime.unwrap().block_on(async {
+            let wire = Arc::new(Wire::new(ScreenRouter::new(), None, None));
+            let quality = Quality { scale: 0.25, ..Quality::default() };
+            let target = CaptureTarget::Display(DISPLAY.id);
+            let opened = Pipeline::<NoEncoder>::open(STREAM, target, quality, wire, |_e| {});
+            let (mut stream, _opened) = opened.await.unwrap();
+            let wake = stream.geometry_wake();
+            let watched = Duration::from_secs(3);
+            let deadline = tokio::time::Instant::now() + watched;
+            loop {
+                tokio::select! {
+                    () = wake.notified() => follow(&mut stream).await,
+                    () = tokio::time::sleep_until(deadline) => break,
+                }
+            }
+            let built = UNAVAILABLE_BUILT.load(Ordering::Relaxed);
+            eprintln!("{built} sessions built in {watched:?}: {:?}", stream.stats());
+            // The open's, then at once, 250 ms, 500 ms and 1 s after the one before: 5 in 3 s.
+            assert!(built >= 3, "still replaced: {built}");
+            assert!(built <= 8, "replaced ever more slowly, not as fast as built: {built}");
+            assert_eq!(stream.stats().encoded, 0, "no session coded");
+            stream.close().await;
+        });
+    }
+
     /// The drawn screen whose first encoder session never comes back from its
     /// [`WEDGED_AT`]th submit until the test lets it, as one did on a hosted virtual Mac
     /// (MEASUREMENTS.md, "an encode that never returned").

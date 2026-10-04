@@ -147,8 +147,8 @@ static TIMED: Mutex<Option<HashMap<Size, Option<bool>>>> = Mutex::new(None);
 ///
 /// The timing ([`VideoEncoder::side_by_side`]) codes 26 frames on three sessions of its own,
 /// about 300 ms of the engines at 2560 × 1600, so it starts only where `may_time` says the
-/// engines are idle (`engines::Engines::quiet`), off the runtime, once per size. Asked at a
-/// stream's open it would code beside the stream's first keyframe.
+/// engines are idle (`engines::Engines::quiet`), on a thread of its own, once per size. Asked
+/// at a stream's open it would code beside the stream's first keyframe.
 pub(super) fn pays<V: VideoEncoder>(
     width: u32,
     height: u32,
@@ -172,24 +172,38 @@ pub(super) fn pays<V: VideoEncoder>(
     if let Some(known) = asked {
         return known;
     }
-    let Ok(runtime) = tokio::runtime::Handle::try_current() else { return None };
-    drop(runtime.spawn_blocking(move || {
-        let verdict = match V::side_by_side(width, height, chroma) {
-            Ok(Some(gate)) => {
-                let pays = gate.pays() && gate.whole > WHOLE_OVER;
-                tracing::info!(width, height, ?chroma, whole = ?gate.whole, striped = ?gate.striped, pays, "stripes timed");
-                pays
+    // A thread of its own, never the runtime's blocking pool: a runtime waits for its blocking
+    // tasks when it shuts down, and a VideoToolbox call that never returns (as one has on a
+    // hosted virtual Mac) would hold the worker's exit, or a test's end, for good.
+    let spawned = std::thread::Builder::new().name("slopty-stripe-timing".to_owned()).spawn(
+        move || {
+            // The timing's own sessions count as calls under way, so no other size is timed
+            // beside it and no stream's engines read as idle while it codes.
+            let inside = super::engines::ENGINES.enter();
+            let verdict = match V::side_by_side(width, height, chroma) {
+                Ok(Some(gate)) => {
+                    let pays = gate.pays() && gate.whole > WHOLE_OVER;
+                    tracing::info!(width, height, ?chroma, whole = ?gate.whole, striped = ?gate.striped, pays, "stripes timed");
+                    pays
+                }
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(width, height, error = %e, "stripes not timed: one picture");
+                    false
+                }
+            };
+            drop(inside);
+            if let Some(timed) = TIMED.lock().as_mut() {
+                timed.insert(key, Some(verdict));
             }
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(width, height, error = %e, "stripes not timed: one picture");
-                false
-            }
-        };
+        },
+    );
+    if let Err(e) = spawned {
+        tracing::warn!(width, height, error = %e, "no thread to time the stripes on: asked again later");
         if let Some(timed) = TIMED.lock().as_mut() {
-            timed.insert(key, Some(verdict));
+            timed.remove(&key);
         }
-    }));
+    }
     None
 }
 

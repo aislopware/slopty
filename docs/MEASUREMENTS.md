@@ -14277,3 +14277,81 @@ CARGO_BUILD_JOBS=4 nice -n 19 cargo nextest run -p slopty-ui --lib \
   7 lively, 1 off or quiet), a needs-you wave is six beats over two seconds.
 - So lively stays the default (`docs/decisions/brand.md`, "Companions"). Not measured yet: the
   app's own process CPU idle with a lively yard on a real display, release build.
+
+## 2026-10-04 — a virtual Mac's encoder and its clients
+
+The worker shard's hangs on CI (`docs/decisions/video.md`, "A virtual Mac's encoder stops for
+good past its 1020th client"), reproduced in macOS 26.6.2 guests (25G83, tart 2.40.1 on the
+M1 Max, macOS 27.0), 4 cores and 8 GB or 3 cores and 7 GB. The count is the guest kernel's
+`AppleVideoToolboxParavirtualizationUserClient` objects; a fresh guest boots with 2.
+
+```sh
+# in the guest: the clients, then one process that codes and ends cleanly, then the clients
+ioreg -l -w0 -r -c AppleVideoToolboxParavirtualizationDriver \
+  | grep -c 'o AppleVideoToolboxParavirtualizationUserClient'
+cargo-nextest nextest run --archive-file vt.tar.zst --workspace-remap ws \
+  -E 'package(slopty-codec) & test(=tests::hevc_encode_then_decode)'
+```
+
+| what one process does before it ends | clients it leaves |
+| --- | --- |
+| one HEVC session: 2 frames, `CompleteFrames`, `Invalidate`, release | 2 |
+| 10 such sessions one after another | 2 |
+| 50 such sessions one after another | 2 |
+| one decoder session, or 20 one after another | 2 |
+| `hevc_encode_then_decode` (`slopty-codec`), three runs | 2 each |
+| a session left alive at exit, or the process killed mid-encode | 2 |
+
+None of them is ever given back before the guest restarts. A loop of processes that each code
+two frames at 1280 × 800 and end cleanly, counting every 50:
+
+| guest | other guest | clients at the start | the loop's run that failed | clients then |
+| --- | --- | --- | --- | --- |
+| 4 cores, 8 GB | running the same loop | 32 | 496th | 1020 |
+| 3 cores, 7 GB | running the same loop | 2 | 510th | 1020 |
+| 4 cores, 8 GB, fresh | idle, 8–14 clients | 2 | 509th | 1020 |
+
+Past it no session codes: frames come back `kVTVideoEncoderNotAvailableNowErr`
+(-12915), and the system log reads "VTVideoEncoderSelection signalled err=-12908",
+"(VCPRealtimeEncoder) PT: No real codec!!" and, as processes end, "stalling for detach from
+AppleVideoToolboxParavirtualizationDriver". The idle guest beside the third went on coding,
+and the host's own VideoToolbox coded throughout. Thirty-two 2560 × 1600 sessions alive in one
+process on a fresh guest got -12915 or -12912 for 12 of 96 frames, and the next process coded
+again: busy, not stopped.
+
+What the tests leave: one run of the `slopty-codec`, `slopty-capture` and `slopty-worker`
+library tests under nextest adds 60 clients (10 runs: 2 → 602); the whole worker shard added
+61 (4 → 65). So one shard on a fresh guest is a sixteenth of the way.
+
+The worker on a stopped encoder. The test
+`sessions_lost_one_after_another_are_replaced_ever_more_slowly` runs a stream at scale 0.25 for
+3 s on a real session that answers every frame -12915:
+
+| | sessions built in 3 s |
+| --- | --- |
+| rebuilt at once on every loss (before) | 181 |
+| 250 ms after a second loss in a row, doubling (`LostRetry`) | 5 |
+
+A stopped run of the old worker in a guest logged "the geometry tick builds new sessions"
+13 301 times.
+
+The fix under load. On the M1 Max (other lanes' builds and the guest's loop below running beside
+it), the worker library's VideoToolbox tests in one process, the commit before and the fix
+alternated 10 times: 15 of 15 and 16 of 16 passed every time, 4.4–5.8 s a run. In a fresh 4-core
+guest with two `yes` processes beside it, the three packages' library tests under nextest (three
+at a time, VideoToolbox two at a time) 10 times: every VideoToolbox test passed in every run, no
+test process lived past 100 s, 26–43 s a run. The failures there were the guest's own every run
+(`this_mac_says_whether_it_wakes_on_lan`,
+`this_mac_reports_its_toolchains_and_what_its_person_said`, and twice
+`player_starts_and_drains`, which CI skips for want of audio hardware).
+
+```sh
+CARGO_BUILD_JOBS=4 nice -n 19 cargo nextest archive -p slopty-codec -p slopty-capture \
+  -p slopty-worker --archive-file vt.tar.zst
+# in the guest, 10 times:
+cargo-nextest nextest run --archive-file vt.tar.zst --workspace-remap ws --test-threads 3 \
+  --no-fail-fast \
+  -E 'package(slopty-codec) | package(slopty-capture) | (package(slopty-worker) & kind(lib))'
+# on the host, 10 times each:
+target/debug/deps/slopty_worker-<hash> screen::synthetic:: screen::tests::a_rebuild_beside
+```

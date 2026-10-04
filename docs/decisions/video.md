@@ -2706,3 +2706,67 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `the_engines_are_quiet_a_second_after_the_last_frame` (`engines`), and
     `a_new_stream_codes_its_first_frames_with_the_engines_to_itself` (`synthetic`, a 2560 ×
     1600 stream on an encoder that counts its timings: one with the old open, none now).
+
+- ✅ **A virtual Mac's encoder stops for good past its 1020th client** (2026-10-04, MEASUREMENTS
+  "a virtual Mac's encoder and its clients"). From 2026-10-03 the worker shard on CI hung
+  in five of seventeen runs: the VideoToolbox tests timed out one after another, each in a
+  process of its own, the killed ones stayed in `?<E`, and the job was cancelled at 45 min
+  (runs 37134085979, 37156683749, 37171599737, 37173900555, 37177919762). Reproduced in a
+  macOS 26.6.2 guest (tart, Virtualization.framework, as the hosted runners are):
+  - *The guest's VideoToolbox is forwarded.* An encode in the guest goes through the kernel's
+    `AppleVideoToolboxParavirtualizationDriver` to an encoder in the host's virtual machine
+    process. Each guest process that opens a session, encoder or decoder, leaves two of the
+    driver's user clients behind (its own and its `VTEncoderXPCService`'s) until the guest
+    restarts. That holds after `VTCompressionSessionCompleteFrames`,
+    `VTCompressionSessionInvalidate` and the release, which is all Apple asks of a session's
+    end, and it is per process: one session or fifty in a row leave two.
+  - *At 1020 clients the encoder stops.* In three runs out of three, fresh guests of 4 and 3
+    cores, alone or side by side, about the 510th process past boot failed: the system log reads
+    "VTVideoEncoderSelection signalled err=-12908" and "No real codec!!", frames answer
+    `kVTVideoEncoderNotAvailableNowErr`, calls into a session stop returning, and a process
+    that exits stalls in the kernel "for detach from AppleVideoToolboxParavirtualizationDriver",
+    which is the `?<E` CI showed. Only a restart of the guest brings it back; another guest
+    on the same Mac goes on coding. Thirty-two 2560 × 1600 sessions alive at once got the same
+    status for some frames but recovered at once: busy is not stopped.
+  - *What the worker did then.* Every encode answered `EncoderLost`, so the geometry tick
+    built new sessions at once, every time: 13 301 builds in one stopped run, each one more
+    call into an encoder that no longer answered. A replacement now waits when the one before
+    it was lost too without coding a frame: 250 ms, doubling to `ENCODE_STUCK_MAX` (32 s), and
+    a coded frame brings it back to at once (`LostRetry`). The beat wakes the tick when the
+    wait is over, so a lost session is still rebuilt with nothing else moving. A session the
+    system takes away once, as the 2026-10-01 entry above has it, is rebuilt at once as
+    before.
+  - *What CI does then.* The VideoToolbox tests are bounded at a minute on CI (they take
+    9.2 s at most on a green runner), so a stopped encoder fails the shard in minutes,
+    naming its tests, instead of cancelling the job.
+  - *Not proven: how a runner gets there.* The whole worker shard on a fresh guest adds 61
+    clients (4 → 65), far from 1020, and a hosted runner is a fresh virtual Mac per job. The
+    hangs match the stopped encoder in every sign, but either the runner's guest starts a job
+    with clients in use or its limit is lower. The CI watchdog is to log the guest's client
+    count (`ioreg -r -c AppleVideoToolboxParavirtualizationDriver`) and the driver's lines from
+    the system log when a test hangs, which will tell them apart. The first hang fell on
+    eabfe413 and none in the thirty runs before it; that commit's stripe timing never ran in
+    the hung tests (their sizes are under `TIMED_FROM`, or the timing is a stub), and it
+    leaves no client a process does not already leave.
+  - Not taken: fewer VideoToolbox tests side by side. The limit is in processes, not in
+    sessions at once, so it would only slow the shard.
+  - Tests: `replacements_lost_without_a_frame_are_rebuilt_ever_more_slowly` (`screen`),
+    `sessions_lost_one_after_another_are_replaced_ever_more_slowly` (`synthetic`, a real
+    session that answers every frame `kVTVideoEncoderNotAvailableNowErr`: 181 builds in 3 s
+    before, 5 now).
+
+- ✅ **The stripe timing waits for the encoder to answer** (2026-10-04). The engines counted
+  as idle once no frame had gone in or come out for a second (`Engines::quiet`), so a call
+  that had not returned for a second read as a second of nothing. On a hosted virtual Mac an
+  encode has stayed inside VideoToolbox for 170 s (run 36989451177), and the geometry tick
+  would then have timed stripes onto it: three more sessions and 26 encodes on an encoder that
+  was not answering.
+  - Each call into a session holds a count while it is under way (`Engines::enter`): the
+    submit, a session's build and a retired session's release. The engines are quiet only
+    when no call is, so one that never returns keeps them busy for good. The timing's own
+    calls count too, so no stream's engines read as idle while it codes.
+  - The timing runs on a thread of its own, not the runtime's blocking pool. A runtime waits
+    for its blocking tasks as it shuts down, so a timing call that never returned would hold
+    the worker's exit, or a test's end, until something killed it.
+  - Tests: `a_call_that_has_not_returned_keeps_the_engines_busy` (`engines`),
+    `the_engines_are_timed_only_where_they_are_idle` (`stripes`).

@@ -21,7 +21,7 @@
 //! each other. It also cost the other streams 1–3 ms a frame and a rung (MEASUREMENTS.md, "the
 //! focused stream when the engines are full").
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
@@ -45,6 +45,17 @@ pub(super) const SETTLE_WINDOWS: u32 = 2;
 /// idle ([`Engines::quiet`]): past a still picture's last refinements, and past any frame a
 /// session still holds at 60 frames a second.
 pub(super) const QUIET_US: u64 = 1_000_000;
+
+/// A call into a session under way ([`Engines::enter`]): the engines are not idle while one is,
+/// however long ago its frame went in. Dropped when the call returns, so a call that never
+/// returns keeps them busy for good.
+pub(super) struct Inside<'a>(&'a Engines);
+
+impl Drop for Inside<'_> {
+    fn drop(&mut self) {
+        self.0.inside.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// What a stream lends the others.
 pub(super) trait Contender: Send + Sync {
@@ -75,6 +86,8 @@ pub(super) struct Engines {
     /// The clock's time a frame last went into or came out of any session, `0` before the
     /// first.
     busy_us: AtomicU64,
+    /// Calls into a session under way now, those given up on included ([`Inside`]).
+    inside: AtomicUsize,
 }
 
 /// This process's engines: one worker, one Mac.
@@ -86,6 +99,7 @@ impl Engines {
             streams: Mutex::new(Vec::new()),
             gave_at_us: AtomicU64::new(0),
             busy_us: AtomicU64::new(0),
+            inside: AtomicUsize::new(0),
         }
     }
 
@@ -94,11 +108,26 @@ impl Engines {
         self.busy_us.fetch_max(now_us.max(1), Ordering::Relaxed);
     }
 
-    /// Whether no session has coded anything for [`QUIET_US`] by `now_us`: never before the
-    /// first frame went in, while a new stream's first keyframe is still to be coded.
+    /// A call into a session starts: the engines are busy until the guard is dropped.
+    pub(super) fn enter(&self) -> Inside<'_> {
+        self.inside.fetch_add(1, Ordering::Relaxed);
+        Inside(self)
+    }
+
+    /// Whether no session has coded anything for [`QUIET_US`] by `now_us` and no call into one
+    /// is under way: never before the first frame went in, while a new stream's first keyframe
+    /// is still to be coded.
+    ///
+    /// A frame stamps the clock only as it goes in and comes out, so a call that has not
+    /// returned for a second looks like a second of nothing. On a hosted virtual Mac an encode
+    /// has stayed inside VideoToolbox for 170 s, and timing the engines then would put three
+    /// more sessions on an encoder that is not answering (`docs/decisions/video.md`, "The stripe
+    /// timing waits for the encoder to answer").
     pub(super) fn quiet(&self, now_us: u64) -> bool {
         let busy = self.busy_us.load(Ordering::Relaxed);
-        busy != 0 && now_us.saturating_sub(busy) >= QUIET_US
+        busy != 0
+            && now_us.saturating_sub(busy) >= QUIET_US
+            && self.inside.load(Ordering::Relaxed) == 0
     }
 
     /// A stream opened; it leaves by being dropped.
@@ -168,6 +197,21 @@ mod tests {
         engines.busy(6_100_000);
         assert!(!engines.quiet(6_200_000), "a frame came out again");
         assert!(engines.quiet(7_100_000));
+    }
+
+    /// A call into a session keeps the engines busy for as long as it is under way, however long
+    /// ago its frame went in, and they are idle again once every call has returned.
+    #[test]
+    fn a_call_that_has_not_returned_keeps_the_engines_busy() {
+        let engines = Engines::new();
+        engines.busy(5_000_000);
+        let first = engines.enter();
+        let second = engines.enter();
+        assert!(!engines.quiet(60_000_000), "a call under way for a minute is not idle");
+        drop(first);
+        assert!(!engines.quiet(60_000_000), "one still under way");
+        drop(second);
+        assert!(engines.quiet(60_000_000));
     }
 
     /// A stream on the ladder 60, 30, 15.
