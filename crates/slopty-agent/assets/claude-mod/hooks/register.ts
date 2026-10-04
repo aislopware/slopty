@@ -59,7 +59,10 @@ async function flush($: EngineInterface): Promise<void> {
     const events = queue;
     queue = [];
     try {
-      await $.http.fetch("http://slopty/v1/events", {
+      // The host is cosmetic over a Unix socket, but a managed client's egress layer reads it:
+      // a reserved `.localhost` name is one no proxy rule takes, and a proxied socket request
+      // is refused.
+      await $.http.fetch("http://slopty.localhost/v1/events", {
         method: "POST",
         socketPath: socket,
         headers: { "content-type": "application/json" },

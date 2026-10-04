@@ -190,6 +190,19 @@ mod tests {
         assert_eq!(names, [std::ffi::OsString::from(digest())], "no staging left behind");
     }
 
+    /// The mod posts to a reserved `.localhost` host, which no egress proxy takes: a managed
+    /// client proxies any other name, and a proxied request over a Unix socket fails.
+    #[test]
+    fn the_mod_posts_to_a_host_no_proxy_takes() {
+        let register = FILES[2].1;
+        let hosts: Vec<_> =
+            register.split("http://").skip(1).filter_map(|url| url.split('/').next()).collect();
+        assert!(!hosts.is_empty(), "the mod posts somewhere");
+        for host in hosts {
+            assert!(host == "localhost" || host.ends_with(".localhost"), "{host}");
+        }
+    }
+
     /// The flag goes first, in its `=` form, once; words after `--` are the prompt's.
     #[test]
     fn an_agent_loads_the_mod_once() {
