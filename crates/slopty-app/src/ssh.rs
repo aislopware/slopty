@@ -1072,8 +1072,7 @@ impl Workspace {
                             .items_center()
                             .pl(px(spacing.xs))
                             .rounded(px(theme.radii.sm))
-                            .bg(hsla(s.hover))
-                            .map(|el| kit::sunk(el, theme, 0.0))
+                            .map(|el| kit::field(el, theme))
                             .text_size(px(theme.typography.ui_size))
                             .child(Input::new(input).appearance(false).aria_label(label)),
                     )
@@ -1151,8 +1150,7 @@ impl Workspace {
             .items_center()
             .pl(px(spacing.xs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.hover))
-            .map(|el| kit::sunk(el, theme, 0.0))
+            .map(|el| kit::field(el, theme))
             .text_size(px(theme.typography.ui_size))
             .child(
                 Input::new(&sheet.password).appearance(false).mask_toggle().aria_label("Password"),

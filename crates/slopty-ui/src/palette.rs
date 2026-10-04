@@ -480,7 +480,7 @@ fn legend(theme: &Theme, verb: &'static str) -> gpui::Stateful<gpui::Div> {
         .flex()
         .items_center()
         .gap(px(theme.spacing.md))
-        .bg(hsla(s.hover))
+        .map(|el| crate::kit::inset(el, theme))
         .rounded_b(px(inner))
         .text_size(px(theme.typography.small()))
         .text_color(hsla(s.text_muted))

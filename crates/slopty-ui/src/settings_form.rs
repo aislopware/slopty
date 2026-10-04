@@ -1595,7 +1595,7 @@ impl SettingsForm {
             .mb(px(spacing.sm))
             .p(px(spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.hover))
+            .map(|el| crate::kit::inset(el, theme))
             .text_size(px(theme.typography.ui_size))
             .children(rows)
             .into_any_element()
@@ -1658,16 +1658,14 @@ impl SettingsForm {
     }
 }
 
-/// A control's well: a row tall, the hover wash, sunk ([`crate::kit::sunk`]), no hairline, as
-/// a field is drawn.
+/// A control's well: a row tall, a field's ground ([`crate::kit::field`]), no hairline.
 fn well(theme: &Theme) -> Div {
-    crate::kit::sunk(div(), theme, 0.0)
+    crate::kit::field(div(), theme)
         .flex_none()
         .h(px(theme.density.row))
         .flex()
         .items_center()
         .rounded(px(theme.radii.sm))
-        .bg(hsla(theme.surfaces.hover))
 }
 
 /// What a child of the page is in a group's card.

@@ -110,3 +110,21 @@ fn the_simulation_keeps_greys_and_merges_red_with_green() {
     assert!(apart(red, green, &identity) > 0.30, "far apart to a trichromat");
     assert!(apart(red, green, &DEUTERANOPIA) < 0.05, "one colour to a deuteranope");
 }
+
+/// The agent's orange and the waiting amber sit near in hue, so they are held apart for
+/// normal vision too: the agent's mark is a glyph and waiting a dot or a word, and shape tells
+/// them apart for a dichromat, but at a glance in colour they must not drift into one brown.
+#[test]
+fn the_agent_stays_apart_from_waiting() {
+    let normal = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for variant in [Variant::Dark, Variant::Light] {
+        let s = Theme::new(variant).surfaces;
+        let d = apart(s.agent, s.warn, &normal);
+        assert!(
+            d >= APART,
+            "{variant:?}: the agent {:?} and waiting {:?}: {d:.3}",
+            s.agent,
+            s.warn
+        );
+    }
+}

@@ -518,7 +518,7 @@ fn rest_layers(theme: &Theme, border: f32, first: bool, last: bool) -> Vec<BoxSh
     let e = &theme.elevation;
     let contact = e.rest.filter(|_| last).map(|layer| drop_shadow(theme, layer));
     let lit = if e.rim.top { first } else { last };
-    let edge = lit.then(|| rim(theme, e.rim.rest, border));
+    let edge = e.rim.rest.filter(|_| lit).map(|alpha| rim(theme, alpha, border));
     contact.into_iter().chain(edge).collect()
 }
 
@@ -553,15 +553,66 @@ fn rim(theme: &Theme, alpha: f32, border: f32) -> BoxShadow {
 /// How far a rim reaches in past its surface's border: one point.
 const RIM_DEPTH: f32 = 1.0;
 
-/// A card: what rests on a plane and holds a thing of its own (a board's task, a settings
-/// group, an expanded tool group, a question's option), on the resting elevation.
+/// `el` raised off its plane at rest: what stands up from where it lies (a card, a tray's head,
+/// a secondary button, a notice's disc, a pill over a body), on the resting elevation.
 ///
-/// `radii.md`, the rim, and in light the floating surface's white with a hairline round it
-/// and a contact shadow, so it reads on the quiet well under it ([`well`]). In dark it is the
-/// hover wash, a step over whatever plane it rests on (+4.7 L on the content, the floating
-/// step's own), with its lit top edge, as coss's cards are; so a card on a sheet still rises
-/// from the sheet. Under Increase Contrast its hairline is drawn in dark too. The caller adds
-/// the identity and pads it.
+/// In light the floating surface's white, a step over the content, with the quieter hairline
+/// round it and a contact shadow; in dark the hover wash, a step over whatever plane it rests
+/// on, with its lit top edge, as coss's cards are. Under Increase Contrast its hairline is drawn
+/// in dark too. A wash is never a resting surface: in light it sinks what it fills, so the kit
+/// lint `a_resting_fill_is_raised_or_sunk` keeps the washes to the pointer and the selection.
+/// The caller keeps its own radius.
+#[must_use]
+pub fn raised<E: Styled>(el: E, theme: &Theme) -> E {
+    raised_part(el, theme, true, true)
+}
+
+/// One part of a [`raised`] thing cut across its width: `first` takes the top edge and `last`
+/// the bottom one, the contact and (in dark) the lit edge where they fall. In order the parts
+/// read as one.
+#[must_use]
+pub fn raised_part<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> E {
+    let light = theme.variant() == Variant::Light;
+    let ringed = light || theme.contrast == slopty_theme::Contrast::Increased;
+    let border = if ringed { theme.hair() } else { 0.0 };
+    let s = theme.surfaces;
+    let ring = if light { s.border_subtle } else { s.border };
+    let el = el.bg(raised_fill(theme));
+    let el = if ringed {
+        let el = el.border_l(hair(theme)).border_r(hair(theme));
+        let el = if first { el.border_t(hair(theme)) } else { el };
+        let el = if last { el.border_b(hair(theme)) } else { el };
+        el.border_color(hsla(ring))
+    } else {
+        el
+    };
+    el.shadow(rest_layers(theme, border, first, last))
+}
+
+/// The tone of what is raised: white in light, the hover wash in dark.
+fn raised_fill(theme: &Theme) -> Hsla {
+    let s = theme.surfaces;
+    if theme.variant() == Variant::Light { hsla(s.elevated) } else { hsla(s.hover) }
+}
+
+/// `el` set into its plane as a quiet well: code, a command's output, an attachment's chip, the
+/// person's own message, the foot of a sheet. The band, a hair off the plane in both modes.
+#[must_use]
+pub fn inset<E: Styled>(el: E, theme: &Theme) -> E {
+    el.bg(hsla(theme.surfaces.band))
+}
+
+/// `el` drawn as a field's ground: the raised tone (white in light, as Radix's and shadcn's
+/// fields are), sunk ([`sunk`]) so it reads as somewhere to type rather than something to press.
+#[must_use]
+pub fn field<E: Styled>(el: E, theme: &Theme) -> E {
+    sunk(el.bg(raised_fill(theme)), theme, 0.0)
+}
+
+/// A card: [`raised`] at `radii.md`, the caller adding the identity and the padding.
+///
+/// It is what rests on a plane and holds a thing of its own: a board's task, a settings group,
+/// an expanded tool group, a question's option.
 #[must_use]
 pub fn card(theme: &Theme) -> Div {
     card_part(theme, true, true)
@@ -574,27 +625,10 @@ pub fn card(theme: &Theme) -> Div {
 /// and the top edge, `last` the bottom ones. In order the parts read as one card.
 #[must_use]
 pub fn card_part(theme: &Theme, first: bool, last: bool) -> Div {
-    let light = theme.variant() == Variant::Light;
-    let ringed = light || theme.contrast == slopty_theme::Contrast::Increased;
     let r = px(theme.radii.md);
-    let border = if ringed { theme.hair() } else { 0.0 };
-    div()
-        .map(|el| {
-            if light {
-                el.bg(hsla(theme.surfaces.elevated))
-            } else {
-                el.bg(hsla(theme.surfaces.hover))
-            }
-        })
+    raised_part(div(), theme, first, last)
         .when(first, |el| el.rounded_t(r))
         .when(last, |el| el.rounded_b(r))
-        .when(ringed, |el| {
-            el.border_x(hair(theme))
-                .when(first, |el| el.border_t(hair(theme)))
-                .when(last, |el| el.border_b(hair(theme)))
-                .border_color(hsla(theme.surfaces.border))
-        })
-        .shadow(rest_layers(theme, border, first, last))
 }
 
 /// `el` sunk into its plane ([`slopty_theme::Sunk`]).
@@ -617,17 +651,16 @@ pub fn sunk<E: Styled>(el: E, theme: &Theme, border: f32) -> E {
     el.shadow(std::iter::once(shade).chain(lip).collect())
 }
 
-/// A segmented control's track: the hover wash, sunk, its options held [`TRACK_PAD`] in, at
+/// A segmented control's track: a well ([`inset`]), sunk, its options held [`TRACK_PAD`] in, at
 /// `radii.sm`. The thumb ([`paint_thumb`]) rides in it.
 #[must_use]
 pub fn track(theme: &Theme) -> Div {
-    sunk(div(), theme, 0.0)
+    inset(sunk(div(), theme, 0.0), theme)
         .relative()
         .flex()
         .items_center()
         .p(px(TRACK_PAD))
         .rounded(px(theme.radii.sm))
-        .bg(hsla(theme.surfaces.hover))
 }
 
 /// How far a segmented control's track holds its options in from its edge.
@@ -646,8 +679,10 @@ pub fn paint_thumb(theme: &Theme, bounds: gpui::Bounds<gpui::Pixels>, window: &m
     let layers = rest_layers(theme, f32::from(border), true, true);
     window.paint_drop_shadows(bounds, radius, &layers);
     let quad = gpui::fill(bounds, hsla(theme.surfaces.elevated)).corner_radii(radius);
+    let light = theme.variant() == Variant::Light;
+    let ring = if light { theme.surfaces.border_subtle } else { theme.surfaces.border };
     window.paint_quad(if ringed {
-        quad.border_widths(border).border_color(hsla(theme.surfaces.border))
+        quad.border_widths(border).border_color(hsla(ring))
     } else {
         quad
     });
@@ -838,24 +873,26 @@ fn solid_states(theme: &Theme) -> (Rgb, Rgb) {
     (solid.mix(content, alpha::FAINT), solid.mix(content, alpha::DIM))
 }
 
-/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): a step past its plane at rest,
-/// another under the pointer, a third while held.
+/// `el` drawn as a secondary button ([`ButtonKind::Secondary`]): raised at rest ([`raised`]),
+/// the selected wash under the pointer, the pressed one while held, so a press reads apart
+/// from a hover.
 ///
-/// At rest the hover wash with a hairline just inside its edge and the text's own ink; under the
-/// pointer the selected wash; held, the pressed one, so a press reads apart from a hover.
-///
-/// The hairline is what makes it a button on a card (a board's card, this Mac's checklist):
-/// there the fill alone is near the card's own tone and the button read as words.
+/// In dark a hairline just inside its edge goes with the wash: it is what makes it a button on
+/// a card (a board's card, this Mac's checklist), where the fill alone is near the card's own
+/// tone and the button read as words. In light its ring does that.
 pub fn secondary(el: gpui::Stateful<Div>, theme: &Theme) -> gpui::Stateful<Div> {
     let s = theme.surfaces;
-    let mut layers = vec![ring_inside(theme)];
-    layers.push(rim(theme, theme.elevation.rim.rest, theme.hair()));
-    eased(el)
-        .bg(hsla(s.hover))
-        .shadow(layers)
+    let el = raised(eased(el), theme)
         .text_color(hsla(s.text))
         .hover(move |el| el.bg(hsla(s.selected)))
-        .active(move |el| el.bg(hsla(s.pressed)))
+        .active(move |el| el.bg(hsla(s.pressed)));
+    if theme.variant() == Variant::Light {
+        el
+    } else {
+        let mut layers = vec![ring_inside(theme)];
+        layers.extend(theme.elevation.rim.rest.map(|a| rim(theme, a, theme.hair())));
+        el.shadow(layers)
+    }
 }
 
 /// `el` drawn as the selected row of a list, live while that list has the keyboard.
@@ -1210,8 +1247,8 @@ pub const NOTICE_DISC: f32 = 40.0;
 
 /// What a tile's body says when it has nothing to show, as one block in its middle.
 ///
-/// A mark seated in a [`NOTICE_DISC`] of the hover wash, which gives the empty body a centre of
-/// mass without decoration (a bare grey glyph floated in it), a line at `small()` in the medium
+/// A mark seated in a raised [`NOTICE_DISC`] ([`raised`]), which gives the empty body a centre
+/// of mass without decoration (a bare grey glyph floated in it), a line at `small()` in the medium
 /// weight saying what is so, and under it an optional muted line saying why or where. The
 /// caller adds the identity and its actions under it.
 ///
@@ -1238,12 +1275,11 @@ pub fn notice(
         .font_family(theme.typography.ui_family.clone())
         .text_center()
         .child(
-            div()
+            raised(div(), theme)
                 .flex_none()
                 .size(px(NOTICE_DISC * k))
                 .mb(px(theme.spacing.xs * k))
                 .rounded(px(theme.radii.full))
-                .bg(hsla(s.hover))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1988,8 +2024,9 @@ mod tests {
         assert_eq!(on.style().size.width, off.style().size.width, "one size either way");
     }
 
-    /// The primary is the neutral solid, the secondary the hover wash and the rest bare, all
-    /// one control's height, in both variants: no button wears the accent. A selection is the
+    /// The primary is the neutral solid, the secondary raised (white in light, the hover wash in
+    /// dark) and the rest bare, all one control's height, in both variants: no button wears the
+    /// accent. A selection is the
     /// selected wash with a hairline ring inside it.
     #[test]
     fn a_button_is_neutral_and_one_height() {
@@ -1998,7 +2035,8 @@ mod tests {
             let s = theme.surfaces;
             let fill = |kind| button(&theme, "b", "Go", kind).style().background.clone();
             assert_eq!(fill(ButtonKind::Primary), Some(gpui::Fill::from(hsla(s.solid))));
-            assert_eq!(fill(ButtonKind::Secondary), Some(gpui::Fill::from(hsla(s.hover))));
+            let raised = if variant == Variant::Light { hsla(s.elevated) } else { hsla(s.hover) };
+            assert_eq!(fill(ButtonKind::Secondary), Some(gpui::Fill::from(raised)));
             assert_eq!(fill(ButtonKind::Ghost), None);
             assert_eq!(fill(ButtonKind::Link), None);
             for kind in [ButtonKind::Primary, ButtonKind::Secondary, ButtonKind::Ghost] {
@@ -2196,6 +2234,64 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
+    /// Whether `line` fills something with a state wash: the pointer's, the selection's or the
+    /// press's.
+    fn washes(line: &str) -> bool {
+        let code = line.split("//").next().unwrap_or_default();
+        code.contains(".bg(hsla(")
+            && [".hover))", ".selected))", ".pressed))"].iter().any(|w| code.contains(w))
+    }
+
+    /// Whether a wash on `line`, after `before`, is laid in a state: inside a `hover` or `active`
+    /// closure, or under a condition (a `when`, an `if`) that names the state.
+    fn in_a_state(line: &str, before: &[&str]) -> bool {
+        const STATES: [&str; 4] = [".hover(", ".active(", ".when(", "group_hover("];
+        STATES.iter().any(|s| line.contains(s))
+            || before.iter().any(|l| l.contains(".when(") || l.trim_start().starts_with("if "))
+    }
+
+    #[test]
+    fn the_wash_check_knows_a_state_from_a_surface() {
+        assert!(washes("            .bg(hsla(s.hover))"));
+        assert!(washes(".bg(hsla(theme.surfaces.selected))"));
+        assert!(!washes(".bg(hsla(s.band))"), "a well");
+        assert!(!washes("// .bg(hsla(s.hover)) once filled it"), "a comment");
+        assert!(in_a_state(".hover(move |el| el.bg(hsla(s.hover)))", &[]));
+        assert!(in_a_state("el.bg(hsla(s.hover))", &["        if shown {"]));
+        assert!(in_a_state(
+            "el.bg(hsla(s.hover)).aria_selected(true)",
+            &[".when(ix == at, |el| {"]
+        ));
+        assert!(!in_a_state(".bg(hsla(s.hover))", &[".rounded(px(theme.radii.sm))"]));
+    }
+
+    /// A resting fill is raised or sunk, never a wash. The `hover`, `selected` and `pressed`
+    /// washes are for the pointer, the selection and the press: laid on something at rest they
+    /// lift it in dark and sink it in light, so a tray, an option or a field went grey on paper.
+    /// What rests is [`super::raised`], a well is [`super::inset`] and a field
+    /// [`super::field`]; this file, which draws those, is not checked.
+    #[test]
+    fn a_resting_fill_is_raised_or_sunk() {
+        let mut wrong = Vec::new();
+        for dir in ["slopty-ui/src", "slopty-app/src"] {
+            let lines = chrome_lines(dir);
+            for (ix, (file, no, line)) in lines.iter().enumerate() {
+                if file.ends_with("slopty-ui/src/kit.rs") || !washes(line) {
+                    continue;
+                }
+                let before: Vec<&str> = lines[ix.saturating_sub(2)..ix]
+                    .iter()
+                    .filter(|(f, ..)| f == file)
+                    .map(|(.., l)| l.as_str())
+                    .collect();
+                if !in_a_state(line, &before) {
+                    wrong.push(format!("{file}:{no}: a wash at rest: {}", line.trim()));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
     /// A text size, a radius or a control's height written as a literal: a type size off the
     /// scale, a corner off the radii, a row off the density.
     fn raw_size(line: &str) -> Option<&'static str> {
@@ -2242,10 +2338,11 @@ mod tests {
     /// control's radius: at 12 a 20 pt hint is a lozenge.
     #[test]
     fn a_floating_surface_is_rounded_lg() {
-        const SHEETS: [(&str, &str); 5] = [
+        const SHEETS: [(&str, &str); 6] = [
             ("slopty-ui/src/kit.rs", "pub fn dialog("),
-            ("slopty-ui/src/conversation/view/parts.rs", "\"composer-shell\""),
-            ("slopty-ui/src/conversation/view/parts.rs", ".id(\"conversation-find\")"),
+            ("slopty-ui/src/conversation/thread/view/composer.rs", "fn shell<"),
+            ("slopty-ui/src/conversation/thread/view/finding.rs", ".id(\"thread-find\")"),
+            ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
             ("slopty-ui/src/workspace/titlebar.rs", "fn menu_panel("),
             ("slopty-app/src/lib.rs", ".id(\"add-worker\")"),
         ];
@@ -2377,10 +2474,10 @@ mod tests {
         }
     }
 
-    /// A card rests: in light white with a hairline round it, a contact shadow and a shade
-    /// along its bottom edge; in dark the hover wash, no shadow, light along its top edge, and
-    /// a hairline only under Increase Contrast. A card cut into parts lights only the edge its
-    /// rim is on and casts its contact only under the last part.
+    /// A card rests: in light white with the quieter hairline round it and a contact shadow,
+    /// one edge and no rim; in dark the hover wash, no shadow, light along its top edge, and a
+    /// hairline only under Increase Contrast. A card cut into parts lights only its first part's
+    /// top in dark and casts its contact only under the last part in light.
     #[test]
     fn a_card_rests_on_its_rim() {
         for variant in [Variant::Dark, Variant::Light] {
@@ -2392,12 +2489,20 @@ mod tests {
             let fill = if light { hsla(s.elevated) } else { hsla(s.hover) };
             assert_eq!(style.background, Some(gpui::Fill::from(fill)), "{variant:?}");
             assert_eq!(style.border_widths.top.is_some(), light, "{variant:?}: ringed in light");
+            if light {
+                let ring = Some(hsla(s.border_subtle));
+                assert_eq!(style.border_color, ring, "light: the quieter hairline");
+            }
             let layers = style.box_shadow.clone().unwrap_or_default();
             let (drop, rims): (Vec<_>, Vec<_>) = layers.iter().partition(|l| !l.inset);
             assert_eq!(drop.len(), usize::from(light), "{variant:?}: a contact in light only");
-            let [rim] = rims.as_slice() else { panic!("{variant:?}: one rim, {rims:?}") };
-            assert_eq!(rim.offset.y > px(0.0), !light, "{variant:?}: lit from above in dark");
-            assert!((rim.color.a - alpha::RIM).abs() < 1e-3, "{variant:?}: {:?}", rim.color);
+            if light {
+                assert!(rims.is_empty(), "light: one edge, its ring: {rims:?}");
+            } else {
+                let [rim] = rims.as_slice() else { panic!("dark: one rim, {rims:?}") };
+                assert!(rim.offset.y > px(0.0), "dark: lit from above");
+                assert!((rim.color.a - alpha::RIM).abs() < 1e-3, "dark: {:?}", rim.color);
+            }
             let lit = |first, last| {
                 card_part(&theme, first, last)
                     .style()
@@ -2407,7 +2512,7 @@ mod tests {
                     .iter()
                     .any(|l| l.inset)
             };
-            assert_eq!((lit(true, false), lit(false, true)), (!light, light), "{variant:?}");
+            assert_eq!((lit(true, false), lit(false, true)), (!light, false), "{variant:?}");
             assert!(!lit(false, false), "{variant:?}: a middle part has no rim");
         }
         let theme = Theme { contrast: slopty_theme::Contrast::Increased, ..Theme::default() };
@@ -2456,18 +2561,24 @@ mod tests {
         }
     }
 
-    /// The secondary button rests too: its hairline ring and the rim inside it.
+    /// The secondary button rests as a card does: in dark its hairline ring and the lit edge
+    /// inside it, in light its ring and contact.
     #[test]
     fn a_secondary_button_catches_the_light() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let mut b = button(&theme, "b", "Go", ButtonKind::Secondary);
-            let layers = b.style().box_shadow.clone().unwrap_or_default();
-            let rim = theme.elevation.rim;
-            let rimmed = layers.iter().any(|l| {
-                l.inset && l.spread_radius == px(0.0) && (l.offset.y > px(0.0)) == rim.top
-            });
-            assert!(rimmed, "{variant:?}: {layers:?}");
+            let style = b.style();
+            let layers = style.box_shadow.clone().unwrap_or_default();
+            if variant == Variant::Light {
+                assert!(style.border_widths.top.is_some(), "light: ringed");
+                assert!(layers.iter().any(|l| !l.inset), "light: a contact: {layers:?}");
+            } else {
+                let rimmed = layers
+                    .iter()
+                    .any(|l| l.inset && l.spread_radius == px(0.0) && l.offset.y > px(0.0));
+                assert!(rimmed, "dark: lit from above: {layers:?}");
+            }
         }
     }
 

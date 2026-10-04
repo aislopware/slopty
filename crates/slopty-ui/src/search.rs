@@ -1017,7 +1017,7 @@ impl ProjectSearch {
             .flex()
             .items_center()
             .gap(px(theme.spacing.md))
-            .bg(hsla(s.hover))
+            .map(|el| crate::kit::inset(el, theme))
             .rounded_b(px(theme.radii.lg - 1.0))
             .text_size(px(theme.typography.small()))
             .text_color(hsla(s.text_muted))

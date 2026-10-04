@@ -268,6 +268,8 @@ ListItem │ Edit the last queued message │ ⌥↑
 Button │ Keys for Edit the last queued message │ ⌥↑
 ListItem │ Cycle effort
 Button │ Keys for Cycle effort
+ListItem │ Ask aside
+Button │ Keys for Ask aside
 ListItem │ Previous prompt │ ⌘↑
 Button │ Keys for Previous prompt │ ⌘↑
 ListItem │ Next prompt │ ⌘↓

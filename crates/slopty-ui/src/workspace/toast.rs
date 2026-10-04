@@ -14,6 +14,7 @@
 use std::time::Duration;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Animation, AnimationExt as _, Context, InteractiveElement as _, IntoElement as _,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
@@ -348,9 +349,9 @@ impl WorkspaceView {
             .gap(px(theme.spacing.sm))
             .pl(px(theme.spacing.sm))
             .pr(px(if actions.is_empty() { theme.spacing.sm } else { theme.spacing.xxs }))
-            // The selection's fill, which stands off the bar in both variants: a notice is
-            // a thing on the bar, not one more of its readouts.
-            .bg(hsla(s.selected))
+            // Raised off the bar in both variants: a notice is a thing on the bar, not one
+            // more of its readouts.
+            .map(|el| crate::kit::raised(el, theme))
             .rounded(px(theme.radii.sm))
             .text_color(hsla(s.text))
             .children(icon.map(|icon| {

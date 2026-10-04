@@ -43,7 +43,7 @@ use crate::colors::hsla;
 use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
 use crate::conversation::{
-    CTX, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
+    AskAside, CTX, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
     RefreshPullRequest,
 };
 use crate::icons::{Glyph, IconName, IconSize, Status};
@@ -55,7 +55,7 @@ fn message_group(id: &ItemId) -> SharedString {
 }
 
 /// How long a copy button says it copied.
-pub(crate) const COPIED_FOR: Duration = Duration::from_millis(1_500);
+const COPIED_FOR: Duration = Duration::from_millis(1_500);
 
 /// The widest the reading column's text runs, in points at zoom 1 (`design.md` §3).
 pub const COLUMN: f32 = 736.0;
@@ -104,6 +104,7 @@ const BUBBLE: f32 = 0.85;
 const BUBBLE_LINES: usize = 8;
 const BUBBLE_CHARS: usize = 480;
 
+mod aside;
 mod asking;
 mod branch;
 mod composer;
@@ -111,6 +112,7 @@ mod composing;
 pub mod denying;
 mod drafts;
 mod finding;
+mod goal;
 #[cfg(test)]
 pub(crate) use finding::ASK_AFTER as FIND_ASK_AFTER;
 pub mod exited;
@@ -122,9 +124,7 @@ mod tools;
 mod trail;
 mod tray;
 
-pub(crate) use composer::{context_ring, context_tone};
-pub(crate) use pictures::picture_words;
-pub(crate) use plan::plan_parts;
+use composer::{context_ring, context_tone};
 
 /// Diffs coloured once, by call.
 type Coloured = HashMap<ItemId, Rc<[Block]>>;
@@ -155,6 +155,7 @@ pub enum ThreadViewEvent {
     },
     /// Show the system's picker; the files picked are attached as a drop on the tile is.
     PickFiles,
+
     /// Ask the worker for the paths under `root` an `@` query matches; the answer comes to
     /// [`ThreadView::files_found`].
     FindFiles {
@@ -243,6 +244,12 @@ pub struct ThreadView {
     branching: Option<branch::Branching>,
     /// The find bar, while it is open.
     finder: Option<finding::Finder>,
+    /// The aside asked from here, in its sheet.
+    aside: Option<aside::Aside>,
+    /// What the aside's own view asks of the workspace, passed on.
+    asides_heard: Option<Subscription>,
+    /// Times this view was rendered rather than replayed from the view cache.
+    renders: u32,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -295,6 +302,9 @@ impl ThreadView {
                 this.chase(cx);
             }
             HubEvent::Hits => this.refind(cx),
+            HubEvent::Started { from, thread, intent, aside: true } if *from == this.thread => {
+                this.aside_started(*intent, *thread, cx);
+            }
             HubEvent::Table | HubEvent::Expanded(_) => cx.notify(),
             _ => {}
         });
@@ -310,9 +320,14 @@ impl ThreadView {
         cx.on_release(move |this, cx| {
             let shown: Vec<ThreadId> =
                 this.trail.iter().map(trail::Above::thread).chain([this.thread]).collect();
+            // An aside left open goes with the view: nothing else shows it.
+            let aside = this.aside();
             this.hub.update(cx, |hub, cx| {
                 for thread in shown {
                     hub.close(thread, cx);
+                }
+                if let Some(aside) = aside {
+                    let _id = hub.intent(aside, Intent::Discard, cx);
                 }
             });
         })
@@ -359,6 +374,9 @@ impl ThreadView {
             drafts: drafts::Drafts::default(),
             branching: None,
             finder: None,
+            aside: None,
+            asides_heard: None,
+            renders: 0,
             focus: cx.focus_handle(),
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -412,6 +430,17 @@ impl ThreadView {
         self.composer.read(cx).value().to_string()
     }
 
+    /// Times this view was rendered rather than replayed from the view cache.
+    #[cfg(test)]
+    pub const fn renders(&self) -> u32 {
+        self.renders
+    }
+
+    /// Put back `text`, a draft kept from an earlier view of this thread, caret at its end.
+    pub fn restore_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_draft(text, text.len(), window, cx);
+    }
+
     /// Draw the header, or leave it to the tile.
     pub fn set_header(&mut self, header: bool, cx: &mut Context<Self>) {
         self.header = header;
@@ -428,6 +457,9 @@ impl ThreadView {
             self.list.remeasure();
             cx.notify();
         }
+        if let Some(view) = self.aside.as_ref().and_then(aside::Aside::view) {
+            view.update(cx, |v, cx| v.set_layout(zoom, width, cx));
+        }
     }
 
     /// The theme it draws in.
@@ -441,6 +473,9 @@ impl ThreadView {
         self.shared = Arc::new(theme.clone());
         if let Some((sheet, _)) = &self.commit {
             sheet.update(cx, |sheet, cx| sheet.set_theme(theme.clone(), cx));
+        }
+        if let Some(view) = self.aside.as_ref().and_then(aside::Aside::view) {
+            view.update(cx, |v, cx| v.set_theme(theme.clone(), cx));
         }
         self.theme = theme;
         self.diffs.borrow_mut().clear();
@@ -930,12 +965,9 @@ impl ThreadView {
         // row of them keeps one height.
         let el = match kind {
             ButtonKind::Primary => kit::solid_pressable(el.border_color(hsla(s.solid)), theme),
-            ButtonKind::Secondary => el
-                .border_color(gpui::transparent_black())
-                .bg(hsla(s.hover))
-                .text_color(hsla(s.text))
-                .hover(move |el| el.bg(hsla(s.selected)))
-                .active(move |el| el.bg(hsla(s.pressed))),
+            ButtonKind::Secondary => {
+                kit::secondary(el.border_color(gpui::transparent_black()), theme)
+            }
             ButtonKind::Ghost | ButtonKind::Link => el
                 .border_color(gpui::transparent_black())
                 .text_color(hsla(s.text_secondary))
@@ -999,7 +1031,7 @@ impl ThreadView {
         style.code_block = gpui::StyleRefinement::default()
             .font_family(mono.to_string())
             .text_size(px(theme.typography.small() * z))
-            .bg(hsla(theme.surfaces.hover))
+            .bg(hsla(theme.surfaces.band))
             .rounded(px(theme.radii.md * z))
             .px(px(theme.spacing.md * z))
             .py(px(theme.spacing.sm * z));
@@ -1276,7 +1308,7 @@ impl ThreadView {
                     .px(self.z(theme.spacing.md))
                     .py(self.z(theme.spacing.sm))
                     .rounded(self.z(theme.radii.lg))
-                    .bg(hsla(s.hover))
+                    .map(|el| kit::inset(el, theme))
                     .text_size(self.z(theme.typography.prose()))
                     .line_height(relative(theme.typography.prose_line_height))
                     .text_color(hsla(s.text))
@@ -1748,9 +1780,9 @@ impl ThreadView {
             Some(Status::Away)
         };
         let wait = phase
+            .filter(|p| matches!(p.phase, Phase::NeedsYou | Phase::Waiting))
             .and_then(|p| p.wait.as_ref())
-            .map(|w| w.text.clone())
-            .filter(|_| phase.is_some_and(|p| p.phase == Phase::NeedsYou));
+            .map(wait_words);
         let used = state.and_then(|st| context_used(&st.meters)).filter(|u| *u >= RING_FROM);
         let k = self.zoom;
         Some(
@@ -1879,6 +1911,7 @@ impl ThreadView {
 
 impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders = self.renders.saturating_add(1);
         self.settle_edit(window, cx);
         self.settle_questions(window, cx);
         self.settle_drafts(window, cx);
@@ -1892,6 +1925,7 @@ impl Render for ThreadView {
         let header = self.header_bar(cx);
         let trail = self.trail_bar(cx);
         let rows = self.list_region(cx);
+        let aside = self.aside_sheet(window, cx);
         let viewer = self.picture_viewer(cx);
         // A subagent takes no messages: its thread is read, and answered from the bar.
         let composes = !self.in_subagent();
@@ -1919,6 +1953,7 @@ impl Render for ThreadView {
             }))
             .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
             .on_action(cx.listener(|this, _: &CycleEffort, _w, cx| this.next_effort(cx)))
+            .on_action(cx.listener(|this, _: &AskAside, window, cx| this.ask_aside(window, cx)))
             .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
             .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
             .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| {
@@ -1972,6 +2007,7 @@ impl Render for ThreadView {
             .children(header)
             .children(trail)
             .child(rows)
+            .children(aside)
             .child(self.foot(bar, composer))
             .children(viewer)
             .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
@@ -2110,6 +2146,16 @@ const fn status_of(phase: Phase) -> Option<Status> {
     }
 }
 
+/// What a thread waits on, in the header's words. The worker names only the commands left
+/// running, since it sets them in a sentence of its own, so the header says they run.
+fn wait_words(wait: &slopty_proto::thread::Wait) -> String {
+    if wait.kind == slopty_proto::thread::Wait::COMMAND {
+        format!("Running {}", wait.text)
+    } else {
+        wait.text.clone()
+    }
+}
+
 /// The share of the context window in use, in percent.
 fn context_used(meters: &slopty_proto::thread::Meters) -> Option<f64> {
     // Nothing in use is no usage reported yet: an agent says its window before its first
@@ -2176,11 +2222,7 @@ fn tokens(n: u64) -> String {
 }
 
 /// A fenced block's corner: its language and a copy, at the meta size.
-pub(crate) fn code_actions(
-    theme: &Theme,
-    zoom: f32,
-    block: &gpui_kit::base::text::CodeBlock,
-) -> AnyElement {
+fn code_actions(theme: &Theme, zoom: f32, block: &gpui_kit::base::text::CodeBlock) -> AnyElement {
     let s = theme.surfaces;
     let code = block.code().to_string();
     let lang = block.lang().filter(|l| !l.is_empty());
@@ -2231,6 +2273,18 @@ mod tests {
         assert_eq!(super::thought_for(Some(Duration::from_millis(400))), "Thought for a moment");
         assert_eq!(super::thought_for(Some(Duration::from_millis(12_700))), "Thought for 12 s");
         assert_eq!(super::thought_for(Some(Duration::from_secs(65))), "Thought for 1m 5s");
+    }
+
+    /// A thread left running commands says it runs them; any other wait reads as worded.
+    #[test]
+    fn a_command_wait_says_it_runs() {
+        use slopty_proto::thread::Wait;
+        let wait = |kind: &str, text: &str| Wait { kind: kind.to_owned(), text: text.to_owned() };
+        assert_eq!(super::wait_words(&wait(Wait::COMMAND, "npm run dev")), "Running npm run dev");
+        assert_eq!(
+            super::wait_words(&wait(Wait::TASK, "2 in the background")),
+            "2 in the background"
+        );
     }
 
     /// An ACP agent reads as the name its registry gives it, as the worker names its threads.

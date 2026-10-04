@@ -5,8 +5,8 @@ Heading │ e2e-worker, 1 tile, 1 needs you
 Button │ Needs you
 Status │ 1 new
 Button │ More
-Group │ Do these steps in order with the named tools, t…
-Heading │ terminal Do these steps in order with the named tools, t…
+Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
+Heading │ terminal Do these steps in order with the named tools, then reply "done". 1) Read…
 Label │ ~
 Button │ Show terminal
 Button │ Close tile
@@ -29,6 +29,7 @@ Group │ Edits · notes.txt
 Button │ Review
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Ask aside
 Button │ Model, Opus 5.5
 Label │ Mode, Default
 Button │ Commit

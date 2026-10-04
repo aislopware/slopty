@@ -6382,7 +6382,115 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     length: an agent's answers, the person's messages, a plan's body and the composer's
     field. The chrome keeps `ui_size`. Headings sit 3 and 1 points over it, as 18 and 16 did
     over 15. It is under Settings, Appearance, Interface, after the text size.
-  - Tests: `kit::fit::tests::only_a_label_past_its_room_fades_at_its_tail`,
+  - Tests: `kit::fit::tests::only_a_label_past_its_room_runs_past_its_edge` (on layout: the
+    test platform paints no glyphs, so the fade itself is GPUI's to prove),
     `slopty_app::settings::tests::the_reading_size_rides_on_the_theme`,
     `conversation::thread::tests::face::the_reading_size_grows_what_is_read_and_not_the_chrome`,
     and the settings crate's `[font]` keys.
+
+- ✅ **An aside is a sheet over its thread, not a tile** (2026-10-04, A9 on lane A's contract).
+  - "Ask aside" asks a question beside the work without touching it. It is an icon door in
+    the composer's foot and a palette line, with no default key (`ask_aside`). It is offered
+    where the agent forks (`Cap::FORK`), and not on a thread that is itself an aside.
+  - It forks the whole thread (`Intent::Aside`), and the draft goes to the fork as its
+    question once the fork is there. With no draft, the sheet opens on the fork's own
+    composer.
+  - The sheet takes the lower half of the thread above its foot. It holds the fork's own
+    thread view without a header, so answers, steps and requests read and are answered as
+    anywhere else, and follow-ups go from its composer. It has two doors:
+    - Close ends the fork for good (`Intent::Discard`; the agent's own session file stays,
+      since Slopty never deletes one). Closing before the fork came ends it as it comes.
+    - "Keep as a thread" drops the mark (`Intent::KeepAside`). The workspace then opens it
+      as it opens a fork, on the worker's word (`HubEvent::Started` with `aside: false`).
+  - Esc does not close the sheet: ending a fork is for good, so it takes a press.
+  - The lists of threads pass over an aside by its row's fact (`hub::is_aside`). That is
+    lane U's navigator and attention, and the server's ladder and notes.
+  - Tests: `conversation::thread::tests::aside::*`.
+
+- ✅ **A Codex goal is one line over the field, read-only** (2026-10-04, A11).
+  - While the agent holds a goal (`ThreadState.goal`), one quiet line stands over the
+    composer's field. It shows the objective (fading at its tail), where the goal stands when
+    that is not plain work ("Paused", "Blocked", "Budget limited", "Done"), and the tokens
+    spent, against the budget where there is one.
+  - A budget draws a thin bar under the line, gliding, in the context meter's tones: warn
+    past 80 %, error past 95 %. The hint says how long it worked toward it.
+  - While the goal is active, the Stop button's hint adds that Codex may go on by itself
+    toward its goal: a stop ends a turn, not the goal.
+  - There are no controls: the goal is set and paused in Codex's own TUI.
+  - The line sits by the field rather than in the header, which a tile may hide.
+  - Tests: `conversation::thread::tests::face::a_goal_is_one_quiet_line_with_its_budget`,
+    `view::goal::tests`.
+
+- ✅ **A stop pauses the queue, said once** (2026-10-04, A1). Messages the person's stop holds
+  (`Pending::stopped`) sit under one quiet line, "Queue paused · sends after your next
+  message", rather than each saying it. Each held message can be sent now, which lets the
+  rest go after it. Test: `conversation::thread::tests::composing::a_stop_pauses_the_queue_until_the_next_message`.
+
+- ✅ **A refused rewind offers going back without the files** (2026-10-04, A10). When the
+  worker turns down `Rewind { files: true }` (another thread works in the same folder), its
+  words show verbatim in the tray. Beside them, "Without the files" goes back to the same
+  turn with the files left as they are. Test: the end of
+  `conversation::thread::tests::carry::branching_from_a_message_keeps_or_puts_back_the_files`.
+
+- ✅ **One face for every agent: the old Claude Code face is gone** (2026-10-04, item 7 of the
+  thread-view plan, after the cuts ruling). It ruled out the conversation face first built for
+  Claude Code, which is now superseded: `conversation/view/**`, its model, rows, tools, find,
+  composer, approval, question and fixtures. Every agent, Claude Code included, is drawn by the
+  thread view over the agent-neutral thread model. A Claude Code terminal's face is its
+  thread's view, as the worker's table names it.
+  - What both faces used lives on with the thread:
+    - `conversation/attach.rs` holds the pasted picture or dropped file as a chip. Its
+      `Target` is now the thread view alone.
+    - `menu.rs` holds the `/` and `@` menus, over the thread's commands only.
+    - `figures.rs` keeps a model's spoken name and the times of day.
+    - `diff.rs`, `lines.rs` and `chips.rs` are unchanged.
+  - A permission prompt is a request on its thread. The worker holds a yes or no for the
+    clients that keep its table (lane A's half). The workspace answers it from the
+    navigator's *Needs you* row and the note's buttons with `Intent::Answer`, once.
+    - A terminal's note and row answer the request of the thread its agent runs. The thread's
+      row speaks for the request even where the terminal's hook status speaks for the agent.
+    - A note tapped before its request is here waits until the worker's table has had time to
+      come after the link came up, then says it no longer waits.
+    - The person at the agent's terminal, its TUI shown and the app in front, gets the agent's
+      own dialog at once: the workspace hands the request back with `Intent::Release`.
+  - A terminal shows its thread only once the worker's table names one, and then by default
+    on every device; ⌘J picks the TUI, and the pick is saved with the layout. With no thread
+    yet there is only the TUI, so a phone no longer opens on a face of its own.
+  - A thread view is made only while it shows. What its composer held is kept per session
+    when it hides and put back when it shows again, so ⌘J never loses a draft.
+  - A face no longer outlives a dropped link on its tile. The tile is set back like any other
+    with its worker away, and the thread's own tile keeps what it showed.
+  - The marks and names the old face gave the chrome come from the thread's table row:
+    - a tile reads as working while its thread's row says a turn runs, though the hook lags;
+    - an untitled agent is named by its thread's title;
+    - the navigator, the overview and the palette say the row's last line.
+  - The kit's floating-surface lint now names the thread's composer, find bar and aside
+    sheet.
+
+- ✅ **One warm neutral, white floats and raised surfaces** (2026-10-04, light pass phase 1,
+  from `.research/light-premium-2026-10-04.md` §3 and §5). Light mode read as grey slabs: a
+  field, a tray head or an option rested on the hover wash, and a card wore three edges.
+  - Every neutral in both modes sits on one warm hue, OKLCH 85 (`NEUTRAL_HUE`), at a chroma
+    under 0.006. The text is `#1c1c1a` in light and `#ecebea` in dark. Light content is
+    `#fdfcfb`, and what floats or is raised is pure white, so it rises by tone as well as by
+    its ring.
+  - `kit::raised` is what rests on a plane (a card, a secondary button, a toast, a block of
+    facts): white with the quieter hairline and a contact in light, the hover wash with the
+    lit top edge in dark. `kit::inset` is what sits in a plane (a code block, a chip, a
+    legend): the band. `kit::field` is a field: the raised fill, sunk. The 31 resting washes
+    moved onto these.
+  - A wash is a state, never a surface: the lint-as-test `a_resting_fill_is_raised_or_sunk`
+    allows the hover, pressed and selected fills only in a hover, an active or a selection.
+  - The light card drops its bottom rim and its ring is `border_subtle`: one edge and its
+    contact, not three.
+  - Error is a crimson (OKLCH 0.41 0.165 25, `#8f0214`). The colour-blind test set its
+    lightness: the first pick sat too close to the agent's orange under protanopia. Green
+    text is more saturated (OKLCH 0.49 0.135), and the light accent fill keeps 3:1 on the
+    new content.
+  - Pruned: the board's lane is a heading over a column, not a well (the cards are white on
+    the content now). A *Needs you* heading and "… in a subtask" are the muted ink, since the
+    mark beside them already says it. The overview's frame was already the neutral double
+    ring.
+  - Tests: one hue per meaning across both modes, one neutral hue, nearer is lighter in both
+    modes, the dividing hairline is seen equally, and the agent's colour stays apart from
+    waiting under every vision. The kit's card, button and secondary tests follow the rims.

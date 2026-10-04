@@ -1346,7 +1346,6 @@ impl ProjectView {
             return None;
         }
         let theme = &self.theme;
-        let s = &theme.surfaces;
         let rows = nodes.into_iter().map(|node| {
             let asks = self.agent(board, node).and_then(|a| a.asks.clone());
             let status = node.and_then(|t| board.tasks.get(&t)).and_then(|c| c.status.clone());
@@ -1363,8 +1362,8 @@ impl ProjectView {
                 .flex_none()
                 .mb(self.z(theme.spacing.xs))
                 .pb(self.z(theme.spacing.xxs))
-                .bg(hsla(s.hover))
-                .child(self.heading("project-needs-heading", NEEDS_YOU, Some(s.warn)))
+                .map(|el| crate::kit::raised(el, theme))
+                .child(self.heading("project-needs-heading", NEEDS_YOU))
                 .children(spent)
                 .children(rows),
         )
@@ -1428,7 +1427,7 @@ impl ProjectView {
                 .flex_none()
                 .mb(self.z(sp.xs))
                 .pb(self.z(sp.xs))
-                .bg(hsla(s.hover))
+                .map(|el| crate::kit::raised(el, theme))
                 .child(head)
                 .children(lines)
                 .children(partial),
@@ -1522,7 +1521,7 @@ impl ProjectView {
             .items_center()
             .gap(self.z(sp.xs))
             .pr(self.z(sp.inset()))
-            .child(self.heading("project-plan-heading", PROPOSED, None).flex_none())
+            .child(self.heading("project-plan-heading", PROPOSED).flex_none())
             .child(
                 div()
                     .id("project-plan-summary")
@@ -1562,14 +1561,14 @@ impl ProjectView {
                 .flex_none()
                 .mb(self.z(sp.xs))
                 .pb(self.z(sp.xxs))
-                .bg(hsla(s.hover))
+                .map(|el| crate::kit::raised(el, theme))
                 .child(head)
                 .children(rows),
         )
     }
 
     /// A quiet label over a group of rows, on the column their marks stand in.
-    fn heading(&self, id: &'static str, text: &'static str, tone: Option<Rgb>) -> Stateful<Div> {
+    fn heading(&self, id: &'static str, text: &'static str) -> Stateful<Div> {
         let theme = &self.theme;
         div()
             .id(id)
@@ -1580,7 +1579,7 @@ impl ProjectView {
             .pt(self.z(theme.spacing.xs))
             .pb(self.z(theme.spacing.xxs))
             .text_size(self.z(theme.typography.small()))
-            .text_color(hsla(tone.unwrap_or(theme.surfaces.text_muted)))
+            .text_color(hsla(theme.surfaces.text_muted))
             .child(text)
     }
 
@@ -2420,7 +2419,7 @@ impl ProjectView {
             Some(self.card(board, card, lane, cx))
         });
         let selector = format!("project-lane-{}", lane.selector());
-        crate::kit::well(div(), theme)
+        div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || selector)
             .role(Role::List)
@@ -2549,7 +2548,7 @@ impl ProjectView {
             .children(why.map(|why| {
                 div()
                     .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(lane_tone(theme, lane)))
+                    .text_color(hsla(s.text_muted))
                     .child(SharedString::from(why))
             }))
             // Last, on a line of their own: a lane is too narrow for a title and its buttons.
@@ -2970,7 +2969,7 @@ impl ProjectView {
         let per_worker = board.project.limits.live_per_worker;
         let mut out = Vec::new();
         if !board.project.needs.is_empty() {
-            out.push(self.heading("project-machines-needs", NEEDS, None).into_any_element());
+            out.push(self.heading("project-machines-needs", NEEDS).into_any_element());
             for (at, need) in board.project.needs.iter().enumerate() {
                 out.push(self.need_row(at, need).into_any_element());
             }
@@ -3050,9 +3049,7 @@ impl ProjectView {
             }
         }
         if !waiting.is_empty() {
-            out.push(
-                self.heading("project-machines-waiting", NOT_STARTED, None).into_any_element(),
-            );
+            out.push(self.heading("project-machines-waiting", NOT_STARTED).into_any_element());
             for task in waiting {
                 let said = board.tasks.get(&task).map(|c| match c.pin {
                     Some(worker) => format!("To run on {}", self.worker_name(worker)),

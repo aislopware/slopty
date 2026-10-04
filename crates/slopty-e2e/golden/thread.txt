@@ -3,14 +3,14 @@ Group │ Workspace
 Navigation │ Navigator
 TextInput │ Filter
 Heading │ Needs you
-Button │ Do these steps in order with the named tools, t…, Run touch refused.txt, Needs you
+Button │ Do these steps in order with the named tools, then reply "done". 1) Read…, Run touch refused.txt, Needs you
 Button │ Deny
 Button │ Allow
 Heading │ Machines
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
-Button │ Do these steps in order with the named tools, t…, Needs approval
+Button │ Do these steps in order with the named tools, then reply "done". 1) Read…, Needs approval
 Image │ Needs you
 Button │ Close tile
 Button │ Navigator
@@ -20,8 +20,8 @@ Button │ New
 Button │ Needs you
 Status │ 1 new
 Button │ More
-Group │ Do these steps in order with the named tools, t…
-Heading │ terminal Do these steps in order with the named tools, t…
+Group │ Do these steps in order with the named tools, then reply "done". 1) Read…
+Heading │ terminal Do these steps in order with the named tools, then reply "done". 1) Read…
 Label │ ~
 Button │ Show terminal
 Button │ Fullscreen tile
@@ -45,6 +45,7 @@ Group │ Edits · notes.txt
 Button │ Review
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Ask aside
 Button │ Model, Opus 5.5
 Label │ Mode, Default
 Button │ Commit

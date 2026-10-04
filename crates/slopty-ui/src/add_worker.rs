@@ -255,7 +255,7 @@ pub fn failure(theme: &Theme, failed: &Failed) -> gpui::Stateful<Div> {
             .flex_col()
             .p(px(theme.spacing.sm))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.hover))
+            .map(|el| kit::inset(el, theme))
             .children(
                 failed
                     .lines

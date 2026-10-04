@@ -1831,7 +1831,6 @@ impl TerminalView {
         }
         let m = self.metrics?;
         let theme = &self.theme;
-        let s = &theme.surfaces;
         let rows = prompt.0.saturating_sub(self.state.index_at_row(0).0);
         let row = u16::try_from(rows).unwrap_or(u16::MAX).min(m.rows.saturating_sub(1));
         let inset = px(theme.spacing.inset() * self.zoom);
@@ -1850,11 +1849,7 @@ impl TerminalView {
                 .occlude()
                 .pr(px(theme.spacing.xxs))
                 .rounded(px(theme.radii.xs))
-                .when(!on_band, |el| {
-                    el.border(crate::kit::hair(theme))
-                        .border_color(hsla(s.border_subtle))
-                        .bg(hsla(s.hover))
-                })
+                .when(!on_band, |el| crate::kit::raised(el, theme))
                 .child(self.render_block_facts(prompt, cx))
                 .into_any_element(),
         )

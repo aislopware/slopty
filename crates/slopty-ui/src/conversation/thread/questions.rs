@@ -182,7 +182,10 @@ impl Questions {
             QuestionnaireItem::new(state, name.clone())
                 .child(QuestionnaireTitle::new(state, name.clone()))
                 .children(answers)
-                .child(QuestionnaireInput::new(state, name.clone()).h(field))
+                .child(crate::kit::field(
+                    QuestionnaireInput::new(state, name.clone()).h(field),
+                    theme,
+                ))
                 .child(QuestionnaireError::new(state, name))
         });
         Questionnaire::new(state)

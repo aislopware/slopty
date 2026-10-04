@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use gpui::accesskit::Role;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement as _, IntoElement as _, ObjectFit,
     ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _,
@@ -139,7 +140,7 @@ fn picture_chip(
         .overflow_hidden()
         .border(kit::hair(theme))
         .border_color(hsla(s.border_subtle))
-        .bg(hsla(s.hover))
+        .map(|el| kit::inset(el, theme))
         .child(img(picture).size_full().object_fit(ObjectFit::Cover))
         .children(progress)
         .child(disc)
@@ -165,7 +166,7 @@ fn file_chip(theme: &Theme, zoom: f32, chip: &Attachment, remove: Remove) -> Any
         .max_w(z(ATTACHMENT_WIDTH))
         // The way off sits in the pill's own end, a pad's width from its edge.
         .pr(z(theme.spacing.xxs))
-        .bg(hsla(s.hover))
+        .map(|el| kit::inset(el, theme))
         .text_color(hsla(s.text_secondary))
         .child(
             crate::icons::icon(theme, IconName::File, IconSize::Inline, hsla(s.text_muted))

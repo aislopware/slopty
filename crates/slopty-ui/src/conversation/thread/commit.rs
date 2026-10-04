@@ -348,7 +348,7 @@ impl CommitSheet {
         )
     }
 
-    /// Words in the code face on the hover wash: what git or gh said, as it said it.
+    /// Words in the code face in a well ([`kit::inset`]): what git or gh said, as it said it.
     fn said_block(&self, id: &'static str, words: &str, tone: Rgb) -> Div {
         let theme = &self.theme;
         div()
@@ -357,7 +357,7 @@ impl CommitSheet {
             .px(px(theme.spacing.sm))
             .py(px(theme.spacing.xs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(theme.surfaces.hover))
+            .map(|el| kit::inset(el, theme))
             .font_family(self.mono())
             .text_size(px(theme.typography.small()))
             .text_color(hsla(tone))

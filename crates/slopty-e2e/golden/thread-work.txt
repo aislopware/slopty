@@ -5,7 +5,7 @@ TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
-Button │ The header clips its chips on a narrow window,…
+Button │ The header clips its chips on a narrow window, as here.
 Button │ Close tile
 Button │ Navigator
 Group │ Where
@@ -13,8 +13,8 @@ Button │ e2e-worker
 Button │ New
 Button │ Needs you
 Button │ More
-Group │ The header clips its chips on a narrow window,…
-Heading │ terminal The header clips its chips on a narrow window,…
+Group │ The header clips its chips on a narrow window, as here.
+Heading │ terminal The header clips its chips on a narrow window, as here.
 Label │ ~
 Button │ Show terminal
 Button │ Fullscreen tile
@@ -34,10 +34,11 @@ Article │ The chips now give way from the right, the model first. The release 
 Button │ Copy message
 Group │ Activity
 Button │ Plan, 1 of 3 done
-Button │ In the background, 1 finished
+Button │ In the background
 Status │ Build the release binary: Completed
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Ask aside
 Button │ Model, Opus 5.5
 Button │ 1 finished
 Button │ Commit

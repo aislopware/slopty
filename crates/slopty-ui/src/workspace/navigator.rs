@@ -2052,7 +2052,7 @@ impl WorkspaceView {
                 .max_w(px(self.navigator_width() / 2.0))
                 .child(SharedString::from(name))
         });
-        let field = kit::sunk(div(), theme, 0.0)
+        let field = kit::field(div(), theme)
             .id("nav-filter-field")
             .flex_1()
             .min_w_0()
@@ -2064,7 +2064,6 @@ impl WorkspaceView {
             .items_center()
             .gap(px(spacing.xs + spacing.xxs))
             .rounded(px(theme.radii.sm))
-            .bg(hsla(s.selected))
             .child(icon(theme, IconName::Search, IconSize::Inline, hsla(s.text_muted)))
             .children(scope)
             .children(input)

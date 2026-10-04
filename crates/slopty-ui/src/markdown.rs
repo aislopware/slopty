@@ -213,7 +213,7 @@ pub fn code_block(
         .flex()
         .flex_col()
         .rounded(px(theme.radii.xs))
-        .bg(hsla(s.hover))
+        .map(|el| crate::kit::inset(el, theme))
         .px(px(spacing.sm * scale))
         .py(px(spacing.xs * scale))
         .font_family(mono)
@@ -365,7 +365,7 @@ pub fn style(theme: &Theme, mono: &str, scale: f32) -> TextViewStyle {
     let code_block = gpui::StyleRefinement::default()
         .font_family(mono.to_owned())
         .text_size(px(small))
-        .bg(hsla(theme.surfaces.hover))
+        .bg(hsla(theme.surfaces.band))
         .rounded(px(theme.radii.xs))
         .px(px(theme.spacing.sm * scale))
         .py(px(theme.spacing.xs * scale));

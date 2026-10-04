@@ -59,6 +59,34 @@ impl Rgb {
             .mul_add(linear(self.b), 0.7152_f32.mul_add(linear(self.g), 0.2126 * linear(self.r)))
     }
 
+    /// The colour in OKLCH (Björn Ottosson's matrices), its hue in degrees from 0 to 360.
+    #[must_use]
+    pub fn oklch(self) -> Oklch {
+        let linear = |c: u8| {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        let (red, green, blue) = (linear(self.r), linear(self.g), linear(self.b));
+        let long =
+            0.051_445_99_f32.mul_add(blue, 0.412_221_46_f32.mul_add(red, 0.536_332_55 * green));
+        let medium =
+            0.107_396_96_f32.mul_add(blue, 0.211_903_5_f32.mul_add(red, 0.680_699_5 * green));
+        let short =
+            0.629_978_7_f32.mul_add(blue, 0.088_302_46_f32.mul_add(red, 0.281_718_84 * green));
+        let (long, medium, short) = (long.cbrt(), medium.cbrt(), short.cbrt());
+        let lightness = (-0.004_072_047_f32)
+            .mul_add(short, 0.210_454_26_f32.mul_add(long, 0.793_617_8 * medium));
+        let green_red =
+            0.450_593_7_f32.mul_add(short, 1.977_998_5_f32.mul_add(long, -2.428_592_2 * medium));
+        let blue_yellow = (-0.808_675_77_f32)
+            .mul_add(short, 0.025_904_037_f32.mul_add(long, 0.782_771_77 * medium));
+        Oklch {
+            l: lightness,
+            c: green_red.hypot(blue_yellow),
+            h: blue_yellow.atan2(green_red).to_degrees().rem_euclid(360.0),
+        }
+    }
+
     /// `self` moved `t` (0 to 1) of the way to `other`, channel by channel.
     #[must_use]
     pub fn mix(self, other: Self, t: f32) -> Self {
@@ -248,14 +276,23 @@ pub struct TerminalPalette {
 }
 
 /// The dark terminal background: the content step of the chrome's surface order, which tile
-/// headers and bodies share. A neutral charcoal with no hue (`MonoCode`'s), so the accent and
-/// the status colours are the only colour on screen; the blue-grey `#16181d` it replaced
-/// blended with the blue accent (`docs/decisions/ui.md`, "The dark theme is neutral").
+/// headers and bodies share. A charcoal of the one neutral ([`NEUTRAL_HUE`]) at a chroma no eye
+/// reads as hued, so the accent and the status colours are the only colour on screen; the
+/// blue-grey `#16181d` it replaced blended with the blue accent (`docs/decisions/ui.md`, "The
+/// dark theme is neutral", and "One warm neutral for both modes").
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
-const DARK_BG: Rgb = Rgb::hex(0x171717);
-/// The light terminal background.
+const DARK_BG: Rgb = Rgb::hex(0x181716);
+/// The light terminal background: a hair off white in the one neutral, so what floats and what
+/// is raised (white) rises from it by tone as well as by its ring and shadow.
 #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
-const LIGHT_BG: Rgb = Rgb::hex(0xffffff);
+const LIGHT_BG: Rgb = Rgb::hex(0xfdfcfb);
+
+/// The hue of every neutral in both modes, in OKLCH degrees: a warm paper grey.
+///
+/// Barely tinted (chroma 0.002 to 0.004), as Linear's and Notion's neutrals are. Warm greys keep
+/// the code hues (blue, cyan) reading as colour, and the brand's green sits on it as on paper; a
+/// green tint would dull the one colour that means live.
+pub const NEUTRAL_HUE: f32 = 85.0;
 
 impl TerminalPalette {
     /// The default dark palette.
@@ -296,11 +333,11 @@ impl TerminalPalette {
     /// The default light palette (GitHub-light hues: legible on white without glare).
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
-        fg: Rgb::hex(0x1f2328),
+        fg: Rgb::hex(0x1c1c1a),
         bg: LIGHT_BG,
-        cursor: Rgb::hex(0x1f2328),
+        cursor: Rgb::hex(0x1c1c1a),
         cursor_text: LIGHT_BG,
-        selection: Rgb::hex(0xd6d6d6),
+        selection: Rgb::hex(0xdbd9d5),
         search_match: Rgb::hex(0xffe9a8),
         search_current: Rgb::hex(0xf5b942),
         ansi: [
@@ -311,7 +348,7 @@ impl TerminalPalette {
             Rgb::hex(0x0969da),
             Rgb::hex(0x8250df),
             Rgb::hex(0x1b7c83),
-            Rgb::hex(0x6e7781),
+            Rgb::hex(0x565553),
             Rgb::hex(0x57606a),
             Rgb::hex(0xa40e26),
             Rgb::hex(0x1a7f37),
@@ -980,7 +1017,7 @@ const DARK_TONES: Tones = Tones {
     band: ink(0.035),
     border: ink(0.10),
     pole: Rgb::hex(0xffffff),
-    text: Rgb::hex(0xebebeb),
+    text: Rgb::hex(0xecebea),
     // `content/74.5` and `content/65.1`: the least shares at which secondary text reads APCA
     // |Lc| 55 and muted 45 on the selected wash over a float (the lightest ground text lands
     // on), so the lift has nothing to do. WCAG AA alone put them at `/71.5` and `/62.5`, which
@@ -1011,7 +1048,9 @@ const LIGHT_TONES: Tones = Tones {
     // under a darker rule than any reference draws.
     canvas: ink(0.04),
     panel: ink(0.025),
-    elevated: Step { toward: Toward::White, share: 0.6 },
+    // White, a step over the content: what floats and what is raised rises by tone as well as
+    // by its ring and shadow. At 0.6 over a white content it was white on white.
+    elevated: Step { toward: Toward::White, share: 1.0 },
     hover: 0.05,
     selected: 0.08,
     pressed: 0.12,
@@ -1022,20 +1061,27 @@ const LIGHT_TONES: Tones = Tones {
     band: ink(0.045),
     border: ink(0.13),
     pole: Rgb::hex(0x000000),
-    text: Rgb::hex(0x1d1d1f),
-    text_secondary: 0.78,
-    // The least share at which muted text reads AA on the selected wash over the bars.
-    text_muted: 0.675,
-    // The brand's hue at the lightness that reads AA on white as text, and 3:1 as a mark.
-    accent: Oklch { l: 0.5, c: 0.13, h: BRAND_OKLCH.h },
-    accent_fill: Oklch { l: 0.65, c: 0.16, h: BRAND_OKLCH.h },
+    text: Rgb::hex(0x1c1c1a),
+    // Where the lift would put them on paper: secondary at the level gap under the text, muted
+    // AA on the selected wash over the bars. Light's tiers are pinned there, so its hierarchy
+    // comes from weight and placement too.
+    text_secondary: 0.745,
+    text_muted: 0.68,
+    // The brand's hue at the lightness that reads AA on paper as text, with as much chroma as
+    // sRGB holds there, and 3:1 as a mark on the paper: a word is darkened only to its floor,
+    // never greyed.
+    accent: Oklch { l: 0.49, c: 0.135, h: BRAND_OKLCH.h },
+    accent_fill: Oklch { l: 0.64, c: 0.16, h: BRAND_OKLCH.h },
     accent_ink: ON_GREEN,
-    warn: Rgb::hex(0x8b5d00),
-    // A deep red, near Tailwind's red 800: at the green's and the amber's lightness
-    // (`c7212c`) a deuteranope saw the amber and the red as one brown (0.03 Oklab apart);
-    // a step darker keeps failed apart from waiting and from added for every dichromacy
-    // (`vision`), and on white it reads past AAA.
-    error: Rgb::hex(0x8f1d1d),
+    // A touch more amber than brown, so waiting reads apart from the agent's orange.
+    warn: Rgb::hex(0x8a5600),
+    // A crimson: at the green's and the amber's lightness (`c7212c`) a deuteranope saw the
+    // amber and the red as one brown (0.03 Oklab apart); this lightness keeps failed apart
+    // from waiting and from added for every dichromacy (`vision`), and the chroma keeps it red
+    // rather than the oxblood `8f1d1d` it replaced. The colour-blind test set its lightness,
+    // `oklch(0.41 0.165 25)`: with the green word at full chroma, the lighter crimsons
+    // (`940018`, `940c19`) met a deuteranope's floor against it only to the third place.
+    error: Rgb::hex(0x8f0214),
     warn_fill: Rgb::hex(0xf0a000),
     error_fill: Rgb::hex(0xef4b52),
     fill_fg: Rgb::hex(0x0a0b0e),
@@ -1282,9 +1328,9 @@ pub struct Rim {
     pub top: bool,
     /// What it is drawn in: white for light, black for a shade.
     pub ink: Rgb,
-    /// Its opacity on what rests: a card, a secondary button, the composer, a segmented
-    /// control's thumb.
-    pub rest: f32,
+    /// Its opacity on what rests (a card, a secondary button, the composer, a segmented
+    /// control's thumb), or none where the ring and the contact already end it.
+    pub rest: Option<f32>,
     /// Its opacity on what floats, or none where the drop shadow already says where it ends.
     pub float: Option<f32>,
 }
@@ -1352,7 +1398,7 @@ impl Elevation {
         rim: Rim {
             top: true,
             ink: Rgb::hex(0x00ff_ffff),
-            rest: alpha::RIM,
+            rest: Some(alpha::RIM),
             float: Some(alpha::EDGE),
         },
         finish: Finish { top: false, ink: Rgb::hex(0), alpha: 0.10, contact: None, pressed: 0.08 },
@@ -1371,7 +1417,9 @@ impl Elevation {
         // coss's every shadow sits at 5 %: a card on its well is held by its hairline and a
         // contact this faint, not a pool.
         rest: Some(Shadow { y: 1.0, blur: 2.0, spread: -0.5, alpha: 0.05 }),
-        rim: Rim { top: false, ink: Rgb::hex(0), rest: alpha::RIM, float: None },
+        // No rim on what rests: its ring and contact already end it, and a third edge along
+        // its bottom read as a box drawn twice.
+        rim: Rim { top: false, ink: Rgb::hex(0), rest: None, float: None },
         finish: Finish {
             top: true,
             ink: Rgb::hex(0x00ff_ffff),
@@ -2107,15 +2155,17 @@ mod tests {
     /// Terminal backgrounds the chrome is derived for, with a name for the messages: the two
     /// defaults, popular schemes, and the ends of the supported range (a relative luminance of
     /// 0.05 at most in dark, 0.6 at least in light).
-    const BACKGROUNDS: [(&str, u32); 13] = [
+    const BACKGROUNDS: [(&str, u32); 15] = [
         ("black", 0x00_0000),
-        ("default dark", 0x16_181d),
+        ("default dark", 0x18_1716),
+        ("old default dark", 0x16_181d),
         ("catppuccin mocha", 0x1e_1e2e),
         ("dracula", 0x28_2a36),
         ("solarized dark", 0x00_2b36),
         ("nord", 0x2e_3440),
         ("dark end", 0x3f_3f3f),
-        ("default light", 0xff_ffff),
+        ("default light", 0xfd_fcfb),
+        ("white", 0xff_ffff),
         ("one light", 0xfa_fafa),
         ("solarized light", 0xfd_f6e3),
         ("gruvbox light", 0xfb_f1c7),
@@ -2500,6 +2550,103 @@ mod tests {
     /// What floats reads above what it covers in both variants: a step up from the content in
     /// dark and white in light, with a shadow dark enough to see on near-black. A finger gets
     /// Apple's 44 pt, a pointer rows no taller than they were.
+    /// The most chroma a neutral holds: a warm paper grey, never a colour.
+    const NEUTRAL_CHROMA: f32 = 0.006;
+
+    /// One neutral, two polarities (R1): every grey of the chrome in both modes is the one
+    /// warm neutral, barely tinted. Its hue is held loosely: at a chroma of 0.002 an 8-bit
+    /// channel's rounding swings it by tens of degrees, so a grey is held only to the warm
+    /// side, within 45° of [`NEUTRAL_HUE`], and only where it has any chroma to speak of.
+    #[test]
+    fn light_and_dark_share_one_neutral_hue() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let content = theme.content();
+            let greys = [
+                ("content", content),
+                ("canvas", s.canvas),
+                ("panel", s.panel),
+                ("elevated", s.elevated),
+                ("band", s.band),
+                ("hover", s.hover.over(content)),
+                ("selected", s.selected.over(content)),
+                ("pressed", s.pressed.over(content)),
+                ("border", s.border.over(content)),
+                ("border_subtle", s.border_subtle.over(content)),
+                ("text", s.text),
+                ("text_secondary", s.text_secondary),
+                ("text_muted", s.text_muted),
+                ("selection", theme.terminal.selection),
+            ];
+            for (name, grey) in greys {
+                let Oklch { c, h, .. } = grey.oklch();
+                assert!(c <= NEUTRAL_CHROMA, "{variant:?}: {name} {grey:?} is coloured ({c:.4})");
+                let off = (h - NEUTRAL_HUE).abs().min(360.0 - (h - NEUTRAL_HUE).abs());
+                assert!(c < 0.0015 || off <= 45.0, "{variant:?}: {name} {grey:?} at {h:.0}°");
+            }
+        }
+    }
+
+    /// Nearer is lighter in both modes (R2): what floats and what is raised sits over the
+    /// content in L*, and in light by a step the eye takes, not only by its ring.
+    #[test]
+    fn what_is_nearer_is_lighter_in_both_modes() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let theme = Theme::new(variant);
+            let s = theme.surfaces;
+            let content = lightness(theme.content());
+            let raised =
+                if variant == Variant::Light { s.elevated } else { s.hover.over(theme.content()) };
+            for (name, surface) in [("elevated", s.elevated), ("raised", raised)] {
+                let step = lightness(surface) - content;
+                assert!(step > 0.0, "{variant:?}: {name} sits {step:.2} L* off the content");
+            }
+            if variant == Variant::Light {
+                let step = lightness(s.elevated) - content;
+                assert!(step >= 0.75, "light: a float is only {step:.2} L* over the paper");
+            }
+        }
+    }
+
+    /// The dividing hairline is seen equally in both modes (R5): `border` over the content sits
+    /// the same L* off it, within a unit, and reads APCA Lc 14 or more on paper.
+    #[test]
+    fn the_dividing_hairline_is_seen_equally() {
+        let off = |variant| {
+            let theme = Theme::new(variant);
+            let content = theme.content();
+            let rule = theme.surfaces.border.over(content);
+            ((lightness(content) - lightness(rule)).abs(), rule.apca(content).abs())
+        };
+        let ((dark, _), (light, lc)) = (off(Variant::Dark), off(Variant::Light));
+        assert!(
+            (dark - light).abs() <= 1.0,
+            "the rule sits {dark:.2} L* off in dark, {light:.2} in light"
+        );
+        assert!(lc >= 14.0, "light: the rule reads Lc {lc:.1}");
+    }
+
+    /// One hue per meaning across the modes (R6): the green on the brand's 150°, waiting amber,
+    /// failed red and the agent's orange each in its own band in both, whatever lightness
+    /// each mode needs.
+    #[test]
+    fn one_hue_per_meaning_across_modes() {
+        for variant in [Variant::Dark, Variant::Light] {
+            let s = Theme::new(variant).surfaces;
+            for (name, colour, band) in [
+                ("accent", s.accent, 145.0..=155.0),
+                ("accent_fill", s.accent_fill, 145.0..=155.0),
+                ("warn", s.warn, 65.0..=85.0),
+                ("error", s.error, 15.0..=30.0),
+                ("agent", s.agent, 40.0..=50.0),
+            ] {
+                let h = colour.oklch().h;
+                assert!(band.contains(&h), "{variant:?}: {name} {colour:?} at {h:.1}°");
+            }
+        }
+    }
+
     #[test]
     fn elevation_and_density() {
         let dark = Theme::new(Variant::Dark);
@@ -2524,6 +2671,8 @@ mod tests {
         assert!(dark_rim.top && !light_rim.top, "lit from above in dark, a shade below in light");
         assert!(dark_rim.ink.is_light() && !light_rim.ink.is_light());
         assert!(dark.elevation.rest.is_none(), "dark rests on its rim alone");
+        assert!(dark_rim.rest.is_some(), "dark: what rests catches the light at its top");
+        assert_eq!(light_rim.rest, None, "light: what rests wears one edge, its ring");
         let rest = light.elevation.rest.map(|s| s.alpha).unwrap_or_default();
         assert!(rest > 0.0 && rest < light.elevation.shadow[0].alpha, "a contact under a float's");
         const {
@@ -2638,8 +2787,8 @@ mod tests {
         let cursor = |p: TerminalPalette| p.cursor == p.fg;
         assert!(cursor(TerminalPalette::DARK) && cursor(TerminalPalette::LIGHT), "no blue caret");
         for p in [TerminalPalette::DARK, TerminalPalette::LIGHT] {
-            let c = p.selection;
-            assert!(c.r == c.g && c.g == c.b, "a neutral selection: {c:?}");
+            let c = p.selection.oklch().c;
+            assert!(c <= NEUTRAL_CHROMA, "a neutral selection: {:?} at chroma {c:.4}", p.selection);
         }
     }
 

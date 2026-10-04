@@ -5,8 +5,7 @@ TextInput │ Filter
 Button │ e2e-worker
 Button │ New shell on e2e-worker
 Button │ Machine actions, e2e-worker
-Button │ Claude Code, Working
-Image │ Working
+Button │ Claude Code
 Button │ Close tile
 Button │ Navigator
 Group │ Where
@@ -16,7 +15,6 @@ Button │ Needs you
 Button │ More
 Group │ Claude Code
 Heading │ terminal Claude Code
-Image │ Working
 Label │ ~
 Button │ Show terminal
 Button │ Fullscreen tile
@@ -27,6 +25,7 @@ Button │ Copy message
 Button │ Preparing Bash
 MultilineTextInput │ Message (focused)
 Button │ Attach files
+Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Send

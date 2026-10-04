@@ -266,24 +266,25 @@ impl ThreadView {
         if !bar.edited.is_empty() {
             groups.push(vec![self.edited_section(&bar.edited, cx)]);
         }
+        let paused = bar.queue.iter().any(|q| q.stopped).then(|| self.paused_line());
         groups.push(
-            bar.queue
-                .iter()
-                .map(|q| {
+            paused
+                .into_iter()
+                .chain(bar.queue.iter().map(|q| {
                     let draft = (q.delivery == Delivery::Draft && q.on_worker)
                         .then(|| self.draft_card(q, cx))
                         .flatten();
                     draft.unwrap_or_else(|| {
                         self.queued_line(q, bar.can_withdraw, bar.can_promote, cx)
                     })
-                })
+                }))
                 .collect(),
         );
         if !bar.background.is_empty() {
             groups.push(vec![self.background_section(&bar.background)]);
         }
         if self.tasks_open && !bar.tasks.is_empty() {
-            let mut tasks = vec![self.tasks_head(&bar.tasks, cx)];
+            let mut tasks = vec![self.tasks_head(cx)];
             tasks.extend(bar.tasks.iter().map(|task| self.task_line(task, bar.can_stop, cx)));
             groups.push(tasks);
         }
@@ -317,7 +318,8 @@ impl ThreadView {
         // Over the composer the tray is the card's head: as wide, its corners the composer's,
         // and the composer's top edge the one hairline between them, so one outline holds both
         // and no row reads as cut by the composer. Alone, it is a card of its own. Inside, its
-        // kinds of thing stand apart by the quieter hairline.
+        // kinds of thing stand apart by the quieter hairline. It is raised as the composer is,
+        // on the same surface: a wash would sink it into the page in light.
         let radius = self.z(if tucked { theme.radii.lg } else { theme.radii.md });
         Some(
             div()
@@ -339,7 +341,7 @@ impl ThreadView {
                         .mb(self.z(theme.spacing.xs))
                 })
                 .border_color(hsla(s.border))
-                .bg(hsla(s.hover))
+                .bg(hsla(s.elevated))
                 .map(|el| kit::rests(el, theme, true, !tucked))
                 .overflow_hidden()
                 .children(request)
@@ -392,24 +394,20 @@ impl ThreadView {
 
     /// The head of the work in the background, opened from its chip: what it is, how much of
     /// it runs or how it ended, and the way to fold it.
-    fn tasks_head(&self, tasks: &[&BackgroundTask], cx: &Context<Self>) -> AnyElement {
+    fn tasks_head(&self, cx: &Context<Self>) -> AnyElement {
         let s = self.theme.surfaces;
-        let words = tasks_words(tasks.iter().copied());
+        // The count is the composer's chip's, which opened this and stays beside it as the
+        // way back: said twice, a step apart, it read as two things.
         self.section()
             .id("thread-tasks-head")
             .debug_selector(|| "thread-tasks-head".to_owned())
             .role(Role::Button)
-            .aria_label(SharedString::from(format!("In the background, {words}")))
+            .aria_label("In the background")
             .aria_expanded(true)
             .cursor_pointer()
             .text_color(hsla(s.text_secondary))
             .child(self.slot().child(self.icon(IconName::Activity, s.text_muted)))
             .child(div().flex_none().child("In the background"))
-            .child(div().text_color(hsla(s.text_muted)).child(kit::Rolling::new(
-                "thread-tasks-figure",
-                words,
-                self.z(self.theme.typography.small()),
-            )))
             .child(div().flex_1())
             .child(self.icon(IconName::ChevronDown, s.text_muted))
             .on_click(cx.listener(|this, _ev, _w, cx| {
@@ -437,6 +435,27 @@ impl ThreadView {
                     .flex_1()
                     .whitespace_normal()
                     .child(SharedString::from(refusal.words.clone())),
+            )
+            // Going back with the files was refused (another thread edits the same folder):
+            // going back without them is the next thing to try.
+            .when_some(
+                match refusal.intent {
+                    Some(Intent::Rewind { turn, files: true }) => Some(turn),
+                    _ => None,
+                },
+                |el, turn| {
+                    el.child(
+                        self.button(
+                            format!("refused-no-files-{id}"),
+                            "Without the files",
+                            ButtonKind::Ghost,
+                        )
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            this.dismiss(id, cx);
+                            let _id = this.intent(Intent::Rewind { turn, files: false }, cx);
+                        })),
+                    )
+                },
             )
             .child(
                 self.icon_button(format!("refused-dismiss-{id}"), IconName::X, "Dismiss")
@@ -876,6 +895,22 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Over a queue the person's stop holds: it goes on with their next message.
+    fn paused_line(&self) -> AnyElement {
+        let s = self.theme.surfaces;
+        let words = "Queue paused \u{b7} sends after your next message";
+        self.section()
+            .id("thread-queue-paused")
+            .debug_selector(|| "thread-queue-paused".to_owned())
+            .role(Role::Status)
+            .aria_label(SharedString::from(words.replace('\u{b7}', ",")))
+            .text_size(self.z(self.theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .child(self.slot().child(self.icon(IconName::CirclePause, s.text_muted)))
+            .child(SharedString::from(words))
+            .into_any_element()
+    }
+
     /// A waiting message: its first line, where it is (when one held for later goes, or what
     /// it waits on), and the ways to change it, send it now or take it back while the worker
     /// holds it.
@@ -895,6 +930,8 @@ impl ThreadView {
         let state = match (&queued.held, queued.on_worker, queued.withdrawing, &refused) {
             (_, _, true, _) => Some("Taking back".to_owned()),
             (.., Some((_, _, reason))) => Some(format!("Not changed: {reason}")),
+            // The line over the queue says it once for all of them.
+            (Some(_), ..) if queued.stopped => None,
             (Some(why), ..) => Some(why.clone()),
             (None, false, ..) if queued.delivery == Delivery::Interrupt => {
                 Some("Stopping the turn to send".to_owned())
@@ -947,7 +984,7 @@ impl ThreadView {
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(intent, cx))),
                 )
             })
-            .when(open && scheduled && can_promote && !queued.going, |el| {
+            .when(open && (scheduled || queued.stopped) && can_promote && !queued.going, |el| {
                 el.child(
                     self.icon_button(format!("promote-{pending}"), IconName::ArrowUp, "Send now")
                         .on_click(cx.listener(move |this, _ev, _w, cx| {

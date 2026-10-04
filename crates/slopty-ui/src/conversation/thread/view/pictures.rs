@@ -101,7 +101,7 @@ impl ThreadView {
                         .overflow_hidden()
                         .border(kit::hair(&theme))
                         .border_color(hsla(s.border_subtle))
-                        .bg(hsla(s.hover))
+                        .map(|el| kit::inset(el, &theme))
                         .children(shown.map(|p| img(p).size_full().object_fit(ObjectFit::Cover))),
                     s.accent,
                 )
@@ -192,7 +192,7 @@ impl ThreadView {
 /// What a picture `width` × `height` of `media_type`, `bytes` long, is in words; a size its
 /// header did not give is left out.
 #[must_use]
-pub(crate) fn picture_words(width: u32, height: u32, media_type: &str, bytes: u64) -> String {
+fn picture_words(width: u32, height: u32, media_type: &str, bytes: u64) -> String {
     let kind = media_type.strip_prefix("image/").unwrap_or(media_type).to_uppercase();
     let mut parts = Vec::new();
     if width > 0 && height > 0 {
