@@ -894,6 +894,16 @@ impl Hub {
                 "a snooze is the person's way to put a finish off, never an agent's",
             ),
             Verb::Snooze { of, until, zone } => self.snooze(of, until, zone.as_deref()),
+            verb @ (Verb::ScriptSet { .. } | Verb::ScriptDelete { .. }) => {
+                self.script_change(caller, key, &verb)
+            }
+            Verb::ScriptRun { project, name, worker, task } => {
+                self.script_run(caller, key, (project, name), worker, task).await
+            }
+            Verb::RunScript { .. } => error(
+                ErrorCode::Forbidden,
+                "the server opens a script's terminal itself; ask it with script run",
+            ),
             Verb::Unsnooze { of } => self.unsnooze(of),
             Verb::Git { .. } if caller == Caller::Agent => error(
                 ErrorCode::Forbidden,
@@ -1760,7 +1770,10 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::TaskReview { .. }
         | Verb::ProjectDelete { .. }
         | Verb::Snooze { .. }
-        | Verb::Unsnooze { .. } => None,
+        | Verb::Unsnooze { .. }
+        | Verb::ScriptSet { .. }
+        | Verb::ScriptDelete { .. }
+        | Verb::ScriptRun { .. } => None,
         Verb::OpenTerminal { worker, .. }
         | Verb::SpawnAgent { worker, .. }
         | Verb::ReadFile { worker, .. }
@@ -1769,6 +1782,7 @@ const fn target(verb: &Verb) -> Option<WorkerId> {
         | Verb::Stat { worker, .. }
         | Verb::FsChange { worker, .. }
         | Verb::Git { worker, .. }
+        | Verb::RunScript { worker, .. }
         | Verb::Search { worker, .. }
         | Verb::ListPorts { worker }
         | Verb::ListItems { worker }

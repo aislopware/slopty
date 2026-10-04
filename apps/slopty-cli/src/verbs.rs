@@ -1007,7 +1007,7 @@ async fn cat(
     Ok(())
 }
 
-fn print_term(term: slopty_proto::orchestration::TermRef, json: bool) -> Result<()> {
+pub fn print_term(term: slopty_proto::orchestration::TermRef, json: bool) -> Result<()> {
     if json {
         print_json(&view::opened(term))
     } else {

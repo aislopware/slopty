@@ -499,9 +499,10 @@ mod tests {
 
     /// The person's commit sheet on a real worker through `slopty git`, over a real repository
     /// with a bare remote: its status in git's letters, a commit of exactly the files named
-    /// with the person's message, a push that sets the upstream, and a pull request opened by
-    /// the `gh` on the worker's `PATH`. That `gh` is a stand-in the test writes, which says
-    /// what it was asked: the real one would reach for the person's GitHub sign-in. What git
+    /// with the person's message, a push that sets the upstream, and a pull request opened,
+    /// read (again after a push) and merged at the head the person saw, by the `gh` on the
+    /// worker's `PATH`. That `gh` is a stand-in the test writes ([`STAND_IN_GH`]): the real
+    /// one would reach for the person's GitHub sign-in. What git
     /// refuses comes back in its words (a commit hook that fails), and an agent is refused the
     /// sheet, since it commits with its own git.
     #[tokio::test(flavor = "multi_thread")]
@@ -548,36 +549,52 @@ mod tests {
         let left = slopty(&root, addr, &["git", "status", &at]).await;
         assert!(left.ends_with("\n?? later.txt\n"), "only what was not chosen is left: {left}");
 
+        let gh = root.join("programs").join("gh");
+        std::fs::write(&gh, STAND_IN_GH).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let asked = || {
+            let asked = std::fs::read_to_string(root.join("programs").join("gh.asked"));
+            asked.unwrap_or_default().lines().map(str::to_owned).collect::<Vec<_>>()
+        };
         let pushed = slopty(&root, addr, &["git", "push", &at]).await;
-        assert_eq!(pushed, "pushed main to origin, its upstream set\n");
+        assert_eq!(pushed, "pushed main to origin, its upstream set\n", "no pull request yet");
         assert_eq!(git_out(&bare, &["rev-parse", "main"]), commit);
         let level = slopty(&root, addr, &["git", "status", &at]).await;
         assert!(level.starts_with("## main...origin/main (ahead 0, behind 0)\n"), "{level}");
 
-        let gh = root.join("programs").join("gh");
-        std::fs::write(
-            &gh,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$0.asked\"\n\
-             echo 'Creating pull request for main into trunk in o/demo' >&2\n\
-             echo 'https://github.com/o/demo/pull/7'\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let opened = slopty(
             &root,
             addr,
             &[
-                "git", "pr", &at, "--title", "Keep it", "--body", "Why.", "--base", "trunk",
-                "--draft",
+                "git", "pr", "open", &at, "--title", "Keep it", "--body", "Why.", "--base",
+                "trunk", "--draft",
             ],
         )
         .await;
         assert_eq!(opened, "https://github.com/o/demo/pull/7\n");
-        let asked = std::fs::read_to_string(root.join("programs").join("gh.asked")).unwrap();
-        let asked: Vec<&str> = asked.lines().collect();
-        let expected =
-            ["pr", "create", "--title", "Keep it", "--body", "Why.", "--base", "trunk", "--draft"];
-        assert_eq!(asked, expected);
+        assert!(
+            asked().contains(&"pr create --title Keep it --body Why. --base trunk --draft".into()),
+            "{:?}",
+            asked()
+        );
+        let read = slopty(&root, addr, &["--json", "git", "pr", "status", &at]).await;
+        let read: Value = serde_json::from_str(&read).unwrap();
+        assert_eq!(read["pull"]["standing"], json!("failing"), "{read}");
+        assert_eq!(read["pull"]["checks"][1]["link"], json!("https://preview.example/7"));
+        let pushed = slopty(&root, addr, &["git", "push", &at]).await;
+        assert!(pushed.contains("#7 Keep it: failing"), "read again after a push: {pushed}");
+        let merged = slopty(
+            &root,
+            addr,
+            &["git", "pr", "merge", &at, "--method", "squash", "--head", &commit],
+        )
+        .await;
+        assert!(
+            merged.starts_with("Squashed and merged pull request #7\n#7 Keep it: merged"),
+            "{merged}"
+        );
+        let merge = format!("pr merge --squash --match-head-commit {commit}");
+        assert!(asked().contains(&merge), "{:?}", asked());
 
         let hook = repo.join(".git").join("hooks").join("pre-commit");
         std::fs::write(&hook, "#!/bin/sh\necho 'lint: later.txt is not formatted' >&2\nexit 1\n")
@@ -599,6 +616,77 @@ mod tests {
 
         server.shutdown().await;
     }
+
+    /// A script the person sets with the CLI runs on the real worker in the project's clone,
+    /// under the folder it names, through the login shell: its terminal is the person's, and
+    /// listed. `script ls` names it, and taken away it is gone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_script_set_from_the_cli_runs_in_the_project_s_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let repo = root.join("demo");
+        std::fs::create_dir_all(repo.join("web")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        let (server, _daemons, worker) = fleet(&root, "").await;
+        let hub = server.hub().clone();
+        let addr = server.quic_addr();
+        let shell = Verb::OpenTerminal {
+            worker,
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            command: Vec::new(),
+            env: Vec::new(),
+            name: None,
+            size: None,
+            session: None,
+        };
+        let Outcome::Opened(orchestrator) = hub.dispatch(shell).await else { panic!("no shell") };
+        let term = format!("{}/{}", orchestrator.worker, orchestrator.session);
+        let made = ["project", "create", "demo", "--title", "Demo", "--repo", "demo"];
+        slopty(&root, addr, &[&made[..], &["--orchestrator", &term]].concat()).await;
+        let project = ProjectId::new("demo").unwrap();
+        until("the project learns its repository", async || {
+            status(&hub, &project).await.project.repo_id.filter(|id| id.root.is_some())
+        })
+        .await;
+
+        let out = root.join("ran-in");
+        let command = format!("printf %s \"$PWD\" > '{}'", out.display());
+        let set = ["project", "script", "set", "--project", "demo", "--dir", "web", "where"];
+        slopty(&root, addr, &[&set[..], &[command.as_str()]].concat()).await;
+        let listed = slopty(&root, addr, &["project", "script", "ls", "--project", "demo"]).await;
+        assert_eq!(listed, format!("script where (in web): {command}\n"));
+
+        let ran =
+            slopty(&root, addr, &["project", "script", "run", "--project", "demo", "where"]).await;
+        let ran_in = until("the script runs", async || std::fs::read_to_string(&out).ok()).await;
+        assert_eq!(PathBuf::from(ran_in), repo.join("web"));
+        let session = ran.trim().rsplit('/').next().unwrap().to_owned();
+        let terminals = slopty(&root, addr, &["--json", "terminals"]).await;
+        assert!(terminals.contains(&session), "its terminal is listed: {terminals}");
+
+        slopty(&root, addr, &["project", "script", "rm", "--project", "demo", "where"]).await;
+        let none = slopty(&root, addr, &["project", "script", "ls", "--project", "demo"]).await;
+        assert_eq!(none, "demo has no script\n");
+        server.shutdown().await;
+    }
+
+    /// A stand-in for gh that the person's commit sheet test writes on the worker's `PATH`. It
+    /// records each call and answers as GitHub would through gh: no pull request until one is
+    /// opened, then one with a passed job and a failed commit status, merged once merged.
+    const STAND_IN_GH: &str = r#"#!/bin/sh
+d=$(dirname "$0")
+echo "$*" >> "$d/gh.asked"
+case "$1 $2" in
+'pr create') touch "$d/gh.opened"; echo 'https://github.com/o/demo/pull/7' ;;
+'pr merge') touch "$d/gh.merged"; echo 'Squashed and merged pull request #7' ;;
+'pr view')
+  [ -e "$d/gh.opened" ] || { echo 'no pull requests found for branch "main"' >&2; exit 1; }
+  state=OPEN; [ -e "$d/gh.merged" ] && state=MERGED
+  printf '{"number":7,"url":"https://github.com/o/demo/pull/7","title":"Keep it","state":"%s","isDraft":false,"headRefName":"main","headRefOid":"x","baseRefName":"trunk","reviewDecision":"","mergeable":"MERGEABLE","mergeStateStatus":"UNSTABLE","statusCheckRollup":[{"__typename":"CheckRun","name":"test","workflowName":"CI","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/o/demo/actions/runs/1"},{"__typename":"StatusContext","context":"deploy/preview","state":"FAILURE","targetUrl":"https://preview.example/7"}]}' "$state" ;;
+*) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"#;
 
     /// A schedule the person sets with the CLI is kept with its next run in the zone named;
     /// run on their word it makes its task and starts its command on the worker, with its

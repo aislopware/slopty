@@ -11,22 +11,40 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use slopty_proto::git::{
-    FILES_MAX, GitDone, GitFile, GitOp, GitOutcome, GitStatus, MESSAGE_MAX, SAID_MAX,
+    FILES_MAX, GitDone, GitFile, GitOp, GitOutcome, GitStatus, MESSAGE_MAX, PullStatus, SAID_MAX,
 };
 use tokio::io::AsyncWriteExt as _;
 
 /// How long a status or a commit may take: a commit runs the person's hooks.
 const LOCAL: Duration = Duration::from_mins(5);
 /// How long a push or a pull request may take.
-const REMOTE: Duration = Duration::from_mins(10);
+pub(super) const REMOTE: Duration = Duration::from_mins(10);
 
-/// Where gh is looked for beyond `PATH`: a worker started by launchd or systemd has a short
-/// one.
-const GH_DIRS: [&str; 3] = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
+/// The person's programs an op runs: git, and gh for a pull request.
+#[derive(Clone, Debug, Default)]
+pub struct Programs {
+    /// git, when the worker has it.
+    pub git: Option<PathBuf>,
+    /// gh, when the worker has it.
+    pub gh: Option<PathBuf>,
+}
 
-/// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `git`.
-pub async fn apply(git: Option<&Path>, repo: &str, op: GitOp) -> GitOutcome {
-    let Some(git) = git else {
+impl Programs {
+    /// The ones this worker has: git as everything else finds it ([`crate::changes::git`]),
+    /// gh on `PATH` or where Homebrew and the system put it ([`super::checks::find`]).
+    #[must_use]
+    pub fn here() -> Self {
+        Self {
+            git: crate::changes::git().map(Path::to_path_buf),
+            gh: super::checks::find("gh", std::env::var_os("PATH").as_deref()),
+        }
+    }
+}
+
+/// Do `op` in the repository holding `repo` (absolute, or `~/…`), with `programs`.
+pub async fn apply(programs: &Programs, repo: &str, op: GitOp) -> GitOutcome {
+    let gh = programs.gh.as_deref();
+    let Some(git) = programs.git.as_deref() else {
         return GitOutcome::Unavailable {
             program: "git".to_owned(),
             why: "git is not on this worker".to_owned(),
@@ -42,9 +60,13 @@ pub async fn apply(git: Option<&Path>, repo: &str, op: GitOp) -> GitOutcome {
     let done = match op {
         GitOp::Status => status(git, &root).await.map(|s| GitDone::Status(Box::new(s))),
         GitOp::Commit { paths, message } => commit(git, &root, &paths, &message).await,
-        GitOp::Push => push(git, &root).await,
+        GitOp::Push => push(git, gh, &root).await,
         GitOp::PullRequest { title, body, base, draft } => {
-            pull_request(&root, (&title, &body), base.as_deref(), draft).await
+            pull_request(gh, &root, (&title, &body), base.as_deref(), draft).await
+        }
+        GitOp::PullStatus => super::pull::status_done(gh, &root).await,
+        GitOp::Merge { method, head, delete_branch } => {
+            super::pull::merge(gh, &root, &method, head.as_deref(), delete_branch).await
         }
     };
     done.map_or_else(|o| o, GitOutcome::Done)
@@ -174,7 +196,7 @@ async fn current_branch(git: &Path, root: &Path) -> Option<String> {
 
 /// Push the branch checked out: to its upstream, or setting one on the repository's only
 /// remote, else `origin`.
-async fn push(git: &Path, root: &Path) -> Result<GitDone, GitOutcome> {
+async fn push(git: &Path, gh: Option<&Path>, root: &Path) -> Result<GitDone, GitOutcome> {
     let Some(branch) = current_branch(git, root).await else {
         return Err(GitOutcome::Refused {
             why: "HEAD is detached: check out a branch to push".to_owned(),
@@ -195,7 +217,8 @@ async fn push(git: &Path, root: &Path) -> Result<GitDone, GitOutcome> {
     if let Some(tracked) = tracked {
         run(git, root, &["push", "--porcelain"], None, REMOTE).await?;
         let remote = tracked.split_once('/').map_or(tracked.as_str(), |(r, _)| r).to_owned();
-        return Ok(GitDone::Pushed { remote, branch, upstream_set: false });
+        let pull = pushed_pull(gh, root).await;
+        return Ok(GitDone::Pushed { remote, branch, upstream_set: false, pull });
     }
     let remotes = run(git, root, &["remote"], None, LOCAL).await?;
     let remotes: Vec<&str> = remotes.lines().map(str::trim).filter(|r| !r.is_empty()).collect();
@@ -219,23 +242,25 @@ async fn push(git: &Path, root: &Path) -> Result<GitDone, GitOutcome> {
     };
     run(git, root, &["push", "--porcelain", "--set-upstream", &remote, &branch], None, REMOTE)
         .await?;
-    Ok(GitDone::Pushed { remote, branch, upstream_set: true })
+    let pull = pushed_pull(gh, root).await;
+    Ok(GitDone::Pushed { remote, branch, upstream_set: true, pull })
+}
+
+/// The branch's pull request after a push, so its checks read as started: none when gh is
+/// missing, says the branch has none, or fails, since the push itself went.
+async fn pushed_pull(gh: Option<&Path>, root: &Path) -> Option<Box<PullStatus>> {
+    super::pull::status(gh, root).await.ok().flatten().map(Box::new)
 }
 
 /// Open a pull request for the branch checked out with the person's own gh.
 async fn pull_request(
+    gh: Option<&Path>,
     root: &Path,
     (title, body): (&str, &str),
     base: Option<&str>,
     draft: bool,
 ) -> Result<GitDone, GitOutcome> {
-    let Some(gh) = gh() else {
-        return Err(GitOutcome::Unavailable {
-            program: "gh".to_owned(),
-            why: "gh, GitHub's command line, is not on this worker, so it opens no pull request"
-                .to_owned(),
-        });
-    };
+    let gh = super::pull::gh(gh)?;
     if body.len() > MESSAGE_MAX {
         return Err(GitOutcome::Refused {
             why: format!("a pull request's description is at most {MESSAGE_MAX} bytes"),
@@ -253,25 +278,16 @@ async fn pull_request(
     if draft {
         args.push("--draft");
     }
-    let out = run(&gh, root, &args, None, REMOTE).await?;
+    let out = run(gh, root, &args, None, REMOTE).await?;
     let url = out.lines().rev().map(str::trim).find(|l| l.starts_with("http"));
     url.map(|u| GitDone::PullRequest { url: u.to_owned() }).ok_or_else(|| GitOutcome::Failed {
         said: format!("gh opened no pull request it named: {}", out.trim()),
     })
 }
 
-/// gh, on `PATH` or where it is installed.
-fn gh() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain(GH_DIRS.iter().map(PathBuf::from))
-        .map(|dir| dir.join("gh"))
-        .find(|candidate| candidate.is_file())
-}
-
 /// `program args…` in `root`, with `input` on its stdin, within `within`: its stdout when it
 /// succeeds, else what it said, its end kept.
-async fn run(
+pub(super) async fn run(
     program: &Path,
     root: &Path,
     args: &[&str],

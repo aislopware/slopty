@@ -19,8 +19,9 @@ mod golden_project {
         LimitsChange, Live, Merge, Moment, Native, NativeAgent, NativeChange, NativeTask, Natives,
         Need, NodeDetail, Peer, Placed, Placement, Preference, Project, ProjectId, ProjectStatus,
         ProjectUpdate, ProjectsPart, Reason, Report, ReportKind, RunOn, Runner, Schedule,
-        ScheduleRun, ScheduleSpec, Spend, Spent, StepKind, StepState, Suggestion, Task, TaskChange,
-        TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun, WorkerFacts,
+        ScheduleRun, ScheduleSpec, Script, Spend, Spent, StepKind, StepState, Suggestion, Task,
+        TaskChange, TaskId, TaskLaunch, TaskSpec, TaskState, TaskStep, TimelineEntry, VerifierRun,
+        WorkerFacts,
     };
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::terminal::RepoId;
@@ -72,6 +73,11 @@ mod golden_project {
             },
             needs: Vec::new(),
             schedules: vec![schedule()],
+            scripts: vec![Script {
+                name: "dev".to_owned(),
+                command: "bun run dev".to_owned(),
+                dir: Some("web".to_owned()),
+            }],
             orchestrator_spent: Spent { active_ms: 480_000, since_ms: None },
             id: project_id(),
             title: "Projects mode".to_owned(),
@@ -560,6 +566,26 @@ mod golden_project {
             &request(Verb::ScheduleDelete { project: project_id(), schedule: 1 }),
         );
         snap("schedule_run", &request(Verb::ScheduleRun { project: project_id(), schedule: 1 }));
+        let script =
+            Script { name: "test".to_owned(), command: "cargo test".to_owned(), dir: None };
+        snap("script_set", &request(Verb::ScriptSet { project: project_id(), script }));
+        let delete = Verb::ScriptDelete { project: project_id(), name: "test".to_owned() };
+        snap("script_delete", &request(delete));
+        let run = Verb::ScriptRun {
+            project: project_id(),
+            name: "dev".to_owned(),
+            worker: Some(term().worker),
+            task: Some(TaskId(3)),
+        };
+        snap("script_run", &request(run));
+        let open = Verb::RunScript {
+            worker: term().worker,
+            cwd: "/w/slopty/web".to_owned(),
+            line: "bun run dev".to_owned(),
+            name: "dev · slopty".to_owned(),
+            session: term().session,
+        };
+        snap("run_script", &request(open));
         let start = Start {
             agent: AgentId::acp("gemini"),
             cwd: "/w/slopty".to_owned(),

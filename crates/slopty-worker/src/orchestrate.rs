@@ -384,6 +384,9 @@ impl Orchestrator {
             | Verb::ScheduleRun { .. }
             | Verb::Snooze { .. }
             | Verb::Unsnooze { .. }
+            | Verb::ScriptSet { .. }
+            | Verb::ScriptDelete { .. }
+            | Verb::ScriptRun { .. }
             | Verb::TaskTell { .. }
             | Verb::ProjectNeeds { .. }
             | Verb::ProjectList
@@ -421,6 +424,24 @@ impl Orchestrator {
                 if slopty_agent::detect::is_claude("", &req.command) {
                     inner.agent_terms.lock().insert(handle.id());
                 }
+                Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
+            }
+            Verb::RunScript { worker, cwd, line, name, session } => {
+                self.mine(worker)?;
+                let shell = crate::repo::script::login_shell();
+                let req = OpenSession {
+                    size: ORCHESTRATED_SIZE,
+                    cwd: Some(cwd),
+                    command: crate::repo::script::command_line(&line, &shell),
+                    env: Vec::new(),
+                    title: Some(name),
+                    attach: false,
+                };
+                let _choosing = self.choosing(Some(session)).await;
+                if let Some(running) = self.running(Some(session)) {
+                    return Ok(Outcome::Opened(TermRef { worker, session: running }));
+                }
+                let handle = self.open_as(Some(session), &req, ORCHESTRATOR).await?;
                 Ok(Outcome::Opened(TermRef { worker, session: handle.id() }))
             }
             Verb::SpawnAgent {
@@ -553,7 +574,9 @@ impl Orchestrator {
             }
             Verb::Git { worker, repo, op } => {
                 self.mine(worker)?;
-                match crate::repo::commit::apply(crate::changes::git(), &repo, op).await {
+                match crate::repo::commit::apply(&crate::repo::commit::Programs::here(), &repo, op)
+                    .await
+                {
                     GitOutcome::Done(done) => Ok(Outcome::Git(Box::new(done))),
                     GitOutcome::Refused { why } => Err(Failure::new(ErrorCode::Invalid, why)),
                     GitOutcome::Unavailable { why, .. } => {

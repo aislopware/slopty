@@ -36,6 +36,7 @@ use crate::placement;
 
 mod attempts;
 mod schedule;
+mod scripts;
 pub(crate) mod when;
 
 /// Latest timeline entries a connecting client gets, and a status read with no cursor.
@@ -1173,6 +1174,7 @@ impl Projects {
         let project = Project {
             needs: Vec::new(),
             schedules: Vec::new(),
+            scripts: Vec::new(),
             orchestrator_spent: Spent::default(),
             spend: slopty_proto::project::Spend::default(),
             id: new.id.clone(),

@@ -15,7 +15,7 @@ use slopty_proto::orchestration::{
 };
 use slopty_proto::project::{
     BadProjectId, LimitsChange, Moment, NodeDetail, Peer, Placement, Preference, Project,
-    ProjectId, ProjectStatus, Report, Runner, ScheduleSpec, StepState, Suggestion, Task,
+    ProjectId, ProjectStatus, Report, Runner, ScheduleSpec, Script, StepState, Suggestion, Task,
     TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry, WorkerFacts,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
@@ -951,6 +951,56 @@ pub async fn schedule_run<D: Dispatch>(
 ) -> Result<Task, ToolError> {
     let project = project_named(project, &own(dispatch).await?)?;
     task_answer(dispatch, key, Verb::ScheduleRun { project, schedule: number }).await
+}
+
+/// Keep a script in a project, in place of one of its name, as the person.
+///
+/// # Errors
+/// Refused for an agent, or for a script that cannot be kept.
+pub async fn script_set<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    script: Script,
+    key: Option<IdempotencyKey>,
+) -> Result<ProjectStatus, ToolError> {
+    let project = project_named(project, &own(dispatch).await?)?;
+    project_answer(dispatch, key, Verb::ScriptSet { project, script }).await
+}
+
+/// Take a script away from a project, as the person.
+///
+/// # Errors
+/// Refused for an agent, or for a script the project lacks.
+pub async fn script_delete<D: Dispatch>(
+    dispatch: &D,
+    project: Option<&str>,
+    name: String,
+    key: Option<IdempotencyKey>,
+) -> Result<ProjectStatus, ToolError> {
+    let project = project_named(project, &own(dispatch).await?)?;
+    project_answer(dispatch, key, Verb::ScriptDelete { project, name }).await
+}
+
+/// Run a project's script in a terminal of the person's: in a task's worktree, else in the
+/// project's folder on `worker` (its orchestrator's when omitted).
+///
+/// # Errors
+/// Refused for an agent, for an unknown script or task, or with no folder to run it in.
+pub async fn script_run<D: Dispatch>(
+    res: &mut Resolver<'_, D>,
+    project: Option<&str>,
+    name: String,
+    worker: Option<&str>,
+    task: Option<&str>,
+    key: Option<IdempotencyKey>,
+) -> Result<TermRef, ToolError> {
+    let project = project_named(project, &own(res.dispatch()).await?)?;
+    let worker = match worker {
+        Some(name) => Some(res.worker(Some(name)).await?),
+        None => None,
+    };
+    let task = task.map(task_number).transpose()?;
+    opened(res.dispatch(), key, Verb::ScriptRun { project, name, worker, task }).await
 }
 
 /// Every project.

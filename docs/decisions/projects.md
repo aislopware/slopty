@@ -2172,7 +2172,7 @@ follow-up)
     then committed is committed as saved. A status or a commit runs in that order. A push or a
     pull request waits on the network, so it runs beside later saves, after what came before;
   - the CLI goes through the server, with `Verb::Git { worker, repo, op }` and `Outcome::Git`.
-    It is `slopty git status|commit|push|pr`. `push` and `pull` were already the file transfer
+    It is `slopty git status|commit|push|pr open|pr status|pr merge`. `push` and `pull` were already the file transfer
     verbs, so git gets its own noun.
 - `GitOp` is `Status`, `Commit { paths, message }`, `Push` and `PullRequest { title, body,
   base, draft }`.
@@ -2214,3 +2214,113 @@ follow-up)
     on the worker's `PATH`, which records what it was asked. A real gh would reach for the
     person's GitHub sign-in, and a test never runs anything signed in.
   - The goldens in `golden_git`.
+
+**A branch's pull request reads where it stands, and merges on the person's word.** ✅ 2026-10-04
+- Before: Slopty opened a pull request for any thread and read a task's checks onto its
+  card, but the person could not see whether a thread's pull request was reviewed, blocked or
+  failing, and merged it in a browser.
+- Prior art: T3 Code shows a thread's pull request with its checks and merges it from the
+  thread, through gh.
+- `GitOp::PullStatus` reads the branch checked out with `gh pr view --json …`, which asks for
+  the state, draft, head and base, head commit, review decision, mergeability, merge state and
+  check rollup. The answer is `GitDone::PullStatus(Option<PullStatus>)`, with none for a
+  branch that has no pull request. That is gh's "no pull requests found", which is read as an
+  answer, not a failure.
+- **Open data.** Each fact keeps GitHub's own spelling as a string (`state`, `review`,
+  `mergeable`, `merge_state`, and each `PullCheck::state`, the conclusion once a check ends,
+  else its status). A state GitHub adds later is carried, not refused.
+  - Only the ranking is closed: `PullCheck::bucket` (passed, skipped, running, failed) and
+    `PullStatus::standing`.
+  - Standing goes merged or closed first, then failing, conflicting, changes requested,
+    draft, checks running, ready, and waiting.
+  - A check state not known here reads as running, never as passed.
+- A check is a CI job (`CheckRun`: name, workflow, conclusion or status, and its page) or a
+  commit status another service set (`StatusContext`: context, state, target). Both arrive as
+  a `PullCheck`, at most `CHECKS_MAX` (200), with the rest counted.
+- **Refreshed on demand and after a push.** A push reads the pull request again
+  (`GitDone::Pushed::pull`), so the sheet shows the new checks as started. If gh is missing or
+  fails there, the push still stands and `pull` is none. A refresh is otherwise the person's
+  ask; nothing polls.
+- **The merge is the person's.** `GitOp::Merge { method, head, delete_branch }` runs
+  `gh pr merge --<method>` with gh's own methods, merge, squash or rebase.
+  - Any other method is refused before gh runs.
+  - `head` passes `--match-head-commit`, so gh merges only the commit the person looked at.
+    A push after they looked makes gh refuse, in its words.
+  - The answer carries what gh said and the pull request read again.
+  - The whole sheet is refused to agents (`Verb::Git`), merge included: an agent that may
+    merge does so with its own gh.
+- gh runs as everywhere else, found on `PATH` or where Homebrew and the system put it
+  (`repo::checks::find`), with prompts off. `repo::commit::Programs` names the git and gh an
+  op runs, so tests hand it a stand-in gh and never reach a person's sign-in.
+- CLI: `slopty git pr open|status|merge`. `--json` adds `standing` beside the forge's facts.
+- Not GitLab yet: gh speaks for GitHub alone, and on a GitLab remote it refuses in its own
+  words. A task's merge request checks stay as they were (`Verb::PullChecks`, `glab`).
+- The thread and review tiles' pull request view is lane D's (`target/lanes/ui-queue.md`).
+- Tests:
+  - `repo::pull` (`slopty-worker`), with a stand-in gh: the forge's words read from jobs and
+    commit statuses with their pages; no pull request reads as none, and no gh says so; a
+    merge by the method named at the head seen, with branch deletion; a method gh lacks is
+    refused before it runs; and gh's refusal comes back in its words.
+  - `git::tests` (`slopty-proto`): buckets and standing.
+  - The CLI E2E `a_thread_s_changes_are_committed_pushed_and_proposed_from_the_cli` adds a
+    status read, a read after a push, and a merge at the head commit.
+  - The goldens `client_git_pull_status`, `client_git_merge`, `worker_git_pull_status`,
+    `worker_git_no_pull`, `worker_git_merged` and `verb_git_merge`. `worker_git_pushed`
+    changed: a push now carries the pull request.
+
+**A project keeps the person's scripts.** ✅ 2026-10-04
+- Before: the person typed the project's dev server, test run or build into a terminal they
+  opened and moved into the right folder themselves, on each worker and each task's worktree.
+- Prior art: T3 Code's project scripts, named commands per project run from the thread with
+  one action.
+- `Project.scripts` holds up to `SCRIPTS_MAX` (32) scripts. Each `Script { name, command, dir }`
+  has:
+  - a name of letters, digits, `-`, `_` and `.`, unique in its project;
+  - a command line of at most 4 KiB, as the person would type it;
+  - an optional folder under the project's, relative and never climbing out
+    (`Script::refusal`).
+  The verbs are `ScriptSet` (in place of one of the same name), `ScriptDelete` and
+  `ScriptRun`. Setting and taking away a script are timeline notes. The scripts ride the
+  project, so every client and `project_status` have them, and the store keeps them.
+- **Where it runs.** `ScriptRun { project, name, worker, task }`:
+  - with a task, in that task's worktree on its worker. A task with no worktree yet, or a
+    worker named that is not the task's, is refused;
+  - else in the project's clone on the worker named, or on the orchestrator's worker when
+    none is named. The clone is the one a shell there or the server's own clone placed
+    (`clone_on`), else the project's own path on the orchestrator's worker. A worker with no
+    clone is refused, pointing at one that has one or at a task's worktree.
+  - The script's `dir` goes under that folder.
+- **An ordinary shell the person owns.** The server sends the worker `RunScript`, and the
+  worker opens a terminal tile titled "name · project".
+  - It runs the line through the person's login shell, interactive (`$SHELL -l -i -c`), as
+    verifiers do, so their `PATH`, toolchains and aliases apply.
+  - When the line ends, however it ends (Ctrl-C on a dev server included), that shell takes
+    the terminal over in the same folder (`exec $SHELL -l`). The person goes on from there and
+    closes it when done.
+  - Nothing is typed into a shell. The command is the terminal's own program, so nothing can
+    race a prompt or land in the wrong place.
+  - A `RunScript` sent by a caller rather than the server is refused.
+- **The person's alone; agents read them.** Agents see the scripts in `project_status` (JSON
+  `scripts`, and a line each in the text). The server refuses setting, taking away and
+  running a script to an agent, and there is no MCP tool.
+  - An agent runs its own commands in its own terminal anyway, so a script gains it nothing.
+    Its output would land in a tile the person owns, which the agent does not read.
+  - A script opens a terminal on a machine of the person's choosing, which is a person's
+    decision, as a schedule's run is.
+  - An agent that wants the command reads it from the status and runs it itself.
+- CLI: `slopty project script set|rm|ls|run`. `run` takes `--worker` and `--task` and prints
+  the TERM.
+- The run action in the board, the palette and a project's tiles is lane D's
+  (`target/lanes/ui-queue.md`).
+- Tests:
+  - `hub::projects::scripts` (`slopty-server`): kept by name and sorted, refusals,
+    the most kept, taken away with a timeline note, an agent reading them in the status but
+    refused setting and running; run in the orchestrator's folder under its `dir`, in a
+    task's worktree on its worker, and the refusals for no worker, an unknown script, a task
+    with no worktree and another worker.
+  - `repo::script` (`slopty-worker`): the login-shell command line and the shell taking over.
+  - `a_script_set_from_the_cli_runs_in_the_project_s_clone` (CLI e2e, a real server and
+    worker): set, listed, run in the clone's folder through the login shell, its terminal
+    listed, then taken away.
+  - The goldens `script_set`, `script_delete`, `script_run` and `run_script`, with a script
+    on the golden project. The project snapshots changed.

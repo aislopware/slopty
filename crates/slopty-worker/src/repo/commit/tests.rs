@@ -39,8 +39,13 @@ fn repo() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (dir, work, bare)
 }
 
+/// The worker's git and no gh, so no test reaches the person's own GitHub sign-in.
+fn git_only() -> Programs {
+    Programs { git: crate::changes::git().map(Path::to_path_buf), gh: None }
+}
+
 async fn done(repo: &Path, op: GitOp) -> GitDone {
-    match apply(crate::changes::git(), &repo.to_string_lossy(), op).await {
+    match apply(&git_only(), &repo.to_string_lossy(), op).await {
         GitOutcome::Done(done) => done,
         other => panic!("{other:?}"),
     }
@@ -125,6 +130,7 @@ async fn the_chosen_files_are_committed_with_the_person_s_message_and_pushed() {
         remote: "origin".to_owned(),
         branch: "main".to_owned(),
         upstream_set: true,
+        pull: None,
     };
     assert_eq!(pushed, first);
     assert_eq!(git_in(&bare, &["rev-parse", "main"]).trim(), commit);
@@ -140,7 +146,7 @@ async fn the_chosen_files_are_committed_with_the_person_s_message_and_pushed() {
 #[tokio::test]
 async fn a_refusal_is_said_in_git_s_own_words() {
     let (dir, work, bare) = repo();
-    let git = crate::changes::git();
+    let git = &git_only();
     let commit = |paths: &[&str], message: &str| GitOp::Commit {
         paths: paths.iter().map(|p| (*p).to_owned()).collect(),
         message: message.to_owned(),

@@ -6,7 +6,9 @@
 #[cfg(test)]
 mod golden_git {
     use slopty_core::WorkerId;
-    use slopty_proto::git::{GitDone, GitFile, GitOp, GitOutcome, GitStatus};
+    use slopty_proto::git::{
+        GitDone, GitFile, GitOp, GitOutcome, GitStatus, PullCheck, PullStatus,
+    };
     use slopty_proto::orchestration::{Outcome, Verb};
     use slopty_proto::server::{FromServer, ToServer};
     use slopty_proto::{ClientMsg, WorkerMsg, codec};
@@ -63,6 +65,37 @@ mod golden_git {
         }))
     }
 
+    fn pull() -> PullStatus {
+        PullStatus {
+            number: 7,
+            url: "https://github.com/o/demo/pull/7".to_owned(),
+            title: "Keep what matters".to_owned(),
+            state: "OPEN".to_owned(),
+            draft: false,
+            head: "feature".to_owned(),
+            head_commit: "89abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            base: "main".to_owned(),
+            review: "REVIEW_REQUIRED".to_owned(),
+            mergeable: "MERGEABLE".to_owned(),
+            merge_state: "BLOCKED".to_owned(),
+            checks: vec![PullCheck {
+                name: "test".to_owned(),
+                workflow: Some("CI".to_owned()),
+                state: "IN_PROGRESS".to_owned(),
+                link: Some("https://github.com/o/demo/actions/runs/1".to_owned()),
+            }],
+            more_checks: 0,
+        }
+    }
+
+    fn merge() -> GitOp {
+        GitOp::Merge {
+            method: "squash".to_owned(),
+            head: Some("89abcdef0123456789abcdef0123456789abcdef".to_owned()),
+            delete_branch: true,
+        }
+    }
+
     #[test]
     fn client_git_ops() {
         let ask = |request, op| ClientMsg::Git { request, repo: "~/src/demo".to_owned(), op };
@@ -70,6 +103,8 @@ mod golden_git {
         snap("client_git_commit", &ask(4, commit()));
         snap("client_git_push", &ask(5, GitOp::Push));
         snap("client_git_pull_request", &ask(6, pull_request()));
+        snap("client_git_pull_status", &ask(7, GitOp::PullStatus));
+        snap("client_git_merge", &ask(8, merge()));
     }
 
     #[test]
@@ -86,10 +121,19 @@ mod golden_git {
             remote: "origin".to_owned(),
             branch: "feature".to_owned(),
             upstream_set: true,
+            pull: Some(Box::new(pull())),
         };
         snap("worker_git_pushed", &done(5, GitOutcome::Done(pushed)));
         let opened = GitDone::PullRequest { url: "https://github.com/o/demo/pull/7".to_owned() };
         snap("worker_git_pull_request", &done(6, GitOutcome::Done(opened)));
+        let read = GitDone::PullStatus(Some(Box::new(pull())));
+        snap("worker_git_pull_status", &done(7, GitOutcome::Done(read)));
+        snap("worker_git_no_pull", &done(7, GitOutcome::Done(GitDone::PullStatus(None))));
+        let merged = GitDone::Merged {
+            said: "Squashed and merged pull request #7".to_owned(),
+            pull: Some(Box::new(PullStatus { state: "MERGED".to_owned(), ..pull() })),
+        };
+        snap("worker_git_merged", &done(8, GitOutcome::Done(merged)));
         let refused = GitOutcome::Refused { why: "choose the files to commit".to_owned() };
         snap("worker_git_refused", &done(4, refused));
         let unavailable = GitOutcome::Unavailable {
@@ -113,6 +157,7 @@ mod golden_git {
         };
         snap("verb_git_commit", &request(commit()));
         snap("verb_git_pull_request", &request(pull_request()));
+        snap("verb_git_merge", &request(merge()));
         snap(
             "outcome_git_status",
             &FromServer::Reply { id: 21, outcome: Outcome::Git(Box::new(status())) },

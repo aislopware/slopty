@@ -5,7 +5,7 @@
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use serde_json::json;
-use slopty_proto::git::{GitDone, GitOp, GitStatus};
+use slopty_proto::git::{GitDone, GitOp, GitStatus, PullStanding, PullStatus};
 use slopty_proto::orchestration::IdempotencyKey;
 use slopty_tools::ops;
 use slopty_tools::resolve::Resolver;
@@ -50,9 +50,19 @@ pub enum GitCmd {
         /// A folder in the repository on the worker: absolute, or `~/…`.
         repo: String,
     },
-    /// Open a pull request for the branch checked out with the worker's own `gh`, and print
-    /// where it is.
+    /// The branch's pull request, through the worker's own `gh`: open one, read where it
+    /// stands, merge it.
     Pr {
+        #[command(subcommand)]
+        cmd: PrCmd,
+    },
+}
+
+/// `slopty git pr …`.
+#[derive(Subcommand, Debug)]
+pub enum PrCmd {
+    /// Open a pull request for the branch checked out, and print where it is.
+    Open {
         /// Worker id or name (the only worker online when omitted).
         #[arg(long)]
         worker: Option<String>,
@@ -70,6 +80,32 @@ pub enum GitCmd {
         /// Open it as a draft.
         #[arg(long)]
         draft: bool,
+    },
+    /// Where the branch's pull request stands: its state, review, whether it can merge, and
+    /// each check with its page.
+    Status {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// A folder in the repository on the worker: absolute, or `~/…`.
+        repo: String,
+    },
+    /// Merge the branch's pull request.
+    Merge {
+        /// Worker id or name (the only worker online when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// A folder in the repository on the worker: absolute, or `~/…`.
+        repo: String,
+        /// How: merge, squash or rebase, as gh takes them.
+        #[arg(long)]
+        method: String,
+        /// Merge only while the pull request ends at this commit: the one you looked at.
+        #[arg(long)]
+        head: Option<String>,
+        /// Delete the branch once merged.
+        #[arg(long)]
+        delete_branch: bool,
     },
 }
 
@@ -90,9 +126,13 @@ pub async fn git(cmd: GitCmd, link: &Link, json: bool, key: Option<IdempotencyKe
             (worker, repo, GitOp::Commit { paths, message: message.join("\n\n") })
         }
         GitCmd::Push { worker, repo } => (worker, repo, GitOp::Push),
-        GitCmd::Pr { worker, repo, title, body, base, draft } => {
+        GitCmd::Pr { cmd: PrCmd::Open { worker, repo, title, body, base, draft } } => {
             let op = GitOp::PullRequest { title: title.unwrap_or_default(), body, base, draft };
             (worker, repo, op)
+        }
+        GitCmd::Pr { cmd: PrCmd::Status { worker, repo } } => (worker, repo, GitOp::PullStatus),
+        GitCmd::Pr { cmd: PrCmd::Merge { worker, repo, method, head, delete_branch } } => {
+            (worker, repo, GitOp::Merge { method, head, delete_branch })
         }
     };
     let done = ops::git(&mut res, worker.as_deref(), repo, op, key).await?;
@@ -116,10 +156,17 @@ fn done_json(done: &GitDone) -> serde_json::Value {
         GitDone::Committed { commit, branch, files } => {
             json!({ "commit": commit, "branch": branch, "files": files })
         }
-        GitDone::Pushed { remote, branch, upstream_set } => {
-            json!({ "remote": remote, "branch": branch, "upstream_set": upstream_set })
-        }
+        GitDone::Pushed { remote, branch, upstream_set, pull } => json!({
+            "remote": remote,
+            "branch": branch,
+            "upstream_set": upstream_set,
+            "pull": pull.as_deref().map(pull_json),
+        }),
         GitDone::PullRequest { url } => json!({ "url": url }),
+        GitDone::PullStatus(pull) => json!({ "pull": pull.as_deref().map(pull_json) }),
+        GitDone::Merged { said, pull } => {
+            json!({ "said": said, "pull": pull.as_deref().map(pull_json) })
+        }
     }
 }
 
@@ -151,12 +198,64 @@ fn done_text(done: &GitDone) -> String {
             let plural = if *files == 1 { "" } else { "s" };
             format!("committed {short} on {on}: {files} file{plural}\n")
         }
-        GitDone::Pushed { remote, branch, upstream_set } => {
+        GitDone::Pushed { remote, branch, upstream_set, pull } => {
             let set = if *upstream_set { ", its upstream set" } else { "" };
-            format!("pushed {branch} to {remote}{set}\n")
+            let pull = pull.as_deref().map(pull_text).unwrap_or_default();
+            format!("pushed {branch} to {remote}{set}\n{pull}")
         }
         GitDone::PullRequest { url } => format!("{url}\n"),
+        GitDone::PullStatus(Some(pull)) => pull_text(pull),
+        GitDone::PullStatus(None) => "no pull request for this branch\n".to_owned(),
+        GitDone::Merged { said, pull } => {
+            let pull = pull.as_deref().map(pull_text).unwrap_or_default();
+            format!("{said}\n{pull}")
+        }
     }
+}
+
+/// A pull request as JSON: the forge's facts as it spells them, with where it stands.
+fn pull_json(pull: &PullStatus) -> serde_json::Value {
+    let mut value = json!(pull);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("standing".to_owned(), json!(standing_word(pull.standing())));
+    }
+    value
+}
+
+/// Where a pull request stands, in a word or two.
+const fn standing_word(standing: PullStanding) -> &'static str {
+    match standing {
+        PullStanding::Failing => "failing",
+        PullStanding::Conflicting => "conflicting",
+        PullStanding::ChangesRequested => "changes requested",
+        PullStanding::Ready => "ready to merge",
+        PullStanding::Running => "checks running",
+        PullStanding::Waiting => "waiting",
+        PullStanding::Draft => "draft",
+        PullStanding::Merged => "merged",
+        PullStanding::Closed => "closed",
+    }
+}
+
+/// A pull request as lines: its number, where it stands and its page, then each check.
+fn pull_text(pull: &PullStatus) -> String {
+    let review = if pull.review.is_empty() { String::new() } else { format!(", {}", pull.review) };
+    let head = format!(
+        "#{} {}: {}{review} ({} into {})\n{}",
+        pull.number,
+        pull.title,
+        standing_word(pull.standing()),
+        pull.head,
+        pull.base,
+        pull.url
+    );
+    let checks = pull.checks.iter().map(|check| {
+        let link = check.link.as_deref().map(|l| format!("  {l}")).unwrap_or_default();
+        format!("  {:<12} {}{link}", check.state, check.name)
+    });
+    let more = (pull.more_checks > 0).then(|| format!("  … and {} more", pull.more_checks));
+    let lines: Vec<String> = std::iter::once(head).chain(checks).chain(more).collect();
+    format!("{}\n", lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -197,10 +296,19 @@ mod tests {
         parse(&["commit", "~/r", "a.rs"]).unwrap_err();
         parse(&["commit", "~/r", "-m", "s"]).unwrap_err();
         parse(&["commit", "~/r", "-m", "s", "--all", "a.rs"]).unwrap_err();
-        let GitCmd::Pr { title, draft, .. } = parse(&["pr", "~/r", "--draft"]).unwrap() else {
+        let GitCmd::Pr { cmd: PrCmd::Open { title, draft, .. } } =
+            parse(&["pr", "open", "~/r", "--draft"]).unwrap()
+        else {
             panic!()
         };
         assert_eq!((title, draft), (None, true));
+        let GitCmd::Pr { cmd: PrCmd::Merge { method, delete_branch, .. } } =
+            parse(&["pr", "merge", "~/r", "--method", "squash", "--delete-branch"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((method.as_str(), delete_branch), ("squash", true));
+        parse(&["pr", "merge", "~/r"]).unwrap_err();
     }
 
     /// `--all` commits what the status lists, both paths of a rename, and nothing ignored; the

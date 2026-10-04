@@ -13,8 +13,8 @@ use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
     Attempts, Bounds, Fact, Facts, Finding, Limits, Live, Moment, NativeCounts, Natives, Need,
     NodeDetail, Peer, Placement, Project, ProjectStatus, Report, ReportKind, ReviewRun, Reviewer,
-    Schedule, StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep, TimelineEntry,
-    VerifierRun,
+    Schedule, Script, StepKind, StepState, Suggestion, Task, TaskCard, TaskState, TaskStep,
+    TimelineEntry, VerifierRun,
 };
 use slopty_proto::server::Os;
 
@@ -114,6 +114,9 @@ pub struct ProjectView<'a> {
     /// The tasks it runs on a schedule the person set.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     schedules: Vec<ScheduleView<'a>>,
+    /// The person's named commands for it.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    scripts: &'a [Script],
     created_ms: WallMs,
 }
 
@@ -162,6 +165,13 @@ pub fn schedule_text(s: &Schedule) -> String {
     format!("schedule {} [{when}] {}{paused}{last}", s.id, s.spec.task.title)
 }
 
+/// A script on one line: its name, where under the folder it runs, and its command.
+#[must_use]
+pub fn script_text(s: &Script) -> String {
+    let dir = s.dir.as_deref().map_or_else(String::new, |d| format!(" (in {d})"));
+    format!("script {}{dir}: {}", s.name, s.command)
+}
+
 /// A need, for JSON.
 #[derive(Debug, Serialize)]
 pub struct NeedView<'a> {
@@ -201,6 +211,7 @@ pub fn project(p: &Project) -> ProjectView<'_> {
             })
             .collect(),
         schedules: p.schedules.iter().map(schedule).collect(),
+        scripts: &p.scripts,
         created_ms: p.created_ms,
     }
 }
@@ -963,6 +974,9 @@ pub fn status_text<S: std::hash::BuildHasher>(
     }
     for s in &p.schedules {
         let _infallible = writeln!(out, "  {}", schedule_text(s));
+    }
+    for s in &p.scripts {
+        let _infallible = writeln!(out, "  {}", script_text(s));
     }
     let mut children: HashMap<Option<u32>, Vec<&TaskCard>> = HashMap::new();
     for t in &s.tasks {

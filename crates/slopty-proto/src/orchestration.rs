@@ -1001,6 +1001,50 @@ pub enum Verb {
         /// What.
         of: crate::snooze::SnoozeOf,
     },
+    /// Keep `script` in `project`, in place of one of its name. Answered with
+    /// [`Outcome::Project`]. The person's alone.
+    ScriptSet {
+        /// The project.
+        project: ProjectId,
+        /// The script.
+        script: crate::project::Script,
+    },
+    /// Take script `name` away from `project`. Answered with [`Outcome::Project`]. The
+    /// person's alone.
+    ScriptDelete {
+        /// The project.
+        project: ProjectId,
+        /// The script's name.
+        name: String,
+    },
+    /// Run script `name` of `project` in a terminal of the person's: in `task`'s worktree on
+    /// its worker, else in the project's folder on `worker` (its orchestrator's when absent).
+    /// Answered with [`Outcome::Opened`]. The person's alone.
+    ScriptRun {
+        /// The project.
+        project: ProjectId,
+        /// The script's name.
+        name: String,
+        /// The worker; the task's, or the orchestrator's, when absent.
+        worker: Option<WorkerId>,
+        /// The task whose worktree it runs in.
+        task: Option<TaskId>,
+    },
+    /// Server → worker, for [`Verb::ScriptRun`]: open a terminal in `cwd` running `line`
+    /// through the person's login shell, then leave them that shell. Answered with
+    /// [`Outcome::Opened`].
+    RunScript {
+        /// Where.
+        worker: WorkerId,
+        /// The folder it runs in.
+        cwd: String,
+        /// The command line.
+        line: String,
+        /// The terminal's title.
+        name: String,
+        /// The terminal's id, chosen by the server.
+        session: SessionId,
+    },
 }
 
 /// Where a worker keeps the git bundles it makes and is sent ([`Verb::BundleBranch`],
@@ -1100,7 +1144,11 @@ impl Verb {
             | Self::ScheduleDelete { .. }
             | Self::ScheduleRun { .. }
             | Self::Snooze { .. }
-            | Self::Unsnooze { .. } => true,
+            | Self::Unsnooze { .. }
+            | Self::ScriptSet { .. }
+            | Self::ScriptDelete { .. }
+            | Self::ScriptRun { .. }
+            | Self::RunScript { .. } => true,
             Self::Git { op, .. } => !matches!(op, crate::git::GitOp::Status),
             // A part rewrites the same bytes and an abort finds nothing the second time; only
             // the finish replaces the file.

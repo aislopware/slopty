@@ -35,6 +35,7 @@ use crate::deliver::{Batch, plain};
 
 mod attempts;
 mod schedule;
+mod scripts;
 use crate::placement::{self, Candidate, Installed, Ranking};
 use crate::project::{
     Assignee, Caller, Drove, Keep, NewProject, Policy, ProjectChange, Running, Starting, Teller,

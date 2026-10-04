@@ -194,9 +194,15 @@ pub async fn git_op(
         GitOp::Commit { .. } => "commit",
         GitOp::Push => "push",
         GitOp::PullRequest { .. } => "pull request",
+        GitOp::PullStatus => "pull request status",
+        GitOp::Merge { .. } => "merge",
     };
-    let outcome =
-        slopty_worker::repo::commit::apply(slopty_worker::changes::git(), &repo, op).await;
+    let outcome = slopty_worker::repo::commit::apply(
+        &slopty_worker::repo::commit::Programs::here(),
+        &repo,
+        op,
+    )
+    .await;
     let done = matches!(outcome, GitOutcome::Done(_));
     tracing::info!(%client, request, %repo, op = what, done, "git op");
     let _sent = out.send(WorkerMsg::GitDone { request, outcome }).await;

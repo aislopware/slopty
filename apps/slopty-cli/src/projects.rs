@@ -8,8 +8,8 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use slopty_proto::orchestration::IdempotencyKey;
 use slopty_proto::project::{
-    LimitsChange, Preference, ProjectStatus, Report, ReportKind, RunOn, Runner, Task, TaskChange,
-    TaskState, VerifierRun,
+    LimitsChange, Preference, ProjectStatus, Report, ReportKind, RunOn, Runner, Script, Task,
+    TaskChange, TaskState, VerifierRun,
 };
 use slopty_tools::ops::{
     self, LaunchSpec, NewTask, PlacementSpec, ProjectEdit, ProjectSpec, ScheduleWhen,
@@ -164,6 +164,12 @@ pub enum ProjectCmd {
         #[command(subcommand)]
         cmd: Box<ScheduleCmd>,
     },
+    /// A project's scripts: the commands you name for it (dev, test, build), each run in a
+    /// terminal of your own.
+    Script {
+        #[command(subcommand)]
+        cmd: ScriptCmd,
+    },
     /// A project's tree, bounds and timeline.
     Status {
         /// The project (this session's own when omitted).
@@ -205,6 +211,87 @@ pub enum ScheduleCmd {
         #[arg(long)]
         project: Option<String>,
     },
+}
+
+/// `slopty project script …`.
+#[derive(Subcommand, Debug)]
+pub enum ScriptCmd {
+    /// Name a command for the project, in place of one of the same name.
+    Set {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// Where under the project's folder it runs, relative (`web`).
+        #[arg(long)]
+        dir: Option<String>,
+        /// Its name: `dev`, `test`, anything of letters, digits, `-`, `_` and `.`.
+        name: String,
+        /// The command line, as you would type it in your shell.
+        command: String,
+    },
+    /// Take a script away.
+    Rm {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// Its name.
+        name: String,
+    },
+    /// List a project's scripts.
+    Ls {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Run a script in a terminal of your own on a worker, and print its TERM: in a task's
+    /// worktree with `--task`, else in the project's folder.
+    Run {
+        /// The project (this session's own when omitted).
+        #[arg(long)]
+        project: Option<String>,
+        /// The worker (the task's, or the orchestrator's, when omitted).
+        #[arg(long)]
+        worker: Option<String>,
+        /// The task whose worktree it runs in.
+        #[arg(long)]
+        task: Option<String>,
+        /// Its name.
+        name: String,
+    },
+}
+
+/// Run a `slopty project script …`.
+async fn script(
+    cmd: ScriptCmd,
+    res: &mut Resolver<'_, Link>,
+    link: &Link,
+    (json, key): (bool, Option<IdempotencyKey>),
+) -> Result<()> {
+    let status = match cmd {
+        ScriptCmd::Set { project, dir, name, command } => {
+            let script = Script { name, command, dir };
+            ops::script_set(link, project.as_deref(), script, key).await?
+        }
+        ScriptCmd::Rm { project, name } => {
+            ops::script_delete(link, project.as_deref(), name, key).await?
+        }
+        ScriptCmd::Ls { project } => ops::project_status(link, project.as_deref(), None, 0).await?,
+        ScriptCmd::Run { project, worker, task, name } => {
+            let (project, worker, task) = (project.as_deref(), worker.as_deref(), task.as_deref());
+            let term = ops::script_run(res, project, name, worker, task, key).await?;
+            return crate::verbs::print_term(term, json);
+        }
+    };
+    if json {
+        return print_json(&status.project.scripts);
+    }
+    if status.project.scripts.is_empty() {
+        println!("{} has no script", status.project.id);
+    }
+    for s in &status.project.scripts {
+        println!("{}", view::script_text(s));
+    }
+    Ok(())
 }
 
 /// `slopty project schedule set`.
@@ -843,6 +930,7 @@ pub async fn project(
             }
         }
         ProjectCmd::Schedule { cmd } => schedule(*cmd, &mut res, link, (json, key)).await,
+        ProjectCmd::Script { cmd } => script(cmd, &mut res, link, (json, key)).await,
         ProjectCmd::Status { project, since, timeout } => {
             let status = ops::project_status(link, project.as_deref(), since, timeout).await?;
             print_status(&mut res, &status, json).await
