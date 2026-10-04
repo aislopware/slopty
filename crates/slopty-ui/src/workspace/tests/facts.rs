@@ -200,9 +200,10 @@ fn repo_changes_show_in_the_row_and_the_bar(cx: &mut TestAppContext) {
     assert_eq!(navigator::line_changes(renamed), None, "no line changed, no figure");
 }
 
-/// A worker's header says what is wrong with it only when something is: Screen Recording or
-/// Accessibility off on a Mac, another version. Its menu reads its machine, and a window
-/// asked of a worker that cannot capture says why instead of an empty picker.
+/// A worker's header says what is wrong with it only when something is: its own writes
+/// failing, Screen Recording or Accessibility off on a Mac, never another version. Its menu reads
+/// its machine, and a window asked of a worker that cannot capture says why instead of an empty
+/// picker.
 #[gpui::test]
 fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) {
     let (view, cx) = workspace(cx);
@@ -227,6 +228,9 @@ fn a_workers_health_shows_only_when_something_is_wrong(cx: &mut TestAppContext) 
     );
     let linux = WorkerCaps { os: Os::Linux, can_capture: false, can_inject: false, ..healthy() };
     assert_eq!(navigator::worker_warning(&linux), None, "not a Mac's grants");
+    let full = "Thread logs cannot be written: No space left on device";
+    let failing = WorkerCaps { writes_failing: Some(full.to_owned()), ..linux.clone() };
+    assert_eq!(navigator::worker_warning(&failing).as_deref(), Some(full), "on any machine");
 
     view.update_in(cx, |v, window, cx| v.add_window(&AddWindow, window, cx));
     cx.run_until_parked();

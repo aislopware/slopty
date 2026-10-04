@@ -365,12 +365,15 @@ pub(super) const fn worker_health(status: &WorkerStatus) -> Option<(Status, &'st
 }
 
 /// What is wrong with a worker itself, as its header's warn line says it; nothing when all is
-/// well. A Mac that has not granted Screen Recording cannot share a window, and one without
-/// Accessibility cannot take the keys. A worker on another build never links at all: its
-/// status says so ([`WorkerStatus::NeedsUpdate`]), from the wire's own fingerprint.
+/// well. A worker whose own writes fail (a full or read-only disk) says which and why first,
+/// as its kept screens and thread logs are being lost. A Mac that has not granted Screen
+/// Recording cannot share a window, and one without Accessibility cannot take the keys. A
+/// worker on another build never links at all: its status says so
+/// ([`WorkerStatus::NeedsUpdate`]), from the wire's own fingerprint.
 pub(super) fn worker_warning(caps: &WorkerCaps) -> Option<String> {
     let mac = caps.os == Os::MacOs;
     let wrong: Vec<String> = [
+        caps.writes_failing.as_deref().map(|why| kit::first_line(why).to_owned()),
         (mac && !caps.can_capture).then(|| "Screen Recording off".to_owned()),
         (mac && !caps.can_inject).then(|| "Accessibility off".to_owned()),
     ]

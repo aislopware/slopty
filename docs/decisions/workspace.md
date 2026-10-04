@@ -1124,12 +1124,25 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     seed whole, and a tile whose item it no longer has leaves, as on any snapshot. A file from
     another build reads as nothing.
   - **Update where the worker is named.** A worker on another build offers Update on its
-    navigator row, at rest, in place of its readouts, and in the hosts popover. Each runs the
+    navigator row, at rest, in place of its readouts, and in the machine's menu. Each runs the
     app's update against the host the notice names, as the pill does, and neither offers it
     while one runs.
+  - **A tile kept nowhere still stands.** The cache misses a tile when nothing was kept yet,
+    or when this build cannot read what an older one kept, which is the morning after an
+    update. While its worker is away such a tile draws the worker's name in its header over
+    the same pill, with its Retry now, Wake or Update; it is never a gap. Once the worker is
+    linked its registry decides, and a tile it lacks leaves with the snapshot.
+  - **The start page names it too.** Its machines list offers Update on the row of a worker
+    on another build, as the navigator does.
+  - The self-test reads the layout as the app does: each stack has a data directory of its
+    own, so a relaunch within a test puts its layout back as a person's would.
   - Tests: `the_items_kept_read_back_and_a_broken_file_goes` (`slopty-client`),
-    `a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back` (`tests/relaunch.rs`),
-    `a_worker_on_another_build_offers_update_where_it_is_named` (`tests/bars.rs`).
+    `a_cold_launch_draws_the_kept_tiles_until_the_worker_is_back` and
+    `a_tile_kept_nowhere_says_where_its_worker_is` (`tests/relaunch.rs`),
+    `a_worker_on_another_build_offers_update_where_it_is_named` and
+    `the_start_page_offers_a_worker_on_another_build_its_update` (`tests/bars.rs`), and the
+    `tile-away` goldens in both themes (`gallery.rs`
+    `a_tile_kept_nowhere_says_its_worker_is_away`).
 
 - ✅ **The away pill says why and offers the way back** (2026-10-04, readiness N9). The pill
   said only "Reconnecting…", so a machine the tailnet policy shuts out, one asleep and a
@@ -1146,9 +1159,11 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
     Each kind of write marks itself failing or written (`slopty_worker::caps::not_written`,
     `wrote`). The first that fails, with its error, goes out in `WorkerCaps::writes_failing`
     at the next 5 s probe, and clears once that kind of write goes through again.
-    The worker's doctor prints it as a ✘ line. Tests:
+    The worker's doctor prints it as a ✘ line, and its machine's row in the navigator leads
+    its warn line with it. Tests:
     `a_failing_write_is_said_until_one_goes_through` (`slopty-worker`),
-    `doctor_report_names_the_binary_and_flags_missing_permissions` (`slopty-cli`).
+    `doctor_report_names_the_binary_and_flags_missing_permissions` (`slopty-cli`),
+    `a_workers_health_shows_only_when_something_is_wrong` (`tests/facts.rs`).
 
 - ✅ **The clipboard is shared or stopped per machine from the palette** (2026-10-04,
   readiness N25). Sharing per machine was a settings key, so stopping it for one machine meant
@@ -1197,8 +1212,17 @@ Read from niri's source (`src/layout/{scrolling,monitor}.rs`, tag v26.04).
   - The app holds a background grace from the tap until every answer tapped is settled (sent,
     or given up as unreachable), plus two seconds for the bytes to leave. Then iOS may suspend
     it again.
+  - **The system waits for the same word.** The notification delegate used to say it was done
+    with a button's response as soon as it handed the tap on, before the app had even taken
+    its grace, so the system could suspend the app in between. Now a button answered in the
+    background (`Tap::finished_later`: Allow, Deny) keeps its completion handler owed, and the
+    app says it (`notify::taps_finished`) when its grace goes. A tap that names no request
+    settles at once, so nothing is owed for long. The note itself and Show are done when handed
+    on, as before.
   - Tests: `a_thread_s_yes_or_no_is_answered_from_its_row_and_its_note`
-    (`tests/thread_waits.rs`), `a_notes_answer_waits_for_its_prompt` (`tests/attention.rs`).
+    (`tests/thread_waits.rs`), `a_notes_answer_waits_for_its_request` (`tests/attention.rs`),
+    `only_an_answer_in_the_background_is_finished_later` and
+    `the_system_hears_a_tap_is_done_once_the_answers_are_out` (`slopty-platform` `notify`).
 
 - ✅ **Every transfer is on one list in the status bar, and survives a relaunch** (2026-10-04,
   readiness N22). The bar counted only uploads, as one percentage. A download (Save a copy,
