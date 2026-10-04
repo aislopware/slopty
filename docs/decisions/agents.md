@@ -294,6 +294,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     old side. "What is left to review" is the kept tree against now, starting from the
     thread's first snapshot. Both run git, so they are answered from a task of their own, and a
     repeat that comes while one is under way gets nothing until it is done.
+  - **Every adapter advertises `Cap::SNAPSHOTS`** (corrected 2026-10-04). The worker takes the
+    snapshots, not the agent, so keep and revert are the worker's door for every thread whose
+    folder is in git: observed Claude Code, Codex, pi and every ACP agent. Only observed Claude
+    Code had the cap before, so keep and revert were refused on the others for no reason. Test:
+    `a_pi_thread_puts_a_change_back_through_the_workers_snapshots`.
   - **Every variant is appended last** (`ThreadRequest::Review`, `ThreadFrame::Review`,
     `Intent::Keep`, `Intent::Revert`), so no existing golden changed for them. The model
     catalogue (`ThreadMeta::models`, the composer's entry) did change the snapshot goldens.

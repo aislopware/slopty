@@ -46,9 +46,17 @@ use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
 /// What every ACP agent can do through Slopty.
 ///
 /// Its requests are answered here, its turn is cancelled, its text streams, a message waits on
-/// the worker for the turn to end, and it is gone on from in a new thread.
-pub const CAPS: [&str; 6] =
-    [Cap::APPROVALS, Cap::CONTINUE, Cap::INTERRUPT, Cap::LIVE_TEXT, Cap::QUEUE, Cap::SCHEDULE];
+/// the worker for the turn to end, it is gone on from in a new thread, and the worker's turn
+/// snapshots are kept and put back.
+pub const CAPS: [&str; 7] = [
+    Cap::APPROVALS,
+    Cap::CONTINUE,
+    Cap::INTERRUPT,
+    Cap::LIVE_TEXT,
+    Cap::QUEUE,
+    Cap::SCHEDULE,
+    Cap::SNAPSHOTS,
+];
 
 /// The protocol version spoken.
 pub const PROTOCOL: ProtocolVersion = ProtocolVersion::V1;

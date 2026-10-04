@@ -17,7 +17,7 @@ mod pi {
     use slopty_agent::handoff;
     use slopty_core::{ClientId, SessionId, WallMs};
     use slopty_proto::thread::detail::Clipped;
-    use slopty_proto::thread::wire::{Intent, Outcome, Start};
+    use slopty_proto::thread::wire::{Intent, Outcome, Pick, Start};
     use slopty_proto::thread::{
         Action, AgentId, Answerer, Cap, Changed, Delivery, Drive, Fork, IntentId, Item, ItemBody,
         ItemId, Liveness, Phase, RequestState, Status, ThreadId, ThreadMeta, ThreadState,
@@ -27,6 +27,7 @@ mod pi {
     use slopty_worker::thread::log::Limits;
     use slopty_worker::thread::pi::tui::{Pending, Terminals};
     use slopty_worker::thread::pi::{self, Pi};
+    use slopty_worker::thread::review::Snapshots;
     use slopty_worker::thread::{Host, Seated, schedule};
     use tokio::process::ChildStdin;
     use tokio::sync::watch;
@@ -663,6 +664,48 @@ mod pi {
         let record =
             rig.record_once(|r| r["heard"].as_array().is_some_and(|h| !h.is_empty())).await;
         assert_eq!(record["unexpected"], serde_json::json!([]));
+    }
+
+    /// The worker's turn snapshots are every adapter's: a pi thread in a git folder takes a
+    /// change back by the worker's revert, as an observed one does, checked against the blob
+    /// the review showed.
+    #[tokio::test]
+    async fn a_pi_thread_puts_a_change_back_through_the_workers_snapshots() {
+        let rig = Rig::new();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&rig.work)
+                .args(args)
+                .envs([("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t")])
+                .envs([("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(rig.work.join("a.txt"), "first\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "a"]);
+        let from = git(&["rev-parse", "HEAD:a.txt"]);
+        let (pi, _served) = rig.serve();
+        let Outcome::Started { thread } = pi.start(IntentId::new(), rig.start("Say hello.")).await
+        else {
+            panic!("not started");
+        };
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
+        assert!(state.meta.can(Cap::SNAPSHOTS), "{:?}", state.meta.caps);
+
+        std::fs::write(rig.work.join("a.txt"), "changed\n").unwrap();
+        let stamp = git(&["hash-object", "a.txt"]);
+        let snapshots =
+            Snapshots::new(rig.host.clone(), &rig.data.join("snapshots"), Some("git".into()));
+        let pick =
+            Pick { path: "a.txt".to_owned(), from: Some(from), stamp: Some(stamp), hunks: vec![] };
+        let id = IntentId::new();
+        assert_eq!(snapshots.pick(thread, id, &Intent::Revert(pick)).await, Some(Outcome::Done));
+        assert_eq!(std::fs::read_to_string(rig.work.join("a.txt")).unwrap(), "first\n");
     }
 
     /// The worker going while the gate asks closes pi's stdin and ends pi with no answer sent,
