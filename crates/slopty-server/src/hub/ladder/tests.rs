@@ -258,6 +258,45 @@ async fn notices_go_where_the_person_is_and_a_subagent_speaks_through_its_parent
     assert_eq!(hub.present().len(), 1, "a link that ends leaves");
 }
 
+/// A thread put to sleep says nothing: its turn ended at rest before, and that rest was the
+/// news. One that slept from work (its agent ended under it) is not told as finished either.
+#[tokio::test]
+async fn a_thread_put_to_sleep_is_no_news() {
+    use slopty_proto::thread::Liveness;
+    let hub = Hub::new("server".to_owned(), Vec::new());
+    let (shell, worker) = (SessionId::new(), WorkerId::new());
+    let (tx, _rx) = mpsc::channel(8);
+    let lease = hub
+        .register(registration(worker, vec![summary(shell)]), [100, 64, 0, 7].into(), tx)
+        .unwrap();
+    let mut mac = Client::sit(&hub, "mac");
+    mac.at(&hub, Seat::Desk, true, Vec::new());
+    let rank = |rows: Vec<ThreadRow>| {
+        lease.handle(delta(rows));
+        hub.rank_ladder();
+    };
+    let asleep = |row: &ThreadRow, since: u64| {
+        let mut row = moved(row, Phase::Idle, since);
+        row.status.liveness = Liveness::Asleep { since_ms: WallMs::from_millis(since) };
+        row
+    };
+    let thread = row(Phase::Working, 1_000, Some(shell));
+    lease.handle(snapshot(vec![thread.clone()]));
+    hub.rank_ladder();
+
+    rank(vec![moved(&thread, Phase::Idle, 2_000)]);
+    let rested = mac.notices();
+    assert_eq!(rested.iter().map(|n| n.kind).collect::<Vec<_>>(), [NoticeKind::Finished]);
+    rank(vec![asleep(&thread, 3_000)]);
+    assert_eq!(mac.notices(), Vec::<Notice>::new(), "asleep at rest: told already");
+
+    rank(vec![moved(&thread, Phase::Working, 4_000)]);
+    rank(vec![asleep(&thread, 5_000)]);
+    assert_eq!(mac.notices(), Vec::<Notice>::new(), "asleep from work: no finish to tell");
+    let standing = hub.ladder().threads.into_iter().find(|t| t.at.thread == thread.id);
+    assert_eq!(standing.map(|t| t.rung), Some(Rung::Sleeping));
+}
+
 /// A subagent that fails while its parent works reads as working, since the parent may carry
 /// on without it; once the whole family is at rest, the failure lifts the parent, and the
 /// notice names the subagent. One that needs the person lifts its parent at once.

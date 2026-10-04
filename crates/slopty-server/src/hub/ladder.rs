@@ -517,7 +517,8 @@ fn source<'a>(root: &'a ThreadRow, family: &[&'a ThreadRow]) -> (Rung, &'a Threa
         Rung::Failed if busy && row.id != root.id => Rung::Working,
         rung => rung,
     };
-    let top = family.iter().map(|r| rung(r)).max().unwrap_or_default().max(rung(root));
+    // From the root's own rung: no default stands in, since asleep stands below idle.
+    let top = family.iter().map(|r| rung(r)).fold(rung(root), Ord::max);
     if rung(root) == top {
         return (top, root);
     }
@@ -634,12 +635,20 @@ fn moved(board: &mut Board, ladder: &Ladder) -> Vec<Notice> {
         if busy(now.rung) {
             board.busy.entry(now.at).or_insert(now.since_ms);
         }
-        // A wait on the person is part of the work; coming to rest or failing ends it.
-        let rest = matches!(now.rung, Rung::ToReview | Rung::Idle | Rung::Failed);
+        // A wait on the person is part of the work; coming to rest or failing ends it, as
+        // being put to sleep does.
+        let rest = matches!(now.rung, Rung::ToReview | Rung::Idle | Rung::Failed | Rung::Sleeping);
         let kind = match (was, now.rung) {
             (Some(was), Rung::NeedsYou) if was != Rung::NeedsYou => Some(NoticeKind::NeedsYou),
             (Some(was), Rung::Failed) if was != Rung::Failed => Some(NoticeKind::Failed),
             (Some(was), Rung::ToReview | Rung::Idle) if busy(was) => Some(NoticeKind::Finished),
+            // The person puts an agent to sleep at rest, so its turn finished before, and was
+            // told then: a second notice would tell nothing new.
+            #[expect(
+                clippy::match_same_arms,
+                reason = "sleep is ruled on its own, so a rung added later is not silently quiet"
+            )]
+            (_, Rung::Sleeping) => None,
             _ => None,
         };
         let worked_ms = if rest {
