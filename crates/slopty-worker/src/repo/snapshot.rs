@@ -174,7 +174,8 @@ impl Repo {
     /// The change from `from` to `to` as one commit, for an agent's own review of it: `from`
     /// as a base commit of its own and `to` as a commit on it, kept under `thread`'s
     /// `review-base` and `review-head`, which each review overwrites. Their ids, base first, so
-    /// `base...head` and the head commit alone both say exactly the change.
+    /// `base...head` and the head commit alone both say exactly the change. They are made at
+    /// a fixed time ([`Self::commit_at`]), so the same change is always the same two ids.
     ///
     /// # Errors
     ///
@@ -186,9 +187,10 @@ impl Repo {
         to: &TreeRef,
     ) -> Result<(String, String), Failed> {
         let base_message = format!("slopty: thread {thread} review base");
-        let base = self.line(&["commit-tree", &from.0, "-m", &base_message], None).await?;
+        let at = slopty_core::WallMs::ZERO;
+        let base = self.commit_at(from, None, &base_message, at).await?;
         let message = format!("slopty: thread {thread} review");
-        let head = self.line(&["commit-tree", &to.0, "-p", &base, "-m", &message], None).await?;
+        let head = self.commit_at(to, Some(&base), &message, at).await?;
         let refs = refs(thread);
         let updates = format!(
             "start\nupdate {refs}/review-base {base}\nupdate {refs}/review-head {head}\n\
@@ -204,7 +206,7 @@ impl Repo {
     ///
     /// # Errors
     ///
-    /// When git fails.
+    /// When git fails, or `tree` is no tree here.
     pub async fn commit_at(
         &self,
         tree: &TreeRef,
@@ -212,6 +214,10 @@ impl Repo {
         message: &str,
         at: slopty_core::WallMs,
     ) -> Result<String, Failed> {
+        // `hash-object` writes whatever it is given: a commit of a tree not here would break
+        // the repository.
+        let tree_here = format!("{}^{{tree}}", tree.0);
+        self.run(&["rev-parse", "-q", "--verify", &tree_here], None, None).await?;
         let secs = at.as_millis() / 1_000;
         let parent = parent.map(|p| format!("parent {p}\n")).unwrap_or_default();
         let who = format!("Slopty <slopty@localhost> {secs} +0000");
