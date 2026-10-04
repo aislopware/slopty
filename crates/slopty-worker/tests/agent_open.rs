@@ -67,12 +67,26 @@ mod agent_open {
 
     /// Open `command` and read what the stub was started with.
     async fn started(worker: &Worker, dir: &Path, command: &[&str]) -> Value {
+        started_in(worker, dir, command, None).await
+    }
+
+    /// [`started`], as `project`'s agent when one is named.
+    async fn started_in(
+        worker: &Worker,
+        dir: &Path,
+        command: &[&str],
+        project: Option<&str>,
+    ) -> Value {
         let record = dir.join(format!("record-{}.json", SessionId::new()));
+        let mut env = vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())];
+        if let Some(project) = project {
+            env.push((slopty_proto::project::PROJECT_ENV.to_owned(), project.to_owned()));
+        }
         let open = OpenSession {
             size: TermSize::default(),
             cwd: Some(dir.to_string_lossy().into_owned()),
             command: command.iter().map(|&w| w.to_owned()).collect(),
-            env: vec![("STUB_RECORD".to_owned(), record.to_string_lossy().into_owned())],
+            env,
             title: None,
             attach: false,
         };
@@ -151,12 +165,12 @@ mod agent_open {
         assert!(argv(&seen).is_empty(), "no relay to hand out: {:?}", argv(&seen));
     }
 
-    /// A `codex` opened on a worker with a server gets Slopty's tools among its MCP servers,
-    /// as `<relay> mcp` with the variables that name its server, project, task and terminal,
-    /// its own arguments after; one that names Slopty's server already, and a worker with no
-    /// server, start as asked.
+    /// A project's `codex` opened on a worker with a server gets Slopty's tools among its MCP
+    /// servers, as `<relay> mcp` with the variables that name its server, project, task and
+    /// terminal, its own arguments after. A `codex` the person opens in a tile, one that names
+    /// Slopty's server already, and one on a worker with no server, start as asked.
     #[tokio::test]
-    async fn codex_opened_on_a_worker_with_a_server_gets_slopty_s_tools() {
+    async fn a_project_s_codex_gets_slopty_s_tools_and_a_tile_s_does_not() {
         let dir = tempfile::tempdir().unwrap();
         let dir = std::fs::canonicalize(dir.path()).unwrap();
         let (_ptyd, socket) = ptyd(&dir).await;
@@ -171,7 +185,10 @@ mod agent_open {
             "127.0.0.1:9".to_owned(),
         )]);
 
-        let seen = started(&worker, &dir, &["codex", "--model", "o3", "Read the brief"]).await;
+        let tile = ["codex", "--model", "o3", "Read the brief"];
+        let seen = started(&worker, &dir, &tile).await;
+        assert_eq!(argv(&seen), tile[1..], "a tile's Codex is the person's: as asked");
+        let seen = started_in(&worker, &dir, &tile, Some("slopty")).await;
         let config = |key: &str| {
             let args = argv(&seen);
             let at = args.iter().position(|a| a.starts_with(&format!("mcp_servers.slopty.{key}=")));
@@ -188,12 +205,13 @@ mod agent_open {
         assert_eq!(argv(&seen)[6..], ["--model", "o3", "Read the brief"], "its own after");
 
         let own = ["codex", "-c", "mcp_servers.slopty.command=\"x\"", "go"];
-        let seen = started(&worker, &dir, &own).await;
+        let seen = started_in(&worker, &dir, &own, Some("slopty")).await;
         assert_eq!(argv(&seen), own[1..], "wired already: as asked");
-        let seen = started(&worker, &dir, &["codex", "set mcp_servers.slopty up"]).await;
+        let named = ["codex", "set mcp_servers.slopty up"];
+        let seen = started_in(&worker, &dir, &named, Some("slopty")).await;
         assert_eq!(argv(&seen).len(), 7, "a prompt that names it is no config: {:?}", argv(&seen));
         worker.set_session_env(Vec::new());
-        let seen = started(&worker, &dir, &["codex", "go"]).await;
+        let seen = started_in(&worker, &dir, &["codex", "go"], Some("slopty")).await;
         assert_eq!(argv(&seen), ["go"], "no server to serve its tools: as asked");
     }
 

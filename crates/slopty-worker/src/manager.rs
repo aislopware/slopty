@@ -412,13 +412,17 @@ impl Worker {
     /// pinned to a conversation id, so it can come back after a reboot. It is the person's own,
     /// so the mode that asks no permission is not locked. The request's
     /// arguments and variables are kept, and the mod's variables go last. One whose program is
-    /// Codex gets Slopty's tools on its MCP servers when this worker has a server.
+    /// Codex gets Slopty's tools on its MCP servers when it is a project's agent (its session
+    /// names a project) and this worker has a server; a Codex the person opens in a tile is
+    /// theirs, and gets nothing.
     async fn as_agent(&self, req: &OpenSession) -> (Vec<String>, Vec<(String, String)>) {
         let unchanged = (req.command.clone(), req.env.clone());
         let Some(program) = req.command.first() else { return unchanged };
         let name = program.rsplit('/').next().unwrap_or(program);
+        let project =
+            req.env.iter().any(|(k, v)| k == slopty_proto::project::PROJECT_ENV && !v.is_empty());
         if name == CODEX {
-            let relay = self.agent_launch().relay.filter(|_| self.served());
+            let relay = self.agent_launch().relay.filter(|_| project && self.served());
             let args = req.command.get(1..).unwrap_or_default();
             return match relay {
                 Some(relay) if !codex_names_server(args) => {
@@ -434,8 +438,6 @@ impl Worker {
         let args = req.command.get(1..).unwrap_or_default().to_vec();
         let launch = self.agent_launch();
         let Some(relay) = launch.relay.clone() else { return unchanged };
-        let project =
-            req.env.iter().any(|(k, v)| k == slopty_proto::project::PROJECT_ENV && !v.is_empty());
         let cwd = req.cwd.as_deref().map_or_else(slopty_platform::dirs::home, |cwd| {
             crate::file::expand_home(Path::new(cwd))
         });

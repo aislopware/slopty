@@ -1322,6 +1322,10 @@ Tests:
   variables it is told to. Codex 0.156.1 reads these keys back as given (`codex mcp get slopty
   --json` with the overrides, under an empty `CODEX_HOME`). Arguments that name the `slopty`
   server themselves are left alone; a prompt that merely mentions it is not taken for one.
+- Only a project's Codex gets the tools: one whose terminal names a project
+  (`SLOPTY_PROJECT`), as the server opens a task's. A `codex` the person opens in a tile is
+  theirs and starts as typed (fixed 2026-10-05; it had the tools wherever the worker had a
+  server, against the prune ruling that tools are for project agents only).
 - A writing task beside a clone runs with Codex's own `--worktree`, so two Codex tasks never
   edit one checkout. Codex makes and names that worktree itself, so its role tells it to name
   the branch when it reports done.
@@ -1334,7 +1338,7 @@ Tests:
 - Tests: `only_what_asks_the_person_no_less_goes_through` and
   `codex_starts_with_its_role_and_its_brief` (`slopty-server::hub::codex`),
   `a_codex_task_goes_only_where_codex_is_and_starts_with_its_role` (`slopty-server`),
-  `codex_opened_on_a_worker_with_a_server_gets_slopty_s_tools` (`slopty-worker`, the stub
+  `a_project_s_codex_gets_slopty_s_tools_and_a_tile_s_does_not` (`slopty-worker`, the stub
   standing in for `codex`), and the codex case of
   `task_start_makes_and_starts_a_task_in_the_caller_s_own_project` (`slopty-tools`).
 
