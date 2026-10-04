@@ -69,6 +69,21 @@ filter = 'package(xtask) & test(=icon::tests::compiles_and_the_prompt_reads_at_e
 priority = 100
 slow-timeout = { period = "60s", terminate-after = 6, grace-period = "10s" }
 
+# A hosted runner's virtual Mac whose paravirtual encoder has stopped (docs/decisions/video.md,
+# "A virtual Mac's encoder stops for good past its 1020th client") hangs every VideoToolbox
+# test after that point, each until its timeout: at 180 s each, two at a time, the run was
+# cancelled at 45 min with no lane's verdict. The longest of these tests on a green runner took
+# 9.2 s (runs 37159493702, 37167071093, 37176595656), so a minute fails the run in minutes,
+# still named.
+[[profile.ci.overrides]]
+filter = '''
+(package(slopty-codec) & !test(player_starts_and_drains))
+| (package(slopty-worker) & (
+    test(=screen::tests::a_rebuild_beside_a_cadence_change_finishes)
+    | test(/^screen::synthetic::tests::/)))
+'''
+slow-timeout = { period = "30s", terminate-after = 2, grace-period = "5s" }
+
 [[profile.default.overrides]]
 filter = 'test(/^(proptest|fuzz|slow)_/)'
 slow-timeout = { period = "120s", terminate-after = 2 }
