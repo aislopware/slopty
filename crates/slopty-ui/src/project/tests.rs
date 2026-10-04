@@ -8,7 +8,7 @@ use slopty_proto::project::{
 };
 
 use super::fixtures::{self, AT, card, entry, on, project, snapshot, status, task_changed};
-use super::model::{Lane, Projects, TIMELINE_KEPT, TreeRow, moment_line, state_word};
+use super::model::{Lane, Projects, TIMELINE_KEPT, state_word};
 
 fn one(tasks: Vec<slopty_proto::project::TaskCard>) -> Projects {
     let mut mirror = Projects::default();
@@ -99,25 +99,6 @@ fn the_timeline_keeps_each_entry_once_and_its_latest() {
     assert_eq!(kept.len(), TIMELINE_KEPT);
     assert_eq!(kept.back().map(|e| e.seq), Some(TIMELINE_KEPT as u64 + 10));
     assert!(kept.iter().zip(kept.iter().skip(1)).all(|(a, b)| a.seq < b.seq), "in order");
-}
-
-/// The tree is one level: the orchestrator, then every task under it by number.
-#[test]
-fn every_task_stands_under_the_orchestrator() {
-    let mirror = one(vec![
-        card(2, "store", TaskState::Done),
-        card(1, "wire", TaskState::Running),
-        card(3, "goldens", TaskState::Planned),
-    ]);
-    let rows: Vec<(Option<u32>, usize, bool)> = board(&mirror)
-        .tree()
-        .into_iter()
-        .map(|r: TreeRow| (r.task.map(|t| t.0), r.depth, r.last))
-        .collect();
-    assert_eq!(
-        rows,
-        [(None, 0, true), (Some(1), 1, false), (Some(2), 1, false), (Some(3), 1, true)]
-    );
 }
 
 /// Each task stands in the lane its own state puts it in; lanes with nothing are left out.
@@ -234,72 +215,9 @@ fn a_session_finds_its_node() {
     assert_eq!(at(SessionId::new()), "an agent");
 }
 
-/// Every moment reads as a sentence, with the worker's name where it has one.
+/// Every word the board says of a state, a lane or itself is sentence case.
 #[test]
-fn every_moment_reads_as_a_sentence() {
-    let (worker, session) = (WorkerId::new(), SessionId::new());
-    let term = TermRef { worker, session };
-    let name = |_: WorkerId| "studio".to_owned();
-    let agent =
-        |t: TermRef| if t == term { "the orchestrator".to_owned() } else { "an agent".to_owned() };
-    let say = |what| moment_line(&entry(1, Some(1), what), name, agent);
-    assert_eq!(
-        say(Moment::Delivered { term, reports: 1 }),
-        "A report delivered to the orchestrator"
-    );
-    assert_eq!(
-        say(Moment::Delivered { term, reports: 3 }),
-        "3 reports delivered to the orchestrator"
-    );
-    assert_eq!(say(Moment::Assigned { term, spawned: true }), "Started on studio");
-    assert_eq!(
-        say(Moment::State { from: TaskState::Running, to: TaskState::Blocked }),
-        "Needs you"
-    );
-    assert_eq!(
-        say(Moment::Verified(slopty_proto::project::VerifierRun {
-            passed: false,
-            summary: "Compiling a\nerror: could not compile `a`\n\n".into(),
-            head: "abcdef0123".into(),
-            base: "0123456789".into(),
-            exit: Some(101),
-            took_ms: 9000,
-        })),
-        "Verifier failed at abcdef0: error: could not compile `a`"
-    );
-    assert_eq!(
-        say(Moment::Branch { branch: Some("slopty/board/1".into()), pr: Some(7) }),
-        "On slopty/board/1, pull request #7"
-    );
-    let step = |kind, state| {
-        Moment::Step(slopty_proto::project::TaskStep {
-            kind,
-            worker,
-            state,
-            since_ms: AT,
-            term: None,
-            commits: None,
-        })
-    };
-    let running = |phase: &str, percent| StepState::Running { phase: phase.into(), percent };
-    assert_eq!(say(step(StepKind::Clone, running("Starting", None))), "Cloning on studio");
-    assert_eq!(
-        say(step(StepKind::Clone, running("Receiving objects", Some(45)))),
-        "Cloning on studio: Receiving objects 45%"
-    );
-    assert_eq!(
-        say(step(StepKind::Clone, StepState::Failed { why: "fatal: denied\nmore".into() })),
-        "Clone on studio failed: fatal: denied"
-    );
-    assert_eq!(
-        say(step(StepKind::Home, running("Sending", Some(40)))),
-        "Bringing its branch to studio: 40%"
-    );
-    let detail = "worktree-slopty-board-1 as slopty/board/1 at 4a7aa6d in /w/board".to_owned();
-    assert_eq!(
-        say(step(StepKind::Home, StepState::Done { detail })),
-        "Branch arrived on studio: worktree-slopty-board-1 as slopty/board/1 at 4a7aa6d in /w/board"
-    );
+fn every_board_word_is_sentence_case() {
     let words = [
         TaskState::Planned,
         TaskState::Running,
@@ -316,7 +234,6 @@ fn every_moment_reads_as_a_sentence() {
         super::view::NO_TASKS,
         super::view::NEEDS_YOU,
         super::view::ORCHESTRATOR,
-        super::view::CREATED,
         super::view::PROJECT_GONE,
     ]) {
         let mut chars = text.chars();
@@ -562,71 +479,35 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
     assert_eq!(Recap::of(board, Looked { seq: 7, at_ms: AT }, &timeline, false), None);
 }
 
-/// A node's time at work counts its subtree's with its own, the orchestrator's share stays
-/// apart, and a stretch under way counts to the moment the board reads it. What the agents'
-/// threads say adds context and the plan's rate windows, the fullest of each; a node whose
-/// thread is not heard shows its time alone.
+/// The project's time at work is its tasks' with the orchestrator's share apart, and a stretch
+/// under way counts to the moment the board reads it.
 #[test]
 fn time_adds_up_with_the_orchestrator_apart() {
     use slopty_proto::project::Spent;
-    use slopty_proto::thread::{Limit, Meters};
 
-    use super::spend::{MetersBySession, limit_line, worked};
+    use super::spend::worked;
     let min = |m: u64| m * 60_000;
     let at = |m: u64| WallMs::from_millis(AT.as_millis() + min(m));
     let worker = WorkerId::new();
-    let (orchestrator, parent, child, leaf) =
-        (SessionId::new(), SessionId::new(), SessionId::new(), SessionId::new());
     let spent = |c: slopty_proto::project::TaskCard, done: u64, since: Option<u64>| {
         let mut c = c;
         c.spent = Spent { active_ms: min(done), since_ms: since.map(at) };
         c
     };
-    let mut record = project("board", Some(TermRef { worker, session: orchestrator }));
+    let mut record = project("board", Some(TermRef { worker, session: SessionId::new() }));
     record.orchestrator_spent = Spent { active_ms: min(8), since_ms: None };
     let tasks = vec![
-        spent(on(card(1, "Parent", TaskState::Running), worker, parent), 12, None),
-        spent(on(card(2, "Child", TaskState::Running), worker, child), 20, Some(0)),
-        spent(on(card(3, "Grandchild", TaskState::Done), worker, leaf), 5, None),
+        spent(on(card(1, "First", TaskState::Running), worker, SessionId::new()), 12, None),
+        spent(on(card(2, "Second", TaskState::Running), worker, SessionId::new()), 20, Some(0)),
+        spent(on(card(3, "Third", TaskState::Done), worker, SessionId::new()), 5, None),
         spent(card(4, "Apart", TaskState::Planned), 0, None),
     ];
     let mut mirror = Projects::default();
     mirror.apply_part(snapshot(10, vec![status(record, tasks, Vec::new())]));
     let b = board(&mirror);
     assert!(b.at_work(), "#2's clock runs");
-    let none = MetersBySession::new();
-    let now = at(10);
-    let first = b.spend(Some(TaskId(1)), now, &none);
-    assert_eq!((first.own_ms, first.subtree_ms), (min(12), min(12)), "one level: its own");
-    assert!(!first.has_subtree() && first.context_bp.is_none());
-    assert_eq!(b.spend(Some(TaskId(2)), now, &none).own_ms, min(30), "its clock runs");
-    let mine = b.spend(None, now, &none);
-    assert_eq!((mine.own_ms, mine.subtree_ms), (min(8), min(8)), "its own share alone");
-    let all = b.project_spend(now, &none);
+    let all = b.project_spend(at(10));
     assert_eq!((all.orchestrator_ms, all.tasks_ms, all.total_ms()), (min(8), min(47), min(55)));
-
-    let meters = |used, limits: Vec<Limit>| Meters {
-        context_tokens: Some(used),
-        context_window: Some(200_000),
-        limits,
-        ..Meters::default()
-    };
-    let limit = |name: &str, used_bp| Limit { name: name.to_owned(), used_bp, resets_ms: None };
-    let heard: MetersBySession = [
-        (orchestrator, meters(40_000, vec![limit("five-hour", 4_200)])),
-        (child, meters(170_000, vec![limit("five-hour", 4_400), limit("seven-day", 1_800)])),
-        (leaf, meters(10_000, Vec::new())),
-    ]
-    .into_iter()
-    .collect();
-    let first = b.spend(Some(TaskId(1)), now, &heard);
-    assert_eq!(first.context_bp, None, "its thread is not heard");
-    let second = b.spend(Some(TaskId(2)), now, &heard);
-    assert_eq!(second.context_shown(), Some((8_500, true)), "85% warns");
-    assert_eq!(b.spend(Some(TaskId(3)), now, &heard).context_shown(), None, "5% is not shown");
-    assert_eq!(b.spend(None, now, &heard).context_shown(), Some((2_000, false)));
-    let all = b.project_spend(now, &heard);
-    assert_eq!(all.limits.iter().map(limit_line).collect::<Vec<_>>(), ["5-hour 44%", "weekly 18%"]);
     assert_eq!([worked(0), worked(min(12)), worked(min(64))], ["under 1m", "12m", "1h 4m"]);
 }
 
@@ -836,8 +717,7 @@ fn a_node_says_where_it_runs_and_whether_it_can_move() {
 }
 
 /// Checks that could not be read say why on the pull request's stage, in the first line, and
-/// hold nothing: no Fix CI is offered for a forge that did not answer. The timeline says it as
-/// a sentence.
+/// hold nothing: no Fix CI is offered for a forge that did not answer.
 #[test]
 fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
     use slopty_proto::agent::PullRequest;
@@ -852,7 +732,7 @@ fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
         review: None,
         merge_request: false,
     });
-    let unknown = Checks {
+    c.checks = Some(Checks {
         state: ChecksState::Unknown,
         passed: 0,
         failed: 0,
@@ -861,8 +741,7 @@ fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
         failing: Vec::new(),
         why: Some("this worker has no gh\nsee https://cli.github.com".into()),
         at_ms: AT,
-    };
-    c.checks = Some(unknown.clone());
+    });
     let mirror = one(vec![c]);
     let b = board(&mirror);
     let checks: Vec<_> = b
@@ -873,12 +752,6 @@ fn checks_that_could_not_be_read_say_why_and_ask_nothing() {
         .collect();
     assert_eq!(checks, [("checks unknown: this worker has no gh".to_owned(), false)]);
     assert!(!b.actions(TaskId(1)).contains(&TaskAction::FixCi), "{:?}", b.actions(TaskId(1)));
-    let name = |_: WorkerId| "studio".to_owned();
-    let agent = |_: TermRef| "an agent".to_owned();
-    assert_eq!(
-        moment_line(&entry(1, Some(1), Moment::Checks(unknown)), name, agent),
-        "The pull request's checks could not be read: this worker has no gh"
-    );
 }
 
 /// What lands on the timeline is said to the person only when it holds a task up: failed

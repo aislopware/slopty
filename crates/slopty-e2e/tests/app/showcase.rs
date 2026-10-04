@@ -2211,8 +2211,7 @@ async fn board_both(stack: &mut ProjectStack, name: &str) {
 const PROJECT: &str = "atlas-043";
 
 /// A project of eleven tasks in every state: running, blocked, planned, reviewed with changes
-/// asked, a verifier that broke, two waiting in the merge queue, merged, failed. Its tree, its
-/// lanes and its timeline.
+/// asked, a verifier that broke, two waiting in the merge queue, merged, failed, in its lanes.
 #[tokio::test]
 #[ignore = "showcase: cargo xtask e2e showcase"]
 #[expect(clippy::too_many_lines, reason = "one project, made task by task")]
@@ -2397,21 +2396,13 @@ async fn showcase_a_project_board_in_every_state() {
     drv.keys("cmd-shift-j").await.unwrap();
     wait(drv, "the board", |d| d.projects.iter().any(|p| p.id == PROJECT && p.shown)).await;
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
-    board_both(&mut stack, "project-tree").await;
-    for (key, lens, name) in
-        [("2", "Board", "project-lanes"), ("3", "Timeline", "project-timeline")]
-    {
-        let drv = &mut stack.driver;
-        drv.keys(key).await.unwrap();
-        wait(drv, lens, |d| {
-            d.projects.iter().any(|p| p.id == PROJECT && p.lens.as_deref() == Some(lens))
-        })
-        .await;
-        board_both(&mut stack, name).await;
-    }
+    board_both(&mut stack, "project-lanes").await;
     let drv = &mut stack.driver;
-    drv.keys("1").await.unwrap();
-    drv.keys("down down enter").await.unwrap();
+    let d = look(drv).await;
+    let board = d.projects.iter().find(|p| p.id == PROJECT).unwrap();
+    let cards: Vec<u32> = board.lanes.iter().flat_map(|(_, t)| t.clone()).collect();
+    let at = cards.iter().position(|&t| t == 1).unwrap();
+    drv.keys(&format!("{} enter", vec!["down"; at + 1].join(" "))).await.unwrap();
     wait(drv, "task 1's agent", |d| !d.focused.starts_with("project:")).await;
     shot(drv, "project-task-agent-light").await;
 

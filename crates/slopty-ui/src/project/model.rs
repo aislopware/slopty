@@ -1,14 +1,13 @@
 //! The server's projects as this client mirrors them, and what the board derives from one.
 //!
-//! The server sends every project's tree after a link comes up, in parts
+//! The server sends every project after a link comes up, in parts
 //! ([`ProjectsPart`]), then each change as a [`ProjectUpdate`] numbered in its event log. A part
 //! marked `first` replaces what was here. An update at or below the snapshot's `seq` is already
 //! in it and is dropped, since a replay after a lag would otherwise put older state over newer.
 //!
-//! Everything the board draws is derived here, pure: the tree of who split what from whom
-//! ([`Board::tree`]), the lanes that answer "what needs me" ([`Board::lanes`], the worst of a
-//! task's subtree deciding a parent's), the dependencies still open ([`Board::waiting_on`]) and
-//! each timeline entry in words ([`moment_line`]).
+//! Everything the board draws is derived here, pure: the lanes that answer "what needs me"
+//! ([`Board::lanes`]), the dependencies still open ([`Board::waiting_on`]), each task's way to
+//! the target ([`Board::pipeline`]) and what the person can do to it ([`Board::actions`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
@@ -171,7 +170,7 @@ impl Projects {
     }
 }
 
-/// Where a node of the tree stands on the board: the lanes, left to right.
+/// Where a task stands on the board: the lanes, left to right.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Lane {
     /// An agent waits on the person: a permission, a question.
@@ -191,8 +190,7 @@ pub enum Lane {
 }
 
 impl Lane {
-    /// Every lane, left to right. The order is also the urgency a parent takes from its
-    /// subtree: the first lane any of them is in.
+    /// Every lane, left to right, the most urgent first.
     pub const ALL: [Self; 7] = [
         Self::NeedsYou,
         Self::Failed,
@@ -384,97 +382,6 @@ impl StageKind {
 /// A node of the tree: a task, or the orchestrator for `None`.
 pub type Node = Option<TaskId>;
 
-/// One worker as the machines lens draws it, from the server's facts about it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Machine {
-    /// Which.
-    pub worker: WorkerId,
-    /// Its name.
-    pub name: String,
-    /// Whether the server reaches it now.
-    pub online: bool,
-    /// Its system, in the facts' word (`macos`, `linux`).
-    pub os: Option<String>,
-    /// How many cores it has.
-    pub cpus: Option<i64>,
-    /// How much memory, in MiB.
-    pub memory_mb: Option<i64>,
-    /// Its load average.
-    pub load: Option<f64>,
-    /// Every agent running on it, whatever project.
-    pub live_agents: Option<i64>,
-}
-
-impl Machine {
-    /// What `facts` say of their worker. A fact it does not report is absent.
-    #[must_use]
-    pub fn of(facts: &WorkerFacts) -> Self {
-        let text = |k: &str| match facts.facts.get(k) {
-            Some(Fact::Text(t)) => Some(t.clone()),
-            _ => None,
-        };
-        let int = |k: &str| match facts.facts.get(k) {
-            Some(Fact::Int(n)) => Some(*n),
-            _ => None,
-        };
-        let load = match facts.facts.get("load") {
-            Some(Fact::Float(f)) => Some(*f),
-            Some(Fact::Int(n)) => Some(f64::from(i32::try_from(*n).unwrap_or(i32::MAX))),
-            _ => None,
-        };
-        Self {
-            worker: facts.worker,
-            name: text("name").unwrap_or_else(|| facts.worker.to_string()),
-            online: matches!(facts.facts.get("online"), Some(Fact::Bool(true))),
-            os: text("os"),
-            cpus: int("cpus"),
-            memory_mb: int("memory_mb"),
-            load,
-            live_agents: int("live_agents"),
-        }
-    }
-
-    /// What it is, in a line: "macos, 12 cores, 64 GB".
-    #[must_use]
-    pub fn kind_line(&self) -> String {
-        let os = self.os.as_deref().map(|os| match os {
-            "macos" => "macOS".to_owned(),
-            "linux" => "Linux".to_owned(),
-            other => other.to_owned(),
-        });
-        let cores =
-            self.cpus.map(|n| if n == 1 { "1 core".to_owned() } else { format!("{n} cores") });
-        let memory = self.memory_mb.map(|mb| format!("{} GB", mb.saturating_add(512) / 1024));
-        [os, cores, memory].into_iter().flatten().collect::<Vec<_>>().join(", ")
-    }
-}
-
-/// How long a task takes, as a project's finished tasks say ([`Board::estimate`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Estimate {
-    /// The median time a task worked before it was done, in milliseconds.
-    pub each_ms: u64,
-    /// How many finished tasks it is from.
-    pub from: usize,
-    /// They are of the kind asked about, not of every kind.
-    pub same_kind: bool,
-}
-
-impl Estimate {
-    /// It in words: "about 12 min of work each, from 5 finished of the kind".
-    #[must_use]
-    pub fn line(&self) -> String {
-        let mins = self.each_ms.saturating_add(30_000) / 60_000;
-        let each = match mins {
-            0 => "under a minute of work each".to_owned(),
-            m if m < 120 => format!("about {m} min of work each"),
-            m => format!("about {} h of work each", m.saturating_add(30) / 60),
-        };
-        let kind = if self.same_kind { "of the kind" } else { "in this project" };
-        format!("{each}, from {} finished {kind}", self.from)
-    }
-}
-
 /// The "Run on" picker open on a task: every worker with its facts, once the server answers.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RunOnPicker {
@@ -509,17 +416,6 @@ pub fn run_on_words(worker: &WorkerFacts) -> (String, String, bool) {
     .collect::<Vec<_>>()
     .join(" \u{b7} ");
     (name, line, online)
-}
-
-/// One line of the tree, in the order it is drawn.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct TreeRow {
-    /// The task, or `None` for the orchestrator at the root.
-    pub task: Option<TaskId>,
-    /// How far in: 0 for the orchestrator, 1 for what it split off itself.
-    pub depth: usize,
-    /// Whether it is the last of its parent's children, so its guide ends at it.
-    pub last: bool,
 }
 
 /// One project in full, as the board draws it.
@@ -719,64 +615,16 @@ impl Board {
         }
     }
 
-    /// The tasks under `parent`, by number: every task under the orchestrator (`None`), and
-    /// none under a task, as the tree is one level deep.
-    fn children(&self, parent: Option<TaskId>) -> Vec<TaskId> {
-        if parent.is_some() {
-            return Vec::new();
-        }
-        self.tasks.keys().copied().collect()
-    }
-
-    /// The tree, depth first: the orchestrator, then what each node split off, by number.
-    #[must_use]
-    pub fn tree(&self) -> Vec<TreeRow> {
-        let mut rows = vec![TreeRow { task: None, depth: 0, last: true }];
-        let mut stack: Vec<(TaskId, usize, bool)> = Vec::new();
-        let push_children = |stack: &mut Vec<(TaskId, usize, bool)>, parent, depth| {
-            let children = self.children(parent);
-            let n = children.len();
-            for (i, child) in children.into_iter().enumerate().rev() {
-                stack.push((child, depth, i.saturating_add(1) == n));
-            }
-        };
-        push_children(&mut stack, None, 1);
-        // A cycle of parents cannot come from the server, but a bound keeps a bad one finite.
-        while let Some((task, depth, last)) = stack.pop() {
-            if rows.len() > self.tasks.len() {
-                break;
-            }
-            rows.push(TreeRow { task: Some(task), depth, last });
-            push_children(&mut stack, Some(task), depth.saturating_add(1));
-        }
-        rows
-    }
-
-    /// The lane a task is in on the board: the first lane of it and everything split from
-    /// it, so a parent stands where its most urgent descendant does.
+    /// The lane a task is in on the board: its state's.
     #[must_use]
     pub fn lane(&self, task: TaskId) -> Option<Lane> {
-        let mut lane = Lane::of(self.tasks.get(&task)?.state);
-        let mut todo = self.children(Some(task));
-        let mut seen = 0_usize;
-        while let Some(next) = todo.pop() {
-            seen = seen.saturating_add(1);
-            if seen > self.tasks.len() {
-                break;
-            }
-            if let Some(card) = self.tasks.get(&next) {
-                lane = lane.min(Lane::of(card.state));
-            }
-            todo.extend(self.children(Some(next)));
-        }
-        Some(lane)
+        Some(Lane::of(self.tasks.get(&task)?.state))
     }
 
     /// The board: each lane that holds a task, left to right. Ready to merge is the merge
     /// queue, so it runs in the queue's order, and Verifying puts the run under way first and
     /// the rest in the order the server takes them. A done task the queue does not hold comes
-    /// after those it does. Every other lane, and a parent standing
-    /// in a lane for a descendant, goes by number.
+    /// after those it does. Every other lane goes by number.
     #[must_use]
     pub fn lanes(&self) -> Vec<(Lane, Vec<TaskId>)> {
         let mut by_lane: BTreeMap<Lane, Vec<TaskId>> = BTreeMap::new();
@@ -1047,62 +895,9 @@ impl Board {
         out
     }
 
-    /// How long a task of `kind` works before it is done, from this project's tasks whose
-    /// work is done: the median of their time at work (idle waits left out), of those of the
-    /// kind, else of every kind.
-    #[must_use]
-    pub fn estimate(&self, kind: &str) -> Option<Estimate> {
-        let finished: Vec<&TaskCard> = self
-            .tasks
-            .values()
-            .filter(|c| {
-                matches!(c.state, TaskState::Verifying | TaskState::Done | TaskState::Merged)
-            })
-            .filter(|c| c.spent.active_ms > 0)
-            .collect();
-        let of_kind: Vec<u64> =
-            finished.iter().filter(|c| c.kind == kind).map(|c| c.spent.active_ms).collect();
-        let (mut times, same_kind) = if of_kind.is_empty() {
-            (finished.iter().map(|c| c.spent.active_ms).collect::<Vec<_>>(), false)
-        } else {
-            (of_kind, true)
-        };
-        if times.is_empty() {
-            return None;
-        }
-        times.sort_unstable();
-        let each_ms = times.get(times.len() / 2).copied().unwrap_or_default();
-        Some(Estimate { each_ms, from: times.len(), same_kind })
-    }
-
     /// Whether `card` waits to be started: planned, with no terminal on it now.
     fn not_started(&self, card: &TaskCard) -> bool {
         card.state == TaskState::Planned && self.terminal(Some(card.id)).is_none()
-    }
-
-    /// The nodes whose agents run on `worker` now, the orchestrator first, then by number.
-    #[must_use]
-    pub fn on_worker(&self, worker: WorkerId) -> Vec<Node> {
-        let orchestrator = self.terminal(None).filter(|(w, _)| *w == worker).map(|_| None);
-        let tasks = self
-            .tasks
-            .keys()
-            .copied()
-            .filter(|t| self.terminal(Some(*t)).is_some_and(|(w, _)| w == worker))
-            .map(Some);
-        orchestrator.into_iter().chain(tasks).collect()
-    }
-
-    /// The tasks waiting to be started, by number: where they will run is still to choose.
-    #[must_use]
-    pub fn waiting_to_start(&self) -> Vec<TaskId> {
-        self.tasks.values().filter(|c| self.not_started(c)).map(|c| c.id).collect()
-    }
-
-    /// How many of this project's agents run on `worker` now.
-    #[must_use]
-    pub fn live_on(&self, worker: WorkerId) -> usize {
-        self.on_worker(worker).len()
     }
 
     /// The tasks whose agent waits on the person, by number.
@@ -1184,65 +979,6 @@ pub fn news_line(board: &Board, entry: &TimelineEntry) -> Option<String> {
         },
         _ => return None,
     })
-}
-
-/// `entry` in words, with the worker names `name` gives and the agents `agent` names by their
-/// terminals. The task's number leads, where there is one, since the row draws it apart.
-#[must_use]
-pub fn moment_line(
-    entry: &TimelineEntry,
-    name: impl Fn(WorkerId) -> String,
-    agent: impl Fn(TermRef) -> String,
-) -> String {
-    match &entry.what {
-        Moment::Created => "Project created".to_owned(),
-        Moment::Orchestrator { term } => format!("Orchestrator on {}", name(term.worker)),
-        Moment::Limits { limits } => {
-            format!("Review limit: {} waiting on you at most", limits.review)
-        }
-        Moment::TaskCreated { title } => format!("Created: {title}"),
-        Moment::Assigned { term, spawned: true } => {
-            format!("Started on {}", name(term.worker))
-        }
-        Moment::Assigned { term, spawned: false } => {
-            format!("Taken on in a terminal on {}", name(term.worker))
-        }
-        Moment::State { to, .. } => state_word(*to).to_owned(),
-        Moment::Branch { branch, pr } => match (branch, pr) {
-            (Some(branch), Some(pr)) => format!("On {branch}, pull request #{pr}"),
-            (Some(branch), None) => format!("On {branch}"),
-            (None, Some(pr)) => format!("Pull request #{pr}"),
-            (None, None) => "Left its branch".to_owned(),
-        },
-        Moment::Verified(run) => verdict_line(run),
-        Moment::Checks(checks) => match checks.state {
-            ChecksState::None => "The pull request has no checks".to_owned(),
-            ChecksState::Pending => "The pull request's checks run".to_owned(),
-            ChecksState::Passing => "The pull request's checks pass".to_owned(),
-            ChecksState::Failing if checks.failing.is_empty() => {
-                "The pull request's checks fail".to_owned()
-            }
-            ChecksState::Failing => {
-                format!("The pull request's checks fail: {}", checks.failing.join(", "))
-            }
-            ChecksState::Unknown => match checks.why.as_deref().map(crate::kit::first_line) {
-                Some(why) => format!("The pull request's checks could not be read: {why}"),
-                None => "The pull request's checks could not be read".to_owned(),
-            },
-        },
-        Moment::AgentGone { .. } => "Agent ended".to_owned(),
-        Moment::Note { text } => crate::kit::first_line(text).to_owned(),
-        Moment::Told { text } => format!("You told its agent: {}", crate::kit::first_line(text)),
-        Moment::Reported { report } => match crate::kit::first_line(&report.note) {
-            "" => "Reported done".to_owned(),
-            line => format!("Reported done: {line}"),
-        },
-        Moment::Delivered { term, reports: 1 } => format!("A report delivered to {}", agent(*term)),
-        Moment::Delivered { term, reports } => {
-            format!("{reports} reports delivered to {}", agent(*term))
-        }
-        Moment::Step(step) => step_line(step, &name),
-    }
 }
 
 /// A step the server takes for a task, in words: what, where, and how it went.

@@ -118,7 +118,7 @@ Tests make no sound on this Mac: the drawn screen's worker sounds only under `SL
    worker registered with it with `slopty-stub-claude` first on its `PATH` as `claude` and a
    `HOME` of its own, and the app pointed at the server by its settings. The orchestrator and a
    task's agent are stubs the server starts; the project and its tasks are made and moved with
-   the `slopty` CLI. Goldens `project-tree`, `project-lanes` and `project-timeline`.
+   the `slopty` CLI. Goldens `project-lanes`, `project-lanes-dark` and `project-live-lanes`.
    `cargo xtask linux e2e` (serial) is a terminal-only Linux worker.
    ptyd, the worker and the `slopty` relay are cross-built for `aarch64-unknown-linux-gnu`
    and run in a Debian container on Docker Desktop, as an account with bash for its shell,

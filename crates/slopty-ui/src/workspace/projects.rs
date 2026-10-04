@@ -28,17 +28,14 @@ use super::attention::{About, ProjectNote, Route};
 use super::{WorkspaceEvent, WorkspaceView};
 use crate::icons::Status;
 use crate::project::create::{NewProject, ProjectSheet, SheetEvent};
-use crate::project::model::{Board, Lane, Machine, Projects, RunOnPicker, TaskAction, news_line};
+use crate::project::model::{Board, Lane, Projects, RunOnPicker, TaskAction, news_line};
 use crate::project::recap::{Looked, Recap};
-use crate::project::spend::MetersBySession;
 use crate::project::{AgentSeen, Node, ProjectEvent, ProjectView, Seen, StartProject, WorkerSeen};
 
 /// What the palette and the header call turning a tile to its board.
 pub(crate) const SHOW_BOARD: &str = "Show project board";
 /// What a terminal says when asked for a board it has none of.
 pub(crate) const NO_PROJECT: &str = "No project runs in this terminal";
-/// What a board's action says when this client has no server to send it to.
-pub(crate) const NO_SERVER: &str = "No server to send it to";
 /// What "Start a project here" says away from a terminal.
 pub(crate) const NO_TERMINAL: &str = "Stand in a terminal to start a project there";
 /// How many pages of the timeline a recap reads back from the server, past what the board
@@ -86,10 +83,6 @@ pub(super) struct ProjectsState {
     pub sheet: Option<Sheet>,
     /// The projects' moments to note while the app is away, until the app takes them.
     pub news: Vec<ProjectNote>,
-    /// The workers as the server last said they are doing, for the machines lens.
-    pub machines: Vec<Machine>,
-    /// A question about the workers is out: another waits for its answer.
-    pub machines_asked: bool,
     /// The "Run on" picker open on a task, per project.
     pub run_on: HashMap<ProjectId, RunOnPicker>,
     /// How far this client read each project's timeline, as its board last hid.
@@ -98,8 +91,6 @@ pub(super) struct ProjectsState {
     pub open: HashSet<ProjectId>,
     /// What changed since the last look, for each board that opened onto news.
     pub recaps: HashMap<ProjectId, Recap>,
-    /// The agents' threads' meters as last heard, by the session their TUI runs in.
-    pub meters: MetersBySession,
 }
 
 /// The last entry of `board`'s timeline, 0 for an empty one.
@@ -399,26 +390,6 @@ impl WorkspaceView {
         self.reveal_session(session, cx);
     }
 
-    /// Open one of Claude Code's own subagents running in `node`'s session: that agent's tile,
-    /// as its row opens it, showing its face on the subagent's thread.
-    fn open_subagent(
-        &mut self,
-        project: &ProjectId,
-        node: Node,
-        agent: String,
-        kind: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_node(project, node, cx);
-        let session = self.projects.mirror.get(project).and_then(|b| b.terminal(node));
-        if let Some((_, session)) = session
-            && self.tile_of_session(session).is_some()
-            && !self.board_shown(session)
-        {
-            self.show_subagent(session, agent, kind, cx);
-        }
-    }
-
     /// `to` is about to be focused from `from` and should show beside it: when `from`'s column
     /// fills the view, it gives up its full width first, as a column does for a tile opened
     /// beside it. Following the focus would otherwise leave the board cut off at the window's
@@ -630,20 +601,9 @@ impl WorkspaceView {
         for (project, view) in views {
             let board = self.projects.mirror.get(&project).cloned();
             let agents = board.as_ref().map(|b| self.board_agents(b)).unwrap_or_default();
-            let machines = self.projects.machines.clone();
             let run_on = self.projects.run_on.get(&project).cloned();
             let recap = self.projects.recaps.get(&project).cloned();
-            let meters = board.as_ref().map(|b| self.board_meters(b)).unwrap_or_default();
-            let seen = Seen {
-                board,
-                workers: names.clone(),
-                agents,
-                now,
-                machines,
-                run_on,
-                recap,
-                meters,
-            };
+            let seen = Seen { board, workers: names.clone(), agents, now, run_on, recap };
             view.update(cx, |v, cx| v.set_seen(seen, cx));
         }
         for project in std::mem::take(&mut self.projects.focus) {
@@ -782,9 +742,6 @@ impl WorkspaceView {
         let subscription =
             cx.subscribe(&view, move |this, _view, event: &ProjectEvent, cx| match event {
                 ProjectEvent::Open(node) => this.open_node(&asked, *node, cx),
-                ProjectEvent::OpenSubagent { node, agent, kind } => {
-                    this.open_subagent(&asked, *node, agent.clone(), kind.clone(), cx);
-                }
                 ProjectEvent::Output(term) => {
                     this.open_output(term.session, "The verifier's terminal has closed", cx);
                 }
@@ -804,7 +761,6 @@ impl WorkspaceView {
                 }
                 ProjectEvent::Say(text) => this.show_notice(text.clone(), cx),
                 ProjectEvent::Tell(text) => this.tell_orchestrator(&asked, text.clone(), cx),
-                ProjectEvent::Machines => this.ask_machines(cx),
                 ProjectEvent::Pin(task, run_on) => this.pin_task(&asked, *task, *run_on, cx),
                 ProjectEvent::CloseRecap => {
                     if this.projects.recaps.remove(&asked).is_some() {
@@ -872,9 +828,8 @@ impl WorkspaceView {
     /// The person's words from a board's line to its orchestrator. The server keeps them on
     /// the timeline and hands them to the orchestrator through its hooks; words it refuses go
     /// back on the line.
-    fn tell_orchestrator(&mut self, project: &ProjectId, text: String, cx: &mut Context<Self>) {
+    fn tell_orchestrator(&self, project: &ProjectId, text: String, cx: &mut Context<Self>) {
         let Some(caller) = self.projects.caller.clone() else {
-            self.show_notice(NO_SERVER.to_owned(), cx);
             self.give_back_words(project, text, cx);
             return;
         };
@@ -939,36 +894,14 @@ impl WorkspaceView {
         self.send_to_server(verb, |_, _| (), cx);
     }
 
-    /// Ask the server how the workers are doing, for the machines lens: one question at a
-    /// time.
-    fn ask_machines(&mut self, cx: &mut Context<Self>) {
-        if self.projects.machines_asked || self.projects.caller.is_none() {
-            return;
-        }
-        self.projects.machines_asked = true;
-        self.ask_server(Verb::WorkerFacts { worker: None }, cx, |this, outcome, cx| {
-            this.projects.machines_asked = false;
-            if let Outcome::Facts(facts) = outcome {
-                let machines: Vec<Machine> = facts.iter().map(Machine::of).collect();
-                if machines != this.projects.machines {
-                    this.projects.machines = machines;
-                    this.projects_moved(cx);
-                }
-            }
-        });
-    }
-
-    /// Send `verb` and hand whatever the server answers to `then`; with no server, say so.
+    /// Send `verb` and hand whatever the server answers to `then`.
     fn ask_server(
-        &mut self,
+        &self,
         verb: Verb,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
         then: impl FnOnce(&mut Self, Outcome, &mut Context<Self>) + 'static,
     ) {
-        let Some(caller) = self.projects.caller.clone() else {
-            self.show_notice(NO_SERVER.to_owned(), cx);
-            return;
-        };
+        let Some(caller) = self.projects.caller.clone() else { return };
         cx.spawn(async move |this, cx| {
             let outcome = caller.call(verb).await;
             this.update(cx, |this, cx| then(this, outcome, cx))
@@ -979,15 +912,12 @@ impl WorkspaceView {
     /// Send `verb` to the server and hand its answer to `then`; a refusal is said as a
     /// notice, in the server's words.
     pub(super) fn send_to_server(
-        &mut self,
+        &self,
         verb: Verb,
         then: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) {
-        let Some(caller) = self.projects.caller.clone() else {
-            self.show_notice(NO_SERVER.to_owned(), cx);
-            return;
-        };
+        let Some(caller) = self.projects.caller.clone() else { return };
         cx.spawn(async move |this, cx| {
             let outcome = caller.call(verb).await;
             this.update(cx, |this, cx| match outcome {
@@ -1130,36 +1060,6 @@ impl WorkspaceView {
     }
 
     /// How each agent of `board` is doing, as this client sees it.
-    /// What the thread of the agent in `session` says it spent, its context and the plan's
-    /// rate windows, as the thread's mirror hears it; `None` once the thread is gone. The
-    /// boards whose nodes it runs show it in the next frame.
-    pub fn thread_meters(
-        &mut self,
-        session: SessionId,
-        meters: Option<slopty_proto::thread::Meters>,
-        cx: &mut Context<Self>,
-    ) {
-        let changed = match meters {
-            Some(meters) => self.projects.meters.insert(session, meters.clone()) != Some(meters),
-            None => self.projects.meters.remove(&session).is_some(),
-        };
-        if changed {
-            self.projects_moved(cx);
-        }
-    }
-
-    /// The meters of `board`'s agents: its orchestrator's and every task's last agent's.
-    fn board_meters(&self, board: &Board) -> MetersBySession {
-        let orchestrator = board.project.orchestrator.map(|t| t.session);
-        let tasks =
-            board.tasks.values().filter_map(|c| c.assignment.as_ref().map(|a| a.term.session));
-        orchestrator
-            .into_iter()
-            .chain(tasks)
-            .filter_map(|s| Some((s, self.projects.meters.get(&s)?.clone())))
-            .collect()
-    }
-
     fn board_agents(&self, board: &Board) -> HashMap<SessionId, AgentSeen> {
         let sessions = std::iter::once(None)
             .chain(board.tasks.keys().copied().map(Some))

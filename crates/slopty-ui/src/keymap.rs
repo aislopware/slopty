@@ -479,13 +479,10 @@ pub fn defaults() -> Vec<Command> {
         c(Folder, "select_last", crate::folder::SelectLast, &["end"], &[FOLDER]),
         c(Folder, "open", crate::folder::OpenSelected, &["enter"], &[FOLDER]),
         c(Folder, "open_parent", crate::folder::OpenParent, &["backspace", "cmd-up"], &[FOLDER]),
-        // A board: the arrows walk its rows, ↩ opens one's agent, the digits pick a lens.
+        // A board: the arrows walk its cards, ↩ opens one's agent.
         c(Project, "select_previous", crate::project::SelectPrevious, &["up", "k"], &[BOARD]),
         c(Project, "select_next", crate::project::SelectNext, &["down", "j"], &[BOARD]),
         c(Project, "open", crate::project::OpenNode, &["enter"], &[BOARD]),
-        c(Project, "show_tree", crate::project::ShowTree, &["1"], &[BOARD]),
-        c(Project, "show_board", crate::project::ShowBoard, &["2"], &[BOARD]),
-        c(Project, "show_timeline", crate::project::ShowTimeline, &["3"], &[BOARD]),
         // The search surface's toggles, VS Code's keys.
         c(Search, "toggle_match_case", crate::search::ToggleMatchCase, &["cmd-alt-c"], &[SEARCH]),
         c(Search, "toggle_whole_word", crate::search::ToggleWholeWord, &["cmd-alt-w"], &[SEARCH]),

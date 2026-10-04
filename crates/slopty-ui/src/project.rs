@@ -3,14 +3,14 @@
 //! A project lives on the server (`docs/decisions/projects.md`); its orchestrator is a Claude
 //! Code session in a terminal tile like any other. That tile turns between the TUI, the
 //! conversation face and the board, so the board sits where the person talks to the
-//! orchestrator, and every agent the tree names is a tile of its own that the board opens.
+//! orchestrator, and every agent a card names is a tile of its own that the board opens.
 //!
 //! * [`create`] — the sheet that makes a project from a terminal its agent orchestrates.
 //! * [`model`] — the server's projects mirrored, and what the board derives from one.
 //! * [`recap`] — what changed since this client last looked.
-//! * [`spend`] — time at work per node and subtree, and what the agents' threads say they cost.
-//! * `view` — the board itself: the header and its bar, what needs the person, and the tree, board
-//!   and timeline lenses.
+//! * [`spend`] — the project's time at work, the orchestrator's share apart.
+//! * `view` — the board itself: the header and its bar, what needs the person, and the lanes each
+//!   task stands in by what it waits on.
 
 #![expect(clippy::derive_partial_eq_without_eq, reason = "gpui::actions! derives PartialEq only")]
 
@@ -33,14 +33,6 @@ gpui::actions!(
         SelectPrevious,
         /// Open the agent of the row the keyboard stands on.
         OpenNode,
-        /// The tree: who split what from whom, down to the subagents inside a session.
-        ShowTree,
-        /// The board: each task in the lane its most urgent descendant is in.
-        ShowBoard,
-        /// The timeline: what happened, newest first.
-        ShowTimeline,
-        /// The machines: each worker, how it is doing, and the project's agents on it.
-        ShowMachines,
         /// Choose the worker the task the keyboard stands on runs on.
         RunTaskOn,
         /// Ask for the merge of the task the keyboard stands on.
@@ -97,7 +89,6 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "stop_task_agent", StopTaskAgent, &[], BOARD),
         Command::new(Scope::Project, "show_terminal", ShowTerminal, &["t"], BOARD),
         Command::new(Scope::Project, "tell_orchestrator", TellOrchestrator, &["c"], BOARD),
-        Command::new(Scope::Project, "show_machines", ShowMachines, &["4"], BOARD),
         Command::new(Scope::Project, "run_task_on", RunTaskOn, &["o"], BOARD),
         Command::new(Scope::Project, "toggle_push", TogglePush, &[], BOARD),
         Command::new(Scope::Project, "delete_project", DeleteProject, &[], BOARD),
@@ -131,62 +122,12 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Cancel the task", IconName::X, Box::new(CancelTask)),
         line("Stop the task's agent", IconName::Square, Box::new(StopTaskAgent)),
         line("Run the task on\u{2026}", IconName::Server, Box::new(RunTaskOn)),
-        line("Show the machines", IconName::Server, Box::new(ShowMachines)),
         line("Push after each merge", IconName::Upload, Box::new(TogglePush)),
         line("Show the orchestrator's terminal", IconName::SquareTerminal, Box::new(ShowTerminal)),
         line("Tell the orchestrator\u{2026}", IconName::MessageSquare, Box::new(TellOrchestrator)),
         line("Verifier\u{2026}", IconName::ListChecks, Box::new(EditChecks)),
         line("Delete the project", IconName::X, Box::new(DeleteProject)),
     ]
-}
-
-/// One way of looking at a project.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub enum Lens {
-    /// Who split what from whom.
-    #[default]
-    Tree,
-    /// What needs the person, what runs, what waits to merge.
-    Board,
-    /// What happened, newest first.
-    Timeline,
-    /// Where everything runs: each worker and the agents on it.
-    Machines,
-}
-
-impl Lens {
-    /// Its tab's words.
-    #[must_use]
-    pub const fn title(self) -> &'static str {
-        match self {
-            Self::Tree => "Tree",
-            Self::Board => "Board",
-            Self::Timeline => "Timeline",
-            Self::Machines => "Machines",
-        }
-    }
-
-    /// Its tab's icon.
-    #[must_use]
-    pub const fn icon(self) -> IconName {
-        match self {
-            Self::Tree => IconName::ListTree,
-            Self::Board => IconName::Kanban,
-            Self::Timeline => IconName::Clock,
-            Self::Machines => IconName::Server,
-        }
-    }
-
-    /// Its tab's element name.
-    #[must_use]
-    pub const fn selector(self) -> &'static str {
-        match self {
-            Self::Tree => "project-lens-tree",
-            Self::Board => "project-lens-board",
-            Self::Timeline => "project-lens-timeline",
-            Self::Machines => "project-lens-machines",
-        }
-    }
 }
 
 impl model::Lane {

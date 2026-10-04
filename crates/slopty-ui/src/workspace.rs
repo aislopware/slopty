@@ -1715,8 +1715,6 @@ impl WorkspaceView {
                 window.focus(&handle, cx);
             }
         }
-        // After the face took the keyboard: the subagent's thread takes it from its composer.
-        self.open_asked_subagent(window, cx);
         if let Some((session, needle)) = self.pending_find.take()
             && let Some(view) = self.terminals.get(&session).cloned()
         {

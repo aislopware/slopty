@@ -4166,7 +4166,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     wire item on some worker for something the server owns, and an overlay, which hides the
     strip the agents run on. A task agent's ⇧⌘J goes to its project's board; a project with no
     orchestrator, or one whose tile is not here, says so.
-  - **What it shows.** A header with the project's title, where its work lands (repository →
+  - **What it shows.** (Narrowed 2026-10-04 to the lanes alone: `docs/decisions/projects.md`,
+    "The board is its lanes alone".) A header with the project's title, where its work lands (repository →
     target branch), its verifier and its live agents against its limit, over a bar that is every
     task at once, one segment per lane in the lane's tone. Under it, what waits on the person:
     each blocked task and a blocked orchestrator, with what its agent asks when this client

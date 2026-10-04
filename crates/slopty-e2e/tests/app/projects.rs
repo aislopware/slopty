@@ -83,8 +83,8 @@ async fn golden(stack: &mut ProjectStack, name: &str) {
 
 /// The server's project, with an orchestrator and six tasks one level under it in five states,
 /// one of them run by an agent the server started, one whose verifier broke and one waiting to
-/// merge, reaches the app; ⇧⌘J turns the orchestrator's tile to its board, the lenses are keys,
-/// ↓↓↩ opens the task's agent, and a change on the server moves the board while it shows.
+/// merge, reaches the app; ⇧⌘J turns the orchestrator's tile to its board of lanes, ↓ walks its
+/// cards and ↩ opens a task's agent, and a change on the server moves the board while it shows.
 #[tokio::test]
 #[ignore = "live: cargo xtask e2e app"]
 async fn a_project_board_follows_its_orchestration() {
@@ -215,16 +215,6 @@ async fn a_project_board_follows_its_orchestration() {
         })
         .await
         .unwrap();
-    golden(&mut stack, "project-tree").await;
-
-    stack.driver.keys("2").await.unwrap();
-    stack
-        .driver
-        .wait_for("the lanes", STEP, |d| {
-            project(d).and_then(|p| p.lens.clone()).as_deref() == Some("Board")
-        })
-        .await
-        .unwrap();
     golden(&mut stack, "project-lanes").await;
     stack.set_appearance("dark").unwrap();
     stack.driver.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
@@ -232,20 +222,9 @@ async fn a_project_board_follows_its_orchestration() {
     stack.set_appearance("light").unwrap();
     stack.driver.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
 
-    stack.driver.keys("3").await.unwrap();
-    stack
-        .driver
-        .wait_for("the timeline", STEP, |d| {
-            project(d).and_then(|p| p.lens.clone()).as_deref() == Some("Timeline")
-        })
-        .await
-        .unwrap();
-    golden(&mut stack, "project-timeline").await;
-
     // A change on the server moves the board while it shows.
-    stack.driver.keys("1").await.unwrap();
     stack.slopty(&update("3", &["--state", "failed", "--note", "no golden yet"])).await.unwrap();
-    stack
+    let d = stack
         .driver
         .wait_for("task 3 failed", STEP, |d| {
             project(d).is_some_and(|p| p.lanes.iter().any(|(l, t)| l == "failed" && t == &[3]))
@@ -253,9 +232,13 @@ async fn a_project_board_follows_its_orchestration() {
         .await
         .unwrap();
 
-    // ↓ stands on the orchestrator, ↓ again on task 1, ↩ opens its agent: its tile is the
-    // active one and has the keyboard, on its terminal or its conversation, whichever it shows.
-    stack.driver.keys("down down enter").await.unwrap();
+    // ↓ walks the cards lane by lane until it stands on task 1, and ↩ opens its agent: its
+    // tile is the active one and has the keyboard, on its terminal or its conversation,
+    // whichever it shows.
+    let cards: Vec<u32> = project(&d).unwrap().lanes.iter().flat_map(|(_, t)| t.clone()).collect();
+    let at = cards.iter().position(|&t| t == 1).unwrap();
+    let walk = vec!["down"; at + 1].join(" ");
+    stack.driver.keys(&format!("{walk} enter")).await.unwrap();
     let d = stack
         .driver
         .wait_for("task 1's agent with the keyboard", STEP, |d| {
@@ -394,9 +377,6 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         .unwrap();
     // Time shows from a minute at work, and says "1m" until the second.
     tokio::time::sleep(AT_WORK.saturating_sub(at_work())).await;
-    let picked = |want: &'static str| {
-        move |d: &Dump| project(d).and_then(|p| p.lens.clone()).as_deref() == Some(want)
-    };
     // The board's tile takes the keys again, whatever the agent's own tile did meanwhile.
     stack.driver.reveal(&orchestrator_session).await.unwrap();
     stack
@@ -404,13 +384,7 @@ async fn a_live_task_shows_its_checks_its_time_and_its_next_steps() {
         .wait_for("the board with the keyboard", STEP, |d| d.focused.starts_with("project:"))
         .await
         .unwrap();
-    // Each render follows a lens turned to, so it is a frame drawn after the minute.
-    stack.driver.keys("2").await.unwrap();
-    stack.driver.wait_for("the lanes", STEP, picked("Board")).await.unwrap();
     golden(&mut stack, "project-live-lanes").await;
-    stack.driver.keys("1").await.unwrap();
-    stack.driver.wait_for("the tree", STEP, picked("Tree")).await.unwrap();
-    golden(&mut stack, "project-live-tree").await;
     assert!(at_work() < Duration::from_secs(118), "rendered within its first 2 minutes at work");
 
     stack.shutdown().await;

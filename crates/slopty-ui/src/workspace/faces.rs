@@ -32,7 +32,7 @@ use slopty_proto::thread::wire::{
     IntentDone, Outcome, RequestCard, Start, TableFrame, ThreadFrame, ThreadHits, ThreadRequest,
     ThreadRow,
 };
-use slopty_proto::thread::{AgentId, IntentId, Meters, ThreadId};
+use slopty_proto::thread::{AgentId, IntentId, ThreadId};
 use slopty_proto::{ClientMsg, RequestId};
 
 use super::WorkspaceView;
@@ -54,22 +54,6 @@ pub(super) struct Faces {
     pub drafts: HashMap<SessionId, String>,
     /// The thread views and the hubs they read.
     pub threads: ThreadFaces,
-    /// A subagent's thread the board asked to open in its session's face, once that face is
-    /// made and has the keyboard.
-    pub subagent: Option<SubagentAsked>,
-}
-
-/// A subagent's thread to open in the face of the session it runs in.
-#[derive(Clone, Debug)]
-pub(super) struct SubagentAsked {
-    /// The session.
-    pub session: SessionId,
-    /// Claude Code's id for the subagent.
-    pub agent: String,
-    /// Its type, which the thread's bar names it by until it has a title.
-    pub kind: String,
-    /// Frames it may still wait for the face to be made.
-    pub waits: u8,
 }
 
 /// Where a thread works, as its row says.
@@ -429,19 +413,9 @@ impl WorkspaceView {
     }
 
     /// A frame of `key`'s thread table.
-    ///
-    /// The meters of each terminal's own thread go to the boards whose nodes it runs.
     pub fn thread_table(&mut self, key: WorkerKey, frame: &TableFrame, cx: &mut Context<Self>) {
         let hub = self.thread_hub(key, cx);
-        let before = root_meters(&hub, cx);
         hub.update(cx, |hub, cx| hub.table(frame, cx));
-        let after = root_meters(&hub, cx);
-        for session in before.keys().filter(|s| !after.contains_key(s)) {
-            self.thread_meters(*session, None, cx);
-        }
-        for (session, meters) in after {
-            self.thread_meters(session, Some(meters), cx);
-        }
     }
 
     /// A frame of one of `key`'s threads.
@@ -864,46 +838,6 @@ impl WorkspaceView {
         self.thread_face(session).is_some() && self.session_request(session).is_some()
     }
 
-    /// Show subagent `agent` (of type `kind`) of the agent in `session`: its tile shows its
-    /// face, and the face opens the subagent's thread once it is made.
-    pub(super) fn show_subagent(
-        &mut self,
-        session: SessionId,
-        agent: String,
-        kind: String,
-        cx: &mut Context<Self>,
-    ) {
-        self.show_face(session, true, cx);
-        self.faces.subagent = Some(SubagentAsked { session, agent, kind, waits: 2 });
-        self.faces_dirty = true;
-        cx.notify();
-    }
-
-    /// Open the subagent the board asked for in its session's thread view, its own way in (its
-    /// bar leads back). A view not made yet is waited for a frame or two; a thread the worker
-    /// has not begun is said.
-    pub(super) fn open_asked_subagent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(mut asked) = self.faces.subagent.take() else { return };
-        let session = asked.session;
-        if let Some(view) = self.thread_face(session).cloned() {
-            let child = view.read(cx).thread().subagent(&asked.agent);
-            let known =
-                self.worker_of_session(session).and_then(|k| self.faces.threads.hubs.get(&k));
-            if known.is_some_and(|hub| hub.read(cx).threads().rows().rows.contains_key(&child)) {
-                view.update(cx, |v, cx| v.open_subagent(child, asked.kind, window, cx));
-            } else {
-                self.show_notice(format!("The {} subagent has no thread here yet", asked.kind), cx);
-            }
-        } else if asked.waits > 0 && self.tile_of_session(session).is_some() {
-            asked.waits = asked.waits.saturating_sub(1);
-            self.faces.subagent = Some(asked);
-            self.faces_dirty = true;
-            cx.notify();
-        } else {
-            self.show_notice(format!("The {} subagent has no thread here yet", asked.kind), cx);
-        }
-    }
-
     /// Show `session`'s face or its TUI.
     pub fn show_face(&mut self, session: SessionId, face: bool, cx: &mut Context<Self>) {
         self.faces.chosen.insert(session, face);
@@ -1165,18 +1099,6 @@ pub(super) struct ThreadWait {
 
 /// What a thread tile's header says before its worker's table names the thread.
 const THREAD: &str = "Thread";
-
-/// The meters of each terminal's own thread in `hub`'s table: a subagent's are its parent's.
-fn root_meters(hub: &Entity<ThreadHub>, cx: &App) -> HashMap<SessionId, Meters> {
-    hub.read(cx)
-        .threads()
-        .rows()
-        .rows
-        .values()
-        .filter(|row| row.parent.is_none() && !hub::is_aside(row))
-        .filter_map(|row| Some((row.terminal?, row.meters.clone())))
-        .collect()
-}
 
 /// Where each of `key`'s threads stands, from its table: a subagent's rung folded into the
 /// thread it hangs from, as the server's ladder folds it, and no row of its own.

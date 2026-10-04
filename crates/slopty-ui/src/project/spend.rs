@@ -1,62 +1,19 @@
-//! What a project's agents spent: time at work per node and per subtree, with the
-//! orchestrator's share apart, and from each agent's thread meters its context and the plan's
-//! quota.
+//! A project's time at work, the orchestrator's share apart from its tasks'.
 //!
-//! Time comes from the server, which follows every agent's status
-//! ([`slopty_proto::project::Spent`]), so it is there for every node on every worker. Context
-//! and quota come from the agents' own threads ([`Meters`]), handed to the board by session as this
-//! client hears them; a node whose thread it has not heard shows its time alone.
+//! The server follows every agent's status ([`slopty_proto::project::Spent`]), so the time is
+//! there for every task on every worker.
 
-use std::collections::HashMap;
+use slopty_core::WallMs;
 
-use slopty_core::{SessionId, WallMs};
-use slopty_proto::thread::{Limit, Meters};
-
-use super::model::{Board, Node};
-
-/// Below this share of its window a node's context is not worth a mark.
-pub const CONTEXT_QUIET_BP: u32 = 2_000;
-/// From this share of its window a node's context warns.
-pub const CONTEXT_WARN_BP: u32 = 8_000;
-
-/// The threads' meters this client has heard, by the session their TUI runs in.
-pub type MetersBySession = HashMap<SessionId, Meters>;
-
-/// What one node spent.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NodeSpend {
-    /// Its own agents' time at work, in milliseconds.
-    pub own_ms: u64,
-    /// With every task split from it, at any depth.
-    pub subtree_ms: u64,
-    /// How full its agent's context is, in hundredths of a percent, when its thread says.
-    pub context_bp: Option<u32>,
-}
-
-impl NodeSpend {
-    /// Whether it has split work off whose time counts with its own.
-    #[must_use]
-    pub const fn has_subtree(&self) -> bool {
-        self.subtree_ms > self.own_ms
-    }
-
-    /// Its context, when it is full enough to show: hidden under [`CONTEXT_QUIET_BP`], and
-    /// warning from [`CONTEXT_WARN_BP`].
-    #[must_use]
-    pub fn context_shown(&self) -> Option<(u32, bool)> {
-        self.context_bp.filter(|bp| *bp >= CONTEXT_QUIET_BP).map(|bp| (bp, bp >= CONTEXT_WARN_BP))
-    }
-}
+use super::model::Board;
 
 /// What a whole project spent, the orchestrator's share apart from its tasks'.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProjectSpend {
-    /// The orchestrator's time at work.
+    /// The orchestrator's time at work, in milliseconds.
     pub orchestrator_ms: u64,
     /// Every task's, together.
     pub tasks_ms: u64,
-    /// The plan's rate windows, the fullest that any of its agents reports for each.
-    pub limits: Vec<Limit>,
 }
 
 impl ProjectSpend {
@@ -75,58 +32,14 @@ impl Board {
             || self.tasks.values().any(|c| c.spent.since_ms.is_some())
     }
 
-    /// The meters of `node`'s last agent, when its thread has said them: an ended agent's
-    /// last word still says how full its context was.
-    fn meters<'m>(&self, node: Node, meters: &'m MetersBySession) -> Option<&'m Meters> {
-        let session = match node {
-            None => self.project.orchestrator?.session,
-            Some(task) => self.tasks.get(&task)?.assignment.as_ref()?.term.session,
-        };
-        meters.get(&session)
-    }
-
-    /// What `node` spent as of `now`: the orchestrator's share alone for `None`, which the
-    /// header sets beside its tasks'.
-    #[must_use]
-    pub fn spend(&self, node: Node, now: WallMs, meters: &MetersBySession) -> NodeSpend {
-        let own_ms = match node {
-            None => self.project.orchestrator_spent.at(now),
-            Some(task) => self.tasks.get(&task).map_or(0, |c| c.spent.at(now)),
-        };
-        let context_bp = self.meters(node, meters).and_then(context_bp);
-        NodeSpend { own_ms, subtree_ms: own_ms, context_bp }
-    }
-
     /// What the project spent as of `now`.
     #[must_use]
-    pub fn project_spend(&self, now: WallMs, meters: &MetersBySession) -> ProjectSpend {
-        let orchestrator = self.meters(None, meters);
-        let mut spend = ProjectSpend {
+    pub fn project_spend(&self, now: WallMs) -> ProjectSpend {
+        ProjectSpend {
             orchestrator_ms: self.project.orchestrator_spent.at(now),
-            ..ProjectSpend::default()
-        };
-        let mut limits: Vec<Limit> = orchestrator.map(|m| m.limits.clone()).unwrap_or_default();
-        for card in self.tasks.values() {
-            spend.tasks_ms = spend.tasks_ms.saturating_add(card.spent.at(now));
-            let Some(m) = self.meters(Some(card.id), meters) else { continue };
-            for limit in &m.limits {
-                match limits.iter_mut().find(|l| l.name == limit.name) {
-                    Some(held) if held.used_bp < limit.used_bp => *held = limit.clone(),
-                    Some(_) => {}
-                    None => limits.push(limit.clone()),
-                }
-            }
+            tasks_ms: self.tasks.values().map(|c| c.spent.at(now)).fold(0, u64::saturating_add),
         }
-        spend.limits = limits;
-        spend
     }
-}
-
-/// How full a thread's context is, in hundredths of a percent.
-fn context_bp(meters: &Meters) -> Option<u32> {
-    let (used, window) = (meters.context_tokens?, meters.context_window?);
-    let bp = used.saturating_mul(10_000).checked_div(window)?;
-    Some(u32::try_from(bp.min(10_000)).unwrap_or(10_000))
 }
 
 /// Time at work as the board says it, to the minute: a clock that moves once a minute shows
@@ -140,15 +53,4 @@ pub fn worked(ms: u64) -> String {
         1..60 => format!("{mins}m"),
         _ => crate::kit::duration(std::time::Duration::from_secs(mins.saturating_mul(60))),
     }
-}
-
-/// A rate window's name and use, as the header says it: "5-hour 42%".
-#[must_use]
-pub fn limit_line(limit: &Limit) -> String {
-    let name = match limit.name.as_str() {
-        "five-hour" => "5-hour",
-        "seven-day" => "weekly",
-        other => other,
-    };
-    format!("{name} {}%", limit.used_bp.saturating_add(50) / 100)
 }

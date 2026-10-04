@@ -744,8 +744,6 @@ pub struct ProjectInfo {
     pub timeline: usize,
     /// Its orchestrator's tile shows the board.
     pub shown: bool,
-    /// The board's lens, once it has been made.
-    pub lens: Option<String>,
     /// The node the board's keyboard stands on: a task's number, or `orchestrator`.
     pub picked: Option<String>,
 }

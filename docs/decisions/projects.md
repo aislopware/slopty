@@ -65,7 +65,7 @@ model no longer needs).
   - **Asking before each task starts** (`ask_to_start` and its proposals). A project's rules
     say it in a line when the person wants it.
   - **Dollar cost.** Slopty touches no credential, so it cannot know how a run is billed.
-    Tokens, the context and the plan's windows stay.
+    The plan's windows stay, in the status bar ("The board is its lanes alone", below).
   - **Most MCP tools.** `slopty mcp` serves the eight project tools above, not 46. An agent
     Slopty starts outside a project gets no Slopty MCP at all, and reaches the rest through
     the `slopty` command. Every agent saves a tool block of about 24 KB of descriptions, and
@@ -73,6 +73,31 @@ model no longer needs).
   - **`slopty git`.** A person or an agent at a shell already has git and gh. The person's
     commit sheet in the app stays.
 - Rejected: keeping them as hidden options. An unused feature is deleted, not hidden.
+
+**The board is its lanes alone.** ✅ 2026-10-04 (frontier prune step 4; overturns the tree,
+timeline and machines lenses and the board's meters)
+- Tasks are one level, so the board needs one view of them. The lanes say where each task
+  stands, and the thread view already shows a task's subagents, so the other lenses repeated
+  what the lanes said. What went:
+  - **The tree, timeline and machines lenses**, with their keys (`1` to `4`) and palette lines.
+    The timeline stays on the server, for the recap and the orchestrator.
+  - **The estimate of the time left**, and the machines lens's `WorkerFacts` polling every 5 s.
+  - **The context meters and plan windows on the board.** The status bar shows the plan's
+    windows. The header keeps the project's time at work, with the orchestrator's share on
+    hover (`ProjectSpend`).
+  - **Opening a subagent from the board.** A task's card opens its agent, and the thread view
+    leads into the subagent.
+- **Run on…** stays. It is a control on the card stood on (key `o`), and the place chip moves
+  a task only while it has not started. A chip that cannot move is a label, with no pointer.
+- The "Needs you" band now holds only the orchestrator, since a task waiting on the person
+  stands in its own lane. It sits on the lanes' left edge rather than past the column's edge.
+- With the server always there, a board's action has no "No server to send it to" notice.
+- Tests: `the_board_says_each_thing_once_and_fills_its_tile`,
+  `a_task_not_started_is_pinned_from_its_card`,
+  `every_card_says_where_it_runs_and_a_waiting_one_moves_from_there` and
+  `the_board_says_what_its_agents_spent` (`slopty-ui::workspace`). The `project-lanes`,
+  `project-lanes-dark` and `project-live-lanes` goldens were retaken. `project-tree`,
+  `project-live-tree` and `project-timeline` were deleted.
 
 **Project state lives on the server.** ✅ 2026-09-30
 - The server holds, in a store beside `workers.json`:
@@ -110,8 +135,8 @@ merging on the person's word since 2026-10-04
   session.
 - The person's `live_agents` bound in the server's settings caps live agents across the fleet.
   A project's review limit (3 by default, the person's alone) stops new starts while that many
-  of its tasks wait on the person, so what the person can review sets the pace. The board
-  shows each agent's tokens, context and plan windows as its agent reports them.
+  of its tasks wait on the person, so what the person can review sets the pace. The status
+  bar shows the plan's windows as the agents report them.
 
 **What the user sees.** ✅ 2026-09-30
 - A project opens as a tile. It shows:
@@ -1066,7 +1091,7 @@ Tests:
 ## Where tasks run (2026-10-02)
 
 **The board has a machines lens, and the person can move a task before it starts.** ✅
-2026-10-02, narrowed 2026-10-04
+2026-10-02, narrowed 2026-10-04; the lens went on 2026-10-04 ("The board is its lanes alone")
 - Before: the board showed which worker a task was on, but never which machines had room.
 - The machines lens (key `4`) asks for `WorkerFacts` every 5 s while it is shown, and stops
   when it is not. It groups the tasks by host: first the workers holding tasks, then the online
@@ -1079,7 +1104,7 @@ Tests:
   the task's pin. `TaskCard.pin` shows the pin to the board. The CLI's `slopty task update
   --run-on <worker|anywhere>` does the same.
 - Tests: `a_task_runs_where_the_person_says_and_keeps_why_it_went_there` (`slopty-server`) and
-  `the_machines_lens_shows_where_everything_runs_and_where_a_task_will` (`slopty-ui::workspace`).
+  `a_task_not_started_is_pinned_from_its_card` (`slopty-ui::workspace`).
 
 ## What changed while you were away, and the time it took (2026-10-02)
 
@@ -1102,7 +1127,7 @@ Tests:
   board holds. The recap then reads the gap back with `ProjectStatus { since }`, a page at a
   time and at most 8 pages. If the server no longer keeps the entries back to the cursor, the
   recap says so on its last line rather than passing for complete.
-- The first look on a device has no recap: there is nothing to compare with, and the tree
+- The first look on a device has no recap: there is nothing to compare with, and the board
   already shows everything. A cursor past the end belongs to an earlier project of the same
   name, so it is dropped.
 - The band sits over "Needs you" until the person closes it or the board hides. Nothing on
@@ -1127,10 +1152,10 @@ Tests:
   survives a restart for at most one extra write per turn. A restart drops a stretch that was
   under way, since the server cannot know the gap was work. A closed terminal ends its
   stretch.
-- `TaskCard.spent` carries it to the board. A row shows its time beside its state, from a
-  minute. The header shows the project's total, with the tasks' and the orchestrator's shares
-  on hover.
-- **Context and quota are the agents' threads' word.** `slopty_proto::thread::Meters`
+- `TaskCard.spent` carries it to the board. The header shows the project's total, with the
+  tasks' and the orchestrator's shares on hover.
+- **Context and quota are the agents' threads' word.** (The board's meters went on
+  2026-10-04: "The board is its lanes alone".) `slopty_proto::thread::Meters`
   carries a session's context and the plan's rate windows from the agent's own status line, so
   no credential is read. The workspace takes them per session
   (`WorkspaceView::thread_meters`), and the board shows:

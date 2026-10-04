@@ -1,10 +1,9 @@
 //! The board: one project drawn in its orchestrator's tile.
 //!
 //! A header names the project and where its work lands, over a bar that is every task at once,
-//! each a segment in its lane's tone. Under it, whatever waits on the person, then one of three
-//! lenses: the tree of who split what from whom, down to the subagents running inside a session;
-//! the board, each task in the lane its most urgent descendant is in; the timeline, newest
-//! first. Every node that runs somewhere opens its agent's tile with a click or ↩.
+//! each a segment in its lane's tone. Under it, the orchestrator while it waits on the person,
+//! then the lanes, each task in the one its state puts it in, what needs the person first.
+//! Every card whose agent runs somewhere opens that agent's tile with a click or ↩.
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -14,7 +13,7 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Context, Div, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, FontWeight, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    Focusable, FontWeight, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _,
     Subscription, Task, Window, div, px, relative,
 };
@@ -22,23 +21,22 @@ use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::orchestration::TermRef;
 use slopty_proto::project::{
-    Moment, NativeCounts, ProjectId, RunOn, StepKind, StepState, TaskCard, TaskId, TaskState,
-    TaskStep, VerifierRun,
+    NativeCounts, ProjectId, RunOn, StepKind, StepState, TaskCard, TaskId, TaskState, TaskStep,
+    VerifierRun,
 };
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use super::model::{
-    Board, Lane, Machine, Place, PlaceHow, RunOnPicker, Stage, StageKind, TaskAction, TreeRow,
-    os_name, pull_words, queue_words, run_on_words, short_commit, state_status, state_word,
-    verdict_detail, verdict_tail,
+    Board, Lane, Place, PlaceHow, RunOnPicker, Stage, StageKind, TaskAction, os_name, pull_words,
+    queue_words, run_on_words, short_commit, state_status, state_word, verdict_detail,
+    verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
-use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, limit_line, worked};
+use super::spend::worked;
 use super::{
-    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask, OpenNode,
-    PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard,
-    ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StopTaskAgent, TellOrchestrator,
-    TogglePush,
+    AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, MergeTask, OpenNode, PushTask,
+    ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowTerminal,
+    StopTaskAgent, TellOrchestrator, TogglePush,
 };
 use crate::a11y::tab_stop;
 use crate::colors::{hsla, hsla_alpha};
@@ -57,23 +55,14 @@ pub(crate) const NO_TASKS_HINT: &str =
 pub(crate) const PROJECT_GONE: &str = "This project is no longer on the server";
 /// The heading over what waits on the person.
 pub(crate) const NEEDS_YOU: &str = "Needs you";
-/// What the root of the tree is called.
+/// What the orchestrator's line under it says when its agent names no question.
+const WAITING_ON_YOU: &str = "Waiting on you";
+/// What the orchestrator's row is called.
 pub(crate) const ORCHESTRATOR: &str = "Orchestrator";
-/// A timeline entry for a task made under the title it still has.
-pub(crate) const CREATED: &str = "Created";
-/// The machines lens with no worker to draw.
-pub(crate) const NO_MACHINES: &str = "No workers yet";
-/// What the machines lens offers then.
-pub(crate) const NO_MACHINES_HINT: &str =
-    "The workers this server reaches show here, with the agents on each.";
-/// A worker the server cannot reach now.
-pub(crate) const AWAY: &str = "Away";
-/// The machines lens's heading over the tasks still to start.
-pub(crate) const NOT_STARTED: &str = "Not started";
 /// The "Run on" picker's first choice.
 pub(crate) const ANYWHERE: &str = "Anywhere";
 /// What "Anywhere" means.
-pub(crate) const ANYWHERE_LINE: &str = "Wherever its placement chooses";
+pub(crate) const ANYWHERE_LINE: &str = "A worker with room when it starts";
 /// The "Run on" picker while the server reads the workers.
 pub(crate) const RANKING: &str = "Reading the workers\u{2026}";
 /// The "Run on" picker's close button.
@@ -81,15 +70,11 @@ pub(crate) const CLOSE_RUN_ON: &str = "Close the worker choice";
 
 /// The least a lane is wide at zoom 1: the tile takes as many across as fit.
 const LANE_W: f32 = 232.0;
-/// How far a level of the tree steps in, at zoom 1.
-const INDENT: f32 = 16.0;
-/// How far a row that arrives travels up into its place, at zoom 1: a new task, an entry.
+/// How far a card that arrives travels up into its place, at zoom 1.
 const ARRIVE: f32 = 4.0;
-/// How often the timeline's ages move on: they say minutes at the finest.
-const AGE_TICK: std::time::Duration = std::time::Duration::from_secs(60);
-/// How often the tree and the board move their time at work on while agents work: often
-/// enough that a minute's readout is never more than a moment late, sums of several stretches
-/// included, which cross their minutes at no one stretch's.
+/// How often the board moves its time at work on while agents work: often enough that a
+/// minute's readout is never more than a moment late, sums of several stretches included,
+/// which cross their minutes at no one stretch's.
 const AT_WORK_TICK: std::time::Duration = std::time::Duration::from_secs(10);
 /// The most facts a row's or a card's second line holds: two separators.
 const META_PARTS: usize = 3;
@@ -97,24 +82,12 @@ const META_PARTS: usize = 3;
 const BAR_H: f32 = 3.0;
 
 pub use super::model::Node;
-/// How often the machines lens asks again how the workers are doing, while it shows.
-const MACHINES_TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What a board tells the workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectEvent {
     /// Open this node's agent in its tile.
     Open(Node),
-    /// Open the thread of one of Claude Code's own subagents in this node's session, by its
-    /// agent id, under its type (`Explore`).
-    OpenSubagent {
-        /// The node whose session runs it.
-        node: Node,
-        /// Claude Code's id for it, which names its thread.
-        agent: String,
-        /// Its type, which the thread's bar names it by until it has a title.
-        kind: String,
-    },
     /// Show a terminal the server runs for a task, its verifier's, in its tile.
     Output(TermRef),
     /// Do this to a task ([`Board::actions`]).
@@ -130,8 +103,6 @@ pub enum ProjectEvent {
     Delete,
     /// Say this: what was asked of the board cannot be done now.
     Say(String),
-    /// The machines lens shows: ask the server how the workers are doing.
-    Machines,
     /// Run the task there, or wherever its placement chooses: the "Run on" picker's choice.
     Pin(TaskId, RunOn),
     /// Close the "Run on" picker.
@@ -172,14 +143,6 @@ impl Check<'_> {
         match self {
             Self::Running { .. } => true,
             Self::Verdict { .. } => step.kind == StepKind::Verify,
-        }
-    }
-
-    /// A word that lets the work go on: a pass.
-    const fn cleared(&self) -> bool {
-        match self {
-            Self::Verdict { run, .. } => run.passed,
-            Self::Running { .. } => false,
         }
     }
 }
@@ -225,24 +188,13 @@ pub struct Seen {
     pub workers: BTreeMap<WorkerId, WorkerSeen>,
     /// The agents this client sees, by session.
     pub agents: HashMap<SessionId, AgentSeen>,
-    /// The server's clock now, near enough, for the timeline's ages.
+    /// The server's clock now, near enough, for the recap's age and the time at work.
     pub now: WallMs,
-    /// The workers as the server last said they are doing, for the machines lens.
-    pub machines: Vec<Machine>,
     /// The "Run on" picker, while it is open on one of the project's tasks.
     pub run_on: Option<RunOnPicker>,
     /// What changed since this client last looked, from the moment the board opened until the
     /// person closes it or the board hides.
     pub recap: Option<Recap>,
-    /// The meters of the project's agents' threads, as this client heard them, by session.
-    pub meters: MetersBySession,
-}
-
-/// A row the keyboard can stand on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Pick {
-    Node(Node),
-    Entry(u64),
 }
 
 /// How a project's work is checked, as the person sets it on the board: the verifier command.
@@ -255,8 +207,8 @@ struct Checks {
 pub struct ProjectView {
     id: ProjectId,
     seen: Seen,
-    lens: Lens,
-    picked: Option<Pick>,
+    /// The card the keyboard stands on.
+    picked: Option<Node>,
     zoom: f32,
     width: f32,
     theme: Theme,
@@ -265,11 +217,8 @@ pub struct ProjectView {
     focus: FocusHandle,
     scroll: ScrollHandle,
     plate: Plate,
-    /// The lenses' segmented thumb, sliding to the lens shown.
-    lens_plate: Plate,
-    /// Moves the timeline's ages on once a minute while the timeline shows, and asks for the
-    /// workers' news while the machines lens does; for the lens it was started for.
-    tick: Option<(Lens, Task<()>)>,
+    /// Moves the time at work on while agents work.
+    tick: Option<Task<()>>,
     /// When "Delete the project" was asked once, waiting for the second ask that does it.
     delete_asked: Option<std::time::Instant>,
     /// The line to the orchestrator, made with the first frame (it needs the window), and
@@ -288,7 +237,6 @@ impl std::fmt::Debug for ProjectView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectView")
             .field("id", &self.id)
-            .field("lens", &self.lens)
             .field("picked", &self.picked)
             .finish_non_exhaustive()
     }
@@ -308,7 +256,6 @@ impl ProjectView {
         Self {
             id,
             seen: Seen::default(),
-            lens: Lens::Tree,
             picked: None,
             zoom: 1.0,
             width: 0.0,
@@ -317,7 +264,6 @@ impl ProjectView {
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             plate: Plate::default(),
-            lens_plate: Plate::default(),
             tick: None,
             delete_asked: None,
             composer: None,
@@ -334,19 +280,10 @@ impl ProjectView {
         &self.id
     }
 
-    /// The lens it shows.
-    #[must_use]
-    pub const fn lens(&self) -> Lens {
-        self.lens
-    }
-
     /// The node the keyboard stands on, when it stands on one.
     #[must_use]
-    pub fn picked(&self) -> Option<Node> {
-        match self.picked? {
-            Pick::Node(node) => Some(node),
-            Pick::Entry(seq) => self.entry_node(seq),
-        }
+    pub const fn picked(&self) -> Option<Node> {
+        self.picked
     }
 
     /// What it shows, as the workspace last handed it.
@@ -356,7 +293,7 @@ impl ProjectView {
     }
 
     /// Show the project as `seen` has it; drawn again only when what it shows changed. The
-    /// clock alone draws nothing: the timeline keeps its own time.
+    /// clock alone draws nothing: the board keeps its own time.
     pub fn set_seen(&mut self, seen: Seen, cx: &mut Context<Self>) {
         let same_board = match (&self.seen.board, &seen.board) {
             (Some(was), Some(is)) => Arc::ptr_eq(was, is) || was == is,
@@ -365,10 +302,8 @@ impl ProjectView {
         let same = same_board
             && self.seen.workers == seen.workers
             && self.seen.agents == seen.agents
-            && self.seen.machines == seen.machines
             && self.seen.run_on == seen.run_on
-            && self.seen.recap == seen.recap
-            && self.seen.meters == seen.meters;
+            && self.seen.recap == seen.recap;
         if !same {
             self.seen = seen;
             if self.picked.is_some_and(|p| !self.picks().contains(&p)) {
@@ -401,57 +336,27 @@ impl ProjectView {
         }
     }
 
-    /// Show `lens`. The machines lens asks the server how the workers are doing.
-    pub fn show(&mut self, lens: Lens, cx: &mut Context<Self>) {
-        if self.lens != lens {
-            self.lens = lens;
-            if lens == Lens::Machines {
-                cx.emit(ProjectEvent::Machines);
-            }
-            self.picked = self.picked().map(Pick::Node).filter(|p| self.picks().contains(p));
-            self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
-            cx.notify();
-        }
-    }
-
-    /// The timeline's ages move on once a minute while it shows, the machines lens asks for
-    /// the workers' news every few seconds while it does, the clocks of agents at work move on
-    /// once a minute, and nothing ticks otherwise.
+    /// The clocks of agents at work move on while any works; nothing ticks otherwise.
     fn keep_time(&mut self, cx: &Context<Self>) {
-        let at_work = self.seen.board.as_ref().is_some_and(|b| b.at_work());
-        let every = match self.lens {
-            Lens::Timeline => AGE_TICK,
-            Lens::Machines => MACHINES_TICK,
-            Lens::Tree | Lens::Board if at_work => AT_WORK_TICK,
-            Lens::Tree | Lens::Board => {
-                self.tick = None;
-                return;
-            }
-        };
-        if self.tick.as_ref().is_some_and(|(lens, _)| *lens == self.lens) {
+        if !self.seen.board.as_ref().is_some_and(|b| b.at_work()) {
+            self.tick = None;
             return;
         }
-        let task = cx.spawn(async move |this, cx| {
+        if self.tick.is_some() {
+            return;
+        }
+        self.tick = Some(cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(every).await;
+                cx.background_executor().timer(AT_WORK_TICK).await;
                 let ticked = this.update(cx, |v, cx| {
-                    if v.lens == Lens::Machines {
-                        cx.emit(ProjectEvent::Machines);
-                        if v.seen.board.as_ref().is_some_and(|b| b.at_work()) {
-                            v.seen.now = WallMs::now();
-                            cx.notify();
-                        }
-                    } else {
-                        v.seen.now = WallMs::now();
-                        cx.notify();
-                    }
+                    v.seen.now = WallMs::now();
+                    cx.notify();
                 });
                 if ticked.is_err() {
                     break;
                 }
             }
-        });
-        self.tick = Some((self.lens, task));
+        }));
     }
 
     /// Give the board the keyboard.
@@ -482,26 +387,15 @@ impl ProjectView {
             && self.picked != Some(pick)
         {
             self.picked = Some(pick);
-            if let Some(child) = self.child_of(pick) {
-                self.scroll.scroll_to_item(child);
-            }
             cx.notify();
         }
     }
 
-    /// Open the node the keyboard stands on. A timeline entry about the project itself
-    /// opens nothing: the orchestrator's own row is the way back to its terminal, and an entry
-    /// is not.
+    /// Open the agent of the card the keyboard stands on.
     pub fn open_picked(&self, cx: &mut Context<Self>) {
-        let node = match self.picked {
-            Some(Pick::Node(node)) => node,
-            Some(Pick::Entry(seq)) => match self.entry_node(seq) {
-                Some(Some(task)) => Some(task),
-                _ => return,
-            },
-            None => return,
-        };
-        cx.emit(ProjectEvent::Open(node));
+        if let Some(node) = self.picked {
+            cx.emit(ProjectEvent::Open(node));
+        }
     }
 
     /// Do `action` to the task the keyboard stands on, or say why not.
@@ -542,98 +436,10 @@ impl ProjectView {
         )));
     }
 
-    /// Everything the keyboard can stand on, in the order the lens draws it.
-    fn picks(&self) -> Vec<Pick> {
+    /// Every card the keyboard can stand on, in the order the lanes draw them.
+    fn picks(&self) -> Vec<Node> {
         let Some(board) = &self.seen.board else { return Vec::new() };
-        match self.lens {
-            Lens::Tree => board.tree().into_iter().map(|row| Pick::Node(row.task)).collect(),
-            Lens::Board => board
-                .lanes()
-                .into_iter()
-                .flat_map(|(_, tasks)| tasks)
-                .map(|task| Pick::Node(Some(task)))
-                .collect(),
-            Lens::Timeline => board.timeline.iter().rev().map(|e| Pick::Entry(e.seq)).collect(),
-            Lens::Machines => self
-                .machine_groups(board)
-                .into_iter()
-                .flat_map(|g| g.nodes)
-                .chain(board.waiting_to_start().into_iter().map(Some))
-                .map(Pick::Node)
-                .collect(),
-        }
-    }
-
-    /// The machines lens's groups, in the order it draws them: the workers running this
-    /// project's agents, by name, then the rest online, then those away. A worker the server
-    /// said nothing of yet is drawn from its name alone.
-    fn machine_groups(&self, board: &Board) -> Vec<MachineGroup> {
-        let mut groups: Vec<MachineGroup> = self
-            .seen
-            .machines
-            .iter()
-            .map(|m| MachineGroup {
-                worker: m.worker,
-                name: m.name.clone(),
-                machine: Some(m.clone()),
-                nodes: board.on_worker(m.worker),
-            })
-            .collect();
-        let mut running: Vec<WorkerId> = std::iter::once(None)
-            .chain(board.tasks.keys().copied().map(Some))
-            .filter_map(|node| board.terminal(node).map(|(w, _)| w))
-            .collect();
-        running.sort_unstable();
-        running.dedup();
-        for worker in running {
-            if !groups.iter().any(|g| g.worker == worker) {
-                groups.push(MachineGroup {
-                    worker,
-                    name: self.worker_name(worker),
-                    machine: None,
-                    nodes: board.on_worker(worker),
-                });
-            }
-        }
-        groups.sort_by(|a, b| {
-            let rank = |g: &MachineGroup| {
-                let online = g.machine.as_ref().is_none_or(|m| m.online);
-                (g.nodes.is_empty(), !online)
-            };
-            rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name))
-        });
-        groups
-    }
-
-    /// Which child of the scrolled list draws `pick`: a tree row comes after the running
-    /// subagents of the rows above it. The board's lanes are one child.
-    fn child_of(&self, pick: Pick) -> Option<usize> {
-        let board = self.seen.board.as_ref()?;
-        match (self.lens, pick) {
-            (Lens::Tree, Pick::Node(node)) => {
-                let mut child = 0_usize;
-                for row in board.tree() {
-                    if row.task == node {
-                        return Some(child);
-                    }
-                    let running = board
-                        .natives
-                        .get(&row.task)
-                        .map_or(0, |n| n.agents.iter().filter(|a| a.stopped_ms.is_none()).count());
-                    child = child.saturating_add(1).saturating_add(running);
-                }
-                None
-            }
-            (Lens::Timeline, Pick::Entry(seq)) => {
-                board.timeline.iter().rev().position(|e| e.seq == seq)
-            }
-            _ => None,
-        }
-    }
-
-    fn entry_node(&self, seq: u64) -> Option<Node> {
-        let board = self.seen.board.as_ref()?;
-        board.timeline.iter().find(|e| e.seq == seq).map(|e| e.task)
+        board.lanes().into_iter().flat_map(|(_, tasks)| tasks).map(Some).collect()
     }
 
     fn worker_name(&self, worker: WorkerId) -> String {
@@ -657,14 +463,15 @@ impl ProjectView {
         lines.extend(place.worktree.as_ref().map(|w| format!("Worktree {w}")));
         lines.extend(place.branch.as_ref().map(|b| format!("Branch {b}")));
         lines.extend(place.why.as_ref().map(|why| format!("Why: {why}")));
-        let task = node.filter(|t| board.movable(*t));
-        lines.push(if task.is_some() { MOVE_HINT } else { MACHINES_HINT }.to_owned());
+        if node.is_some_and(|t| board.movable(t)) {
+            lines.push(MOVE_HINT.to_owned());
+        }
         Some((place, short, lines.join("\n")))
     }
 
     /// `node`'s place as a quiet chip: the worker and its system, in a stronger ink while its
     /// agent runs there. Its hint says the rest; a click moves a task not started yet ("Run
-    /// on…") and shows the machines lens otherwise.
+    /// on…"), and a chip that cannot move is only words.
     fn where_chip(
         &self,
         board: &Board,
@@ -689,7 +496,7 @@ impl ProjectView {
         let el = div()
             .id(SharedString::from(id))
             .debug_selector(move || selector)
-            .role(Role::Button)
+            .role(if movable.is_some() { Role::Button } else { Role::Label })
             .aria_label(SharedString::from(label))
             .flex_none()
             .max_w_full()
@@ -702,8 +509,6 @@ impl ProjectView {
             .whitespace_nowrap()
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(tone))
-            .cursor_pointer()
-            .hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)))
             .child(
                 icon(theme, glyph, IconSize::Inline, hsla(tone))
                     .size(self.z(theme.typography.small())),
@@ -716,13 +521,13 @@ impl ProjectView {
                 let theme = Rc::clone(&hint_theme);
                 cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
             });
+        let Some(task) = movable else { return Some(el) };
+        let el =
+            el.cursor_pointer().hover(move |el| el.bg(hsla(s.selected)).text_color(hsla(s.text)));
         Some(tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
             cx.stop_propagation();
-            this.picked = Some(Pick::Node(node));
-            match movable {
-                Some(task) => cx.emit(ProjectEvent::Act(task, TaskAction::RunOn)),
-                None => this.show(Lens::Machines, cx),
-            }
+            this.picked = Some(node);
+            cx.emit(ProjectEvent::Act(task, TaskAction::RunOn));
             cx.notify();
         })))
     }
@@ -746,8 +551,8 @@ impl ProjectView {
         }
     }
 
-    /// Where a view of it is summed up in words: its lens and its tasks, for the self-test's
-    /// dump and a screen reader.
+    /// Where a view of it is summed up in words: its lanes and their tasks, for the
+    /// self-test's dump and a screen reader.
     #[must_use]
     pub fn summary(&self) -> String {
         let Some(board) = &self.seen.board else { return PROJECT_GONE.to_owned() };
@@ -845,8 +650,6 @@ pub(crate) const CLOSE_RECAP: &str = "Close the recap";
 pub(crate) const RECAP_PARTIAL: &str = "And earlier changes the recap could not read";
 /// What a click on a task's place does while it can still move.
 pub(crate) const MOVE_HINT: &str = "Click to choose where it runs";
-/// What a click on a place does once its agent has started.
-pub(crate) const MACHINES_HINT: &str = "Click to see the machines";
 /// The header's way back to the orchestrator's terminal.
 pub(crate) const SHOW_TERMINAL: &str = "Show the orchestrator's terminal";
 /// The header's toggle for the panel that sets how the work is checked, and the panel's name.
@@ -944,11 +747,6 @@ fn said(parts: &[&str]) -> SharedString {
     SharedString::from(parts.join(", "))
 }
 
-/// An element id for the `n`th of a kind.
-fn numbered(kind: &'static str, n: u64) -> ElementId {
-    ElementId::NamedInteger(kind.into(), n)
-}
-
 /// A node's element id and selector: `project-node-orchestrator`, `project-node-3`.
 fn node_key(node: Node) -> String {
     node.map_or_else(|| "project-node-orchestrator".to_owned(), |t| format!("project-node-{t}"))
@@ -1039,7 +837,7 @@ impl ProjectView {
                 self.facts(
                     std::iter::once(readout("project-live", live))
                         .chain(progress.map(|p| readout("project-progress", p)))
-                        .chain(self.spent_readouts(board)),
+                        .chain(self.spent_readout(board)),
                 ),
             )
             .child(checks_toggle)
@@ -1084,53 +882,38 @@ impl ProjectView {
         row
     }
 
-    /// What the project spent, in the header: its time at work, then the plan's rate windows
-    /// once the agents' threads say them. Each says on hover how the
-    /// orchestrator's share and its tasks' make it up.
-    fn spent_readouts(&self, board: &Board) -> Vec<Stateful<Div>> {
+    /// The project's time at work, in the header, once there is a minute of it. It says on
+    /// hover how the orchestrator's share and its tasks' make it up.
+    fn spent_readout(&self, board: &Board) -> Option<Stateful<Div>> {
         let theme = &self.theme;
-        let s = &theme.surfaces;
-        let spend = board.project_spend(self.seen.now, &self.seen.meters);
-        let readout = |id: &'static str, text: String, hint: Option<String>, tone: Rgb| {
-            let hint_theme = Rc::clone(&self.hint_theme);
-            let label = hint.clone().unwrap_or_else(|| text.clone());
+        let spend = board.project_spend(self.seen.now);
+        let total = spend.total_ms();
+        if total < SHOWN_FROM_MS {
+            return None;
+        }
+        let hint = format!(
+            "{} of work: tasks {}, orchestrator {}",
+            worked(total),
+            worked(spend.tasks_ms),
+            worked(spend.orchestrator_ms)
+        );
+        let hint_theme = Rc::clone(&self.hint_theme);
+        Some(
             crate::kit::tabular(div())
-                .id(id)
-                .debug_selector(move || id.to_owned())
+                .id("project-spent")
+                .debug_selector(|| "project-spent".to_owned())
                 .role(Role::Label)
-                .aria_label(SharedString::from(label))
+                .aria_label(SharedString::from(hint.clone()))
                 .flex_none()
                 .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(tone))
-                .child(SharedString::from(text))
-                .when_some(hint, |el, hint| {
-                    el.map(crate::kit::hint_timing).tooltip(move |_window, cx| {
-                        let theme = Rc::clone(&hint_theme);
-                        cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
-                    })
-                })
-        };
-        let mut out = Vec::new();
-        if spend.total_ms() >= SHOWN_FROM_MS {
-            let hint = format!(
-                "{} of work: tasks {}, orchestrator {}",
-                worked(spend.total_ms()),
-                worked(spend.tasks_ms),
-                worked(spend.orchestrator_ms)
-            );
-            out.push(readout(
-                "project-spent",
-                worked(spend.total_ms()),
-                Some(hint),
-                s.text_secondary,
-            ));
-        }
-        let ids = ["project-limit-0", "project-limit-1", "project-limit-2"];
-        for (limit, id) in spend.limits.iter().zip(ids) {
-            let tone = if limit.used_bp >= CONTEXT_WARN_BP { s.warn } else { s.text_secondary };
-            out.push(readout(id, limit_line(limit), None, tone));
-        }
-        out
+                .text_color(hsla(theme.surfaces.text_secondary))
+                .child(SharedString::from(worked(total)))
+                .map(crate::kit::hint_timing)
+                .tooltip(move |_window, cx| {
+                    let theme = Rc::clone(&hint_theme);
+                    cx.new(|_| crate::kit::Hint::new(hint.clone(), "", theme)).into()
+                }),
+        )
     }
 
     /// A task's actions, as buttons on its row or card: what needs the person to move on, and
@@ -1142,17 +925,19 @@ impl ProjectView {
         prefix: &str,
         cx: &Context<Self>,
     ) -> Option<Div> {
-        // Choosing a worker is the machines lens's: elsewhere it is the palette's, so a tree
-        // of planned tasks is not a column of the same button.
-        let mut actions: Vec<(TaskAction, bool)> = board
-            .actions(task)
-            .into_iter()
-            .filter(|a| {
-                *a != TaskAction::RunOn || matches!(prefix, "project-machine" | "project-plan")
-            })
+        // Choosing a worker is a control of the card stood on, so a lane of planned tasks is
+        // not a column of the same button.
+        let offered = board.actions(task);
+        let mut actions: Vec<(TaskAction, bool)> = offered
+            .iter()
+            .copied()
+            .filter(|a| *a != TaskAction::RunOn)
             .map(|a| (a, false))
             .collect();
         if self.picked() == Some(Some(task)) {
+            if offered.contains(&TaskAction::RunOn) {
+                actions.push((TaskAction::RunOn, true));
+            }
             actions.extend(board.controls(task).into_iter().map(|a| (a, true)));
         }
         if actions.is_empty() {
@@ -1242,28 +1027,65 @@ impl ProjectView {
         div().child(track.children(segments))
     }
 
-    /// The tasks whose agents wait on the person, over the lens: never below a fold. The board
-    /// leads with its own *Needs you* lane, so there the band holds only the orchestrator,
-    /// which has no card.
+    /// The orchestrator while it waits on the person, over the lanes: never below a fold. Each
+    /// task has its card in the *Needs you* lane; the orchestrator has none. Inset to the
+    /// lanes' edges, so the band stands in the column as a card does.
     fn needs_you(&self, board: &Board, cx: &Context<Self>) -> Option<Stateful<Div>> {
-        let mut nodes: Vec<Node> = Vec::new();
-        if self.agent(board, None).is_some_and(|a| a.status == Status::NeedsYou) {
-            nodes.push(None);
-        }
-        if self.lens != Lens::Board {
-            nodes.extend(board.needs_you().into_iter().map(Some));
-        }
-        if nodes.is_empty() {
-            return None;
-        }
+        let agent = self.agent(board, None).filter(|a| a.status == Status::NeedsYou)?;
         let theme = &self.theme;
-        let rows = nodes.into_iter().map(|node| {
-            let asks = self.agent(board, node).and_then(|a| a.asks.clone());
-            let status = node.and_then(|t| board.tasks.get(&t)).and_then(|c| c.status.clone());
-            let second = asks.or(status).unwrap_or_else(|| "Waiting on you".to_owned());
-            let line = Line { asking: Some(second), said: None, depth: 0, prefix: "project-needs" };
-            self.node_row(board, node, line, cx)
-        });
+        let s = &theme.surfaces;
+        let sp = theme.spacing;
+        let asks = agent.asks.clone().unwrap_or_else(|| WAITING_ON_YOU.to_owned());
+        let key = "project-needs-orchestrator";
+        let row = div()
+            .id(key)
+            .debug_selector(move || key.to_owned())
+            .role(Role::Button)
+            .aria_label(said(&[ORCHESTRATOR, &asks]))
+            .flex()
+            .items_start()
+            .gap(self.z(sp.sm))
+            .px(self.z(sp.sm))
+            .py(self.z(sp.xs))
+            .rounded(self.z(theme.radii.sm))
+            .cursor_pointer()
+            .hover(move |el| el.bg(hsla(s.selected)))
+            .child(
+                div()
+                    .flex_none()
+                    .h(self.z(theme.density.row * 0.9))
+                    .flex()
+                    .items_center()
+                    .child(self.mark(Some(Status::NeedsYou))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(self.z(theme.density.row * 0.9))
+                            .flex()
+                            .items_center()
+                            .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
+                            .child(ORCHESTRATOR),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(self.z(theme.typography.small()))
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(asks)),
+                    ),
+            );
+        let row = tab_stop(row, s.accent).on_click(cx.listener(|_this, _ev, _w, cx| {
+            cx.emit(ProjectEvent::Open(None));
+        }));
         Some(
             div()
                 .id("project-needs-you")
@@ -1271,11 +1093,13 @@ impl ProjectView {
                 .role(Role::Group)
                 .aria_label(NEEDS_YOU)
                 .flex_none()
-                .mb(self.z(theme.spacing.xs))
-                .pb(self.z(theme.spacing.xxs))
+                .mx(self.z(sp.inset() - sp.xs))
+                .mb(self.z(sp.xs))
+                .p(self.z(sp.xxs))
+                .rounded(self.z(theme.radii.md))
                 .map(|el| crate::kit::raised(el, theme))
-                .child(self.heading("project-needs-heading", NEEDS_YOU))
-                .children(rows),
+                .child(self.heading("project-needs-heading", NEEDS_YOU).px(self.z(sp.sm)))
+                .child(row),
         )
     }
 
@@ -1398,270 +1222,6 @@ impl ProjectView {
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(theme.surfaces.text_muted))
             .child(text)
-    }
-
-    /// The lenses as a segmented control, its thumb sliding to the lens shown.
-    fn lenses(&self, cx: &Context<Self>) -> Stateful<Div> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let tab = |lens: Lens| {
-            let on = self.lens == lens;
-            let id = lens.selector();
-            let el = div()
-                .id(id)
-                .debug_selector(move || id.to_owned())
-                .role(Role::Tab)
-                .aria_label(lens.title())
-                .aria_selected(on)
-                .h_full()
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xs))
-                .px(self.z(sp.sm))
-                .cursor_pointer()
-                .text_size(self.z(theme.typography.small()))
-                .when(on, |el| self.lens_plate.mark(el.text_color(hsla(s.text)), id))
-                .when(!on, |el| {
-                    el.text_color(hsla(s.text_muted)).hover(move |el| el.text_color(hsla(s.text)))
-                })
-                .child(
-                    icon(
-                        theme,
-                        lens.icon(),
-                        IconSize::Inline,
-                        hsla(if on { s.text_secondary } else { s.text_muted }),
-                    )
-                    .size(self.z(theme.typography.icon())),
-                )
-                .child(lens.title());
-            tab_stop(el, s.accent)
-                .on_click(cx.listener(move |this, _ev, _w, cx| this.show(lens, cx)))
-        };
-        let track = crate::kit::track(theme)
-            .id("project-lenses")
-            .debug_selector(|| "project-lenses".to_owned())
-            .role(Role::TabList)
-            .aria_label("Lens")
-            .flex_none()
-            .h(self.z(theme.density.control))
-            .child(self.lens_plate.under_thumb(theme, true, None))
-            .child(tab(Lens::Tree))
-            .child(tab(Lens::Board))
-            .child(tab(Lens::Timeline))
-            .child(tab(Lens::Machines));
-        div()
-            .id("project-lens-bar")
-            .flex_none()
-            .flex()
-            .items_center()
-            .px(self.z(sp.inset()))
-            .pb(self.z(sp.xs))
-            .border_b(crate::kit::hair(theme))
-            .border_color(hsla(s.border_subtle))
-            .child(track)
-    }
-
-    /// One node on two lines: its mark, its number and title with its state at the right, then
-    /// where it runs and what it is on. `depth` steps it in under its parent.
-    fn node_row(&self, board: &Board, node: Node, line: Line, cx: &Context<Self>) -> AnyElement {
-        let Line { asking, said: own_line, depth, prefix } = line;
-        let mark = asking.is_some().then_some(Status::NeedsYou);
-        let second = asking.or(own_line);
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let card = node.and_then(|t| board.tasks.get(&t));
-        let status = mark.or_else(|| self.node_status(board, node));
-        let title = card.map_or_else(|| ORCHESTRATOR.to_owned(), |c| c.title.clone());
-        // A row under "Needs you" says no word its heading says.
-        let word = card
-            .filter(|_| mark.is_none())
-            .map(|c| (state_word(c.state), board_tone(theme, state_status(c.state))));
-        let actions = node.and_then(|task| self.actions(board, task, prefix, cx));
-        let run_on = node.and_then(|task| self.run_on_block(task, prefix, cx));
-        let spend = board.spend(node, self.seen.now, &self.seen.meters);
-        let spent_words = spent_words(&spend);
-        let settled = card.is_some_and(|c| c.state == TaskState::Merged);
-        // The tree shows a verifier running or failed under its row; a pass is a word in it.
-        let check = card
-            .filter(|_| prefix == "project-row")
-            .and_then(|c| Self::check(board, c))
-            .filter(|c| !c.cleared());
-        // A row that says its own line, and the machines lens's, which groups by worker, show
-        // no place.
-        let placed = second.is_none() && prefix != "project-machine";
-        let meta = second.unwrap_or_else(|| self.node_meta(board, card, check.as_ref(), false));
-        // The place sits at the end of a line it shares, so the rows' places read as one
-        // column; alone, it stands where the line's words would.
-        let place = placed
-            .then(|| self.where_chip(board, node, prefix, cx))
-            .flatten()
-            .map(|chip| chip.when(!meta.is_empty(), gpui::Styled::ml_auto));
-        let place_words = placed
-            .then(|| self.where_words(board, node))
-            .flatten()
-            .map_or_else(String::new, |(_, short, _)| short);
-        let key = format!("{prefix}-{}", node_key(node));
-        let spent = self.spent_readout(&key, &spend);
-        let picked = self.picked() == Some(node)
-            && match self.lens {
-                Lens::Tree => prefix == "project-row",
-                Lens::Machines => prefix == "project-machine",
-                Lens::Board | Lens::Timeline => false,
-            };
-        let number = node.map(|t| {
-            crate::kit::tabular(div())
-                .flex_none()
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(format!("#{t}")))
-        });
-        let first = div()
-            .flex()
-            .items_center()
-            .gap(self.z(sp.xs))
-            .min_w_0()
-            .h(self.z(theme.density.row * 0.9))
-            .children(number)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_color(hsla(if settled { s.text_secondary } else { s.text }))
-                    .when(node.is_none(), |el| {
-                        el.font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                    })
-                    .child(SharedString::from(title.clone())),
-            )
-            .children(spent)
-            .children(word.map(|(word, tone)| {
-                div()
-                    .flex_none()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(tone))
-                    .child(word)
-            }))
-            .children(actions);
-        let text = (!meta.is_empty()).then(|| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child(dotted(theme, meta.clone()))
-        });
-        let second = (place.is_some() || text.is_some()).then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xs))
-                .min_w_0()
-                .text_size(self.z(theme.typography.small()))
-                .text_color(hsla(s.text_muted))
-                .children(text)
-                .children(place)
-        });
-        let label =
-            said(&[&title, word.map_or("", |(word, _)| word), &meta, &place_words, &spent_words]);
-        let selector = key.clone();
-        let row = div()
-            .id(SharedString::from(key.clone()))
-            .debug_selector(move || selector)
-            .role(Role::TreeItem)
-            .aria_label(label)
-            .relative()
-            .flex()
-            .items_start()
-            .gap(self.z(sp.sm))
-            .mx(self.z(sp.xs))
-            .pl(self.z(INDENT.mul_add(depth_f(depth), sp.inset() - sp.xs)))
-            .pr(self.z(sp.inset() - sp.xs))
-            .py(self.z(sp.xs))
-            .rounded(self.z(theme.radii.sm))
-            .cursor_pointer()
-            .when(settled, |el| el.opacity(alpha::STRONG))
-            .hover(move |el| el.bg(hsla(if mark.is_some() { s.selected } else { s.hover })))
-            .children((depth > 0).then(|| self.guides(depth)))
-            .child(
-                div()
-                    .flex_none()
-                    .h(self.z(theme.density.row * 0.9))
-                    .flex()
-                    .items_center()
-                    .child(self.mark(status)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(first)
-                    .children(second)
-                    .children(check.as_ref().map(|c| self.check_block(&key, c, cx)))
-                    .children(run_on),
-            );
-        let arrive = ElementId::Name(format!("{key}-in").into());
-        let row = if picked { self.plate.mark(row, key) } else { row };
-        let row = tab_stop(row, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
-            this.picked = Some(Pick::Node(node));
-            cx.emit(ProjectEvent::Open(node));
-            cx.notify();
-        }));
-        crate::kit::slide_fade(row, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
-    }
-
-    /// A node's time at work beside its state, with its subtree's when it split work off, and
-    /// its context once full enough to matter.
-    fn spent_readout(&self, key: &str, spend: &NodeSpend) -> Option<Div> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let ms = if spend.has_subtree() { spend.subtree_ms } else { spend.own_ms };
-        let ms = Some(ms).filter(|ms| *ms >= SHOWN_FROM_MS);
-        let context = spend.context_shown();
-        if ms.is_none() && context.is_none() {
-            return None;
-        }
-        let time = ms.map(|ms| {
-            let id = format!("{key}-spent");
-            crate::kit::tabular(div())
-                .debug_selector(move || id)
-                .text_color(hsla(s.text_muted))
-                .child(SharedString::from(worked(ms)))
-        });
-        let context = context.map(|(bp, warns)| {
-            let id = format!("{key}-context");
-            crate::kit::tabular(div())
-                .debug_selector(move || id)
-                .text_color(hsla(if warns { s.warn } else { s.text_muted }))
-                .child(SharedString::from(format!("{}%", bp / 100)))
-        });
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(self.z(theme.spacing.xs))
-                .text_size(self.z(theme.typography.small()))
-                .children(context)
-                .children(time),
-        )
-    }
-
-    /// The hairlines that tie a row to its parent's column: one per level above it.
-    fn guides(&self, depth: usize) -> Div {
-        let theme = &self.theme;
-        let line = hsla(theme.surfaces.border_subtle);
-        let first =
-            theme.typography.icon_large().mul_add(0.5, theme.spacing.inset() - theme.spacing.xs);
-        div().absolute().top_0().bottom_0().left_0().children((1..=depth).map(|level| {
-            let x = INDENT.mul_add(depth_f(level.saturating_sub(1)), first);
-            div().absolute().top_0().bottom_0().left(self.z(x)).w(px(1.0)).bg(line)
-        }))
     }
 
     /// A status mark in its fixed slot at the board's zoom.
@@ -1898,75 +1458,6 @@ impl ProjectView {
             .children(tail)
     }
 
-    /// Claude Code's own subagents running under `node`, as leaves of the tree; one opens its
-    /// thread.
-    fn native_rows(&self, board: &Board, row: TreeRow, cx: &Context<Self>) -> Vec<AnyElement> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let Some(natives) = board.natives.get(&row.task) else { return Vec::new() };
-        let hover = hsla(s.hover);
-        natives
-            .agents
-            .iter()
-            .filter(|a| a.stopped_ms.is_none())
-            .map(|agent| {
-                let id = format!("{}-native-{}", node_key(row.task), agent.id);
-                let selector = id.clone();
-                let depth = row.depth.saturating_add(1);
-                let open = ProjectEvent::OpenSubagent {
-                    node: row.task,
-                    agent: agent.id.clone(),
-                    kind: agent.kind.clone(),
-                };
-                let row = div()
-                    .id(SharedString::from(id))
-                    .debug_selector(move || selector)
-                    .role(Role::TreeItem)
-                    .aria_label(SharedString::from(format!("Subagent {}", agent.kind)))
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(self.z(sp.sm))
-                    .mx(self.z(sp.xs))
-                    .pl(self.z(INDENT.mul_add(depth_f(depth), sp.inset() - sp.xs)))
-                    .h(self.z(theme.density.row))
-                    .rounded(self.z(theme.radii.sm))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hover))
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_secondary))
-                    .child(self.guides(depth))
-                    .child(self.mark(Some(Status::Working)))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(SharedString::from(agent.kind.clone())),
-                    );
-                // Its thread, in the face of the session it runs in, as a row opens its agent.
-                tab_stop(row, s.accent)
-                    .on_click(cx.listener(move |_this, _ev, _w, cx| cx.emit(open.clone())))
-                    .into_any_element()
-            })
-            .collect()
-    }
-
-    fn tree(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
-        let mut out = Vec::new();
-        for row in board.tree() {
-            let line = Line { asking: None, said: None, depth: row.depth, prefix: "project-row" };
-            out.push(self.node_row(board, row.task, line, cx));
-            out.extend(self.native_rows(board, row, cx));
-        }
-        if board.tasks.is_empty() {
-            out.push(self.empty(NO_TASKS, NO_TASKS_HINT));
-        }
-        out
-    }
-
     /// The lanes in as many columns as the tile fits at [`LANE_W`] ([`lanes_across`]),
     /// sharing its width. With more lanes than columns, neighbouring short lanes stack in one
     /// column ([`stack_lanes`]), so every lane stands in the first screenful in its left-to-right
@@ -1981,11 +1472,11 @@ impl ProjectView {
         let across = usize::from(lanes_across(self.width, self.zoom)).min(lanes.len());
         let weights: Vec<u32> = lanes
             .iter()
-            .map(|(lane, tasks)| {
+            .map(|(_, tasks)| {
                 tasks
                     .iter()
                     .filter_map(|task| board.tasks.get(task))
-                    .map(|card| self.card_lines(board, card, *lane))
+                    .map(|card| self.card_lines(board, card))
                     .fold(LANE_HEAD_LINES, u32::saturating_add)
             })
             .collect();
@@ -2033,7 +1524,7 @@ impl ProjectView {
     /// About how many lines `card` stands in `lane`, its padding counted as one: what
     /// [`stack_lanes`] balances the columns by. Only the balance rests on it, so it counts the
     /// card's parts as [`Self::card`] draws them without measuring a glyph.
-    fn card_lines(&self, board: &Board, card: &TaskCard, lane: Lane) -> u32 {
+    fn card_lines(&self, board: &Board, card: &TaskCard) -> u32 {
         let CardFacts { check, stages, meta } = self.card_facts(board, card);
         let check_lines = match &check {
             None => 0,
@@ -2048,7 +1539,6 @@ impl ProjectView {
             .saturating_add(usize::from(self.where_words(board, Some(card.id)).is_some()))
             .saturating_add(usize::from(!stages.is_empty()))
             .saturating_add(check_lines)
-            .saturating_add(usize::from(Lane::of(card.state) != lane))
             .saturating_add(if board.actions(card.id).is_empty() { 0 } else { 2 });
         u32::try_from(lines).unwrap_or(u32::MAX)
     }
@@ -2081,7 +1571,7 @@ impl ProjectView {
             );
         let cards = tasks.into_iter().filter_map(|task| {
             let card = board.tasks.get(&task)?;
-            Some(self.card(board, card, lane, cx))
+            Some(self.card(board, card, cx))
         });
         let selector = format!("project-lane-{}", lane.selector());
         div()
@@ -2101,7 +1591,7 @@ impl ProjectView {
     }
 
     /// One task on the board: its number and title, where it runs, and what it waits on.
-    fn card(&self, board: &Board, card: &TaskCard, lane: Lane, cx: &Context<Self>) -> AnyElement {
+    fn card(&self, board: &Board, card: &TaskCard, cx: &Context<Self>) -> AnyElement {
         let theme = &self.theme;
         let s = &theme.surfaces;
         let sp = theme.spacing;
@@ -2118,8 +1608,6 @@ impl ProjectView {
             self.where_words(board, node).map_or_else(String::new, |(_, short, _)| short);
         let pipeline = self.pipeline_row(&key, &stages);
         let block = check.as_ref().map(|c| self.check_block(&key, c, cx));
-        // A parent standing in a lane for a descendant says whose it is.
-        let why = (own != lane).then(|| format!("{} in a subtask", lane.title()));
         let arrive = ElementId::Name(format!("{key}-in").into());
         let selector = key.clone();
         let along: Vec<&str> = stages.iter().map(|stage| stage.words.as_str()).collect();
@@ -2206,19 +1694,13 @@ impl ProjectView {
             .children(pipeline)
             .children(block)
             .children(self.run_on_block(card.id, "project-card", cx))
-            .children(why.map(|why| {
-                div()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .child(SharedString::from(why))
-            }))
             // Last, on a line of their own: a lane is too narrow for a title and its buttons.
             .children(
                 self.actions(board, card.id, "project-card", cx)
                     .map(|actions| actions.pt(self.z(sp.xxs))),
             );
         let el = tab_stop(el, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
-            this.picked = Some(Pick::Node(node));
+            this.picked = Some(node);
             cx.emit(ProjectEvent::Open(node));
             cx.notify();
         }));
@@ -2443,226 +1925,6 @@ impl ProjectView {
         Some(div().flex().flex_wrap().gap(self.z(sp.xxs)).pt(self.z(sp.xxs)).children(chips))
     }
 
-    /// The timeline, newest first: when, which task, and what happened.
-    fn timeline(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        if board.timeline.is_empty() {
-            return vec![self.empty(
-                "Nothing has happened yet",
-                "Tasks starting, waiting on you, passing their verifier and merging show here.",
-            )];
-        }
-        let now = self.seen.now;
-        // A run of entries of one age says it once, on the newest, as a heading would.
-        let mut above: Option<String> = None;
-        board
-            .timeline
-            .iter()
-            .rev()
-            .map(|entry| {
-                let seq = entry.seq;
-                let task = entry.task.and_then(|t| board.tasks.get(&t));
-                // The row names its task already; a title the task was made under says only
-                // that it was made, unless it has been renamed since.
-                let line = match (&entry.what, task) {
-                    (Moment::TaskCreated { title }, Some(card)) if card.title == *title => {
-                        CREATED.to_owned()
-                    }
-                    _ => super::model::moment_line(
-                        entry,
-                        |w| self.worker_name(w),
-                        |t| board.agent_at(t),
-                    ),
-                };
-                let (glyph, tone) = moment_icon(theme, &entry.what);
-                let age = age_label(now.since(entry.at_ms));
-                let shown = (above.as_ref() != Some(&age)).then(|| age.clone());
-                above = Some(age.clone());
-                let key = format!("project-entry-{seq}");
-                let selector = key.clone();
-                let picked = self.picked == Some(Pick::Entry(seq));
-                let label = SharedString::from(match task {
-                    Some(card) => format!("#{} {}: {line}, {age}", card.id, card.title),
-                    None => format!("{line}, {age}"),
-                });
-                let row = div()
-                    .id(numbered("project-entry", seq))
-                    .debug_selector(move || selector)
-                    .role(Role::ListItem)
-                    .aria_label(label)
-                    .relative()
-                    .flex()
-                    .items_center()
-                    .gap(self.z(sp.sm))
-                    .mx(self.z(sp.xs))
-                    .px(self.z(sp.inset() - sp.xs))
-                    .h(self.z(theme.density.row + sp.xs))
-                    .rounded(self.z(theme.radii.sm))
-                    .when(entry.task.is_some(), |el| {
-                        el.cursor_pointer().hover(move |el| el.bg(hsla(s.hover)))
-                    })
-                    .child(
-                        div()
-                            .flex_none()
-                            .size(self.z(theme.typography.icon_large()))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                icon(theme, glyph, IconSize::Inline, tone)
-                                    .size(self.z(theme.typography.icon())),
-                            ),
-                    )
-                    .children(task.map(|card| {
-                        crate::kit::tabular(div())
-                            .flex_none()
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(format!("#{}", card.id)))
-                    }))
-                    .children(task.map(|card| {
-                        div()
-                            .min_w_0()
-                            .max_w(relative(0.4))
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(hsla(s.text_secondary))
-                            .child(SharedString::from(card.title.clone()))
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .text_color(hsla(s.text))
-                            .child(SharedString::from(line)),
-                    )
-                    .children(shown.map(|age| {
-                        let selector = format!("project-entry-{seq}-age");
-                        crate::kit::tabular(div())
-                            .debug_selector(move || selector)
-                            .flex_none()
-                            .text_size(self.z(theme.typography.small()))
-                            .text_color(hsla(s.text_muted))
-                            .child(SharedString::from(age))
-                    }));
-                let arrive = ElementId::Name(format!("{key}-in").into());
-                let row = if picked { self.plate.mark(row, key) } else { row };
-                let node = entry.task;
-                let row =
-                    tab_stop(row, s.accent).on_click(cx.listener(move |this, _ev, _w, cx| {
-                        this.picked = Some(Pick::Entry(seq));
-                        if node.is_some() {
-                            cx.emit(ProjectEvent::Open(node));
-                        }
-                        cx.notify();
-                    }));
-                crate::kit::slide_fade(row, arrive, ARRIVE, crate::kit::Pace::Fade, cx)
-            })
-            .collect()
-    }
-
-    /// A lens with nothing in it: one line, and what will land there.
-    /// The machines lens: each worker with how it is doing and the project's agents on it,
-    /// then the tasks still to start, each with a way to choose where it runs.
-    fn machines(&self, board: &Board, cx: &Context<Self>) -> Vec<AnyElement> {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let sp = theme.spacing;
-        let groups = self.machine_groups(board);
-        let waiting = board.waiting_to_start();
-        if groups.is_empty() && waiting.is_empty() {
-            return vec![self.empty(NO_MACHINES, NO_MACHINES_HINT)];
-        }
-        let mut out = Vec::new();
-        for group in groups {
-            let key = format!("project-host-{}", group.worker);
-            let online = group.machine.as_ref().is_none_or(|m| m.online);
-            let live = format!("{} live", board.live_on(group.worker));
-            let load = group.machine.as_ref().and_then(|m| m.load).map(|l| format!("load {l:.1}"));
-            let kind = group.machine.as_ref().map(Machine::kind_line).filter(|k| !k.is_empty());
-            let away = (!online).then_some(AWAY);
-            let readout = |text: String| {
-                crate::kit::tabular(div())
-                    .flex_none()
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_secondary))
-                    .child(SharedString::from(text))
-            };
-            let label = said(&[
-                &group.name,
-                away.unwrap_or(""),
-                kind.as_deref().unwrap_or(""),
-                load.as_deref().unwrap_or(""),
-                &live,
-            ]);
-            let selector = key.clone();
-            let head = div()
-                .id(SharedString::from(key.clone()))
-                .debug_selector(move || selector)
-                .role(Role::Heading)
-                .aria_label(label)
-                .flex()
-                .items_center()
-                .gap(self.z(sp.xs))
-                .px(self.z(sp.inset()))
-                .pt(self.z(sp.sm))
-                .pb(self.z(sp.xxs))
-                .when(!online, |el| el.opacity(alpha::STRONG))
-                .child(
-                    icon(theme, IconName::Server, IconSize::Inline, hsla(s.text_secondary))
-                        .size(self.z(theme.typography.icon())),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
-                        .text_color(hsla(s.text))
-                        .child(SharedString::from(group.name.clone())),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(self.z(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(
-                            [away.map(str::to_owned), kind]
-                                .into_iter()
-                                .flatten()
-                                .collect::<Vec<_>>()
-                                .join(", "),
-                        )),
-                )
-                .children(load.map(readout))
-                .child(readout(live));
-            out.push(head.into_any_element());
-            for node in group.nodes {
-                let line = Line { asking: None, said: None, depth: 1, prefix: "project-machine" };
-                out.push(self.node_row(board, node, line, cx));
-            }
-        }
-        if !waiting.is_empty() {
-            out.push(self.heading("project-machines-waiting", NOT_STARTED).into_any_element());
-            for task in waiting {
-                let said = board.tasks.get(&task).map(|c| match c.pin {
-                    Some(worker) => format!("To run on {}", self.worker_name(worker)),
-                    None => ANYWHERE_LINE.to_owned(),
-                });
-                let line = Line { asking: None, said, depth: 0, prefix: "project-machine" };
-                out.push(self.node_row(board, Some(task), line, cx));
-            }
-        }
-        out
-    }
-
     /// The "Run on" picker under `task`'s row or card, while it is open there: "Anywhere",
     /// then every worker with its system and its agents, the one the task is pinned to marked.
     fn run_on_block(
@@ -2821,34 +2083,6 @@ impl ProjectView {
     }
 }
 
-/// One worker in the machines lens, and the project's nodes running on it.
-struct MachineGroup {
-    worker: WorkerId,
-    name: String,
-    /// What the server last said of it.
-    machine: Option<Machine>,
-    nodes: Vec<Node>,
-}
-
-/// How a node's row is drawn: in the tree at its depth, or in what needs the person with what
-/// its agent asks.
-struct Line {
-    /// What the agent asks, for a row of what needs the person.
-    asking: Option<String>,
-    /// A second line of its own, over the node's facts: why it runs where it does.
-    said: Option<String>,
-    /// How far in the tree it steps.
-    depth: usize,
-    /// Its element name's start.
-    prefix: &'static str,
-}
-
-/// `n` as a float, for a step of the tree's indent.
-#[expect(clippy::cast_precision_loss, reason = "a tree's depth is small")]
-const fn depth_f(n: usize) -> f32 {
-    n as f32
-}
-
 /// What runs inside a node, in words: its subagents and its to-dos.
 fn natives_line(counts: NativeCounts) -> Option<String> {
     let agents = match (counts.agents, counts.running) {
@@ -2870,22 +2104,6 @@ fn natives_line(counts: NativeCounts) -> Option<String> {
 /// Time at work is shown from a minute: less than that on every row of a board just started
 /// would be noise.
 const SHOWN_FROM_MS: u64 = 60_000;
-
-/// What a node spent, as its row says it to assistive technology: "worked 40m, 12m itself,
-/// context 82%".
-fn spent_words(spend: &NodeSpend) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if spend.has_subtree() && spend.subtree_ms >= SHOWN_FROM_MS {
-        parts.push(format!("worked {}", worked(spend.subtree_ms)));
-        parts.push(format!("{} itself", worked(spend.own_ms)));
-    } else if spend.own_ms >= SHOWN_FROM_MS {
-        parts.push(format!("worked {}", worked(spend.own_ms)));
-    }
-    if let Some((bp, _)) = spend.context_shown() {
-        parts.push(format!("context {}%", bp / 100));
-    }
-    parts.join(", ")
-}
 
 /// The word a recap line's selector ends in.
 const fn recap_word(kind: RecapKind) -> &'static str {
@@ -2916,46 +2134,6 @@ const fn recap_icon(kind: RecapKind) -> IconName {
     }
 }
 
-fn moment_icon(theme: &Theme, what: &Moment) -> (IconName, Hsla) {
-    let s = &theme.surfaces;
-    let (glyph, tone) = match what {
-        Moment::Created | Moment::TaskCreated { .. } => (IconName::Plus, s.text_muted),
-        Moment::Orchestrator { .. } => (IconName::Sparkles, s.text_secondary),
-        Moment::Limits { .. } => (IconName::ListFilter, s.text_muted),
-        Moment::Assigned { .. } => (IconName::SquareTerminal, s.text_secondary),
-        Moment::State { to, .. } => {
-            let status = state_status(*to);
-            (status.icon(), board_tone(theme, status))
-        }
-        Moment::Branch { pr: Some(_), .. } => (IconName::GitPullRequest, s.text_secondary),
-        Moment::Branch { .. } => (IconName::GitBranch, s.text_secondary),
-        Moment::Verified(run) if run.passed => (IconName::CircleCheck, s.text_secondary),
-        Moment::Verified(_) => (IconName::CircleX, s.error),
-        Moment::Checks(checks) => match checks.state {
-            slopty_proto::project::ChecksState::Failing => (IconName::CircleX, s.error),
-            slopty_proto::project::ChecksState::Passing => {
-                (IconName::CircleCheck, s.text_secondary)
-            }
-            _ => (IconName::GitPullRequest, s.text_secondary),
-        },
-        Moment::AgentGone { .. } => (IconName::Power, s.text_muted),
-        Moment::Note { .. } | Moment::Told { .. } => (IconName::MessageSquare, s.text_secondary),
-        Moment::Reported { .. } => (IconName::CircleCheck, s.text_secondary),
-        Moment::Delivered { .. } => (IconName::Inbox, s.text_muted),
-        Moment::Step(step) => match (step.kind, &step.state) {
-            (_, StepState::Failed { .. }) => (IconName::CircleX, s.error),
-            (StepKind::Clone, _) => (IconName::FolderGit2, s.text_secondary),
-            (StepKind::Home, StepState::Done { .. }) | (StepKind::Rebase, _) => {
-                (IconName::GitBranch, s.text_secondary)
-            }
-            (StepKind::Home, _) => (IconName::Download, s.text_secondary),
-            (StepKind::Verify, _) => (IconName::ListChecks, s.text_secondary),
-            (StepKind::Merge, _) => (IconName::GitMerge, s.text_secondary),
-        },
-    };
-    (glyph, hsla(tone))
-}
-
 impl Render for ProjectView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         #[cfg(test)]
@@ -2974,10 +2152,6 @@ impl Render for ProjectView {
             .on_action(cx.listener(|this, _: &SelectNext, _w, cx| this.select_by(1, cx)))
             .on_action(cx.listener(|this, _: &SelectPrevious, _w, cx| this.select_by(-1, cx)))
             .on_action(cx.listener(|this, _: &OpenNode, _w, cx| this.open_picked(cx)))
-            .on_action(cx.listener(|this, _: &ShowTree, _w, cx| this.show(Lens::Tree, cx)))
-            .on_action(cx.listener(|this, _: &ShowBoard, _w, cx| this.show(Lens::Board, cx)))
-            .on_action(cx.listener(|this, _: &ShowTimeline, _w, cx| this.show(Lens::Timeline, cx)))
-            .on_action(cx.listener(|this, _: &ShowMachines, _w, cx| this.show(Lens::Machines, cx)))
             .on_action(cx.listener(|this, _: &RunTaskOn, _w, cx| {
                 this.act_on_picked(TaskAction::RunOn, cx);
             }))
@@ -3039,18 +2213,10 @@ impl Render for ProjectView {
                 keys.child(self.empty(PROJECT_GONE, "Its tasks and agents are as they were left.")),
             );
         };
-        let body = match self.lens {
-            Lens::Tree => self.tree(&board, cx),
-            Lens::Board => self.board(&board, cx),
-            Lens::Timeline => self.timeline(&board, cx),
-            Lens::Machines => self.machines(&board, cx),
-        };
+        let body = self.board(&board, cx);
         let composer = self.composer_row(&board, cx);
-        let keys = keys
-            .children(self.recap(&board, cx))
-            .children(self.needs_you(&board, cx))
-            .child(self.lenses(cx))
-            .child(
+        let keys =
+            keys.children(self.recap(&board, cx)).children(self.needs_you(&board, cx)).child(
                 self.scroll_fade(
                     div()
                         .id("project-body")

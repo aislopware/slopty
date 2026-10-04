@@ -1295,7 +1295,6 @@ impl Workspace {
                 tasks: board.tasks.values().map(|c| (c.id.0, format!("{:?}", c.state))).collect(),
                 timeline: board.timeline.len(),
                 shown,
-                lens: board_view.map(|b| b.lens().title().to_owned()),
                 picked: board_view.and_then(ProjectView::picked).map(|node| {
                     node.map_or_else(|| "orchestrator".to_owned(), |t| t.0.to_string())
                 }),
