@@ -55,7 +55,7 @@ use super::protocol::{
 use crate::attach::Attached;
 
 /// What a Codex thread can do through Slopty.
-pub const CAPS: [&str; 10] = [
+pub const CAPS: [&str; 11] = [
     Cap::APPROVALS,
     Cap::CONTINUE,
     Cap::FORK,
@@ -63,6 +63,7 @@ pub const CAPS: [&str; 10] = [
     Cap::LIVE_TEXT,
     Cap::LIVE_TUI,
     Cap::QUEUE,
+    Cap::REWIND,
     Cap::SCHEDULE,
     Cap::SLEEP,
     Cap::STEER,
@@ -895,6 +896,23 @@ impl Shared {
         Ok(p::ThreadForkParams {
             thread_id: self.meta.native.clone(),
             last_turn_id: last,
+            config: Some(unclaimed()),
+            ..p::ThreadForkParams::default()
+        })
+    }
+
+    /// What branches a new thread off this one with the turns before `turn` and none from it on
+    /// (`thread/fork` with `beforeTurnId`); why not, in words, when it cannot.
+    ///
+    /// # Errors
+    ///
+    /// When `turn` is no turn Codex holds of the thread.
+    pub fn fork_before(&self, turn: TurnId) -> Result<p::ThreadForkParams, String> {
+        let codex = self.turns.iter().find(|(_, t)| **t == turn).map(|(c, _)| c);
+        let codex = codex.ok_or_else(|| format!("There is no turn {} here", turn.0))?;
+        Ok(p::ThreadForkParams {
+            thread_id: self.meta.native.clone(),
+            before_turn_id: Some(codex.clone()),
             config: Some(unclaimed()),
             ..p::ThreadForkParams::default()
         })

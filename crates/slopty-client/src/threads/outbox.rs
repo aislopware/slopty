@@ -83,7 +83,8 @@ impl Sent {
             | Intent::Fork { .. }
             | Intent::Sleep
             | Intent::Wake
-            | Intent::Continue { .. } => self.outcome.is_some(),
+            | Intent::Continue { .. }
+            | Intent::Rewind { .. } => self.outcome.is_some(),
         }
     }
 

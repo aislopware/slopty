@@ -257,6 +257,9 @@ impl Cap {
     /// [`wire::Intent::Send`] with [`Delivery::Queue`], held until the turn ends, and the
     /// editing of what is held.
     pub const QUEUE: &'static str = "queue";
+    /// [`wire::Intent::Rewind`]: the agent branches its session before an earlier turn through
+    /// its own door.
+    pub const REWIND: &'static str = "rewind";
     /// [`wire::Intent::Send`] with a delivery the worker keeps ([`Delivery::is_kept`]): it holds
     /// the message until its moment, or the person's word for a draft.
     pub const SCHEDULE: &'static str = "schedule";

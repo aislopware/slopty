@@ -443,6 +443,15 @@ impl Following {
                     let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
                 });
             }
+            // An edit from a turn branches the thread and may put files back: on a task of its own.
+            ThreadRequest::Intent { id, thread, intent: Intent::Rewind { turn, files } } => {
+                tracing::info!(client = %at.client, %id, %thread, turn = turn.0, files, "rewind");
+                let out = at.out.clone();
+                at.tasks.spawn(async move {
+                    let outcome = rewind(&threads, thread, id, turn, files).await;
+                    let _gone = out.send(WorkerMsg::IntentDone(IntentDone { id, outcome })).await;
+                });
+            }
             // Going on in a new thread starts one: on a task of its own.
             ThreadRequest::Intent { id, thread, intent: Intent::Continue { agent } } => {
                 tracing::info!(client = %at.client, %id, %thread, agent = %agent.0, "continue");
@@ -549,6 +558,29 @@ async fn fork(threads: &Threads, thread: ThreadId, id: IntentId, after: Option<T
         let reason = format!("{} threads are not forked here", state.meta.agent.0);
         threads.host.record_start(id, refused(reason))
     }
+}
+
+/// Edit `thread` from turn `turn` for intent `id`, once, its files going back too with `files`
+/// ([`slopty_worker::thread::rewind`]): only Codex branches a session before a turn, and every
+/// other agent is refused in words.
+async fn rewind(
+    threads: &Threads,
+    thread: ThreadId,
+    id: IntentId,
+    turn: TurnId,
+    files: bool,
+) -> Outcome {
+    let shared = threads.host.state(thread).is_some_and(|(state, _)| codex::is_shared(&state));
+    let branch = async || {
+        if shared {
+            threads.codex.rewind(thread, id, turn).await
+        } else {
+            refused("Only Codex goes back to before a turn through its own door".to_owned())
+        }
+    };
+    let (host, snapshots) = (&threads.host, &threads.snapshots);
+    slopty_worker::thread::rewind::rewind(host, snapshots, (thread, id), (turn, files), branch)
+        .await
 }
 
 /// Put `thread`'s agent to sleep for intent `id`, once, when it rests with nothing under way

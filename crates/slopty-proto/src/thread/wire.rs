@@ -248,6 +248,20 @@ pub enum Intent {
         /// The agent the new thread runs.
         agent: AgentId,
     },
+    /// Edit from turn `turn`: go back to just before it, in a new thread ([`Cap::REWIND`]).
+    ///
+    /// The agent branches its session before the turn through its own door, and the turn's
+    /// message waits on the new thread as a draft ([`Delivery::Draft`]) for the person to
+    /// change and send. With `files`, the folder goes back to the turn's before-snapshot too,
+    /// what it held first kept under the thread's refs. Refused while a turn is under way.
+    /// Answered with [`Outcome::Started`] and the new thread; this one goes on as it was, and
+    /// no agent's session file is ever written.
+    Rewind {
+        /// The turn gone back to the start of.
+        turn: TurnId,
+        /// The folder goes back to the turn's before-snapshot too.
+        files: bool,
+    },
 }
 
 /// A file's change as a review showed it, or some of its hunks.
@@ -291,6 +305,7 @@ impl Intent {
             Self::Keep(_) | Self::Revert(_) => Cap::SNAPSHOTS,
             Self::Sleep | Self::Wake => Cap::SLEEP,
             Self::Continue { .. } => Cap::CONTINUE,
+            Self::Rewind { .. } => Cap::REWIND,
         }
     }
 }

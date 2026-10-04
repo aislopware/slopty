@@ -14,11 +14,12 @@ mod codex {
     use slopty_core::SessionId;
     use slopty_proto::thread::wire::{Outcome, Start};
     use slopty_proto::thread::{
-        AgentId, Delivery, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta, ThreadState,
-        TurnState,
+        Action, AgentId, Delivery, Edge, Fork, IntentId, ItemBody, Liveness, ThreadId, ThreadMeta,
+        ThreadState, TreeRef, TurnId, TurnState,
     };
     use slopty_worker::thread::codex::{self, Codex};
     use slopty_worker::thread::log::Limits;
+    use slopty_worker::thread::review::Snapshots;
     use slopty_worker::thread::{Host, Seated};
     use tokio::net::UnixListener;
     use tokio::sync::mpsc;
@@ -536,10 +537,22 @@ mod codex {
         }
     }
 
+    /// `answer`, its thread in folder `cwd` when one is given.
+    fn in_folder(mut answer: Value, cwd: Option<&str>) -> Value {
+        if let Some(cwd) = cwd {
+            answer["result"]["thread"]["cwd"] = json!(cwd);
+        }
+        answer
+    }
+
     /// A stand-in daemon with no thread loaded that takes the recording's thread up again, forks
     /// it into `forked-1`, lists it among the folder's threads under the name Codex keeps, and
     /// answers a turn as the recording did. Every frame the worker sent goes to `heard`.
-    async fn brancher(listener: UnixListener, heard: mpsc::UnboundedSender<Value>) {
+    async fn brancher(
+        listener: UnixListener,
+        heard: mpsc::UnboundedSender<Value>,
+        cwd: Option<String>,
+    ) {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
         let lines = starter();
@@ -550,9 +563,9 @@ mod codex {
                 Some("thread/loaded/list") => {
                     json!({ "result": { "data": [], "nextCursor": null } })
                 }
-                Some("thread/resume") => resumed(),
+                Some("thread/resume") => in_folder(resumed(), cwd.as_deref()),
                 Some("thread/fork") => {
-                    let mut forked = resumed();
+                    let mut forked = in_folder(resumed(), cwd.as_deref());
                     let from = forked["result"]["thread"]["id"].clone();
                     forked["result"]["thread"]["id"] = json!("forked-1");
                     forked["result"]["thread"]["forkedFromId"] = from;
@@ -583,7 +596,7 @@ mod codex {
         let socket: PathBuf = short.path().join("s.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         let (tx, mut heard) = mpsc::unbounded_channel();
-        let _server = tokio::spawn(brancher(listener, tx));
+        let _server = tokio::spawn(brancher(listener, tx, None));
         let host = host(dir.path());
         let (handle, asks) = Codex::channel();
         let _served = codex::spawn(host.clone(), socket, None, asks);
@@ -649,6 +662,131 @@ mod codex {
         let lists: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/list").collect();
         assert_eq!(lists[0]["params"]["cwd"], json!(cwd));
         assert_eq!(lists[0]["params"]["limit"], 5);
+    }
+
+    /// `git args` in `dir`, with `index` as its index when given; what it printed.
+    fn git(dir: &Path, index: Option<&Path>, args: &[&str]) -> String {
+        let mut command = std::process::Command::new("git");
+        command.arg("-C").arg(dir).args(args);
+        command.env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@t");
+        command.env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@t");
+        if let Some(index) = index {
+            command.env("GIT_INDEX_FILE", index);
+        }
+        let out = command.output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Edit from a turn: Codex branches the thread before the turn (`beforeTurnId`), once, and
+    /// the new thread says it shares the turns before it; the turn's message waits on the new
+    /// thread as a draft; with the files, the folder goes back to the turn's before-snapshot
+    /// (a changed file back, a new one gone, the person's own index untouched), what it held
+    /// first kept under the thread's refs. The thread edited from keeps every turn. A turn
+    /// with no snapshot cannot take its files back, and an agent with no door is refused.
+    #[tokio::test]
+    async fn an_edit_from_a_turn_branches_before_it_and_puts_its_files_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().canonicalize().unwrap().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, None, &["init", "-q"]);
+        std::fs::write(work.join("a.txt"), "first\n").unwrap();
+        git(&work, None, &["add", "a.txt"]);
+        git(&work, None, &["commit", "-qm", "a"]);
+        let short = tempfile::Builder::new().prefix("slopty-codex").tempdir_in("/tmp").unwrap();
+        let socket: PathBuf = short.path().join("s.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let (tx, mut heard) = mpsc::unbounded_channel();
+        let cwd = work.to_string_lossy().into_owned();
+        let _server = tokio::spawn(brancher(listener, tx, Some(cwd.clone())));
+        let host = host(dir.path());
+        let snapshots =
+            Snapshots::new(host.clone(), &dir.path().join("snapshots"), Some("git".into()));
+        let (handle, asks) = Codex::channel();
+        let _served = codex::spawn(host.clone(), socket, None, asks);
+
+        let native = resumed()["result"]["thread"]["id"].as_str().unwrap().to_owned();
+        let mut again = start(&work, "");
+        again.prompt = None;
+        again.args = shared::resume_args(&native);
+        let Outcome::Started { thread } = handle.start(IntentId::new(), again).await else {
+            panic!("not taken up again");
+        };
+        let state = until(&host, thread, |s| !s.turns.is_empty()).await;
+        assert_eq!(state.meta.cwd, cwd);
+        let asked = |s: &ThreadState, n: usize| {
+            s.items.iter().filter(|i| i.turn == s.turns[n].id).find_map(|i| match &i.body {
+                ItemBody::User(m) => Some(m.text.text.clone()),
+                _ => None,
+            })
+        };
+        let at = (0..state.turns.len()).find(|n| asked(&state, *n).is_some()).unwrap();
+        let (turn, prompt) = (state.turns[at].id, asked(&state, at).unwrap());
+        let kept_before = state.turns.len();
+
+        let edit = |id| {
+            let handle = handle.clone();
+            slopty_worker::thread::rewind::rewind(
+                &host,
+                &snapshots,
+                (thread, id),
+                (turn, true),
+                move || {
+                    let handle = handle.clone();
+                    async move { handle.rewind(thread, id, turn).await }
+                },
+            )
+        };
+        let bare = edit(IntentId::new()).await;
+        let Outcome::Refused { reason } = bare else { panic!("{bare:?}") };
+        assert!(reason.contains("No snapshot"), "{reason}");
+
+        // The turn's before-snapshot, as the worker takes one: the first file as committed.
+        let index = dir.path().join("index");
+        git(&work, Some(&index), &["read-tree", "HEAD"]);
+        git(&work, Some(&index), &["add", "-A"]);
+        let tree = TreeRef(git(&work, Some(&index), &["write-tree"]));
+        host.apply(thread, vec![Action::Snapshot { turn, edge: Edge::Before, tree }]);
+        std::fs::write(work.join("a.txt"), "changed by the turn\n").unwrap();
+        std::fs::write(work.join("new.txt"), "made by the turn\n").unwrap();
+
+        let id = IntentId::new();
+        let Outcome::Started { thread: branch } = edit(id).await else { panic!("not edited") };
+        assert_eq!(edit(id).await, Outcome::Started { thread: branch }, "once");
+        assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "first\n");
+        assert!(!work.join("new.txt").exists(), "what the turn made is gone");
+        assert_eq!(
+            git(&work, None, &["status", "--porcelain"]),
+            "",
+            "the person's index untouched"
+        );
+        let rewound = format!("refs/slopty/threads/{thread}/{}-rewound", turn.0);
+        let held = git(&work, None, &["show", &format!("{rewound}:new.txt")]);
+        assert_eq!(held, "made by the turn", "what the folder held first is kept");
+
+        let state = until(&host, branch, |s| s.pending.len() == 1).await;
+        let shared_turn = (at > 0).then(|| host.state(thread).unwrap().0.turns[at - 1].id);
+        assert_eq!(state.meta.forked_from, Some(Fork { thread, turn: shared_turn }));
+        assert_eq!(state.pending[0].delivery, Delivery::Draft);
+        assert_eq!(state.pending[0].text, prompt, "the turn's message, back to be edited");
+        assert_eq!(host.state(thread).unwrap().0.turns.len(), kept_before, "the old thread kept");
+        let mut sent = Vec::new();
+        while let Ok(msg) = heard.try_recv() {
+            sent.push(msg);
+        }
+        let forks: Vec<&Value> = sent.iter().filter(|m| m["method"] == "thread/fork").collect();
+        assert_eq!(forks.len(), 1, "asked once: {sent:?}");
+        let codex_turn = &resumed()["result"]["thread"]["turns"][at]["id"];
+        assert_eq!(forks[0]["params"]["beforeTurnId"], *codex_turn);
+
+        let refused = slopty_worker::thread::rewind::rewind(
+            &host,
+            &snapshots,
+            (branch, IntentId::new()),
+            (TurnId(99), false),
+            async || Outcome::Done,
+        );
+        assert!(matches!(refused.await, Outcome::Refused { .. }), "no such turn");
     }
 
     /// A stand-in daemon that has the recording's thread loaded, takes it up again on each

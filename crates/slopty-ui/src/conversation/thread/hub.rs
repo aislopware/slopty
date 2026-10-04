@@ -465,6 +465,7 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Sleep => "Couldn't put the agent to sleep".to_owned(),
         Intent::Wake => "Couldn't wake the agent".to_owned(),
         Intent::Continue { .. } => "Couldn't go on in a new thread".to_owned(),
+        Intent::Rewind { .. } => "Couldn't go back to that turn".to_owned(),
     };
     format!("{what}: {why}")
 }

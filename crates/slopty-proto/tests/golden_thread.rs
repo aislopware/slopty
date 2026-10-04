@@ -441,6 +441,7 @@ mod golden_thread {
         snap("intent_sleep", &send(Intent::Sleep));
         snap("intent_wake", &send(Intent::Wake));
         snap("intent_continue", &send(Intent::Continue { agent: AgentId::named(AgentId::PI) }));
+        snap("intent_rewind", &send(Intent::Rewind { turn: TurnId(3), files: true }));
     }
 
     #[test]

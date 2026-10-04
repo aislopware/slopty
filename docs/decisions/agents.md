@@ -1445,3 +1445,37 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
     (`slopty-worker/tests/acp.rs`); `it_goes_before_what_waits_and_stops_only_a_turn_under_way`
     (`thread::steer`); golden `intent_send_interrupt`.
+
+- ✅ **Edit from a turn goes back in a new thread, through the agent's own door** (2026-10-04,
+  §11 of the T3 Code UI study). `Intent::Rewind { turn, files }` needs `Cap::REWIND`.
+  - **A branch, never a rewrite.** The conversation goes back only the way the agent offers.
+    Codex branches a session cut before a turn (`thread/fork` with `beforeTurnId`), so its
+    adapter has the cap, and the new thread's `forked_from` names the turn before. The thread
+    edited from keeps every turn: the agent's session stays the record, and no session file is
+    written. Codex's `thread/revert` rewrites a thread's own history in place. It is left
+    unused, because the branch loses nothing and gives the same next turn.
+  - **The other agents, checked and refused.**
+    - pi's RPC `fork { entryId }` moves the running pi onto a new session cut before a message.
+      Taking it means the adapter follows a session that changes under a thread, which it does
+      not do yet. Until then pi has no cap.
+    - ACP has no rollback, and its `session/fork` branches a whole session.
+    - Claude Code goes back through its TUI's own rewind, which Slopty never types into. Its
+      `--resume-session-at` is a hidden flag for print mode only, so it is not a door.
+  - **The prompt returns to the draft.** The turn's message waits on the new thread as a draft
+    (`Delivery::Draft`), kept on the worker, for the person to change and send.
+  - **The files, on the person's word.** With `files`, the folder goes back to the turn's
+    before-snapshot (`refs/slopty/threads/<thread>/<turn>-before`) through the thread's own
+    index (`git restore --source --worktree`). Every file a snapshot holds goes back to its blob
+    and mode, and a file the snapshot lacks is removed. Ignored files, the person's index, `HEAD`
+    and stash are untouched. What the folder held first is kept as
+    `refs/slopty/threads/<thread>/<turn>-rewound`, so nothing is lost. A turn with no
+    before-snapshot is refused before anything happens.
+  - **Order and once.** It is refused while a turn is under way. The branch comes first, since it
+    changes nothing on disk, then the files, then the draft. Each step is kept under an intent of
+    its own, so a repeat finishes what the first left and repeats nothing.
+  - **Not yet.** The menu item on a person's message, "Edit from here" with or without the
+    files, is the client's half.
+  - Tests: `an_edit_from_a_turn_branches_before_it_and_puts_its_files_back`
+    (`slopty-worker/tests/codex.rs`, a stand-in Codex daemon and a real git folder);
+    `a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from`
+    (`slopty-agent/tests/codex.rs`); golden `intent_rewind`.

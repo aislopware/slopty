@@ -814,8 +814,9 @@ mod tests {
         assert!(shared.settings(approval, &sandbox).is_empty(), "nothing moved");
     }
 
-    /// A fork names Codex's own id of the turn it branches after, or none for the whole thread;
-    /// a turn Codex does not hold, or the one under way, is refused in words. A thread Codex
+    /// A fork names Codex's own id of the turn it branches after, or none for the whole thread,
+    /// or of the turn it branches before for an edit from there; a turn Codex does not hold, or
+    /// the one under way, is refused in words. A thread Codex
     /// forked says which it came from, as Codex records it, with no turn.
     #[test]
     fn a_fork_names_codexs_turn_and_a_forked_thread_says_where_it_came_from() {
@@ -837,8 +838,11 @@ mod tests {
             "turn/completed",
             &recorded_note("question.jsonl", "turn/completed"),
         );
-        assert_eq!(shared.fork(Some(turn)).unwrap().last_turn_id, Some(codex_turn));
+        assert_eq!(shared.fork(Some(turn)).unwrap().last_turn_id, Some(codex_turn.clone()));
         assert!(shared.fork(Some(TurnId(99))).is_err(), "no such turn");
+        let before = shared.fork_before(turn).unwrap();
+        assert_eq!((before.before_turn_id, before.last_turn_id), (Some(codex_turn), None));
+        assert!(shared.fork_before(TurnId(99)).is_err(), "no such turn");
 
         let lines = fixture("question.jsonl");
         let started = lines.iter().find(|l| l.msg["result"].get("thread").is_some()).unwrap();
