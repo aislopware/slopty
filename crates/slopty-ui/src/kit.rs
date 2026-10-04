@@ -25,11 +25,13 @@ mod change;
 mod disclosure;
 pub mod find;
 mod fit;
+pub mod menu;
 mod spark;
 pub use change::{Gliding, Rolling, on_change};
 pub use disclosure::Disclosure;
 pub use find::FindBar;
 pub use fit::{FitLabel, fit_label};
+pub use menu::{Menu, MenuItem, MenuPanel};
 pub use spark::Spark;
 
 /// Figures of one width: OpenType `tnum`, which the system UI font and the terminal face both
@@ -2349,7 +2351,7 @@ mod tests {
             ("slopty-ui/src/conversation/thread/view/composer.rs", "fn shell<"),
             ("slopty-ui/src/kit/find.rs", "super::elevate(div(), &theme)"),
             ("slopty-ui/src/conversation/thread/view/aside.rs", ".id(\"thread-aside\")"),
-            ("slopty-ui/src/workspace/titlebar.rs", "fn menu_panel("),
+            ("slopty-ui/src/kit/menu.rs", "super::elevate(div(), &theme)"),
             ("slopty-app/src/lib.rs", ".id(\"add-worker\")"),
         ];
         let lines: Vec<_> =

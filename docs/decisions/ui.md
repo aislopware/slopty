@@ -6547,3 +6547,20 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   GPUI draws it after the page, so it shows over the native view. The query itself
   (`kit::find::Query`) is the file tile's, moved to the kit so every bar shares it.
 
+- ✅ **One menu engine, the kit's** (2026-10-05). The bar's menus, a terminal block's menu and the
+  commit sheet's merge-method menu each drew their own panel and ran their own keys: only the
+  bar's walked its rows with the arrows, only the block menu closed on Esc by the terminal's own
+  key handler, and the merge menu took no keyboard at all. After Ely GPUI Components' menu and
+  select (Ely study §5 #2), `kit::Menu` holds the rows (plain, check or radio, an icon, muted keys,
+  disabled) with hairlines between groups, and `kit::MenuPanel` draws and runs them. It takes the
+  keyboard when it opens. Opened from the keyboard its first row is marked; from the pointer, none.
+  ↑ and ↓ go round past a disabled row, Home and End go to the ends, and letters typed within
+  800 ms go to the row they start, as Finder does. ↩ and Space choose on their release, armed by
+  their own press, so the key that opened a menu never chooses in it. Esc and a press outside
+  dismiss it. Choosing closes the menu first and then runs the row, so the row runs with the
+  keyboard back with its owner. The marked row is the panel's active descendant, so a screen
+  reader follows the mark. Rows go by `{menu}-{key}` under `menu`, `block-menu` and
+  `commit-method`. There are no submenus, since no menu has one. The composer's model, mode,
+  effort, `/` and `@` lists stay as they are: they are pickers bound to the field, which keeps
+  the keyboard while they filter, so a panel that takes the keyboard is the wrong shape for them.
+  The status bar's popovers show facts and hold no rows to choose, so they are not menus.

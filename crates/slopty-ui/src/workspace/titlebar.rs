@@ -41,7 +41,6 @@ use super::navigator::Mode;
 use super::rollup::Rollup;
 use super::strip::NEW_WORKSPACE;
 use super::{MenuEntry, MenuGroup, WorkspaceView};
-use crate::a11y::tab_stop;
 use crate::colors::hsla;
 use crate::draw::Draw;
 use crate::icons::IconName;
@@ -525,7 +524,6 @@ impl WorkspaceView {
             (None, None) => return None,
         };
         let theme = &self.theme;
-        let s = &theme.surfaces;
         let spacing = theme.spacing;
         let safe = window.insets().effective();
         let entity = cx.entity().downgrade();
@@ -582,66 +580,27 @@ impl WorkspaceView {
                 entries
             }
         };
-        let mut rows: Vec<gpui::AnyElement> = Vec::with_capacity(entries.len());
-        if let MenuKind::Machine(key) = which {
-            rows.extend(self.machine_facts_rows(key));
-        }
+        let head = match which {
+            MenuKind::Machine(key) => self.machine_facts_rows(key),
+            _ => Vec::new(),
+        };
+        let mut menu = kit::Menu::new();
         let mut group = entries.first().map(|entry| entry.group);
-        for (i, entry) in entries.into_iter().enumerate() {
+        for entry in entries {
             if group != Some(entry.group) {
                 group = Some(entry.group);
-                rows.push(
-                    div()
-                        .debug_selector(move || format!("menu-separator-{i}"))
-                        .flex_none()
-                        .child(kit::list_rule(theme))
-                        .into_any_element(),
-                );
+                menu.separate();
             }
-            rows.push({
-                let run = Rc::clone(&entry.run);
-                let entity = entity.clone();
-                let row = kit::sheet_row(theme, kit::Row::One)
-                    .id(("menu-row", i))
-                    .debug_selector({
-                        let label = entry.label.clone();
-                        move || format!("menu-{label}")
-                    })
-                    .role(Role::MenuItem)
-                    .aria_label(entry.label.clone())
-                    .gap(px(spacing.md))
-                    .cursor_pointer()
-                    .map(kit::eased)
-                    .hover(move |el| el.bg(hsla(s.hover)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(theme.typography.ui_size))
-                            .text_color(hsla(s.text))
-                            .child(entry.label.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(theme.typography.small()))
-                            .text_color(hsla(s.text_muted))
-                            .child(entry.detail.clone()),
-                    );
-                tab_stop(row, s.accent)
-                    .on_click(move |_ev, window, cx| {
-                        // The menu closes first, so the entry runs with the focus back where
-                        // it was.
-                        let _closed = entity.update(cx, |this, cx| this.close_menu(window, cx));
-                        run(window, cx);
-                    })
-                    .into_any_element()
-            });
+            menu.push(
+                kit::MenuItem::with_run(entry.label.clone(), entry.label, entry.run)
+                    .detail(entry.detail),
+            );
         }
         // A base unit below the bar, the right edge on the window's inset, where the tiles'
         // headers end: a popover lined up with what it covers rather than hung off its button a
         // few points in.
         let gap = spacing.xs;
-        let panel = self.menu_panel(rows, which, leaving, cx);
+        let panel = self.menu_panel(menu, head, which, leaving, cx);
         // A click anywhere else closes it and goes no further, so a press on the button that
         // opened it closes it rather than opening it again. A popover, it paints over the frame
         // and the navigator laid over it, under a dialog. Leaving, it lets the window have the
@@ -690,26 +649,27 @@ impl WorkspaceView {
     /// ([`kit::Presence`]).
     fn menu_panel(
         &self,
-        rows: Vec<gpui::AnyElement>,
+        menu: kit::Menu,
+        head: Vec<gpui::AnyElement>,
         which: MenuKind,
         leaving: bool,
         cx: &Context<Self>,
     ) -> gpui::AnyElement {
         let theme = &self.theme;
         let spacing = theme.spacing;
-        let panel = kit::elevate(div(), theme)
-            .id("menu")
-            .debug_selector(|| "menu".to_owned())
-            .role(Role::Menu)
-            .occlude()
-            .w(px(260.0))
-            .flex()
-            .flex_col()
-            .p(px(kit::sheet_pad(theme)))
-            .rounded(px(theme.radii.lg))
-            .font_family(theme.typography.ui_family.clone())
-            .on_mouse_down(MouseButton::Left, |_ev, _w, cx| cx.stop_propagation())
-            .children(rows);
+        let (closing, dismissing) = (cx.entity().downgrade(), cx.entity().downgrade());
+        let panel =
+            kit::MenuPanel::new("menu", menu_name(which), Rc::new(menu), theme, move |w, cx| {
+                // The menu closes first, so the row runs with the keyboard back where it was.
+                let _gone = closing.update(cx, |this, cx| this.close_menu(w, cx));
+            })
+            .on_dismiss(move |w, cx| {
+                let _gone = dismissing.update(cx, |this, cx| this.dismiss_menu(w, cx));
+            })
+            .head(head)
+            .keyed(self.menu_keyed)
+            .inert(leaving);
+        let panel = div().child(panel);
         let panel =
             if leaving { panel.debug_selector(|| "menu-leaving".to_owned()) } else { panel };
         let id = SharedString::from(format!("menu-presence-{which:?}"));
@@ -717,5 +677,16 @@ impl WorkspaceView {
             .arrives_whole(self.menu_keyed || !self.chrome_moves(cx))
             .travel(-spacing.xs)
             .into_any_element()
+    }
+}
+
+/// What a bar's menu is called, as a screen reader names it.
+const fn menu_name(which: MenuKind) -> &'static str {
+    match which {
+        MenuKind::New => NEW,
+        MenuKind::More => "More",
+        MenuKind::Machine(_) => "Machine",
+        MenuKind::Workspaces => "Workspaces",
+        MenuKind::Checkouts => "Checkouts",
     }
 }

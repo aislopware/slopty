@@ -11,7 +11,7 @@ Heading │ terminal Terminal
 Label │ ~
 Button │ Fullscreen tile
 Button │ Close tile
-Group (focused)
+Group
 Terminal │ shell │ ~ %
 Group │ Release
 Heading │ note Release
@@ -30,7 +30,7 @@ Group
 Terminal │ shell
 Group │ Status
 Status │ e2e-worker
-Menu
+Menu │ More (focused)
 MenuItem │ Command palette
 MenuItem │ Overview
 MenuItem │ Stream stats

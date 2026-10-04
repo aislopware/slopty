@@ -1443,14 +1443,15 @@ impl TerminalView {
         items
     }
 
-    /// A menu item was chosen: do it and close the menu.
+    /// A menu item was chosen, the menu already closed: do it, for `block` (the one the menu
+    /// was opened on, if any).
     fn block_menu_pick(
         &mut self,
         item: BlockMenuItem,
+        block: Option<CommandBlock>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.block_menu.take() else { return };
         match item {
             BlockMenuItem::Copy => self.copy(&Copy, window, cx),
             BlockMenuItem::Paste => self.paste_clipboard(&Paste, window, cx),
@@ -1458,7 +1459,7 @@ impl TerminalView {
             BlockMenuItem::ClearScreen => self.clear_screen(&ClearScreen, window, cx),
             BlockMenuItem::AttachSelection => self.attach_selection(&AttachSelection, window, cx),
             BlockMenuItem::Note => {
-                let text = match menu.block {
+                let text = match block {
                     Some(block) => block_note(&block),
                     None => match self.selected_text().filter(|t| !t.trim().is_empty()) {
                         Some(t) => format!("```\n{t}\n```\n"),
@@ -1472,12 +1473,20 @@ impl TerminalView {
             | BlockMenuItem::Rerun
             | BlockMenuItem::Attach
             | BlockMenuItem::SelectBlock => {
-                if let Some(block) = menu.block {
+                if let Some(block) = block {
                     self.block_item_pick(item, block, cx);
                 }
             }
         }
         cx.notify();
+    }
+
+    /// Close the block menu and give the program the keyboard back.
+    fn close_block_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.block_menu.take().is_some() {
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
     }
 
     /// One of the block's own items.
@@ -1862,50 +1871,29 @@ impl TerminalView {
 
     /// The block menu, drawn late and anchored where the right click landed.
     fn render_block_menu(&self, menu: &BlockMenu, cx: &Context<Self>) -> gpui::AnyElement {
-        let theme = &self.theme;
-        let s = &theme.surfaces;
-        let spacing = &theme.spacing;
         let has_selection = self.selection_has_text();
         let items = Self::block_menu_items(menu.block.as_ref(), has_selection, menu.attach);
-        let list = div()
-            .id("block-menu")
-            .debug_selector(|| "block-menu".to_owned())
-            .role(gpui::accesskit::Role::Menu)
-            .aria_label(if menu.block.is_some() { "Command block" } else { "Terminal" })
-            .occlude()
-            .flex()
-            .flex_col()
-            .min_w(px(160.0))
-            .p(px(spacing.xs))
-            .rounded(px(theme.radii.sm))
-            .map(|el| crate::kit::elevate(el, theme))
-            .text_size(px(theme.typography.small()))
-            .text_color(hsla(s.text))
-            .on_mouse_down_out(cx.listener(|this, _ev, _window, cx| {
-                this.block_menu = None;
-                cx.notify();
-            }))
-            .children(items.into_iter().map(|item| {
-                let key = item.key();
-                let row = div()
-                    .id(gpui::ElementId::Name(format!("block-menu-{key}").into()))
-                    .debug_selector(move || format!("block-menu-{key}"))
-                    .role(gpui::accesskit::Role::MenuItem)
-                    .aria_label(item.label())
-                    .px(px(spacing.sm))
-                    .py(px(spacing.xxs))
-                    .rounded(px(theme.radii.xs))
-                    .cursor_pointer()
-                    .hover(move |el| el.bg(hsla(s.hover)))
-                    .child(SharedString::from(item.label()));
-                crate::a11y::tab_stop(row, s.accent).on_click(cx.listener(
-                    move |this, _ev, window, cx| {
-                        this.block_menu_pick(item, window, cx);
-                    },
-                ))
+        let this = cx.entity().downgrade();
+        let mut rows = crate::kit::Menu::new();
+        for item in items {
+            let (this, block) = (this.clone(), menu.block.clone());
+            rows.push(crate::kit::MenuItem::new(item.key(), item.label(), move |window, cx| {
+                let _gone = this.update(cx, |v, cx| {
+                    v.block_menu_pick(item, block.clone(), window, cx);
+                });
             }));
+        }
+        let label = if menu.block.is_some() { "Command block" } else { "Terminal" };
+        let panel = crate::kit::MenuPanel::new("block-menu", label, Rc::new(rows), &self.theme, {
+            move |window, cx| {
+                let _gone = this.update(cx, |v, cx| v.close_block_menu(window, cx));
+            }
+        });
         deferred(
-            anchored().position(menu.at).snap_to_window_with_margin(px(spacing.sm)).child(list),
+            anchored()
+                .position(menu.at)
+                .snap_to_window_with_margin(px(self.theme.spacing.sm))
+                .child(panel),
         )
         .with_priority(crate::palette::Layer::Submenu.priority())
         .into_any_element()
@@ -3243,13 +3231,6 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // Esc closes the block menu and goes no further.
-        if self.block_menu.is_some() && event.keystroke.key == "escape" {
-            self.block_menu = None;
-            cx.notify();
-            cx.stop_propagation();
-            return;
-        }
         // Something waiting at the foot (a held-back paste, a close): ↩ confirms it, Esc
         // drops it, any other key drops it and goes on to the program as typed (nothing is
         // swallowed).

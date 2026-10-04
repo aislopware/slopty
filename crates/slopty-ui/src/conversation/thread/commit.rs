@@ -12,6 +12,7 @@
 //! one answer.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 
 use gpui::accesskit::{Role, Toggled};
 use gpui::prelude::FluentBuilder as _;
@@ -660,36 +661,30 @@ impl CommitSheet {
 
     /// The merge's methods, under the split button: the one chosen ticked.
     fn methods_menu(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = &self.theme;
-        let s = theme.surfaces;
-        kit::elevate(div(), theme)
-            .id("commit-methods")
-            .debug_selector(|| "commit-methods".to_owned())
-            .role(Role::Menu)
-            .aria_label("Merge method")
-            .w(px(kit::Overlay::List.bounds().0 / 2.0))
-            .p(px(kit::sheet_pad(theme)))
-            .rounded(px(theme.radii.lg))
-            .children(Method::ALL.into_iter().map(|method| {
-                let on = method == self.method;
-                kit::sheet_row(theme, kit::Row::One)
-                    .id(ElementId::Name(format!("commit-method-{}", method.wire()).into()))
-                    .debug_selector(move || format!("commit-method-{}", method.wire()))
-                    .role(Role::MenuItemRadio)
-                    .aria_label(method.verb())
-                    .aria_toggled(if on { Toggled::True } else { Toggled::False })
-                    .cursor_pointer()
-                    .text_size(px(theme.typography.ui_size))
-                    .hover(move |el| el.bg(hsla(s.hover)))
-                    .child(div().flex_1().child(method.verb()))
-                    .children(on.then(|| self.icon(IconName::Check, s.text_secondary)))
-                    .on_click(cx.listener(move |this, _ev, _w, cx| {
+        let this = cx.entity().downgrade();
+        let mut menu = kit::Menu::new();
+        for method in Method::ALL {
+            let this = this.clone();
+            menu.push(
+                kit::MenuItem::new(method.wire(), method.verb(), move |_w, cx| {
+                    let _gone = this.update(cx, |this, cx| {
                         this.method = method;
-                        this.methods_open = false;
                         cx.notify();
-                    }))
-            }))
-            .into_any_element()
+                    });
+                })
+                .mark(kit::menu::Mark::Radio(method == self.method)),
+            );
+        }
+        kit::MenuPanel::new("commit-method", "Merge method", Rc::new(menu), &self.theme, {
+            move |window, cx| {
+                let _gone = this.update(cx, |this, cx| {
+                    this.methods_open = false;
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                });
+            }
+        })
+        .into_any_element()
     }
 
     /// The changed files, each ticked to go in the commit.
@@ -1062,13 +1057,8 @@ impl Render for CommitSheet {
                     .track_focus(&self.focus)
                     .role(Role::Dialog)
                     .aria_label("Commit")
-                    .capture_action(cx.listener(|this, _: &input::Escape, _w, cx| {
-                        if this.methods_open {
-                            this.methods_open = false;
-                            cx.notify();
-                        } else {
-                            Self::close(cx);
-                        }
+                    .capture_action(cx.listener(|_this, _: &input::Escape, _w, cx| {
+                        Self::close(cx);
                         cx.stop_propagation();
                     }))
                     .overflow_y_scroll()
