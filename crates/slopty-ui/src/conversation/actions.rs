@@ -13,7 +13,11 @@ gpui::actions!(
         QueueMessage,
         /// Take the last waiting message into the thread's composer to change it.
         EditLastQueued,
-        /// Choose when the thread's draft goes: at a time, or once another thread rests.
-        SendLater,
+        /// Open the commit sheet over the thread's or the review's tile.
+        OpenCommit,
+        /// Ask the branch's pull request again, where a thread's or a review's tile shows it.
+        RefreshPullRequest,
+        /// Switch the thread's model to think at the next level its agent offers, round.
+        CycleEffort,
     ]
 );

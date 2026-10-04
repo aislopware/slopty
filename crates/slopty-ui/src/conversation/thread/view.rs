@@ -24,6 +24,7 @@ use gpui::{
     Styled as _, Subscription, Task, Window, div, list, px, relative,
 };
 use gpui_kit::component::input::{self, InputEvent, TextareaState};
+use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
@@ -35,12 +36,16 @@ use slopty_proto::thread::{
 use slopty_theme::{Rgb, Theme, Typography, alpha};
 
 use self::composing::Composing;
+use super::commit::{CommitEvent, CommitSheet};
 use super::hub::{HubEvent, ThreadHub};
 use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
-use crate::conversation::composer::Attach;
+use crate::conversation::attach::Attach;
 use crate::conversation::diff::Block;
-use crate::conversation::{CTX, CycleDensity, EditLastQueued, Interrupt, QueueMessage, SendLater};
+use crate::conversation::{
+    CTX, CycleDensity, CycleEffort, EditLastQueued, Interrupt, OpenCommit, QueueMessage,
+    RefreshPullRequest,
+};
 use crate::icons::{Glyph, IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
 
@@ -48,6 +53,9 @@ use crate::kit::{self, ButtonKind};
 fn message_group(id: &ItemId) -> SharedString {
     SharedString::from(format!("message-{}", id.0))
 }
+
+/// How long a copy button says it copied.
+pub(crate) const COPIED_FOR: Duration = Duration::from_millis(1_500);
 
 /// The widest the reading column's text runs, in points at zoom 1 (`design.md` §3).
 pub const COLUMN: f32 = 736.0;
@@ -82,8 +90,9 @@ const TOOL_ROW: f32 = 24.0;
 /// Lines of a call's output or a diff shown before "Show all".
 const PEEK_LINES: usize = 12;
 
-/// Markdown headings at the prose base: h1, h2, then the rest at the prose size.
-const HEADINGS: [f32; 2] = [18.0, 16.0];
+/// Markdown headings over the prose size, in points: h1, h2, then the rest at the prose size
+/// (18 and 16 at the default 15).
+const HEADINGS: [f32; 2] = [3.0, 1.0];
 
 /// The gap between an answer's paragraphs, in points at the prose size.
 const PARAGRAPH: f32 = 10.0;
@@ -96,10 +105,14 @@ const BUBBLE_LINES: usize = 8;
 const BUBBLE_CHARS: usize = 480;
 
 mod asking;
+mod branch;
 mod composer;
 mod composing;
 pub mod denying;
-pub mod editing;
+mod drafts;
+mod finding;
+#[cfg(test)]
+pub(crate) use finding::ASK_AFTER as FIND_ASK_AFTER;
 pub mod exited;
 mod later;
 mod notes;
@@ -108,6 +121,10 @@ mod plan;
 mod tools;
 mod trail;
 mod tray;
+
+pub(crate) use composer::{context_ring, context_tone};
+pub(crate) use pictures::picture_words;
+pub(crate) use plan::plan_parts;
 
 /// Diffs coloured once, by call.
 type Coloured = HashMap<ItemId, Rc<[Block]>>;
@@ -199,8 +216,6 @@ pub struct ThreadView {
     asking: Option<asking::Asking>,
     /// A request being denied with a reason.
     denying: Option<denying::Denying>,
-    /// A request whose call is being changed before it is allowed.
-    editing: Option<editing::Editing>,
     /// The agent's terminal comes into view once the thread names one: the person asked for
     /// it before the worker had opened it.
     reveal_terminal: bool,
@@ -220,6 +235,14 @@ pub struct ThreadView {
     /// The message whose words were just copied, by its item, and the timer that clears it.
     copied: Option<ItemId>,
     copied_clear: Option<Task<()>>,
+    /// The commit sheet over the tile, while it is open.
+    commit: Option<(Entity<CommitSheet>, Subscription)>,
+    /// A field for each draft the worker holds.
+    drafts: drafts::Drafts,
+    /// The "Branch from here" panel open under a message, and its settings.
+    branching: Option<branch::Branching>,
+    /// The find bar, while it is open.
+    finder: Option<finding::Finder>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -267,7 +290,11 @@ impl ThreadView {
                 _ => {}
             });
         let hearing = cx.subscribe(&hub, |this, _hub, event, cx| match event {
-            HubEvent::Thread(t) if *t == this.thread => this.rebuild(cx),
+            HubEvent::Thread(t) if *t == this.thread => {
+                this.rebuild(cx);
+                this.chase(cx);
+            }
+            HubEvent::Hits => this.refind(cx),
             HubEvent::Table | HubEvent::Expanded(_) => cx.notify(),
             _ => {}
         });
@@ -319,7 +346,6 @@ impl ThreadView {
             pictures: RefCell::default(),
             asking: None,
             denying: None,
-            editing: None,
             reveal_terminal: false,
             marks: Cell::default(),
             unseen_from: None,
@@ -329,6 +355,10 @@ impl ThreadView {
             marks_moved: Cell::default(),
             copied: None,
             copied_clear: None,
+            commit: None,
+            drafts: drafts::Drafts::default(),
+            branching: None,
+            finder: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![composing, hearing, watching],
         };
@@ -409,6 +439,9 @@ impl ThreadView {
     /// Draw in `theme`.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.shared = Arc::new(theme.clone());
+        if let Some((sheet, _)) = &self.commit {
+            sheet.update(cx, |sheet, cx| sheet.set_theme(theme.clone(), cx));
+        }
         self.theme = theme;
         self.diffs.borrow_mut().clear();
         self.list.remeasure();
@@ -520,15 +553,17 @@ impl ThreadView {
         unshown: &[&Sent],
     ) -> u64 {
         let flags = |item: &ItemId| {
-            u64::from(self.items_open.contains(item)) | (u64::from(self.whole.contains(item)) << 1)
+            u64::from(self.items_open.contains(item))
+                | (u64::from(self.whole.contains(item)) << 1)
+                | (u64::from(self.branching.as_ref().is_some_and(|b| b.item == *item)) << 2)
         };
         match row {
             Row::User { item }
             | Row::Text { item }
             | Row::Reasoning { item }
             | Row::Tool { item }
-            | Row::Note { item } => mirror.rev(item).wrapping_mul(4) | flags(item),
-            Row::Fold { turn, open } => {
+            | Row::Note { item } => mirror.rev(item).wrapping_mul(8) | flags(item),
+            Row::Fold { turn, open, .. } => {
                 let ended = state.turn(*turn).and_then(|t| t.ended_ms).map_or(0, WallMs::as_millis);
                 ended.wrapping_mul(2) | u64::from(*open)
             }
@@ -639,14 +674,11 @@ impl ThreadView {
             self.composer.update(cx, |c, cx| c.clean(window, cx));
             return;
         }
-        // A draft set to go later goes then, whichever key sent it.
-        let delivery = self.later().unwrap_or(delivery);
         if self.composing.uploading() {
             self.arm(delivery, window, cx);
             return;
         }
         let Some(text) = self.take_message(cx) else { return };
-        self.send_later(None, cx);
         let _id = self.intent(Intent::Send { text, delivery, attachments: Vec::new() }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
         self.list.scroll_to_end();
@@ -713,6 +745,22 @@ impl ThreadView {
         self.rebuild(cx);
     }
 
+    /// Switch the model to think at the next level the agent offers after the one it is at,
+    /// round; the first where it says none.
+    fn next_effort(&self, cx: &mut Context<Self>) {
+        let Some(state) = self.state(cx) else { return };
+        let efforts = &state.meta.efforts;
+        if !state.meta.can(Cap::SET_EFFORT) || efforts.is_empty() {
+            return;
+        }
+        let now = state.meters.effort.as_deref();
+        let at = efforts.iter().position(|e| now.is_some_and(|n| n == e.id || n == e.label));
+        let next = at.map_or(0, |ix| ix.saturating_add(1).checked_rem(efforts.len()).unwrap_or(0));
+        if let Some(effort) = efforts.get(next).map(|e| e.id.clone()) {
+            let _id = self.intent(Intent::SetEffort { effort }, cx);
+        }
+    }
+
     fn toggle_turn(&mut self, turn: TurnId, cx: &mut Context<Self>) {
         if !self.open.remove(&turn) {
             self.open.insert(turn);
@@ -757,6 +805,52 @@ impl ThreadView {
         }
     }
 
+    /// The folder the thread works in, when the worker said: its repository is what the
+    /// commit sheet works.
+    pub(super) fn repo(&self, cx: &App) -> Option<String> {
+        self.state(cx).map(|st| st.meta.cwd.clone()).filter(|cwd| !cwd.trim().is_empty())
+    }
+
+    /// Open the commit sheet over the tile, on the thread's repository.
+    pub fn open_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((sheet, _)) = &self.commit {
+            sheet.update(cx, |sheet, cx| sheet.refresh(cx));
+            return;
+        }
+        let Some(repo) = self.repo(cx) else { return };
+        let (hub, theme) = (self.hub.clone(), self.theme.clone());
+        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx));
+        let closing =
+            cx.subscribe_in(&sheet, window, |this, _sheet, event, window, cx| match event {
+                CommitEvent::Close => {
+                    this.commit = None;
+                    this.composer.update(cx, |c, cx| c.focus(window, cx));
+                    cx.notify();
+                }
+            });
+        self.commit = Some((sheet, closing));
+        cx.notify();
+    }
+
+    /// Whether the commit sheet is open.
+    #[must_use]
+    pub const fn commit_open(&self) -> bool {
+        self.commit.is_some()
+    }
+
+    /// Ask the branch's pull request again.
+    fn refresh_pull(&self, cx: &mut Context<Self>) {
+        if let Some((sheet, _)) = &self.commit {
+            sheet.update(cx, |sheet, cx| sheet.refresh(cx));
+            return;
+        }
+        if let Some(repo) = self.repo(cx) {
+            let _asked = self
+                .hub
+                .update(cx, |hub, cx| hub.git_op(&repo, slopty_proto::git::GitOp::PullStatus, cx));
+        }
+    }
+
     // ----- drawing: pieces -------------------------------------------------------------
 
     /// An agent's mark, at the size of an icon or of a large one.
@@ -764,6 +858,13 @@ impl ThreadView {
         let theme = &self.theme;
         let side = if large { theme.typography.icon_large() } else { theme.typography.icon() };
         crate::icons::glyph(theme, agent_icon(agent), self.z(side), hsla(tone))
+    }
+
+    /// A row's disclosure chevron under `id`, turning a quarter as the row opens or folds.
+    fn chevron(&self, id: impl Into<SharedString>, open: bool) -> AnyElement {
+        let side = self.z(self.theme.typography.icon());
+        let tone = hsla(self.theme.surfaces.text_muted);
+        kit::Disclosure::new(id, open, &self.theme, side, tone).into_any_element()
     }
 
     fn icon(&self, name: IconName, tone: Rgb) -> AnyElement {
@@ -882,15 +983,15 @@ impl ThreadView {
     fn prose_style(&self) -> TextViewStyle {
         let theme = &self.theme;
         let z = self.zoom;
-        let base = theme.typography.title();
+        let base = theme.typography.prose();
         let mono = self.mono();
         let mut style = crate::markdown::style(theme, &mono, z);
         style.paragraph_gap = gpui::rems(PARAGRAPH / base);
         style.heading_base_font_size = px(base * z);
         style.heading_font_size = Some(Arc::new(move |level: u8, _base| {
             let size = match level {
-                1 => HEADINGS[0],
-                2 => HEADINGS[1],
+                1 => base + HEADINGS[0],
+                2 => base + HEADINGS[1],
                 _ => base,
             };
             px(size * z)
@@ -913,9 +1014,7 @@ impl ThreadView {
             .style(self.prose_style())
             .selectable(true)
             .motion(if streams { kit::stream_motion() } else { TextViewMotion::default() })
-            .code_block_actions(move |block, _window, _cx| {
-                crate::conversation::view::code_actions(&theme, zoom, block)
-            })
+            .code_block_actions(move |block, _window, _cx| code_actions(&theme, zoom, block))
             .into_any_element()
     }
 
@@ -975,19 +1074,47 @@ impl ThreadView {
             Row::Reasoning { item } => (self.reasoning_row(ix, item, cx), spacing.xs),
             Row::Tool { item } => (self.tool_row(ix, item, cx), spacing.xxs),
             Row::Note { item } => (self.note_row(ix, item, cx), spacing.xs),
-            Row::Fold { turn, open } => (self.fold_row(ix, *turn, *open, cx), spacing.sm),
+            Row::Fold { turn, part, open } => {
+                let last = !self
+                    .rows
+                    .get(ix.saturating_add(1)..)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|r| matches!(r, Row::Fold { turn: t, .. } if t == turn));
+                let fold = if last {
+                    self.fold_row(ix, *turn, *open, cx)
+                } else {
+                    self.stretch_row(ix, *turn, *part, *open, cx)
+                };
+                (fold, spacing.sm)
+            }
             Row::Group { first, open } => (self.group_row(ix, first, *open, cx), spacing.xxs),
             Row::Working { turn } => (self.working_row(*turn, cx), spacing.sm),
             Row::Sending { intent } => (self.sending_row(*intent, cx), spacing.lg),
+        };
+        let found = self.find_row(cx) == Some(ix);
+        let inner = if found {
+            // The match the find bar is on: a wash under the whole row, the selection's hue at
+            // its faint step.
+            let wash = crate::colors::hsla_alpha(self.theme.surfaces.accent_fill, alpha::FAINT);
+            div()
+                .debug_selector(|| "thread-found".to_owned())
+                .rounded(self.z(self.theme.radii.sm))
+                .bg(wash)
+                .child(inner)
+                .into_any_element()
+        } else {
+            inner
         };
         self.column(inner).pt(self.z(if first { spacing.lg } else { gap })).into_any_element()
     }
 
     fn user_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
-        let Some(Item { body: ItemBody::User(message), at_ms, .. }) = self.item(ix, id, cx) else {
+        let Some(Item { body: ItemBody::User(message), at_ms, turn, .. }) = self.item(ix, id, cx)
+        else {
             return div().into_any_element();
         };
-        let at_ms = *at_ms;
+        let (at_ms, turn) = (*at_ms, *turn);
         let words = match &message.command {
             Some(command) if message.text.text.trim().is_empty() => format!("/{command}"),
             _ => message.text.text.clone(),
@@ -1011,8 +1138,24 @@ impl ThreadView {
                 .on_click(cx.listener(move |this, _ev, _w, cx| this.show_whole(item.clone(), cx)))
                 .into_any_element()
         });
+        let branch = self.branch_button(id, turn, cx);
         let actions = self.message_actions(id, at_ms, words.clone(), true, cx);
-        let under = div().flex().flex_col().items_end().w_full().children(more).child(actions);
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(self.z(self.theme.spacing.xs))
+            .children(branch)
+            .child(actions);
+        let choices =
+            self.branching.as_ref().filter(|b| b.item == *id).and_then(|_| self.branch_panel(cx));
+        let under = div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .w_full()
+            .children(more)
+            .child(actions)
+            .children(choices);
         let shown = cut.unwrap_or(words);
         div()
             .group(message_group(id))
@@ -1094,7 +1237,7 @@ impl ThreadView {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(words));
         self.copied = Some(item);
         self.copied_clear = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(crate::conversation::view::COPIED_FOR).await;
+            cx.background_executor().timer(COPIED_FOR).await;
             let _gone = this.update(cx, |this, cx| {
                 this.copied = None;
                 this.copied_clear = None;
@@ -1134,7 +1277,7 @@ impl ThreadView {
                     .py(self.z(theme.spacing.sm))
                     .rounded(self.z(theme.radii.lg))
                     .bg(hsla(s.hover))
-                    .text_size(self.z(theme.typography.title()))
+                    .text_size(self.z(theme.typography.prose()))
                     .line_height(relative(theme.typography.prose_line_height))
                     .text_color(hsla(s.text))
                     .whitespace_normal()
@@ -1159,15 +1302,17 @@ impl ThreadView {
         let (text, clipped_more) = self.text_of(id, &clipped, cx);
         let theme = &self.theme;
         let label = SharedString::from(kit::first_line(&text).to_owned());
+        let selector = format!("item-{}", id.0);
         div()
-            .id(ElementId::Name(format!("item-{}", id.0).into()))
+            .id(ElementId::Name(selector.clone().into()))
+            .debug_selector(move || selector)
             .role(Role::Article)
             .aria_label(label)
             .w_full()
             .flex()
             .flex_col()
             .gap(self.z(theme.spacing.xs))
-            .text_size(self.z(theme.typography.title()))
+            .text_size(self.z(theme.typography.prose()))
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .group(message_group(id))
@@ -1185,6 +1330,16 @@ impl ThreadView {
         let s = self.theme.surfaces;
         let line = self.thought_line(kit::first_line(&text.text));
         let toggle = id.clone();
+        let (thinking, took) = self.thinking(ix, id, cx);
+        let said = if thinking { "Thinking".to_owned() } else { thought_for(took) };
+        let head = if thinking {
+            ShimmerText::new("Thinking")
+                .id(ElementId::Name(format!("thinking-{}", id.0).into()))
+                .into_any_element()
+        } else {
+            SharedString::from(said.clone()).into_any_element()
+        };
+        let head_id = format!("reasoning-head-{}", id.0);
         div()
             .w_full()
             .flex()
@@ -1193,7 +1348,7 @@ impl ThreadView {
                 div()
                     .id(ElementId::Name(format!("reasoning-{}", id.0).into()))
                     .role(Role::Button)
-                    .aria_label("Thought")
+                    .aria_label(SharedString::from(said))
                     .aria_expanded(open)
                     .flex()
                     .items_center()
@@ -1204,7 +1359,7 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text_secondary)))
                     .child(self.slot().child(self.icon(IconName::Brain, s.text_muted)))
-                    .child(div().flex_none().child("Thought"))
+                    .child(div().flex_none().debug_selector(move || head_id).child(head))
                     .when(!open, |el| {
                         el.child(
                             div()
@@ -1248,6 +1403,29 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Whether the thought at row `ix` is still coming (the thread's last item, in a turn under
+    /// way), and how long it took: from it to the item after it, or to its turn's end.
+    pub(super) fn thinking(&self, ix: usize, id: &ItemId, cx: &App) -> (bool, Option<Duration>) {
+        let Some(state) = self.state(cx) else { return (false, None) };
+        let at = self
+            .spans
+            .get(ix)
+            .map(|span| span.start)
+            .filter(|at| state.items.get(*at).is_some_and(|item| item.id == *id));
+        let Some(at) = at.or_else(|| state.items.iter().position(|item| item.id == *id)) else {
+            return (false, None);
+        };
+        let Some(item) = state.items.get(at) else { return (false, None) };
+        let turn = state.turn(item.turn);
+        let next = state.items.get(at.saturating_add(1)).map(|next| next.at_ms);
+        let live = next.is_none() && turn.is_some_and(|t| t.state == TurnState::Active);
+        let end = next.or_else(|| turn.and_then(|t| t.ended_ms));
+        let took = end
+            .filter(|end| !item.at_ms.is_zero() && !end.is_zero())
+            .map(|end| Duration::from_millis(end.millis_since(item.at_ms)));
+        (live, took)
+    }
+
     /// A thought's first line as one line of words, its code spans in the code face on the
     /// raised fill as the prose sets them, the rest of its Markdown taken off.
     fn thought_line(&self, line: &str) -> gpui::StyledText {
@@ -1289,8 +1467,6 @@ impl ThreadView {
         let (line, when, label) = (fold.line(), fold.when(), fold.label());
         let (model, spent) = notes::turn_footer(figures, &state.meters);
         let hint_theme = theme.clone();
-        let fork = (state.meta.can(Cap::FORK) && figures.state != TurnState::Active)
-            .then(|| self.fork_button(turn, cx));
         let group = SharedString::from(format!("fold-{}", turn.0));
         div()
             .id(ElementId::Name(format!("fold-{}", turn.0).into()))
@@ -1308,10 +1484,7 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(self.slot().child(self.icon(
-                if open { IconName::ChevronDown } else { IconName::ChevronRight },
-                s.text_muted,
-            )))
+            .child(self.slot().child(self.chevron(format!("fold-{}-chevron", turn.0), open)))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -1342,52 +1515,53 @@ impl ThreadView {
                         })
                     })
             }))
-            .children(fork)
             .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_turn(turn, cx)))
             .into_any_element()
     }
 
-    /// "Fork from here" on a settled turn's fold, while the pointer is on it (always under a
-    /// finger): a new thread through this turn, by the agent's own door ([`Intent::Fork`]),
-    /// which goes on here as it was. Offered only where the agent can ([`Cap::FORK`]).
-    fn fork_button(&self, turn: TurnId, cx: &Context<Self>) -> AnyElement {
+    /// The fold over a turn's work before a message the person sent into it: what that
+    /// stretch did, with nothing of the turn's own (its time, its changes, its model), which
+    /// the turn's last fold carries.
+    fn stretch_row(
+        &self,
+        ix: usize,
+        turn: TurnId,
+        part: u32,
+        open: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let fold = Fold::of_calls(self.turn_items(ix, turn, cx));
         let theme = &self.theme;
         let s = theme.surfaces;
-        let touch = theme.density == slopty_theme::Density::TOUCH;
-        let id = format!("fork-{}", turn.0);
-        let group = SharedString::from(format!("fold-{}", turn.0));
-        crate::a11y::tab_stop(
-            div()
-                .id(ElementId::Name(id.clone().into()))
-                .debug_selector(move || id)
-                .role(Role::Button)
-                .aria_label("Fork from here")
-                .flex_none()
-                .size(self.z(theme.typography.icon_large()))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(self.z(theme.radii.xs))
-                .cursor_pointer()
-                .map(kit::eased)
-                .hover(move |el| el.bg(hsla(s.hover)))
-                .active(move |el| el.bg(hsla(s.pressed)))
-                .when(!touch, |el| el.invisible().group_hover(group, gpui::Styled::visible))
-                .child(self.icon(IconName::GitBranch, s.text_muted))
-                .map(kit::hint_timing)
-                .tooltip({
-                    let theme = Rc::new(theme.clone());
-                    move |_window, cx| {
-                        cx.new(|_| kit::Hint::new("Fork from here", "", Rc::clone(&theme))).into()
-                    }
-                }),
-            s.accent,
-        )
-        .on_click(cx.listener(move |this, _ev, _w, cx| {
-            cx.stop_propagation();
-            let _id = this.intent(Intent::Fork { after: Some(turn) }, cx);
-        }))
-        .into_any_element()
+        let line = fold.line();
+        let id = format!("fold-{}-{part}", turn.0);
+        let selector = id.clone();
+        div()
+            .id(ElementId::Name(id.into()))
+            .debug_selector(move || selector)
+            .role(Role::Button)
+            .aria_label(SharedString::from(line.clone()))
+            .aria_expanded(open)
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
+            .min_h(self.z(TOOL_ROW))
+            .text_size(self.z(theme.typography.small()))
+            .text_color(hsla(s.text_muted))
+            .cursor_pointer()
+            .hover(move |el| el.text_color(hsla(s.text_secondary)))
+            .child(self.slot().child(self.chevron(format!("fold-{}-{part}-chevron", turn.0), open)))
+            .child(
+                kit::tabular(div())
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(line)),
+            )
+            .on_click(cx.listener(move |this, _ev, _w, cx| this.toggle_turn(turn, cx)))
+            .into_any_element()
     }
 
     /// Quiet calls done one after another, as one line: "Read 3 files · Searched once".
@@ -1417,10 +1591,7 @@ impl ThreadView {
             .text_color(hsla(s.text_muted))
             .cursor_pointer()
             .hover(move |el| el.text_color(hsla(s.text_secondary)))
-            .child(self.slot().child(self.icon(
-                if open { IconName::ChevronDown } else { IconName::ChevronRight },
-                s.text_muted,
-            )))
+            .child(self.slot().child(self.chevron(format!("group-{}-chevron", first.0), open)))
             .child(
                 kit::tabular(div())
                     .min_w_0()
@@ -1467,12 +1638,29 @@ impl ThreadView {
             .min_h(self.z(TOOL_ROW))
             .text_size(self.z(self.theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .child(self.slot().child(self.spinner(stopping || asks)))
+            .child(
+                self.slot().child(
+                    crate::companions::at_work(
+                        &self.theme,
+                        self.state(cx),
+                        turn,
+                        stopping,
+                        self.z(self.theme.typography.icon()),
+                    )
+                    .unwrap_or_else(|| self.spinner(stopping || asks)),
+                ),
+            )
             .child(
                 div()
                     .when(retrying, |el| el.debug_selector(|| "thread-retrying".to_owned()))
                     .child(SharedString::from(words)),
             )
+            .children(crate::companions::trailing(
+                &self.theme,
+                self.state(cx),
+                turn,
+                self.z(self.theme.typography.icon()),
+            ))
             .child(div().flex_1())
             .children(elapsed.map(|e| {
                 kit::tabular(div())
@@ -1632,8 +1820,9 @@ impl ThreadView {
                         .gap(self.z(theme.spacing.xxs))
                         .text_size(self.z(theme.typography.small()))
                         .text_color(hsla(s.text_muted))
-                        .child(crate::conversation::view::context_ring(
+                        .child(context_ring(
                             theme,
+                            "thread-header-ring",
                             u,
                             theme.typography.small() * k,
                         ))
@@ -1683,6 +1872,7 @@ impl ThreadView {
                 .size_full(),
             )
             .children(self.marks.get().down.then(|| self.down_button(cx)))
+            .children(self.find_bar(cx))
             .into_any_element()
     }
 }
@@ -1691,6 +1881,7 @@ impl Render for ThreadView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_edit(window, cx);
         self.settle_questions(window, cx);
+        self.settle_drafts(window, cx);
         self.marks.set(self.read_marks(cx));
         self.count_unseen(cx);
         // The list lays out after this render: what its scroll then says is read once the
@@ -1719,12 +1910,6 @@ impl Render for ThreadView {
             .on_action(cx.listener(|this, _: &EditLastQueued, window, cx| {
                 this.edit_last_queued(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SendLater, window, cx| {
-                if this.schedules(cx) {
-                    this.toggle_later(cx);
-                    this.composer.update(cx, |c, cx| c.focus(window, cx));
-                }
-            }))
             // Esc outside the composer: a picture open large closes first, so the key that
             // closes it never also stops the turn.
             .on_action(cx.listener(|this, _: &Interrupt, window, cx| {
@@ -1733,6 +1918,12 @@ impl Render for ThreadView {
                 }
             }))
             .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
+            .on_action(cx.listener(|this, _: &CycleEffort, _w, cx| this.next_effort(cx)))
+            .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
+            .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
+            .on_action(cx.listener(|this, _: &crate::terminal::Find, window, cx| {
+                this.open_find(window, cx);
+            }))
             // The composer's menu, recall and a change to a waiting message take the arrows, ↵, ⇥
             // and Esc before the field does; Esc otherwise stops the turn under way.
             // While an input method composes, these keys are all its own.
@@ -1755,8 +1946,14 @@ impl Render for ThreadView {
                 this.menu_key(window, cx, Self::menu_enter);
             }))
             .capture_action(cx.listener(|this, _: &input::Escape, window, cx| {
+                if this.find_focused(window, cx) {
+                    this.close_find(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
                 this.menu_key(window, cx, |this, window, cx| {
                     this.close_picture(cx)
+                        || this.close_find(window, cx)
                         || this.menu_close(cx)
                         || this.cancel_edit(window, cx)
                         || this.leave_subagent(window, cx)
@@ -1777,6 +1974,7 @@ impl Render for ThreadView {
             .child(rows)
             .child(self.foot(bar, composer))
             .children(viewer)
+            .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
     }
 }
 
@@ -1852,6 +2050,25 @@ fn agent_name(agent: &AgentId) -> &str {
         AgentId::CODEX => "Codex",
         AgentId::PI => "pi",
         other => other.strip_prefix(ACP).filter(|name| !name.is_empty()).unwrap_or("the agent"),
+    }
+}
+
+/// How long a thought took, in the one way chrome says a duration: "Thought for 12 s"; under a
+/// second "Thought for a moment", and with no times to measure by, "Thought".
+fn thought_for(took: Option<Duration>) -> String {
+    match took.map(|t| t.as_secs()) {
+        None => "Thought".to_owned(),
+        Some(0) => "Thought for a moment".to_owned(),
+        Some(secs) => format!("Thought for {}", kit::duration(Duration::from_secs(secs))),
+    }
+}
+
+/// An agent's name as a menu lists it: Claude Code, Codex, pi, an ACP agent by its registry's
+/// name.
+fn agent_label(agent: &AgentId) -> String {
+    match agent.0.as_str() {
+        AgentId::CLAUDE_CODE => "Claude Code".to_owned(),
+        _ => agent_name(agent).to_owned(),
     }
 }
 
@@ -1958,11 +2175,63 @@ fn tokens(n: u64) -> String {
     }
 }
 
+/// A fenced block's corner: its language and a copy, at the meta size.
+pub(crate) fn code_actions(
+    theme: &Theme,
+    zoom: f32,
+    block: &gpui_kit::base::text::CodeBlock,
+) -> AnyElement {
+    let s = theme.surfaces;
+    let code = block.code().to_string();
+    let lang = block.lang().filter(|l| !l.is_empty());
+    div()
+        .flex()
+        .items_center()
+        .gap(px(theme.spacing.xs * zoom))
+        .px(px(theme.spacing.xs * zoom))
+        .font_family(theme.typography.ui_family.clone())
+        .text_size(px(theme.typography.small() * zoom))
+        .text_color(hsla(s.text_muted))
+        .children(lang.map(|lang| div().child(lang)))
+        .child(
+            div()
+                .id("copy")
+                .role(Role::Button)
+                .aria_label("Copy code")
+                .size(px(theme.typography.icon_large() * zoom))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(theme.radii.xs * zoom))
+                .cursor_pointer()
+                .hover(move |el| el.bg(hsla(s.hover)))
+                .child(
+                    crate::icons::icon(theme, IconName::Copy, IconSize::Inline, hsla(s.text_muted))
+                        .size(px(theme.typography.icon() * zoom)),
+                )
+                .on_click(move |_ev, _window, cx| {
+                    cx.stop_propagation();
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+                }),
+        )
+        .into_any_element()
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_proto::thread::AgentId;
 
     use super::{ACP, agent_name};
+
+    /// A thought says how long it took in whole seconds, the one way chrome says it.
+    #[test]
+    fn a_thought_says_how_long_it_took() {
+        use std::time::Duration;
+        assert_eq!(super::thought_for(None), "Thought");
+        assert_eq!(super::thought_for(Some(Duration::from_millis(400))), "Thought for a moment");
+        assert_eq!(super::thought_for(Some(Duration::from_millis(12_700))), "Thought for 12 s");
+        assert_eq!(super::thought_for(Some(Duration::from_secs(65))), "Thought for 1m 5s");
+    }
 
     /// An ACP agent reads as the name its registry gives it, as the worker names its threads.
     #[test]

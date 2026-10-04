@@ -22,12 +22,15 @@ use std::time::Duration;
 
 use gpui::{Context, EventEmitter, Task};
 use slopty_client::threads::{Cache, Cached, Changed, Outbox, Threads};
-use slopty_proto::ClientMsg;
+use slopty_proto::git::{GitOp, GitOutcome};
 use slopty_proto::thread::wire::{
-    Expanded, Intent, IntentDone, Outcome, Review, ReviewScope, Start, TableFrame, ThreadFrame,
-    ThreadRequest,
+    Expanded, Intent, IntentDone, Outcome, Review, ReviewScope, SEARCH_THREADS, Start, TableFrame,
+    ThreadFrame, ThreadHits, ThreadRequest,
 };
-use slopty_proto::thread::{ContentRef, IntentId, ThreadId};
+use slopty_proto::thread::{AgentId, ContentRef, IntentId, ThreadId};
+use slopty_proto::{ClientMsg, RequestId};
+
+use super::git::GitBook;
 
 /// How long a thread rests before what it is now is kept on disk: a busy one is written once
 /// it settles, not on every word.
@@ -66,6 +69,19 @@ pub enum HubEvent {
     Expanded(ContentRef),
     /// `thread`'s review came.
     Review(ThreadId),
+    /// A git op on the repository holding this folder was asked or answered.
+    Git(String),
+    /// What the worker found in its threads for the words last asked
+    /// ([`ThreadHub::search`]).
+    Hits,
+    /// An intent on `from` started `thread`: a fork, a go in another agent, an edit from a
+    /// turn. The workspace opens it.
+    Started {
+        /// The thread the person acted on.
+        from: ThreadId,
+        /// The thread it started.
+        thread: ThreadId,
+    },
 }
 
 /// Writes waiting for the disk, the newest of each.
@@ -99,6 +115,13 @@ pub struct ThreadHub {
     /// Starts that take an exited thread's session up again, not yet answered: each goes again
     /// under its id when the link comes back.
     resuming: HashMap<IntentId, (ThreadId, Start)>,
+    /// The git ops asked of this worker's repositories, and what each last said.
+    git: GitBook,
+    /// The agents this worker can start a thread of, as its link says.
+    agents: Vec<AgentId>,
+    /// The words last searched for in this worker's threads, and what it found for them once
+    /// it answered.
+    searched: Option<(String, Option<ThreadHits>)>,
 }
 
 impl std::fmt::Debug for ThreadHub {
@@ -128,6 +151,9 @@ impl ThreadHub {
             writing: None,
             refusals: Vec::new(),
             resuming: HashMap::new(),
+            git: GitBook::default(),
+            agents: Vec::new(),
+            searched: None,
         }
     }
 
@@ -135,6 +161,56 @@ impl ThreadHub {
     #[must_use]
     pub fn worker(&self) -> &str {
         &self.worker
+    }
+
+    /// The agents this worker can start a thread of: what "Continue in…" offers.
+    #[must_use]
+    pub fn agents(&self) -> &[AgentId] {
+        &self.agents
+    }
+
+    /// The worker's link says which agents it can start.
+    pub fn set_agents(&mut self, agents: Vec<AgentId>, cx: &mut Context<Self>) {
+        if self.agents != agents {
+            self.agents = agents;
+            cx.notify();
+        }
+    }
+
+    /// Ask the worker what was said in its threads with every word of `query`; the answer
+    /// comes back to [`Self::thread_hits`]. The same words again, or none, ask nothing.
+    pub fn search(&mut self, query: &str, cx: &mut Context<Self>) {
+        let query = query.trim();
+        if query.is_empty() {
+            self.searched = None;
+            return;
+        }
+        if self.searched.as_ref().is_some_and(|(asked, _)| asked == query) || !self.threads.linked()
+        {
+            return;
+        }
+        self.searched = Some((query.to_owned(), None));
+        let limit = SEARCH_THREADS;
+        let ask = ThreadRequest::Search { query: query.to_owned(), limit };
+        cx.emit(HubEvent::Send(vec![ClientMsg::Thread(ask)]));
+    }
+
+    /// What the worker found; an answer for words no longer asked is dropped.
+    pub fn thread_hits(&mut self, hits: ThreadHits, cx: &mut Context<Self>) {
+        let Some((asked, found)) = &mut self.searched else { return };
+        if *asked != hits.query {
+            return;
+        }
+        *found = Some(hits);
+        cx.emit(HubEvent::Hits);
+        cx.notify();
+    }
+
+    /// What the worker found for `query`, once it answered.
+    #[must_use]
+    pub fn hits(&self, query: &str) -> Option<&ThreadHits> {
+        let (asked, found) = self.searched.as_ref()?;
+        (asked == query.trim()).then_some(found.as_ref()?)
     }
 
     /// The threads.
@@ -156,6 +232,8 @@ impl ThreadHub {
     /// The link went.
     pub fn disconnected(&mut self, cx: &mut Context<Self>) {
         self.threads.disconnected();
+        self.git.lost();
+        self.searched = None;
         for thread in self.threads.open() {
             cx.emit(HubEvent::Thread(thread));
         }
@@ -212,6 +290,9 @@ impl ThreadHub {
             self.keep_outbox(cx);
             if let Some(sent) = sent {
                 let why = turned_down(&done.outcome).filter(|_| !speaks_for_itself(&sent.intent));
+                if let Outcome::Started { thread } = done.outcome {
+                    cx.emit(HubEvent::Started { from: sent.thread, thread });
+                }
                 if let Some(why) = why {
                     let words = refused_words(&sent.intent, &why);
                     self.refuse(Refusal {
@@ -363,6 +444,63 @@ impl ThreadHub {
         self.threads.review(thread)
     }
 
+    // ----- git ---------------------------------------------------------------------------
+
+    /// The git ops asked of this worker's repositories, and what each last said.
+    #[must_use]
+    pub const fn git(&self) -> &GitBook {
+        &self.git
+    }
+
+    /// Ask `op` of the repository holding the folder `repo`. Out of reach, nothing is asked
+    /// and the repository says so: an op is never held for later, since what it would do may
+    /// no longer be what the person meant.
+    pub fn git_op(&mut self, repo: &str, op: GitOp, cx: &mut Context<Self>) -> Option<RequestId> {
+        if !self.threads.linked() {
+            self.git.offline(repo, &op);
+            self.git_sent(repo, Vec::new(), cx);
+            return None;
+        }
+        let (request, msg) = self.git.ask(repo, op);
+        self.git_sent(repo, vec![msg], cx);
+        Some(request)
+    }
+
+    /// Commit `paths` of the repository holding `repo` with the person's `message`, then push
+    /// once the commit is made.
+    pub fn commit_and_push(
+        &mut self,
+        repo: &str,
+        paths: Vec<String>,
+        message: String,
+        cx: &mut Context<Self>,
+    ) -> Option<RequestId> {
+        if !self.threads.linked() {
+            self.git.offline(repo, &GitOp::Push);
+            self.git_sent(repo, Vec::new(), cx);
+            return None;
+        }
+        let (request, msg) = self.git.commit_and_push(repo, paths, message);
+        self.git_sent(repo, vec![msg], cx);
+        Some(request)
+    }
+
+    /// The worker answered git op `request`: what the repository said shows, and what goes
+    /// after it (a push, a fresh status) is sent.
+    pub fn git_done(&mut self, request: RequestId, outcome: GitOutcome, cx: &mut Context<Self>) {
+        if let Some((repo, then)) = self.git.answer(request, outcome) {
+            self.git_sent(&repo, then, cx);
+        }
+    }
+
+    fn git_sent(&self, repo: &str, msgs: Vec<ClientMsg>, cx: &mut Context<Self>) {
+        cx.emit(HubEvent::Git(repo.to_owned()));
+        cx.notify();
+        if self.threads.linked() && !msgs.is_empty() {
+            cx.emit(HubEvent::Send(msgs));
+        }
+    }
+
     // ----- the cache -------------------------------------------------------------------
 
     /// Keep `thread` once it has rested [`KEEP_AFTER`].
@@ -449,7 +587,6 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Edit { .. } => "Not changed".to_owned(),
         Intent::Withdraw { .. } => "Couldn't take the message back".to_owned(),
         Intent::Promote { .. } => "Couldn't send the message now".to_owned(),
-        Intent::Reorder { .. } => "Couldn't move the message".to_owned(),
         Intent::Interrupt => "Couldn't stop".to_owned(),
         Intent::Answer { .. } => "The answer didn't go".to_owned(),
         Intent::Release { .. } => "Couldn't hand the request back".to_owned(),
@@ -462,10 +599,12 @@ pub fn refused_words(intent: &Intent, why: &str) -> String {
         Intent::Handoff => "Couldn't hand over to the terminal".to_owned(),
         Intent::TakeBack => "Couldn't take the session back".to_owned(),
         Intent::Fork { .. } => "Couldn't fork the thread".to_owned(),
-        Intent::Sleep => "Couldn't put the agent to sleep".to_owned(),
-        Intent::Wake => "Couldn't wake the agent".to_owned(),
         Intent::Continue { .. } => "Couldn't go on in a new thread".to_owned(),
         Intent::Rewind { .. } => "Couldn't go back to that turn".to_owned(),
+        Intent::SetEffort { effort } => format!("Couldn't set the effort to {effort}"),
+        Intent::Aside => "Couldn't ask aside".to_owned(),
+        Intent::Discard => "Couldn't close the aside".to_owned(),
+        Intent::KeepAside => "Couldn't keep the aside".to_owned(),
     };
     format!("{what}: {why}")
 }

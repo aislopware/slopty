@@ -121,7 +121,9 @@ impl ThreadView {
             .filter(|end| *end > item.at_ms && !item.at_ms.is_zero())
             .map(|end| kit::duration(Duration::from_millis(end.millis_since(item.at_ms))));
         let line = self.call_line(id, call, look, open, child, took, cx);
-        let body = open.then(|| self.tool_body(id, call, look)).flatten();
+        let body = open
+            .then(|| self.sources(id, call, look).or_else(|| self.tool_body(id, call, look)))
+            .flatten();
         let pictures = if open { self.pictures_row(&call.images, false, cx) } else { None };
         let answers = self
             .answered_inline(ix)
@@ -217,6 +219,10 @@ impl ThreadView {
             (name.to_owned(), tidy(&format!("{dir}/"), &cwd).trim_end_matches('/').to_owned())
         });
         let changes = patch_of(call).and_then(|p| kit::changes(theme, p.added, p.removed));
+        let found = match &call.detail {
+            Some(ToolDetail::WebSearch(search)) => sources_words(&search.links),
+            _ => None,
+        };
         let quiet = look == Look::Line;
         let ink = if quiet { s.text_muted } else { s.text_secondary };
         let group: SharedString = format!("call-{}", id.0).into();
@@ -283,6 +289,16 @@ impl ThreadView {
             .cursor_pointer()
             .child(self.slot().child(mark))
             .child(what)
+            .children(found.map(|words| {
+                div()
+                    .flex_none()
+                    .max_w(gpui::relative(0.5))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(words))
+            }))
             .children(changes)
             .when(failed(&call.state), |el| el.child(self.icon(IconName::X, s.text_muted)))
             .when(matches!(call.state, ToolState::Pending { .. }), |el| {
@@ -377,6 +393,81 @@ impl ThreadView {
         })
     }
 
+    /// What a web search came back with, opened: its links numbered, each its title and its
+    /// site, opening its page on a press, or on ↵ once Tab is on it.
+    fn sources(&self, id: &ItemId, call: &ToolCall, look: Look) -> Option<AnyElement> {
+        let Some(ToolDetail::WebSearch(search)) = &call.detail else { return None };
+        if search.links.is_empty() {
+            return None;
+        }
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let rows = search.links.iter().enumerate().map(|(ix, link)| {
+            let url = link.url.clone();
+            let number = ix.saturating_add(1);
+            let title =
+                if link.title.trim().is_empty() { link.url.clone() } else { link.title.clone() };
+            let selector = format!("source-{}-{number}", id.0);
+            crate::a11y::tab_stop(
+                div()
+                    .id(ElementId::Name(selector.clone().into()))
+                    .debug_selector(move || selector)
+                    .role(Role::Link)
+                    .aria_label(SharedString::from(format!("{title}, {}", host(&link.url))))
+                    .w_full()
+                    .flex()
+                    .items_baseline()
+                    .gap(self.z(theme.spacing.xs))
+                    .min_h(self.z(TOOL_ROW))
+                    .px(self.z(theme.spacing.xxs))
+                    .rounded(self.z(theme.radii.xs))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .child(
+                        kit::tabular(div())
+                            .flex_none()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(number.to_string())),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(hsla(s.text))
+                            .child(SharedString::from(title)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(gpui::relative(0.4))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_color(hsla(s.text_muted))
+                            .child(SharedString::from(host(&link.url).to_owned())),
+                    ),
+                s.accent,
+            )
+            .on_click(move |_ev, _w, cx| cx.open_url(&url))
+        });
+        let list = div()
+            .id(ElementId::Name(format!("sources-{}", id.0).into()))
+            .w_full()
+            .flex()
+            .flex_col()
+            .role(Role::List)
+            .aria_label("Sources")
+            .text_size(self.z(theme.typography.small()))
+            .children(rows);
+        Some(match look {
+            Look::Card => list.p(self.z(theme.spacing.xs)).into_any_element(),
+            Look::Line => self.ruled(div().w_full().child(list)).into_any_element(),
+        })
+    }
+
     /// A quiet call's output: under its mark, past a one-point rule, unfilled.
     fn ruled(&self, content: Div) -> Div {
         let theme = &self.theme;
@@ -393,11 +484,61 @@ impl ThreadView {
     }
 }
 
+/// The site a link is on: its host, without the scheme or a leading `www.`.
+fn host(url: &str) -> &str {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    host.strip_prefix("www.").unwrap_or(host)
+}
+
+/// A search's links in a few words beside its query: "3 sources · docs.rs · github.com", the
+/// first two sites it found, each once.
+fn sources_words(links: &[slopty_proto::thread::detail::WebLink]) -> Option<String> {
+    if links.is_empty() {
+        return None;
+    }
+    let mut sites: Vec<&str> = Vec::new();
+    for link in links {
+        let site = host(&link.url);
+        if !site.is_empty() && !sites.contains(&site) {
+            sites.push(site);
+        }
+    }
+    let count = kit::count(links.len() as u64, "source", "sources");
+    Some(
+        std::iter::once(count)
+            .chain(sites.into_iter().take(2).map(str::to_owned))
+            .collect::<Vec<_>>()
+            .join(" \u{b7} "),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use slopty_proto::thread::{AskId, Clipped, ToolCall, ToolState, kind};
 
-    use super::{Look, tidy};
+    use super::{Look, host, sources_words, tidy};
+
+    /// A search's links read as how many and the first two sites, each once.
+    #[test]
+    fn a_search_says_its_sources_and_their_sites() {
+        use slopty_proto::thread::detail::WebLink;
+        let link = |url: &str| WebLink { title: "t".to_owned(), url: url.to_owned() };
+        assert_eq!(host("https://www.docs.rs/gpui?x=1"), "docs.rs");
+        assert_eq!(host("github.com/a/b"), "github.com");
+        let links = [
+            link("https://docs.rs/a"),
+            link("https://docs.rs/b"),
+            link("https://github.com/c"),
+            link("https://zed.dev"),
+        ];
+        assert_eq!(
+            sources_words(&links).as_deref(),
+            Some("4 sources \u{b7} docs.rs \u{b7} github.com")
+        );
+        assert_eq!(sources_words(&links[..1]).as_deref(), Some("1 source \u{b7} docs.rs"));
+        assert_eq!(sources_words(&[]), None);
+    }
 
     fn call(of: &str, state: ToolState) -> ToolCall {
         ToolCall {

@@ -11,7 +11,7 @@ use slopty_proto::thread::{
 };
 
 use super::{asked, hub, intents, snapshot, view};
-use crate::conversation::composer::{self, Attach};
+use crate::conversation::attach::{self, Attach};
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
 use crate::conversation::thread::view::{ThreadView, ThreadViewEvent};
@@ -200,7 +200,7 @@ fn a_message_waits_for_its_attachment_and_carries_its_path(cx: &mut TestAppConte
     let landed = ["/drop/x/shot.png".to_owned()];
     view.update(cx, |v, cx| v.attachment_landed(id, &landed, cx));
     cx.run_until_parked();
-    let text = composer::with_paths("Look at this", &landed);
+    let text = attach::with_paths("Look at this", &landed);
     assert_eq!(
         intents(&sent),
         [Intent::Send { text, delivery: Delivery::Steer, attachments: vec![] }]
@@ -513,52 +513,44 @@ fn up_recalls_the_messages_sent_and_down_comes_back(cx: &mut TestAppContext) {
     assert_eq!(draft(cx), "mine", "a draft of one's own is not replaced");
 }
 
-/// Where the agent takes a message held until its moment, the clock by the send button opens
-/// the times to send at; a pick says when over the field and turns Send into Schedule, and ↵
-/// sends the draft held until then. Taken off, ↵ sends as before. With no such door there is
-/// no clock.
+/// A thread a usage limit stopped says over the field when the limit lifts, where the agent
+/// takes a message held until its moment; "Continue at" sends the draft, or "Continue" with
+/// nothing typed, to go then. Once one waits, the line goes.
 #[gpui::test]
-fn a_draft_is_sent_later_from_the_clock(cx: &mut TestAppContext) {
+fn a_thread_a_limit_stopped_continues_when_it_lifts(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = state();
     let thread = state.meta.id;
+    let lifts = WallMs::from_millis(WallMs::now().as_millis().saturating_add(3_600_000));
+    let mut stopped = working(state.clone()).turns.remove(0);
+    stopped.state = TurnState::Failed { error: "limit".to_owned(), until_ms: Some(lifts) };
+    stopped.ended_ms = Some(WallMs::from_millis(1_000));
+    state.turns = vec![stopped];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
-    cx.update(|window, _cx| window.set_a11y_active(true));
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
     cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-later-open").is_none(), "no door, no clock");
+    assert!(cx.debug_bounds("thread-limit").is_none(), "no door, no line");
 
     state.meta.caps.push(Cap::named(Cap::SCHEDULE));
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
-    let click = |cx: &mut gpui::VisualTestContext, what: &'static str| {
-        let at = cx.debug_bounds(what).unwrap_or_else(|| panic!("{what}")).center();
-        cx.simulate_click(at, Modifiers::none());
-        cx.run_until_parked();
-    };
-    click(cx, "thread-later-open");
-    assert!(cx.debug_bounds("thread-menu").is_some(), "the times");
-    let before = WallMs::now();
-    click(cx, "thread-menu-1");
-    assert!(cx.debug_bounds("thread-menu").is_none(), "a pick closes the menu");
-    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
-    assert!(tree.iter().any(|n| n.is("Button", Some("Schedule"))), "the send button says so");
-    assert!(
-        tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Sends at "))),
-        "and the line over the field"
-    );
-
-    cx.simulate_input("Check the nightly build");
-    cx.simulate_keystrokes("enter");
+    assert!(cx.debug_bounds("thread-limit").is_some(), "when the limit lifts");
+    let at = cx.debug_bounds("thread-continue-at").expect("Continue at").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
     let said = intents(&sent);
     let [Intent::Send { text, delivery: Delivery::At { at_ms }, .. }] = said.as_slice() else {
-        panic!("held until its time: {:?}", intents(&sent))
+        panic!("held until the limit lifts: {said:?}")
     };
-    assert_eq!(text, "Check the nightly build");
-    let hour = at_ms.millis_since(before);
-    assert!((3_590_000..=3_610_000).contains(&hour), "in an hour: {hour} ms");
-    assert!(cx.debug_bounds("thread-later").is_none(), "the next draft goes as ↵ sends");
+    assert_eq!((text.as_str(), *at_ms), ("Continue", lifts));
+
+    let mut held = waiting("Continue");
+    held.delivery = Delivery::At { at_ms: lifts };
+    state.pending = vec![held];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-limit").is_none(), "the tray says when it goes");
 }
 
 /// What waits for its moment says in the tray when it goes or what it waits on, and offers
@@ -569,9 +561,10 @@ fn a_held_message_says_when_and_goes_now_on_a_press(cx: &mut TestAppContext) {
     let mut state = working(state());
     let thread = state.meta.id;
     state.meta.caps.push(Cap::named(Cap::SCHEDULE));
-    let mut held = waiting("after the other one");
-    held.delivery =
-        Delivery::After { thread: slopty_proto::thread::ThreadId::new(), settle_ms: 60_000 };
+    let mut held = waiting("after the build");
+    let at_ms = WallMs::from_millis(WallMs::now().as_millis().saturating_add(3_600_000));
+    held.delivery = Delivery::At { at_ms };
+    let when = crate::conversation::figures::stamp(at_ms, WallMs::now()).expect("a time");
     state.pending = vec![held.clone()];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
@@ -580,8 +573,7 @@ fn a_held_message_says_when_and_goes_now_on_a_press(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     assert!(
-        tree.iter()
-            .any(|n| n.is("ListItem", Some("after the other one, When another thread rests"))),
+        tree.iter().any(|n| n.is("ListItem", Some(&format!("after the build, {when}")))),
         "what it waits on"
     );
     let now = format!("promote-{}", held.intent).leak();

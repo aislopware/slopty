@@ -207,6 +207,68 @@ fn the_mode_chip_switches_the_agent_s_mode(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
 }
 
+/// The effort chip names the level by the agent's label and lists the levels it offers where
+/// it can switch; picking one, or "Next effort level" from the palette, asks the agent to
+/// switch. With the door but no levels for its model there is no chip.
+#[gpui::test]
+fn the_effort_chip_switches_how_hard_the_model_thinks(cx: &mut TestAppContext) {
+    use slopty_proto::thread::Effort;
+
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.meta.caps = vec![Cap::named(Cap::SET_EFFORT)];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-effort").is_none(), "no levels: no chip");
+
+    let effort = |id: &str, label: &str| Effort {
+        id: id.to_owned(),
+        label: label.to_owned(),
+        description: None,
+    };
+    state.meta.efforts = vec![effort("low", "Low"), effort("high", "High"), effort("xhigh", "Max")];
+    state.meters.effort = Some("high".to_owned());
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    let chip = cx.debug_bounds("thread-effort").expect("the effort chip").center();
+    cx.simulate_click(chip, Modifiers::none());
+    assert!(cx.debug_bounds("thread-menu-2").is_some(), "the three levels");
+    let low = cx.debug_bounds("thread-menu-0").expect("the first").center();
+    cx.simulate_click(low, Modifiers::none());
+    assert_eq!(intents(&sent), [Intent::SetEffort { effort: "low".to_owned() }]);
+    assert!(cx.debug_bounds("thread-menu").is_none(), "picking closes the menu");
+    cx.dispatch_action(crate::conversation::CycleEffort);
+    let asked = intents(&sent);
+    assert_eq!(asked.last(), Some(&Intent::SetEffort { effort: "xhigh".to_owned() }), "next");
+}
+
+/// The reading size grows what is read, an answer and a message, and leaves the chrome's
+/// lines as they were.
+#[gpui::test]
+fn the_reading_size_grows_what_is_read_and_not_the_chrome(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.items = vec![item("a", ItemBody::Text(Clipped::whole("The parser splits on spaces.")))];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let tall = |cx: &mut VisualTestContext, id: &'static str| {
+        cx.debug_bounds(id).unwrap_or_else(|| panic!("{id}")).size.height
+    };
+    let (answer, chip) = (tall(cx, "item-a"), tall(cx, "thread-model"));
+    let mut theme = slopty_theme::Theme::default();
+    theme.typography.prose_size = 24.0;
+    view.update(cx, |v, cx| v.set_theme(theme, cx));
+    cx.run_until_parked();
+    assert!(tall(cx, "item-a") > answer, "the answer grows");
+    assert_eq!(tall(cx, "thread-model"), chip, "the chrome does not");
+}
+
 /// The composer's one solid stops the turn while it runs and nothing is typed, and sends what
 /// is typed.
 #[gpui::test]
@@ -663,4 +725,85 @@ fn a_picture_opens_large_and_esc_closes_it(cx: &mut TestAppContext) {
     cx.simulate_click(viewer.origin + point(px(4.0), px(4.0)), Modifiers::none());
     cx.run_until_parked();
     assert!(cx.debug_bounds("picture-viewer").is_none(), "a press closes it");
+}
+
+/// A thought still coming says "Thinking" in a sweep of light, still under Reduce Motion; once
+/// the next item came it says how long it took, from it to that item.
+#[gpui::test]
+fn a_thought_says_thinking_then_how_long_it_took(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![live_turn()];
+    let thought = Item {
+        id: ItemId("r".to_owned()),
+        turn: TurnId(1),
+        at_ms: WallMs::from_millis(1_000),
+        body: ItemBody::Reasoning(Clipped::whole("Weigh the parser")),
+    };
+    state.items = vec![thought];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    let id = ItemId("r".to_owned());
+    assert_eq!(view.read_with(cx, |v, cx| v.thinking(0, &id, cx)), (true, None));
+    assert!(cx.debug_bounds("reasoning-head-r").is_some());
+    let mut answer = item("t", ItemBody::Text(Clipped::whole("Done")));
+    answer.at_ms = WallMs::from_millis(13_400);
+    state.items.push(answer);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    let took = view.read_with(cx, |v, cx| v.thinking(0, &id, cx));
+    assert_eq!(took, (false, Some(std::time::Duration::from_millis(12_400))));
+}
+
+/// A web search says how many sources it found and from where; opened, its links are
+/// numbered rows that open their page on a press.
+#[gpui::test]
+fn a_web_search_lists_its_sources(cx: &mut TestAppContext) {
+    use slopty_proto::thread::detail::{WebLink, WebSearchDetail};
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![live_turn()];
+    let link = |title: &str, url: &str| WebLink { title: title.to_owned(), url: url.to_owned() };
+    state.items = vec![item(
+        "w",
+        ItemBody::Tool(Box::new(ToolCall {
+            name: "WebSearch".to_owned(),
+            kind: kind::WEB_SEARCH.to_owned(),
+            title: "gpui list virtualisation".to_owned(),
+            input: Clipped::default(),
+            state: ToolState::Completed,
+            output: None,
+            images: Vec::new(),
+            detail: Some(ToolDetail::WebSearch(WebSearchDetail {
+                query: "gpui list virtualisation".to_owned(),
+                results: Some(2),
+                links: vec![
+                    link("ListState", "https://docs.rs/gpui/latest/gpui/struct.ListState.html"),
+                    link("Zed's list", "https://github.com/zed-industries/zed"),
+                ],
+            })),
+            child: None,
+            ended_ms: None,
+        })),
+    )];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("source-w-1").is_none(), "folded under its line");
+    let line = cx.debug_bounds("tool-w").expect("the search's line").center();
+    cx.simulate_click(line, Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("source-w-2").is_some(), "numbered rows");
+    let first = cx.debug_bounds("source-w-1").expect("the first source").center();
+    cx.simulate_click(first, Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://docs.rs/gpui/latest/gpui/struct.ListState.html")
+    );
 }

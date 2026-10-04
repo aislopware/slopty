@@ -28,7 +28,6 @@ fn question(text: &str, header: Option<&str>, options: &[(&str, &str)], multi: b
 
 fn asking(id: &str, options: Vec<Choice>, questions: Vec<Question>) -> Request {
     Request {
-        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::QUESTION.to_owned(),

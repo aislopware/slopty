@@ -10,6 +10,7 @@ use slopty_proto::thread::{AgentId, Drive, ThreadId, ThreadMeta, ThreadState};
 pub(crate) fn empty() -> ThreadState {
     ThreadState::new(ThreadMeta {
         modes: Vec::new(),
+        efforts: Vec::new(),
         id: ThreadId::new(),
         agent: AgentId::named(AgentId::CLAUDE_CODE),
         agent_version: String::new(),
@@ -28,18 +29,35 @@ pub(crate) fn empty() -> ThreadState {
     })
 }
 
+/// What the worker's transcript decoder reads from the recorded session `name` under
+/// `slopty-agent`'s fixtures: its main transcript, then each subagent's.
+fn changes(name: &str) -> Vec<slopty_proto::conversation::Change> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../slopty-agent/tests/fixtures/conversation")
+        .join(name);
+    let mut files = vec![dir.join("transcript.jsonl")];
+    if let Ok(agents) = std::fs::read_dir(dir.join("subagents")) {
+        let mut agents: Vec<_> =
+            agents.map(|e| e.expect("a subagent's transcript").path()).collect();
+        agents.sort();
+        files.extend(agents);
+    }
+    let mut decoder = slopty_agent::conversation::Conversation::default();
+    let mut changes = vec![slopty_proto::conversation::Change::Reset { thread: None }];
+    for file in files {
+        let mut tail = slopty_agent::transcript::Tail::default();
+        changes.extend(decoder.read(&mut tail, &file).expect("a recorded transcript"));
+    }
+    changes
+}
+
 /// The main thread of the recorded session `name`, as the worker hosts it.
 pub(crate) fn thread(name: &str) -> ThreadState {
-    let events = crate::conversation::fixtures::events(name);
     let mut observed =
         slopty_agent::observed::Observed::new("s1", "2.1.0", None, "/w", WallMs::ZERO);
     let main = observed.main();
     let mut outs = observed.drain();
-    for event in events {
-        if let slopty_proto::conversation::ConversationEvent::Changes(changes) = event {
-            outs.extend(observed.transcript(&changes, &[]));
-        }
-    }
+    outs.extend(observed.transcript(&changes(name), &[]));
     let mut state = empty();
     for out in outs {
         match out {

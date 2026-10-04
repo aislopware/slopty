@@ -34,6 +34,7 @@ use slopty_theme::Typography;
 use super::ConversationView;
 use crate::colors::hsla;
 use crate::conversation::rows::{self, Level};
+use crate::conversation::thread::view::plan_parts;
 use crate::conversation::{figures, tools};
 use crate::icons::{IconName, Status};
 use crate::kit;
@@ -145,17 +146,6 @@ fn bash_standing(bash: &BashDetail) -> (Standing, String) {
             bash.exit_code.map_or_else(|| "Failed".to_owned(), |code| format!("Exit {code}")),
         ),
         ShellStatus::Interrupted | ShellStatus::Killed => (Standing::Stopped, "Stopped".to_owned()),
-    }
-}
-
-/// A plan's title (its first heading, else its first line) and the Markdown under it.
-#[must_use]
-pub(in crate::conversation) fn plan_parts(plan: &str) -> (String, &str) {
-    let trimmed = plan.trim_start();
-    let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
-    match first.trim().strip_prefix('#') {
-        Some(heading) => (heading.trim_start_matches('#').trim().to_owned(), rest.trim_start()),
-        None => ("Proposed plan".to_owned(), trimmed),
     }
 }
 

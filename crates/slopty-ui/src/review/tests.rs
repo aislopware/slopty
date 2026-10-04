@@ -262,3 +262,41 @@ fn a_refused_keep_says_why_on_its_hunk(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("review-refused-hunk-1-0").is_none(), "the new try speaks now");
     assert_eq!(intents(&sent).len(), 2);
 }
+
+/// The tile asks the branch's pull request once, as it opens on a thread whose folder is
+/// known, shows where it stands at the scope bar's end, and opens the commit sheet from there.
+#[gpui::test]
+fn the_tile_shows_the_branch_s_pull_request_and_opens_the_commit_sheet(cx: &mut TestAppContext) {
+    use slopty_proto::git::{GitDone, GitOp, GitOutcome, PullStatus};
+    let (_view, hub, sent, cx) = tile(cx, 1200.0);
+    let reads: Vec<u64> = sent
+        .borrow()
+        .iter()
+        .filter_map(|m| match m {
+            ClientMsg::Git { request, op: GitOp::PullStatus, .. } => Some(*request),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads.len(), 1, "asked once, never polled");
+    let pull = PullStatus {
+        number: 12,
+        url: "https://github.com/o/r/pull/12".to_owned(),
+        title: "Refresh tokens".to_owned(),
+        state: "OPEN".to_owned(),
+        draft: false,
+        head: "feature".to_owned(),
+        head_commit: "abc".to_owned(),
+        base: "main".to_owned(),
+        review: "CHANGES_REQUESTED".to_owned(),
+        mergeable: "MERGEABLE".to_owned(),
+        merge_state: "BLOCKED".to_owned(),
+        checks: Vec::new(),
+        more_checks: 0,
+    };
+    let done = GitOutcome::Done(GitDone::PullStatus(Some(Box::new(pull))));
+    hub.update(cx, |hub, cx| hub.git_done(reads[0], done, cx));
+    cx.run_until_parked();
+    click(cx, "review-pull");
+    assert!(cx.debug_bounds("commit-sheet").is_some(), "the sheet opens over the review");
+    assert!(cx.debug_bounds("commit-merge").is_none(), "no merge while changes are asked for");
+}

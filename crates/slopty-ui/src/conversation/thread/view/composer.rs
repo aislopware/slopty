@@ -9,13 +9,15 @@
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Div, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    AnyElement, App, AppContext as _, Bounds, Context, Div, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, PathBuilder, Pixels, SharedString,
+    StatefulInteractiveElement as _, Styled as _, canvas, div, point, px,
 };
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{BackgroundTask, Cap, Delivery};
+use slopty_theme::{Rgb, Theme};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
@@ -232,14 +234,7 @@ impl ThreadView {
                 crate::icons::icon(theme, icon, IconSize::Inline, hsla(s.text_muted))
                     .size(self.z(theme.typography.small())),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(words)),
-            )
+            .child(kit::fit_label(format!("thread-fact-{}", icon.path()), words, theme).fixed())
     }
 
     /// Where the thread works, in the composer's toolbar after its chips: the checkout, its
@@ -273,6 +268,34 @@ impl ThreadView {
                     cx.emit(ThreadViewEvent::Review { thread });
                 }))
         });
+        let place = div()
+            .min_w_0()
+            .flex_shrink_1()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.sm))
+            .children(here.checkout.map(|c| self.fact(IconName::Folder, c).flex_shrink_1()))
+            .children(here.branch.map(|b| self.fact(IconName::GitBranch, b).flex_shrink_1()));
+        // Where it works opens the commit sheet on that repository.
+        let place = if self.repo(cx).is_some() {
+            crate::a11y::tab_stop(
+                place
+                    .id("thread-git")
+                    .debug_selector(|| "thread-git".to_owned())
+                    .role(Role::Button)
+                    .aria_label("Commit")
+                    .px(self.z(theme.spacing.xs))
+                    .rounded(self.z(theme.radii.xs))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text_secondary)))
+                    .active(move |el| el.bg(hsla(s.pressed)))
+                    .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
+                s.accent,
+            )
+            .into_any_element()
+        } else {
+            place.into_any_element()
+        };
         div()
             .debug_selector(|| "thread-where".to_owned())
             .flex_1()
@@ -280,13 +303,59 @@ impl ThreadView {
             .overflow_hidden()
             .flex()
             .items_center()
-            .gap(self.z(theme.spacing.sm))
-            .px(self.z(theme.spacing.xs))
+            .gap(self.z(theme.spacing.xs))
             .text_size(self.z(theme.typography.small()))
             .text_color(hsla(s.text_muted))
-            .children(here.checkout.map(|c| self.fact(IconName::Folder, c).flex_shrink_1()))
-            .children(here.branch.map(|b| self.fact(IconName::GitBranch, b).flex_shrink_1()))
+            .child(place)
+            .children(self.pull_chip(cx))
             .children(changes)
+    }
+
+    /// The branch's pull request, once this client has heard of it: its number in the tone of
+    /// where it stands, which opens the commit sheet with the pull request at its head.
+    fn pull_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let repo = self.repo(cx)?;
+        let hub = self.hub.read(cx);
+        let pull = hub.git().repo(&repo)?.pull.status()?;
+        let words = crate::conversation::thread::git::standing_words(pull);
+        let tone = crate::conversation::thread::commit::standing_tone(theme, pull.standing());
+        Some(
+            crate::a11y::tab_stop(
+                div()
+                    .id("thread-pull")
+                    .debug_selector(|| "thread-pull".to_owned())
+                    .role(Role::Button)
+                    .aria_label(SharedString::from(format!(
+                        "Pull request {}, {words}",
+                        pull.number
+                    )))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(self.z(theme.spacing.xxs))
+                    .px(self.z(theme.spacing.xs))
+                    .rounded(self.z(theme.radii.xs))
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)))
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            IconName::GitPullRequest,
+                            IconSize::Inline,
+                            hsla(tone),
+                        )
+                        .size(self.z(theme.typography.small())),
+                    )
+                    .child(
+                        kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))),
+                    )
+                    .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx))),
+                s.accent,
+            )
+            .into_any_element(),
+        )
     }
 
     /// A quiet chip in the composer's foot: the model, the mode.
@@ -318,14 +387,10 @@ impl ThreadView {
         let name =
             model_said(&state.meters).unwrap_or_else(|| agent_name(&state.meta.agent).to_owned());
         let mark = self.agent_mark(Some(&state.meta.agent), false, s.text_secondary);
-        let chip = self.chip("thread-model", format!("Model, {name}")).child(mark).child(
-            div()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(SharedString::from(name)),
-        );
+        let chip = self
+            .chip("thread-model", format!("Model, {name}"))
+            .child(mark)
+            .child(kit::fit_label("thread-model-name", name, theme).fixed());
         Some(if switch {
             crate::a11y::tab_stop(
                 chip.role(Role::Button)
@@ -412,24 +477,56 @@ impl ThreadView {
         )
     }
 
-    /// The effort chip: how hard the model thinks, as the agent names it.
+    /// The effort chip: how hard the model thinks, as the agent names it, by the label of the
+    /// level it published when one matches; a menu of the levels when it can switch
+    /// ([`Cap::SET_EFFORT`] and a level to switch to). An agent with the door but no levels
+    /// for its model (a pi model that does not reason) shows no chip.
     fn effort_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
-        let effort = self.state(cx)?.meters.effort.clone().filter(|e| !e.trim().is_empty())?;
-        let words = sentence(&effort);
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let state = self.state(cx)?;
+        let switch = state.meta.can(Cap::SET_EFFORT) && !state.meta.efforts.is_empty();
+        let effort = state.meters.effort.as_deref().map(str::trim).filter(|e| !e.is_empty());
+        let named = effort.map(|e| {
+            state
+                .meta
+                .efforts
+                .iter()
+                .find(|known| known.id == e || known.label == e)
+                .map_or_else(|| sentence(e), |known| known.label.clone())
+        });
+        if named.is_none() && state.meta.can(Cap::SET_EFFORT) && !switch {
+            return None;
+        }
+        let words = named.or_else(|| switch.then(|| "Effort".to_owned()))?;
+        let chip = self
+            .chip("thread-effort", format!("Effort, {words}"))
+            .child(
+                crate::icons::icon(theme, IconName::Brain, IconSize::Inline, hsla(s.text_muted))
+                    .size(self.z(theme.typography.small())),
+            )
+            .child(SharedString::from(words));
+        if !switch {
+            return Some(chip.role(Role::Label).into_any_element());
+        }
         Some(
-            self.chip("thread-effort", format!("Effort, {words}"))
-                .role(Role::Label)
-                .child(
-                    crate::icons::icon(
-                        &self.theme,
-                        IconName::Brain,
-                        IconSize::Inline,
-                        hsla(self.theme.surfaces.text_muted),
+            crate::a11y::tab_stop(
+                chip.role(Role::Button)
+                    .cursor_pointer()
+                    .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
+                    .child(
+                        crate::icons::icon(
+                            theme,
+                            IconName::ChevronDown,
+                            IconSize::Inline,
+                            hsla(s.text_muted),
+                        )
+                        .size(self.z(theme.typography.small())),
                     )
-                    .size(self.z(self.theme.typography.small())),
-                )
-                .child(SharedString::from(words))
-                .into_any_element(),
+                    .on_click(cx.listener(|this, _ev, _w, cx| this.toggle_efforts(cx))),
+                s.accent,
+            )
+            .into_any_element(),
         )
     }
 
@@ -460,7 +557,11 @@ impl ThreadView {
                     .when(open, |el| el.bg(hsla(s.hover)))
                     .hover(move |el| el.bg(hsla(s.hover)).text_color(hsla(s.text)))
                     .child(mark)
-                    .child(SharedString::from(words))
+                    .child(kit::Rolling::new(
+                        "thread-tasks-chip-figure",
+                        words,
+                        self.z(theme.typography.small()),
+                    ))
                     .on_click(cx.listener(|this, _ev, _w, cx| {
                         this.tasks_open = !this.tasks_open;
                         cx.notify();
@@ -498,13 +599,20 @@ impl ThreadView {
                     .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .children(used.map(|u| {
-                        crate::conversation::view::context_ring(
+                        context_ring(
                             theme,
+                            "thread-meter-ring",
                             u,
                             theme.typography.small() * self.zoom,
                         )
                     }))
-                    .children(used.map(|u| SharedString::from(share(u))))
+                    .children(used.map(|u| {
+                        kit::Rolling::new(
+                            "thread-meter-figure",
+                            share(u),
+                            self.z(theme.typography.small()),
+                        )
+                    }))
                     .map(kit::hint_timing)
                     .tooltip(move |_window, cx| {
                         let theme = std::rc::Rc::new(hint_theme.clone());
@@ -514,6 +622,23 @@ impl ThreadView {
             )
             .into_any_element(),
         )
+    }
+
+    /// "Interrupt and send" beside the queue's send, while a turn runs on an agent that takes
+    /// no message mid-turn but can be stopped ([`Cap::INTERRUPT`] and [`Cap::QUEUE`] without
+    /// [`Cap::STEER`]): the turn stops, then the message goes ([`Delivery::Interrupt`]).
+    fn interrupt_send(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let meta = &self.state(cx)?.meta;
+        let offered = meta.can(Cap::INTERRUPT) && meta.can(Cap::QUEUE) && !meta.can(Cap::STEER);
+        let typed = !self.composer.read(cx).value().trim().is_empty();
+        let ready = offered && typed && self.working(cx) && !self.composing.editing();
+        ready.then(|| {
+            self.button("thread-interrupt-send", "Interrupt and send", ButtonKind::Ghost)
+                .on_click(cx.listener(|this, _ev, window, cx| {
+                    this.submit(Delivery::Interrupt, window, cx);
+                }))
+                .into_any_element()
+        })
     }
 
     /// The one solid: stop the turn while one runs and nothing is typed; otherwise what ↵ will
@@ -530,8 +655,6 @@ impl ThreadView {
             ("thread-stop", IconName::Square, "Stop")
         } else if self.composing.editing() {
             ("thread-send", IconName::Check, "Update")
-        } else if self.later().is_some() {
-            ("thread-send", IconName::Clock, "Schedule")
         } else if !working {
             ("thread-send", IconName::ArrowUp, "Send")
         } else if self.send_now(cx) == Delivery::Queue {
@@ -628,7 +751,7 @@ impl ThreadView {
                     .text_size(self.z(theme.typography.title()))
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
-                    .children(self.later_strip(cx))
+                    .children(self.limit_strip(cx))
                     .children(self.notice_strip())
                     .children(self.editing_strip(cx))
                     .children(self.attachment_chips(cx))
@@ -641,7 +764,7 @@ impl ThreadView {
                                 .with_size(Size::XSmall)
                                 .appearance(false)
                                 .bordered(false)
-                                .text_size(self.z(theme.typography.title()))
+                                .text_size(self.z(theme.typography.prose()))
                                 .line_height(gpui::relative(theme.typography.prose_line_height))
                                 .aria_label("Message")
                                 .on_paste(move |item, _window, cx| {
@@ -673,11 +796,93 @@ impl ThreadView {
                     .child(self.where_facts(cx))
                     .children(self.meter(cx))
                     .children(self.handoff_button(cx))
-                    .children(self.later_button(cx))
+                    .children(self.interrupt_send(cx))
                     .child(self.send_button(cx)),
             )
             .into_any_element()
     }
+}
+
+/// The tone the share of the context window in use is drawn in: warn past 80 %, error past
+/// 95 %.
+#[must_use]
+pub(crate) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
+    let s = theme.surfaces;
+    match used_pct {
+        p if p >= 95.0 => s.error,
+        p if p >= 80.0 => s.warn,
+        _ => s.text_secondary,
+    }
+}
+
+/// The share of the context window in use as a ring, `side` points round: the whole track drawn
+/// in the muted ink at a tint, the used arc over it in the tone the share calls for (warn past
+/// 80 %, error past 95 %). On the hairline the track all but vanished, and a lone arc beside the
+/// stop button read as a spinner; a closed ring reads as a gauge.
+///
+/// The arc is a true one with round ends, and it glides to a new share
+/// ([`kit::Gliding`]), turning back from where it is drawn; under `id`, one per place it shows.
+#[must_use]
+pub(crate) fn context_ring(
+    theme: &Theme,
+    id: impl Into<gpui::ElementId>,
+    used_pct: f64,
+    side: f32,
+) -> AnyElement {
+    let s = theme.surfaces;
+    let track = crate::colors::hsla_alpha(s.text_muted, slopty_theme::alpha::TINT);
+    let arc = hsla(context_tone(theme, used_pct));
+    #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
+    let share = (used_pct / 100.0).clamp(0.0, 1.0) as f32;
+    kit::Gliding::new(id, share, move |share| ring(share, side, track, arc)).into_any_element()
+}
+
+/// The ring at `share`: its track, and the used arc with round ends.
+fn ring(share: f32, side: f32, track: gpui::Hsla, arc: gpui::Hsla) -> AnyElement {
+    canvas(
+        |_bounds, _window, _cx| {},
+        move |bounds: Bounds<Pixels>, (), window, _cx| {
+            let width = (bounds.size.width.min(bounds.size.height) * 0.16).max(px(1.5));
+            let r = (bounds.size.width.min(bounds.size.height) - width) / 2.0;
+            let c = bounds.center();
+            let at = |t: f32| {
+                let a = t.mul_add(std::f32::consts::TAU, -std::f32::consts::FRAC_PI_2);
+                point(c.x + r * a.cos(), c.y + r * a.sin())
+            };
+            // Arcs of at most half a turn, so each is the short way round between its ends.
+            let stroke = |from: f32, to: f32| {
+                let mut path = PathBuilder::stroke(width);
+                path.move_to(at(from));
+                let mid = (from + 0.5).min(to);
+                path.arc_to(point(r, r), px(0.0), false, true, at(mid));
+                if mid < to {
+                    path.arc_to(point(r, r), px(0.0), false, true, at(to));
+                }
+                path.build().ok()
+            };
+            // A round end: a disc as wide as the stroke.
+            let cap = |t: f32| {
+                let (p, rc) = (at(t), width / 2.0);
+                let mut path = PathBuilder::fill();
+                path.move_to(point(p.x + rc, p.y));
+                path.arc_to(point(rc, rc), px(0.0), false, true, point(p.x - rc, p.y));
+                path.arc_to(point(rc, rc), px(0.0), false, true, point(p.x + rc, p.y));
+                path.close();
+                path.build().ok()
+            };
+            if let Some(path) = stroke(0.0, 1.0) {
+                window.paint_path(path, track);
+            }
+            if share > 0.0 {
+                for path in [stroke(0.0, share), cap(0.0), cap(share)].into_iter().flatten() {
+                    window.paint_path(path, arc);
+                }
+            }
+        },
+    )
+    .size(px(side))
+    .flex_none()
+    .into_any_element()
 }
 
 #[cfg(test)]

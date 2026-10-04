@@ -68,7 +68,7 @@ impl ConversationView {
         let figures = self.context_figures()?;
         let theme = &self.theme;
         let s = theme.surfaces;
-        let tone = super::parts::context_tone(theme, figures.used_pct);
+        let tone = crate::conversation::thread::view::context_tone(theme, figures.used_pct);
         #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
         let share = (figures.used_pct / 100.0).clamp(0.0, 1.0) as f32;
         let bar = div()
@@ -76,9 +76,13 @@ impl ConversationView {
             .h(self.z(BAR_HEIGHT))
             .rounded(self.z(theme.radii.xs))
             .bg(hsla(s.border))
-            .child(
-                div().h_full().w(relative(share)).rounded(self.z(theme.radii.xs)).bg(hsla(tone)),
-            );
+            .child({
+                let (radius, fill) = (self.z(theme.radii.xs), hsla(tone));
+                kit::Gliding::new("context-bar", share, move |share| {
+                    div().h_full().w(relative(share)).rounded(radius).bg(fill).into_any_element()
+                })
+                .fill()
+            });
         let line = |text: String, tone| {
             div().text_color(hsla(tone)).child(SharedString::from(text)).into_any_element()
         };

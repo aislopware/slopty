@@ -30,10 +30,14 @@ pub enum Row {
         /// The item.
         item: ItemId,
     },
-    /// A settled turn's work as one line, open or folded.
+    /// A settled turn's work as one line, open or folded: one for the work before each
+    /// message the person sent into the turn, and one after the last.
     Fold {
         /// The turn.
         turn: TurnId,
+        /// Which stretch of the turn's work, counted by the messages before it: 0 is the work
+        /// before the first steer.
+        part: u32,
         /// The reader opened it.
         open: bool,
     },
@@ -90,7 +94,8 @@ impl Row {
             | Self::Tool { item }
             | Self::Note { item }
             | Self::Group { first: item, .. } => item.hash(&mut h),
-            Self::Fold { turn, .. } | Self::Working { turn } => turn.hash(&mut h),
+            Self::Fold { turn, part, .. } => (turn, part).hash(&mut h),
+            Self::Working { turn } => turn.hash(&mut h),
             Self::Sending { intent } => intent.hash(&mut h),
         }
         h.finish()
@@ -187,7 +192,8 @@ pub fn under_way(state: &ThreadState) -> Option<&Turn> {
 const fn bubble(sent: &Sent) -> bool {
     match &sent.intent {
         Intent::Send { delivery: Delivery::Steer, .. } => true,
-        Intent::Send { delivery: Delivery::Queue, .. } => sent.failed(),
+        // An interrupting send waits in the tray, as a queued one does, until it goes.
+        Intent::Send { delivery: Delivery::Queue | Delivery::Interrupt, .. } => sent.failed(),
         _ => false,
     }
 }
@@ -202,21 +208,42 @@ pub fn plan(item: &Item) -> bool {
 /// A settled turn: its message, the fold over its work, then its answer, the last thing the
 /// agent wrote. A plan stands outside the fold where it was proposed. Opened, the work shows
 /// between the fold and the answer.
+///
+/// A message the person sent into the turn while it ran (a steer) stands where it was sent,
+/// and splits the work: a fold over what came before it, another over what came after, so
+/// the steer is never folded away and each fold says what its stretch did. The turn opens
+/// as one.
 fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>, open: bool) {
     let answer = items.iter().rposition(|i| matches!(i.body, ItemBody::Text(_)));
     let work = |ix: usize, i: &Item| {
         Some(ix) != answer && !matches!(i.body, ItemBody::User(_)) && !plan(i)
     };
-    let has_work = items.iter().enumerate().any(|(ix, i)| work(ix, i));
+    let mut part = 0_u32;
+    let mut start = 0_usize;
     let mut folded = false;
     for (ix, item) in items.iter().enumerate() {
         let at = run.start.saturating_add(ix);
+        if ix > 0 && matches!(item.body, ItemBody::User(_)) {
+            part = part.saturating_add(1);
+            start = ix;
+            folded = false;
+        }
         if !work(ix, item) {
             built.push(row_of(item), at..at.saturating_add(1));
             continue;
         }
-        if !folded && has_work {
-            built.push(Row::Fold { turn, open }, run.clone());
+        if !folded {
+            // The stretch runs to the next steer, or the turn's end.
+            let len = items
+                .get(start.saturating_add(1)..)
+                .unwrap_or_default()
+                .iter()
+                .take_while(|i| !matches!(i.body, ItemBody::User(_)))
+                .count()
+                .saturating_add(1);
+            let stretch = run.start.saturating_add(start)
+                ..run.start.saturating_add(start.saturating_add(len));
+            built.push(Row::Fold { turn, part, open }, stretch);
             folded = true;
         }
         if open {
@@ -617,7 +644,7 @@ mod tests {
             rows,
             [
                 Row::User { item: id("u") },
-                Row::Fold { turn: TurnId(1), open: false },
+                Row::Fold { turn: TurnId(1), part: 0, open: false },
                 Row::Text { item: id("end") },
             ]
         );
@@ -628,13 +655,60 @@ mod tests {
             rows,
             [
                 Row::User { item: id("u") },
-                Row::Fold { turn: TurnId(1), open: true },
+                Row::Fold { turn: TurnId(1), part: 0, open: true },
                 Row::Tool { item: id("x") },
                 Row::Text { item: id("mid") },
                 Row::Tool { item: id("r") },
                 Row::Text { item: id("end") },
             ],
             "opened, the work shows in its order"
+        );
+    }
+
+    /// A message the person sent into a running turn stands where it was sent and splits the
+    /// turn's work into a fold before it and one after; the turn opens as one.
+    #[test]
+    fn a_steer_splits_the_fold_where_it_was_sent() {
+        let state = state(
+            vec![turn(1, TurnState::Complete, 55)],
+            vec![user("u", 1), exec("x", 1), user("steer", 1), read("r", 1), text("end", 1)],
+        );
+        let mut open = HashSet::new();
+        let built = build_spans(Input {
+            state: &state,
+            unshown: &[],
+            open: &open,
+            groups: &HashSet::new(),
+        });
+        let id = |s: &str| ItemId(s.to_owned());
+        assert_eq!(
+            built.rows,
+            [
+                Row::User { item: id("u") },
+                Row::Fold { turn: TurnId(1), part: 0, open: false },
+                Row::User { item: id("steer") },
+                Row::Fold { turn: TurnId(1), part: 1, open: false },
+                Row::Text { item: id("end") },
+            ]
+        );
+        assert_eq!(built.spans.get(1), Some(&(0..2)), "the stretch before the steer");
+        assert_eq!(built.spans.get(3), Some(&(2..5)), "and after it");
+        let key = |ix: usize| built.rows.get(ix).map(Row::key);
+        assert_ne!(key(1), key(3), "two rows, two keys");
+        open.insert(TurnId(1));
+        let rows =
+            build(Input { state: &state, unshown: &[], open: &open, groups: &HashSet::new() });
+        assert_eq!(
+            rows,
+            [
+                Row::User { item: id("u") },
+                Row::Fold { turn: TurnId(1), part: 0, open: true },
+                Row::Tool { item: id("x") },
+                Row::User { item: id("steer") },
+                Row::Fold { turn: TurnId(1), part: 1, open: true },
+                Row::Tool { item: id("r") },
+                Row::Text { item: id("end") },
+            ]
         );
     }
 
@@ -657,7 +731,7 @@ mod tests {
             rows,
             [
                 Row::User { item: id("u") },
-                Row::Fold { turn: TurnId(1), open: false },
+                Row::Fold { turn: TurnId(1), part: 0, open: false },
                 Row::Tool { item: id("p") },
                 Row::Text { item: id("end") },
             ]
@@ -779,7 +853,7 @@ mod tests {
             rows,
             [
                 Row::User { item: id("u1") },
-                Row::Fold { turn: TurnId(1), open: false },
+                Row::Fold { turn: TurnId(1), part: 0, open: false },
                 Row::Text { item: id("a1") },
                 Row::User { item: id("u2") },
                 Row::Tool { item: id("r") },

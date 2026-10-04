@@ -161,8 +161,8 @@ impl<'a> Activity<'a> {
                     && matches!(
                         delivery,
                         Delivery::Queue
+                            | Delivery::Interrupt
                             | Delivery::At { .. }
-                            | Delivery::After { .. }
                             | Delivery::Draft
                     ) =>
             {
@@ -281,7 +281,6 @@ mod tests {
 
     fn request(id: &str) -> Request {
         Request {
-            editable: Vec::new(),
             id: AskId(id.to_owned()),
             item: None,
             kind: Request::APPROVAL.to_owned(),

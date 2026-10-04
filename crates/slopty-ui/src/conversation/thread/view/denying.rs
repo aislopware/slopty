@@ -82,7 +82,6 @@ impl ThreadView {
             }
         });
         field.update(cx, |f, cx| f.focus(window, cx));
-        self.editing = None;
         self.denying = Some(Denying { ask, choice, field, _entered: entered });
         cx.notify();
     }
@@ -161,7 +160,6 @@ mod tests {
 
     fn request(kind: &str, options: Vec<Choice>) -> Request {
         Request {
-            editable: Vec::new(),
             id: AskId("a".to_owned()),
             item: None,
             kind: kind.to_owned(),

@@ -497,7 +497,7 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   | `surfaces.accent` | `8AB4F8` | `2A63C4` | focus ring, active border, links (text and hairlines only) |
   | `surfaces.success` | `98C379` | `187633` | connected, agent done |
   | `surfaces.warn` | `E5C07B` | `8B5D00` | agent waiting, "N need you", muted, reconnecting |
-  | `surfaces.error` | `F06C75` | `C7212C` | failed result, failed command, pairing error |
+  | `surfaces.error` | `FF9095` | `8F1D1D` | failed result, failed command, pairing error (2026-10-04: apart from the green and the amber for colour-blind eyes) |
   | `radii.xs / sm / md` | 4 / 6 / 8 | same | pills and inline buttons / buttons, inputs, key caps / panels, items, popovers |
   | `spacing.xxs … xl` | 2 / 4 / 8 / 12 / 16 / 24 | same | the only paddings and gaps in chrome |
   | `typography.ui_size` + `caption()/small()/title()` | 13 → 10 / 12 / 15 | same | chrome type scale (settings move the base) |
@@ -4022,7 +4022,9 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   (`cargo xtask e2e app --no-build --filter …` in a loop, logs in `target/logs/stale/`).
 - ✅ **Slopty's mark in the app** (2026-09-30; `docs/decisions/brand.md`). The prompt
   `#.. / .#. / #.#` leads the empty workspace, centred over its words, and the About panel
-  ("About Slopty" in the palette), over the name, the version and the build.
+  ("About Slopty" in the palette), over the name, the version and the build. (Amended
+  2026-10-04: the panel is gone; "About Slopty" opens Settings › About, see workspace.md "One
+  About, in the settings".)
   - It is nine circles drawn with GPUI (`workspace::about::Mark`), lit in `surfaces.brand`
     (`slopty_theme::BRAND`, `#4ac06c`, the same in both variants), with the unlit dots at
     `Theme::brand_unlit`: the brand's 0.2 on a dark content and 0.3 on a light one, where 0.2
@@ -4037,9 +4039,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     closes. It reuses the settings' version line (`settings_form::schema::about`).
   - Tests: `slopty-theme` `the_mark_is_slopty_green_with_its_unlit_dots_set_back`;
     `workspace::tests::about` (lit while a worker is reachable and dim when its link drops;
-    blinks at the cadence without building the strip, steady under Reduce Motion; the panel
-    opens from the palette's action and Esc closes it); goldens `empty-workspace` and `about`
-    (`about_slopty_leads_with_the_mark`).
+    blinks at the cadence without building the strip, steady under Reduce Motion); golden
+    `empty-workspace`.
 
 - ✅ **A browser tile's page is composed by the window, not laid over it** (2026-09-30, gpui-fast
   f994c34's native hosts; MEASUREMENTS "a browser tile's page composed by the window"). It
@@ -4579,6 +4580,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   HIG on empty states guiding people to what they can do. Tests:
   `workspace::tests::palette::the_empty_workspace_asks_what_an_agent_should_do` and
   `the_questions_chips_choose_where_the_agent_starts`.
+  (Superseded 2026-10-04: the field and its chips are gone, folded into the starting tile, see
+  workspace.md "One way to ask an agent its task".)
 
 - ✅ **Names come from the task, never a number** (2026-10-01, design.md §10 #4). A workspace
   nobody named takes its first shell's repository, else that shell's directory. Where neither
@@ -5906,6 +5909,8 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a_long_plan_shows_its_head_until_opened}`.
 
 - ✅ **An agent asleep is woken from its thread, and an attempt is picked from its row**
+  (the Wake half went the same day with lane A's sleep, `docs/decisions/agents.md`, "Sleep,
+  waits on another thread, queue reordering and edited allows are gone")
   (2026-10-04, lane A's `Intent::Wake`/`Liveness::Asleep`/`Cap::SLEEP` and lane P's R11
   `Attempts`/`Verb::TaskPick`).
   - **Wake.** An agent put to sleep keeps its composer: the line over it says "{agent} is
@@ -5921,8 +5926,10 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     pick, only it offers Merge and none offers Pick. Test:
     `workspace::tests::projects::an_attempt_is_picked_from_its_row`.
 
-- ✅ **A message can be sent later, and what waits says when it goes** (2026-10-04, lane A's
-  `Delivery::At`/`After`/`Draft` on `Cap::SCHEDULE`).
+- ⛔ **A message can be sent later, and what waits says when it goes** (2026-10-04, lane A's
+  `Delivery::At`/`After`/`Draft` on `Cap::SCHEDULE`). The composer's clock and its menu were
+  cut the same day; see "One way to branch, and continuing when a limit lifts" below. What
+  waits still says when it goes.
   - **The composer.** Where the agent takes a message the worker holds until its moment, a
     clock beside the send button opens a menu over the field. It offers "In 30 minutes", "In
     an hour", "In 3 hours" and "Tomorrow morning" (09:00 in this machine's zone), each with
@@ -6101,3 +6108,281 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: `conversation::thread::tests::face::the_way_down_counts_what_came_and_says_it_once_it_settles`,
     `conversation::thread::view::tray::tests::a_count_of_new_rows_stops_at_99`, and in the
     fork `fast::tests::live_region::a_live_region_carries_its_politeness_and_value`.
+
+- ✅ **The commit sheet, and the branch's pull request where the work is reviewed** (2026-10-04,
+  P items 1 and 3; wire in `slopty_proto::git`, ruling in `docs/decisions/projects.md`).
+  - **Where.** Where the thread works (the checkout and its branch in the composer's toolbar)
+    is a button that opens the sheet, and so is the pull request's number beside it once the
+    client has heard of one. The review tile's scope bar ends with the pull request, its
+    number and its standing in the standing's tone, and "Commit…". The palette has "Commit…"
+    and "Refresh pull request" (`conversation::palette_items`); no button carries a key.
+  - **A sheet over the tile, not the window.** It is drawn on a scrim of its tile alone, so
+    the other tiles stay in reach and a press round it closes it, as Esc and its close do. It
+    is the dialog shell (`kit::dialog`, the list size), its head the title, the branch line
+    ("feature → origin/feature · 2 ahead", "no upstream", "Detached HEAD"), refresh and close.
+  - **The files.** Every changed file is ticked at first, one tick for all ("2 of 3 files"
+    while some are not), git's letter in its tone (M, D, A, R, "new" for untracked, an
+    unmerged file as git spells it), a rename as "from → to". The list scrolls past eight rows
+    (a `uniform_list`, so a status at its 2000-file cap lays out what shows).
+  - **The person's words only.** The message starts empty and nothing is suggested. Commit and
+    Commit and push stay set back until a file is ticked and a word is written. With nothing to
+    commit and the branch ahead of its upstream, or with none, the second button is Push.
+    "Commit and push" sends the commit and the push only once the commit is made, never both
+    at once. Every change is followed by a fresh status, so the list shows what is left; the
+    message clears once its commit is made.
+  - **The pull request over the files.** Its number (a link to its page), its title, and its
+    standing as a pill: checks failing, conflicts with the base, changes requested, ready to
+    merge, checks running, behind the base, waiting for review, blocked, draft, merged,
+    closed (`git::standing_words`, read through `PullStatus::standing`, never matched on
+    GitHub's spelling). Up to six checks follow, the most pressing first, each with its
+    bucket's mark and opening its page; the rest are counted. With none, the sheet says so and
+    offers "Open pull request", a page of title (empty means gh fills it from the commits),
+    description, base and draft.
+  - **A merge only on the person's press, only while ready.** A split button, "Squash and
+    merge" with Merge and Rebase in its menu, and "Delete branch" ticked, send the head the
+    person is looking at. Any other standing shows "Merge waits: …" in its place. Without gh,
+    the merge and the pull request page say gh's absence in the worker's words.
+  - **Refusals verbatim.** Slopty's own refusal, a missing program, and git's or gh's words
+    (a hook's output, a rejected push) stand under the buttons in the code face, as said.
+    What went is one quiet line: "Committed abc1234 · 1 file", "Pushed to origin/feature",
+    "Opened" with the link.
+  - **State in the hub.** `conversation::thread::git::GitBook`, one per worker, numbers each
+    op, holds it until the worker answers (`ThreadHub::git_done`), and keeps each
+    repository's status, pull request and last outcome, so a thread's tile and its review's
+    show one answer. Out of reach, nothing is asked and the sheet says the machine is out of
+    reach: an op held for later might no longer be what the person meant. The pull request is
+    asked when the sheet or the review tile opens, on refresh, and comes with every push;
+    nothing polls.
+  - Tests: `conversation::thread::git::tests` (five), `conversation::thread::tests::commit`
+    (three: commit and push in order, the merge's gate and its head, a refusal verbatim and
+    closing), `review::tests::the_tile_shows_the_branch_s_pull_request_and_opens_the_commit_sheet`.
+
+- ✅ **Carrying a thread on: continue in another agent, interrupt and send, edit from here**
+  (2026-10-04; rulings R8 and R13 and "Edit from a turn" in `docs/decisions/agents.md`).
+  - **Continue in….** Where the thread can (`Cap::CONTINUE`), the model chip is a button
+    even with no model to switch to, and its menu ends with "Continue in a new thread": the
+    thread's own agent first as "Start afresh", then every agent the worker can start
+    (`ThreadHub::set_agents`, fed by the workspace from the link). Each row says what comes
+    over: the account of this thread, as a draft. The models stay first, since switching the
+    model is the smaller step.
+  - **Started threads open.** An intent the worker answers with a new thread (a fork, a
+    continue, an edit from a turn) raises `HubEvent::Started { from, thread }`; the workspace
+    brings that thread up as a tile. Before, a fork's new thread was found only in the
+    navigator.
+  - **A draft is read and changed where it stands.** A message the worker holds as a draft
+    stands whole in the tray, in a field of its own (up to twelve lines, then it scrolls), not
+    pulled into the composer: an account can run to 32 KiB, and the composer is for the next
+    message. Discard takes it back, Save keeps a change on the worker, Send gives the agent the
+    words as they stand, the change first and the send after, in that order. A field the
+    person has not touched follows the worker's words.
+  - **Interrupt and send.** On an agent that takes no message mid-turn but can be stopped
+    (`Cap::INTERRUPT` and `Cap::QUEUE` without `Cap::STEER`, every ACP agent today), a ghost
+    "Interrupt and send" stands beside the Queue send while a turn runs and something is
+    typed. The message waits in the tray under its own intent ("Stopping the turn to send"),
+    as a queued one does, never as a bubble that looks sent.
+  - **Edit from here** (superseded the same day by "Branch from here", below). Under a
+    message of the person's, where the agent can (`Cap::REWIND`), an undo mark offered the edit; it opens a line under the bubble with
+    T3 Code's two choices, Keep files (the solid) and Revert files too, and Cancel. While a
+    turn runs it is set back and does nothing, since the worker refuses it then. A refusal
+    reads in the tray in the worker's words.
+  - Tests: `conversation::thread::tests::carry` (four).
+
+- ✅ **A thought says how long it took, and says Thinking while it comes** (2026-10-04, Ely
+  study #6, `.research/ely-gpui-components-2026-10-04.md`).
+  - Before, a reasoning row read "Thought" and its first line whether it had ended or not.
+  - Settled, it reads "Thought for 12 s", measured from the thought to the item after it (or
+    its turn's end when it was the last), in the one way chrome says a duration
+    (`kit::duration` in whole seconds); under a second "Thought for a moment"; with no times
+    to measure, "Thought". The first line still follows, quiet.
+  - While it is the thread's last item in a turn under way, the word is "Thinking", swept by
+    gpui-kit's `ShimmerText`, which holds still under Reduce Motion. Only that word moves.
+  - Tests: `conversation::thread::view::tests::a_thought_says_how_long_it_took`,
+    `conversation::thread::tests::face::a_thought_says_thinking_then_how_long_it_took`.
+
+- ✅ **A web search shows what it found** (2026-10-04, Ely study #5).
+  - Before, the thread view drew a search as its query alone; the links the worker carries
+    (`WebSearchDetail::links`) were dropped.
+  - Its line now ends "3 sources · docs.rs · github.com": how many, and the first two sites,
+    each once, quiet. Opened, the links are numbered rows of their title and site, each a link
+    (a press, or ↵ once Tab is on it) to its page. Open state is the call's own entry in
+    `items_open`, as every call's is. The worker carries no snippet, so none is drawn.
+  - Tests: `conversation::thread::view::tools::tests::a_search_says_its_sources_and_their_sites`,
+    `conversation::thread::tests::face::a_web_search_lists_its_sources`.
+
+- ✅ **Motion keyed on a change, and figures that roll** (2026-10-04, Ely study #7; ported
+  from Ely's `motion/changes.rs` and `typography/rolling.rs` with their notice, in
+  `kit/change.rs`).
+  - `kit::on_change(id, value)` counts how often a value changed since its element first
+    drew: 0 on the first paint, one more per change. An animation keyed on the count plays
+    once per change, is still when the element first appears, and never re-keys what is
+    inside it. It is for every lane (the inbox and status-bar counts are lane U's).
+  - `kit::Rolling` draws a figure whose digits roll to their new place, each along a column
+    of 0–9 over `Pace::Settle`, in tabular figures, on a line of `FIGURE_LEADING` times its
+    size snapped to whole device pixels. Signs, `%` and `+` stand. It rolls only when the
+    figure keeps its words ("2 running" to "3 running"); new words ("1 finished") are drawn
+    at once, as are the first paint and every paint under Reduce Motion.
+  - Used for the way down's count ("3 new"), the background work in the composer and the
+    tray ("2 running"), and the context share in the composer's meter.
+  - Tests: `kit::change::tests::{figures_pair_by_place, only_the_digits_may_change}`, and the
+    way down's face test, unchanged.
+
+- ✅ **One way to branch, and continuing when a limit lifts** (2026-10-04, the cuts of the
+  day's audit, `target/lanes/cuts-2026-10-04.md`). The person asked for fewer, plainer
+  controls: three ways to carry a thread on became one, and the controls nobody reached for
+  went.
+  - **Branch from here.** Fork (on a turn's fold), edit from here (an undo mark on a
+    message) and "Continue in a new thread" (the model chip's menu) are one branch mark under
+    each message of the person's. It opens a small panel under the bubble with three rows of
+    choices and Branch: the agent (the thread's own first, then each one the worker can
+    start), where from (this message, or the end) and the files (keep them, or put them
+    back). Each choice goes through the agent's own door: another agent is
+    `Intent::Continue` with the account of the whole thread, so "where from" is not offered;
+    this message on its own agent is `Intent::Rewind` (`Cap::REWIND`) with the files as
+    chosen, or `Intent::Fork` after the turn before it where only `Cap::FORK` holds; the end
+    is a fork of the whole thread, or a fresh thread of the same agent. While a turn runs
+    Branch asks nothing, since the worker refuses it then. The thread it starts opens as a
+    tile (`HubEvent::Started`). The model chip is a button only where models can switch.
+  - **Send later is gone.** The clock beside the send button, its menu of times and other
+    threads, and "Send later…" in the palette went. The one moment worth waiting for is a
+    usage limit's reset, which the agent names (`TurnState::Failed::until_ms`): while a limit
+    holds a thread whose agent takes a message kept for later (`Cap::SCHEDULE`), a line over
+    the field says "The usage limit lifts at 14:35", and "Continue at 14:35" sends the draft
+    (or "Continue", with nothing typed) to go then. Once that message waits, the tray says
+    when it goes and the line goes.
+  - **Edit… on an approval is gone.** Changing an edit's text before allowing it was rarely
+    used and doubled the tray's states. Deny… with a reason stays. The wire's
+    `Request::editable` is lane A's to remove.
+  - **Settings.** `[web] inspector` went: every page is open to Web Inspector, as a
+    developer's browser is, since a worker's dev page is a browser tile's main use.
+    `[remote] fps` went: a stream asks for the refresh of the screen it is drawn on, up to
+    120, which is what the default did. `[terminal] bell_alert` and `agent_alert` are one
+    `[terminal] alert` ("never", "hidden" by default, "always") for a terminal's bell and an
+    agent that needs the person alike. The Mac's "Open in editor" in the settings dialog went:
+    the dialog's own file face is the editor.
+  - Tests: `conversation::thread::tests::carry` (four, on the panel),
+    `conversation::thread::view::branch::tests::a_branch_asks_the_agent_s_own_door`,
+    `conversation::thread::tests::composing::a_thread_a_limit_stopped_continues_when_it_lifts`,
+    `conversation::thread::view::later::tests::{a_held_message_says_when_it_goes,
+    a_limit_lifts_when_its_turn_says}`, `slopty_app::settings::tests::an_alert_sounds_only_in_the_background_unless_asked`,
+    `screen::tests::{the_rate_follows_the_screen_up_to_the_ceiling,
+    a_view_on_a_screen_of_another_rate_asks_for_it}`, and the platform's
+    `every_page_is_open_to_web_inspector`.
+
+- ✅ **The context ring and bar glide to a new share** (2026-10-04, Ely study #8).
+  - `kit::Gliding` draws a value through a closure at each step of a glide over
+    `Pace::Settle`: a change while it glides sets out from where it is drawn, so it turns
+    back rather than jumping to its last end first (Ely's restarted from its last end). The
+    first paint and every paint under Reduce Motion draw the value as it is.
+  - The context ring (`parts::context_ring`) is a true arc drawn with `PathBuilder::arc_to`,
+    its ends rounded as filled discs since GPUI exports no line cap, and the meter's bar
+    fills through `Gliding::fill`.
+  - `kit::Spark` draws a short history as one line over its own low and high, the newest
+    value at the right edge with a dot, sliding one step left over `Pace::Settle` as each
+    value comes (keyed on how many came, so a repaint between them never moves it; still
+    under Reduce Motion). A value that is no number is a gap. It is said as the words for its
+    newest value. From Ely's `spark.rs` and `charts/realtime.rs`, with their notice.
+  - The stream overlay's "Details" opens on three of them over the engineering lines: the
+    last half minute (thirty samples, one a second) of the frame's age, the interarrival
+    jitter and the round trip, each with its latest figure ("Round trip 7 ms"). A stalling
+    link shows as a rise before it shows as a stall.
+  - Tests: `kit::spark::tests` (two),
+    `screen::tests::the_details_show_the_last_half_minute_of_age_jitter_and_round_trip`.
+
+- ✅ **Find in a thread** (2026-10-04, on lane A's `ThreadRequest::Search`; the old face's
+  find goes with it).
+  - ⌘F in a thread opens a find bar at the list's top right: the field, "2 of 9", the older
+    and newer match, and Close. The matches run newest first, as a thread reads from its end,
+    so ↵ steps back through them and ⇧↵ forward, round, as the terminal's find does. Esc in
+    the bar closes it and gives the composer the keyboard.
+  - It reads what the worker's search reads: the person's messages, the agent's answers and
+    its reasoning, its calls' titles and its notices, every word of the query in any order
+    and case. The items the client holds are matched at once as the person types.
+  - Where the thread has older turns than the client holds, the worker is asked
+    (`ThreadHub::search`, once the words rest for 120 ms, from two characters), and its hits
+    in those turns come after the held ones. Going to one pages the thread back, a page at a
+    time and never twice for the same page, until its turn is held; the count says "+" when
+    the worker left matches out. An answer for words no longer asked is dropped.
+  - The match on show is washed in the selection's hue at its faint step and scrolled to;
+    one in a folded turn, a closed group or a closed step opens what hides it.
+  - The workspace routes `WorkerMsg::ThreadHits` to the worker's hub (lane U's hunk), which
+    the palette's "Threads" section can read too.
+  - Tests: `conversation::thread::find::tests` (three),
+    `conversation::thread::tests::find::{a_match_opens_the_fold_over_it_and_return_walks_back,
+    a_match_in_an_older_turn_pages_back_to_it}`.
+
+- ✅ **A steer splits its turn's fold** (2026-10-04, audit A5).
+  - Before, a message the person sent into a running turn stood after the one fold over the
+    whole turn's work, so the fold summed work from both sides of it and opening the turn
+    put the steer in the middle of the work it had folded.
+  - Now each steer stands where it was sent between two folds: one over the work before it,
+    one over the work after. An earlier fold says only what its stretch did ("Ran a
+    command"); the last carries the turn's own figures as before (its time, its changes, its
+    model and cost). The turn opens as one, from any of its folds, since its stretches are
+    one piece of work. `Row::Fold` carries its `part`, so each fold keeps its own row.
+  - Tests: `conversation::thread::rows::tests::a_steer_splits_the_fold_where_it_was_sent`,
+    `conversation::thread::tests::steps::a_steer_stands_between_the_folds_of_its_turn`.
+
+- ✅ **Opposite states stay apart for colour-blind eyes** (2026-10-04, Ely study's next
+  batch; `crates/slopty-theme/src/vision.rs`).
+  - A test draws the three pairs the chrome sets side by side to mean opposite things (lines
+    added against removed, a live mark against a failure, waiting against failed) through
+    Machado, Oliveira and Fernandes's simulation of protanopia, deuteranopia and tritanopia
+    at full severity (2009, linear sRGB), in both appearances, and holds each pair 0.06
+    apart in Oklab, about three just-noticeable steps.
+  - It found two pairs a deuteranope could not tell apart. In dark, the green and One Dark's
+    red (`f27d84`) sat 0.020 apart, one step, so a diff's added and removed lines read alike.
+    In light, the amber (`8b5d00`) and the red (`c7212c`) sat 0.029 apart, one brown. Both
+    reds now differ from their neighbours in lightness, the one difference every dichromacy
+    keeps: dark's error is a light coral, `ff9095` (near Radix's dark red 11), and light's
+    a deep red, `8f1d1d` (near Tailwind's red 800). Both read past their floors (APCA Lc 45
+    in dark, AAA on white), and the green and the amber are unchanged. Goldens that draw an
+    error or a removed line move with this.
+  - Increase Contrast is not held to it: its lift carries every tone toward the pole, where
+    they meet. The signs and marks beside them (a diff's `+` and `−`, the check and the
+    cross) carry the difference there.
+  - Tests: `vision::{opposite_states_stay_apart_for_every_dichromacy,
+    the_simulation_keeps_greys_and_merges_red_with_green}`.
+
+- ✅ **A disclosure chevron turns** (2026-10-04, Ely study's next batch, from Ely's
+  `primitives/disclosure.rs` with its notice).
+  - `kit::Disclosure` is one chevron that points right when closed and down when open, turned
+    a quarter over `Pace::Fade` as the state changes (keyed by `kit::on_change`), where rows
+    swapped two glyphs and the eye lost which row moved. It is still on the first paint and
+    under Reduce Motion.
+  - A thread's folds, stretches, groups and notes that open use it. The navigator's section
+    headers (lane U) can take it the same way.
+
+- ✅ **The effort chip switches how hard the model thinks** (2026-10-04, lane A's
+  `Intent::SetEffort`, `ThreadMeta::efforts` and `Cap::SET_EFFORT`; ruling in agents.md,
+  "Model, effort and mode are switched through each agent's own settings door").
+  - Each of the composer's three chips is a switch only where the agent has the door and a
+    list to switch among: the model (`SET_MODEL` and `models`), the mode (`SET_MODE` and
+    `modes`), the effort (`SET_EFFORT` and `efforts`). Without them a chip is a quiet meter.
+  - The effort chip reads the level the agent says it is at, by the label of the level it
+    published when one matches its id or its label (Codex and pi say the id, an ACP agent
+    the label). Its menu lists the levels with their descriptions and checks the current
+    one, as the modes' does. An agent with the door but no levels for its model (a pi model
+    that does not reason) shows no chip.
+  - "Next effort level" is in the palette, with no default key (it can be bound as
+    `cycle_effort`); it steps to the next level, round. A refusal reads in the tray in the
+    agent's words, as every refused intent does.
+  - Test: `conversation::thread::tests::face::the_effort_chip_switches_how_hard_the_model_thinks`.
+
+- ✅ **Labels fade at their tail, and reading has a size of its own** (2026-10-04, items 12
+  and 13 of the thread-view plan above).
+  - `kit::fit_label(id, text, theme)` lays a label out whole, keeps it from scrolling, and
+    fades its right edge through GPUI's per-pixel `edge_fade` only as far as text lies past
+    it (`hidden_by_scroll` on a scroll handle that tracks an overflow-hidden row, so no wheel
+    moves it). A label that fits is drawn sharp to its last letter; one that is cut keeps the
+    start of every word, offers its whole text in a hint, and is heard whole. The composer's
+    model name, where the thread works (the checkout and the branch) and a queued message's
+    line use it; tile titles keep their ruled ellipsis. The navigator's rows are lane U's to
+    move onto it.
+  - `[font] prose_size` ("Reading size", 15 pt by default, 10 to 32) sets what is read at
+    length: an agent's answers, the person's messages, a plan's body and the composer's
+    field. The chrome keeps `ui_size`. Headings sit 3 and 1 points over it, as 18 and 16 did
+    over 15. It is under Settings, Appearance, Interface, after the text size.
+  - Tests: `kit::fit::tests::only_a_label_past_its_room_fades_at_its_tail`,
+    `slopty_app::settings::tests::the_reading_size_rides_on_the_theme`,
+    `conversation::thread::tests::face::the_reading_size_grows_what_is_read_and_not_the_chrome`,
+    and the settings crate's `[font]` keys.

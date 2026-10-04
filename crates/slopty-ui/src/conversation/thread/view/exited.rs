@@ -9,10 +9,6 @@
 //!   the same thread, `resume <thread>` in Codex's own words, which brings the person's app-server
 //!   up with Codex's published command and takes the thread up again there.
 //! - **An agent that cannot load its sessions** has nothing to go on with ([`Gone::Over`]).
-//!
-//! An agent put to sleep on the person's word ([`Liveness::Asleep`]) is not gone: its session
-//! is kept, the next message wakes it, and where it sleeps by Slopty's door ([`Cap::SLEEP`]) a
-//! Wake beside the line takes it up again at once (`Intent::Wake`).
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -20,8 +16,8 @@ use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
-use slopty_proto::thread::wire::{Intent, Start};
-use slopty_proto::thread::{AgentId, Cap, Drive, Liveness, ThreadState};
+use slopty_proto::thread::wire::Start;
+use slopty_proto::thread::{AgentId, Drive, Liveness, ThreadState};
 
 use super::{ThreadView, agent_name};
 use crate::colors::hsla;
@@ -91,26 +87,14 @@ impl ThreadView {
         let _id = self.hub.update(cx, |hub, cx| hub.resume(thread, start, cx));
     }
 
-    /// The line at the composer's head while the next message is what starts the agent again:
-    /// one that exited, or one put to sleep, which Wake also takes up again.
+    /// The line at the composer's head while the next message is what starts the agent again.
     pub(super) fn exited_line(&self, cx: &Context<Self>) -> Option<AnyElement> {
         let state = self.state(cx)?;
-        let name = agent_name(&state.meta.agent);
-        let asleep = matches!(state.status.liveness, Liveness::Asleep { .. });
-        let words = if asleep {
-            format!("{name} is asleep. Your next message wakes it")
-        } else if self.gone(cx) == Some(Gone::ByMessage) {
-            format!("{name} exited. Your next message starts it again")
-        } else {
+        if self.gone(cx) != Some(Gone::ByMessage) {
             return None;
-        };
-        let wake = (asleep && state.meta.can(Cap::SLEEP)).then(|| {
-            self.button("thread-wake", "Wake", ButtonKind::Secondary)
-                .on_click(cx.listener(|this, _ev, _w, cx| {
-                    let _id = this.intent(Intent::Wake, cx);
-                }))
-                .into_any_element()
-        });
+        }
+        let name = agent_name(&state.meta.agent);
+        let words = format!("{name} exited. Your next message starts it again");
         let theme = &self.theme;
         let s = theme.surfaces;
         Some(
@@ -124,12 +108,8 @@ impl ThreadView {
                 .gap(self.z(theme.spacing.xs))
                 .text_size(self.z(theme.typography.small()))
                 .text_color(hsla(s.text_secondary))
-                .child(self.icon(
-                    if asleep { IconName::CirclePause } else { IconName::Power },
-                    s.text_muted,
-                ))
+                .child(self.icon(IconName::Power, s.text_muted))
                 .child(div().min_w_0().flex_1().child(SharedString::from(words)))
-                .children(wake)
                 .into_any_element(),
         )
     }

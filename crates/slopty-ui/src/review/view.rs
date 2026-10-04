@@ -31,12 +31,14 @@ use super::model::{self, Comment, Model, Scope, Side};
 use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::lines::{self, Ink};
+use crate::conversation::thread::commit::{CommitEvent, CommitSheet};
 use crate::conversation::thread::{HubEvent, ThreadHub};
+use crate::conversation::{OpenCommit, RefreshPullRequest};
 use crate::icons::{IconName, IconSize};
 use crate::kit;
 
 /// How wide the tile has to be, at rest, for its diff to show both sides.
-pub const SPLIT_FROM: f32 = crate::conversation::view::SPLIT_FROM;
+pub const SPLIT_FROM: f32 = 960.0;
 
 /// How wide the tile has to be for the file list to sit beside the diff.
 const LIST_FROM: f32 = 720.0;
@@ -145,6 +147,10 @@ pub struct ReviewView {
     /// Keeps and put-backs this tile sent, until the worker has acted on them: then the
     /// review is asked for again.
     picks: HashSet<IntentId>,
+    /// The branch's pull request was asked for, once the thread's folder was known.
+    pull_asked: bool,
+    /// The commit sheet over the tile, while it is open.
+    commit: Option<(Entity<CommitSheet>, Subscription)>,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -185,6 +191,7 @@ impl ReviewView {
         let hearing = cx.subscribe(&hub, |this, _hub, event, cx| match event {
             HubEvent::Review(t) if *t == this.thread => this.reviewed(cx),
             HubEvent::Thread(t) if *t == this.thread => this.thread_moved(cx),
+            HubEvent::Git(repo) if this.repo(cx).as_ref() == Some(repo) => cx.notify(),
             _ => {}
         });
         let watching = cx.observe(&draft, |_, _, cx| cx.notify());
@@ -208,12 +215,15 @@ impl ReviewView {
             drafting: None,
             draft,
             picks: HashSet::new(),
+            pull_asked: false,
+            commit: None,
             focus: cx.focus_handle(),
             _subscriptions: vec![writing, hearing, watching],
         };
         view.hub.update(cx, |hub, cx| hub.open(thread, cx));
         view.reviewed(cx);
         view.ask(cx);
+        view.ask_pull(cx);
         view
     }
 
@@ -249,6 +259,9 @@ impl ReviewView {
 
     /// Draw in `theme`.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        if let Some((sheet, _)) = &self.commit {
+            sheet.update(cx, |sheet, cx| sheet.set_theme(theme.clone(), cx));
+        }
         self.theme = theme;
         self.blocks.clear();
         self.list.remeasure();
@@ -290,6 +303,56 @@ impl ReviewView {
         self.hub.update(cx, |hub, cx| hub.ask_review(thread, scope, cx));
     }
 
+    /// The folder the thread works in, when the worker said: its repository is the one the
+    /// commit sheet and the pull request are of.
+    fn repo(&self, cx: &App) -> Option<String> {
+        let hub = self.hub.read(cx);
+        let state = hub.threads().mirror(self.thread).and_then(Mirror::state)?;
+        Some(state.meta.cwd.clone()).filter(|cwd| !cwd.trim().is_empty())
+    }
+
+    /// Ask the branch's pull request once the folder is known: the tile shows where it stands.
+    fn ask_pull(&mut self, cx: &mut Context<Self>) {
+        if self.pull_asked {
+            return;
+        }
+        let Some(repo) = self.repo(cx) else { return };
+        self.pull_asked = true;
+        let _asked = self
+            .hub
+            .update(cx, |hub, cx| hub.git_op(&repo, slopty_proto::git::GitOp::PullStatus, cx));
+    }
+
+    /// Open the commit sheet over the tile.
+    pub fn open_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some((sheet, _)) = &self.commit {
+            sheet.update(cx, |sheet, cx| sheet.refresh(cx));
+            return;
+        }
+        let Some(repo) = self.repo(cx) else { return };
+        let (hub, theme) = (self.hub.clone(), self.theme.clone());
+        let sheet = cx.new(|cx| CommitSheet::new(hub, repo, theme, window, cx));
+        let closing =
+            cx.subscribe_in(&sheet, window, |this, _sheet, event, window, cx| match event {
+                CommitEvent::Close => {
+                    this.commit = None;
+                    window.focus(&this.focus, cx);
+                    cx.notify();
+                }
+            });
+        self.commit = Some((sheet, closing));
+        cx.notify();
+    }
+
+    fn refresh_pull(&mut self, cx: &mut Context<Self>) {
+        if let Some((sheet, _)) = &self.commit {
+            sheet.update(cx, |sheet, cx| sheet.refresh(cx));
+            return;
+        }
+        self.pull_asked = false;
+        self.ask_pull(cx);
+    }
+
     /// The thread moved on: a new turn asks the last-turn review again, and a keep or a put
     /// back the worker acted on asks the review again.
     fn thread_moved(&mut self, cx: &mut Context<Self>) {
@@ -307,6 +370,7 @@ impl ReviewView {
             self.asked = None;
         }
         self.ask(cx);
+        self.ask_pull(cx);
         cx.notify();
     }
 
@@ -690,7 +754,55 @@ impl ReviewView {
                     .child(scope.label())
                     .on_click(cx.listener(move |this, _ev, _w, cx| this.set_scope(scope, cx)))
             }))
+            .child(div().flex_1())
+            .children(self.git_part(cx))
             .into_any_element()
+    }
+
+    /// At the scope bar's end: the branch's pull request where it stands, and the way to the
+    /// commit sheet.
+    fn git_part(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let repo = self.repo(cx)?;
+        let hub = self.hub.read(cx);
+        let pull = hub.git().repo(&repo).and_then(|r| r.pull.status()).map(|pull| {
+            let tone = crate::conversation::thread::commit::standing_tone(theme, pull.standing());
+            let words = crate::conversation::thread::git::standing_words(pull);
+            div()
+                .id("review-pull")
+                .debug_selector(|| "review-pull".to_owned())
+                .role(Role::Button)
+                .aria_label(SharedString::from(format!("Pull request {}, {words}", pull.number)))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xxs))
+                .px(self.z(theme.spacing.xs))
+                .py(self.z(theme.spacing.xxs))
+                .rounded(self.z(theme.radii.sm))
+                .cursor_pointer()
+                .text_color(hsla(s.text_secondary))
+                .hover(move |el| el.bg(hsla(s.hover)))
+                .child(self.icon(IconName::GitPullRequest, tone))
+                .child(kit::tabular(div()).child(SharedString::from(format!("#{}", pull.number))))
+                .child(div().text_color(hsla(tone)).child(SharedString::from(words)))
+                .on_click(cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)))
+        });
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
+                .children(pull)
+                .child(
+                    self.action("review-commit".to_owned(), "Commit\u{2026}", false).on_click(
+                        cx.listener(|this, _ev, window, cx| this.open_commit(window, cx)),
+                    ),
+                )
+                .into_any_element(),
+        )
     }
 
     fn file_list(&self, cx: &Context<Self>) -> AnyElement {
@@ -1189,8 +1301,12 @@ impl Render for ReviewView {
             .font_family(theme.typography.ui_family.clone())
             .text_size(self.z(theme.typography.ui_size))
             .text_color(hsla(s.text))
+            .on_action(cx.listener(|this, _: &OpenCommit, window, cx| this.open_commit(window, cx)))
+            .on_action(cx.listener(|this, _: &RefreshPullRequest, _w, cx| this.refresh_pull(cx)))
+            .relative()
             .child(scopes)
             .child(body)
             .child(foot)
+            .children(self.commit.as_ref().map(|(sheet, _)| sheet.clone()))
     }
 }

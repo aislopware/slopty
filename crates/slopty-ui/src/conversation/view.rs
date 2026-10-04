@@ -28,7 +28,6 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
-pub(in crate::conversation) use entries::code_actions;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable,
@@ -37,9 +36,7 @@ use gpui::{
     Subscription, Task, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
-pub(in crate::conversation) use media::picture_words;
 pub use parts::HeaderChips;
-pub(in crate::conversation) use parts::context_ring;
 pub use review::Scope;
 use slopty_core::{ClientId, SessionId, WallMs};
 use slopty_proto::agent::{AgentEvent, AgentStatus, BlockReason};
@@ -48,7 +45,6 @@ use slopty_proto::conversation::{
     Verdict,
 };
 use slopty_theme::Theme;
-pub(in crate::conversation) use work::plan_parts;
 
 use super::approval::Approvals;
 use super::composer::Attach;
@@ -71,11 +67,8 @@ const COMPOSER_ROWS: usize = 8;
 /// How long a message the transcript never records (a local command) shows as pending.
 const PENDING_FOR: Duration = Duration::from_secs(15);
 
-/// How wide a tile has to be, at rest, for an edit's diff to show its sides beside each other.
-pub const SPLIT_FROM: f32 = 960.0;
-
-/// How long a copy button says it copied.
-pub(crate) const COPIED_FOR: Duration = Duration::from_millis(1_500);
+use crate::conversation::thread::view::COPIED_FOR;
+pub use crate::review::view::SPLIT_FROM;
 
 /// What the list shows.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]

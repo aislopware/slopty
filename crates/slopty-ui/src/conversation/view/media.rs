@@ -20,6 +20,7 @@ use slopty_proto::conversation::{IMAGE_BYTES, Image};
 use super::ConversationView;
 use crate::colors::hsla;
 use crate::conversation::model::Picture;
+use crate::conversation::thread::view::picture_words;
 use crate::kit;
 
 /// The box a thumbnail fits in, in points at zoom 1: a screenshot reads at this height, and a
@@ -48,25 +49,6 @@ pub(super) fn thumb_size(image: &Image) -> (f32, f32) {
 #[must_use]
 pub(super) fn describe(image: &Image) -> String {
     picture_words(image.width, image.height, &image.media_type, image.bytes)
-}
-
-/// What a picture `width` × `height` of `media_type`, `bytes` long, is in words; a size its
-/// header did not give is left out.
-#[must_use]
-pub(in crate::conversation) fn picture_words(
-    width: u32,
-    height: u32,
-    media_type: &str,
-    bytes: u64,
-) -> String {
-    let kind = media_type.strip_prefix("image/").unwrap_or(media_type).to_uppercase();
-    let mut parts = Vec::new();
-    if width > 0 && height > 0 {
-        parts.push(format!("{width} \u{d7} {height}"));
-    }
-    parts.push(kind);
-    parts.push(kit::size_label(bytes));
-    parts.join(" \u{b7} ")
 }
 
 fn format_of(media_type: &str) -> ImageFormat {

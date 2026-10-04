@@ -13,9 +13,9 @@ use std::time::Duration;
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Div, ElementId, FontWeight,
-    InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Window, div, px, relative,
+    AnyElement, AppContext as _, Context, Div, ElementId, FontWeight, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px, relative,
 };
 use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_core::WallMs;
@@ -29,6 +29,7 @@ use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::figures;
 use crate::conversation::model::Expanded;
 use crate::conversation::rows::{self, Fold, Level, Row, ToolKind};
+use crate::conversation::thread::view::code_actions;
 use crate::conversation::tools::{self, State};
 use crate::icons::{IconName, IconSize, Status};
 use crate::kit::first_line;
@@ -1502,48 +1503,6 @@ pub(super) fn until_turn_ticks(since: WallMs, now: WallMs) -> Duration {
         return Duration::from_secs(1);
     }
     crate::icons::until_next_second(now.since(since))
-}
-
-/// A fenced block's corner: its language and a copy, at the meta size.
-pub(in crate::conversation) fn code_actions(
-    theme: &slopty_theme::Theme,
-    zoom: f32,
-    block: &gpui_kit::base::text::CodeBlock,
-) -> AnyElement {
-    let s = theme.surfaces;
-    let code = block.code().to_string();
-    let lang = block.lang().filter(|l| !l.is_empty());
-    div()
-        .flex()
-        .items_center()
-        .gap(px(theme.spacing.xs * zoom))
-        .px(px(theme.spacing.xs * zoom))
-        .font_family(theme.typography.ui_family.clone())
-        .text_size(px(theme.typography.small() * zoom))
-        .text_color(hsla(s.text_muted))
-        .children(lang.map(|lang| div().child(lang)))
-        .child(
-            div()
-                .id("copy")
-                .role(Role::Button)
-                .aria_label("Copy code")
-                .size(px(theme.typography.icon_large() * zoom))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(theme.radii.xs * zoom))
-                .cursor_pointer()
-                .hover(move |el| el.bg(hsla(s.hover)))
-                .child(
-                    crate::icons::icon(theme, IconName::Copy, IconSize::Inline, hsla(s.text_muted))
-                        .size(px(theme.typography.icon() * zoom)),
-                )
-                .on_click(move |_ev, _window, cx| {
-                    cx.stop_propagation();
-                    cx.write_to_clipboard(ClipboardItem::new_string(code.clone()));
-                }),
-        )
-        .into_any_element()
 }
 
 /// What a title line's slot shows.

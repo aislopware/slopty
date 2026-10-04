@@ -18,7 +18,7 @@ use gpui::{
 };
 use slopty_proto::thread::detail::ExecStatus;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{BackgroundTask, Cap, Choice, Drive, Effect, ItemId, Request};
+use slopty_proto::thread::{BackgroundTask, Cap, Choice, Delivery, Drive, Effect, ItemId, Request};
 use slopty_theme::{Rgb, Theme, Typography};
 
 use super::composer::sentence;
@@ -198,12 +198,21 @@ impl ThreadView {
                     .cursor_pointer()
                     .hover(move |el| el.bg(hsla(s.hover)))
                     .when(new > 0, |el| {
+                        let size = self.z(theme.typography.small());
                         el.child(
-                            kit::tabular(div())
+                            div()
                                 .debug_selector(|| "thread-down-count".to_owned())
-                                .text_size(self.z(theme.typography.small()))
+                                .flex()
+                                .items_center()
+                                .gap(self.z(theme.spacing.xxs))
+                                .text_size(size)
                                 .text_color(hsla(s.text_secondary))
-                                .child(SharedString::from(new_words(new))),
+                                .child(kit::Rolling::new(
+                                    "thread-down-figure",
+                                    new_figure(new),
+                                    size,
+                                ))
+                                .child(NEW_TAIL),
                         )
                     })
                     .child(self.icon(IconName::ChevronDown, s.text_secondary))
@@ -260,7 +269,14 @@ impl ThreadView {
         groups.push(
             bar.queue
                 .iter()
-                .map(|q| self.queued_line(q, bar.can_withdraw, bar.can_promote, cx))
+                .map(|q| {
+                    let draft = (q.delivery == Delivery::Draft && q.on_worker)
+                        .then(|| self.draft_card(q, cx))
+                        .flatten();
+                    draft.unwrap_or_else(|| {
+                        self.queued_line(q, bar.can_withdraw, bar.can_promote, cx)
+                    })
+                })
                 .collect(),
         );
         if !bar.background.is_empty() {
@@ -389,9 +405,11 @@ impl ThreadView {
             .text_color(hsla(s.text_secondary))
             .child(self.slot().child(self.icon(IconName::Activity, s.text_muted)))
             .child(div().flex_none().child("In the background"))
-            .child(
-                kit::tabular(div()).text_color(hsla(s.text_muted)).child(SharedString::from(words)),
-            )
+            .child(div().text_color(hsla(s.text_muted)).child(kit::Rolling::new(
+                "thread-tasks-figure",
+                words,
+                self.z(self.theme.typography.small()),
+            )))
             .child(div().flex_1())
             .child(self.icon(IconName::ChevronDown, s.text_muted))
             .on_click(cx.listener(|this, _ev, _w, cx| {
@@ -476,7 +494,7 @@ impl ThreadView {
     /// where it has one in a terminal; a request that offers nothing here (a secret Codex
     /// keeps to its own terminal) makes that way its one solid.
     pub(super) fn answer_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
-        if let Some(row) = self.deny_row(request, cx).or_else(|| self.edit_row(request, cx)) {
+        if let Some(row) = self.deny_row(request, cx) {
             return vec![row];
         }
         let mut answers = self.choice_buttons(request, cx);
@@ -488,12 +506,6 @@ impl ThreadView {
     fn choice_buttons(&self, request: &Request, cx: &Context<Self>) -> Vec<AnyElement> {
         let ask = request.id.clone();
         let plain_deny = super::denying::deny_choice(request).map(|c| c.id.clone());
-        // "Edit…" follows the first plain allow, the one it sends.
-        let plain_allow = request
-            .options
-            .iter()
-            .find(|c| c.effect == Effect::Allow && c.scope.is_none())
-            .map(|c| c.id.clone());
         let mut answers: Vec<AnyElement> = Vec::new();
         for (choice, kind) in request.options.iter().zip(answer_kinds(&request.options)) {
             let (ask, id) = (ask.clone(), choice.id.clone());
@@ -509,9 +521,6 @@ impl ThreadView {
                 }))
                 .into_any_element(),
             );
-            if plain_allow.as_deref() == Some(choice.id.as_str()) {
-                answers.extend(self.edit_button(request, cx));
-            }
             if plain_deny.as_deref() == Some(choice.id.as_str()) {
                 answers.extend(self.deny_with_reason_button(request, cx));
             }
@@ -603,11 +612,10 @@ impl ThreadView {
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (choices, release) =
-            match self.deny_row(request, cx).or_else(|| self.edit_row(request, cx)) {
-                Some(row) => (vec![row], None),
-                None => (self.choice_buttons(request, cx), self.release_button(request, cx)),
-            };
+        let (choices, release) = match self.deny_row(request, cx) {
+            Some(row) => (vec![row], None),
+            None => (self.choice_buttons(request, cx), self.release_button(request, cx)),
+        };
         let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
         // A plan put to the person is read on its card in the thread: the tray names it and
         // keeps the way to it and the answers, not a second copy of its words.
@@ -888,12 +896,11 @@ impl ThreadView {
             (_, _, true, _) => Some("Taking back".to_owned()),
             (.., Some((_, _, reason))) => Some(format!("Not changed: {reason}")),
             (Some(why), ..) => Some(why.clone()),
-            (None, false, ..) if !super::later::kept(queued.delivery) => Some("Sending".to_owned()),
-            (None, ..) => {
-                super::later::when_words(queued.delivery, slopty_core::WallMs::now(), |t| {
-                    self.thread_title(t, cx)
-                })
+            (None, false, ..) if queued.delivery == Delivery::Interrupt => {
+                Some("Stopping the turn to send".to_owned())
             }
+            (None, false, ..) if !super::later::kept(queued.delivery) => Some("Sending".to_owned()),
+            (None, ..) => super::later::when_words(queued.delivery, slopty_core::WallMs::now()),
         };
         let scheduled = super::later::kept(queued.delivery);
         let open = can_change && queued.on_worker && !queued.withdrawing;
@@ -909,15 +916,11 @@ impl ThreadView {
             .aria_label(SharedString::from(said))
             .text_color(hsla(s.text_secondary))
             .child(self.slot().child(self.icon(IconName::Clock, s.text_muted)))
-            .child(
-                div()
-                    .min_w_0()
-                    .flex_1()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(kit::first_line(&queued.text).to_owned())),
-            )
+            .child(kit::fit_label(
+                format!("queued-words-{pending}"),
+                kit::first_line(&queued.text).to_owned(),
+                &self.theme,
+            ))
             .children(state.map(|st| {
                 div()
                     .flex_none()
@@ -1152,7 +1155,19 @@ pub(super) const TELL_AFTER: Duration = Duration::from_millis(700);
 
 /// What the way down says of `n` new rows: "3 new", capped at "99+ new".
 pub(super) fn new_words(n: usize) -> String {
-    if n > 99 { "99+ new".to_owned() } else { format!("{n} new") }
+    format!("{} {NEW_TAIL}", new_figure(n))
+}
+
+/// The word after the way down's figure: "3 new" is one phrase that starts with the figure,
+/// so its word is lower case.
+const NEW_TAIL: &str = "new";
+
+/// The most new rows the way down counts one by one.
+const NEW_MOST: usize = 99;
+
+/// The figure of [`new_words`]: "3", "99+".
+fn new_figure(n: usize) -> String {
+    if n > NEW_MOST { format!("{NEW_MOST}+") } else { n.to_string() }
 }
 
 /// How the work in the background stands, in a few words: how much runs while any does,

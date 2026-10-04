@@ -1,18 +1,18 @@
 //! The steps of a thread beyond its words: a subagent's thread opened from its call and left
-//! again, every step opened at once, the commands run in the background, a fork from a settled
-//! turn, and a message's copy.
+//! again, every step opened at once, the commands run in the background, and a message's
+//! copy.
 
 use gpui::{Modifiers, TestAppContext};
 use slopty_core::WallMs;
 use slopty_proto::ClientMsg;
 use slopty_proto::thread::detail::{ExecDetail, ExecStatus};
-use slopty_proto::thread::wire::{Intent, TableFrame, ThreadRequest};
+use slopty_proto::thread::wire::{TableFrame, ThreadRequest};
 use slopty_proto::thread::{
-    Cap, Changed, Clipped, Cursor, Item, ItemBody, ItemId, Link, ThreadId, ToolCall, ToolDetail,
+    Changed, Clipped, Cursor, Item, ItemBody, ItemId, Link, ThreadId, ToolCall, ToolDetail,
     ToolState, Turn, TurnId, TurnState, Usage, UserMessage, kind,
 };
 
-use super::{hub, intents, snapshot, view};
+use super::{hub, snapshot, view};
 use crate::conversation::CycleDensity;
 use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::ThreadHub;
@@ -197,44 +197,6 @@ fn a_background_command_shows_while_it_runs(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("background-old").is_none(), "not one an earlier turn ended");
 }
 
-/// A settled turn offers "Fork from here" on its fold where the agent can fork, and only
-/// there; the press asks for a fork through that turn and leaves the fold as it was.
-#[gpui::test]
-fn a_settled_turn_forks_from_its_fold_where_the_agent_can(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.turns = vec![turn(1, TurnState::Complete), turn(2, TurnState::Active)];
-    state.items = vec![
-        user("u1", 1),
-        call("c1", 1, kind::READ, None, None),
-        user("u2", 2),
-        call("c2", 2, kind::READ, None, None),
-    ];
-    hub.update(cx, ThreadHub::connected);
-    let (view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 2), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("fold-1").is_some(), "the settled turn's fold");
-    assert!(cx.debug_bounds("fork-1").is_none(), "this agent cannot fork");
-
-    state.meta.caps = vec![Cap::named(Cap::FORK)];
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 3), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("fork-2").is_none(), "a turn under way is not forked");
-    // It shows while the pointer is on the fold, and it is on the fold.
-    let fork = cx.debug_bounds("fork-1").expect("offered on the fold").center();
-    cx.simulate_mouse_move(fork, None, Modifiers::none());
-    cx.run_until_parked();
-    sent.borrow_mut().clear();
-    cx.simulate_click(fork, Modifiers::none());
-    assert_eq!(intents(&sent), [Intent::Fork { after: Some(TurnId(1)) }]);
-    let open = view.read_with(cx, |v, _| {
-        v.rows().iter().any(|r| matches!(r, Row::Fold { turn: TurnId(1), open: true }))
-    });
-    assert!(!open, "the press was the fork's, not the fold's");
-}
-
 /// A message's copy puts its words on the clipboard.
 #[gpui::test]
 fn a_message_s_copy_puts_its_words_on_the_clipboard(cx: &mut TestAppContext) {
@@ -255,4 +217,38 @@ fn a_message_s_copy_puts_its_words_on_the_clipboard(cx: &mut TestAppContext) {
     cx.simulate_click(copy, Modifiers::none());
     cx.run_until_parked();
     assert_eq!(cx.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some("Count the lines"));
+}
+
+/// A message the person sent into a running turn stands between two folds, each saying what
+/// its stretch of the work did; the turn's time stands on the last. Either opens the turn.
+#[gpui::test]
+fn a_steer_stands_between_the_folds_of_its_turn(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.turns = vec![turn(1, TurnState::Complete)];
+    state.items = vec![
+        user("u", 1),
+        call("x", 1, kind::EXEC, None, None),
+        user("s", 1),
+        call("r", 1, kind::READ, None, None),
+        item("a", 1, ItemBody::Text(Clipped::whole("Done."))),
+    ];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    for drawn in ["fold-1-0", "item-s", "fold-1"] {
+        assert!(cx.debug_bounds(drawn).is_some(), "{drawn}");
+    }
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Button", Some("Ran a command"))), "{tree:#?}");
+    assert!(tree.iter().any(|n| n.is("Button", Some("Worked 4 s: Read a file"))), "{tree:#?}");
+    let at = cx.debug_bounds("fold-1-0").expect("the first fold").center();
+    cx.simulate_click(at, Modifiers::none());
+    cx.run_until_parked();
+    let tools = view
+        .read_with(cx, |v, _| v.rows().iter().filter(|r| matches!(r, Row::Tool { .. })).count());
+    assert_eq!(tools, 2, "the turn opens as one");
 }

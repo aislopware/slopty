@@ -69,7 +69,6 @@ fn approval(id: &str) -> Request {
         stops: false,
     };
     Request {
-        editable: Vec::new(),
         id: AskId(id.to_owned()),
         item: None,
         kind: Request::APPROVAL.to_owned(),
@@ -413,8 +412,11 @@ fn timing_of_the_thread_s_frames(cx: &mut TestAppContext) {
     println!("every step opened or folded by ctrl-o: {:?}", median(every));
 }
 
+mod carry;
+mod commit;
 mod composing;
 mod doors;
 mod face;
+mod find;
 mod questions;
 mod steps;

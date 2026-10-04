@@ -133,10 +133,7 @@ impl ThreadView {
             .when(opens, |el| {
                 el.cursor_pointer()
                     .hover(move |el| el.text_color(hsla(s.text_secondary)))
-                    .child(self.icon(
-                        if open { IconName::ChevronDown } else { IconName::ChevronRight },
-                        s.text_muted,
-                    ))
+                    .child(self.chevron(format!("note-{}-chevron", toggle.0), open))
                     .on_click(cx.listener(move |this, _ev, _w, cx| {
                         this.toggle_item(toggle.clone(), cx);
                     }))

@@ -15,7 +15,7 @@ use gpui::{
 };
 use slopty_theme::Theme;
 
-use super::composer::Attachment;
+use super::attach::Attachment;
 use crate::colors::hsla;
 use crate::icons::{IconName, IconSize};
 use crate::kit;

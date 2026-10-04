@@ -296,7 +296,6 @@ pub(super) fn scenario(name: &str) -> super::model::Model {
 pub(crate) fn bash_prompt(session: SessionId, ask: u64) -> PermissionPrompt {
     let command = "npm test";
     PermissionPrompt {
-        editable: Vec::new(),
         session,
         ask,
         tool: "Bash".into(),

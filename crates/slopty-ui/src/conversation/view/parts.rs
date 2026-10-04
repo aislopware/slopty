@@ -10,19 +10,20 @@ use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, AppContext as _, Bounds, Context, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, PathBuilder, Pixels, SharedString, StatefulInteractiveElement as _,
-    Styled as _, canvas, div, point, px,
+    ParentElement as _, Pixels, SharedString, StatefulInteractiveElement as _, Styled as _, canvas,
+    div, px,
 };
 use gpui_kit::component::input::{Input, Textarea};
 use slopty_core::WallMs;
 use slopty_proto::conversation::{ThreadId, ToolDetail, Verdict};
-use slopty_theme::{Rgb, Theme};
+use slopty_theme::Theme;
 
 use super::entries::READING;
 use super::{ConversationView, Pane};
 use crate::colors::hsla;
 use crate::conversation::approval::{self, Outcome};
 use crate::conversation::rows;
+use crate::conversation::thread::view::context_ring;
 use crate::icons::IconName;
 use crate::kit::{self, ButtonKind};
 
@@ -936,7 +937,12 @@ impl ConversationView {
                         .hover(move |el| el.bg(hsla(s.hover)))
                         .text_color(hsla(s.text_muted))
                         .child(place)
-                        .child(context_ring(theme, used, theme.typography.small() * k))
+                        .child(context_ring(
+                            theme,
+                            "face-context-ring",
+                            used,
+                            theme.typography.small() * k,
+                        ))
                         .child(SharedString::from(format!("{used:.0}%"))),
                     s.accent,
                 )
@@ -958,64 +964,6 @@ impl ConversationView {
                 .into_any_element(),
         ]
     }
-}
-
-/// The tone the share of the context window in use is drawn in: warn past 80 %, error past
-/// 95 %.
-#[must_use]
-pub(super) fn context_tone(theme: &Theme, used_pct: f64) -> Rgb {
-    let s = theme.surfaces;
-    match used_pct {
-        p if p >= 95.0 => s.error,
-        p if p >= 80.0 => s.warn,
-        _ => s.text_secondary,
-    }
-}
-
-/// The share of the context window in use as a ring, `side` points round: the whole track drawn
-/// in the muted ink at a tint, the used arc over it in the tone the share calls for (warn past
-/// 80 %, error past 95 %). On the hairline the track all but vanished, and a lone arc beside the
-/// stop button read as a spinner; a closed ring reads as a gauge.
-#[must_use]
-pub(in crate::conversation) fn context_ring(theme: &Theme, used_pct: f64, side: f32) -> AnyElement {
-    let s = theme.surfaces;
-    let track = crate::colors::hsla_alpha(s.text_muted, slopty_theme::alpha::TINT);
-    let arc = hsla(context_tone(theme, used_pct));
-    #[expect(clippy::cast_possible_truncation, reason = "a share on screen")]
-    let share = (used_pct / 100.0).clamp(0.0, 1.0) as f32;
-    canvas(
-        |_bounds, _window, _cx| {},
-        move |bounds: Bounds<Pixels>, (), window, _cx| {
-            let width = (bounds.size.width.min(bounds.size.height) * 0.16).max(px(1.5));
-            let r = (bounds.size.width.min(bounds.size.height) - width) / 2.0;
-            let c = bounds.center();
-            let at = |t: f32| {
-                let a = t.mul_add(std::f32::consts::TAU, -std::f32::consts::FRAC_PI_2);
-                point(c.x + r * a.cos(), c.y + r * a.sin())
-            };
-            let stroke = |from: f32, to: f32| {
-                let mut path = PathBuilder::stroke(width);
-                let steps = 48_u16;
-                path.move_to(at(from));
-                for step in 1..=steps {
-                    let t = f32::from(step) / f32::from(steps);
-                    path.line_to(at((to - from).mul_add(t, from)));
-                }
-                path.build().ok()
-            };
-            if let Some(path) = stroke(0.0, 1.0) {
-                window.paint_path(path, track);
-            }
-            if share > 0.0
-                && let Some(path) = stroke(0.0, share)
-            {
-                window.paint_path(path, arc);
-            }
-        },
-    )
-    .size(px(side))
-    .flex_none()
-    .into_any_element()
 }
 
 /// When the worker hands the prompt back to the terminal, once that is five minutes off or

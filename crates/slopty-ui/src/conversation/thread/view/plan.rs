@@ -60,7 +60,7 @@ impl ThreadView {
         let (whole, clipped_more) = self.text_of(id, plan, cx);
         let theme = &self.theme;
         let s = theme.surfaces;
-        let (title, body) = crate::conversation::view::plan_parts(&whole);
+        let (title, body) = plan_parts(&whole);
         let lines = body.lines().count();
         let (body_shown, more) = shown(body, self.items_open.contains(id));
         let word = standing(&call.state);
@@ -109,7 +109,7 @@ impl ThreadView {
             let item = id.clone();
             let label = SharedString::from(format!(
                 "Show the whole plan \u{b7} {}",
-                crate::conversation::tools::count(lines as u64, "line", "lines")
+                kit::count(lines as u64, "line", "lines")
             ));
             let selector = format!("plan-more-{}", id.0);
             crate::a11y::tab_stop(
@@ -154,7 +154,7 @@ impl ThreadView {
                     .gap(self.z(theme.spacing.xs))
                     .px(self.z(theme.spacing.md))
                     .pb(self.z(theme.spacing.sm))
-                    .text_size(self.z(theme.typography.title()))
+                    .text_size(self.z(theme.typography.prose()))
                     .line_height(relative(theme.typography.prose_line_height))
                     .text_color(hsla(s.text))
                     .child(self.markdown(format!("plan-{}", id.0), &body_shown, false))
@@ -163,6 +163,17 @@ impl ThreadView {
             )
             .children(answers)
             .into_any_element()
+    }
+}
+
+/// A plan's title (its first heading, else its first line) and the Markdown under it.
+#[must_use]
+pub(crate) fn plan_parts(plan: &str) -> (String, &str) {
+    let trimmed = plan.trim_start();
+    let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    match first.trim().strip_prefix('#') {
+        Some(heading) => (heading.trim_start_matches('#').trim().to_owned(), rest.trim_start()),
+        None => ("Proposed plan".to_owned(), trimmed),
     }
 }
 

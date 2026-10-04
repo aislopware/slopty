@@ -40,7 +40,6 @@ impl Outcome {
             (Verdict::Deny { .. }, QUESTION_TOOL) => "Skipped the question".to_owned(),
             (Verdict::Allow, _) => format!("Allowed {tool} once"),
             (Verdict::AllowAlways, _) => format!("Always allowed {tool}"),
-            (Verdict::AllowEdited { .. }, _) => format!("Allowed {tool} as edited"),
             (Verdict::Deny { .. }, _) => format!("Denied {tool}"),
         };
         match self {
@@ -277,7 +276,6 @@ mod tests {
 
     fn prompt(ask: u64) -> PermissionPrompt {
         PermissionPrompt {
-            editable: Vec::new(),
             session: SessionId::new(),
             ask,
             tool: "Bash".to_owned(),

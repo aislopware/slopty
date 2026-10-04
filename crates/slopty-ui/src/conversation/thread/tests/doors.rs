@@ -113,49 +113,6 @@ fn deny_with_a_reason_sends_the_reason_with_the_deny(cx: &mut TestAppContext) {
     );
 }
 
-/// "Edit…" on an edit's approval puts its new text in a field in the answers' place: Cancel
-/// brings the answers back with nothing sent, and "Allow edited" sends the plain allow as the
-/// edited choice with the text as the person left it.
-#[gpui::test]
-fn edit_then_allow_sends_the_persons_text(cx: &mut TestAppContext) {
-    use slopty_proto::thread::Editable;
-
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    let mut edit = approval("e");
-    edit.editable = vec![Editable { field: "new_string".to_owned(), text: "fn b() {}".to_owned() }];
-    state.requests = vec![edit];
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
-    cx.run_until_parked();
-
-    click(cx, "edit-e");
-    assert!(cx.debug_bounds("edit-call-e").is_some(), "the field is up");
-    assert!(cx.debug_bounds("answer-e-allow").is_none(), "in the answers' place");
-    click(cx, "edit-cancel");
-    assert!(cx.debug_bounds("answer-e-allow").is_some(), "the answers are back");
-    assert!(intents(&sent).is_empty(), "nothing went");
-
-    click(cx, "edit-e");
-    cx.simulate_keystrokes("cmd-a");
-    cx.simulate_input("fn b() -> u8 { 1 }");
-    click(cx, "edit-allow");
-    let fields = std::collections::BTreeMap::from([(
-        "new_string".to_owned(),
-        "fn b() -> u8 { 1 }".to_owned(),
-    )]);
-    assert_eq!(
-        intents(&sent),
-        [Intent::Answer {
-            ask: AskId("e".to_owned()),
-            choice: Editable::choice(&fields),
-            message: None,
-        }]
-    );
-}
-
 /// A Codex request with nothing to answer here is handed to Codex's own TUI: the button says
 /// so, sends the release, and the TUI's terminal comes into view once the thread names it.
 #[gpui::test]
@@ -256,27 +213,4 @@ fn an_exited_pi_thread_goes_on_with_the_next_message(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert_eq!(intents(&sent).len(), 1, "the message goes, and starts pi again");
     assert_eq!(starts(&sent), Vec::<(slopty_proto::thread::IntentId, Vec<String>)>::new());
-}
-
-/// An agent put to sleep keeps its composer, whose line says the next message wakes it; where
-/// it sleeps by Slopty's door, Wake beside the line wakes it at once, and nowhere else.
-#[gpui::test]
-fn an_agent_asleep_is_woken_by_wake_or_the_next_message(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    state.status.liveness = Liveness::Asleep { since_ms: slopty_core::WallMs::from_millis(1_000) };
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
-    cx.run_until_parked();
-    assert!(cx.debug_bounds("thread-exited-line").is_some(), "the line over the composer");
-    assert!(cx.debug_bounds("thread-exited").is_none(), "the composer stays");
-    assert!(cx.debug_bounds("thread-wake").is_none(), "no door where the agent has none");
-
-    state.meta.caps = vec![Cap::named(Cap::SLEEP)];
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    click(cx, "thread-wake");
-    assert_eq!(intents(&sent), [Intent::Wake]);
 }

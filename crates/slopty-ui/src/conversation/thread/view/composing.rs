@@ -9,12 +9,13 @@
 //!   writes into the draft.
 //! - **Models.** The model chip opens a menu of the models the agent can switch to; picking one
 //!   asks the agent to switch (`Intent::SetModel`), and the chip reads as the agent then says. The
-//!   mode chip does the same with the modes the agent publishes (`Intent::SetMode`).
+//!   mode chip does the same with the modes the agent publishes (`Intent::SetMode`), and the effort
+//!   chip with how hard its model can think (`Intent::SetEffort`).
 //! - **Attachments.** A pasted picture, files copied here, a drop on the tile or the picker's files
 //!   go up through the workspace as a drop on the face does; each shows as a chip
 //!   ([`crate::conversation::chips`]) until the message goes, which carries their paths after its
-//!   text ([`composer::with_paths`]). Files go up through the terminal the thread's agent runs in,
-//!   so a thread with none (Codex, pi, an ACP agent) takes no attachment: the composer says so in
+//!   text ([`attach::with_paths`]). Files go up through the terminal the thread's agent runs in, so
+//!   a thread with none (Codex, pi, an ACP agent) takes no attachment: the composer says so in
 //!   words, and no chip waits for an upload that never starts. ↵ while one is still on its way up
 //!   arms the message: it goes as soon as the last one lands, and an upload that fails disarms it,
 //!   saying so, rather than sending without the file.
@@ -38,11 +39,11 @@ use gpui::{
 };
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Command, Delivery, IntentId, ItemBody, Mode, Model};
+use slopty_proto::thread::{Cap, Command, Delivery, Effort, IntentId, ItemBody, Mode, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
-use crate::conversation::composer::{self, Attach, Attachment};
+use crate::conversation::attach::{self, Attach, Attachment};
 use crate::conversation::menu::{self, Token};
 use crate::icons::IconName;
 use crate::kit::ButtonKind;
@@ -72,8 +73,8 @@ pub(super) enum MenuRows {
     Models(Vec<Model>),
     /// The modes the agent can switch to, opened from the mode chip.
     Modes(Vec<Mode>),
-    /// When to send the draft, opened from the clock by the send button.
-    Later(Vec<super::later::LaterRow>),
+    /// How hard the model can be set to think, opened from the effort chip.
+    Efforts(Vec<Effort>),
 }
 
 impl MenuRows {
@@ -84,7 +85,7 @@ impl MenuRows {
             Self::Hint => 0,
             Self::Models(models) => models.len(),
             Self::Modes(modes) => modes.len(),
-            Self::Later(rows) => rows.len(),
+            Self::Efforts(efforts) => efforts.len(),
         }
     }
 }
@@ -116,7 +117,7 @@ pub(super) struct Composing {
     asked: Option<String>,
     found: Option<Found>,
     scroll: ScrollHandle,
-    attachments: composer::Attachments,
+    attachments: attach::Attachments,
     /// A pasted picture's chip draws the picture, by attachment.
     pictures: HashMap<u64, Arc<gpui::Image>>,
     editing: Option<Editing>,
@@ -124,6 +125,8 @@ pub(super) struct Composing {
     models: bool,
     /// The mode chip's menu is open.
     modes: bool,
+    /// The effort chip's menu is open.
+    efforts: bool,
     /// What the composer says above the field until the draft changes: an attachment it cannot
     /// take, a message waiting for its uploads.
     notice: Option<String>,
@@ -132,34 +135,9 @@ pub(super) struct Composing {
     armed: Option<(Delivery, gpui::AnyWindowHandle)>,
     /// The sent message recalled into the composer, by how far back it is, and its words.
     recall: Option<(usize, String)>,
-    /// The menu of when to send is open.
-    later_menu: bool,
-    /// When the draft goes, where it is set to go later.
-    later: Option<Delivery>,
 }
 
 impl Composing {
-    /// Whether the menu of when to send is open.
-    pub(super) const fn later_open(&self) -> bool {
-        self.later_menu
-    }
-
-    /// Open or shut the menu of when to send.
-    pub(super) const fn open_later(&mut self, open: bool) {
-        self.later_menu = open;
-    }
-
-    /// When the draft goes, where it is set to go later.
-    pub(super) const fn later(&self) -> Option<Delivery> {
-        self.later
-    }
-
-    /// Set when the draft goes, or let ↵ say again; the menu shuts.
-    pub(super) const fn set_later(&mut self, later: Option<Delivery>) {
-        self.later = later;
-        self.later_menu = false;
-    }
-
     /// Whether a waiting message is being changed.
     pub(super) const fn editing(&self) -> bool {
         self.editing.is_some()
@@ -222,8 +200,9 @@ impl ThreadView {
             let modes = self.state(cx).map(|s| s.meta.modes.clone()).unwrap_or_default();
             return (!modes.is_empty()).then_some(MenuRows::Modes(modes));
         }
-        if self.composing.later_open() {
-            return Some(MenuRows::Later(self.later_rows(cx)));
+        if self.composing.efforts {
+            let efforts = self.state(cx).map(|s| s.meta.efforts.clone()).unwrap_or_default();
+            return (!efforts.is_empty()).then_some(MenuRows::Efforts(efforts));
         }
         match self.menu_token(cx)? {
             Token::Command { query } => {
@@ -354,7 +333,7 @@ impl ThreadView {
 
     /// Esc with the menu open closes it for the word the caret is in. Whether it was open.
     pub(super) fn menu_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.composing.models || self.composing.modes || self.composing.later_open() {
+        if self.composing.models || self.composing.modes || self.composing.efforts {
             self.close_chip_menus();
             cx.notify();
             return true;
@@ -380,17 +359,17 @@ impl ThreadView {
                 cx.notify();
                 return;
             }
-            (MenuRows::Later(rows), _) => {
-                let Some(row) = rows.get(ix) else { return };
-                self.send_later(Some(row.delivery), cx);
-                // The draft is what is being sent later: the keyboard goes back to it.
-                self.composer.update(cx, |c, cx| c.focus(window, cx));
-                return;
-            }
             (MenuRows::Modes(modes), _) => {
                 let Some(mode) = modes.get(ix) else { return };
                 self.composing.modes = false;
                 let _id = self.intent(Intent::SetMode { mode: mode.id.clone() }, cx);
+                cx.notify();
+                return;
+            }
+            (MenuRows::Efforts(efforts), _) => {
+                let Some(effort) = efforts.get(ix) else { return };
+                self.composing.efforts = false;
+                let _id = self.intent(Intent::SetEffort { effort: effort.id.clone() }, cx);
                 cx.notify();
                 return;
             }
@@ -509,7 +488,7 @@ impl ThreadView {
             MenuRows::Commands(_) => "Commands",
             MenuRows::Models(_) => "Models",
             MenuRows::Modes(_) => "Modes",
-            MenuRows::Later(_) => "Send later",
+            MenuRows::Efforts(_) => "Effort",
             MenuRows::Paths(_) | MenuRows::Hint => "Files",
         };
         let body: Vec<AnyElement> = match &rows {
@@ -526,15 +505,26 @@ impl ThreadView {
             }
             MenuRows::Paths(None) => vec![self.menu_note("Searching…")],
             MenuRows::Hint => vec![self.menu_note("Type to find a file or folder")],
-            MenuRows::Later(rows) => {
-                rows.iter().enumerate().map(|(ix, row)| self.later_row(ix, row, cx)).collect()
-            }
             MenuRows::Modes(modes) => {
                 let now = self.state(cx).and_then(|s| s.meters.mode.clone());
                 modes
                     .iter()
                     .enumerate()
-                    .map(|(ix, mode)| self.mode_row(ix, mode, now.as_deref(), cx))
+                    .map(|(ix, mode)| {
+                        let Mode { id, label, description } = mode;
+                        self.named_row(ix, (id, label, description.as_deref()), now.as_deref(), cx)
+                    })
+                    .collect()
+            }
+            MenuRows::Efforts(efforts) => {
+                let now = self.state(cx).and_then(|s| s.meters.effort.clone());
+                efforts
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, effort)| {
+                        let Effort { id, label, description } = effort;
+                        self.named_row(ix, (id, label, description.as_deref()), now.as_deref(), cx)
+                    })
                     .collect()
             }
             MenuRows::Models(models) => {
@@ -652,12 +642,12 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// Shut the menus the composer's foot opens: the models, the modes, when to send. The
+    /// Shut the menus the composer's foot opens: the models, the modes, the efforts. The
     /// keyboard starts the next one from its first row.
     pub(super) const fn close_chip_menus(&mut self) {
         self.composing.models = false;
         self.composing.modes = false;
-        self.composing.later_menu = false;
+        self.composing.efforts = false;
         self.composing.selected = 0;
     }
 
@@ -670,19 +660,29 @@ impl ThreadView {
         cx.notify();
     }
 
-    /// A mode the agent can switch to, with what it does in the agent's words, and a check on
-    /// the one it is in (by its id or its name, as the agent says it).
-    fn mode_row(
+    /// The effort chip's menu open or shut; open, the keyboard walks it from its first row.
+    pub(super) fn toggle_efforts(&mut self, cx: &mut Context<Self>) {
+        let open = !self.composing.efforts;
+        self.close_chip_menus();
+        self.composing.efforts = open;
+        self.composing.selected = 0;
+        cx.notify();
+    }
+
+    /// A mode or an effort the agent can switch to, by its `(id, label, description)`, with
+    /// what it does in the agent's words, and a check on the one it is in (by its id or its
+    /// name, as the agent says it).
+    fn named_row(
         &self,
         ix: usize,
-        mode: &Mode,
+        (id, label, description): (&String, &String, Option<&str>),
         now: Option<&str>,
         cx: &Context<Self>,
     ) -> AnyElement {
         let theme = &self.theme;
         let s = theme.surfaces;
-        let current = now.is_some_and(|n| n == mode.id || n == mode.label);
-        let label = if mode.label.trim().is_empty() { &mode.id } else { &mode.label };
+        let current = now.is_some_and(|n| n == id || n == label);
+        let label = if label.trim().is_empty() { id } else { label };
         self.menu_row(ix, label.clone(), cx)
             .child(
                 div()
@@ -703,7 +703,7 @@ impl ThreadView {
                     .whitespace_nowrap()
                     .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
-                    .children(mode.description.clone().map(SharedString::from)),
+                    .children(description.map(|d| SharedString::from(d.to_owned()))),
             )
             .when(current, |el| el.child(self.icon(IconName::Check, s.text_secondary)))
             .into_any_element()
@@ -969,7 +969,7 @@ impl ThreadView {
         if attachments.uploading() {
             return None;
         }
-        let text = composer::with_paths(self.draft(cx).trim(), &attachments.paths());
+        let text = attach::with_paths(self.draft(cx).trim(), &attachments.paths());
         if text.trim().is_empty() {
             return None;
         }
