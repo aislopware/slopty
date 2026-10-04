@@ -1014,6 +1014,11 @@ pub enum Delivery {
     /// withdrawn until then ([`Cap::SCHEDULE`]). A continued thread's first message waits so
     /// ([`wire::Intent::Continue`]).
     Draft,
+    /// Now, for an agent with no steer of its own ([`Cap::STEER`]): the worker puts the
+    /// message first in the agent's queue and stops the turn under way, so it goes as that
+    /// turn ends. It needs [`Cap::INTERRUPT`] and [`Cap::QUEUE`]; with no turn under way it
+    /// goes as a queued one does.
+    Interrupt,
 }
 
 impl Delivery {

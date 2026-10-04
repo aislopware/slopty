@@ -65,7 +65,7 @@ pub(super) fn when_words(
             None => "When another thread rests".to_owned(),
         }),
         Delivery::Draft => Some("Draft".to_owned()),
-        Delivery::Steer | Delivery::Queue => None,
+        Delivery::Steer | Delivery::Queue | Delivery::Interrupt => None,
     }
 }
 

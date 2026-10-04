@@ -35,7 +35,7 @@ use slopty_worker::thread::history::{self, History};
 use slopty_worker::thread::pi::{self, Pi};
 use slopty_worker::thread::review::Snapshots;
 use slopty_worker::thread::terminals::{Pending, Terminals as AgentTerminalsTrait};
-use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule};
+use slopty_worker::thread::{Composer, Follower, Host, Seated, schedule, steer};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
@@ -752,6 +752,12 @@ fn act_as(
 ) -> Outcome {
     // A scheduled message is the worker's to hold: no agent hears of it until its moment.
     if let Some(outcome) = schedule::act(&threads.host, thread, id, intent) {
+        return outcome;
+    }
+    // A message sent by interrupt is queued, then the turn under way stopped, each its own
+    // intent.
+    let step = |id, intent: &Intent| act_as(who, threads, thread, id, intent);
+    if let Some(outcome) = steer::act(&threads.host, thread, id, intent, step) {
         return outcome;
     }
     let decided = threads.host.intent(thread, id, |state| decide(who, threads, state, id, intent));

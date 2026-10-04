@@ -1425,3 +1425,23 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `a_claude_code_thread_goes_on_in_pi_from_a_draft_the_person_sends`
     (`slopty-worker/tests/pi.rs`); `only_an_agent_at_rest_with_nothing_under_way_sleeps` for
     the draft; goldens `intent_continue` and `intent_send_draft`.
+
+- ✅ **A message sent now to an agent with no steer of its own stops its turn** (2026-10-04, R13
+  of the T3 Code orchestrator study, after T3's steering restart and ACP agents steered by
+  cancel and resend). `Delivery::Interrupt` needs `Cap::INTERRUPT` and `Cap::QUEUE`. It is for
+  an agent without `Cap::STEER`, today any ACP agent, whose message otherwise waits for the turn
+  to end.
+  - **Through the agent's own doors, on the person's word.** The worker (`thread::steer::act`)
+    takes the send in steps, each an intent of its own, decided once. First it queues the message
+    under the person's intent, so the pending list and the turn it starts name it as theirs. Then
+    it moves the message before anything already queued. Last it stops the turn under way, when
+    there is one. The stopped turn ends as the agent ends it, and the queue sends the message
+    next. Nothing is typed into a screen and nothing is answered for the person: the open request
+    is withdrawn by the agent's own cancel.
+  - **No race to lose.** The stop is the agent's to make. A turn that ends before the stop lands
+    leaves the message to go as a queued one does, so it goes once either way. Orchestration's
+    intents take the same path.
+  - **Not yet.** The composer's "Interrupt and send" for such an agent is the client's half.
+  - Tests: `a_message_sent_by_interrupt_stops_the_turn_and_goes_next`
+    (`slopty-worker/tests/acp.rs`); `it_goes_before_what_waits_and_stops_only_a_turn_under_way`
+    (`thread::steer`); golden `intent_send_interrupt`.

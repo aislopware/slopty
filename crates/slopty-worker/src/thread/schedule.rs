@@ -85,7 +85,7 @@ pub fn when(pending: &Pending, watched: Option<&ThreadState>, now: WallMs) -> Wh
             }
             None => When::Later,
         },
-        Delivery::Steer | Delivery::Queue | Delivery::Draft => When::Later,
+        Delivery::Steer | Delivery::Queue | Delivery::Draft | Delivery::Interrupt => When::Later,
     }
 }
 

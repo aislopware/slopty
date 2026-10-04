@@ -388,6 +388,14 @@ mod golden_thread {
                 attachments: Vec::new(),
             }),
         );
+        snap(
+            "intent_send_interrupt",
+            &send(Intent::Send {
+                text: "Stop, and fix the parser first".to_owned(),
+                delivery: Delivery::Interrupt,
+                attachments: Vec::new(),
+            }),
+        );
         snap("intent_withdraw", &send(Intent::Withdraw { pending: intent() }));
         snap(
             "intent_edit",

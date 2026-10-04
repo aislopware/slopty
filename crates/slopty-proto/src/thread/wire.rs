@@ -266,6 +266,8 @@ pub struct Pick {
 
 impl Intent {
     /// The capability a thread needs for this intent.
+    ///
+    /// A send by interrupt ([`Delivery::Interrupt`]) needs [`Cap::QUEUE`] too.
     #[must_use]
     pub const fn needs(&self) -> &'static str {
         match self {
@@ -278,7 +280,7 @@ impl Intent {
             | Self::Withdraw { .. }
             | Self::Edit { .. }
             | Self::Reorder { .. } => Cap::QUEUE,
-            Self::Interrupt => Cap::INTERRUPT,
+            Self::Send { delivery: Delivery::Interrupt, .. } | Self::Interrupt => Cap::INTERRUPT,
             Self::Answer { .. } | Self::Release { .. } => Cap::APPROVALS,
             Self::SetModel { .. } => Cap::SET_MODEL,
             Self::SetMode { .. } => Cap::SET_MODE,

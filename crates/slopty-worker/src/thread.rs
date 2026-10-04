@@ -31,6 +31,7 @@ pub mod pi;
 pub mod review;
 pub mod schedule;
 pub mod sleep;
+pub mod steer;
 pub mod table;
 pub mod terminals;
 
