@@ -1,129 +1,48 @@
-//! The verbs as MCP tools: names, descriptions, hints, argument schemas, and a call run end to
-//! end (arguments parsed, names resolved, the verb sent, the answer rendered as its view).
+//! A project's verbs as MCP tools: names, descriptions, hints, argument schemas, and a call run
+//! end to end (arguments parsed, names resolved, the verb sent, the answer rendered as its view).
 //!
 //! Every MCP surface serves exactly this list and this [`call`], so a model sees the same tools
-//! and gets the same JSON whether it reaches the server's endpoint or `slopty mcp`.
+//! and gets the same JSON whether it reaches the server's endpoint or `slopty mcp`. They are
+//! only what a project's orchestrator and its tasks' agents need; every other verb is the
+//! `slopty` command, which an agent runs through its shell like any other.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use rmcp::ErrorData;
-use rmcp::handler::server::common::{schema_for_empty_input, schema_for_type};
-use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool, ToolAnnotations};
+use rmcp::handler::server::common::schema_for_type;
+use rmcp::model::{CallToolResult, ContentBlock, Tool, ToolAnnotations};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use slopty_core::{DisplayId, WindowId};
-use slopty_proto::folder::FsOp;
-use slopty_proto::items::ItemKind;
-use slopty_proto::orchestration::{
-    ErrorCode, EventFilter, IdempotencyKey, Input, Size, ThreadView, WaitUntil,
-};
-use slopty_proto::project::{LimitsChange, Report, Runner, TaskChange, TaskId};
-use slopty_proto::screen::CaptureTarget;
-use slopty_proto::search::SearchQuery;
+use slopty_proto::orchestration::{ErrorCode, IdempotencyKey, Size, ThreadView};
+use slopty_proto::project::{Report, Runner, TaskChange, TaskId};
 
-use crate::ops::{
-    self, AgentSpec, DEFAULT_MAX_ENTRIES, DEFAULT_MAX_LINES, DEFAULT_MAX_MATCHES, DEFAULT_WAIT_MS,
-    LaunchSpec, NewTask, ProjectEdit, ProjectSpec, Spec, Which,
-};
+use crate::ops::{self, LaunchSpec, NewTask, Which};
 use crate::resolve::Resolver;
-use crate::view::{self, Encoding};
-use crate::{Dispatch, ToolError, bulk};
+use crate::{Dispatch, ToolError, view};
 
 /// What the model reads before any tool description.
 pub const INSTRUCTIONS: &str = "\
-Slopty runs terminals and coding agents on a fleet of machines (workers). Start with \
-list_workers, then list_terminals. A terminal is named by its `term` (worker/session, as the \
-lists print it); copy it verbatim into the terminal tools. A `worker` argument takes a worker's \
-name or id. To run a command: send_input text \"cmd\\n\", then wait_for command_done, then \
-read_output from the line you started at. Prefer wait_for (one terminal) and events (the whole \
-fleet: agents needing you, terminals opening and closing, workers coming and going) to polling \
-read_screen or read_output in a loop. To follow another coding agent's work, read_thread; its \
-requests are the person's to answer, never an agent's, so never type its menu's digits. \
-For a goal bigger than one agent, make a project (project_create) and start its tasks with \
-task_start: each task is one agent, Claude Code, Codex or any command, working from its brief \
-in its own worktree on the worker you name or one with room. Tasks sit side by side \
-under the project and do not nest. Follow the project with project_status (since and \
-timeout_ms wait for news), or wait for tasks' news with task_wait; task_tell says something \
-to a task's agent, and task_update changes a task. A task's agent reports with task_report. \
-Agents started for a task have these tools too, their project and task the defaults.";
+These tools are a Slopty project's: one goal that agents work on side by side across a fleet \
+of machines (workers). project_status shows the whole project, its tasks and its timeline, and \
+with since and timeout_ms waits for the next change; task_get shows one task in full. The \
+orchestrator starts work with task_start: each task is one agent (Claude Code, Codex, pi or an \
+ACP agent) or a command, working from its brief in a worktree of its own on the worker named \
+or one with room. Tasks sit side by side under the project and do not nest. task_tell says \
+more to a task's agent, task_wait waits for tasks' news, and task_update changes a task. A \
+task's agent moves its own task with task_update and reports it with task_report; its project \
+and task are the defaults. read_thread reads another agent's thread; the requests on it are \
+the person's to answer, never an agent's. Everything else, the workers and their facts, \
+terminals, files and the workspace, is the `slopty` command in your shell: `slopty --help` \
+lists it, and `slopty --json …` prints what a script reads.";
 
-/// How often a `wait_for` with a progress sink reports that it is still waiting.
+/// How often a long wait with a progress sink reports that it is still waiting.
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(10);
 
-/// Told how long a `wait_for` has waited so far, every [`PROGRESS_EVERY`].
+/// Told how long a long wait has waited so far, every [`PROGRESS_EVERY`].
 pub type Progress<'a> = &'a (dyn Fn(Duration) + Send + Sync);
-
-/// A worker, or the only one online.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct WorkerArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-}
-
-/// `list_terminals`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ListTerminalsArgs {
-    /// Only this worker (name or id); every worker when omitted.
-    worker: Option<String>,
-}
-
-/// `open_terminal`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct OpenTerminalArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Working directory, absolute or `~/…`; the worker's home when omitted.
-    cwd: Option<String>,
-    /// Program and arguments, e.g. `["npm", "run", "dev"]`; the login shell when omitted.
-    #[serde(default)]
-    command: Vec<String>,
-    /// Extra environment variables.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    /// A short name for the terminal's tile on the workspace.
-    name: Option<String>,
-    /// Columns (10-1000); with `rows`. 120x36 when omitted, until a client shows it.
-    cols: Option<u16>,
-    /// Rows (2-500); with `cols`.
-    rows: Option<u16>,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `spawn_agent`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct SpawnAgentArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Working directory, usually a repository root.
-    cwd: String,
-    /// The first prompt, typed once the agent is ready.
-    prompt: Option<String>,
-    /// Arguments for `claude`, e.g. `["--model", "opus"]`.
-    #[serde(default)]
-    args: Vec<String>,
-    /// Extra environment variables.
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    /// Columns (10-1000); with `rows`. 120x36 when omitted, until a client shows it.
-    cols: Option<u16>,
-    /// Rows (2-500); with `cols`.
-    rows: Option<u16>,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
 
 /// A task by its number, `3` or `"#3"`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -156,44 +75,6 @@ fn metadata_text(doc: Option<Map<String, Value>>) -> Result<Option<String>, Tool
 
 fn task_numbers(tasks: &[TaskArg]) -> Result<Vec<TaskId>, ToolError> {
     tasks.iter().map(|t| ops::task_number(&t.text())).collect()
-}
-
-/// `project_create`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ProjectCreateArgs {
-    /// Its name: 1-40 lowercase letters, digits and dashes (`slopty`, `net-rewrite`).
-    project: String,
-    /// What it is for, in a line.
-    title: String,
-    /// The repository its tasks work in: a path on the workers, or a URL.
-    repo: String,
-    /// The branch finished work lands on; `main` when omitted.
-    target: Option<String>,
-    /// The command that says a task's work is right, such as `cargo gate`.
-    verifier: Option<String>,
-    /// The orchestrator's terminal (`worker/session`); yours when omitted and you run in one.
-    orchestrator: Option<String>,
-    /// Anything to keep with it, as a JSON object.
-    metadata: Option<Map<String, Value>>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
-}
-
-/// `project_update`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ProjectUpdateArgs {
-    /// The project; yours when omitted.
-    project: Option<String>,
-    /// A new orchestrator terminal (`worker/session`).
-    orchestrator: Option<String>,
-    /// A new verifier command; empty for none.
-    verifier: Option<String>,
-    /// New metadata, a JSON object in place of the old.
-    metadata: Option<Map<String, Value>>,
-    /// A name for this call's effect, such as a fresh UUID; a repeat answers as the first did.
-    idempotency_key: Option<String>,
 }
 
 /// `project_status`.
@@ -247,8 +128,8 @@ struct TaskStartArgs {
     read_only: bool,
     /// A new task: anything to keep with it, as a JSON object.
     metadata: Option<Map<String, Value>>,
-    /// This worker (name or id); one with room when omitted. `list_workers` shows each
-    /// worker's facts, and work that needs no Apple platform belongs on Linux.
+    /// This worker (name or id); one with room when omitted. `slopty --json workers`
+    /// shows each worker's facts, and work that needs no Apple platform belongs on Linux.
     worker: Option<String>,
     /// Working directory on the worker; beside a clone of the project's repository, in a git
     /// worktree of the task's own when it writes, when omitted.
@@ -474,323 +355,6 @@ impl TaskUpdateArgs {
     }
 }
 
-/// `resize_terminal`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ResizeArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-    /// Columns (10-1000).
-    cols: u16,
-    /// Rows (2-500).
-    rows: u16,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `events`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct EventsArgs {
-    /// Cursor: the `next` of the previous call. Omitted means from now on; 0 means everything
-    /// the server still holds.
-    since: Option<u64>,
-    /// Wait this long for a first event (default 60000; the server caps it at 240000). 0
-    /// answers at once, with the cursor for now.
-    timeout_ms: Option<u32>,
-    /// Only agents that come to need a human or go idle, on any worker.
-    #[serde(default)]
-    agent_input: bool,
-}
-
-/// `send_input`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct SendInputArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-    /// Text typed as-is; `\n` presses Enter.
-    text: Option<String>,
-    /// Text delivered as one paste (bracketed when the program asked for it).
-    paste: Option<String>,
-    /// Named keys pressed in order, each `[mods+]key`.
-    keys: Option<Vec<String>>,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// A terminal alone.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct TermArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-}
-
-/// `close_terminal`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct CloseArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `read_output`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReadOutputArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-    /// First absolute line index wanted: the `next` of the previous call, or a command's
-    /// `output_start`. The oldest retained line when omitted.
-    since: Option<u64>,
-    /// At most this many lines (default 200).
-    max_lines: Option<u32>,
-}
-
-/// `list_commands`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ListCommandsArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-    /// Only commands whose prompt is at or after this absolute line.
-    since: Option<u64>,
-}
-
-/// `wait_for`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct WaitForArgs {
-    /// The terminal, as the lists print it (`worker/session`).
-    term: String,
-    /// Wait for a new line of output matching this regular expression.
-    output: Option<String>,
-    /// Wait for this many milliseconds without output.
-    quiet_ms: Option<u32>,
-    /// Wait for the running shell command to finish (or the next one, if none runs).
-    #[serde(default)]
-    command_done: bool,
-    /// Wait for the terminal's program to exit.
-    #[serde(default)]
-    exit: bool,
-    /// Wait for the agent in the terminal to need a human or go idle.
-    #[serde(default)]
-    agent_input: bool,
-    /// Give up after this many milliseconds (default 60000; the server caps it at 240000).
-    timeout_ms: Option<u32>,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `read_file`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ReadFileArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Absolute path, or `~/…`.
-    path: String,
-    /// First byte to read (default 0).
-    #[serde(default)]
-    offset: u64,
-    /// At most this many bytes (8 MiB at most); the rest of the file when omitted.
-    length: Option<u64>,
-}
-
-/// `list_dir`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ListDirArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Absolute path, or `~/…`.
-    path: String,
-    /// At most this many entries (default 1000, at most 10000).
-    max: Option<u32>,
-}
-
-/// `stat`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct PathArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Absolute path, or `~/…`.
-    path: String,
-}
-
-/// `make_dir` and `trash_path`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct FsPathArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Absolute path, or `~/…`.
-    path: String,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `move_path`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct MovePathArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// What to move: absolute path, or `~/…`.
-    from: String,
-    /// Where it goes, its new name last: absolute path, or `~/…`.
-    to: String,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `search_files`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct SearchFilesArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// The directory to search, absolute or `~/…`.
-    root: String,
-    /// What to look for: the text as it is, unless `regex`.
-    pattern: String,
-    /// The pattern is a regular expression (Rust regex syntax, as ripgrep takes it).
-    #[serde(default)]
-    regex: bool,
-    /// Upper and lower case differ; by default they match each other.
-    #[serde(default)]
-    match_case: bool,
-    /// A match must stand as a whole word.
-    #[serde(default)]
-    whole_word: bool,
-    /// Which files, as ripgrep's `--glob` takes them (`*.rs`, `!tests/**`).
-    #[serde(default)]
-    globs: Vec<String>,
-    /// Lines of context before and after each match (0-5, default 0).
-    #[serde(default)]
-    context: u32,
-    /// At most this many matching lines (default 200, at most 2000).
-    max_lines: Option<u32>,
-}
-
-impl SearchFilesArgs {
-    fn query(&self) -> SearchQuery {
-        SearchQuery {
-            pattern: self.pattern.clone(),
-            regex: self.regex,
-            match_case: self.match_case,
-            whole_word: self.whole_word,
-            globs: self.globs.clone(),
-            context: self.context,
-        }
-    }
-}
-
-/// `forget_worker`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ForgetWorkerArgs {
-    /// Worker name or id.
-    worker: String,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `wake_worker`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct WakeWorkerArgs {
-    /// Worker name or id.
-    worker: String,
-}
-
-/// `write_file`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct WriteFileArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// Absolute path, or `~/…`.
-    path: String,
-    /// The whole new contents, spelled as `encoding` says.
-    content: String,
-    /// `utf8` (the default) for text as it is, `base64` for binary contents.
-    #[serde(default)]
-    encoding: Encoding,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `open_item`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct OpenItemArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// A web page, `http` or `https`; a localhost address is the worker's own.
-    url: Option<String>,
-    /// A text file on the worker to edit, absolute.
-    file: Option<String>,
-    /// A note's Markdown.
-    note: Option<String>,
-    /// A window to stream live, by its id from `list_windows`.
-    window: Option<u32>,
-    /// A whole display to stream live, by its id from `list_windows`.
-    display: Option<u32>,
-    /// A short name for the tile.
-    name: Option<String>,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// An item alone.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct ItemArgs {
-    /// The item, as `list_items` prints it (`worker/item`).
-    item: String,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `rename_item`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct RenameItemArgs {
-    /// The item, as `list_items` prints it (`worker/item`).
-    item: String,
-    /// The new name; omitted takes the name away, and the tile says what it shows.
-    name: Option<String>,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
 /// `read_thread`.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -832,74 +396,6 @@ impl ViewArg {
     }
 }
 
-/// `capture_still`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct CaptureStillArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// A window, by its id from `list_windows`.
-    window: Option<u32>,
-    /// A whole display, by its id from `list_windows`.
-    display: Option<u32>,
-}
-
-impl CaptureStillArgs {
-    fn target(&self) -> Result<CaptureTarget, ToolError> {
-        match (self.window, self.display) {
-            (Some(id), None) => Ok(CaptureTarget::Window(WindowId(id))),
-            (None, Some(id)) => Ok(CaptureTarget::Display(DisplayId(id))),
-            _ => Err(ToolError::invalid("give exactly one of window, display")),
-        }
-    }
-}
-
-/// `upload_file`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct UploadArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// The file on the machine this tool runs on, absolute.
-    local: String,
-    /// Where it goes on the worker: absolute, or `~/…`.
-    path: String,
-    /// A name for this call's effect, such as a fresh UUID. Sent again with the same key (a
-    /// retry after a timeout or a dropped connection), the call answers what the first did
-    /// instead of doing it twice; the same key with other arguments is an error.
-    idempotency_key: Option<String>,
-}
-
-/// `download_file`.
-#[derive(Debug, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-struct DownloadArgs {
-    /// Worker name or id; the only worker online when omitted.
-    worker: Option<String>,
-    /// The file on the worker: absolute, or `~/…`.
-    path: String,
-    /// Where it goes on the machine this tool runs on, absolute; a directory takes the file
-    /// under its own name.
-    local: String,
-}
-
-impl OpenItemArgs {
-    fn kind(self) -> Result<(ItemKind, Option<String>), ToolError> {
-        let kinds = [
-            self.url.map(|url| ItemKind::Browser { url }),
-            self.file.map(|path| ItemKind::File { path }),
-            self.note.map(|text| ItemKind::Note { text }),
-            self.window.map(|id| ItemKind::Window { window: WindowId(id) }),
-            self.display.map(|display| ItemKind::Display { display: DisplayId(display) }),
-        ];
-        let mut given = kinds.into_iter().flatten();
-        match (given.next(), given.next()) {
-            (Some(kind), None) => Ok((kind, self.name)),
-            _ => Err(ToolError::invalid("give exactly one of url, file, note, window, display")),
-        }
-    }
-}
-
 /// The key a call gave, checked.
 fn checked_key(given: Option<String>) -> Result<Option<IdempotencyKey>, ToolError> {
     given.map(IdempotencyKey::new).transpose().map_err(|e| ToolError::invalid(e.to_string()))
@@ -914,36 +410,6 @@ fn size(cols: Option<u16>, rows: Option<u16>) -> Result<Option<Size>, ToolError>
     }
 }
 
-impl SendInputArgs {
-    fn input(self) -> Result<Input, ToolError> {
-        match (self.text, self.paste, self.keys) {
-            (Some(text), None, None) => Ok(Input::Text(text)),
-            (None, Some(paste), None) => Ok(Input::Paste(paste)),
-            (None, None, Some(keys)) => Ok(Input::Keys(keys)),
-            _ => Err(ToolError::invalid("give exactly one of text, paste, keys")),
-        }
-    }
-}
-
-impl WaitForArgs {
-    fn until(&self) -> Result<WaitUntil, ToolError> {
-        let conditions = [
-            self.output.as_ref().map(|p| WaitUntil::Output(p.clone())),
-            self.quiet_ms.map(|ms| WaitUntil::Quiet { ms }),
-            self.command_done.then_some(WaitUntil::CommandDone),
-            self.exit.then_some(WaitUntil::Exit),
-            self.agent_input.then_some(WaitUntil::AgentNeedsInput),
-        ];
-        let mut given = conditions.into_iter().flatten();
-        match (given.next(), given.next()) {
-            (Some(until), None) => Ok(until),
-            _ => Err(ToolError::invalid(
-                "give exactly one of output, quiet_ms, command_done, exit, agent_input",
-            )),
-        }
-    }
-}
-
 /// How a tool behaves, for the client's hints.
 #[derive(Clone, Copy)]
 enum Kind {
@@ -951,23 +417,6 @@ enum Kind {
     Read,
     /// Changes something, nothing lost.
     Write,
-    /// Ends or replaces something.
-    Destroy,
-}
-
-fn tool_with(
-    name: &'static str,
-    description: &'static str,
-    kind: Kind,
-    schema: Arc<JsonObject>,
-) -> Tool {
-    let hints = ToolAnnotations::new().open_world(false);
-    let hints = match kind {
-        Kind::Read => hints.read_only(true),
-        Kind::Write => hints.read_only(false).destructive(false),
-        Kind::Destroy => hints.read_only(false).destructive(true),
-    };
-    Tool::new(name, description, schema).annotate(hints)
 }
 
 fn tool<T: JsonSchema + 'static>(
@@ -975,284 +424,18 @@ fn tool<T: JsonSchema + 'static>(
     description: &'static str,
     kind: Kind,
 ) -> Tool {
-    tool_with(name, description, kind, schema_for_type::<T>())
+    let hints = ToolAnnotations::new().open_world(false);
+    let hints = match kind {
+        Kind::Read => hints.read_only(true),
+        Kind::Write => hints.read_only(false).destructive(false),
+    };
+    Tool::new(name, description, schema_for_type::<T>()).annotate(hints)
 }
 
 /// Every tool, in the order a model meets them.
 #[must_use]
 pub fn list() -> Vec<Tool> {
     vec![
-        tool_with(
-            "list_workers",
-            "Every machine (worker) the Slopty server knows: name, liveness (online, \
-             unreachable, gone), address, OS, how many terminals it runs, `waiting` (the \
-             agents on it that need a human, each with its `term`), and `facts`: everything it \
-             is and has (toolchains, agent CLIs, GPUs, its person's labels and probes, load, \
-             live agents), by the names placement rules read. Start here.",
-            Kind::Read,
-            schema_for_empty_input(),
-        ),
-        tool::<ListTerminalsArgs>(
-            "list_terminals",
-            "Terminals on one worker or on all: `term` (the handle every terminal tool takes, \
-             copy it verbatim), title, working directory, repository, size, whether the program \
-             still runs, its command line, and the coding agent in it if one runs (as \
-             `agent_status` gives it).",
-            Kind::Read,
-        ),
-        tool::<OpenTerminalArgs>(
-            "open_terminal",
-            "Start a terminal on a worker, running the login shell or `command`, and return its \
-             `term`. Then send_input, wait_for and read_output. `cols`/`rows` set its size; \
-             a client that shows it later sizes it to its window.",
-            Kind::Write,
-        ),
-        tool::<SpawnAgentArgs>(
-            "spawn_agent",
-            "Start Claude Code (`claude` plus `args`) in a new terminal in `cwd`, optionally \
-             typing `prompt` once it is ready, and return its `term`. It gets Slopty's tools \
-             too. For a project's work, task_start places and tracks it instead. Follow it with wait_for agent_input (this agent) or events agent_input \
-             (any agent) to learn when it needs you, agent_status for what it is doing, and \
-             read_screen to see it.",
-            Kind::Write,
-        ),
-        tool::<SendInputArgs>(
-            "send_input",
-            "Type into a terminal; give exactly one of: `text`, typed as-is with `\\n` pressing \
-             Enter (\"cargo test\\n\" runs a command); `paste`, delivered as one bracketed paste, \
-             best for multi-line text into an editor, a REPL or an agent's prompt; `keys`, keys \
-             pressed in order, each `[mods+]key` with mods ctrl, alt (or opt), shift, cmd and the \
-             key a single character, a name (enter, tab, space, escape, backspace, delete, up, \
-             down, left, right, home, end, pageup, pagedown, insert, f1…f25) or a W3C \
-             KeyboardEvent.code (ArrowUp, Digit1, NumpadEnter). Examples: [\"ctrl+c\"], \
-             [\"escape\", \":\", \"w\", \"q\", \"enter\"], [\"shift+tab\"], [\"up\", \"enter\"].",
-            Kind::Write,
-        ),
-        tool::<TermArgs>(
-            "read_screen",
-            "The screen as drawn now: rows with their absolute line index, cursor, title, \
-             working directory, and `alternate` (a full-screen program such as an editor or an \
-             agent's TUI is showing). Best for TUIs and prompts; for what a command printed, \
-             read_output pages through all of it.",
-            Kind::Read,
-        ),
-        tool::<ReadOutputArgs>(
-            "read_output",
-            "Scrollback and screen as lines with absolute indexes, which stay put as old lines \
-             are evicted. Returns `lines` and `next`: pass `next` back as `since` to read only \
-             what came after, and page through long output that way instead of re-reading it. \
-             A command's output starts at its `output_start` from list_commands.",
-            Kind::Read,
-        ),
-        tool::<ListCommandsArgs>(
-            "list_commands",
-            "Commands run at the shell prompt (OSC 133 blocks), oldest first: the command line, \
-             `exit` (null while it runs) and the output's line range [output_start, output_end) \
-             for read_output. Empty when the shell has no prompt integration.",
-            Kind::Read,
-        ),
-        tool::<WaitForArgs>(
-            "wait_for",
-            "Block until something happens in a terminal instead of polling read_screen or \
-             read_output. Give exactly one condition: `output` (a regex matched by a new line), \
-             `quiet_ms` (that long with no output), `command_done` (the running command ends), \
-             `exit` (the program exits), `agent_input` (the agent needs a human or went idle). \
-             `timeout_ms` defaults to 60000 and the server caps it at 240000. Returns `result`: \
-             met (with the matching `line` for `output`), timed_out, or closed. On timed_out, \
-             look with read_screen, then wait again.",
-            Kind::Read,
-        ),
-        tool::<EventsArgs>(
-            "events",
-            "What happened across every worker, oldest first: agent status changes (`agent`, \
-             with `term` and `needs_human`), terminals opened, exited (with `exit_status`) \
-             and closed, workers online, \
-             unreachable, gone or removed. Blocks until at least one event or `timeout_ms`. \
-             Returns `events`, `next` and `missed` (events dropped from the server's log). Pass \
-             `next` back as `since` to go on without gaps. With `agent_input` it waits for the \
-             first agent anywhere that needs a human or goes idle. To see nothing twice, take \
-             the cursor first (timeout_ms 0), then read state (list_workers), then wait from \
-             the cursor.",
-            Kind::Read,
-        ),
-        tool::<TermArgs>(
-            "agent_status",
-            "The coding agent in a terminal, if one runs, and its status: idle, working, tool \
-             (running `tool`), blocked (needs a human, with `reason` and for a permission the \
-             `tool`), or done. `source` says what the status was read from: `hook`, or \
-             `transcript`, `title` or `process` when the agent's hooks are not installed.",
-            Kind::Read,
-        ),
-        tool::<ResizeArgs>(
-            "resize_terminal",
-            "Resize a terminal to `cols` x `rows`, for a program that lays out to the width. \
-             Fails while a client shows the terminal, since its window sets the size then.",
-            Kind::Write,
-        ),
-        tool::<CloseArgs>(
-            "close_terminal",
-            "Hang up a terminal's program and remove the terminal.",
-            Kind::Destroy,
-        ),
-        tool::<ReadFileArgs>(
-            "read_file",
-            "Read a file on a worker, whole or from `offset` for `length` bytes (8 MiB per \
-             read). Returns `content`, its `encoding` (utf8 when the bytes are UTF-8, else \
-             base64), the file's `size`, `offset`, `length` read and `more` (the file goes on: \
-             read again from offset + length).",
-            Kind::Read,
-        ),
-        tool::<WriteFileArgs>(
-            "write_file",
-            "Create or replace a file on a worker with `content`: text as it is, or binary \
-             contents in base64 with `encoding` base64.",
-            Kind::Destroy,
-        ),
-        tool::<ListDirArgs>(
-            "list_dir",
-            "A directory's entries on a worker, by name: `name`, `kind` (file, dir, symlink, \
-             other), `size` and `modified_ms`, with `total` and `truncated` when there are more \
-             than `max`.",
-            Kind::Read,
-        ),
-        tool::<PathArgs>(
-            "stat",
-            "What is at a path on a worker, following links: `exists`, then `kind`, `size`, \
-             `modified_ms` and `mode` (octal).",
-            Kind::Read,
-        ),
-        tool::<FsPathArgs>(
-            "make_dir",
-            "Make one empty folder at `path` on a worker; the folder it goes in must exist. \
-             Refused when anything is already there. Returns the new folder's `path`.",
-            Kind::Write,
-        ),
-        tool::<MovePathArgs>(
-            "move_path",
-            "Move or rename `from` to `to` on a worker, within one volume. Nothing is ever \
-             replaced: refused when anything is at `to`, or when `to` is inside `from`. \
-             Returns where it now is as `path`.",
-            Kind::Write,
-        ),
-        tool::<FsPathArgs>(
-            "trash_path",
-            "Put a file or folder on a worker in its OS's trash, where the person can put it \
-             back; never deleted. Refused for the root, a volume, the home or a folder holding \
-             it. Returns its `path` in the trash.",
-            Kind::Write,
-        ),
-        tool::<SearchFilesArgs>(
-            "search_files",
-            "Search the files under a directory on a worker, as ripgrep does: .gitignore \
-             honoured, binary files skipped. Returns `files` in path order, each with its \
-             `lines` (`line`, `text` without indentation, `matches` as byte ranges, `context` \
-             on a line round a match), then `lines`, `searched` and `capped` (there were more: \
-             narrow with `globs` or a sharper pattern).",
-            Kind::Read,
-        ),
-        tool::<WorkerArgs>(
-            "list_ports",
-            "TCP ports listening in a worker's terminals' process trees, with the process and \
-             the `term` it runs in: how to find the dev server a terminal started.",
-            Kind::Read,
-        ),
-        tool::<WorkerArgs>(
-            "list_items",
-            "The items on a worker's workspace, which every person's Slopty shows as tiles: \
-             `item` (the handle the item tools take, copy it verbatim), `kind` (terminal, \
-             window, display, note, file, browser), `name` when one was given, and what it \
-             shows (`term`, `window`, `display`, `text`, `path` or `url`).",
-            Kind::Read,
-        ),
-        tool::<OpenItemArgs>(
-            "open_item",
-            "Put a tile on a worker's workspace for every person to see, and return its `item`. \
-             Give exactly one of: `url`, a web page (a localhost address is the worker's own, \
-             so the dev server list_ports finds opens as the worker serves it); `file`, a text \
-             file to edit; `note`, Markdown; `window` or `display`, streamed live, with ids \
-             from list_windows. A terminal comes with open_terminal instead.",
-            Kind::Write,
-        ),
-        tool::<RenameItemArgs>(
-            "rename_item",
-            "Give an item's tile a name, or take it away (omit `name`) so the tile says what \
-             it shows.",
-            Kind::Write,
-        ),
-        tool::<ItemArgs>(
-            "remove_item",
-            "Take an item off its workspace. A terminal's item goes with close_terminal.",
-            Kind::Destroy,
-        ),
-        tool::<WorkerArgs>(
-            "list_windows",
-            "The windows and displays a worker can stream, for open_item: `windows` (`window` \
-             id, app, title, display, on_screen, width and height in points) and `displays` \
-             (`display` id, width, height, scale, hz).",
-            Kind::Read,
-        ),
-        tool::<ReadThreadArgs>(
-            "read_thread",
-            "What another agent's thread did, whatever its agent (Claude Code, Codex, pi, ACP): \
-             a task's (by `task`), a subagent's (by `thread`) or a terminal's (by `term`). \
-             Returns whole `turns` after `after`, each with its `entries` (`user` and `agent` \
-             messages; with view `activity` also each `tool` call with its `state`, the end of \
-             its `output` and the `child` thread it started, and the agent's `notice`s), its \
-             `phase` and what it `wait`s on, and the `requests` open on it, which are the \
-             person's to answer. Bounded: `truncated` says a text was cut or turns were left \
-             out. Pass `next` back as `after` to read on; a turn under way is read again until \
-             it ends. Reading changes nothing.",
-            Kind::Read,
-        ),
-        tool::<CaptureStillArgs>(
-            "capture_still",
-            "One still picture of a window or a whole display on a worker, by its id from \
-             list_windows, as a PNG image (halved until it fits a reply), with its `width` and \
-             `height`. A worker that may not record its screen answers Unsupported.",
-            Kind::Read,
-        ),
-        tool::<UploadArgs>(
-            "upload_file",
-            "Send a file of any size from the machine this tool runs on (`local`) to `path` on \
-             a worker, in parts, replacing what is there only once every part has arrived and \
-             adds up. A new file keeps the local file's mode. Only where the tool runs on your \
-             machine (`slopty mcp`); the server's endpoint answers Unsupported.",
-            Kind::Destroy,
-        ),
-        tool::<DownloadArgs>(
-            "download_file",
-            "Bring a file of any size from `path` on a worker to `local` on the machine this \
-             tool runs on, in parts; refused when the file changes while it is read. Only where \
-             the tool runs on your machine (`slopty mcp`); the server's endpoint answers \
-             Unsupported.",
-            Kind::Destroy,
-        ),
-        tool::<ForgetWorkerArgs>(
-            "forget_worker",
-            "Remove a worker that is not online (unreachable or gone) from the server's list, \
-             for a machine retired or set up again elsewhere. An online worker is refused.",
-            Kind::Destroy,
-        ),
-        tool::<ProjectCreateArgs>(
-            "project_create",
-            "Make a project: one goal many agents work on across the workers, which every \
-             person's Slopty shows as a tree. Its orchestrator is you unless you name another \
-             terminal. Returns the project with `tasks`, `timeline`, `bounds` and `live`.",
-            Kind::Write,
-        ),
-        tool::<ProjectUpdateArgs>(
-            "project_update",
-            "Change a project's orchestrator terminal, verifier or metadata. Its limits and \
-             the person's bounds are the person's, which no tool raises.",
-            Kind::Write,
-        ),
-        tool_with(
-            "project_list",
-            "Every project: name, title, repository, target branch, verifier, orchestrator, \
-             limits.",
-            Kind::Read,
-            schema_for_empty_input(),
-        ),
         tool::<ProjectStatusArgs>(
             "project_status",
             "A project whole: its `tasks` (each with `state`, its agent's own `status`, \
@@ -1275,14 +458,14 @@ pub fn list() -> Vec<Tool> {
             "Start a task, the one way work starts: a new one made from a `title`, a `brief` \
              its agent works from (its first prompt), a `kind`, `depends_on` or `read_only`; or \
              a `task` the project has. It runs Claude Code, another `agent` or a `command` on \
-             the `worker` you name (list_workers shows each one's facts; work that needs no \
-             Apple platform belongs on Linux) or one with room, beside a clone of the project's \
-             repository in a worktree of its own unless you name a `cwd`. Start only work that runs in \
-             parallel with yours and needs no context you hold: do sequential or small work \
-             yourself. A start is refused while as many tasks wait on the person as the \
-             project's review limit, saying how many and where. A new task refused its start is \
-             kept: start it later by its number. Returns the task \
-             with its terminal's `term`.",
+             the `worker` you name (`slopty --json workers` shows each one's facts; work \
+             that needs no Apple platform belongs on Linux) or one with room, beside a clone of \
+             the project's repository in a worktree of its own unless you name a `cwd`. Start \
+             only work that runs in parallel with yours and needs no context you hold: do \
+             sequential or small work yourself. A start is refused while as many tasks wait on \
+             the person as the project's review limit, saying how many and where. A new task \
+             refused its start is kept: start it later by its number. Returns the task with its \
+             terminal's `term`.",
             Kind::Write,
         ),
         tool::<TaskUpdateArgs>(
@@ -1321,13 +504,18 @@ pub fn list() -> Vec<Tool> {
              cancels nothing. For agents without hooks; hooks bring the same news unasked.",
             Kind::Read,
         ),
-        tool::<WakeWorkerArgs>(
-            "wake_worker",
-            "Wake a worker that sleeps: the server, or an online worker on the same LAN, sends \
-             it a magic packet. Returns `by` (the machine that sent it), `to` (the sleeping \
-             worker's interfaces) and `wake_on_lan_off` (it said it sleeps through one). It \
-             shows online in list_workers once it is up; wait for that with events.",
-            Kind::Write,
+        tool::<ReadThreadArgs>(
+            "read_thread",
+            "What another agent's thread did, whatever its agent (Claude Code, Codex, pi, ACP): \
+             a task's (by `task`), a subagent's (by `thread`) or a terminal's (by `term`). \
+             Returns whole `turns` after `after`, each with its `entries` (`user` and `agent` \
+             messages; with view `activity` also each `tool` call with its `state`, the end of \
+             its `output` and the `child` thread it started, and the agent's `notice`s), its \
+             `phase` and what it `wait`s on, and the `requests` open on it, which are the \
+             person's to answer. Bounded: `truncated` says a text was cut or turns were left \
+             out. Pass `next` back as `after` to read on; a turn under way is read again until \
+             it ends. Reading changes nothing.",
+            Kind::Read,
         ),
     ]
 }
@@ -1340,7 +528,7 @@ pub fn get(name: &str) -> Option<Tool> {
 
 /// Run the tool `name` on `dispatch`, its answer as compact JSON text.
 ///
-/// A failure of the tool is an `isError` result for the model to read; a `wait_for` tells
+/// A failure of the tool is an `isError` result for the model to read; a long wait tells
 /// `progress`, when given, how long it has waited every [`PROGRESS_EVERY`].
 ///
 /// # Errors
@@ -1354,44 +542,10 @@ pub async fn call<D: Dispatch>(
     if get(name).is_none() {
         return Err(ErrorData::invalid_params(format!("no tool is called {name}"), None));
     }
-    let answered = if name == "capture_still" {
-        capture(dispatch, arguments).await
-    } else {
-        run(dispatch, name, arguments, progress)
-            .await
-            .map(|value| vec![ContentBlock::text(value.to_string())])
-    };
-    Ok(match answered {
-        Ok(content) => CallToolResult::success(content),
+    Ok(match run(dispatch, name, arguments, progress).await {
+        Ok(value) => CallToolResult::success(vec![ContentBlock::text(value.to_string())]),
         Err(e) => CallToolResult::error(vec![ContentBlock::text(e.to_string())]),
     })
-}
-
-/// `capture_still`: the picture as an image, after its size as JSON.
-async fn capture<D: Dispatch>(
-    dispatch: &D,
-    arguments: Map<String, Value>,
-) -> Result<Vec<ContentBlock>, ToolError> {
-    let a: CaptureStillArgs = args(arguments)?;
-    let target = a.target()?;
-    let still =
-        ops::capture_still(&mut Resolver::new(dispatch), a.worker.as_deref(), target).await?;
-    let size = json(&view::still(None, still.width, still.height, still.png.len()))?;
-    let image = data_encoding::BASE64.encode(&still.png);
-    Ok(vec![ContentBlock::text(size.to_string()), ContentBlock::image(image, "image/png")])
-}
-
-/// Refused where the tool does not run on the caller's machine.
-fn here<D: Dispatch>(dispatch: &D) -> Result<(), ToolError> {
-    if dispatch.local_files() {
-        Ok(())
-    } else {
-        Err(ToolError::new(
-            ErrorCode::Unsupported,
-            "this endpoint runs on the server, not on your machine, so it cannot reach your \
-             files; run `slopty mcp` where they are, or `slopty push` and `slopty pull`",
-        ))
-    }
 }
 
 fn args<T: DeserializeOwned>(arguments: Map<String, Value>) -> Result<T, ToolError> {
@@ -1411,72 +565,6 @@ async fn run<D: Dispatch>(
 ) -> Result<Value, ToolError> {
     let mut res = Resolver::new(dispatch);
     match name {
-        "list_workers" => {
-            if !arguments.is_empty() {
-                return Err(ToolError::invalid("list_workers takes no arguments"));
-            }
-            json(&ops::overview(dispatch).await?.json())
-        }
-        "list_terminals" => {
-            let a: ListTerminalsArgs = args(arguments)?;
-            let (workers, terminals) = ops::terminals(&mut res, a.worker.as_deref()).await?;
-            json(&view::terminals_json(&workers, &terminals))
-        }
-        "open_terminal" => {
-            let a: OpenTerminalArgs = args(arguments)?;
-            let env = a.env.into_iter().collect();
-            let size = size(a.cols, a.rows)?;
-            let spec = Spec { cwd: a.cwd, command: a.command, env, name: a.name, size };
-            let key = checked_key(a.idempotency_key)?;
-            json(&view::opened(ops::open(&mut res, a.worker.as_deref(), spec, key).await?))
-        }
-        "spawn_agent" => {
-            let a: SpawnAgentArgs = args(arguments)?;
-            let spec = AgentSpec {
-                cwd: a.cwd,
-                prompt: a.prompt,
-                args: a.args,
-                env: a.env.into_iter().collect(),
-                size: size(a.cols, a.rows)?,
-            };
-            let key = checked_key(a.idempotency_key)?;
-            json(&view::opened(ops::spawn_agent(&mut res, a.worker.as_deref(), spec, key).await?))
-        }
-        "project_create" => {
-            let a: ProjectCreateArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key)?;
-            let spec = ProjectSpec {
-                project: a.project,
-                title: a.title,
-                repo: a.repo,
-                target: a.target,
-                verifier: a.verifier,
-                push: false,
-                orchestrator: a.orchestrator,
-                limits: LimitsChange::default(),
-                metadata: metadata_text(a.metadata)?,
-            };
-            json(&view::projects::status(&ops::project_create(&mut res, spec, key).await?))
-        }
-        "project_update" => {
-            let a: ProjectUpdateArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key)?;
-            let edit = ProjectEdit {
-                orchestrator: a.orchestrator,
-                verifier: a.verifier,
-                push: None,
-                limits: LimitsChange::default(),
-                metadata: metadata_text(a.metadata)?,
-            };
-            let set = ops::project_set(&mut res, a.project.as_deref(), edit, key);
-            json(&view::projects::status(&set.await?))
-        }
-        "project_list" => {
-            if !arguments.is_empty() {
-                return Err(ToolError::invalid("project_list takes no arguments"));
-            }
-            json(&view::projects::projects(&ops::projects(dispatch).await?))
-        }
         "project_status" => {
             let a: ProjectStatusArgs = args(arguments)?;
             let timeout = a.timeout_ms.unwrap_or(0);
@@ -1529,153 +617,6 @@ async fn run<D: Dispatch>(
                 ops::task_wait(dispatch, a.project.as_deref(), (&tasks, all), a.since, timeout);
             json(&view::projects::task_wait(&with_progress(waited, progress).await?))
         }
-        "resize_terminal" => {
-            let a: ResizeArgs = args(arguments)?;
-            let size = Size { cols: a.cols, rows: a.rows };
-            ops::resize(&mut res, &a.term, size, checked_key(a.idempotency_key)?).await?;
-            json(&view::DONE)
-        }
-        "events" => {
-            let a: EventsArgs = args(arguments)?;
-            let filter =
-                if a.agent_input { EventFilter::AgentNeedsInput } else { EventFilter::All };
-            let timeout = a.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
-            let page = with_progress(ops::events(dispatch, a.since, timeout, filter), progress);
-            json(&view::events(&page.await?))
-        }
-        "send_input" => {
-            let mut a: SendInputArgs = args(arguments)?;
-            let (term, key) = (a.term.clone(), checked_key(a.idempotency_key.take())?);
-            ops::send(&mut res, &term, a.input()?, key).await?;
-            json(&view::DONE)
-        }
-        "read_screen" => {
-            let a: TermArgs = args(arguments)?;
-            json(&view::screen(&ops::screen(&mut res, &a.term).await?))
-        }
-        "read_output" => {
-            let a: ReadOutputArgs = args(arguments)?;
-            let max = a.max_lines.unwrap_or(DEFAULT_MAX_LINES);
-            let (lines, next) = ops::output(&mut res, &a.term, a.since, max).await?;
-            json(&view::output(&lines, next))
-        }
-        "list_commands" => {
-            let a: ListCommandsArgs = args(arguments)?;
-            json(&view::commands(&ops::commands(&mut res, &a.term, a.since).await?))
-        }
-        "wait_for" => {
-            let a: WaitForArgs = args(arguments)?;
-            let until = a.until()?;
-            let term = res.term(&a.term).await?;
-            let timeout = a.timeout_ms.unwrap_or(DEFAULT_WAIT_MS);
-            let wait = ops::wait(dispatch, term, until, timeout, checked_key(a.idempotency_key)?);
-            json(&view::waited(&with_progress(wait, progress).await?))
-        }
-        "agent_status" => {
-            let a: TermArgs = args(arguments)?;
-            json(&view::agent(ops::agent_status(&mut res, &a.term).await?.as_ref()))
-        }
-        "close_terminal" => {
-            let a: CloseArgs = args(arguments)?;
-            ops::close(&mut res, &a.term, checked_key(a.idempotency_key)?).await?;
-            json(&view::DONE)
-        }
-        "read_file" => {
-            let a: ReadFileArgs = args(arguments)?;
-            let worker = res.worker(a.worker.as_deref()).await?;
-            let path = a.path.clone();
-            let chunk = ops::read_file(dispatch, worker, path, a.offset, a.length).await?;
-            json(&view::file(&a.path, &chunk))
-        }
-        "write_file" => {
-            let a: WriteFileArgs = args(arguments)?;
-            let bytes = a
-                .encoding
-                .decode(a.content)
-                .map_err(|e| ToolError::invalid(format!("content is not base64: {e}")))?;
-            let key = checked_key(a.idempotency_key)?;
-            ops::write_file(&mut res, a.worker.as_deref(), a.path, bytes, key).await?;
-            json(&view::DONE)
-        }
-        "list_ports" => {
-            let a: WorkerArgs = args(arguments)?;
-            let (worker, ports) = ops::ports(&mut res, a.worker.as_deref()).await?;
-            json(&view::ports(worker, &ports))
-        }
-        "list_dir" => {
-            let a: ListDirArgs = args(arguments)?;
-            let max = a.max.unwrap_or(DEFAULT_MAX_ENTRIES);
-            let path = a.path.clone();
-            let (entries, total) = ops::list_dir(&mut res, a.worker.as_deref(), path, max).await?;
-            json(&view::dir(&a.path, &entries, total))
-        }
-        "stat" => {
-            let a: PathArgs = args(arguments)?;
-            let found = ops::stat(&mut res, a.worker.as_deref(), a.path.clone()).await?;
-            json(&view::stat(&a.path, found.as_ref()))
-        }
-        "make_dir" => {
-            let a: FsPathArgs = args(arguments)?;
-            let (parent, name) = ops::parent_and_name(&a.path)?;
-            let op = FsOp::MakeDir { parent, name };
-            let key = checked_key(a.idempotency_key)?;
-            json(&view::placed(&ops::fs_change(&mut res, a.worker.as_deref(), op, key).await?))
-        }
-        "move_path" => {
-            let a: MovePathArgs = args(arguments)?;
-            let op = FsOp::Move { from: a.from, to: a.to };
-            let key = checked_key(a.idempotency_key)?;
-            json(&view::placed(&ops::fs_change(&mut res, a.worker.as_deref(), op, key).await?))
-        }
-        "trash_path" => {
-            let a: FsPathArgs = args(arguments)?;
-            let op = FsOp::Trash { path: a.path };
-            let key = checked_key(a.idempotency_key)?;
-            json(&view::placed(&ops::fs_change(&mut res, a.worker.as_deref(), op, key).await?))
-        }
-        "search_files" => {
-            let a: SearchFilesArgs = args(arguments)?;
-            let max = a.max_lines.unwrap_or(DEFAULT_MAX_MATCHES);
-            let (worker, root) = (a.worker.as_deref(), a.root.clone());
-            let (files, summary) = ops::search(&mut res, worker, root, a.query(), max).await?;
-            json(&view::search(&a.root, &files, &summary))
-        }
-        "forget_worker" => {
-            let a: ForgetWorkerArgs = args(arguments)?;
-            ops::forget_worker(&mut res, &a.worker, checked_key(a.idempotency_key)?).await?;
-            json(&view::DONE)
-        }
-        "wake_worker" => {
-            let a: WakeWorkerArgs = args(arguments)?;
-            json(&view::woken(&ops::wake(&mut res, &a.worker).await?))
-        }
-        "list_items" => {
-            let a: WorkerArgs = args(arguments)?;
-            let (worker, items) = ops::items(&mut res, a.worker.as_deref()).await?;
-            json(&view::items(worker, &items))
-        }
-        "open_item" => {
-            let mut a: OpenItemArgs = args(arguments)?;
-            let (worker, key) = (a.worker.clone(), checked_key(a.idempotency_key.take())?);
-            let (kind, name) = a.kind()?;
-            let item = ops::open_item(&mut res, worker.as_deref(), kind, name, key).await?;
-            json(&view::opened_item(item))
-        }
-        "rename_item" => {
-            let a: RenameItemArgs = args(arguments)?;
-            ops::rename_item(&mut res, &a.item, a.name, checked_key(a.idempotency_key)?).await?;
-            json(&view::DONE)
-        }
-        "remove_item" => {
-            let a: ItemArgs = args(arguments)?;
-            ops::remove_item(&mut res, &a.item, checked_key(a.idempotency_key)?).await?;
-            json(&view::DONE)
-        }
-        "list_windows" => {
-            let a: WorkerArgs = args(arguments)?;
-            let (_worker, windows, displays) = ops::windows(&mut res, a.worker.as_deref()).await?;
-            json(&view::screens(&windows, &displays))
-        }
         "read_thread" => {
             let a: ReadThreadArgs = args(arguments)?;
             let task = task_text(a.task.as_ref());
@@ -1687,21 +628,6 @@ async fn run<D: Dispatch>(
             };
             let read = ops::read_thread(&mut res, of, a.view.view(), a.after).await?;
             json(&view::thread_read(&read))
-        }
-        "upload_file" => {
-            here(dispatch)?;
-            let a: UploadArgs = args(arguments)?;
-            let key = checked_key(a.idempotency_key)?;
-            let local = std::path::Path::new(&a.local);
-            let moved = bulk::upload(&mut res, a.worker.as_deref(), local, a.path, key).await?;
-            json(&view::moved(&moved))
-        }
-        "download_file" => {
-            here(dispatch)?;
-            let a: DownloadArgs = args(arguments)?;
-            let local = std::path::Path::new(&a.local);
-            let moved = bulk::download(&mut res, a.worker.as_deref(), a.path, local).await?;
-            json(&view::moved(&moved))
         }
         other => Err(ToolError::invalid(format!("no tool is called {other}"))),
     }
@@ -1727,14 +653,11 @@ async fn with_progress<T>(wait: impl Future<Output = T>, progress: Option<Progre
 mod tests {
     use parking_lot::Mutex;
     use serde_json::json;
-    use slopty_core::{ItemId, SessionId, WallMs, WorkerId};
-    use slopty_proto::items::Item;
-    use slopty_proto::orchestration::{
-        ItemRef, Outcome, TermRef, ThreadOf, ThreadRead, Verb, Waited,
-    };
+    use slopty_core::{SessionId, WallMs, WorkerId};
+    use slopty_proto::orchestration::{Outcome, TermRef, ThreadOf, ThreadRead, Verb};
     use slopty_proto::project::{
-        Assignment, Bounds, Fact, Limits, Live, NativeCounts, Natives, Project, ProjectId,
-        ProjectStatus, Runner, Task, TaskId, TaskState, TimelineEntry, WorkerFacts,
+        Assignment, Bounds, Limits, Live, NativeCounts, Natives, Project, ProjectId, ProjectStatus,
+        Runner, Task, TaskId, TaskState, TimelineEntry,
     };
     use slopty_proto::server::{Liveness, Os, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
@@ -1746,22 +669,16 @@ mod tests {
         "0199a000-0000-7000-8000-000000000001".parse().unwrap()
     }
 
-    fn page() -> ItemId {
-        "0199a1b1-c3d4-7000-8000-0000000017e5".parse().unwrap()
-    }
-
     fn shell() -> SessionId {
         "0199a1b1-c3d4-7000-8000-00000000abcd".parse().unwrap()
     }
 
     /// One online worker with one shell; records every verb and the keys that came with them;
-    /// a wait takes 25 s.
+    /// a project read that may wait takes 25 s.
     #[derive(Default)]
     struct Fake {
         verbs: Mutex<Vec<Verb>>,
         keys: Mutex<Vec<Option<IdempotencyKey>>>,
-        /// Runs on another machine than its caller, as the server's endpoint does.
-        elsewhere: bool,
         /// The caller's own project and task.
         scope: crate::Scope,
     }
@@ -1892,27 +809,6 @@ mod tests {
                         repo_id: None,
                     },
                 )]),
-                Verb::WaitFor { .. } => {
-                    tokio::time::sleep(Duration::from_secs(25)).await;
-                    Outcome::Waited(Waited::TimedOut)
-                }
-                Verb::ReadFile { offset, .. } => {
-                    Outcome::File { bytes: vec![0xff, 0], offset, size: offset.saturating_add(2) }
-                }
-                Verb::Events { since, .. } => {
-                    Outcome::Events { events: Vec::new(), next: since.unwrap_or(41), missed: 0 }
-                }
-                Verb::Close { .. } => Outcome::Error {
-                    code: ErrorCode::UnknownTerminal,
-                    message: "no such terminal".to_owned(),
-                },
-                Verb::OpenItem { worker, .. } => Outcome::Item(ItemRef { worker, item: page() }),
-                Verb::ListItems { .. } => Outcome::Items(vec![Item {
-                    id: page(),
-                    kind: ItemKind::Browser { url: "http://localhost:5173/".to_owned() },
-                    name: None,
-                    facts: BTreeMap::new(),
-                }]),
                 Verb::ReadThread { of, after, .. } => {
                     let thread = match of {
                         ThreadOf::Thread(thread) => thread,
@@ -1933,53 +829,31 @@ mod tests {
                         skipped: false,
                     }))
                 }
-                Verb::CaptureStill { .. } => {
-                    Outcome::Still { png: b"\x89PNG".to_vec(), width: 640, height: 400 }
-                }
-                Verb::Wake { .. } => {
-                    Outcome::WakeSent { by: "server".to_owned(), to: vec!["en0".to_owned()] }
-                }
                 Verb::TaskCreate { spec, .. } => {
                     Outcome::Task(Box::new(made_task(7, &spec.title, false)))
                 }
                 Verb::TaskUpdate { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, "Review", true)))
                 }
-                Verb::ProjectStatus { project, .. } => {
+                Verb::ProjectStatus { project, timeout_ms, .. } => {
+                    if timeout_ms > 0 {
+                        tokio::time::sleep(Duration::from_secs(25)).await;
+                    }
                     Outcome::Project(Box::new(project_status(project)))
                 }
-                Verb::WorkerFacts { .. } => {
-                    let labels = BTreeMap::from([("rack".to_owned(), Fact::Text("b2".to_owned()))]);
-                    let facts = BTreeMap::from([("labels".to_owned(), Fact::Map(labels))]);
-                    Outcome::Facts(vec![WorkerFacts { worker: studio(), facts }])
-                }
+                Verb::TaskTell { task: Some(TaskId(9)), .. } => Outcome::Error {
+                    code: ErrorCode::UnknownTask,
+                    message: "no task #9".to_owned(),
+                },
                 Verb::TaskSpawn { task, .. } => {
                     Outcome::Task(Box::new(made_task(task.0, "Fix the hub", true)))
                 }
                 // The server's record of the terminal, over what its environment says.
-                Verb::FsChange { op: FsOp::Move { to, .. }, .. } if to == "/taken" => {
-                    Outcome::Error {
-                        code: ErrorCode::Conflict,
-                        message: "refused, nothing was touched: something is already at /taken"
-                            .to_owned(),
-                    }
-                }
-                Verb::FsChange { op, .. } => Outcome::FsDone {
-                    path: match op {
-                        FsOp::MakeDir { parent, name } => format!("{parent}/{name}"),
-                        FsOp::Move { to, .. } => to,
-                        FsOp::Trash { path } => format!("/Users/c/.Trash/{path}"),
-                    },
-                },
                 Verb::WorkingOn { .. } => {
                     Outcome::WorkingOn(Some(("slopty".parse().expect("a name"), Some(TaskId(5)))))
                 }
                 _ => Outcome::Done,
             }
-        }
-
-        fn local_files(&self) -> bool {
-            !self.elsewhere
         }
 
         fn scope(&self) -> crate::Scope {
@@ -1990,8 +864,7 @@ mod tests {
     /// The orchestrator's own project is what the project tools default to: `task_start` makes a
     /// task with the kind, dependencies and metadata it gave and starts it in one call on the
     /// worker named, its brief the agent's first prompt; and it starts a task made before with
-    /// any agent or a command. `spawn_agent` starts an agent outside any task. A caller that runs
-    /// for no project is told to name one.
+    /// any agent or a command. A caller that runs for no project is told to name one.
     #[tokio::test]
     async fn task_start_makes_and_starts_a_task_in_the_caller_s_own_project() {
         let scope =
@@ -2020,11 +893,6 @@ mod tests {
         assert_eq!((*task, launch.pin, launch.cwd.as_str()), (TaskId(7), Some(studio()), "~/w"));
         let brief = Some("Fix the hub\nThen test it".to_owned());
         assert_eq!(launch.run, Runner::Claude { prompt: brief, args: Vec::new() }, "its brief");
-
-        let spawn = json!({"cwd": "~/w", "prompt": "Look around"});
-        call_json(&fake, "spawn_agent", spawn).await;
-        let Some(Verb::SpawnAgent { prompt, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(prompt.as_deref(), Some("Look around"), "no task made for it");
 
         let command = json!({"task": 7, "command": ["cargo", "test"]});
         let (failed, text) = call_json(&fake, "task_start", command).await;
@@ -2100,15 +968,6 @@ mod tests {
         assert!(failed && text.contains("task"), "another project has no own task: {text}");
     }
 
-    /// `list_workers` shows what each worker reports of itself beside its capabilities.
-    #[tokio::test]
-    async fn list_workers_shows_each_worker_s_facts() {
-        let (failed, text) = call_json(&Fake::default(), "list_workers", json!({})).await;
-        assert!(!failed, "{text}");
-        let listed: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(listed[0]["facts"]["labels"]["rack"], "b2", "{listed}");
-    }
-
     async fn call_json(fake: &Fake, name: &str, arguments: Value) -> (bool, String) {
         let Value::Object(arguments) = arguments else { panic!("an object") };
         let result = call(fake, name, arguments, None).await.unwrap();
@@ -2116,6 +975,7 @@ mod tests {
         (result.is_error == Some(true), text)
     }
 
+    /// The tools are the project's eight and nothing else: the rest is the `slopty` command.
     #[test]
     fn every_tool_has_a_schema_a_description_and_a_hint() {
         let tools = list();
@@ -2123,41 +983,6 @@ mod tests {
         assert_eq!(
             names,
             [
-                "list_workers",
-                "list_terminals",
-                "open_terminal",
-                "spawn_agent",
-                "send_input",
-                "read_screen",
-                "read_output",
-                "list_commands",
-                "wait_for",
-                "events",
-                "agent_status",
-                "resize_terminal",
-                "close_terminal",
-                "read_file",
-                "write_file",
-                "list_dir",
-                "stat",
-                "make_dir",
-                "move_path",
-                "trash_path",
-                "search_files",
-                "list_ports",
-                "list_items",
-                "open_item",
-                "rename_item",
-                "remove_item",
-                "list_windows",
-                "read_thread",
-                "capture_still",
-                "upload_file",
-                "download_file",
-                "forget_worker",
-                "project_create",
-                "project_update",
-                "project_list",
                 "project_status",
                 "task_get",
                 "task_start",
@@ -2165,7 +990,7 @@ mod tests {
                 "task_report",
                 "task_tell",
                 "task_wait",
-                "wake_worker",
+                "read_thread",
             ]
         );
         for t in &tools {
@@ -2173,219 +998,49 @@ mod tests {
             assert!(t.description.as_ref().is_some_and(|d| d.len() > 40), "{}", t.name);
             assert!(t.annotations.as_ref().is_some_and(|a| a.read_only_hint.is_some()));
         }
-        let send = get("send_input").unwrap();
-        assert!(send.input_schema["properties"]["keys"].is_object(), "{:?}", send.input_schema);
-        let write = get("write_file").unwrap();
-        assert_eq!(write.input_schema["required"], json!(["path", "content"]));
-    }
-
-    #[test]
-    fn wait_for_takes_exactly_one_condition() {
-        let parse = |v: Value| {
-            let Value::Object(m) = v else { panic!() };
-            args::<WaitForArgs>(m).and_then(|a| a.until())
-        };
-        assert_eq!(
-            parse(json!({"term": "t", "output": "ok$"})).unwrap(),
-            WaitUntil::Output("ok$".to_owned())
-        );
-        assert_eq!(
-            parse(json!({"term": "t", "quiet_ms": 300})).unwrap(),
-            WaitUntil::Quiet { ms: 300 }
-        );
-        assert_eq!(
-            parse(json!({"term": "t", "agent_input": true})).unwrap(),
-            WaitUntil::AgentNeedsInput
-        );
-        parse(json!({"term": "t"})).unwrap_err();
-        parse(json!({"term": "t", "exit": true, "command_done": true})).unwrap_err();
-        let err = parse(json!({"term": "t", "exit": true, "session": "x"})).unwrap_err();
-        assert!(err.message.contains("unknown field"), "{err}");
-    }
-
-    #[test]
-    fn send_input_takes_exactly_one_form() {
-        let parse = |v: Value| {
-            let Value::Object(m) = v else { panic!() };
-            args::<SendInputArgs>(m).and_then(SendInputArgs::input)
-        };
-        assert_eq!(
-            parse(json!({"term": "t", "keys": ["ctrl+c"]})).unwrap(),
-            Input::Keys(vec!["ctrl+c".to_owned()])
-        );
-        parse(json!({"term": "t", "text": "a", "paste": "b"})).unwrap_err();
-        parse(json!({"term": "t"})).unwrap_err();
+        let tell = get("task_tell").unwrap();
+        assert_eq!(tell.input_schema["required"], json!(["task", "text"]));
+        for name in names {
+            assert!(INSTRUCTIONS.contains(name), "the instructions name {name}");
+        }
     }
 
     #[tokio::test]
     async fn an_unknown_tool_is_invalid_params_and_a_failure_is_the_models_to_read() {
-        let fake = Fake::default();
-        let err = call(&fake, "rm_rf", Map::new(), None).await.unwrap_err();
-        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        let scope =
+            crate::Scope { project: Some("slopty".parse().unwrap()), ..crate::Scope::default() };
+        let fake = Fake { scope, ..Fake::default() };
+        let err = call(&fake, "list_workers", Map::new(), None).await.unwrap_err();
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS, "the CLI's now");
 
-        let term = format!("{}/{}", studio(), shell());
-        let (failed, text) = call_json(&fake, "close_terminal", json!({ "term": term })).await;
+        let told = json!({ "task": 9, "text": "Hello." });
+        let (failed, text) = call_json(&fake, "task_tell", told).await;
         assert!(failed);
-        assert_eq!(text, "no such terminal (UnknownTerminal)");
-        assert_eq!(
-            fake.verbs(),
-            [Verb::Close { term: TermRef { worker: studio(), session: shell() } }],
-            "full ids cost no round trip"
-        );
+        assert_eq!(text, "no task #9 (UnknownTask)");
 
-        let (failed, text) = call_json(&fake, "read_screen", json!({ "term": "x", "y": 1 })).await;
+        let (failed, text) = call_json(&fake, "task_get", json!({ "task": 3, "y": 1 })).await;
         assert!(failed);
         assert!(text.starts_with("bad arguments: unknown field `y`"), "{text}");
-        let (failed, text) = call_json(&fake, "list_workers", json!({ "worker": "a" })).await;
-        assert!(failed, "{text}");
     }
 
-    #[tokio::test]
-    async fn names_resolve_and_answers_render_as_views() {
-        let fake = Fake::default();
-        let args = json!({ "term": "mac-studio/0199a1b1", "keys": ["enter"] });
-        let (failed, text) = call_json(&fake, "send_input", args).await;
-        assert!(!failed, "{text}");
-        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({ "ok": true }));
-        assert!(!text.contains('\n'), "compact: {text}");
-        let term = TermRef { worker: studio(), session: shell() };
-        assert_eq!(
-            fake.verbs(),
-            [
-                Verb::ListWorkers,
-                Verb::ListTerminals { worker: Some(studio()) },
-                Verb::SendInput { term, input: Input::Keys(vec!["enter".to_owned()]) },
-            ]
-        );
-
-        let (_, text) = call_json(&fake, "read_file", json!({ "path": "/bin/x" })).await;
-        let file: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(
-            file,
-            json!({
-                "path": "/bin/x", "size": 2, "offset": 0, "length": 2, "more": false,
-                "encoding": "base64", "content": "/wA="
-            })
-        );
-
-        let args = json!({ "worker": studio().to_string(), "path": "/b", "content": "AAE=", "encoding": "base64" });
-        let (failed, text) = call_json(&fake, "write_file", args).await;
-        assert!(!failed, "{text}");
-        let wrote = fake.verbs().pop().unwrap();
-        assert_eq!(
-            wrote,
-            Verb::WriteFile { worker: studio(), path: "/b".to_owned(), bytes: vec![0, 1] }
-        );
-        let args = json!({ "path": "/b", "content": "héllo" });
-        call_json(&fake, "write_file", args).await;
-        let Some(Verb::WriteFile { bytes, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!(bytes, "héllo".as_bytes(), "text by default");
-        let args = json!({ "path": "/b", "content": "!!", "encoding": "base64" });
-        let (failed, text) = call_json(&fake, "write_file", args).await;
-        assert!(failed && text.contains("not base64"), "{text}");
-    }
-
-    /// A folder is made by its whole path, split into where it goes and its name; a move and a
-    /// trip to the trash go as asked, each with its key, and answer where the entry now is. A
-    /// refusal reaches the model in the worker's own plain words, as an error.
-    #[tokio::test]
-    async fn files_are_made_moved_and_trashed_and_a_refusal_is_said() {
-        let fake = Fake::default();
-        let args = json!({ "path": "~/src/new/", "idempotency_key": "mk-1" });
-        let (failed, text) = call_json(&fake, "make_dir", args).await;
-        assert!(!failed, "{text}");
-        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({ "path": "~/src/new" }));
-        let made = FsOp::MakeDir { parent: "~/src".to_owned(), name: "new".to_owned() };
-        assert_eq!(fake.verbs().pop(), Some(Verb::FsChange { worker: studio(), op: made }));
-        assert_eq!(fake.keys.lock().last().cloned().flatten(), IdempotencyKey::new("mk-1").ok());
-        let at_root = FsOp::MakeDir { parent: "/".to_owned(), name: "top".to_owned() };
-        call_json(&fake, "make_dir", json!({ "path": "/top" })).await;
-        assert_eq!(fake.verbs().pop(), Some(Verb::FsChange { worker: studio(), op: at_root }));
-        for nowhere in ["~", "/", ""] {
-            let (failed, text) = call_json(&fake, "make_dir", json!({ "path": nowhere })).await;
-            assert!(failed && text.contains("names no folder to make"), "{nowhere:?}: {text}");
-        }
-
-        let args = json!({ "from": "~/a", "to": "~/b" });
-        let (failed, text) = call_json(&fake, "move_path", args).await;
-        assert!(!failed && text.contains("~/b"), "{text}");
-        let moved = FsOp::Move { from: "~/a".to_owned(), to: "~/b".to_owned() };
-        assert_eq!(fake.verbs().pop(), Some(Verb::FsChange { worker: studio(), op: moved }));
-        let (failed, text) = call_json(&fake, "trash_path", json!({ "path": "~/old" })).await;
-        assert!(!failed && text.contains(".Trash"), "{text}");
-
-        let args = json!({ "from": "~/a", "to": "/taken" });
-        let (failed, text) = call_json(&fake, "move_path", args).await;
-        assert!(failed, "{text}");
-        assert!(text.contains("something is already at /taken"), "{text}");
-    }
-
-    /// A key given to a tool that changes something goes with its verb; a malformed one is the
-    /// model's to fix.
+    /// A key goes with the verb it names, so a retried call is done once; a key that is no key
+    /// is the model's to fix.
     #[tokio::test]
     async fn an_idempotency_key_goes_with_its_verb() {
-        let fake = Fake::default();
-        let term = format!("{}/{}", studio(), shell());
-        let args = json!({ "term": term, "text": "make\n", "idempotency_key": "step-3" });
-        let (failed, text) = call_json(&fake, "send_input", args).await;
+        let scope = crate::Scope {
+            project: Some("slopty".parse().unwrap()),
+            task: Some(TaskId(5)),
+            ..crate::Scope::default()
+        };
+        let fake = Fake { scope, ..Fake::default() };
+        let args = json!({ "state": "done", "idempotency_key": "step-3" });
+        let (failed, text) = call_json(&fake, "task_update", args).await;
         assert!(!failed, "{text}");
         let sent = fake.keys.lock().last().cloned().flatten();
         assert_eq!(sent, Some(IdempotencyKey::new("step-3").unwrap()));
-        let args = json!({ "term": term, "idempotency_key": "two words" });
-        let (failed, text) = call_json(&fake, "close_terminal", args).await;
+        let args = json!({ "note": "x", "idempotency_key": "two words" });
+        let (failed, text) = call_json(&fake, "task_report", args).await;
         assert!(failed && text.contains("idempotency key"), "{text}");
-    }
-
-    /// The new verbs' arguments reach the wire as they were given: a size together or not at
-    /// all, a range, the agent filter, the agent's arguments.
-    #[tokio::test]
-    async fn sizes_ranges_and_filters_reach_the_verb() {
-        let fake = Fake::default();
-        let term = format!("{}/{}", studio(), shell());
-        let t = TermRef { worker: studio(), session: shell() };
-        let (failed, text) =
-            call_json(&fake, "resize_terminal", json!({ "term": term, "cols": 200, "rows": 50 }))
-                .await;
-        assert!(!failed, "{text}");
-        let size = Size { cols: 200, rows: 50 };
-        assert_eq!(fake.verbs().pop(), Some(Verb::ResizeTerminal { term: t, size }));
-
-        let (failed, text) = call_json(&fake, "open_terminal", json!({ "cols": 90 })).await;
-        assert!(failed && text.contains("together"), "{text}");
-        let spawn = json!({
-            "worker": studio().to_string(), "cwd": "~/src", "args": ["--model", "opus"],
-            "env": { "A": "1" }, "cols": 100, "rows": 30,
-        });
-        call_json(&fake, "spawn_agent", spawn).await;
-        let Some(Verb::SpawnAgent { args, env, size, prompt, .. }) = fake.verbs().pop() else {
-            panic!("spawn")
-        };
-        assert_eq!(args, ["--model", "opus"]);
-        assert_eq!(env, [("A".to_owned(), "1".to_owned())]);
-        assert_eq!((size, prompt), (Some(Size { cols: 100, rows: 30 }), None));
-
-        let read =
-            json!({ "worker": studio().to_string(), "path": "/f", "offset": 10, "length": 2 });
-        let (_, text) = call_json(&fake, "read_file", read).await;
-        let file: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!((file["offset"].as_u64(), file["more"].as_bool()), (Some(10), Some(false)));
-        let Some(Verb::ReadFile { offset, length, .. }) = fake.verbs().pop() else { panic!() };
-        assert_eq!((offset, length), (10, Some(2)));
-
-        let (_, text) =
-            call_json(&fake, "events", json!({ "agent_input": true, "timeout_ms": 0 })).await;
-        assert_eq!(
-            serde_json::from_str::<Value>(&text).unwrap(),
-            json!({
-                "events": [], "next": 41, "missed": 0
-            })
-        );
-        let filter = EventFilter::AgentNeedsInput;
-        assert_eq!(
-            fake.verbs().pop(),
-            Some(Verb::Events { since: None, timeout_ms: 0, filter }),
-            "the hub answers it: no name is resolved first"
-        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -2393,46 +1048,17 @@ mod tests {
         let fake = Fake::default();
         let reported = Mutex::new(Vec::new());
         let report = |waited: Duration| reported.lock().push(waited);
-        let term = format!("{}/{}", studio(), shell());
-        let Value::Object(args) = json!({ "term": term, "exit": true, "timeout_ms": 30_000 })
-        else {
+        let Value::Object(args) = json!({ "project": "slopty", "timeout_ms": 30_000 }) else {
             panic!()
         };
-        let result = call(&fake, "wait_for", args, Some(&report)).await.unwrap();
-        let text = &result.content[0].as_text().unwrap().text;
-        let waited: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(waited, json!({ "result": "timed_out", "line": null }));
+        let result = call(&fake, "project_status", args, Some(&report)).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
         let every = PROGRESS_EVERY;
         assert_eq!(*reported.lock(), [every, every.saturating_mul(2)], "at 10 s and 20 s of 25");
-        let Some(Verb::WaitFor { timeout_ms, .. }) = fake.verbs().pop() else { panic!() };
+        let Some(Verb::ProjectStatus { timeout_ms, .. }) = fake.verbs().pop() else { panic!() };
         assert_eq!(timeout_ms, 30_000, "passed through; the server caps it");
     }
 
-    /// An item is opened from exactly one of its kinds and named by a prefix of its id, which
-    /// resolves against the worker's items before the verb goes.
-    #[tokio::test]
-    async fn an_item_opens_from_one_kind_and_answers_to_a_prefix() {
-        let fake = Fake::default();
-        let (failed, text) =
-            call_json(&fake, "open_item", json!({ "url": "http://a/", "note": "x" })).await;
-        assert!(failed && text.contains("exactly one"), "{text}");
-        let open = json!({ "url": "http://localhost:5173/", "name": "app" });
-        let (failed, text) = call_json(&fake, "open_item", open).await;
-        assert!(!failed, "{text}");
-        let handle = format!("{}/{}", studio(), page());
-        assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), json!({ "item": handle }));
-        let kind = ItemKind::Browser { url: "http://localhost:5173/".to_owned() };
-        let name = Some("app".to_owned());
-        assert_eq!(fake.verbs().pop(), Some(Verb::OpenItem { worker: studio(), kind, name }));
-
-        let item = ItemRef { worker: studio(), item: page() };
-        let (failed, text) = call_json(&fake, "rename_item", json!({ "item": "0199a1b1" })).await;
-        assert!(!failed, "{text}");
-        assert_eq!(fake.verbs().pop(), Some(Verb::RenameItem { item, name: None }));
-    }
-
-    /// Attempts name each agent and model, and a worker only where one was named; the task
-    /// comes back with its attempts, and a pick names the attempt and answers the task tried.
     /// A thread is read by a task, a thread's id or a terminal, in the view asked and from
     /// the turn asked, and the server finds where it is; nothing names none. Answering a
     /// request is the person's, so no tool does it.
@@ -2477,55 +1103,6 @@ mod tests {
         let Value::Object(args) = json!({ "thread": child.to_string() }) else { panic!() };
         let unknown = call(&fake, "answer_request", args, None).await;
         assert!(unknown.is_err(), "the person answers requests, never an agent");
-    }
-
-    /// A still comes back as an image after its size; the endpoint that runs elsewhere than
-    /// its caller refuses to move the caller's files.
-    #[tokio::test]
-    async fn a_still_is_an_image_and_files_move_only_where_they_are() {
-        let fake = Fake::default();
-        let Value::Object(args) = json!({ "window": 42 }) else { panic!() };
-        let result = call(&fake, "capture_still", args, None).await.unwrap();
-        assert_ne!(result.is_error, Some(true), "{result:?}");
-        let size: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
-        assert_eq!(size, json!({ "width": 640, "height": 400, "bytes": 4, "format": "png" }));
-        let image = result.content[1].as_image().unwrap();
-        assert_eq!((image.mime_type.as_str(), image.data.as_str()), ("image/png", "iVBORw=="));
-        let target = CaptureTarget::Window(WindowId(42));
-        assert_eq!(fake.verbs().pop(), Some(Verb::CaptureStill { worker: studio(), target }));
-        let (failed, text) = call_json(&fake, "capture_still", json!({})).await;
-        assert!(failed && text.contains("exactly one"), "{text}");
-
-        let server = Fake { elsewhere: true, ..Fake::default() };
-        let up = json!({ "local": "/tmp/x", "path": "/w/x" });
-        let (failed, text) = call_json(&server, "upload_file", up).await;
-        assert!(failed && text.contains("(Unsupported)"), "{text}");
-        let down = json!({ "path": "/w/x", "local": "/tmp/x" });
-        let (failed, text) = call_json(&server, "download_file", down).await;
-        assert!(failed && text.contains("(Unsupported)"), "{text}");
-        assert!(server.verbs().is_empty(), "nothing was sent");
-    }
-
-    /// A worker is woken by its name, and the answer says who sent the packet and where.
-    #[tokio::test]
-    async fn a_worker_is_woken_by_name() {
-        let fake = Fake::default();
-        let (failed, text) =
-            call_json(&fake, "wake_worker", json!({ "worker": "mac-studio" })).await;
-        assert!(!failed, "{text}");
-        let woken: Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(
-            woken,
-            json!({
-                "worker": studio().to_string(),
-                "by": "server",
-                "to": ["en0"],
-                "wake_on_lan_off": false,
-            })
-        );
-        assert_eq!(fake.verbs().pop(), Some(Verb::Wake { worker: studio() }));
-        let (failed, text) = call_json(&fake, "wake_worker", json!({})).await;
-        assert!(failed && text.contains("worker"), "a worker is named: {text}");
     }
 
     /// An agent tells a task by its number, its words going as they are; a task must be named,

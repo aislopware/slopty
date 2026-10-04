@@ -250,7 +250,7 @@ async fn a_finished_task_s_agent_that_left_a_command_running_still_settles() {
     assert_eq!(hub.settle_due(&mut resting, t0), []);
     assert_eq!(hub.settle_due(&mut resting, later(t0)), [], "its own work holds it");
 
-    lease.handle(waiting(ladder::COMMANDS_WAIT));
+    lease.handle(waiting(slopty_proto::thread::Wait::COMMAND));
     let t1 = later(t0);
     assert_eq!(hub.settle_due(&mut resting, t1), []);
     assert_eq!(hub.settle_due(&mut resting, later(t1)), [term], "a command left running does not");

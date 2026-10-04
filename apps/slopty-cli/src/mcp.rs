@@ -1,9 +1,9 @@
-//! `slopty mcp`: the verbs as an MCP server on stdio, for an AI agent such as Claude Code.
+//! `slopty mcp`: a project's tools as an MCP server on stdio, for an AI agent such as Claude Code.
 //!
 //! The tools are [`slopty_tools::tools`], the ones the server's own endpoint serves. Each call
 //! becomes one verb (after any name lookups) on a link to the server held for the process
 //! lifetime as `Role::Agent`, redialled when it drops. Answers are the same JSON as
-//! `slopty … --json`; a `wait_for` that carries a progress token reports every 10 s. An agent that
+//! `slopty … --json`; a long wait that carries a progress token reports every 10 s. An agent that
 //! comes to need a human anywhere on the fleet is announced as a `notifications/message`, so the
 //! orchestrating session hears of it without polling.
 

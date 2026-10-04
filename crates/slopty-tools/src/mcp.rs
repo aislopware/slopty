@@ -39,7 +39,7 @@ impl<D> Handler<D> {
         Self { dispatch, info, progress: false }
     }
 
-    /// Tell a caller that sent a progress token how long a `wait_for` has waited, every
+    /// Tell a caller that sent a progress token how long a long wait has waited, every
     /// [`tools::PROGRESS_EVERY`]. Only a transport that keeps a stream open to the caller has
     /// anywhere to send it.
     #[must_use]

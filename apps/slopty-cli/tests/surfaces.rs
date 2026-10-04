@@ -15,7 +15,7 @@ mod tests {
     use slopty_net::client::bind_client;
     use slopty_net::server::{ServerLink, connect};
     use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
-    use slopty_proto::orchestration::{ErrorCode, Line, Outcome, Screen, Verb, Waited};
+    use slopty_proto::orchestration::Outcome;
     use slopty_proto::server::{FromServer, Os, Registration, Role, ToServer, WorkerCaps};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use slopty_server::{Config, Server};
@@ -91,31 +91,11 @@ mod tests {
         }
     }
 
-    fn answer(verb: &Verb) -> Outcome {
-        match verb {
-            Verb::AgentStatus { .. } => Outcome::Agent(Some(blocked())),
-            Verb::ReadScreen { .. } => Outcome::Screen(Screen {
-                lines: vec![Line { index: 40, text: "$ ready".to_owned() }],
-                cursor: (0, 7),
-                title: "zsh".to_owned(),
-                cwd: Some("/tmp".to_owned()),
-                alternate: false,
-            }),
-            Verb::ReadFile { .. } => Outcome::File { bytes: vec![0xff, 0], offset: 0, size: 2 },
-            Verb::WaitFor { .. } => Outcome::Waited(Waited::TimedOut),
-            Verb::Close { .. } => Outcome::Error {
-                code: ErrorCode::UnknownTerminal,
-                message: "no such terminal".to_owned(),
-            },
-            _ => Outcome::Done,
-        }
-    }
-
-    /// Answer every request the server forwards, until the link ends.
+    /// Answer every request the server forwards as done, until the link ends.
     async fn work(mut link: ServerLink) {
         while let Ok(msg) = link.rx.recv().await {
-            if let FromServer::Request { id, verb, .. } = msg {
-                let reply = ToServer::Reply { id, outcome: answer(&verb) };
+            if let FromServer::Request { id, .. } = msg {
+                let reply = ToServer::Reply { id, outcome: Outcome::Done };
                 if link.tx.send(&reply).await.is_err() {
                     return;
                 }
@@ -208,18 +188,27 @@ mod tests {
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
 
+        let made = scrubbed(data.path())
+            .arg("--server")
+            .arg(server.quic_addr().to_string())
+            .arg("--data-dir")
+            .arg(data.path())
+            .args(["project", "create", "demo", "--title", "Demo", "--repo", "demo"])
+            .env("RUST_LOG", "warn")
+            .kill_on_drop(true)
+            .output();
+        let made = tokio::time::timeout(PATIENCE, made).await.expect("made in time").unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+
         let prefix = shell().to_string();
         let by_name = format!("fake-worker/{}", prefix.get(..8).unwrap());
-        let unknown = format!("{worker}/{}", SessionId::nil());
         let calls = [
-            ("list_workers", json!({})),
-            ("list_terminals", json!({ "worker": "fake-worker" })),
-            ("agent_status", json!({ "term": by_name })),
-            ("read_screen", json!({ "term": by_name })),
-            ("read_file", json!({ "path": "/bin/x" })),
-            ("wait_for", json!({ "term": by_name, "exit": true, "timeout_ms": 1000 })),
-            ("close_terminal", json!({ "term": unknown })),
-            ("read_output", json!({ "term": "no-such-worker/0199" })),
+            ("project_status", json!({ "project": "demo" })),
+            ("project_status", json!({ "project": "nope" })),
+            ("task_get", json!({ "project": "demo", "task": 1 })),
+            ("task_wait", json!({ "project": "demo", "tasks": [1], "timeout_ms": 0 })),
+            ("read_thread", json!({ "term": by_name })),
+            ("read_thread", json!({ "term": "no-such-worker/0199" })),
         ];
         for (id, (name, arguments)) in (1_u64..).zip(&calls) {
             let http = result(&over_http(server.mcp_addr(), id, name, arguments).await);
@@ -238,106 +227,18 @@ mod tests {
                     break result(&msg);
                 }
             };
-
-            let (mut http, mut stdio) = (http, stdio);
-            if *name == "list_workers" {
-                // The hub stamps a worker on every message it sends, and one may land between
-                // the two listings.
-                http.1[0].as_object_mut().unwrap().remove("last_seen_ms");
-                stdio.1[0].as_object_mut().unwrap().remove("last_seen_ms");
-            }
             assert_eq!(http, stdio, "{name} answers alike on both surfaces");
             println!("{name}: {}", http.1);
         }
 
         // Spot checks that the shared answers are the tools' views, not the wire's.
-        let file = result(&over_http(server.mcp_addr(), 99, "read_file", &calls[4].1).await).1;
-        assert_eq!(
-            file,
-            json!({
-                "path": "/bin/x", "size": 2, "offset": 0, "length": 2, "more": false,
-                "encoding": "base64", "content": "/wA="
-            })
-        );
-        let closed = result(&over_http(server.mcp_addr(), 98, "close_terminal", &calls[6].1).await);
-        assert_eq!(closed, (json!(true), json!("no such terminal (UnknownTerminal)")));
-
-        drop(stdin);
-        let _exited = tokio::time::timeout(PATIENCE, child.wait()).await;
-        working.abort();
-        server.shutdown().await;
-    }
-
-    /// A `write_file` too large for one message to the server is refused by `slopty mcp` with
-    /// the server's own words, and the link goes on: the next call is answered. It used to
-    /// drop the link and read "the connection to the server was lost".
-    #[tokio::test]
-    async fn slopty_mcp_refuses_a_file_too_large_for_the_link_and_goes_on() {
-        let dir = tempfile::tempdir().unwrap();
-        let server = Server::start(Config {
-            name: "test-server".to_owned(),
-            quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
-            data_dir: dir.path().to_path_buf(),
-            admission: Admission::default(),
-        })
-        .await
-        .unwrap();
-        let worker = WorkerId::new();
-        let endpoint = bind_client().unwrap();
-        let quic = HostAddr::from(server.quic_addr());
-        let link =
-            connect(&endpoint, &quic, Role::Worker(Box::new(registration(worker)))).await.unwrap();
-        let working = tokio::spawn(work(link));
-
-        let data = tempfile::tempdir().unwrap();
-        let mut child = scrubbed(data.path())
-            .arg("--server")
-            .arg(server.quic_addr().to_string())
-            .arg("--data-dir")
-            .arg(data.path())
-            .arg("mcp")
-            .env("RUST_LOG", "warn")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let mut stdin = child.stdin.take().unwrap();
-        let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-
-        let bytes = slopty_proto::codec::MAX_FRAME_BYTES - 1;
-        let content = "A".repeat(bytes / 3 * 4);
-        let arguments = json!({
-            "worker": worker.to_string(), "path": "/tmp/too-large", "content": content,
-            "encoding": "base64",
-        });
-        let calls = [("write_file", arguments), ("list_workers", json!({}))];
-        let mut answers = Vec::new();
-        for (id, (name, arguments)) in (1_u64..).zip(&calls) {
-            let line = format!("{}\n", request(id, name, arguments));
-            stdin.write_all(line.as_bytes()).await.unwrap();
-            stdin.flush().await.unwrap();
-            let answer = loop {
-                let line = tokio::time::timeout(PATIENCE, stdout.next_line())
-                    .await
-                    .expect("an answer in time")
-                    .unwrap()
-                    .expect("the shim is still running");
-                let msg: Value = serde_json::from_str(&line).unwrap();
-                if msg["id"] == id {
-                    break result(&msg);
-                }
-            };
-            answers.push(answer);
-        }
-        let (failed, text) = &answers[0];
-        assert_eq!(failed, &json!(true), "{text}");
-        let text = text.as_str().unwrap();
-        assert!(text.contains("more than the") && text.contains("(Invalid)"), "{text}");
-        assert_ne!(answers[1].0, json!(true), "the link goes on: {:?}", answers[1]);
-        assert_eq!(answers[1].1[0]["name"], "fake-worker");
+        let status = result(&over_http(server.mcp_addr(), 99, "project_status", &calls[0].1).await);
+        assert_ne!(status.0, json!(true), "{status:?}");
+        assert_eq!(status.1["project"]["title"], json!("Demo"), "{status:?}");
+        let unknown =
+            result(&over_http(server.mcp_addr(), 98, "project_status", &calls[1].1).await);
+        assert_eq!(unknown.0, json!(true), "{unknown:?}");
+        assert!(unknown.1.as_str().unwrap().ends_with("(UnknownProject)"), "{unknown:?}");
 
         drop(stdin);
         let _exited = tokio::time::timeout(PATIENCE, child.wait()).await;

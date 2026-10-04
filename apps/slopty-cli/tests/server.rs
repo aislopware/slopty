@@ -17,6 +17,7 @@ mod tests {
     use slopty_proto::orchestration::{
         ErrorCode, Happening, HubEvent, Input, Outcome, TermRef, Verb,
     };
+    use slopty_proto::project::TaskId;
     use slopty_proto::server::{FromServer, Liveness, Os, Role, ToServer, WorkerCaps, WorkerInfo};
     use slopty_proto::terminal::{SessionState, SessionSummary};
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
@@ -98,7 +99,7 @@ mod tests {
     }
 
     /// What the fake answers: one online worker with a shell and a Claude Code waiting on a
-    /// permission; closing anything else is an unknown terminal.
+    /// permission; closing anything else is an unknown terminal, and any task but #7 is unknown.
     fn answer(verb: &Verb) -> Outcome {
         match verb {
             Verb::ListWorkers => Outcome::Workers(directory()),
@@ -114,6 +115,9 @@ mod tests {
                 code: ErrorCode::UnknownTerminal,
                 message: format!("no terminal {}", term.session),
             },
+            Verb::TaskTell { task: Some(task), .. } if *task != TaskId(7) => {
+                Outcome::Error { code: ErrorCode::UnknownTask, message: format!("no task #{task}") }
+            }
             _ => Outcome::Done,
         }
     }
@@ -407,14 +411,13 @@ mod tests {
         let list = mcp.reply(1).await;
         let tools = list["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), slopty_tools::tools::list().len(), "{list}");
-        assert_eq!(tools[0]["name"], "list_workers");
-        let read_output = tools.iter().find(|t| t["name"] == "read_output").unwrap();
-        assert!(read_output["description"].as_str().unwrap().contains("`next`"), "{read_output}");
+        assert_eq!(tools[0]["name"], "project_status");
+        let wait = tools.iter().find(|t| t["name"] == "task_wait").unwrap();
+        assert!(wait["description"].as_str().unwrap().contains("`next`"), "{wait}");
 
-        mcp.request(2, "tools/call", json!({ "name": "list_workers", "arguments": {} })).await;
-        let workers = tool_json(&mcp.reply(2).await);
-        assert_eq!(workers[0]["name"], "mac-studio");
-        assert_eq!(workers[0]["waiting"][0]["reason"], "permission");
+        let tell = json!({ "project": "slopty", "task": 7, "text": "Cover the iPad." });
+        mcp.request(2, "tools/call", json!({ "name": "task_tell", "arguments": tell })).await;
+        assert_eq!(tool_json(&mcp.reply(2).await), json!({ "ok": true }));
         let Role::Agent { name, .. } = fake.next_role().await else { panic!("an agent") };
         assert!(name.starts_with("slopty mcp @ "), "{name}");
 
@@ -447,23 +450,19 @@ mod tests {
         );
 
         // A tool error is the model's to read, not a protocol error.
-        let unknown = format!("{}/{}", studio(), SessionId::nil());
-        let args = json!({ "name": "close_terminal", "arguments": { "term": unknown } });
+        let tell = json!({ "project": "slopty", "task": 9, "text": "Hello." });
+        let args = json!({ "name": "task_tell", "arguments": tell });
         mcp.request(3, "tools/call", args).await;
         let failed = mcp.reply(3).await;
         assert_eq!(failed["result"]["isError"], true, "{failed}");
         let text = failed["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("no terminal"), "{text}");
+        assert!(text.contains("no task #9"), "{text}");
 
         // The server restarts: the shim redials and the next call goes through.
         fake.push.send(None).unwrap();
         let Role::Agent { .. } = fake.next_role().await else { panic!("the agent again") };
-        let args = json!({ "name": "list_terminals", "arguments": { "worker": "mac-studio" } });
-        mcp.request(4, "tools/call", args).await;
-        let terminals = tool_json(&mcp.reply(4).await);
-        assert_eq!(terminals[1]["term"], format!("{}/{}", studio(), agent()));
-        assert_eq!(terminals[1]["worker_name"], "mac-studio");
-        assert_eq!(terminals[1]["agent"]["source"], "hook", "{terminals}");
-        assert!(terminals[0].get("agent").is_none(), "a shell has no agent: {terminals}");
+        let tell = json!({ "project": "slopty", "task": "#7", "text": "Again." });
+        mcp.request(4, "tools/call", json!({ "name": "task_tell", "arguments": tell })).await;
+        assert_eq!(tool_json(&mcp.reply(4).await), json!({ "ok": true }));
     }
 }

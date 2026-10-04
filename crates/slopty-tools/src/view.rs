@@ -9,8 +9,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use slopty_core::{SessionId, WallMs, WorkerId};
 use slopty_proto::agent::{AgentKind, AgentSource, AgentStatus, BlockReason, SessionAgent};
 use slopty_proto::items::{Item, ItemKind};
@@ -178,8 +177,8 @@ pub struct PortView {
     term: Option<String>,
 }
 
-/// How a file's contents are spelled in JSON, reading and writing alike.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize, JsonSchema)]
+/// How a file's contents are spelled in JSON.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Encoding {
     /// The bytes are UTF-8 text, as they are.
@@ -187,19 +186,6 @@ pub enum Encoding {
     Utf8,
     /// The bytes in standard base64, for anything that is not UTF-8.
     Base64,
-}
-
-impl Encoding {
-    /// The bytes `content` spells.
-    ///
-    /// # Errors
-    /// Base64 that does not decode.
-    pub fn decode(self, content: String) -> Result<Vec<u8>, data_encoding::DecodeError> {
-        match self {
-            Self::Utf8 => Ok(content.into_bytes()),
-            Self::Base64 => data_encoding::BASE64.decode(content.as_bytes()),
-        }
-    }
 }
 
 /// A file's contents, for JSON: UTF-8 text as it is, anything else in base64.
@@ -1601,9 +1587,6 @@ mod tests {
         assert_eq!(binary["content"], "/wA=");
         assert_eq!(binary["length"], 2, "the bytes read, not their spelling");
         assert_eq!((binary["size"].as_u64(), binary["more"].as_bool()), (Some(40), Some(true)));
-        assert_eq!(Encoding::Base64.decode("/wA=".to_owned()).unwrap(), [0xff, 0]);
-        assert_eq!(Encoding::Utf8.decode("/wA=".to_owned()).unwrap(), b"/wA=");
-        Encoding::Base64.decode("not base64".to_owned()).unwrap_err();
     }
 
     #[test]

@@ -59,16 +59,6 @@ pub const fn os_word(os: Os) -> &'static str {
     }
 }
 
-/// The operating system a word names: `macos` or `linux`.
-#[must_use]
-pub fn os_named(word: &str) -> Option<Os> {
-    match word.to_ascii_lowercase().as_str() {
-        "macos" | "mac" => Some(Os::MacOs),
-        "linux" => Some(Os::Linux),
-        _ => None,
-    }
-}
-
 /// A metadata document as JSON: the object it holds.
 fn metadata(text: Option<&str>) -> Option<Value> {
     text.and_then(|t| serde_json::from_str(t).ok())

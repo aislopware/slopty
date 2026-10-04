@@ -42,12 +42,6 @@ pub trait Dispatch: Send + Sync {
         self.send(None, verb)
     }
 
-    /// Whether a file the caller names on its own machine is one this side can read and write:
-    /// the CLI and `slopty mcp` run on the caller's machine, the server's endpoint does not.
-    fn local_files(&self) -> bool {
-        true
-    }
-
     /// Where the caller runs: the defaults a project verb takes when it names no project,
     /// task or terminal. Only a caller on its own machine has an environment to read.
     fn scope(&self) -> Scope {

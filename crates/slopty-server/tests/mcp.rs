@@ -9,11 +9,7 @@ mod tests {
     use std::time::Duration;
 
     use serde_json::{Value, json};
-    use slopty_core::WorkerId;
-    use slopty_net::HostAddr;
     use slopty_net::admission::{Admission, on_tailnet};
-    use slopty_net::client::bind_client;
-    use slopty_proto::server::{Os, Registration, Role, WorkerCaps};
     use slopty_server::{Config, Hub, Server};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -73,26 +69,6 @@ mod tests {
         serde_json::from_str(&body).unwrap()
     }
 
-    fn caps() -> WorkerCaps {
-        WorkerCaps {
-            os: Os::MacOs,
-            os_version: "26.5".to_owned(),
-            arch: "aarch64".to_owned(),
-            cpus: 8,
-            memory: 16 << 30,
-            encoders: Vec::new(),
-            displays: Vec::new(),
-            agents: Vec::new(),
-            can_capture: false,
-            can_inject: false,
-            virtual_displays: false,
-            version: "0".to_owned(),
-            lan: Vec::new(),
-            wake_on_lan: None,
-            writes_failing: None,
-        }
-    }
-
     #[tokio::test]
     async fn every_tool_is_listed_and_a_call_runs_the_verb() {
         let dir = tempfile::tempdir().unwrap();
@@ -105,20 +81,6 @@ mod tests {
         })
         .await
         .unwrap();
-        let worker = WorkerId::new();
-        let endpoint = bind_client().unwrap();
-        let role = Role::Worker(Box::new(Registration {
-            worker,
-            name: "fake-worker".to_owned(),
-            listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
-            caps: caps(),
-            sessions: Vec::new(),
-            session_key: [7; 32],
-        }));
-        let _lease =
-            slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)
-                .await
-                .unwrap();
         let mcp = server.mcp_addr();
 
         let listed = rpc(mcp, 1, "tools/list", None, json!({})).await;
@@ -131,30 +93,19 @@ mod tests {
         let table: Vec<String> =
             slopty_tools::tools::list().into_iter().map(|t| t.name.into_owned()).collect();
         assert_eq!(names, table, "every tool in the table, in its order");
-        let wait = &listed["result"]["tools"][8];
-        assert_eq!(wait["inputSchema"]["required"], json!(["term"]));
+        let status = &listed["result"]["tools"][0];
+        assert_eq!(status["name"], json!("project_status"));
+        let timeout = status["inputSchema"]["properties"]["timeout_ms"]["description"].as_str();
         let cap = slopty_server::WAIT_CAP_MS.to_string();
-        assert!(wait["description"].as_str().unwrap().contains(&cap), "the cap it names is ours");
+        assert!(timeout.unwrap().contains(&cap), "the cap it names is ours");
 
-        let params = json!({ "name": "list_workers", "arguments": {} });
-        let called = rpc(mcp, 2, "tools/call", Some("list_workers"), params).await;
+        // The hub answers the verb; a project nobody made is a tool error the model can read.
+        let params = json!({ "name": "project_status", "arguments": { "project": "nope" } });
+        let called = rpc(mcp, 2, "tools/call", Some("project_status"), params).await;
         let result = &called["result"];
-        assert_ne!(result["isError"], json!(true), "{called}");
+        assert_eq!(result["isError"], json!(true), "{called}");
         let text = result["content"][0]["text"].as_str().unwrap();
-        let workers: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(workers[0]["worker"], json!(worker.to_string()));
-        assert_eq!(workers[0]["name"], json!("fake-worker"));
-        assert_eq!(workers[0]["liveness"], json!("online"), "the tools' view, not the wire enum");
-        assert!(!text.contains('\n'), "compact: {text}");
-
-        // A verb for a worker nobody knows is a tool error the model can read.
-        let params = json!({
-            "name": "read_screen",
-            "arguments": { "term": format!("{}/{}", WorkerId::new(), WorkerId::new()) },
-        });
-        let called = rpc(mcp, 3, "tools/call", Some("read_screen"), params).await;
-        assert_eq!(called["result"]["isError"], json!(true), "{called}");
-        assert!(called["result"]["content"][0]["text"].as_str().unwrap().contains("UnknownWorker"));
+        assert!(text.contains("UnknownProject") && !text.contains('\n'), "{text}");
 
         // A browser page (anything that sends Origin) is refused.
         let (status, _body) = post(
@@ -168,80 +119,6 @@ mod tests {
         )
         .await;
         assert_eq!(status, 403);
-        server.shutdown().await;
-    }
-
-    /// A `write_file` of more bytes than one message to a worker carries gets through HTTP (the
-    /// body limit holds a whole message's worth in base64, as stdio does) and is refused with an
-    /// error a model can read. The worker's link stays up: nothing of the file went down it, and
-    /// the next verb reaches the worker.
-    #[tokio::test]
-    async fn a_file_too_large_for_the_link_is_refused_and_the_link_stays_up() {
-        use slopty_proto::codec::MAX_FRAME_BYTES;
-        use slopty_proto::orchestration::{Outcome, Screen, Verb};
-        use slopty_proto::server::{FromServer, ToServer};
-
-        let dir = tempfile::tempdir().unwrap();
-        let server = Server::start(Config {
-            name: "test-server".to_owned(),
-            quic: "127.0.0.1:0".parse().unwrap(),
-            mcp: "127.0.0.1:0".parse().unwrap(),
-            data_dir: dir.path().to_path_buf(),
-            admission: Admission::with_tailnet(Vec::new(), None),
-        })
-        .await
-        .unwrap();
-        let worker = WorkerId::new();
-        let endpoint = bind_client().unwrap();
-        let role = Role::Worker(Box::new(Registration {
-            worker,
-            name: "fake-worker".to_owned(),
-            listen: SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 45550)),
-            caps: caps(),
-            sessions: Vec::new(),
-            session_key: [7; 32],
-        }));
-        let mut link =
-            slopty_net::server::connect(&endpoint, &HostAddr::from(server.quic_addr()), role)
-                .await
-                .unwrap();
-        let mcp = server.mcp_addr();
-
-        // A frame's worth of zero bytes, a multiple of three so the base64 has no padding.
-        let bytes = MAX_FRAME_BYTES - 1;
-        assert_eq!(bytes % 3, 0);
-        let content = "A".repeat(bytes / 3 * 4);
-        let arguments = json!({
-            "worker": worker.to_string(),
-            "path": "/tmp/too-large",
-            "content": content,
-            "encoding": "base64",
-        });
-        let params = json!({ "name": "write_file", "arguments": arguments });
-        let called = rpc(mcp, 1, "tools/call", Some("write_file"), params).await;
-        let text = called["result"]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(called["result"]["isError"], json!(true), "{text}");
-        assert!(text.contains("more than the"), "{text}");
-
-        let term = format!("{worker}/{}", WorkerId::new());
-        let params = json!({ "name": "read_screen", "arguments": { "term": term } });
-        let worker_side = async {
-            let msg = tokio::time::timeout(Duration::from_secs(10), link.rx.recv()).await;
-            let Ok(Ok(FromServer::Request { id, verb: Verb::ReadScreen { .. }, .. })) = msg else {
-                panic!("the next request down the link is the read: {msg:?}")
-            };
-            let screen = Screen {
-                lines: Vec::new(),
-                cursor: (0, 0),
-                title: String::new(),
-                cwd: None,
-                alternate: false,
-            };
-            link.tx.send(&ToServer::Reply { id, outcome: Outcome::Screen(screen) }).await.unwrap();
-        };
-        let (called, ()) =
-            tokio::join!(rpc(mcp, 2, "tools/call", Some("read_screen"), params), worker_side);
-        assert_ne!(called["result"]["isError"], json!(true), "{called}");
         server.shutdown().await;
     }
 

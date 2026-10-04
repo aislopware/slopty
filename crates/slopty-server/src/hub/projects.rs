@@ -679,8 +679,8 @@ fn orchestrator_role(project: &Project, clones: &Clones) -> String {
          person as the project's review limit, no new task starts: wait for them rather than \
          piling up more."
             .to_owned(),
-        "- list_workers shows each worker's facts; name the worker in task_start. Work that \
-         needs no Apple platform belongs on Linux."
+        "- `slopty --json workers` in your shell shows each worker's facts; name the worker \
+         in task_start. Work that needs no Apple platform belongs on Linux."
             .to_owned(),
     ];
     lines.push(

@@ -19,20 +19,11 @@ use rmcp::model::{Implementation, ServerCapabilities};
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use slopty_net::admission::{Admission, Verdict};
-use slopty_proto::codec::MAX_FRAME_BYTES;
 use slopty_tools::mcp::Handler;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 
 use crate::hub::{Acting, Hub, Speaker};
-
-/// Largest request body: a `write_file` of a whole message's worth of bytes in base64.
-///
-/// That is [`MAX_FRAME_BYTES`] in base64 and a megabyte for the JSON around it. rmcp's 4 MiB
-/// default refused over HTTP files that `slopty mcp` takes over stdio; a file too large for the
-/// worker's link is refused the same way over both.
-pub const MAX_BODY_BYTES: usize =
-    MAX_FRAME_BYTES.div_ceil(3).saturating_mul(4).saturating_add(1_048_576);
 
 /// The MCP tool server over the hub, for agents.
 pub type Mcp = Handler<Acting>;
@@ -53,7 +44,6 @@ pub async fn serve(listener: TcpListener, admission: Admission, hub: Hub) {
         .with_legacy_session_mode(false)
         .with_json_response(true)
         .with_sse_keep_alive(None)
-        .with_max_request_body_bytes(MAX_BODY_BYTES)
         .disable_allowed_hosts()
         .enforce_origin_validation();
     let service = StreamableHttpService::new(

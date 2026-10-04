@@ -26,7 +26,7 @@ use slopty_proto::thread::attention::{
     Via,
 };
 use slopty_proto::thread::wire::{TableFrame, ThreadRow};
-use slopty_proto::thread::{AgentId, Liveness, Phase, Request, ThreadId};
+use slopty_proto::thread::{AgentId, Liveness, Phase, Request, ThreadId, Wait};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 use super::{Hub, WeakHub};
@@ -58,10 +58,6 @@ pub(super) struct Board {
     /// with the seat it was told under and whether it had stopped.
     natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
 }
-
-/// The kind of wait an adapter says when its agent waits only on commands it left running (a
-/// dev server, say): no subagent, monitor or scheduled prompt of its own.
-pub(super) const COMMANDS_WAIT: &str = "command";
 
 /// A person's client link.
 #[derive(Debug)]
@@ -269,10 +265,10 @@ impl Board {
     }
 
     /// What the agent seated at `term` waits on, when that is only commands it left running
-    /// ([`COMMANDS_WAIT`]): the wait's words.
+    /// ([`Wait::COMMAND`]): the wait's words.
     pub(super) fn left_running(&self, term: TermRef) -> Option<String> {
         let wait = self.thread_in(term)?.status.wait.as_ref()?;
-        (wait.kind == COMMANDS_WAIT).then(|| wait.text.clone())
+        (wait.kind == Wait::COMMAND).then(|| wait.text.clone())
     }
 
     /// Whether `term`'s tile is on screen, or has the keyboard, on any client.

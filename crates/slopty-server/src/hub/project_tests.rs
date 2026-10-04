@@ -500,7 +500,7 @@ async fn a_restarted_server_frees_the_tasks_whose_terminals_ended_while_it_was_a
     assert!(matches!(again.await.unwrap(), Outcome::Task(_)));
 }
 
-/// What a worker reports of itself is a fact `list_workers` shows, beside what the server
+/// What a worker reports of itself is a fact `slopty workers` shows, beside what the server
 /// knows of it, whose word wins.
 #[tokio::test]
 async fn a_worker_s_reported_facts_are_shown_under_the_server_s() {

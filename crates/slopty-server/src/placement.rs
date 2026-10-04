@@ -2,7 +2,7 @@
 //! names, and otherwise the least busy worker, beside a clone of the project's repository when
 //! the task named no directory and one has a clone. Wherever it goes, the worker is online and
 //! has the agent installed, named or not. The orchestrator reads every worker's facts with
-//! `list_workers` and names the worker itself; nothing here judges rules over them.
+//! `slopty workers` and names the worker itself; nothing here judges rules over them.
 
 use slopty_core::WorkerId;
 use slopty_proto::project::{Fact, Facts};

@@ -377,7 +377,7 @@ fn invalid(message: impl Into<String>) -> Refused {
 }
 
 fn unknown_project(id: &ProjectId) -> Refused {
-    refuse(ErrorCode::UnknownProject, format!("no project {id}; project_list names them"))
+    refuse(ErrorCode::UnknownProject, format!("no project {id}; `slopty project list` names them"))
 }
 
 fn unknown_task(project: &ProjectId, id: TaskId) -> Refused {

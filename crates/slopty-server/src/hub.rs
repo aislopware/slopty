@@ -1290,11 +1290,6 @@ impl slopty_tools::Dispatch for Hub {
     ) -> impl Future<Output = Outcome> + Send {
         self.dispatch_keyed(key, verb)
     }
-
-    /// The server runs on its own machine, not its caller's.
-    fn local_files(&self) -> bool {
-        false
-    }
 }
 
 /// The hub as one speaker sees it: what the MCP endpoint serves agents through.
@@ -1319,11 +1314,6 @@ impl slopty_tools::Dispatch for Acting {
         verb: Verb,
     ) -> impl Future<Output = Outcome> + Send {
         self.hub.dispatch_as(self.speaker, key, verb)
-    }
-
-    /// The server runs on its own machine, not its caller's.
-    fn local_files(&self) -> bool {
-        false
     }
 }
 
@@ -1754,7 +1744,7 @@ fn error(code: ErrorCode, message: &str) -> Outcome {
 fn unknown_worker(worker: WorkerId) -> Outcome {
     Outcome::Error {
         code: ErrorCode::UnknownWorker,
-        message: format!("no worker {worker}; list_workers names the known ones"),
+        message: format!("no worker {worker}; `slopty workers` names the known ones"),
     }
 }
 
@@ -2047,7 +2037,6 @@ pub(crate) mod tests {
             lease.handle(ToServer::Reply { id, outcome: Outcome::Done });
             assert_eq!(asked.await.unwrap(), Outcome::Done);
         }
-        assert!(!slopty_tools::Dispatch::local_files(&hub), "the caller's files are not here");
     }
 
     /// A caller that gives up on a forwarded verb (an MCP client that went away) takes its
