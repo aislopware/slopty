@@ -404,12 +404,13 @@ mod tests {
                 .is_some()
         );
 
-        // The badge on A reveals A's terminal and does no more: the answer belongs to the TUI's own
-        // prompt, so both clients go on counting one until the worker says otherwise.
+        // The badge on A reveals the agent's thread on A and does no more: the answer belongs to
+        // the agent's own prompt, so both clients go on counting one until the worker says
+        // otherwise.
         let (x, y) = button_in(&da, "Needs approval: Bash", bounds).unwrap();
         a.click(x, y).await.unwrap();
-        let want = format!("terminal:{session}");
-        let da = a.wait_for("A's terminal revealed", STEP, |d| d.focused == want).await.unwrap();
+        let want = format!("thread:{session}");
+        let da = a.wait_for("A's agent revealed", STEP, |d| d.focused == want).await.unwrap();
         assert_eq!(needs_you(&da).as_deref(), Some("1 new"), "{da:#?}");
         let db = b.dump().await.unwrap();
         assert_eq!(needs_you(&db).as_deref(), Some("1 new"), "{db:#?}");
