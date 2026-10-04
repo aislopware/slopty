@@ -106,7 +106,7 @@ async fn any_agent_runs_a_task_as_a_thread() {
 /// The thread of `task` (its assignment's, seated at `term`) is read where it is: by the task,
 /// its seat or its id, each sent to its worker as the thread there, holding prompts for the
 /// person's read alone. A thread no table holds is no read, and answering a request is the
-/// person's.
+/// person's, as is the commit sheet: an agent commits with its own git.
 async fn read_where_it_is(
     hub: &Hub,
     (lease, rx): (&Lease, &mut mpsc::Receiver<FromServer>),
@@ -143,6 +143,13 @@ async fn read_where_it_is(
     };
     let by_agent = hub.dispatch_as(Speaker::Proven(term.session), None, answering).await;
     assert!(refused(&by_agent, ErrorCode::Forbidden).contains("the person's to answer"));
+    let sheet = Verb::Git {
+        worker: term.worker,
+        repo: "/w".to_owned(),
+        op: slopty_proto::git::GitOp::Status,
+    };
+    let by_agent = hub.dispatch_as(Speaker::Agent, None, sheet).await;
+    assert!(refused(&by_agent, ErrorCode::Forbidden).contains("its own git"));
 }
 
 /// The subagents of a task's thread with no hooks are its node's natives, from the rows that

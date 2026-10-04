@@ -28,7 +28,6 @@ mod bench;
 mod client;
 mod clipboard;
 mod deploy;
-mod git;
 mod handoff;
 mod hook;
 mod link;

@@ -6,7 +6,6 @@
 use slopty_core::WorkerId;
 use slopty_proto::agent::{AgentKind, SessionAgent};
 use slopty_proto::folder::FsOp;
-use slopty_proto::git::{GitDone, GitOp};
 use slopty_proto::items::{Item, ItemKind};
 use slopty_proto::orchestration::{
     Command, DirEntry, ErrorCode, EventFilter, FileStat, HubEvent, IdempotencyKey, Input, ItemRef,
@@ -16,7 +15,6 @@ use slopty_proto::orchestration::{
 use slopty_proto::project::{
     BadProjectId, LimitsChange, Moment, NodeDetail, Project, ProjectId, ProjectStatus, Report,
     Runner, Script, StepState, Task, TaskChange, TaskId, TaskLaunch, TaskSpec, TimelineEntry,
-    WorkerFacts,
 };
 use slopty_proto::screen::{CaptureTarget, DisplayInfo, WindowInfo};
 use slopty_proto::search::{FileHits, SearchQuery, SearchSummary};
@@ -346,24 +344,6 @@ pub async fn fs_change<D: Dispatch>(
     let worker = res.worker(worker).await?;
     match res.dispatch().send(key, Verb::FsChange { worker, op }).await {
         Outcome::FsDone { path } => Ok(path),
-        other => Err(ToolError::unexpected(other)),
-    }
-}
-
-/// The person's git op in the repository holding `repo` on a worker.
-///
-/// A status, a commit of the files they chose with their message, a push, or a pull request
-/// through their gh. A refusal comes back in git's or gh's own words.
-pub async fn git<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    worker: Option<&str>,
-    repo: String,
-    op: GitOp,
-    key: Option<IdempotencyKey>,
-) -> Result<GitDone, ToolError> {
-    let worker = res.worker(worker).await?;
-    match res.dispatch().send(key, Verb::Git { worker, repo, op }).await {
-        Outcome::Git(done) => Ok(*done),
         other => Err(ToolError::unexpected(other)),
     }
 }
@@ -1341,17 +1321,5 @@ pub fn agent_runner(
             };
             Runner::Agent { agent, prompt, model, args }
         }
-    }
-}
-
-/// What the workers are and have, or one worker.
-pub async fn worker_facts<D: Dispatch>(
-    res: &mut Resolver<'_, D>,
-    worker: Option<&str>,
-) -> Result<Vec<WorkerFacts>, ToolError> {
-    let worker = res.some_worker(worker).await?;
-    match res.dispatch().call(Verb::WorkerFacts { worker }).await {
-        Outcome::Facts(facts) => Ok(facts),
-        other => Err(ToolError::unexpected(other)),
     }
 }
