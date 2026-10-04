@@ -102,6 +102,9 @@ fn early(under: &[Proc], sampled: &mut HashSet<u32>) -> String {
             text.push_str(&sample(proc));
         }
     }
+    if !text.is_empty() {
+        text.push_str(&host());
+    }
     text
 }
 
@@ -118,6 +121,7 @@ fn report(title: &str, under: &[Proc], held: Duration) -> String {
     for leaf in leaves(under).into_iter().take(SAMPLED) {
         text.push_str(&sample(leaf));
     }
+    text.push_str(&host());
     text
 }
 
@@ -195,6 +199,54 @@ fn sample(leaf: &Proc) -> String {
     }
     let _removed = std::fs::remove_file(&file);
     text
+}
+
+/// What the machine says of its video encoder. On a virtual Mac, each process that opened
+/// VideoToolbox leaves two clients of the paravirtual driver until the guest reboots, and the
+/// encoder stops for good at 1020 of them (docs/decisions/video.md), hanging every VideoToolbox
+/// test: the count, and the driver's own words in the log, say whether that is what a hung run
+/// hit. A Mac on its own hardware has no such driver and says nothing.
+#[cfg(target_os = "macos")]
+fn host() -> String {
+    let listed = Command::new("ioreg")
+        .args(["-l", "-w0", "-r", "-c", "AppleVideoToolboxParavirtualizationDriver"])
+        .output();
+    let clients = listed.map_or(0, |listed| {
+        String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter(|line| line.contains("o AppleVideoToolboxParavirtualizationUserClient"))
+            .count()
+    });
+    if clients == 0 {
+        return String::new();
+    }
+    let mut text = format!("  ── the paravirtual video driver holds {clients} clients\n");
+    let said = Command::new("log")
+        .args([
+            "show",
+            "--last",
+            "15m",
+            "--style",
+            "compact",
+            "--predicate",
+            "eventMessage CONTAINS \"No real codec\" OR eventMessage CONTAINS \"stalling for \
+             detach\" OR eventMessage CONTAINS \"err=-12908\"",
+        ])
+        .output();
+    if let Ok(said) = said {
+        let said = String::from_utf8_lossy(&said.stdout);
+        let lines: Vec<&str> = said.lines().filter(|line| !line.is_empty()).collect();
+        for line in lines.iter().skip(lines.len().saturating_sub(SAMPLE_LINES / 6)) {
+            let _written = writeln!(text, "    {line}");
+        }
+    }
+    text
+}
+
+/// What the machine says of its video encoder: nothing off macOS.
+#[cfg(not(target_os = "macos"))]
+const fn host() -> String {
+    String::new()
 }
 
 /// What `leaf` is doing: on Linux, the kernel function it sleeps in.
