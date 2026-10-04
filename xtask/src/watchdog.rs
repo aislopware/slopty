@@ -3,9 +3,11 @@
 //! CI ends a job at its `timeout-minutes` with nothing but "The operation was canceled": the
 //! hung test, and why it hangs, go with it. A nextest run whose test is stuck where a signal
 //! can't reach it (in the kernel, `U` in `ps`) outlives nextest's own `terminate-after`, so even
-//! its SLOW lines stop. Past [`Watchdog::start`]'s bound this prints every process under the
-//! run, with its state and age, and on macOS a short `sample` of each leaf, then again every
-//! [`AGAIN`] until the run ends.
+//! its SLOW lines stop. So every [`POLL`] it looks under the run: a test process that has run
+//! [`EARLY`] is sampled once while it still lives (nextest kills at 180 s, and a process killed
+//! in the kernel can no longer be sampled), and past [`Watchdog::start`]'s bound it prints every
+//! process under the run with its state and age, sampling each leaf, then again every [`AGAIN`]
+//! until the run ends.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -15,6 +17,13 @@ use std::time::Duration;
 
 /// How long after a first report the next one comes, while the run still holds.
 const AGAIN: Duration = Duration::from_mins(5);
+
+/// How often the watchdog looks under the run.
+const POLL: Duration = Duration::from_secs(30);
+
+/// How long a test process runs before it is sampled: past the profile's SLOW lines, before its
+/// `terminate-after` (3 × 60 s in CI).
+const EARLY: Duration = Duration::from_secs(150);
 
 /// How many leaves are sampled per report: the stuck ones are among a few at most.
 const SAMPLED: usize = 6;
@@ -37,12 +46,17 @@ impl Watchdog {
         let (stop, stopped) = mpsc::channel();
         let title = title.to_owned();
         let thread = std::thread::spawn(move || {
-            let mut wait = after;
-            let mut held = after;
-            while stopped.recv_timeout(wait) == Err(mpsc::RecvTimeoutError::Timeout) {
-                print!("{}", report(&title, root, held));
-                wait = AGAIN;
-                held = held.saturating_add(AGAIN);
+            let started = std::time::Instant::now();
+            let mut next = after;
+            let mut sampled = HashSet::new();
+            while stopped.recv_timeout(POLL) == Err(mpsc::RecvTimeoutError::Timeout) {
+                let Some(procs) = listed() else { continue };
+                let under = descendants(&procs, root);
+                print!("{}", early(&under, &mut sampled));
+                if started.elapsed() >= next {
+                    print!("{}", report(&title, &under, next));
+                    next = next.saturating_add(AGAIN);
+                }
             }
         });
         Self { stop, thread }
@@ -65,27 +79,57 @@ struct Proc {
     command: String,
 }
 
-fn report(title: &str, root: u32, held: Duration) -> String {
+/// Every process on the machine, or `None` when `ps` can't be run.
+fn listed() -> Option<Vec<Proc>> {
+    let listed = Command::new("ps").args(["-axo", "pid=,ppid=,stat=,etime=,command="]).output();
+    listed.ok().map(|listed| parse(&String::from_utf8_lossy(&listed.stdout)))
+}
+
+/// A sample of each test process under the run that has gone on for [`EARLY`] and wasn't
+/// sampled yet. Cargo and nextest themselves are left out: they run as long as the run.
+fn early(under: &[Proc], sampled: &mut HashSet<u32>) -> String {
+    let mut text = String::new();
+    let long = under.iter().filter(|proc| {
+        let ours = proc.command.contains("nextest")
+            || proc.command.starts_with("cargo")
+            || proc.command.starts_with("ps ");
+        !ours && seconds(&proc.etime).is_some_and(|age| age >= EARLY.as_secs())
+    });
+    for proc in long.take(SAMPLED) {
+        if sampled.insert(proc.pid) {
+            let command: String = proc.command.chars().take(200).collect();
+            let _written = writeln!(text, "\n⏱ {} has run {}: {command}", proc.pid, proc.etime);
+            text.push_str(&sample(proc));
+        }
+    }
+    text
+}
+
+fn report(title: &str, under: &[Proc], held: Duration) -> String {
     let mut text = format!(
         "\n⏱ {title} has run {} min: the processes under it (pid ppid state age command)\n",
         held.as_secs() / 60
     );
-    let listed = Command::new("ps").args(["-axo", "pid=,ppid=,stat=,etime=,command="]).output();
-    let Ok(listed) = listed else {
-        text.push_str("  ps could not be run\n");
-        return text;
-    };
-    let procs = parse(&String::from_utf8_lossy(&listed.stdout));
-    let under = descendants(&procs, root);
-    for proc in &under {
+    for proc in under {
         let command: String = proc.command.chars().take(200).collect();
         let _written =
             writeln!(text, "  {} {} {} {} {command}", proc.pid, proc.ppid, proc.stat, proc.etime);
     }
-    for leaf in leaves(&under).into_iter().take(SAMPLED) {
+    for leaf in leaves(under).into_iter().take(SAMPLED) {
         text.push_str(&sample(leaf));
     }
     text
+}
+
+/// `ps`'s elapsed time, `[[dd-]hh:]mm:ss`, in seconds.
+fn seconds(etime: &str) -> Option<u64> {
+    let (days, clock) =
+        etime.split_once('-').map_or((Some(0_u64), etime), |(d, c)| (d.parse().ok(), c));
+    let mut total: u64 = 0;
+    for part in clock.split(':') {
+        total = total.checked_mul(60)?.checked_add(part.parse().ok()?)?;
+    }
+    days?.checked_mul(86_400)?.checked_add(total)
 }
 
 /// Every process `ps` printed, in its order.
@@ -162,7 +206,9 @@ fn sample(leaf: &Proc) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Proc, descendants, leaves, parse};
+    use std::collections::HashSet;
+
+    use super::{Proc, descendants, early, leaves, parse, seconds};
 
     fn proc(pid: u32, ppid: u32, command: &str) -> Proc {
         Proc {
@@ -188,6 +234,32 @@ mod tests {
                 command: "cargo nextest run --profile ci".to_owned(),
             }]
         );
+    }
+
+    /// `ps`'s ages read as seconds, with and without hours and days.
+    #[test]
+    fn an_age_reads_in_seconds() {
+        assert_eq!(seconds("02:30"), Some(150));
+        assert_eq!(seconds("01:02:03"), Some(3_723));
+        assert_eq!(seconds("2-00:00:01"), Some(172_801));
+        assert_eq!(seconds("bad"), None);
+    }
+
+    /// A test process past [`EARLY`] is sampled once; cargo and nextest never are.
+    #[test]
+    fn a_long_test_is_sampled_once() {
+        let mut long = proc(12, 11, "worker-tests screen::synthetic");
+        long.etime = "02:40".to_owned();
+        let mut runner = proc(11, 10, "cargo-nextest nextest run");
+        runner.etime = "20:00".to_owned();
+        let young = proc(13, 11, "worker-tests fsevents");
+        let under = vec![runner, long, young];
+        let mut sampled = HashSet::new();
+        let first = early(&under, &mut sampled);
+        assert!(first.contains("⏱ 12 has run 02:40"), "{first}");
+        assert!(!first.contains("⏱ 11 "), "{first}");
+        assert!(!first.contains("⏱ 13 "), "{first}");
+        assert!(early(&under, &mut sampled).is_empty(), "sampled once");
     }
 
     /// Only the run's own tree is reported, and its leaves are where it waits.
