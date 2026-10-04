@@ -191,6 +191,9 @@ pub struct Doctor {
     pub accessibility: bool,
     /// Whether the tailnet reaches it.
     pub tailnet: Tailnet,
+    /// This Mac runs on a battery of its own: a laptop, which sleeps with its lid closed
+    /// whatever a server on it holds awake.
+    pub battery: bool,
 }
 
 /// This Mac on the tailnet, as the worker reads its Tailscale.
@@ -207,8 +210,9 @@ pub enum Tailnet {
 }
 
 #[cfg(target_os = "macos")]
-impl From<slopty_proto::ctl::Health> for Doctor {
-    fn from(health: slopty_proto::ctl::Health) -> Self {
+impl Doctor {
+    /// What the checklist reads from the worker's `health`, on a Mac with a `battery` or not.
+    pub fn of(health: slopty_proto::ctl::Health, battery: bool) -> Self {
         use slopty_proto::ctl::Tailscale;
         let tailnet = match health.tailscale {
             Tailscale::Up { node, ip } => Tailnet::Reachable(match ip {
@@ -229,6 +233,7 @@ impl From<slopty_proto::ctl::Health> for Doctor {
             screen_recording: health.caps.can_capture,
             accessibility: health.caps.can_inject,
             tailnet,
+            battery,
         }
     }
 }
@@ -551,6 +556,13 @@ fn server_line(server: &Server, doctor: Option<&Doctor>, server_logs: &str) -> L
         return line(Mark::Busy, doing, None);
     };
     match &doctor.server {
+        Some(LinkState::Linked) if here && doctor.battery => line(
+            Mark::Advisory,
+            "Runs on this Mac. It sleeps with its lid closed, and your phone hears nothing from \
+             your other machines then."
+                .to_owned(),
+            None,
+        ),
         Some(LinkState::Linked) if here => line(
             Mark::Ok,
             "Runs on this Mac. Your other devices connect to it here.".to_owned(),
@@ -611,7 +623,7 @@ fn stand_in() -> Option<Rc<dyn Host>> {
         .inspect_err(|e| tracing::warn!(error = %e, "this Mac's stand-in report"))
         .ok()?;
     let here = health.server.as_ref().and_then(|s| s.address.parse().ok());
-    Some(Rc::new(StandIn { doctor: Doctor::from(health), here }))
+    Some(Rc::new(StandIn { doctor: Doctor::of(health, false), here }))
 }
 
 /// The self-test's host outside the e2e build: none, so there is no entry to press.
@@ -772,7 +784,9 @@ mod mac {
                     line.push(b'\n');
                     let reply = service::ask(&socket, &line).await.ok()?;
                     match serde_json::from_str(&reply).ok()? {
-                        CtlReply::Doctor(health) => Some(Doctor::from(*health)),
+                        CtlReply::Doctor(health) => {
+                            Some(Doctor::of(*health, slopty_platform::power::has_battery()))
+                        }
                         other => {
                             tracing::warn!(?other, "doctor: not a health report");
                             None
@@ -926,6 +940,7 @@ mod tests {
             screen_recording,
             accessibility,
             tailnet,
+            battery: false,
         }
     }
 
@@ -994,6 +1009,15 @@ mod tests {
         let here = checklist_of(Worker::Up(doctor(true, true, Tailnet::Absent)), "");
         assert_eq!(here[1].mark, Ok);
         assert!(here[1].detail.starts_with("Runs on this Mac"), "{}", here[1].detail);
+        let laptop = Doctor { battery: true, ..doctor(true, true, Tailnet::Absent) };
+        let laptop = checklist_of(Worker::Up(laptop), "");
+        assert_eq!(laptop[1].mark, Mark::Advisory, "a laptop's server sleeps with its lid");
+        assert!(laptop[1].detail.contains("lid closed"), "{}", laptop[1].detail);
+        let joined_laptop = Flow {
+            worker: Worker::Up(Doctor { battery: true, ..doctor(true, true, Tailnet::Absent) }),
+            ..Flow::installing(1, Serve::Join(HostAddr::new("studio.local", 45560)))
+        };
+        assert_eq!(checklist(&joined_laptop, "", "")[1].mark, Ok, "only a server here sleeps");
         let refused = Doctor {
             server: Some(LinkState::Refused { why: "a worker with this id is linked".to_owned() }),
             ..doctor(true, true, Tailnet::Absent)
@@ -1108,24 +1132,27 @@ mod tests {
         };
         let studio = Tailnet::Reachable("studio.tail1234.ts.net".to_owned());
         let unregistered = Doctor { server: None, ..doctor(true, false, studio) };
-        assert_eq!(Doctor::from(health.clone()), unregistered);
+        assert_eq!(Doctor::of(health.clone(), false), unregistered);
         let bare = Tailscale::Up { node: String::new(), ip: Some([100, 64, 0, 3].into()) };
         let health = slopty_proto::ctl::Health { tailscale: bare, ..health };
         let by_address = Tailnet::Reachable("100.64.0.3".to_owned());
-        assert_eq!(Doctor::from(health.clone()).tailnet, by_address, "no name: the address");
+        assert_eq!(Doctor::of(health.clone(), false).tailnet, by_address, "no name: the address");
         let signed_out = Tailscale::Down { backend: BackendState::NeedsLogin };
         let health = slopty_proto::ctl::Health { tailscale: signed_out, ..health };
-        assert_eq!(Doctor::from(health.clone()).tailnet, Tailnet::Down(BackendState::NeedsLogin));
-        let lines = checklist_of(Worker::Up(Doctor::from(health.clone())), "");
+        assert_eq!(
+            Doctor::of(health.clone(), false).tailnet,
+            Tailnet::Down(BackendState::NeedsLogin)
+        );
+        let lines = checklist_of(Worker::Up(Doctor::of(health.clone(), false)), "");
         assert_eq!(lines[4].detail, "Tailscale is signed out, so only this Mac reaches it.");
         let silent = Tailscale::Unreachable { error: "timed out".to_owned() };
         let health = slopty_proto::ctl::Health { tailscale: silent, ..health };
-        assert_eq!(Doctor::from(health.clone()).tailnet, Tailnet::Unreachable);
-        let lines = checklist_of(Worker::Up(Doctor::from(health.clone())), "");
+        assert_eq!(Doctor::of(health.clone(), false).tailnet, Tailnet::Unreachable);
+        let lines = checklist_of(Worker::Up(Doctor::of(health.clone(), false)), "");
         assert_eq!(lines[4].detail, "Tailscale is not answering, so only this Mac reaches it.");
         assert_eq!(marks(&lines)[4], Mark::Advisory, "a warning, not a stop");
         let health = slopty_proto::ctl::Health { tailscale: Tailscale::Absent, ..health };
-        assert_eq!(Doctor::from(health).tailnet, Tailnet::Absent);
+        assert_eq!(Doctor::of(health, false).tailnet, Tailnet::Absent);
     }
 
     /// Slopty in an Applications folder runs its worker from there; a download's translocated

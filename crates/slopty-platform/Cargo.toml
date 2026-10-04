@@ -81,6 +81,8 @@ objc2-user-notifications = { workspace = true, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Whether this Mac runs on a battery, which the setup's Server line warns of (`power`).
+objc2-io-kit = { workspace = true, features = [ "ps" ] }
 # The session tap that takes system shortcuts for a remote Mac (`system_keys`).
 objc2-core-graphics = { workspace = true, features = [ "CGEvent", "CGEventTypes" ] }
 objc2-core-foundation = { workspace = true, features = [

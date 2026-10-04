@@ -48,6 +48,8 @@ pub mod paste_control;
 #[cfg(target_vendor = "apple")]
 pub mod pasteboard;
 pub mod pasteboard_access;
+#[cfg(target_os = "macos")]
+pub mod power;
 pub mod privacy;
 #[cfg(target_os = "macos")]
 pub mod proc_files;

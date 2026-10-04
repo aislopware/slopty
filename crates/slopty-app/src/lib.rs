@@ -4861,6 +4861,7 @@ mod tests {
             screen_recording: true,
             accessibility: true,
             tailnet: this_mac::Tailnet::Reachable("mac-studio.tail1234.ts.net".to_owned()),
+            battery: false,
         }
     }
 
