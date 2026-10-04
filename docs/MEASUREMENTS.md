@@ -14492,9 +14492,9 @@ its request, the list and the copy of 24 MiB on the worker. Dropped at once, it 
 upload, which the pre-upload takes off the drop, up to the whole upload. The at-once drop is
 always the connection's second 24 MiB transfer here, and that second transfer took 4.4 to 10.2 s
 in four of six runs, against 0.7 to 0.8 s for every first one. That spread is the transport's
-under this shape (QUIC under 3 % loss after a long transfer), not the drop's, and is noted for
-its own look. Before this change the upload began only at the drop, so every drop paid the
-at-once figure.
+under this shape (QUIC under 3 % loss after a long transfer), not the drop's. The entry "a connection's second bulk
+stream" below finds its cause in BBR3 and fixes it. Before this change the upload began only at
+the drop, so every drop paid the at-once figure.
 
 Not measured end to end: a small text fetched lazily. The e2e's drag carries files only. A
 type the program accepted is pushed during the hover and waits on the worker, so it costs
@@ -14520,3 +14520,67 @@ Streaming takes 25 MiB off: the whole copy, and the engine's copy for the answer
 is the program's input queue holding the answer in base64 while the program reads it, which
 `INPUT_MAX_BYTES` (16 MiB) bounds. Pacing a stream by that queue would take most of the rest,
 and is the next step if drops past 8 MiB are wanted.
+
+## 2026-10-05 — a connection's second bulk stream
+
+The drop entry above saw a connection's second 24 MiB upload take 4.4 to 10.2 s where the first
+took 0.7 to 0.8 s. `crates/slopty-net/tests/bulk_twice.rs` reproduces it apart from the app:
+back-to-back 24 MiB bulk streams on one connection, 100 ms apart, through `slopty_shape`'s
+relay at the e2e's tailnet shape (4 ms each way, up to 2 ms jitter) with the loss swept.
+
+```sh
+for loss in 0.5 1 3; do for run in 1 2 3 4 5; do
+  BULK_LOSS=$loss cargo nextest run -p slopty-net --test bulk_twice --run-ignored only \
+    --no-capture streams_from_the_environment 2>&1 | grep 'MEASURE loss'
+done; done
+SLOPTY_BULK_TRACE=1 cargo nextest run -p slopty-net --test bulk_twice --run-ignored only \
+  --no-capture a_second_stream_over_a_tailnet   # BBR3's state every 20 ms
+```
+
+**The cause is BBR3's, not flow control or stream reuse.** Through the slow streams the sender
+had its whole congestion window in flight, and the window was small: 24 to 36 kB against 280 kB
+at the end of the first stream (`target/logs/A-bulk-trace.log`). BBR3's `max_bw`, which sizes
+that window, fell from a 449 Mbit/s peak in the first stream to 8 to 19 Mbit/s by the third.
+Flow-control credit and stream reuse do not depend on loss, and at 1 % loss every stream ran as
+fast as the first, so neither is the cause. noq's `adapt_long_term_model` advanced the `max_bw`
+filter on every round start while `ack_phase` was `ProbeStopping`, and nothing ever moved
+`ack_phase` on. So from the first ProbeBW_DOWN the filter's two-cycle window was two round trips
+long, and `max_bw` followed the last two rounds' delivery rate. Under random loss every lossy
+round cuts `bw_shortterm` by `BETA` (0.7), the cut lowers the delivery rate, the next round's
+`max_bw` takes the lower rate, and the two ratchet down together. The first stream ran mostly
+in Startup and its first probe, so only later streams paid. The fix ends the probe's feedback
+once, as Linux `tcp_bbr.c` v3 and the draft's editor's copy do (`vendor/noq-proto/SLOPTY.md`,
+patches 19 and 20; `docs/decisions/transport.md`, "BBR3's max_bw filter advances once per
+probe"). Tests: `the_max_bw_filter_advances_once_per_probe` holds a simulated flow from its
+first ProbeBW_DOWN to its next REFILL to one filter cycle over more than four rounds, where it
+used to take one per round. `probe_up_goes_on_while_inflight_longterm_holds_it` holds the
+second fix.
+
+**Each stream's time, five runs per loss, before (HEAD's noq) and after.** Medians, with the
+ranges:
+
+| loss | | stream 1 | stream 2 | stream 3 | stream 4 |
+|---|---|---|---|---|---|
+| 0.5 % | before | 586 ms | 505 ms | 515 ms | 504 ms |
+| | after | 568 ms | 483 ms | 480 ms | 482 ms |
+| 1 % | before | 620 ms | 518 ms | 535 ms | 529 ms |
+| | after | 609 ms | 509 ms | 531 ms | 522 ms |
+| 3 % | before | 755 ms (723–846) | 4 510 ms (1 231–7 558) | 13 843 ms (9 878–14 863) | 15 039 ms (14 326–15 439) |
+| | after | 844 ms (770–907) | 1 188 ms (1 021–1 506) | 2 050 ms (1 295–4 294) | 5 729 ms (2 487–14 160) |
+
+Logs: `target/logs/A-bulk-before.log`, `target/logs/A-bulk-after.log`. The before binary was
+built from HEAD's `bbr3/mod.rs` into `target/noq-before`.
+
+**The drop it came from**, the e2e's at-once drop (the connection's second 24 MiB transfer)
+under the tailnet shape: 0.71 to 10.2 s with a 5.5 s median over six runs before, and 698,
+1 009, 1 134, 1 303, 1 450, 1 471, 1 555, 4 288, 4 688 and 7 792 ms after, a 1.46 s median
+over ten. The pre-uploaded drop stays at about 43 ms.
+
+**What is left at 3 % is BBRv3 as designed.** BBRv3 treats a round losing more than
+`LOSS_THRESH` (2 %) of what it had in flight as the path's limit: each probe that meets such a
+round sets `inflight_longterm` to what was in flight, and each lossy round cuts `bw_shortterm`.
+At a uniform 3 %, past the threshold, the rate still slides from stream to stream, more
+slowly: the fourth stream's median is 5.7 s against 15.0 s before. At 0.5 and 1 %, under the
+threshold, every stream runs as fast as the first, before and after. The shape's 3 % is a stress
+figure: on the real tailnet path the worker's QUIC counted no loss in 15 of 16 runs
+(`harness::TAILNET`'s comment).

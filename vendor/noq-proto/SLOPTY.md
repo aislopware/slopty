@@ -1,4 +1,4 @@
-# noq-proto, vendored with eighteen patches
+# noq-proto, vendored with twenty patches
 
 The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, commit
 `c1f411562` of <https://github.com/n0-computer/noq>) with these commits on top:
@@ -201,6 +201,30 @@ The published `noq-proto` 1.3.0 (crates.io, upstream tag `noq-proto-v1.3.0`, com
    `INTERNAL_ERROR`. The cap is checked whatever the over-allocation, and small contiguous
    chunks are coalesced while defragmenting, so a slow reader on a large receive window is not
    refused. Applied as the pull request's diff, unchanged. Tests: quinn's, in `assembler.rs`.
+
+19. `fix(proto): Advance BBR3's max_bw filter once per probe`
+
+   `adapt_long_term_model` advanced the `max_bw` filter on every round start while `ack_phase`
+   was `ProbeStopping`, and nothing moved it on, so from each ProbeBW_DOWN until the next probe
+   the filter's two-cycle window was two round trips. `max_bw` then followed the latest delivery
+   rate down, and with random loss cutting `bw_shortterm` every round the two ratcheted a bulk
+   stream from 450 to 10 Mbit/s within seconds. noq follows draft-05, which left the step out.
+   The draft's editor's copy and Linux `tcp_bbr.c` (`bbr_adapt_upper_bounds`) end the probe's
+   feedback once: `ack_phase` goes to `ACKS_INIT` and `bw_probe_samples` is cleared, so a loss
+   after the probe no longer counts as the probe's. Test:
+   `the_max_bw_filter_advances_once_per_probe` (docs/MEASUREMENTS.md, "a connection's second
+   bulk stream").
+
+20. `fix(proto): Hold BBR3's ProbeBW_UP while inflight_longterm limits it, to a packet`
+
+   ProbeBW_UP goes on while the flow is cwnd-limited at `inflight_longterm`. That ack's
+   `probe_inflight_long_term_upward` has already grown it by bytes `cwnd` takes up only after,
+   so noq's byte comparison was short on nearly every ack and the probe ended on the plateau
+   `inflight_longterm` itself held. Linux compares them in packets, where `inflight_hi` steps
+   once every `bw_probe_up_cnt` packets. `maybe_go_down` now counts `cwnd` within one SMSS of it
+   as at it. Patch 19 exposed it: A.15 (`probe_up_rediscovers_full_bw_after_10x_increase`) had
+   passed only on the filter's decayed `max_bw`. Test:
+   `probe_up_goes_on_while_inflight_longterm_holds_it`.
 
 A probe-up exit for an app-limited round (leaving `ProbeBW_UP` when a round ends
 app-limited) was tried beside patches 11 to 13 and not taken. The draft and Linux keep such a

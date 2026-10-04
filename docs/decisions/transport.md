@@ -2070,3 +2070,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - **The test.** `the_socket_holds_a_large_keyframe_while_nobody_reads` holds on Linux where
     the host allows 4 MiB. CI's Linux job sets `net.core.rmem_max` to 8 MiB, as macOS allows,
     and the failure message names the setting to raise. Docker Desktop's VM allows 4 MiB.
+
+- ✅ **BBR3's max_bw filter advances once per probe** (2026-10-05, MEASUREMENTS "a connection's
+  second bulk stream"). A connection's later bulk streams under loss ran ten to twenty times
+  slower than its first. noq's BBR3 left `ack_phase` at `ProbeStopping` after a probe, so it
+  advanced the `max_bw` filter on every round start. The filter's two-cycle window became two
+  round trips, `max_bw` followed the delivery rate down, and the loss cuts to `bw_shortterm`
+  ratcheted the two together. noq follows draft-05, which lacks the step. Linux `tcp_bbr.c` v3
+  and the draft's editor's copy move `ack_phase` to `ACKS_INIT` and clear `bw_probe_samples`
+  once the probe's feedback ends. noq-proto patch 19 does the same.
+  - *Patch 20, found by it.* Holding `max_bw` exposed ProbeBW_UP ending on the plateau
+    `inflight_longterm` held, because noq compared `cwnd` with it in bytes after
+    `inflight_longterm` had already grown by that ack. Linux compares in packets. The fix
+    counts `cwnd` within one SMSS of it as at it.
+  - *Upstream.* No open noq pull request or issue covers either. Both are written up for
+    noq in `.research/noq-upstream-prs.md` (sections 15 and 16).
+  - *Not changed: `LOSS_THRESH`.* Above BBRv3's 2 % loss threshold, every probe still lowers
+    `inflight_longterm` and every lossy round lowers `bw_shortterm`, so under the e2e's
+    uniform 3 % the rate still slides across streams, more slowly. That is BBRv3 as designed
+    for a path that loses that much. A real tailnet loses far less, and Slopty keeps
+    upstream's threshold.
+  - Tests: `the_max_bw_filter_advances_once_per_probe` and
+    `probe_up_goes_on_while_inflight_longterm_holds_it` (noq-proto, 455 of its tests pass);
+    `crates/slopty-net/tests/bulk_twice.rs` measures it end to end.

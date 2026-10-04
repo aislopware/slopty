@@ -179,6 +179,8 @@ enum BbrState {
 /// equivalent to BBR.ack_phase states <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6>
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum AckPhase {
+    /// equivalent to ACKS_INIT: not probing bandwidth, and the feedback from the last probe is in
+    Init,
     /// equivalent to ACKS_PROBE_STARTING
     ProbeStarting,
     /// equivalent to ACKS_PROBE_STOPPING
@@ -1005,13 +1007,18 @@ impl Bbr3 {
         if self.ack_phase == AckPhase::ProbeStarting && self.round_start {
             self.ack_phase = AckPhase::ProbeFeedback;
         }
-        if self.ack_phase == AckPhase::ProbeStopping
-            && self.round_start
-            && let BbrState::ProbeBw(_) = self.state
-            && let Some(rate_sample) = self.rs
-            && !rate_sample.is_app_limited
-        {
-            self.advance_max_bw_filter();
+        // The feedback from a probe has ended, once: the filter advances one cycle per probe, as
+        // in the draft's editor's copy and Linux `tcp_bbr.c` (draft-05 left `ack_phase` at
+        // PROBE_STOPPING, which advanced the filter on every round until the next probe).
+        if self.ack_phase == AckPhase::ProbeStopping && self.round_start {
+            self.bw_probe_samples = false;
+            self.ack_phase = AckPhase::Init;
+            if let BbrState::ProbeBw(_) = self.state
+                && let Some(rate_sample) = self.rs
+                && !rate_sample.is_app_limited
+            {
+                self.advance_max_bw_filter();
+            }
         }
         if !self.is_inflight_too_high() {
             if self.inflight_longterm == u64::MAX {
@@ -1100,7 +1107,11 @@ impl Bbr3 {
 
     /// equivalent to BBRIsTimeToGoDown <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.3.3.6-6>
     fn maybe_go_down(&mut self) -> bool {
-        if self.is_cwnd_limited && self.cwnd >= self.inflight_longterm {
+        // At `inflight_longterm` to within a packet, as Linux `tcp_bbr.c` compares them in
+        // packets: this ack's `probe_inflight_long_term_upward` has already grown it by bytes that
+        // `cwnd` takes up only when it is set after, so a byte comparison is short every time and
+        // ends the probe on a plateau that `inflight_longterm` itself is holding.
+        if self.is_cwnd_limited && self.cwnd.saturating_add(self.smss) > self.inflight_longterm {
             self.reset_full_bw();
             if let Some(rate_sample) = self.rs {
                 self.full_bw = rate_sample.delivery_rate;
@@ -7405,6 +7416,70 @@ mod test {
     /// byte delivered since as aggregation: `extra_acked` then tracks the window, the window
     /// grows by `extra_acked`, and both climb at the video's rate, to tens of megabytes on a
     /// path whose bandwidth-delay product is 10 kB.
+    /// ProbeBW_UP goes on while `inflight_longterm` is what holds the flow back, though this
+    /// ack has grown it by a few bytes that `cwnd` takes up only after: within a packet is at it.
+    #[test]
+    fn probe_up_goes_on_while_inflight_longterm_holds_it() {
+        let mut bbr = Bbr3::new(Arc::new(Bbr3Config::default()), 1200);
+        bbr.state = BbrState::ProbeBw(ProbeBwSubstate::Up);
+        bbr.is_cwnd_limited = true;
+        bbr.full_bw_now = true;
+        bbr.inflight_longterm = 97_940;
+        bbr.cwnd = 97_925;
+        assert!(
+            !bbr.maybe_go_down(),
+            "a plateau inflight_longterm holds is no plateau"
+        );
+        assert!(!bbr.full_bw_now);
+        bbr.full_bw_now = true;
+        bbr.cwnd = 97_940 - 1200;
+        assert!(
+            bbr.maybe_go_down(),
+            "a packet short of it, the plateau is the path's"
+        );
+    }
+
+    /// The `max_bw` filter's window is two ProbeBW cycles: it advances once when a probe's
+    /// feedback has ended, not on every round until the next probe. Advancing on every round
+    /// shrank the window to two round trips, so `max_bw` followed the latest delivery rate down
+    /// and, with a little random loss cutting `bw_shortterm` each round, the two ratcheted a
+    /// bulk flow from 450 to 10 Mbit/s within a few seconds.
+    #[test]
+    fn the_max_bw_filter_advances_once_per_probe() {
+        const MSS: u64 = 1200;
+        /// 100 Mbit/s in bytes/sec
+        const BW: f64 = 12_500_000.0;
+        const RTT_NS: u64 = 10_000_000;
+        let mut sim = Sim::new(Bbr3Config::default(), MSS, BW, RTT_NS);
+        // From the first ProbeBW_DOWN, count the rounds and the filter's cycles until the next
+        // probe begins (REFILL), which a 10 ms path reaches after 63 rounds at most.
+        let mut since: Option<(u64, u64)> = None;
+        let mut seen = (0, 0);
+        sim.run(
+            10_000_000,
+            |_| ControlFlow::Continue(()),
+            |bbr, _now_ns, _inflight, _pn| {
+                match (bbr.state, since) {
+                    (BbrState::ProbeBw(ProbeBwSubstate::Down), None) => {
+                        since = Some((bbr.round_count, bbr.cycle_count));
+                    }
+                    (BbrState::ProbeBw(ProbeBwSubstate::Refill), Some((rounds, cycles))) => {
+                        seen = (bbr.round_count - rounds, bbr.cycle_count - cycles);
+                        return ControlFlow::Break(());
+                    }
+                    _ => {}
+                }
+                ControlFlow::Continue(())
+            },
+        );
+        let (rounds, cycles) = seen;
+        assert!(rounds > 4, "DOWN and CRUISE lasted {rounds} rounds");
+        assert_eq!(
+            cycles, 1,
+            "the filter advanced {cycles} times in {rounds} rounds"
+        );
+    }
+
     #[test]
     fn restart_from_idle_starts_an_empty_ack_aggregation_interval() {
         let mut sim = VideoSim::new(1_000_000);
