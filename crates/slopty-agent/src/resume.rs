@@ -39,8 +39,8 @@ pub struct Resume {
     /// Its `--settings` locked it out of the mode that asks no permission, locked afresh.
     pub locked: bool,
     /// The system prompt appended to it, kept when it was started with Slopty's tools (the
-    /// server's role for a project's agent) or carries the pointer to Slopty's CLI
-    /// ([`crate::hooks::POINTER`]).
+    /// server's role for a project's agent). One that carries the pointer to Slopty's CLI keeps
+    /// the pointer alone ([`crate::hooks::POINTER`]): a prompt the person appended is never kept.
     pub role: Option<String>,
 }
 
@@ -208,7 +208,12 @@ pub fn invocation(args: &[String]) -> Invocation {
             }
         }
     }
-    out.role = role.filter(|role| out.mcp || role.contains(crate::hooks::POINTER));
+    out.role = if out.mcp {
+        role
+    } else {
+        role.filter(|role| role.contains(crate::hooks::POINTER))
+            .map(|_| crate::hooks::POINTER.to_owned())
+    };
     out
 }
 
@@ -487,7 +492,8 @@ mod tests {
 
     /// What Slopty put on a command line is noted, never kept: its tools, the lock on the mode
     /// that asks nothing. The role appended to an agent with Slopty's tools is kept; a system
-    /// prompt on any other is not, as it may carry anything.
+    /// prompt on any other is not, as it may carry anything, and one joined with the pointer to
+    /// Slopty's CLI keeps the pointer alone.
     #[test]
     fn slopty_s_own_wiring_is_noted_and_its_role_kept() {
         let dir = Path::new("/nowhere");
@@ -505,6 +511,10 @@ mod tests {
         theirs.extend(["--append-system-prompt".to_owned(), "token=hush".to_owned()]);
         let kept = invocation(&theirs);
         assert!(!kept.mcp && !kept.locked && kept.role.is_none(), "{kept:?}");
+
+        let pointed = format!("token=hush\n\n{}", crate::hooks::POINTER);
+        let kept = invocation(&["--append-system-prompt".to_owned(), pointed]);
+        assert_eq!(kept.role.as_deref(), Some(crate::hooks::POINTER), "the person's words go");
     }
 
     /// The mode the hooks last reported replaces the one the agent was started with; `default`
