@@ -556,7 +556,7 @@ fn owners(windows: &[WindowInfo]) -> HashMap<WindowId, i32> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _none = windows;
+        let _ = windows;
         HashMap::new()
     }
 }

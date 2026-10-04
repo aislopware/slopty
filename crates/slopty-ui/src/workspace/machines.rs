@@ -203,7 +203,7 @@ impl WorkspaceView {
         .collect()
     }
 
-    /// "Edit <machine>'s settings": its `settings.toml` in a file tile, an open one focused.
+    /// "Edit `<machine>`'s settings": its `settings.toml` in a file tile, an open one focused.
     pub(super) fn edit_machine_settings(
         &mut self,
         edit: &super::actions::EditMachineSettings,
@@ -216,7 +216,7 @@ impl WorkspaceView {
         self.open_file_on(Some(edit.worker), &path, None, cx);
     }
 
-    /// "Edit <machine>'s settings" for each machine whose greeting said where its file is.
+    /// "Edit `<machine>`'s settings" for each machine whose greeting said where its file is.
     pub(super) fn settings_lines(&self) -> Vec<crate::palette::PaletteItem> {
         self.workers
             .iter()
