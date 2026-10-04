@@ -20,7 +20,7 @@ Button │ Fullscreen tile
 Button │ Close tile
 Group │ Thread
 Article │ You: The header clips its chips on a narrow window, as here.
-Button │ Picture, 640 × 400
+Button │ Picture, 600 × 200
 Button │ Copy message
 Button │ Thought
 Article │ Plan: Let the header's chips give way
@@ -32,11 +32,12 @@ Article │ The chips now give way from the right, the model first. The release 
 Button │ Copy message
 Group │ Activity
 Button │ Plan, 1 of 3 done
+Button │ In the background, 1 finished
 Status │ Build the release binary: Completed
 MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Opus 5.5
-Button │ 1 in the background
+Button │ 1 finished
 Button │ Context 34% of 200k
 Button │ Send later
 Button │ Send

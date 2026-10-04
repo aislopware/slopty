@@ -184,32 +184,44 @@ impl ThreadView {
             .get(at)
             .filter(|_| placement != Placement::Inline)
             .map(|current| self.request_card(current.request, at, waiting.len(), placement, cx));
-        let mut sections: Vec<AnyElement> = Vec::new();
-        for refusal in hub.refusals(self.thread) {
-            sections.push(self.refusal_line(refusal, cx));
-        }
-        for asked in bar.asked.iter().filter(|a| a.answered.is_some()) {
-            sections.push(self.answered_line(asked, cx));
-        }
-        if let Some(plan) = bar.plan {
-            sections.push(self.plan_section(plan, cx));
-        }
+        // Each kind of thing stands in a group of its own, a rule between groups, so a row
+        // never reads as belonging to the group above it.
+        let mut groups: Vec<Vec<AnyElement>> = Vec::new();
+        groups.push(hub.refusals(self.thread).map(|r| self.refusal_line(r, cx)).collect());
+        groups.push(
+            bar.asked
+                .iter()
+                .filter(|a| a.answered.is_some())
+                .map(|a| self.answered_line(a, cx))
+                .collect(),
+        );
+        groups.push(bar.plan.map(|plan| self.plan_section(plan, cx)).into_iter().collect());
         if !bar.edited.is_empty() {
-            sections.push(self.edited_section(&bar.edited, cx));
+            groups.push(vec![self.edited_section(&bar.edited, cx)]);
         }
-        for queued in &bar.queue {
-            sections.push(self.queued_line(queued, bar.can_withdraw, bar.can_promote, cx));
-        }
+        groups.push(
+            bar.queue
+                .iter()
+                .map(|q| self.queued_line(q, bar.can_withdraw, bar.can_promote, cx))
+                .collect(),
+        );
         if !bar.background.is_empty() {
-            sections.push(self.background_section(&bar.background));
+            groups.push(vec![self.background_section(&bar.background)]);
         }
-        if self.tasks_open {
-            for task in &bar.tasks {
-                sections.push(self.task_line(task, bar.can_stop, cx));
-            }
+        if self.tasks_open && !bar.tasks.is_empty() {
+            let mut tasks = vec![self.tasks_head(&bar.tasks, cx)];
+            tasks.extend(bar.tasks.iter().map(|task| self.task_line(task, bar.can_stop, cx)));
+            groups.push(tasks);
         }
         if self.meter_open {
-            sections.push(self.meter_panel(state, cx));
+            groups.push(vec![self.meter_panel(state, cx)]);
+        }
+        let mut sections: Vec<AnyElement> = Vec::new();
+        for group in groups.into_iter().filter(|g| !g.is_empty()) {
+            if !sections.is_empty() {
+                sections.push(kit::rule(theme, s.border_subtle).into_any_element());
+            }
+            sections.extend(group);
         }
         if sections.is_empty() && request.is_none() {
             return None;
@@ -231,7 +243,7 @@ impl ThreadView {
         // Over the composer the tray is the card's head: as wide, its corners the composer's,
         // and the composer's top edge the one hairline between them, so one outline holds both
         // and no row reads as cut by the composer. Alone, it is a card of its own. Inside, its
-        // parts stand apart by room and their rows' own height, never by a rule.
+        // kinds of thing stand apart by the quieter hairline.
         let radius = self.z(if tucked { theme.radii.lg } else { theme.radii.md });
         Some(
             div()
@@ -274,6 +286,61 @@ impl ThreadView {
             .px(self.z(spacing.sm))
             .min_h(self.z(kit::Row::One.height(&self.theme)))
             .text_size(self.z(self.theme.typography.small()))
+    }
+
+    /// A tray row of two lines: `head` at a row's height, and under it, past the mark's slot,
+    /// `under` in the code face and the quiet tone (a command's last line while it runs), cut
+    /// to one line. Output never runs inline after a title in body text.
+    fn two_lines(&self, head: Div, under: Option<String>) -> Div {
+        let theme = &self.theme;
+        let s = theme.surfaces;
+        let spacing = theme.spacing;
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .px(self.z(spacing.sm))
+            .text_size(self.z(theme.typography.small()))
+            .child(head.min_h(self.z(kit::Row::One.height(theme))))
+            .children(under.map(|line| {
+                div()
+                    .w_full()
+                    .pl(self.z(super::TOOL_ROW + spacing.xs))
+                    .pb(self.z(spacing.xs))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .font_family(self.mono())
+                    .text_color(hsla(s.text_muted))
+                    .child(SharedString::from(line))
+            }))
+    }
+
+    /// The head of the work in the background, opened from its chip: what it is, how much of
+    /// it runs or how it ended, and the way to fold it.
+    fn tasks_head(&self, tasks: &[&BackgroundTask], cx: &Context<Self>) -> AnyElement {
+        let s = self.theme.surfaces;
+        let words = tasks_words(tasks.iter().copied());
+        self.section()
+            .id("thread-tasks-head")
+            .debug_selector(|| "thread-tasks-head".to_owned())
+            .role(Role::Button)
+            .aria_label(SharedString::from(format!("In the background, {words}")))
+            .aria_expanded(true)
+            .cursor_pointer()
+            .text_color(hsla(s.text_secondary))
+            .child(self.slot().child(self.icon(IconName::Activity, s.text_muted)))
+            .child(div().flex_none().child("In the background"))
+            .child(
+                kit::tabular(div()).text_color(hsla(s.text_muted)).child(SharedString::from(words)),
+            )
+            .child(div().flex_1())
+            .child(self.icon(IconName::ChevronDown, s.text_muted))
+            .on_click(cx.listener(|this, _ev, _w, cx| {
+                this.tasks_open = false;
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// Something the worker turned down that the thread would not show: what and why, until
@@ -858,7 +925,33 @@ impl ThreadView {
             let running = matches!(bg.detail.status, ExecStatus::Running);
             let last = bg.output.and_then(|o| o.lines().rev().find(|l| !l.trim().is_empty()));
             let label = SharedString::from(format!("{}: {state}", bg.title));
-            self.section()
+            let head = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(self.z(theme.spacing.xs))
+                .child(self.slot().child(if running {
+                    self.spinner(true)
+                } else {
+                    self.icon(IconName::Terminal, s.text_muted)
+                }))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(SharedString::from(bg.title.to_owned())),
+                )
+                .child(
+                    kit::tabular(div())
+                        .flex_none()
+                        .text_size(self.z(theme.typography.small()))
+                        .text_color(hsla(s.text_muted))
+                        .child(SharedString::from(state)),
+                );
+            self.two_lines(head, last.filter(|_| running).map(|l| l.trim().to_owned()))
                 .id(ElementId::Name(format!("background-{}", bg.item.0).into()))
                 .debug_selector({
                     let id = bg.item.0.clone();
@@ -867,31 +960,6 @@ impl ThreadView {
                 .role(Role::Status)
                 .aria_label(label)
                 .text_color(hsla(s.text_secondary))
-                .child(self.slot().child(if running {
-                    self.spinner(true)
-                } else {
-                    self.icon(IconName::Terminal, s.text_muted)
-                }))
-                .child(div().flex_none().child(SharedString::from(bg.title.to_owned())))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_1()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .whitespace_nowrap()
-                        .font_family(self.mono())
-                        .text_size(self.z(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .children(last.map(|l| SharedString::from(l.trim().to_owned()))),
-                )
-                .child(
-                    kit::tabular(div())
-                        .flex_none()
-                        .text_size(self.z(theme.typography.small()))
-                        .text_color(hsla(s.text_muted))
-                        .child(SharedString::from(state)),
-                )
         });
         div()
             .id("thread-background")
@@ -980,22 +1048,12 @@ impl ThreadView {
         let standing = took.map_or_else(|| state.clone(), |t| format!("{state} \u{b7} {t}"));
         let tag = id.clone();
         let label = SharedString::from(format!("{}: {state}", task.title));
-        self.section()
-            .id(ElementId::Name(format!("task-{id}").into()))
-            .debug_selector(move || format!("task-{tag}"))
-            .role(Role::Status)
-            .aria_label(label)
-            .text_color(hsla(s.text_secondary))
+        let head = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(self.z(theme.spacing.xs))
             .child(self.slot().child(mark))
-            .child(
-                div()
-                    .flex_none()
-                    .max_w(relative(0.5))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(SharedString::from(task.title.clone())),
-            )
             .child(
                 div()
                     .min_w_0()
@@ -1003,15 +1061,11 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
-                    .font_family(self.mono())
-                    .text_size(self.z(theme.typography.small()))
-                    .text_color(hsla(s.text_muted))
-                    .children(last.map(SharedString::from)),
+                    .child(SharedString::from(task.title.clone())),
             )
             .child(
                 kit::tabular(div())
                     .flex_none()
-                    .text_size(self.z(theme.typography.small()))
                     .text_color(hsla(s.text_muted))
                     .child(SharedString::from(standing)),
             )
@@ -1023,9 +1077,42 @@ impl ThreadView {
                         }),
                     ),
                 )
-            })
+            });
+        self.two_lines(head, last.filter(|_| running))
+            .id(ElementId::Name(format!("task-{tag}").into()))
+            .debug_selector(move || format!("task-{tag}"))
+            .role(Role::Status)
+            .aria_label(label)
+            .text_color(hsla(s.text_secondary))
             .into_any_element()
     }
+}
+
+/// How the work in the background stands, in a few words: how much runs while any does,
+/// else how it ended ("1 finished", "2 finished · 1 failed"), never "in the background" for
+/// work that is over.
+pub(super) fn tasks_words<'a>(tasks: impl IntoIterator<Item = &'a BackgroundTask>) -> String {
+    let (mut running, mut finished, mut failed, mut stopped, mut ended) = (0, 0, 0, 0, 0_usize);
+    for task in tasks {
+        let n = match task.state.as_str() {
+            BackgroundTask::RUNNING => &mut running,
+            BackgroundTask::COMPLETED => &mut finished,
+            BackgroundTask::FAILED => &mut failed,
+            BackgroundTask::KILLED => &mut stopped,
+            _ => &mut ended,
+        };
+        *n = n.saturating_add(1);
+    }
+    if running > 0 {
+        return format!("{running} running");
+    }
+    let parts: Vec<String> =
+        [(finished, "finished"), (failed, "failed"), (stopped, "stopped"), (ended, "ended")]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, word)| format!("{n} {word}"))
+            .collect();
+    parts.join(" \u{b7} ")
 }
 
 /// What the way back to the agent's own prompt says: the terminal its prompt runs in, or the
@@ -1089,10 +1176,34 @@ fn spent(micro_usd: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::thread::{Choice, Effect};
+    use slopty_core::WallMs;
+    use slopty_proto::thread::{BackgroundTask as T, Choice, Effect};
 
-    use super::{answer_kinds, answer_label, answer_scope};
+    use super::{answer_kinds, answer_label, answer_scope, tasks_words};
     use crate::kit::ButtonKind;
+
+    /// Work in the background says how much runs while any does, else how it ended, so a
+    /// finished task never reads as still running.
+    #[test]
+    fn background_work_says_what_is_true() {
+        let task = |state: &str| T {
+            id: String::new(),
+            kind: T::SHELL.to_owned(),
+            title: String::new(),
+            state: state.to_owned(),
+            item: None,
+            output: None,
+            started_ms: WallMs::from_millis(0),
+            ended_ms: None,
+        };
+        let words =
+            |states: &[&str]| tasks_words(&states.iter().map(|s| task(s)).collect::<Vec<_>>());
+        assert_eq!(words(&[T::RUNNING, T::COMPLETED]), "1 running");
+        assert_eq!(words(&[T::COMPLETED]), "1 finished");
+        assert_eq!(words(&[T::COMPLETED, T::FAILED, T::COMPLETED]), "2 finished \u{b7} 1 failed");
+        assert_eq!(words(&[T::KILLED]), "1 stopped");
+        assert_eq!(words(&["lost"]), "1 ended");
+    }
 
     /// An answer that reaches beyond this once says how far, unless its words already do.
     #[test]

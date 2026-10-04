@@ -450,19 +450,24 @@ async fn a_step_being_written_shows_live_until_the_transcript_settles_it() {
 }
 
 /// A screenshot made up for the session: a window's bar over a header whose chips run into
-/// the title, as a person would paste to show it clipping.
+/// the title, cropped to the header as a person would paste to show it clipping, with the
+/// first lines of the page under it.
 fn screenshot() -> Vec<u8> {
-    let (w, h) = (640_u32, 400_u32);
+    let (w, h) = (600_u32, 200_u32);
     let picture = image::RgbImage::from_fn(w, h, |x, y| {
-        let chip = |x0: u32| (x0..x0.saturating_add(90)).contains(&x) && (58..82).contains(&y);
+        let chip = |x0: u32| (x0..x0.saturating_add(80)).contains(&x) && (52..84).contains(&y);
+        let line =
+            |y0: u32, x1: u32| (24..x1).contains(&x) && (y0..y0.saturating_add(10)).contains(&y);
         if y < 28 {
             image::Rgb([232, 232, 236])
-        } else if chip(300) || chip(400) || chip(500) {
+        } else if chip(330) || chip(420) || chip(510) {
             image::Rgb([96, 120, 220])
-        } else if (24..420).contains(&x) && (62..78).contains(&y) {
+        } else if (24..400).contains(&x) && (60..76).contains(&y) {
             image::Rgb([60, 60, 70])
-        } else if (40..100).contains(&y) {
+        } else if (40..96).contains(&y) {
             image::Rgb([248, 248, 250])
+        } else if line(120, 520) || line(144, 470) || line(168, 360) {
+            image::Rgb([200, 200, 208])
         } else {
             image::Rgb([255, 255, 255])
         }
@@ -646,7 +651,7 @@ async fn the_thread_shows_the_work_beyond_words() {
     start(&stack, &session, &main).await;
     let drv = &mut stack.driver;
     let building = "Build the release binary: Running";
-    let picture = "Picture, 640 \u{d7} 400";
+    let picture = "Picture, 600 \u{d7} 200";
     // The agent lists its background work: a chip says one runs, and opens the panel of it.
     drv.wait_for("the background chip", STEP, |d| has(d, "Button", "1 running")).await.unwrap();
     click(drv, "Button", "1 running").await;

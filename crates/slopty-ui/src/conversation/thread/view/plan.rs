@@ -1,7 +1,9 @@
-//! A plan the agent proposes, as a document in the thread rather than a call: a card with its
-//! title, how it stands and a copy, then its Markdown at the prose size. A long plan shows its
-//! head until opened. While the agent waits on the person's word, the card is edged in the warn
-//! tone and takes the answers, as a call's card does.
+//! A plan the agent proposes, as a document in the thread rather than a call: a card headed by
+//! the map mark and its title alone at the base size (the mark says it is a plan, so no
+//! label runs into the title), how it stands in the quiet tone and a copy, then its Markdown at
+//! the prose size. A long plan shows its head until opened. While the agent waits on the
+//! person's word, the card is edged in the warn tone and takes the answers, as a call's card
+//! does.
 
 use gpui::accesskit::Role;
 use gpui::prelude::FluentBuilder as _;
@@ -82,9 +84,7 @@ impl ThreadView {
             .min_h(self.z(theme.density.row))
             .pl(self.z(theme.spacing.xs))
             .pr(self.z(theme.spacing.xxs))
-            .text_size(self.z(theme.typography.small()))
             .child(self.slot().child(self.icon(IconName::Map, s.text_muted)))
-            .child(div().flex_none().text_color(hsla(s.text_muted)).child("Plan"))
             .child(
                 div()
                     .min_w_0()
@@ -92,11 +92,18 @@ impl ThreadView {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
+                    .text_size(self.z(theme.typography.ui_size))
                     .text_color(hsla(s.text))
                     .font_weight(FontWeight(Typography::MEDIUM_WEIGHT))
                     .child(SharedString::from(title.clone())),
             )
-            .children(word.map(|w| div().flex_none().text_color(hsla(s.text_muted)).child(w)))
+            .children(word.map(|w| {
+                div()
+                    .flex_none()
+                    .text_size(self.z(theme.typography.small()))
+                    .text_color(hsla(s.text_muted))
+                    .child(w)
+            }))
             .child(copy);
         let open_more = more.then(|| {
             let item = id.clone();

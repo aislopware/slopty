@@ -294,31 +294,50 @@ fn the_composer_shrinks_with_the_zoom(cx: &mut TestAppContext) {
 }
 
 /// The agent's background work stays out of the way: a chip says how much runs, and opens
-/// the panel of it, each piece with what it last printed.
+/// the panel of it under its own head. Once nothing runs the chip says how it ended, never
+/// that it is still in the background.
 #[gpui::test]
 fn background_work_opens_from_a_chip(cx: &mut TestAppContext) {
     let (hub, _sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
-    state.tasks = vec![BackgroundTask {
-        id: "b1".to_owned(),
+    let task = |id: &str, state: &str| BackgroundTask {
+        id: id.to_owned(),
         kind: BackgroundTask::SHELL.to_owned(),
         title: "cargo build".to_owned(),
-        state: BackgroundTask::RUNNING.to_owned(),
+        state: state.to_owned(),
         item: None,
         output: Some(Clipped::whole("Compiling slopty-ui")),
         started_ms: WallMs::from_millis(1_000),
         ended_ms: None,
-    }];
+    };
+    state.tasks = vec![task("b1", BackgroundTask::RUNNING)];
     hub.update(cx, ThreadHub::connected);
     let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
     cx.run_until_parked();
+    let labelled = |cx: &mut VisualTestContext, label: &str| {
+        cx.update(|window, _cx| crate::a11y::tree(window))
+            .iter()
+            .any(|n| n.label.as_deref() == Some(label))
+    };
 
     assert!(cx.debug_bounds("task-b1").is_none(), "the panel waits to be asked");
+    assert!(labelled(cx, "1 running"));
     let chip = cx.debug_bounds("thread-tasks").expect("the chip says one runs").center();
     cx.simulate_click(chip, Modifiers::none());
     assert!(cx.debug_bounds("task-b1").is_some(), "the panel lists it");
+    assert!(labelled(cx, "In the background, 1 running"), "under its own head");
+    assert!(labelled(cx, "cargo build: Running"), "what it printed stays off its line");
+
+    state.tasks = vec![task("b1", BackgroundTask::COMPLETED), task("b2", BackgroundTask::FAILED)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    assert!(labelled(cx, "1 finished \u{b7} 1 failed"), "how it ended");
+    let head = cx.debug_bounds("thread-tasks-head").expect("the head").center();
+    cx.simulate_click(head, Modifiers::none());
+    assert!(cx.debug_bounds("task-b1").is_none(), "the head folds it");
 }
 
 /// The composer names how hard the model thinks and how far a Codex sandbox reaches, beside

@@ -15,7 +15,7 @@ use gpui::{
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::{Sizable as _, Size};
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Delivery};
+use slopty_proto::thread::{BackgroundTask, Cap, Delivery};
 
 use super::{ThreadView, ThreadViewEvent, agent_name};
 use crate::colors::hsla;
@@ -442,14 +442,11 @@ impl ThreadView {
         if tasks.is_empty() {
             return None;
         }
-        let running = tasks.iter().filter(|t| t.is_running()).count();
-        let words = if running > 0 {
-            format!("{running} running")
-        } else {
-            format!("{} in the background", tasks.len())
-        };
-        let mark = if running > 0 {
+        let words = super::tray::tasks_words(tasks);
+        let mark = if tasks.iter().any(BackgroundTask::is_running) {
             self.spinner(true)
+        } else if tasks.iter().any(|t| t.state == BackgroundTask::FAILED) {
+            self.icon(IconName::CircleAlert, s.error)
         } else {
             self.icon(IconName::Activity, s.text_muted)
         };
