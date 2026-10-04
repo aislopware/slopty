@@ -201,8 +201,10 @@ mod tests {
         .await
         .unwrap();
 
-        // A long command left running in this shell while the human moves on: the badge on its
-        // title bar says it finished, read from the shell integration marks ptyd injected.
+        // A command left running in this shell while the human moves on: its tile counts how
+        // long it has run from the shell integration marks ptyd injected, and stops once it
+        // ends. (Its end earns a mark only past the slow command's 30 s, which the workspace's
+        // own tests hold; here the marks crossing the wire are the point.)
         drv.type_text("sleep 6").await.unwrap();
         drv.keys("enter").await.unwrap();
 
@@ -215,12 +217,17 @@ mod tests {
             .await
             .unwrap();
         assert!(!dump.items.iter().any(|i| i.id == term.id && i.active), "{dump:#?}");
-        let finished = |d: &slopty_e2e::Dump| {
+        // The count is the tile header's status: a duration, "4 s".
+        let counting = |d: &slopty_e2e::Dump| {
             d.a11y.iter().any(|n| {
-                n.role == "Button" && n.label.as_deref().is_some_and(|l| l.starts_with("Done · "))
+                n.role == "Status"
+                    && n.label.as_deref().is_some_and(|l| {
+                        l.ends_with(" s") && l.starts_with(|c: char| c.is_ascii_digit())
+                    })
             })
         };
-        drv.wait_for("the sleep to badge its shell", STEP + Duration::from_secs(8), finished)
+        drv.wait_for("the sleep counted on its tile", STEP, counting).await.unwrap();
+        drv.wait_for("the sleep ended", STEP + Duration::from_secs(8), |d| !counting(d))
             .await
             .unwrap();
 
@@ -247,7 +254,6 @@ mod tests {
             }),
             "both columns in view: {dump:#?}"
         );
-        assert!(!finished(&dump), "looking at the shell clears its badge: {:#?}", dump.a11y);
         let second = dump.items.iter().find(|i| i.id != term.id).unwrap().clone();
         assert_eq!(second.pos[1], term.pos[1] + 1, "opened right of the first: {dump:#?}");
 
@@ -542,8 +548,10 @@ mod tests {
             dump.a11y
         );
         drv.type_text("new note").await.unwrap();
-        drv.wait_for("one line", STEP, |d| {
-            d.a11y.iter().filter(|n| n.role == "ListBoxOption").count() == 1
+        // The best match first, the one ↩ runs: a looser one may follow it.
+        drv.wait_for("the note first", STEP, |d| {
+            let first = d.a11y.iter().find(|n| n.role == "ListBoxOption");
+            first.and_then(|n| n.label.as_deref()) == Some("New note ⇧⌘N")
         })
         .await
         .unwrap();
