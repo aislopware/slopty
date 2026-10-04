@@ -4127,7 +4127,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#d122bcbcface41380efa106b83b565b01a73c4f6"
+source = "git+https://github.com/aislopware/libghostty-rs.git#9566d491a86b71a7355717942b8abba34d3469a8"
 dependencies = [
  "bitflags 2.13.2",
  "int-enum",
@@ -4138,7 +4138,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.1"
-source = "git+https://github.com/aislopware/libghostty-rs.git#d122bcbcface41380efa106b83b565b01a73c4f6"
+source = "git+https://github.com/aislopware/libghostty-rs.git#9566d491a86b71a7355717942b8abba34d3469a8"
 
 [[package]]
 name = "libloading"
