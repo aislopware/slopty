@@ -2,8 +2,9 @@
 //! golden: the first run, the panels that add a worker, a workspace of columns in both themes,
 //! the overview, the palette, the settings, the "…" menu, the empty workspace, an agent that
 //! needs the human (on its tile and in the navigator), a remote tile, an upload and a forwarded
-//! port, and a failed command block; the first run, the navigator and the failed block dark as
-//! well, and the navigator once under Increase Contrast.
+//! port, a failed command block, and a tile kept nowhere whose worker is away after a relaunch;
+//! the first run, the navigator, the failed block and the away tile dark as well, and the
+//! navigator once under Increase Contrast.
 //!
 //! A golden passes or fails on its numbers. The tolerance is blind to a word of chrome text
 //! (`docs/decisions/ui.md`), so each scenario also asserts the chrome it shows through the
@@ -31,6 +32,11 @@ const PARK: (f32, f32) = (1.0, 1.0);
 pub async fn settled(drv: &mut Driver) -> Dump {
     drv.wait_for("the first round trip", STEP, Dump::rtt_sampled).await.unwrap();
     drv.wait_for("the carets at their prompts", STEP, Dump::prompts_settled).await.unwrap();
+    at_rest(drv).await
+}
+
+/// Wait until nothing moves: two dumps a frame apart place every tile alike.
+async fn at_rest(drv: &mut Driver) -> Dump {
     let deadline = tokio::time::Instant::now().checked_add(STEP);
     let mut last = drv.dump().await.unwrap();
     loop {
@@ -137,6 +143,8 @@ const THIS_MAC: &str = "Use this Mac";
 /// Recording as `screen_recording` says, and on the tailnet.
 fn this_mac_report(screen_recording: bool) -> String {
     let health = slopty_proto::ctl::Health {
+        worker: slopty_core::WorkerId::new(),
+        server: None,
         version: "0.1.0".to_owned(),
         exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
         caps: slopty_proto::server::WorkerCaps {
@@ -453,6 +461,54 @@ async fn a_workspace_of_columns_in_both_themes() {
         .await
         .unwrap();
     golden(drv, &dir, "settings-dark").await;
+    stack.shutdown().await;
+}
+
+/// A morning after an update: the app relaunched with its worker down and none of its items
+/// kept on this device (an older build's cache does not read). The tile still stands where it
+/// was, with the worker's name and the pill saying it is reconnecting, never a gap. In both
+/// themes.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn a_tile_kept_nowhere_says_its_worker_is_away() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    let app_dir = dir.join("app");
+    stack.driver.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let shell = first_shell(&mut stack.driver).await;
+    let tile = shell.item("terminal").expect("the shell's tile").id.clone();
+    // The layout is written a moment after the shell's tile lands, and the items with it.
+    let laid_out = || {
+        std::fs::read_to_string(app_dir.join("layout.json")).is_ok_and(|l| l.contains(&tile))
+            && app_dir.join("items").exists()
+    };
+    let deadline = tokio::time::Instant::now() + STEP;
+    while !laid_out() {
+        assert!(tokio::time::Instant::now() < deadline, "the layout and the items written");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    stack.kill_app().await.unwrap();
+    stack.kill_worker().await.unwrap();
+    std::fs::remove_dir_all(app_dir.join("items")).unwrap();
+    stack.relaunch_app_unlinked().await.unwrap();
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    let away = |d: &Dump| {
+        d.a11y_node("Group", Some("e2e-worker")).is_some()
+            && d.a11y_node("Status", Some("Reconnecting\u{2026}")).is_some()
+    };
+    drv.wait_for("the tile standing with its worker away", STEP, away).await.unwrap();
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    at_rest(drv).await;
+    let frame = drv.render(&dir.join("tile-away.png")).await.unwrap();
+    assert_matches("tile-away", &frame, TOLERANCE, &artifacts_dir()).unwrap();
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    at_rest(drv).await;
+    let frame = drv.render(&dir.join("tile-away-dark.png")).await.unwrap();
+    assert_matches("tile-away-dark", &frame, TOLERANCE, &artifacts_dir()).unwrap();
     stack.shutdown().await;
 }
 

@@ -914,6 +914,22 @@ impl Stack {
     ///
     /// When the binary is missing or the app does not connect in time.
     pub async fn relaunch_app(&mut self) -> Result<()> {
+        self.relaunch_app_unlinked().await?;
+        self.driver
+            .wait_for("the relaunched app to reconnect", STARTUP, |d| {
+                d.workers.iter().any(|w| w.status == "connected")
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// [`Self::relaunch_app`] without waiting for a link: for a worker that is not there to
+    /// answer ([`Self::kill_worker`]).
+    ///
+    /// # Errors
+    ///
+    /// When the binary is missing or the app does not answer its test socket.
+    pub async fn relaunch_app_unlinked(&mut self) -> Result<()> {
         let env: Vec<(&str, &str)> =
             self.app_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         // The killed app left its socket file on disk; remove it so `wait_for_path` waits for
@@ -923,12 +939,21 @@ impl Stack {
         self.app_ix = Some(self.children.len());
         self.children.push(app);
         driver.ok(&crate::Command::Ping).await?;
-        driver
-            .wait_for("the relaunched app to reconnect", STARTUP, |d| {
-                d.workers.iter().any(|w| w.status == "connected")
-            })
-            .await?;
         self.driver = driver;
+        Ok(())
+    }
+
+    /// Kill the worker (SIGKILL, as a crash or a pulled cable would leave it) and reap it;
+    /// ptyd and its shells live on. It stays down: the app's dials are refused.
+    ///
+    /// # Errors
+    ///
+    /// When there is no worker process to kill.
+    pub async fn kill_worker(&mut self) -> Result<()> {
+        // The worker is the second child, after ptyd ([`Self::worker_pid`]).
+        let worker = self.children.get_mut(1).context("no worker process")?;
+        worker.start_kill().context("kill slopty-worker")?;
+        let _status = worker.wait().await;
         Ok(())
     }
 

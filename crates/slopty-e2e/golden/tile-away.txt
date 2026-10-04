@@ -1,0 +1,15 @@
+Window │ Slopty
+Group │ Workspace (focused)
+Button │ Navigator
+Group │ Where
+Button │ New workspace
+Button │ New
+Button │ Needs you
+Button │ More
+Group │ e2e-worker
+Heading │ e2e-worker
+Status │ Reconnecting…
+Button │ Retry now
+Group │ Status
+Status │ e2e-worker
+Status │ Connecting
