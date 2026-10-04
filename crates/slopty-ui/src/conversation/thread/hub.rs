@@ -126,6 +126,10 @@ pub struct ThreadHub {
     /// The words last searched for in this worker's threads, and what it found for them once
     /// it answered.
     searched: Option<(String, Option<ThreadHits>)>,
+    /// The words a new thread's composer opens with, by the intent that starts it.
+    seeds: HashMap<IntentId, String>,
+    /// The same, by the thread it started, until a view takes them.
+    seeded: HashMap<ThreadId, String>,
 }
 
 impl std::fmt::Debug for ThreadHub {
@@ -158,6 +162,8 @@ impl ThreadHub {
             git: GitBook::default(),
             agents: Vec::new(),
             searched: None,
+            seeds: HashMap::new(),
+            seeded: HashMap::new(),
         }
     }
 
@@ -292,9 +298,13 @@ impl ThreadHub {
         let sent = self.threads.outbox().all().iter().find(|s| s.id == done.id).cloned();
         if self.threads.done(done) {
             self.keep_outbox(cx);
+            let seed = self.seeds.remove(&done.id);
             if let Some(sent) = sent {
                 let why = turned_down(&done.outcome).filter(|_| !speaks_for_itself(&sent.intent));
                 if let Outcome::Started { thread } = done.outcome {
+                    if let Some(seed) = seed {
+                        self.seeded.insert(thread, seed);
+                    }
                     let aside = matches!(sent.intent, Intent::Aside);
                     cx.emit(HubEvent::Started {
                         from: sent.thread,
@@ -387,6 +397,25 @@ impl ThreadHub {
             cx.emit(HubEvent::Send(vec![msg]));
         }
         id
+    }
+
+    /// [`ThreadHub::intent`] for an intent that starts a thread, whose composer then opens
+    /// with `seed`.
+    pub fn intent_seeded(
+        &mut self,
+        thread: ThreadId,
+        intent: Intent,
+        seed: String,
+        cx: &mut Context<Self>,
+    ) -> IntentId {
+        let id = self.intent(thread, intent, cx);
+        self.seeds.insert(id, seed);
+        id
+    }
+
+    /// The words `thread`'s composer opens with, given once to the first view of it.
+    pub fn take_seed(&mut self, thread: ThreadId) -> Option<String> {
+        self.seeded.remove(&thread)
     }
 
     /// Let a failed intent go once the person has read why: one the thread draws itself, or

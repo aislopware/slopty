@@ -143,15 +143,9 @@ mod codex {
         let limits = json!({"method": "account/rateLimits/updated", "params": {"rateLimits": {
             "primary": {"usedPercent": 30, "windowDurationMins": 300, "resetsAt": null}}}});
         say(&mut ws, &limits).await;
-        // What the thread cost, asked once its turn ended, as Codex 0.160.0's schema shapes it.
+        // What the thread cost is never asked: what the plan bills is not knowable here.
         while let Some(msg) = next(&mut ws, &heard).await {
-            if msg["method"] == "account/usage/read" {
-                let thread = msg["params"]["threadId"].clone();
-                let usage = json!({ "id": msg["id"], "result": { "summary": {}, "threadUsage": {
-                    "threadId": thread, "estimatedUsageCreditsMicros": 41_000,
-                    "estimatedUsageUsdMicros": 82_000, "groups": [] } } });
-                say(&mut ws, &usage).await;
-            }
+            assert_ne!(msg["method"], "account/usage/read", "no cost is asked");
         }
     }
 
@@ -269,12 +263,8 @@ mod codex {
         assert!(state.meta.agent.is(AgentId::CODEX));
         assert_eq!(handle.start(id, start(&work, "Say hello.")).await, outcome, "started once");
         // What Codex's answer and the account say of the thread: its policy, its sandbox, the
-        // account's window, which names no thread, and what the thread has cost.
-        let state = until(&host, thread, |s| {
-            !s.meters.limits.is_empty() && s.meters.cost_micro_usd.is_some()
-        })
-        .await;
-        assert_eq!(state.meters.cost_micro_usd, Some(82_000));
+        // account's window, which names no thread.
+        let state = until(&host, thread, |s| !s.meters.limits.is_empty()).await;
         assert_eq!(state.meters.mode.as_deref(), Some("on-request"));
         assert_eq!(state.meta.facts.get("sandbox").map(String::as_str), Some("readOnly"));
         assert_eq!(state.meters.limits[0].name, "five-hour");
@@ -295,10 +285,10 @@ mod codex {
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0]["params"]["input"][0]["text"], "Say hello.");
         assert_eq!(turns[0]["params"]["threadId"], native.as_str());
-        let reads: Vec<&Value> =
-            sent.iter().filter(|m| m["method"] == "account/usage/read").collect();
-        assert_eq!(reads.len(), 1, "read once, as the turn ended: {sent:?}");
-        assert_eq!(reads[0]["params"], json!({ "threadId": native }));
+        assert!(
+            !sent.iter().any(|m| m["method"] == "account/usage/read"),
+            "no spend is asked: {sent:?}"
+        );
     }
 
     /// A server task's thread is asked of Codex with the seat's variables set in the commands it
@@ -765,7 +755,8 @@ mod codex {
             })
         };
         let at = (0..state.turns.len()).find(|n| asked(&state, *n).is_some()).unwrap();
-        let (turn, prompt) = (state.turns[at].id, asked(&state, at).unwrap());
+        let turn = state.turns[at].id;
+        assert!(asked(&state, at).is_some(), "a message of the person's to edit");
         let kept_before = state.turns.len();
 
         let edit = |id| {
@@ -828,11 +819,10 @@ mod codex {
         let held = git(&work, None, &["show", &format!("{rewound}:new.txt")]);
         assert_eq!(held, "made by the turn", "what the folder held first is kept");
 
-        let state = until(&host, branch, |s| s.pending.len() == 1).await;
+        let state = until(&host, branch, |s| s.meta.forked_from.is_some()).await;
         let shared_turn = (at > 0).then(|| host.state(thread).unwrap().0.turns[at - 1].id);
         assert_eq!(state.meta.forked_from, Some(Fork { thread, turn: shared_turn }));
-        assert_eq!(state.pending[0].delivery, Delivery::Draft);
-        assert_eq!(state.pending[0].text, prompt, "the turn's message, back to be edited");
+        assert!(state.pending.is_empty(), "the turn's message goes to the client's composer");
         assert_eq!(host.state(thread).unwrap().0.turns.len(), kept_before, "the old thread kept");
         let mut sent = Vec::new();
         while let Ok(msg) = heard.try_recv() {
@@ -1226,9 +1216,9 @@ mod codex {
         polled(&host, thread, held).await;
 
         revert.send(()).unwrap();
-        let sent = until_sent(&mut heard, "account/usage/read").await;
+        let sent = until_sent(&mut heard, "thread/goal/get").await;
         let methods: Vec<&str> = sent.iter().filter_map(|m| m["method"].as_str()).collect();
-        let read = ["thread/resume", "thread/goal/get", "account/usage/read"];
+        let read = ["thread/resume", "thread/goal/get"];
         assert_eq!(methods, read, "read again, and the turn still runs: nothing sent");
         let (state, _) = host.state(thread).unwrap();
         assert_eq!(state.turns.len(), 2, "as the re-read says");

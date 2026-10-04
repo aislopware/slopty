@@ -41,7 +41,7 @@ use slopty_proto::thread::{
 
 use super::rpc;
 use crate::attach::Attached;
-use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
+use crate::driven::{OUTPUT, PROSE, caps, choice, title_of, tool};
 
 /// What every ACP agent can do through Slopty.
 ///
@@ -554,9 +554,6 @@ impl Session {
                 let mut meters = self.meters.clone();
                 meters.context_tokens = Some(usage.used);
                 meters.context_window = Some(usage.size);
-                if let Some(cost) = usage.cost.as_ref().filter(|c| c.currency == "USD") {
-                    meters.cost_micro_usd = Some(micro_usd(cost.amount));
-                }
                 self.meters_now(meters)
             }
             other => {

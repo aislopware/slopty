@@ -1,24 +1,21 @@
 //! A thread gone on from in a new one, on another agent or on its own afresh
 //! ([`Intent::Continue`](slopty_proto::thread::wire::Intent::Continue)).
 //!
-//! The new thread starts with nothing sent. A portable account of the old one
-//! ([`slopty_agent::handoff`]) waits on the worker as its first message, a draft the person
-//! reads, changes and sends ([`schedule::draft`]): no word reaches the agent behind them. The
-//! new thread says which one it went on from ([`Host::forked`]), through the old one's last
-//! turn.
+//! The new thread starts with nothing sent, and nothing reaches the agent behind the person:
+//! the client that asked puts a pointer to the old thread in the new one's composer. The new
+//! thread says which one it went on from ([`Host::forked`]), through the old one's last turn.
 
 use std::future::Future;
 
-use slopty_agent::handoff;
 use slopty_proto::thread::wire::{Outcome, Start};
 use slopty_proto::thread::{AgentId, Cap, Fork, IntentId, ThreadId};
 
-use super::{Host, schedule};
+use super::Host;
 
 /// Go on from thread `from` in a new one on `agent` for intent `id`, once.
 ///
 /// `begin` starts it as a client's start goes. A repeat of the id starts nothing again, and
-/// finishes what the first may not have: its draft and where it came from.
+/// finishes what the first may not have: where it came from.
 pub async fn carry<F, Fut>(
     host: &Host,
     from: ThreadId,
@@ -47,10 +44,6 @@ where
     };
     if let Outcome::Started { thread } = outcome {
         host.forked(thread, Fork { thread: from, turn: state.last_turn().map(|t| t.id) });
-        let text = handoff::render(&state, handoff::BUDGET);
-        if schedule::draft(host, thread, id, text).is_none() {
-            tracing::warn!(%from, %thread, "the thread gone on in left before its draft was kept");
-        }
     }
     outcome
 }

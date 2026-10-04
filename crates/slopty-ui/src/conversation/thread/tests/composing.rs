@@ -433,7 +433,7 @@ fn command_return_queues_and_option_up_edits_the_last_waiting(cx: &mut TestAppCo
 }
 
 /// A press on the meter opens its panel in the tray: the context, each window with its reset,
-/// what the session cost, and "Compact context" where the agent compacts through Slopty.
+/// and "Compact context" where the agent compacts through Slopty. No dollar figure is shown.
 #[gpui::test]
 fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
@@ -441,7 +441,6 @@ fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
     state.meta.caps.push(Cap::named(Cap::COMPACT));
     state.meters.context_tokens = Some(50_000);
     state.meters.context_window = Some(200_000);
-    state.meters.cost_micro_usd = Some(1_234_567);
     state.meters.limits =
         vec![Limit { name: "five-hour".to_owned(), used_bp: 4_200, resets_ms: None }];
     let thread = state.meta.id;
@@ -458,7 +457,7 @@ fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("thread-meter-panel").is_some(), "the panel is open");
     let tree = cx.update(|window, _cx| crate::a11y::tree(window));
     let words: Vec<_> = tree.iter().filter_map(|n| n.label.clone()).collect();
-    assert!(words.iter().any(|w| w.contains("$1.24 this session")), "{words:?}");
+    assert!(!words.iter().any(|w| w.contains('$')), "{words:?}");
     assert!(words.iter().any(|w| w.contains("Five hour 42%")), "{words:?}");
     let compact = cx.debug_bounds("thread-compact").expect("Compact context").center();
     cx.simulate_click(compact, Modifiers::none());

@@ -2379,9 +2379,9 @@ mod ctl {
     use serde::de::DeserializeOwned;
     use slopty_core::{DisplayId, SessionId, WallMs, WindowId, WorkerId};
     use slopty_proto::ctl::{
-        CtlReply, CtlRequest, Decision, Health, InboxAt, LtrStats, PasteboardAccess,
+        CtlReply, CtlRequest, Decision, Health, InboxAt, LinkState, LtrStats, PasteboardAccess,
         PermissionAnswer, PermissionAsk, Quantiles, ReportsAsk, ScreenStats, ScreenSummary,
-        Tailscale,
+        ServerHealth, Tailscale,
     };
     use slopty_proto::screen::{CaptureTarget, VideoCodec};
     use slopty_proto::server::{Os, WorkerCaps};
@@ -2419,6 +2419,11 @@ mod ctl {
 
     fn health() -> Health {
         Health {
+            worker: WorkerId::from_uuid(Uuid::from_u128(0x77)),
+            server: Some(ServerHealth {
+                address: "127.0.0.1:45560".to_owned(),
+                link: LinkState::Linked,
+            }),
             version: "0.1.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
             caps: WorkerCaps {
@@ -2522,6 +2527,16 @@ mod ctl {
         );
         snap("ctl_reply_doctor", &CtlReply::Doctor(Box::new(health())));
         snap("ctl_health_without_tailscale", &Health { tailscale: Tailscale::Absent, ..health() });
+        snap("ctl_health_unregistered", &Health { server: None, ..health() });
+        let links = [
+            LinkState::Dialling,
+            LinkState::Linked,
+            LinkState::Redialling { why: "connection refused".to_owned() },
+            LinkState::Refused {
+                why: "the tailnet policy does not grant this machine the worker role".to_owned(),
+            },
+        ];
+        snap("ctl_server_links", &links.to_vec());
         snap("ctl_tailscale_down", &Tailscale::Down { backend: BackendState::NeedsLogin });
         let error = "tailscale's local API did not answer within 2s".to_owned();
         snap("ctl_tailscale_unreachable", &Tailscale::Unreachable { error });

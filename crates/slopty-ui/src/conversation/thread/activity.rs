@@ -163,10 +163,7 @@ impl<'a> Activity<'a> {
                 if !s.failed()
                     && matches!(
                         delivery,
-                        Delivery::Queue
-                            | Delivery::Interrupt
-                            | Delivery::At { .. }
-                            | Delivery::Draft
+                        Delivery::Queue | Delivery::Interrupt | Delivery::At { .. }
                     ) =>
             {
                 Some(Queued {

@@ -1139,7 +1139,7 @@ fn a_board_opens_onto_what_changed_since_you_last_looked(cx: &mut TestAppContext
 
 /// The board says what the project spent: its time at work in the header with the
 /// orchestrator's share apart on hover, each row's time, and, once the agents' threads hand
-/// their meters over, a row's cost, a context nearly full, and the plan's rate windows. A
+/// their meters over, a context nearly full and the plan's rate windows. A
 /// thread that goes takes its meters with it.
 #[gpui::test]
 fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
@@ -1175,7 +1175,6 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     assert!(said.iter().any(|l| l.ends_with("worked 12m")), "{said:?}");
 
     let meters = Meters {
-        cost_micro_usd: Some(1_250_000),
         context_tokens: Some(170_000),
         context_window: Some(200_000),
         limits: vec![Limit { name: "five-hour".to_owned(), used_bp: 8_100, resets_ms: None }],
@@ -1189,7 +1188,7 @@ fn the_board_says_what_its_agents_spent(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("project-cost").is_none(), "no dollar meter");
     let said = labels(&view, cx);
     assert!(said.iter().any(|l| l == "5-hour 81%"), "{said:?}");
-    assert!(said.iter().any(|l| l.ends_with("worked 12m, $1.25, context 85%")), "{said:?}");
+    assert!(said.iter().any(|l| l.ends_with("worked 12m, context 85%")), "{said:?}");
 
     view.update_in(cx, |v, _w, cx| v.thread_meters(agent, None, cx));
     cx.run_until_parked();

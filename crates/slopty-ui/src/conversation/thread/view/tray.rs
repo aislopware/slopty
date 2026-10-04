@@ -270,14 +270,11 @@ impl ThreadView {
         groups.push(
             paused
                 .into_iter()
-                .chain(bar.queue.iter().map(|q| {
-                    let draft = (q.delivery == Delivery::Draft && q.on_worker)
-                        .then(|| self.draft_card(q, cx))
-                        .flatten();
-                    draft.unwrap_or_else(|| {
-                        self.queued_line(q, bar.can_withdraw, bar.can_promote, cx)
-                    })
-                }))
+                .chain(
+                    bar.queue
+                        .iter()
+                        .map(|q| self.queued_line(q, bar.can_withdraw, bar.can_promote, cx)),
+                )
                 .collect(),
         );
         if !bar.background.is_empty() {
@@ -452,7 +449,9 @@ impl ThreadView {
                         )
                         .on_click(cx.listener(move |this, _ev, _w, cx| {
                             this.dismiss(id, cx);
-                            let _id = this.intent(Intent::Rewind { turn, files: false }, cx);
+                            let seed =
+                                this.state(cx).and_then(|st| super::branch::message_of(st, turn));
+                            this.start(Intent::Rewind { turn, files: false }, seed, cx);
                         })),
                     )
                 },
@@ -936,10 +935,10 @@ impl ThreadView {
             (None, false, ..) if queued.delivery == Delivery::Interrupt => {
                 Some("Stopping the turn to send".to_owned())
             }
-            (None, false, ..) if !super::later::kept(queued.delivery) => Some("Sending".to_owned()),
+            (None, false, ..) if !queued.delivery.is_kept() => Some("Sending".to_owned()),
             (None, ..) => super::later::when_words(queued.delivery, slopty_core::WallMs::now()),
         };
-        let scheduled = super::later::kept(queued.delivery);
+        let scheduled = queued.delivery.is_kept();
         let open = can_change && queued.on_worker && !queued.withdrawing;
         let editable = open && !queued.going && !self.composing.editing();
         // The words the composer takes: a refused change's, so they are not lost.
@@ -1071,7 +1070,7 @@ impl ThreadView {
     }
 
     /// The meter's panel: a line for the context and each of the plan's windows with when it
-    /// resets, what the session cost, and "Compact context" where the agent compacts through
+    /// resets, and "Compact context" where the agent compacts through
     /// Slopty's door ([`Cap::COMPACT`]). Compacting is the person's press, never Slopty's.
     fn meter_panel(
         &self,
@@ -1080,8 +1079,7 @@ impl ThreadView {
     ) -> AnyElement {
         let s = self.theme.surfaces;
         let meters = &state.meters;
-        let mut lines = super::composer::meter_words(meters);
-        lines.extend(meters.cost_micro_usd.map(spent));
+        let lines = super::composer::meter_words(meters);
         let compact = super::composing::compacts(state).then(|| {
             self.button("thread-compact", "Compact context", ButtonKind::Ghost).on_click(
                 cx.listener(|this, _ev, _w, cx| {
@@ -1284,13 +1282,6 @@ fn answer_mark(
         Effect::Deny => Some((IconName::X, quiet.then_some(s.error))),
         Effect::Answer => None,
     }
-}
-
-/// What a session cost, from millionths of a US dollar: "$1.23 this session", a cent at least
-/// once anything was spent.
-fn spent(micro_usd: u64) -> String {
-    let cents = micro_usd.div_ceil(10_000);
-    format!("${}.{:02} this session", cents / 100, cents % 100)
 }
 
 #[cfg(test)]

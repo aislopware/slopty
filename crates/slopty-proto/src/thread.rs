@@ -550,12 +550,11 @@ pub struct Changed {
     pub removed: u32,
 }
 
-/// What a turn used, by kind: the tokens, and what they cost where the agent says it.
+/// What a turn used, by kind: the tokens.
 ///
 /// Open: each agent counts its own (Claude Code reads and writes a cache, Codex counts
-/// reasoning), so the kinds are keys, with the common ones named here.
-/// [`Usage::COST_MICRO_USD`] is not a token count, so a sum of tokens leaves it out
-/// ([`Usage::tokens`]).
+/// reasoning), so the kinds are keys, with the common ones named here. No dollar figure is
+/// kept: what the person's plan bills is not knowable without their credentials.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Usage(pub BTreeMap<String, u64>);
 
@@ -564,8 +563,6 @@ impl Usage {
     pub const CACHE_READ: &'static str = "cache-read";
     /// Input tokens written to the prompt cache.
     pub const CACHE_WRITE: &'static str = "cache-write";
-    /// What the turn cost, in millionths of a US dollar.
-    pub const COST_MICRO_USD: &'static str = "cost-micro-usd";
     /// Tokens read as input.
     pub const INPUT: &'static str = "input";
     /// Tokens written.
@@ -579,13 +576,10 @@ impl Usage {
         self.0.get(kind).copied().unwrap_or(0)
     }
 
-    /// The tokens counted, of every kind: everything but the cost.
+    /// The tokens counted, of every kind.
     #[must_use]
     pub fn tokens(&self) -> u64 {
-        self.0
-            .iter()
-            .filter(|(kind, _)| kind.as_str() != Self::COST_MICRO_USD)
-            .fold(0, |sum, (_, n)| sum.saturating_add(*n))
+        self.0.values().fold(0, |sum, n| sum.saturating_add(*n))
     }
 
     /// Add `other`'s counts to these.
@@ -989,11 +983,6 @@ pub enum Delivery {
         /// When.
         at_ms: WallMs,
     },
-    /// On the person's word alone: a draft held on the worker, through a restart, never sent
-    /// on its own. Sending it ([`wire::Intent::Promote`]) queues it; it can be changed or
-    /// withdrawn until then ([`Cap::SCHEDULE`]). A continued thread's first message waits so
-    /// ([`wire::Intent::Continue`]).
-    Draft,
     /// Now, for an agent with no steer of its own ([`Cap::STEER`]): the worker puts the
     /// message first in the agent's queue and stops the turn under way, so it goes as that
     /// turn ends. It needs [`Cap::INTERRUPT`] and [`Cap::QUEUE`]; with no turn under way it
@@ -1002,16 +991,10 @@ pub enum Delivery {
 }
 
 impl Delivery {
-    /// Whether the worker keeps the message ([`Self::At`], [`Self::Draft`]), rather than the
-    /// agent's queue.
+    /// Whether the worker keeps the message until a moment it watches for ([`Self::At`]),
+    /// rather than the agent's queue.
     #[must_use]
     pub const fn is_kept(self) -> bool {
-        matches!(self, Self::At { .. } | Self::Draft)
-    }
-
-    /// Whether the message goes on its own at a moment the worker watches for ([`Self::At`]).
-    #[must_use]
-    pub const fn is_scheduled(self) -> bool {
         matches!(self, Self::At { .. })
     }
 }
@@ -1092,7 +1075,7 @@ impl BackgroundTask {
     }
 }
 
-/// A thread's meters: its model, context and spend.
+/// A thread's meters: its model, context and plan windows.
 #[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Meters {
     /// The model's name for people.
@@ -1108,8 +1091,6 @@ pub struct Meters {
     pub context_tokens: Option<u64>,
     /// The context window.
     pub context_window: Option<u64>,
-    /// What the session cost, in millionths of a US dollar.
-    pub cost_micro_usd: Option<u64>,
     /// The plan's rate windows.
     pub limits: Vec<Limit>,
 }

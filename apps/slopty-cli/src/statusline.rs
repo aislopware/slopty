@@ -2,9 +2,9 @@
 //! `--settings` (`slopty_agent::hooks::with_relay`).
 //!
 //! Claude Code runs it after each assistant message with its status-line JSON on stdin. It
-//! forwards the meters the conversation face shows (context used, cost, rate limits, model,
-//! session) to the worker as a `Statusline` hook, the same way the relay posts hooks, and runs
-//! the person's own status-line command with the same input, printing exactly what that prints.
+//! forwards the meters the conversation face shows (context used, rate limits, model, session)
+//! to the worker as a `Statusline` hook, the same way the relay posts hooks, and runs the
+//! person's own status-line command with the same input, printing exactly what that prints.
 //! The two run side by side, and the forward gives up after [`FORWARD_TIMEOUT`], so a slow or
 //! absent worker never holds the line back. Whose command runs is decided as
 //! `slopty_agent::statusline` describes; with none, the line is empty, as it was.
@@ -151,7 +151,7 @@ mod tests {
         let session = slopty_core::SessionId::new();
         let status = json!({
             "session_id": "abc", "model": {"id": "claude-opus-5-5", "display_name": "Opus"},
-            "context_window": {"used_percentage": 42.5}, "cost": {"total_cost_usd": 1.25},
+            "context_window": {"used_percentage": 42.5},
         });
         forward(&socket, session, &status).await;
         let CtlRequest::Hook { session: posted, payload } = worker.await.expect("worker") else {
@@ -161,10 +161,7 @@ mod tests {
         let hook = slopty_agent::Hook::parse(&payload).expect("hook");
         assert_eq!(hook.event, slopty_agent::HookEvent::Statusline);
         let meters = hook.meters.expect("meters");
-        assert_eq!(
-            (meters.model.as_deref(), meters.context_used_pct, meters.cost_usd),
-            (Some("Opus"), Some(42.5), Some(1.25))
-        );
+        assert_eq!((meters.model.as_deref(), meters.context_used_pct), (Some("Opus"), Some(42.5)));
 
         // No worker at all: the forward gives up at once and the line is not held.
         let started = std::time::Instant::now();

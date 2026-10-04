@@ -878,8 +878,6 @@ pub struct Meters {
     pub context_used_pct: Option<f64>,
     /// The context window, in tokens.
     pub context_window: Option<u64>,
-    /// The session's cost so far, in US dollars, as Claude Code estimates it.
-    pub cost_usd: Option<f64>,
     /// The five-hour rate limit (subscribers only).
     pub five_hour: Option<RateWindow>,
     /// The seven-day rate limit.

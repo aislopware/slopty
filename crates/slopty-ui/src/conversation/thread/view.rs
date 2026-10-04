@@ -110,7 +110,6 @@ mod branch;
 mod composer;
 mod composing;
 pub mod denying;
-mod drafts;
 mod finding;
 mod goal;
 #[cfg(test)]
@@ -238,8 +237,6 @@ pub struct ThreadView {
     copied_clear: Option<Task<()>>,
     /// The commit sheet over the tile, while it is open.
     commit: Option<(Entity<CommitSheet>, Subscription)>,
-    /// A field for each draft the worker holds.
-    drafts: drafts::Drafts,
     /// The "Branch from here" panel open under a message, and its settings.
     branching: Option<branch::Branching>,
     /// The find bar, while it is open.
@@ -371,7 +368,6 @@ impl ThreadView {
             copied: None,
             copied_clear: None,
             commit: None,
-            drafts: drafts::Drafts::default(),
             branching: None,
             finder: None,
             aside: None,
@@ -381,6 +377,9 @@ impl ThreadView {
             _subscriptions: vec![composing, hearing, watching],
         };
         view.hub.update(cx, |hub, cx| hub.open(thread, cx));
+        if let Some(seed) = view.hub.update(cx, |hub, _cx| hub.take_seed(thread)) {
+            view.set_draft(&seed, seed.len(), window, cx);
+        }
         view.rebuild(cx);
         view
     }
@@ -1914,7 +1913,6 @@ impl Render for ThreadView {
         self.renders = self.renders.saturating_add(1);
         self.settle_edit(window, cx);
         self.settle_questions(window, cx);
-        self.settle_drafts(window, cx);
         self.marks.set(self.read_marks(cx));
         self.count_unseen(cx);
         // The list lays out after this render: what its scroll then says is read once the

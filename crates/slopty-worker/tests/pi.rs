@@ -14,7 +14,6 @@ mod pi {
     use std::time::Duration;
 
     use serde_json::Value;
-    use slopty_agent::handoff;
     use slopty_core::{ClientId, SessionId, WallMs};
     use slopty_proto::thread::detail::Clipped;
     use slopty_proto::thread::wire::{Intent, Outcome, Pick, Start};
@@ -493,7 +492,7 @@ mod pi {
         };
         assert_eq!(schedule::act(&rig.host, thread, later, &send), Some(Outcome::Accepted));
         let state = rig.until(thread, "it waits on the worker", |s| s.pending.len() == 1).await;
-        assert!(state.pending[0].delivery.is_scheduled());
+        assert!(state.pending[0].delivery.is_kept());
         assert_eq!(state.turns.len(), 1, "not before its time");
 
         let state = rig.until(thread, "the scheduled message's ask", asking(1)).await;
@@ -506,11 +505,11 @@ mod pi {
     }
 
     /// A Claude Code thread goes on in pi: pi starts with nothing sent, once per intent, and the
-    /// new thread says where it came from. Its first message, the old thread's portable account,
-    /// waits on the worker as a draft; the person changes it and sends it, and it goes to pi as
-    /// their message. A thread with nothing in it, or whose agent cannot, is not gone on from.
+    /// new thread says where it came from. Nothing waits on the worker for it; the person's
+    /// first message goes to pi as any message does. A thread with nothing in it, or whose agent
+    /// cannot, is not gone on from.
     #[tokio::test]
-    async fn a_claude_code_thread_goes_on_in_pi_from_a_draft_the_person_sends() {
+    async fn a_claude_code_thread_goes_on_in_pi_with_the_persons_first_message() {
         let rig = Rig::new();
         let (pi, _served) = rig.serve();
         let meta = ThreadMeta {
@@ -593,33 +592,20 @@ mod pi {
         };
         let again = carry(&rig.host, from, id, pi_agent, not_started).await;
         assert_eq!(again, Outcome::Started { thread }, "once");
-        let state = rig.until(thread, "the draft waits", |s| s.pending.len() == 1).await;
+        let state = rig.until(thread, "it begins", |s| s.meta.forked_from.is_some()).await;
         assert_eq!(state.meta.agent, AgentId::named(AgentId::PI));
         assert_eq!(state.meta.forked_from, Some(Fork { thread: from, turn: Some(TurnId(1)) }));
         assert!(state.turns.is_empty(), "nothing sent");
-        let draft = state.pending[0].clone();
-        assert_eq!((draft.intent, draft.delivery), (schedule::drafted_as(id), Delivery::Draft));
-        let (old, _) = rig.host.state(from).unwrap();
-        assert_eq!(draft.text, handoff::render(&old, handoff::BUDGET));
-        assert!(draft.text.contains("Fix the parser.") && draft.text.contains("Fixed it."));
+        assert!(
+            state.pending.is_empty(),
+            "nothing waits on the worker: the client fills its composer"
+        );
 
-        let (sending, host, by) = (pi.clone(), rig.host.clone(), rig.by());
-        let fire: schedule::Fire = Arc::new(move |thread, id, intent| {
-            let decide = |s: &ThreadState| (sending.decide(s, id, &intent, by.clone()), vec![]);
-            host.intent(thread, id, decide)
-                .unwrap_or_else(|| Outcome::Refused { reason: "gone".into() })
-        });
-        let _scheduler = schedule::spawn(rig.host.clone(), fire);
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(rig.host.state(thread).unwrap().0.pending.len(), 1, "never on its own");
-        let edit = Intent::Edit { pending: draft.intent, text: "Say hello.".to_owned() };
-        assert_eq!(schedule::act(&rig.host, thread, IntentId::new(), &edit), Some(Outcome::Done));
-        let send = Intent::Promote { pending: draft.intent };
-        assert_eq!(schedule::act(&rig.host, thread, IntentId::new(), &send), Some(Outcome::Done));
-        let state = rig.until(thread, "the draft's turn", turn_ended(1, TurnState::Complete)).await;
-        assert!(state.pending.is_empty(), "it went");
+        // The person's first message goes as any message does.
+        let sent_id = rig.send(&pi, thread, "Say hello.");
+        let state = rig.until(thread, "the first turn", turn_ended(1, TurnState::Complete)).await;
         let sent = users(&state).pop().unwrap();
-        assert_eq!(sent, ("Say hello.".to_owned(), Some(schedule::sent_as(draft.intent))));
+        assert_eq!(sent, ("Say hello.".to_owned(), Some(sent_id)));
         let record =
             rig.record_once(|r| r["heard"].as_array().is_some_and(|h| !h.is_empty())).await;
         assert_eq!(record["unexpected"], serde_json::json!([]));

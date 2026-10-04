@@ -570,11 +570,11 @@ mod tests {
         assert_eq!(texts(&seen), ["Sunday"]);
         let measure = serde_json::json!({
             "kind": "measure", "context": {"percent": 3.5, "tokens": 7000, "window": 200_000},
-            "cost": {"usd": 0.25}, "rateLimits": [],
+            "rateLimits": [],
         });
         board.reported(trusted, &[mod_event(&measure)], now);
         let meters = seen.borrow_and_update().meters.clone().expect("meters");
-        assert_eq!((meters.context_used_pct, meters.cost_usd), (Some(3.5), Some(0.25)));
+        assert_eq!((meters.context_used_pct, meters.context_window), (Some(3.5), Some(200_000)));
 
         let other = board.watch(refused);
         board.reported(refused, &[hello("0.0.1"), piece("unheard")], now);

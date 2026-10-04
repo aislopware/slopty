@@ -1,9 +1,9 @@
 //! What a project's agents spent: time at work per node and per subtree, with the
-//! orchestrator's share apart, and from each agent's thread meters its cost, its context and
-//! the plan's quota.
+//! orchestrator's share apart, and from each agent's thread meters its context and the plan's
+//! quota.
 //!
 //! Time comes from the server, which follows every agent's status
-//! ([`slopty_proto::project::Spent`]), so it is there for every node on every worker. Cost, context
+//! ([`slopty_proto::project::Spent`]), so it is there for every node on every worker. Context
 //! and quota come from the agents' own threads ([`Meters`]), handed to the board by session as this
 //! client hears them; a node whose thread it has not heard shows its time alone.
 
@@ -29,10 +29,6 @@ pub struct NodeSpend {
     pub own_ms: u64,
     /// With every task split from it, at any depth.
     pub subtree_ms: u64,
-    /// Its agent's session cost, in millionths of a US dollar, when its thread says.
-    pub own_cost: Option<u64>,
-    /// With what its subtree's threads say, when any of them says.
-    pub subtree_cost: Option<u64>,
     /// How full its agent's context is, in hundredths of a percent, when its thread says.
     pub context_bp: Option<u32>,
 }
@@ -80,7 +76,7 @@ impl Board {
     }
 
     /// The meters of `node`'s last agent, when its thread has said them: an ended agent's
-    /// last word still says what it cost.
+    /// last word still says how full its context was.
     fn meters<'m>(&self, node: Node, meters: &'m MetersBySession) -> Option<&'m Meters> {
         let session = match node {
             None => self.project.orchestrator?.session,
@@ -97,10 +93,8 @@ impl Board {
             None => self.project.orchestrator_spent.at(now),
             Some(task) => self.tasks.get(&task).map_or(0, |c| c.spent.at(now)),
         };
-        let mine = self.meters(node, meters);
-        let own_cost = mine.and_then(|m| m.cost_micro_usd);
-        let context_bp = mine.and_then(context_bp);
-        NodeSpend { own_ms, subtree_ms: own_ms, own_cost, subtree_cost: own_cost, context_bp }
+        let context_bp = self.meters(node, meters).and_then(context_bp);
+        NodeSpend { own_ms, subtree_ms: own_ms, context_bp }
     }
 
     /// What the project spent as of `now`.
@@ -146,13 +140,6 @@ pub fn worked(ms: u64) -> String {
         1..60 => format!("{mins}m"),
         _ => crate::kit::duration(std::time::Duration::from_secs(mins.saturating_mul(60))),
     }
-}
-
-/// A cost in US dollars, to the cent: "$0.42", "$12.08".
-#[must_use]
-pub fn dollars(micro_usd: u64) -> String {
-    let cents = micro_usd.saturating_add(5_000) / 10_000;
-    format!("${}.{:02}", cents / 100, cents % 100)
 }
 
 /// A rate window's name and use, as the header says it: "5-hour 42%".

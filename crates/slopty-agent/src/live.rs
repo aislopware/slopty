@@ -114,7 +114,7 @@ pub enum ModEvent {
         #[serde(rename = "turnId")]
         turn: String,
     },
-    /// The session's context and cost.
+    /// The session's context.
     #[serde(rename = "measure")]
     Measure(Measure),
     /// `session.end`.
@@ -191,9 +191,6 @@ pub struct Measure {
     /// The context window.
     #[serde(default)]
     pub context: Option<Context>,
-    /// The session's cost.
-    #[serde(default)]
-    pub cost: Option<Cost>,
 }
 
 /// The context window, as measured.
@@ -205,25 +202,15 @@ pub struct Context {
     pub window: u64,
 }
 
-/// The session's cost so far.
-#[derive(Clone, Copy, Debug, PartialEq, Deserialize)]
-pub struct Cost {
-    /// In US dollars, as Claude Code estimates it.
-    pub usd: f64,
-}
-
 impl Measure {
-    /// `meters` with what this measured: the context and the cost, sooner than the status
-    /// line has them. The model and the rate limits stay the status line's.
+    /// `meters` with what this measured: the context, sooner than the status line has it. The
+    /// model and the rate limits stay the status line's.
     #[must_use]
     pub fn onto(&self, meters: Option<Meters>) -> Meters {
         let mut meters = meters.unwrap_or_default();
         if let Some(context) = self.context {
             meters.context_used_pct = Some(context.percent);
             meters.context_window = Some(context.window);
-        }
-        if let Some(cost) = self.cost {
-            meters.cost_usd = Some(cost.usd);
         }
         meters
     }

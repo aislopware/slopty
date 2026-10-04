@@ -290,21 +290,14 @@ fn a_call_settles_by_its_id_and_a_long_answer_by_its_head() {
     assert_eq!(settled, [Live::Clear { id: id("t", 0, 0) }, Live::Clear { id: id("t", 0, 1) }]);
 }
 
-/// The measure's context and cost go onto the status line's meters, which keep the rest.
+/// The measure's context goes onto the status line's meters, which keep the rest.
 #[test]
 fn a_measure_updates_the_meters() {
-    let measure = Measure {
-        context: Some(Context { percent: 12.5, window: 200_000 }),
-        cost: Some(Cost { usd: 0.5 }),
-    };
-    let status =
-        Meters { model: Some("Opus".to_owned()), cost_usd: Some(0.1), ..Meters::default() };
+    let measure = Measure { context: Some(Context { percent: 12.5, window: 200_000 }) };
+    let status = Meters { model: Some("Opus".to_owned()), ..Meters::default() };
     let meters = measure.onto(Some(status));
     assert_eq!(meters.model.as_deref(), Some("Opus"));
-    assert_eq!(
-        (meters.context_used_pct, meters.context_window, meters.cost_usd),
-        (Some(12.5), Some(200_000), Some(0.5))
-    );
+    assert_eq!((meters.context_used_pct, meters.context_window), (Some(12.5), Some(200_000)));
     assert_eq!(Measure::default().onto(None), Meters::default());
 }
 

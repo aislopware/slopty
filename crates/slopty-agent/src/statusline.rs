@@ -1,8 +1,8 @@
 //! Claude Code's status line, as Slopty reads it.
 //!
 //! Claude Code runs a status-line command after each assistant message (debounced 300 ms) with
-//! JSON on stdin: the model, how full the context window is, the session's cost, the rate
-//! limits. An agent Slopty starts gets a wrapper in that place (`slopty hook statusline`, put on
+//! JSON on stdin: the model, how full the context window is, the rate limits (its cost is not
+//! read). An agent Slopty starts gets a wrapper in that place (`slopty hook statusline`, put on
 //! `--settings` by [`crate::hooks::with_relay`]). The wrapper forwards the [`Meters`] to the
 //! worker as a [`HookEvent::Statusline`] hook, the same way the relay posts hooks, then runs the
 //! person's own status-line command and passes its output through unchanged, so their line
@@ -48,7 +48,6 @@ pub fn meters(status: &Value) -> Meters {
         model_id: text("/model/id"),
         context_used_pct: at("/context_window/used_percentage").and_then(Value::as_f64),
         context_window: at("/context_window/context_window_size").and_then(Value::as_u64),
-        cost_usd: at("/cost/total_cost_usd").and_then(Value::as_f64),
         five_hour: window("five_hour"),
         seven_day: window("seven_day"),
     }
@@ -208,7 +207,6 @@ mod tests {
                 model_id: Some("claude-opus-5-5".into()),
                 context_used_pct: Some(8.0),
                 context_window: Some(200_000),
-                cost_usd: Some(0.012_34),
                 five_hour: Some(RateWindow { used_pct: 23.5, resets_at: Some(1_738_425_600) }),
                 seven_day: Some(RateWindow { used_pct: 41.2, resets_at: None }),
             })

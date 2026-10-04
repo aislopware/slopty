@@ -75,24 +75,6 @@ pub fn reset_of_full(limits: &[slopty_proto::thread::Limit]) -> Option<WallMs> {
     full.into_iter().flatten().max()
 }
 
-/// Dollars as millionths of one, rounded; nothing below zero.
-#[must_use]
-pub fn micro_usd(dollars: f64) -> u64 {
-    let micro = (dollars * 1_000_000.0).round();
-    if micro.is_finite() && micro > 0.0 {
-        // In range by the check above; a cost past u64 is no cost an agent reports.
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "checked finite and positive; saturates past u64"
-        )]
-        let micro = micro as u64;
-        micro
-    } else {
-        0
-    }
-}
-
 /// The thread `state` of an agent that ended unheard, as when the worker that ran it stopped.
 ///
 /// Its requests are no longer asked, its calls are cancelled, the turn under way ends stopped,

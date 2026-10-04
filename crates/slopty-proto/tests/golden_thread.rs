@@ -246,7 +246,6 @@ mod golden_thread {
             effort: Some("high".to_owned()),
             context_tokens: Some(42_000),
             context_window: Some(200_000),
-            cost_micro_usd: Some(250_000),
             limits: vec![Limit {
                 name: "five-hour".to_owned(),
                 used_bp: 1_250,
@@ -384,14 +383,6 @@ mod golden_thread {
             &send(Intent::Send {
                 text: "Run the nightly checks".to_owned(),
                 delivery: Delivery::At { at_ms: ms(1_800_000) },
-                attachments: Vec::new(),
-            }),
-        );
-        snap(
-            "intent_send_draft",
-            &send(Intent::Send {
-                text: "Go on from where it stopped".to_owned(),
-                delivery: Delivery::Draft,
                 attachments: Vec::new(),
             }),
         );

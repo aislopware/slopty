@@ -5,7 +5,7 @@
 //! it, and the one moment worth waiting for is a limit's reset, which the agent names
 //! (`TurnState::Failed::until_ms`). The thread says so over the field, and one press sends the
 //! draft, or "Continue" when nothing is typed, to go at that moment. The tray says when it
-//! goes, as it says a draft is one.
+//! goes.
 
 use gpui::accesskit::Role;
 use gpui::{
@@ -25,18 +25,11 @@ use crate::kit::ButtonKind;
 /// What goes at a limit's reset when nothing is typed.
 const CONTINUE: &str = "Continue";
 
-/// Whether a message sent as `delivery` is kept on the worker until its moment or the
-/// person's word, rather than given to the agent's queue.
-pub(super) const fn kept(delivery: Delivery) -> bool {
-    matches!(delivery, Delivery::At { .. } | Delivery::Draft)
-}
-
 /// When a message held for `delivery` goes, in words for a line of its own: "14:35",
-/// "Tomorrow 09:00", "Draft". Nothing for a message that goes with the turn.
+/// "Tomorrow 09:00". Nothing for a message that goes with the turn.
 pub(super) fn when_words(delivery: Delivery, now: WallMs) -> Option<String> {
     match delivery {
         Delivery::At { at_ms } => figures::stamp(at_ms, now),
-        Delivery::Draft => Some("Draft".to_owned()),
         Delivery::Steer | Delivery::Queue | Delivery::Interrupt => None,
     }
 }
@@ -115,14 +108,13 @@ mod tests {
     use crate::conversation::figures;
     use crate::conversation::thread::fixtures;
 
-    /// What waits says when it goes, or that it is a draft.
+    /// What waits says when it goes.
     #[test]
     fn a_held_message_says_when_it_goes() {
         let now = WallMs::now();
         let soon = WallMs::from_millis(now.as_millis() + 60_000);
         let clock = figures::stamp(soon, now).expect("a time");
         assert_eq!(when_words(Delivery::At { at_ms: soon }, now), Some(clock));
-        assert_eq!(when_words(Delivery::Draft, now).as_deref(), Some("Draft"));
         assert_eq!(when_words(Delivery::Queue, now), None);
     }
 

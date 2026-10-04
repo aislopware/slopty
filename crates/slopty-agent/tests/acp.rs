@@ -249,7 +249,6 @@ mod tests {
         assert_eq!(state.meters.model_id.as_deref(), Some("canned/canned-1"));
         assert_eq!(state.meters.mode.as_deref(), Some("build"));
         assert_eq!(state.meters.context_window, Some(200_000));
-        assert_eq!(state.meters.cost_micro_usd, Some(128_000), "the session's cost so far");
         assert_eq!(state.commands.len(), 3);
 
         let ends: Vec<&TurnState> = state.turns.iter().map(|t| &t.state).collect();

@@ -1,5 +1,5 @@
-//! Carrying a thread on: a branch from a message on any agent, the account or the message waiting
-//! as a draft that is read and changed in place, and a message that stops the turn to go.
+//! Carrying a thread on: a branch from a message on any agent, the new thread's composer opening
+//! on the message or on a pointer back, and a message that stops the turn to go.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -8,13 +8,13 @@ use gpui::{Modifiers, TestAppContext};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Intent, IntentDone, Outcome};
 use slopty_proto::thread::{
-    AgentId, Cap, Changed, Clipped, Delivery, IntentId, Item, ItemBody, ItemId, Pending,
-    PendingState, Phase, ThreadId, Turn, TurnId, TurnState, Usage, UserMessage,
+    AgentId, Cap, Changed, Clipped, Delivery, Item, ItemBody, ItemId, Phase, ThreadId, Turn,
+    TurnId, TurnState, Usage, UserMessage,
 };
 
 use super::{hub, intents, snapshot, view};
-use crate::conversation::thread::fixtures;
 use crate::conversation::thread::hub::{HubEvent, ThreadHub};
+use crate::conversation::thread::{ThreadView, fixtures};
 
 fn turn(id: u32, state: TurnState) -> Turn {
     let ended_ms = (!matches!(state, TurnState::Active)).then(|| WallMs::from_millis(5_000));
@@ -61,14 +61,16 @@ fn open_branch(cx: &mut gpui::VisualTestContext) {
 }
 
 /// "Branch from here" offers the thread's own agent first, then the others the worker can
-/// start; another agent takes an account of the whole thread, and the thread it started is
-/// handed to the workspace to open.
+/// start; another agent starts afresh, the thread it started is handed to the workspace to
+/// open, and its composer opens on a pointer back: the old thread's id, folder and branch,
+/// and the command that reads it.
 #[gpui::test]
 fn branching_to_another_agent_carries_the_thread_over(cx: &mut TestAppContext) {
     let (hub, sent) = hub(cx, None);
     let mut state = fixtures::empty();
     let thread = state.meta.id;
     state.meta.caps = vec![Cap::named(Cap::CONTINUE), Cap::named(Cap::REWIND)];
+    state.meta.facts.insert("branch".to_owned(), "main".to_owned());
     state.turns = vec![turn(1, TurnState::Complete)];
     state.items = vec![user("u", 1)];
     let codex = AgentId::named(AgentId::CODEX);
@@ -112,40 +114,14 @@ fn branching_to_another_agent_carries_the_thread_over(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.done(&done, cx));
     cx.run_until_parked();
     assert_eq!(*started.borrow(), [(thread, new)], "the workspace is asked to open it");
-}
-
-/// A draft the worker holds stands whole in a field of its own; Send gives the agent the
-/// words as changed: the change first, then the send.
-#[gpui::test]
-fn a_draft_is_changed_in_place_and_sent(cx: &mut TestAppContext) {
-    let (hub, sent) = hub(cx, None);
-    let mut state = fixtures::empty();
-    let thread = state.meta.id;
-    let pending = IntentId::new();
-    state.pending = vec![Pending {
-        intent: pending,
-        text: "Here is where the work stands.".to_owned(),
-        attachments: Vec::new(),
-        delivery: Delivery::Draft,
-        state: PendingState::Waiting,
-    }];
-    hub.update(cx, ThreadHub::connected);
-    let (_view, cx) = view(cx, &hub, thread);
-    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
-    cx.run_until_parked();
-    let card = format!("draft-{pending}");
-    assert!(cx.debug_bounds(Box::leak(card.into_boxed_str())).is_some(), "the draft, whole");
-    let field = cx.debug_bounds("thread-tray").expect("the tray").center();
-    cx.simulate_click(field, Modifiers::none());
-    cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-end");
-    cx.simulate_input(" Go on.");
-    let send = format!("draft-send-{pending}");
-    let at = cx.debug_bounds(Box::leak(send.into_boxed_str())).expect("Send").center();
-    cx.simulate_click(at, Modifiers::none());
-    cx.run_until_parked();
-    let text = "Here is where the work stands. Go on.".to_owned();
-    assert_eq!(intents(&sent), [Intent::Edit { pending, text }, Intent::Promote { pending }]);
+    let (fresh, cx) = view(cx, &hub, new);
+    let pointer = fresh.read_with(cx, ThreadView::draft);
+    for part in [thread.to_string(), "in /w".to_owned(), "on branch main".to_owned()] {
+        assert!(pointer.contains(&part), "{part:?} in {pointer:?}");
+    }
+    assert!(pointer.contains(&format!("slopty agent read --thread {thread}")), "{pointer}");
+    let (again, cx) = view(cx, &hub, new);
+    assert_eq!(again.read_with(cx, ThreadView::draft), "", "the pointer is given once");
 }
 
 /// On an agent that takes no message mid-turn but can be stopped, "Interrupt and send" stands
@@ -242,4 +218,23 @@ fn branching_from_a_message_keeps_or_puts_back_the_files(cx: &mut TestAppContext
     );
     let refused = format!("refused-{id}");
     assert!(cx.debug_bounds(Box::leak(refused.into_boxed_str())).is_none(), "the refusal goes");
+
+    // The new thread's composer holds the message it started before, to change and send.
+    let again = sent
+        .borrow()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            slopty_proto::ClientMsg::Thread(
+                slopty_proto::thread::wire::ThreadRequest::Intent { id, .. },
+            ) => Some(*id),
+            _ => None,
+        })
+        .expect("sent again");
+    let new = ThreadId::new();
+    let done = IntentDone { id: again, outcome: Outcome::Started { thread: new } };
+    hub.update(cx, |hub, cx| hub.done(&done, cx));
+    cx.run_until_parked();
+    let (fresh, cx) = view(cx, &hub, new);
+    assert_eq!(fresh.read_with(cx, ThreadView::draft), "Count the lines");
 }

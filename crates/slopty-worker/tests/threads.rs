@@ -600,8 +600,7 @@ mod threads {
     /// A message the person schedules waits in the thread's pending list on the worker, once
     /// per intent, whatever list the agent's adapter tells, and outlives a restart; it is taken
     /// back or changed there, and one being sent as the worker stopped comes back held, never
-    /// sent twice. A draft waits for the person's word. A message cannot be scheduled on a
-    /// thread that cannot take it.
+    /// sent twice. A message cannot be scheduled on a thread that cannot take it.
     #[tokio::test]
     async fn a_scheduled_message_waits_on_the_worker_and_outlives_a_restart() {
         let dir = tempfile::tempdir().unwrap();
@@ -611,7 +610,7 @@ mod threads {
         let thread = plan.id;
         host.create(plan.clone()).unwrap();
         let at = Delivery::At { at_ms: WallMs::from_millis(u64::MAX) };
-        let after = Delivery::Draft;
+        let after = at;
         let (first, second) = (IntentId::new(), IntentId::new());
         let act = |id, intent: &Intent| schedule::act(&host, thread, id, intent);
         assert_eq!(act(first, &scheduled("Run the checks", at)), Some(Outcome::Accepted));
@@ -672,7 +671,7 @@ mod threads {
         assert_eq!(host.due(WallMs::now()).0, Vec::new(), "never sent again");
         let withdraw = Intent::Withdraw { pending: first };
         assert_eq!(schedule::act(&host, thread, IntentId::new(), &withdraw), Some(Outcome::Done));
-        // A draft goes only on the person's word.
+        // One whose moment has not come waits for it.
         assert_eq!(host.due(WallMs::now()).0, Vec::new());
         assert_eq!(pending_of(&host, thread), [waiting("Review it all", after)]);
 

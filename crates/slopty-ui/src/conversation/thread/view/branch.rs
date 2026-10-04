@@ -5,14 +5,19 @@
 //! here" on a message, and "Continue in…" in the model chip's menu. They are one choice with
 //! three settings, so they are one panel:
 //! - **Agent**: this thread's own, or another the worker can start.
-//! - **From**: this message (the new thread starts just before it, the message back as a draft) or
-//!   the end (everything so far).
+//! - **From**: this message (the new thread starts just before it, the message waiting in its
+//!   composer) or the end (everything so far).
 //! - **Files**: keep them as they are, or put them back as they were before this message.
 //!
 //! What each setting asks of the worker is the agent's own door, read from its caps
 //! ([`branch_intent`]): an edit from a turn ([`Cap::REWIND`]), a fork ([`Cap::FORK`]), or a
-//! new thread with an account of this one ([`Cap::CONTINUE`]), the only door to another agent.
-//! A setting the agent has no door for is not offered.
+//! fresh thread ([`Cap::CONTINUE`]), the only door to another agent. A setting the agent has no
+//! door for is not offered.
+//!
+//! A fresh thread carries nothing over itself. Its composer opens on a short pointer back
+//! ([`pointer`]): the old thread's id, folder and branch, and the command that reads it. The
+//! new agent reads what it needs with its own tools, and the person sends, changes or clears
+//! the pointer first; an account written by rule would only guess at what matters.
 
 use gpui::accesskit::{Role, Toggled};
 use gpui::prelude::FluentBuilder as _;
@@ -22,7 +27,7 @@ use gpui::{
     Styled as _, div,
 };
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{AgentId, Cap, ItemId, ThreadMeta, ThreadState, TurnId};
+use slopty_proto::thread::{AgentId, Cap, ItemBody, ItemId, ThreadMeta, ThreadState, TurnId};
 
 use super::{ThreadView, agent_label, message_group};
 use crate::colors::hsla;
@@ -77,6 +82,40 @@ pub(super) fn branch_intent(state: &ThreadState, b: &Branching) -> Option<Intent
     }
 }
 
+/// What the new thread's composer opens with: the message it starts before, or for a fresh
+/// thread a pointer back to this one.
+fn branch_seed(state: &ThreadState, b: &Branching, intent: &Intent) -> Option<String> {
+    match intent {
+        Intent::Continue { .. } => Some(pointer(&state.meta)),
+        Intent::Rewind { .. } | Intent::Fork { after: Some(_) } => message_of(state, b.turn),
+        _ => None,
+    }
+}
+
+/// The words the person sent to start `turn`: its input, else its first message of theirs.
+pub(super) fn message_of(state: &ThreadState, turn: TurnId) -> Option<String> {
+    let input = state.turns.iter().find(|t| t.id == turn)?.input.as_ref();
+    let mine = |body: &ItemBody| match body {
+        ItemBody::User(message) => Some(message.text.text.clone()),
+        _ => None,
+    };
+    let items = || state.items.iter().filter(|i| i.turn == turn);
+    input
+        .and_then(|input| items().find(|i| i.id == *input).and_then(|i| mine(&i.body)))
+        .or_else(|| items().find_map(|i| mine(&i.body)))
+}
+
+/// A fresh thread's first words: where the thread it goes on from is, and how to read it.
+fn pointer(meta: &ThreadMeta) -> String {
+    let id = meta.id;
+    let on = meta.facts.get("branch").map(|b| format!(" on branch {b}")).unwrap_or_default();
+    format!(
+        "This goes on from thread {id}, in {}{on}. Read it with `slopty agent read --thread \
+         {id}` (add `--activity` for its tool calls) before going on.",
+        meta.cwd
+    )
+}
+
 impl ThreadView {
     /// The agents a new thread can run: this one's own first, then the others the worker can
     /// start where the agent can carry the thread over ([`Cap::CONTINUE`]).
@@ -126,15 +165,25 @@ impl ThreadView {
 
     /// Ask for the new thread the panel says, and shut it.
     fn branch(&mut self, cx: &mut Context<Self>) {
-        let intent = self
-            .branching
-            .as_ref()
-            .and_then(|b| self.state(cx).and_then(|state| branch_intent(state, b)));
-        if let Some(intent) = intent.filter(|_| !self.working(cx)) {
+        let asked = self.branching.as_ref().and_then(|b| {
+            let state = self.state(cx)?;
+            let intent = branch_intent(state, b)?;
+            Some((branch_seed(state, b, &intent), intent))
+        });
+        if let Some((seed, intent)) = asked.filter(|_| !self.working(cx)) {
             self.branching = None;
-            let _id = self.intent(intent, cx);
+            self.start(intent, seed, cx);
             self.rebuild(cx);
         }
+    }
+
+    /// Send `intent`, which starts a thread whose composer opens with `seed`.
+    pub(super) fn start(&self, intent: Intent, seed: Option<String>, cx: &mut Context<Self>) {
+        let thread = self.thread;
+        let _id = self.hub.update(cx, |hub, cx| match seed {
+            Some(seed) => hub.intent_seeded(thread, intent, seed, cx),
+            None => hub.intent(thread, intent, cx),
+        });
     }
 
     /// The branch mark under a message of the person's, while the pointer is on it (always

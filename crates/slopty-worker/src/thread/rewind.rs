@@ -3,8 +3,8 @@
 //!
 //! The conversation goes back only through the agent's own door: a branch of its session cut
 //! before the turn, which Codex makes (`thread/fork` with `beforeTurnId`). No agent's session
-//! file is written, and the thread edited from goes on as it was. The turn's message waits on
-//! the new thread as a draft ([`schedule::draft`]), and with the files the folder goes back to
+//! file is written, and the thread edited from goes on as it was. The client that asked puts
+//! the turn's message in the new thread's composer, and with the files the folder goes back to
 //! the turn's before-snapshot, what it held first kept under the thread's refs
 //! ([`super::review::Snapshots::restore`]).
 //!
@@ -20,14 +20,14 @@ use slopty_proto::thread::{
     Cap, IntentId, ItemBody, Phase, ThreadId, ThreadState, TurnId, TurnState,
 };
 
+use super::Host;
 use super::review::Snapshots;
-use super::{Host, schedule};
 
 /// Edit thread `from` from turn `turn` for intent `id`, once, its folder going back too with
 /// `files`: `branch` asks the agent for the new thread cut before the turn.
 ///
 /// A repeat of `id` branches nothing again and finishes what the first may not have: the
-/// files and the draft, each once.
+/// files, once.
 pub async fn rewind<F, Fut>(
     host: &Host,
     snapshots: &Snapshots,
@@ -40,9 +40,9 @@ where
     Fut: Future<Output = Outcome>,
 {
     let Some((state, _)) = host.state(from) else { return refused("There is no such thread here") };
-    let Some(prompt) = prompt(&state, turn) else {
+    if prompt(&state, turn).is_none() {
         return refused(&format!("Turn {} has no message of the person's to edit", turn.0));
-    };
+    }
     if host.outcome(from, id).is_none() {
         if !state.meta.can(Cap::REWIND) {
             return Outcome::Unsupported { cap: Cap::named(Cap::REWIND) };
@@ -58,7 +58,7 @@ where
         }
     }
     let outcome = branch().await;
-    let Outcome::Started { thread } = outcome else { return outcome };
+    let Outcome::Started { .. } = outcome else { return outcome };
     if files {
         let restored = snapshots.restore(from, files_of(id), turn).await;
         if let Some(Outcome::Refused { reason }) = restored {
@@ -66,9 +66,6 @@ where
                 "The new thread is there, but the files did not go back: {reason}"
             ));
         }
-    }
-    if schedule::draft(host, thread, id, prompt).is_none() {
-        tracing::warn!(%from, %thread, "the edited thread left before its draft was kept");
     }
     outcome
 }

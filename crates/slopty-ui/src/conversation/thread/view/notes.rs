@@ -10,7 +10,7 @@ use gpui::{
     AnyElement, Context, ElementId, InteractiveElement as _, IntoElement as _, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, div,
 };
-use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Retry, Turn, Usage};
+use slopty_proto::thread::{Compaction, ItemBody, ItemId, Meters, Retry, Turn};
 
 use super::{TOOL_ROW, ThreadView, composer, tokens};
 use crate::colors::hsla;
@@ -42,8 +42,8 @@ pub(super) fn retrying(retry: &Retry) -> String {
 }
 
 /// A settled turn's footer beyond its time: the model that answered, where it is not the
-/// thread's own (a reroute, a switch), and what the turn spent, for its hint ("12k tokens ·
-/// $0.0123").
+/// thread's own (a reroute, a switch), and the tokens the turn used, for its hint ("12k
+/// tokens").
 pub(super) fn turn_footer(turn: &Turn, meters: &Meters) -> (Option<String>, Option<String>) {
     // The thread's own model, by every name the agent gives it: pi's `canned/canned-1` is
     // the turn's `canned-1`.
@@ -62,13 +62,7 @@ pub(super) fn turn_footer(turn: &Turn, meters: &Meters) -> (Option<String>, Opti
         .map(|m| model_name(m))
         .find(|m| !own(m));
     let used = turn.usage.tokens();
-    let cost = turn.usage.get(Usage::COST_MICRO_USD);
-    let parts: Vec<String> =
-        [(used > 0).then(|| format!("{} tokens", tokens(used))), (cost > 0).then(|| dollars(cost))]
-            .into_iter()
-            .flatten()
-            .collect();
-    (model, (!parts.is_empty()).then(|| parts.join(" \u{b7} ")))
+    (model, (used > 0).then(|| format!("{} tokens", tokens(used))))
 }
 
 /// The most lines a notice shows before "Show all".
@@ -79,13 +73,6 @@ fn notice_lines(text: &str) -> (String, bool) {
     let mut lines = text.trim().lines();
     let shown: Vec<&str> = lines.by_ref().take(NOTICE_LINES).collect();
     (shown.join("\n"), lines.next().is_some())
-}
-
-/// Millionths of a dollar as a person reads a cost: "$0.0123", "$1.24".
-pub(super) fn dollars(micro: u64) -> String {
-    #[expect(clippy::cast_precision_loss, reason = "a cost on screen")]
-    let usd = micro as f64 / 1_000_000.0;
-    if usd < 1.0 { format!("${usd:.4}") } else { format!("${usd:.2}") }
 }
 
 impl ThreadView {
@@ -192,7 +179,7 @@ impl ThreadView {
 mod tests {
     use slopty_proto::thread::{Compaction, Meters, Retry, Turn, TurnId, TurnState, Usage};
 
-    use super::{compacted, dollars, notice_lines, retrying, turn_footer};
+    use super::{compacted, notice_lines, retrying, turn_footer};
 
     /// A notice shows three lines and says when there is more; a short one shows whole.
     #[test]
@@ -202,13 +189,12 @@ mod tests {
         assert_eq!(notice_lines("a\nb\nc\nd\ne\n"), ("a\nb\nc".to_owned(), true));
     }
 
-    /// A turn's footer names a model other than the thread's, and what the turn spent.
+    /// A turn's footer names a model other than the thread's, and the tokens the turn used.
     #[test]
     fn a_turn_names_a_model_of_its_own_and_its_spend() {
         let mut usage = Usage::default();
         usage.0.insert(Usage::INPUT.to_owned(), 9_000);
         usage.0.insert(Usage::OUTPUT.to_owned(), 3_000);
-        usage.0.insert(Usage::COST_MICRO_USD.to_owned(), 12_300);
         let turn = |models: &[&str]| Turn {
             id: TurnId(1),
             input: None,
@@ -224,7 +210,7 @@ mod tests {
         let meters = Meters { model_id: Some("gpt-5.5".to_owned()), ..Meters::default() };
         assert_eq!(
             turn_footer(&turn(&["gpt-5.5-mini"]), &meters),
-            (Some("gpt-5.5-mini".to_owned()), Some("12k tokens \u{b7} $0.0123".to_owned()))
+            (Some("gpt-5.5-mini".to_owned()), Some("12k tokens".to_owned()))
         );
         assert_eq!(turn_footer(&turn(&["GPT-5.5"]), &meters).0, None, "the thread's own");
         let claude = Meters { model: Some("Opus 5.5".to_owned()), ..Meters::default() };
@@ -240,7 +226,6 @@ mod tests {
             ..Meters::default()
         };
         assert_eq!(turn_footer(&turn(&["canned-1"]), &pi).0, None, "one model, said once");
-        assert_eq!(dollars(1_240_000), "$1.24");
     }
 
     /// A retry says what the agent says of it, and nothing it does not.

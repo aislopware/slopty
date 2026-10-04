@@ -33,7 +33,7 @@ use super::model::{
     verdict_detail, verdict_tail,
 };
 use super::recap::{Recap, RecapKind};
-use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
+use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, limit_line, worked};
 use super::{
     AddressComments, CancelTask, DeleteProject, EditChecks, FixCi, Lens, MergeTask, OpenNode,
     PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext, SelectPrevious, ShowBoard,
@@ -1084,8 +1084,8 @@ impl ProjectView {
         row
     }
 
-    /// What the project spent, in the header: its time at work, then its cost and the plan's
-    /// rate windows once the agents' threads say them. Each says on hover how the
+    /// What the project spent, in the header: its time at work, then the plan's rate windows
+    /// once the agents' threads say them. Each says on hover how the
     /// orchestrator's share and its tasks' make it up.
     fn spent_readouts(&self, board: &Board) -> Vec<Stateful<Div>> {
         let theme = &self.theme;
@@ -2872,7 +2872,7 @@ fn natives_line(counts: NativeCounts) -> Option<String> {
 const SHOWN_FROM_MS: u64 = 60_000;
 
 /// What a node spent, as its row says it to assistive technology: "worked 40m, 12m itself,
-/// $1.20, context 82%".
+/// context 82%".
 fn spent_words(spend: &NodeSpend) -> String {
     let mut parts: Vec<String> = Vec::new();
     if spend.has_subtree() && spend.subtree_ms >= SHOWN_FROM_MS {
@@ -2881,8 +2881,6 @@ fn spent_words(spend: &NodeSpend) -> String {
     } else if spend.own_ms >= SHOWN_FROM_MS {
         parts.push(format!("worked {}", worked(spend.own_ms)));
     }
-    let cost = if spend.has_subtree() { spend.subtree_cost } else { spend.own_cost };
-    parts.extend(cost.map(dollars));
     if let Some((bp, _)) = spend.context_shown() {
         parts.push(format!("context {}%", bp / 100));
     }

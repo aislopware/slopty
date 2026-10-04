@@ -9,10 +9,6 @@
 //!
 //! One that was being sent when the worker stopped is never sent again: it comes back held,
 //! saying it may have gone ([`CUT_OFF`]), for the person to withdraw or send again.
-//!
-//! A draft ([`Delivery::Draft`]) is kept the same way with no moment of its own: it goes once
-//! the person sends it ([`Intent::Promote`]). A continued thread's first message waits so
-//! ([`draft`]).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,7 +45,7 @@ pub enum When {
     Now,
     /// At this time.
     At(WallMs),
-    /// Not on its own: a draft, which goes on the person's word.
+    /// Not at a moment of its own: the agent's queue or a steer sends it.
     Later,
 }
 
@@ -59,7 +55,7 @@ pub const fn when(pending: &Pending, now: WallMs) -> When {
     match pending.delivery {
         Delivery::At { at_ms } if at_ms.as_millis() <= now.as_millis() => When::Now,
         Delivery::At { at_ms } => When::At(at_ms),
-        Delivery::Steer | Delivery::Queue | Delivery::Draft | Delivery::Interrupt => When::Later,
+        Delivery::Steer | Delivery::Queue | Delivery::Interrupt => When::Later,
     }
 }
 
@@ -68,29 +64,6 @@ pub const fn when(pending: &Pending, now: WallMs) -> When {
 #[must_use]
 pub fn sent_as(intent: IntentId) -> IntentId {
     let derived = ThreadId::derived(&["scheduled send", &intent.to_string()]);
-    IntentId::from_uuid(*derived.as_uuid())
-}
-
-/// Keep `text` on `thread` as a draft for the person to read, change and send, once per
-/// intent `id` ([`drafted_as`]); `None` when there is no such thread.
-pub fn draft(host: &Host, thread: ThreadId, id: IntentId, text: String) -> Option<Outcome> {
-    let draft = drafted_as(id);
-    host.schedule(thread, draft, |_, kept| {
-        kept.push(Pending {
-            intent: draft,
-            text,
-            attachments: Vec::new(),
-            delivery: Delivery::Draft,
-            state: PendingState::Waiting,
-        });
-        Outcome::Accepted
-    })
-}
-
-/// The intent a draft kept for intent `intent` waits as ([`draft`]).
-#[must_use]
-pub fn drafted_as(intent: IntentId) -> IntentId {
-    let derived = ThreadId::derived(&["draft", &intent.to_string()]);
     IntentId::from_uuid(*derived.as_uuid())
 }
 
@@ -206,15 +179,14 @@ mod tests {
         }
     }
 
-    /// A timed message goes at its time, a draft never on its own, and each is sent apart
-    /// from the intent that scheduled it, once.
+    /// A timed message goes at its time, a queued one never at a moment of its own, and each
+    /// is sent apart from the intent that scheduled it, once.
     #[test]
     fn a_message_goes_at_its_time() {
         let ms = WallMs::from_millis;
         let at = pending(Delivery::At { at_ms: ms(5_000) });
         assert_eq!(when(&at, ms(4_999)), When::At(ms(5_000)));
         assert_eq!(when(&at, ms(5_000)), When::Now);
-        assert_eq!(when(&pending(Delivery::Draft), ms(1)), When::Later);
         assert_eq!(when(&pending(Delivery::Queue), ms(1)), When::Later);
         assert_ne!(sent_as(at.intent), at.intent, "sent apart from its schedule");
         assert_eq!(sent_as(at.intent), sent_as(at.intent), "once");

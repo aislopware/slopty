@@ -141,7 +141,7 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         since: Option<String>,
     },
-    /// Tokens, cost and the context window's use.
+    /// Tokens and the context window's use.
     GetSessionStats,
     /// Name the session.
     SetSessionName {
@@ -166,7 +166,7 @@ pub enum Command {
 }
 
 /// What comes from pi, by its `type`.
-#[derive(Clone, PartialEq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Incoming {
     /// A command's answer.
@@ -497,7 +497,7 @@ pub fn confirm(ask: &str, confirmed: bool) -> Request {
 }
 
 /// A message, by its `role`.
-#[derive(Clone, PartialEq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
 #[serde(tag = "role", rename_all = "camelCase")]
 pub enum Message {
     /// The person's.
@@ -516,7 +516,7 @@ pub enum Message {
         /// Its provider.
         #[serde(default)]
         provider: Option<String>,
-        /// What it cost.
+        /// The tokens it used.
         #[serde(default)]
         usage: Option<Usage>,
         /// Why it ended: `stop`, `toolUse`, `length`, `error`, `aborted`, or `pending` while it
@@ -712,8 +712,8 @@ pub struct ToolOutput {
     pub structured: Option<Value>,
 }
 
-/// Tokens and cost of a response.
-#[derive(Clone, Copy, PartialEq, Debug, Default, Deserialize)]
+/// The tokens of a response.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     /// Input tokens.
@@ -734,9 +734,6 @@ pub struct Usage {
     /// All of them.
     #[serde(default)]
     pub total_tokens: u64,
-    /// What they cost, in dollars.
-    #[serde(default)]
-    pub cost: Cost,
 }
 
 /// What a compaction came to.
@@ -751,14 +748,6 @@ pub struct Compacted {
     /// Context tokens after, as pi estimates them.
     #[serde(default, rename = "estimatedTokensAfter")]
     pub estimated_tokens_after: Option<u64>,
-}
-
-/// What a response cost, in dollars.
-#[derive(Clone, Copy, PartialEq, Debug, Default, Deserialize)]
-pub struct Cost {
-    /// All of it.
-    #[serde(default)]
-    pub total: f64,
 }
 
 /// A model, as `get_state` and `get_available_models` give it.
@@ -804,12 +793,9 @@ pub struct State {
 }
 
 /// `get_session_stats`'s answer, as far as Slopty reads it.
-#[derive(Clone, Copy, PartialEq, Debug, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stats {
-    /// What the session cost, in dollars.
-    #[serde(default)]
-    pub cost: f64,
     /// The context window's use now.
     #[serde(default)]
     pub context_usage: Option<ContextUsage>,
@@ -827,7 +813,7 @@ pub struct ContextUsage {
 }
 
 /// `get_entries`' answer: the session's entries in the order they were appended.
-#[derive(Clone, PartialEq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entries {
     /// The entries.
@@ -838,7 +824,7 @@ pub struct Entries {
 }
 
 /// A session entry.
-#[derive(Clone, PartialEq, Debug, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Entry {
     /// Its id, a durable cursor.

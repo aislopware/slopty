@@ -297,21 +297,19 @@ pub enum Intent {
         after: Option<TurnId>,
     },
     /// Go on from this thread in a new one on agent `agent` (this one's own, to start afresh)
-    /// ([`Cap::CONTINUE`]). The new thread starts with nothing sent: its first message, a
-    /// portable account of this one (the person's messages and the answers, newest first, the
-    /// commands run, the files changed, the plan), waits on the worker as a draft
-    /// ([`Delivery::Draft`]) for the person to read, change and send. Answered with
-    /// [`Outcome::Started`] and the new thread, whose
-    /// [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) names this one; this one goes
-    /// on as it was.
+    /// ([`Cap::CONTINUE`]). The new thread starts with nothing sent; the client that asked
+    /// puts a pointer to this one in its composer (its id, folder and branch, and how to read
+    /// it), for the person to send. Answered with [`Outcome::Started`] and the new thread,
+    /// whose [`ThreadMeta::forked_from`](super::ThreadMeta::forked_from) names this one; this
+    /// one goes on as it was.
     Continue {
         /// The agent the new thread runs.
         agent: AgentId,
     },
     /// Edit from turn `turn`: go back to just before it, in a new thread ([`Cap::REWIND`]).
     ///
-    /// The agent branches its session before the turn through its own door, and the turn's
-    /// message waits on the new thread as a draft ([`Delivery::Draft`]) for the person to
+    /// The agent branches its session before the turn through its own door, and the client
+    /// that asked puts the turn's message in the new thread's composer for the person to
     /// change and send. With `files`, the folder goes back to the turn's before-snapshot too,
     /// what it held first kept under the thread's refs. Refused while a turn is under way.
     /// Answered with [`Outcome::Started`] and the new thread; this one goes on as it was, and
@@ -362,7 +360,7 @@ impl Intent {
     pub const fn needs(&self) -> &'static str {
         match self {
             Self::Send { delivery: Delivery::Steer, .. } | Self::Promote { .. } => Cap::STEER,
-            Self::Send { delivery: Delivery::At { .. } | Delivery::Draft, .. } => Cap::SCHEDULE,
+            Self::Send { delivery: Delivery::At { .. }, .. } => Cap::SCHEDULE,
             Self::Send { delivery: Delivery::Queue, .. }
             | Self::Withdraw { .. }
             | Self::Edit { .. } => Cap::QUEUE,

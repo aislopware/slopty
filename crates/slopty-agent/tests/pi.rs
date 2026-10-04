@@ -582,10 +582,10 @@ mod tests {
         }
 
         /// pi's thinking level is the meters' effort, from its state and as it changes; a
-        /// compaction says what it came to, a failed one says why; a message's cost is its
-        /// turn's.
+        /// compaction says what it came to, a failed one says why; a message's tokens are its
+        /// turn's, and its cost is not kept.
         #[test]
-        fn effort_compaction_and_cost_are_carried() {
+        fn effort_compaction_and_tokens_are_carried() {
             let (mut driven, begun) = Driven::new(SESSION, "1.0.0", "/work", WallMs::ZERO);
             let mut state = ThreadState::new(driven.meta().clone());
             let lines = [
@@ -621,8 +621,8 @@ mod tests {
             assert!(state.items.iter().any(|i| matches!(&i.body,
                 ItemBody::Notice(n) if n.text.text.contains("no model"))));
             let last = state.turns.last().expect("a turn");
-            assert_eq!(last.usage.get(slopty_proto::thread::Usage::COST_MICRO_USD), 12_500);
             assert_eq!(last.usage.tokens(), 15, "the cost is no token");
+            assert!(!last.usage.0.keys().any(|k| k.contains("cost")), "{:?}", last.usage);
             assert_eq!(last.models, ["canned-1"]);
         }
 

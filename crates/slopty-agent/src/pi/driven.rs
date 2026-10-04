@@ -46,7 +46,7 @@ use super::rpc::{
     Stats, StreamingBehavior, ToolOutput, UiMethod, UiRequest,
 };
 use crate::attach::Attached;
-use crate::driven::{OUTPUT, PROSE, caps, choice, micro_usd, title_of, tool};
+use crate::driven::{OUTPUT, PROSE, caps, choice, title_of, tool};
 
 /// What a driven pi can do through Slopty.
 pub const CAPS: [&str; 12] = [
@@ -496,14 +496,13 @@ impl Driven {
         actions
     }
 
-    /// The session's tokens and cost, from `get_session_stats`.
+    /// The session's tokens, from `get_session_stats`.
     pub fn stats(&mut self, stats: &Stats) -> Vec<Action> {
         let mut meters = self.meters.clone();
         if let Some(context) = stats.context_usage {
             meters.context_tokens = context.tokens;
             meters.context_window = Some(context.context_window);
         }
-        meters.cost_micro_usd = Some(micro_usd(stats.cost));
         if meters == self.meters {
             return Vec::new();
         }
@@ -1298,6 +1297,5 @@ fn usage_of(usage: &rpc::Usage) -> thread::Usage {
     put(thread::Usage::CACHE_WRITE, usage.cache_write);
     put(thread::Usage::OUTPUT, usage.output);
     put(thread::Usage::REASONING, usage.reasoning.unwrap_or_default());
-    put(thread::Usage::COST_MICRO_USD, micro_usd(usage.cost.total));
     thread::Usage(tokens)
 }

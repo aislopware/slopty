@@ -867,9 +867,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     Claude Code's background shells and agents become `TasksSet`, keyed by the agent's own
     task id, closed by their end and dropped when the transcript drops them. Test:
     `background_commands_are_the_threads_background_work`.
-  - **Per-turn cost is a usage key, not a field.** `Usage::COST_MICRO_USD` sits in the turn's
-    open usage map, and `Usage::tokens()` leaves it out of the token sum. A new `Turn` field
-    would have changed every literal of it for one number only some agents give.
+  - **Per-turn cost is a usage key, not a field.** *Cut the same day: see "Dollar cost, the
+    carried account and drafts on the worker are gone" below.* `Usage::COST_MICRO_USD` sat in
+    the turn's open usage map, and `Usage::tokens()` left it out of the token sum. A new `Turn`
+    field would have changed every literal of it for one number only some agents give.
   - **Effort is a meter** (`Meters.effort`): Codex's reasoning effort, pi's thinking level, ACP's
     thought-level option, each as the agent names it.
   - **Codex.** The turn's diff (`turn/diff/updated`) is the turn's changed lines. A reroute adds
@@ -1401,7 +1402,9 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     `intent_send_at` and `intent_send_after`.
 
 - ✅ **A thread goes on in a new one, on another agent or on its own afresh** (2026-10-04, R8 of
-  the T3 Code orchestrator study, after T3's budgeted context handoff and Amp's Handoff).
+  the T3 Code orchestrator study, after T3's budgeted context handoff and Amp's Handoff). *The
+  account and the draft went the same day; the new thread's composer opens on a pointer back.
+  See "Dollar cost, the carried account and drafts on the worker are gone" below.*
   `Intent::Continue { agent }` needs `Cap::CONTINUE`, which every adapter has, since the worker
   makes the account from the thread it holds and not from the agent. Fork stays the agent's own
   branch of its session; Continue is the portable way, for any pair of agents.
@@ -1470,8 +1473,10 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - ACP has no rollback, and its `session/fork` branches a whole session.
     - Claude Code goes back through its TUI's own rewind, which Slopty never types into. Its
       `--resume-session-at` is a hidden flag for print mode only, so it is not a door.
-  - **The prompt returns to the draft.** The turn's message waits on the new thread as a draft
-    (`Delivery::Draft`), kept on the worker, for the person to change and send.
+  - **The prompt returns to the composer.** The client that asked puts the turn's message in
+    the new thread's composer, for the person to change and send. (It first waited on the
+    worker as a `Delivery::Draft`; see "Dollar cost, the carried account and drafts on the
+    worker are gone" below.)
   - **The files, on the person's word.** With `files`, the folder goes back to the turn's
     before-snapshot (`refs/slopty/threads/<thread>/<turn>-before`) through the thread's own
     index (`git restore --source --worktree`). Every file a snapshot holds goes back to its blob
@@ -1782,3 +1787,71 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     as the next turn at once. Before, it stayed held until some later notice about the thread.
   - Test: `a_reverted_thread_is_read_again_and_keeps_its_held_message`
     (`slopty-worker/tests/codex.rs`; without the send after the re-read it fails).
+
+- ✅ **Dollar cost, the carried account and drafts on the worker are gone** (2026-10-04, prune
+  step 3 of `.research/feature-prune-frontier-2026-10-04.md`, §5.1 #8 and #9).
+  - **Tokens, never dollars.** `Usage::COST_MICRO_USD`, `Meters.cost_micro_usd`, the status
+    line's `cost_usd`, pi's `cost` fields, ACP's `UsageUpdate.cost` and Codex's
+    `account/usage/read` are no longer read. The figure was an estimate for API billing that
+    most people on a subscription never pay, it read differently per agent (Codex gives none
+    on a credits plan), and a turn's tokens already say how much work it took. The turn footer,
+    the tray and the project's spend show tokens and time.
+  - **A pointer, not an account.** Going on in another agent no longer writes a 32 KiB account
+    of the old thread by rule (`slopty_agent::handoff` is deleted). The new thread starts with
+    nothing sent, and the client that asked opens its composer on one short paragraph: the old
+    thread's id, folder and branch, and `slopty agent read --thread <id>` to read it. The new
+    agent reads what it needs with its own tools, and the person sends, changes or clears the
+    words first. An account chosen by rule only guessed at what mattered, and it cost the next
+    agent its context whether it needed the history or not.
+  - **The composer, not the worker, holds a draft.** `Delivery::Draft` is deleted, with the
+    tray's draft card. Edit from a turn and a fork from before a message put the message in
+    the new thread's composer the same way. The hub keeps the words by the intent until the
+    worker says which thread it started, then gives them once to that thread's first view
+    (`ThreadHub::intent_seeded`, `take_seed`). Words the person had not sent are not worth a
+    worker round trip, a log entry and a restart path of their own.
+  - Goldens: `intent_send_draft` deleted; `intent_send_interrupt` and every golden carrying
+    `Meters` changed.
+  - Tests: `branching_to_another_agent_carries_the_thread_over` and
+    `branching_from_a_message_keeps_or_puts_back_the_files` (`slopty-ui`, the composer seeds);
+    `a_claude_code_thread_goes_on_in_pi_with_the_persons_first_message`
+    (`slopty-worker/tests/pi.rs`); the Codex start test
+    (`a_start_asks_the_persons_codex_for_a_thread_and_sends_its_first_turn`) asks no spend.
+
+- ✅ **Only a project's agents get Slopty's tools; the others get a pointer to the CLI**
+  (2026-10-04, prune §5.1 #3). A Claude Code Slopty wires (a tile opened on `claude`, ⌘⇧T, a
+  `claude` typed in a Slopty shell) gets `--mcp-config` serving `slopty mcp` only when its
+  session names a project (`SLOPTY_PROJECT`). Any other gets one paragraph on
+  `--append-system-prompt` (`slopty_agent::hooks::POINTER`): Slopty reaches the person's other
+  machines, and `slopty --help` says how. A system prompt the person appends keeps its place
+  and gets the paragraph after it. The resume keeps it as it keeps a project agent's role.
+  - Why: the tool block cost every agent its descriptions and schemas in context whether it
+    reached another machine or not, and the CLI already does everything the tools did. The
+    paragraph is the agent's lazy door: it reads the help when the work calls for it.
+  - Driven Codex, pi and ACP threads already got Slopty's tools only when seated by a project.
+    They get no pointer yet. Codex's `developerInstructions` would stand in for the person's
+    own `developer_instructions` rather than add to them, pi's `--append-system-prompt` is not
+    yet checked against its `APPEND_SYSTEM.md`, and ACP has no door for it.
+  - Still open: a `codex` opened in a tile on a worker with a server gets Slopty's tools
+    (`Worker::as_agent`, `codex_with_mcp`), and every `SpawnAgent` gets them
+    (`orchestrate.rs`), project or not.
+  - Tests: `a_persons_claude_is_wired_once` and
+    `the_pointer_joins_the_persons_own_appended_prompt` (`slopty-agent`);
+    `claude_opened_in_a_tile_is_started_as_slopty_starts_its_agents`
+    (`slopty-worker/tests/agent_open.rs`); `a_typed_claude_is_wired_as_one_slopty_starts`
+    (`slopty-cli/tests/claude_wire.rs`).
+
+- ✅ **A live block waits for its prompt** (2026-10-04). The mod streams a block as the model
+  writes it, often before the transcript has the prompt that started the turn: the hook and
+  the mod run ahead of the file, read on a hook or every 250 ms. The observed adapter put such
+  a block in the thread's last turn, so a live tool call stood ahead of the prompt it answered
+  until the transcript settled it. Now a block that begins while its thread has no turn open
+  (none began, or the last one ended) is held with what it says meanwhile, and begins after
+  the prompt once the transcript opens its turn. A block the transcript settles first, or a
+  thread read anew, lets it go. A turn with no prompt of its own in the transcript shows its
+  blocks only as the transcript has them.
+  - Still open: a live text the transcript settles is replaced at the end of the list, so its
+    entry lands after a live tool call that began after it, until the thread is read again.
+    Putting it in its place takes an insert on the thread wire.
+  - Test: `live_blocks_stream_after_their_prompt_then_the_transcript_settles_them`
+    (`slopty-agent` observed tests; it fails without the hold, the blocks shown before the
+    prompt).

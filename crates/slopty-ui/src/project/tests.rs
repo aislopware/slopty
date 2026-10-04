@@ -564,14 +564,14 @@ fn a_recap_tells_what_needs_you_first_and_names_its_tasks() {
 
 /// A node's time at work counts its subtree's with its own, the orchestrator's share stays
 /// apart, and a stretch under way counts to the moment the board reads it. What the agents'
-/// threads say adds cost, context and the plan's rate windows, the fullest of each; a node
-/// whose thread is not heard shows its time alone.
+/// threads say adds context and the plan's rate windows, the fullest of each; a node whose
+/// thread is not heard shows its time alone.
 #[test]
-fn time_and_cost_add_up_with_the_orchestrator_apart() {
+fn time_adds_up_with_the_orchestrator_apart() {
     use slopty_proto::project::Spent;
     use slopty_proto::thread::{Limit, Meters};
 
-    use super::spend::{MetersBySession, dollars, limit_line, worked};
+    use super::spend::{MetersBySession, limit_line, worked};
     let min = |m: u64| m * 60_000;
     let at = |m: u64| WallMs::from_millis(AT.as_millis() + min(m));
     let worker = WorkerId::new();
@@ -598,15 +598,14 @@ fn time_and_cost_add_up_with_the_orchestrator_apart() {
     let now = at(10);
     let first = b.spend(Some(TaskId(1)), now, &none);
     assert_eq!((first.own_ms, first.subtree_ms), (min(12), min(12)), "one level: its own");
-    assert!(!first.has_subtree() && first.own_cost.is_none());
+    assert!(!first.has_subtree() && first.context_bp.is_none());
     assert_eq!(b.spend(Some(TaskId(2)), now, &none).own_ms, min(30), "its clock runs");
     let mine = b.spend(None, now, &none);
     assert_eq!((mine.own_ms, mine.subtree_ms), (min(8), min(8)), "its own share alone");
     let all = b.project_spend(now, &none);
     assert_eq!((all.orchestrator_ms, all.tasks_ms, all.total_ms()), (min(8), min(47), min(55)));
 
-    let meters = |cost, used, limits: Vec<Limit>| Meters {
-        cost_micro_usd: Some(cost),
+    let meters = |used, limits: Vec<Limit>| Meters {
         context_tokens: Some(used),
         context_window: Some(200_000),
         limits,
@@ -614,28 +613,21 @@ fn time_and_cost_add_up_with_the_orchestrator_apart() {
     };
     let limit = |name: &str, used_bp| Limit { name: name.to_owned(), used_bp, resets_ms: None };
     let heard: MetersBySession = [
-        (orchestrator, meters(400_000, 40_000, vec![limit("five-hour", 4_200)])),
-        (
-            child,
-            meters(1_250_000, 170_000, vec![limit("five-hour", 4_400), limit("seven-day", 1_800)]),
-        ),
-        (leaf, meters(50_000, 10_000, Vec::new())),
+        (orchestrator, meters(40_000, vec![limit("five-hour", 4_200)])),
+        (child, meters(170_000, vec![limit("five-hour", 4_400), limit("seven-day", 1_800)])),
+        (leaf, meters(10_000, Vec::new())),
     ]
     .into_iter()
     .collect();
     let first = b.spend(Some(TaskId(1)), now, &heard);
-    assert_eq!(first.own_cost, None, "its thread is not heard");
+    assert_eq!(first.context_bp, None, "its thread is not heard");
     let second = b.spend(Some(TaskId(2)), now, &heard);
     assert_eq!(second.context_shown(), Some((8_500, true)), "85% warns");
     assert_eq!(b.spend(Some(TaskId(3)), now, &heard).context_shown(), None, "5% is not shown");
     assert_eq!(b.spend(None, now, &heard).context_shown(), Some((2_000, false)));
-    assert_eq!(second.own_cost, Some(1_250_000));
     let all = b.project_spend(now, &heard);
     assert_eq!(all.limits.iter().map(limit_line).collect::<Vec<_>>(), ["5-hour 44%", "weekly 18%"]);
-    assert_eq!(
-        [worked(0), worked(min(12)), worked(min(64)), dollars(1_700_000), dollars(4_999)],
-        ["under 1m", "12m", "1h 4m", "$1.70", "$0.00"]
-    );
+    assert_eq!([worked(0), worked(min(12)), worked(min(64))], ["under 1m", "12m", "1h 4m"]);
 }
 
 /// While a task's agent runs, its next step is the person's word to it, first on its row: fix

@@ -50,7 +50,6 @@ pub mod conversation;
 pub mod detect;
 pub mod discover;
 pub mod driven;
-pub mod handoff;
 pub mod history;
 pub mod hooks;
 pub mod live;
@@ -1597,7 +1596,7 @@ mod tests {
         let mut t = Tracker::default();
         let statusline = hook(
             r#"{"hook_event_name":"Statusline","meters":{"model":null,"model_id":null,
-            "context_used_pct":null,"context_window":null,"cost_usd":null,
+            "context_used_pct":null,"context_window":null,
             "five_hour":{"used_pct":100.0,"resets_at":1790018000},
             "seven_day":{"used_pct":40.0,"resets_at":1790500000}}}"#,
         );
