@@ -490,13 +490,13 @@ impl Overlay {
     }
 }
 
-/// The floating elevation's shadow, as GPUI draws it: a tight contact layer and a soft one, from
-/// [`slopty_theme::Elevation::shadow`], and in dark the lit top edge
+/// The floating elevation's shadow, as GPUI draws it: a tight contact layer, then softer ones,
+/// from [`slopty_theme::Elevation::shadow`], and in dark the lit top edge
 /// ([`slopty_theme::Rim::float`]).
 #[must_use]
 pub fn elevation(theme: &Theme) -> Vec<BoxShadow> {
     let e = &theme.elevation;
-    let drop = e.shadow.iter().map(|&layer| drop_shadow(theme, layer));
+    let drop = e.shadow.iter().filter(|l| l.shows()).map(|&layer| drop_shadow(theme, layer));
     let edge = e.rim.float.map(|a| rim(theme, a, theme.hair()));
     drop.chain(edge).collect()
 }
@@ -516,10 +516,11 @@ pub fn rests<E: Styled>(el: E, theme: &Theme, first: bool, last: bool) -> E {
 /// The resting elevation's layers for one part of a stack whose border is `border` wide.
 fn rest_layers(theme: &Theme, border: f32, first: bool, last: bool) -> Vec<BoxShadow> {
     let e = &theme.elevation;
-    let contact = e.rest.filter(|_| last).map(|layer| drop_shadow(theme, layer));
+    let contact =
+        e.rest.filter(|_| last).into_iter().flatten().map(|layer| drop_shadow(theme, layer));
     let lit = if e.rim.top { first } else { last };
     let edge = e.rim.rest.filter(|_| lit).map(|alpha| rim(theme, alpha, border));
-    contact.into_iter().chain(edge).collect()
+    contact.chain(edge).collect()
 }
 
 /// One layer of the shade falling under a surface.
@@ -2452,16 +2453,21 @@ mod tests {
         assert!(theme.typography.icon() < icon_button_side(&theme), "the icon stays its size");
     }
 
-    /// The elevation reaches GPUI as the theme says: two layers of the shade, falling down, the
-    /// soft one wider, and in dark a third, inset: white at `alpha::EDGE` along the top, the
-    /// edge a dark sheet needs to be seen on a near-black window.
+    /// The elevation reaches GPUI as the theme says: layers of the shade falling down, the
+    /// softest widest (two of black in dark, three of the warm ink in light), and in dark one
+    /// more, inset: white at `alpha::EDGE` along the top, the edge a dark sheet needs to be
+    /// seen on a near-black window. The scrim is the same shade.
     #[test]
-    fn the_elevation_is_two_layers_of_the_shade_and_a_lit_edge_in_dark() {
+    fn the_elevation_is_layers_of_the_shade_and_a_lit_edge_in_dark() {
         for variant in [Variant::Dark, Variant::Light] {
             let theme = Theme::new(variant);
             let dark = variant == Variant::Dark;
             let layers = elevation(&theme);
-            assert_eq!(layers.len(), 2 + usize::from(dark), "{variant:?}");
+            assert_eq!(layers.len(), 3, "{variant:?}: two of black and the edge, or three of ink");
+            let ink = hsla(theme.elevation.shade);
+            let tinted = |c: Hsla| (c.h, c.s, c.l) == (ink.h, ink.s, ink.l);
+            assert!(layers.iter().filter(|l| !l.inset).all(|l| tinted(l.color)), "{variant:?}");
+            assert!(tinted(scrim(&theme)), "{variant:?}: the scrim is the shade");
             let (drop, edge): (Vec<_>, Vec<_>) = layers.iter().partition(|l| !l.inset);
             assert!(drop.iter().all(|l| l.offset.y > px(0.0)));
             assert!(drop.first().map(|l| l.blur_radius) < drop.last().map(|l| l.blur_radius));
@@ -2495,7 +2501,7 @@ mod tests {
             }
             let layers = style.box_shadow.clone().unwrap_or_default();
             let (drop, rims): (Vec<_>, Vec<_>) = layers.iter().partition(|l| !l.inset);
-            assert_eq!(drop.len(), usize::from(light), "{variant:?}: a contact in light only");
+            assert_eq!(drop.len(), 2 * usize::from(light), "{variant:?}: a contact in light only");
             if light {
                 assert!(rims.is_empty(), "light: one edge, its ring: {rims:?}");
             } else {

@@ -85,6 +85,13 @@ async fn a_file_is_edited_saved_and_caught_changing_under_an_edit() {
     assert!(!info.edited && info.trouble.is_none() && info.read_only.is_none(), "{info:?}");
     assert!(dump.a11y_node("Heading", Some("file main.rs")).is_some(), "{:#?}", dump.a11y);
     golden(drv, &dir, "editor").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(drv, &dir, "editor-dark").await;
+    stack.set_appearance("light").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
 
     drv.type_text("// edited\n").await.unwrap();
     let dump = drv

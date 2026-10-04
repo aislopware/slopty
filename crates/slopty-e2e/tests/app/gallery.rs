@@ -439,6 +439,20 @@ async fn a_workspace_of_columns_in_both_themes() {
         .await
         .unwrap();
     golden(drv, &dir, "palette-dark").await;
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the palette closed", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_none())
+        .await
+        .unwrap();
+    drv.keys("cmd-alt-o").await.unwrap();
+    drv.wait_for("the overview", STEP, |d| d.overview).await.unwrap();
+    golden(drv, &dir, "overview-dark").await;
+    drv.keys("cmd-alt-o").await.unwrap();
+    drv.wait_for("the overview closed", STEP, |d| !d.overview).await.unwrap();
+    drv.keys("cmd-,").await.unwrap();
+    drv.wait_for("the settings", STEP, |d| d.a11y_node("Dialog", Some("Settings")).is_some())
+        .await
+        .unwrap();
+    golden(drv, &dir, "settings-dark").await;
     stack.shutdown().await;
 }
 

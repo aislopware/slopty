@@ -86,14 +86,16 @@ impl Token {
     }
 
     /// The token's colour in `theme`: the terminal's ANSI palette for the code colours (so
-    /// code reads as it does in the shell) and the chrome's greys for the rest.
+    /// code reads as it does in the shell) and the chrome's greys for the rest. A comment is
+    /// ANSI 8, the shell's dim slot: it recedes as every editor's comments do, where the
+    /// chrome's muted grey is held at body strength by its own contrast rule.
     #[must_use]
     pub fn color(self, theme: &Theme) -> Hsla {
         let ansi = &theme.terminal.ansi;
         let s = &theme.surfaces;
         hsla(match self {
             Self::Plain => s.text,
-            Self::Comment => s.text_muted,
+            Self::Comment => ansi[8],
             Self::String => ansi[2],
             Self::Constant => ansi[3],
             Self::Keyword => ansi[5],
@@ -840,5 +842,20 @@ mod tests {
         let trimmed = runs(3, Some(&spans), &font, &theme);
         assert_eq!(trimmed.iter().map(|r| r.len).sum::<usize>(), 3, "trimmed to the line");
         assert_eq!(runs(4, None, &font, &theme).len(), 1, "unparsed: one plain run");
+    }
+
+    /// A comment is the terminal's dim slot in both modes, quieter than the code beside it
+    /// and still read: AA on the code's ground.
+    #[test]
+    fn a_comment_is_the_dim_slot_and_still_reads() {
+        for variant in [slopty_theme::Variant::Light, slopty_theme::Variant::Dark] {
+            let theme = Theme::new(variant);
+            let dim = theme.terminal.ansi[8];
+            assert_eq!(Token::Comment.color(&theme), hsla(dim), "{variant:?}");
+            let ground = theme.content();
+            let (comment, code) = (dim.contrast(ground), theme.surfaces.text.contrast(ground));
+            assert!(comment >= 4.5, "{variant:?}: a comment at {comment:.2}");
+            assert!(comment < code, "{variant:?}: a comment recedes");
+        }
     }
 }

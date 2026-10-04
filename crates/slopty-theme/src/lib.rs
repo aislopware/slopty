@@ -330,7 +330,12 @@ impl TerminalPalette {
         minimum_contrast: 100,
         bold_is_bright: false,
     };
-    /// The default light palette (GitHub-light hues: legible on white without glare).
+    /// The default light palette, generated from the dark one's hues: each colour keeps its
+    /// slot's hue (green moves to the brand's, since at One Dark's 133° and this lightness it
+    /// turns olive), the normals sit at OKLCH L 0.525 and the brights at 0.465, stronger on
+    /// paper as the dark brights are stronger on black, with as much chroma as sRGB allows up to
+    /// a cap. The greys are the one neutral; 7 is the ordinary text and 8 the dim slot, as in
+    /// dark. `light_ansi_is_generated_from_the_dark_hues` regenerates every slot.
     #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
         fg: Rgb::hex(0x1c1c1a),
@@ -341,22 +346,22 @@ impl TerminalPalette {
         search_match: Rgb::hex(0xffe9a8),
         search_current: Rgb::hex(0xf5b942),
         ansi: [
-            Rgb::hex(0x24292f),
-            Rgb::hex(0xcf222e),
-            Rgb::hex(0x116329),
-            Rgb::hex(0x9a6700),
-            Rgb::hex(0x0969da),
-            Rgb::hex(0x8250df),
-            Rgb::hex(0x1b7c83),
+            Rgb::hex(0x1d1c1a),
+            Rgb::hex(0xbf2239),
+            Rgb::hex(0x068032),
+            Rgb::hex(0x896301),
+            Rgb::hex(0x0668c9),
+            Rgb::hex(0x953aaf),
+            Rgb::hex(0x007984),
             Rgb::hex(0x565553),
-            Rgb::hex(0x57606a),
-            Rgb::hex(0xa40e26),
-            Rgb::hex(0x1a7f37),
-            Rgb::hex(0x996c00),
-            Rgb::hex(0x0070ea),
-            Rgb::hex(0x8a4ef7),
-            Rgb::hex(0x2a7e92),
-            Rgb::hex(0x8c959f),
+            Rgb::hex(0x747371),
+            Rgb::hex(0xa70d2c),
+            Rgb::hex(0x006d28),
+            Rgb::hex(0x745300),
+            Rgb::hex(0x0057ac),
+            Rgb::hex(0x83259c),
+            Rgb::hex(0x00666f),
+            Rgb::hex(0x949392),
         ],
         minimum_contrast: 100,
         bold_is_bright: false,
@@ -744,8 +749,7 @@ pub mod alpha {
     /// [`FAINT`] wash: Zed's Delta measures about 0.34, git-delta's emphasis sits about 2.5
     /// times its line's luminance off it.
     pub const EMPH: f32 = 0.34;
-    /// The window under a light modal or sheet: dimmed about as far as an iOS sheet dims it,
-    /// so the sheet leads without the whole screen turning grey.
+    /// A step past [`FAINT`]: the neutral solid pressed, given this far toward its plane.
     pub const DIM: f32 = 0.16;
     /// [`FAINT`] on white: a quiet pill's fill in light, where a saturated tone at 0.12 reads
     /// heavier than it does on near-black.
@@ -774,6 +778,11 @@ pub mod alpha {
     /// The window under a dark modal or sheet: Linear dims under 0.4, shadcn far less; at 0.6
     /// the settings blacked out the work behind them.
     pub const SCRIM: f32 = 0.45;
+    /// The window under a light modal or sheet, dimmed in the warm ink.
+    ///
+    /// About as far as Notion's light overlay (0.24 of a near-black), so the sheet leads and the
+    /// work behind it keeps its own warm material rather than turning a flat grey.
+    pub const SCRIM_ON_PAPER: f32 = 0.20;
     /// Present but set back: a read row in the inbox.
     pub const STRONG: f32 = 0.7;
     /// An unlit dot of the mark on a dark surface (the brand's ink plate).
@@ -1287,8 +1296,8 @@ impl Surfaces {
     }
 }
 
-/// One layer of a shadow, in points: black at `alpha`, `y` down, blurred over `blur`, its
-/// shape grown by `spread` (drawn in by a negative one).
+/// One layer of a shadow, in points: the elevation's shade at `alpha`, `y` down, blurred over
+/// `blur`, its shape grown by `spread` (drawn in by a negative one).
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Shadow {
     /// How far down it falls.
@@ -1300,6 +1309,18 @@ pub struct Shadow {
     pub spread: f32,
     /// Its opacity.
     pub alpha: f32,
+}
+
+impl Shadow {
+    /// No layer: a stack with fewer layers than its slots fills the rest with it, and nothing
+    /// is drawn for it.
+    pub const NONE: Self = Self { y: 0.0, blur: 0.0, spread: 0.0, alpha: 0.0 };
+
+    /// Whether it draws anything.
+    #[must_use]
+    pub fn shows(self) -> bool {
+        self.alpha > 0.0
+    }
 }
 
 /// The finish of what is sunk: a field, a segmented control's track, a meter.
@@ -1363,15 +1384,17 @@ pub struct Finish {
 /// surface and overlay, coss's rim and its large shadow. Both are drawn only by the kit.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Elevation {
-    /// The colour of the shadow and of the scrim.
+    /// The colour of the shadow and of the scrim: black in dark, the warm ink in light, so a
+    /// shadow on paper is a deeper paper rather than a grey (Radix's tinted greys).
     pub shade: Rgb,
     /// How much the scrim under a modal dims the window.
     pub scrim: f32,
-    /// The shadow under an `elevated` surface: a tight contact layer, then a soft one.
-    pub shadow: [Shadow; 2],
-    /// The contact shadow under what rests, or none: in dark a shadow on near-black says
-    /// nothing, and the rim does the work.
-    pub rest: Option<Shadow>,
+    /// The shadow under an `elevated` surface, tightest first: a contact layer, then softer
+    /// ones; [`Shadow::NONE`] fills the slots a mode does not use.
+    pub shadow: [Shadow; 3],
+    /// The contact under what rests, its layers tightest first, or none: in dark a shadow on
+    /// near-black says nothing, and the rim does the work.
+    pub rest: Option<[Shadow; 2]>,
     /// The rim of what is raised, resting or floating.
     pub rim: Rim,
     /// The primary solid's finish.
@@ -1392,6 +1415,7 @@ impl Elevation {
             // Drawn in by 10, so it falls below the sheet (6 to the sides, none above) where
             // `0 12 32` reached 16 sideways and 4 above; a third heavier to keep its weight.
             Shadow { y: 12.0, blur: 32.0, spread: -10.0, alpha: 0.16 },
+            Shadow::NONE,
         ],
         rest: None,
         // coss draws its dark rim at 6 %; what floats keeps that, what rests a step quieter.
@@ -1404,19 +1428,25 @@ impl Elevation {
         finish: Finish { top: false, ink: Rgb::hex(0), alpha: 0.10, contact: None, pressed: 0.08 },
         sunk: Sunk { shade: 0.18, lip: Some(alpha::RIM) },
     };
-    /// Light: a faint shadow and a light scrim, since white panels read on their own. At a
-    /// quarter the scrim flattened the screen to a mid grey behind a drawer.
+    /// Light: shadows in the warm ink (`oklch(0.24 0.012 85)`), three layers under what floats
+    /// and two faint ones under what rests, and a scrim of the same ink.
+    #[expect(clippy::unreadable_literal, reason = "colours read as RRGGBB")]
     pub const LIGHT: Self = Self {
-        shade: Rgb::hex(0),
-        scrim: alpha::DIM,
+        shade: Rgb::hex(0x221f19),
+        scrim: alpha::SCRIM_ON_PAPER,
+        // Geist's menu and modal shape, a notch firmer for the half-point ring: a contact, a
+        // near layer, then a soft one drawn in so it falls below the sheet, not round it.
         shadow: [
-            Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.06 },
-            // As dark's: below the sheet, not a grey halo round every menu.
-            Shadow { y: 12.0, blur: 32.0, spread: -10.0, alpha: 0.13 },
+            Shadow { y: 1.0, blur: 1.0, spread: 0.0, alpha: 0.05 },
+            Shadow { y: 4.0, blur: 8.0, spread: -4.0, alpha: 0.06 },
+            Shadow { y: 16.0, blur: 32.0, spread: -8.0, alpha: 0.11 },
         ],
-        // coss's every shadow sits at 5 %: a card on its well is held by its hairline and a
-        // contact this faint, not a pool.
-        rest: Some(Shadow { y: 1.0, blur: 2.0, spread: -0.5, alpha: 0.05 }),
+        // Primer's resting small: a card on the content is held by its ring and a contact
+        // this faint, not a pool.
+        rest: Some([
+            Shadow { y: 1.0, blur: 1.0, spread: 0.0, alpha: 0.04 },
+            Shadow { y: 1.0, blur: 2.0, spread: 0.0, alpha: 0.03 },
+        ]),
         // No rim on what rests: its ring and contact already end it, and a third edge along
         // its bottom read as a box drawn twice.
         rim: Rim { top: false, ink: Rgb::hex(0), rest: None, float: None },
@@ -2655,15 +2685,29 @@ mod tests {
         let light = Theme::new(Variant::Light);
         assert_eq!(light.surfaces.elevated, Rgb::hex(0xff_ffff), "light: what floats is white");
         for theme in [&dark, &light] {
-            let [contact, soft] = theme.elevation.shadow;
+            let layers: Vec<Shadow> =
+                theme.elevation.shadow.into_iter().filter(|l| l.shows()).collect();
+            let (contact, soft) = (layers[0], layers[layers.len() - 1]);
             assert!(contact.blur < soft.blur && contact.y < soft.y, "a tight layer, then a soft");
+            assert!(
+                layers.windows(2).all(|w| w[0].blur <= w[1].blur && w[0].y <= w[1].y),
+                "{:?}: tightest first",
+                theme.variant()
+            );
             assert!(soft.alpha >= 0.1, "{:?}: the shadow shows", theme.variant());
             // Zed's quiet floor: a dark shadow about a third of the 0.5 it was, drawn in so it
             // falls below the sheet and shows nothing above it.
             assert!(soft.alpha <= 0.17, "{:?}: the shadow pools", theme.variant());
             let v = theme.variant();
             assert!(soft.y + soft.spread > 0.0, "{v:?}: its shape starts below the top edge");
-            assert!(soft.spread + soft.blur / 2.0 <= 6.0, "{v:?}: no halo to the sides");
+            // Its reach to the sides is a third of its reach below at most: a sheet's weight
+            // falls under it, and it never rings the sheet in grey.
+            let (aside, below) =
+                (soft.spread + soft.blur / 2.0, soft.y + soft.spread + soft.blur / 2.0);
+            assert!(
+                aside <= 8.0 && aside * 3.0 <= below,
+                "{v:?}: a halo, {aside} aside, {below} below"
+            );
         }
         let (dark_rim, light_rim) = (dark.elevation.rim, light.elevation.rim);
         assert_eq!(dark_rim.float, Some(alpha::EDGE), "a dark sheet's lit edge");
@@ -2673,8 +2717,14 @@ mod tests {
         assert!(dark.elevation.rest.is_none(), "dark rests on its rim alone");
         assert!(dark_rim.rest.is_some(), "dark: what rests catches the light at its top");
         assert_eq!(light_rim.rest, None, "light: what rests wears one edge, its ring");
-        let rest = light.elevation.rest.map(|s| s.alpha).unwrap_or_default();
-        assert!(rest > 0.0 && rest < light.elevation.shadow[0].alpha, "a contact under a float's");
+        let rest = light.elevation.rest.unwrap_or([Shadow::NONE; 2]);
+        let float = light.elevation.shadow[0].alpha;
+        assert!(rest.iter().all(|l| l.shows() && l.alpha < float), "a contact under a float's");
+        // R8: shadows are black in dark and the warm ink in light.
+        assert_eq!(dark.elevation.shade, Rgb::hex(0), "dark: black");
+        let ink = light.elevation.shade.oklch();
+        assert!((ink.h - NEUTRAL_HUE).abs() < 5.0 && ink.c > 0.006, "light: the warm ink {ink:?}");
+        assert!(ink.l < 0.3, "light: an ink, not a grey: {ink:?}");
         const {
             assert!(alpha::RIM < alpha::EDGE, "what rests catches less light than what floats");
             assert!(alpha::EDGE < alpha::FAINT, "the edge is the ladder's quietest step");
@@ -2938,6 +2988,93 @@ mod tests {
         let program = Colors::new(&theme, &set);
         let fg = program.text_over(program.theme.fg, program.theme.bg);
         assert!(fg.contrast(program.theme.bg) >= 3.0, "{fg:?}");
+    }
+
+    /// The light ANSI colours as generated: each slot's OKLCH, its hue taken from the dark
+    /// palette's (green on the brand's), the normals at L 0.525, the brights at 0.465, chroma
+    /// capped per hue where sRGB would clip it unevenly, and the greys on the one neutral.
+    const LIGHT_ANSI: [Oklch; 16] = {
+        const fn at(l: f32, c: f32, h: f32) -> Oklch {
+            Oklch { l, c, h }
+        }
+        const GREEN: f32 = 148.0;
+        [
+            at(0.226, 0.004, NEUTRAL_HUE),
+            at(0.525, 0.190, 20.0),
+            at(0.525, 0.150, GREEN),
+            at(0.525, 0.108, 82.0),
+            at(0.525, 0.170, 255.0),
+            at(0.525, 0.190, 318.0),
+            at(0.525, 0.090, 206.0),
+            at(0.450, 0.003, NEUTRAL_HUE),
+            at(0.556, 0.003, NEUTRAL_HUE),
+            at(0.465, 0.180, 20.0),
+            at(0.465, 0.135, GREEN),
+            at(0.465, 0.096, 82.0),
+            at(0.465, 0.153, 255.0),
+            at(0.465, 0.190, 318.0),
+            at(0.465, 0.080, 206.0),
+            at(0.665, 0.003, NEUTRAL_HUE),
+        ]
+    };
+
+    /// The light palette is what its generator makes, and the generator's hues are the dark
+    /// palette's: a colour is one hue in both modes (within 10°, green within 15° since it
+    /// moves to the brand's), and the greys share the one neutral.
+    #[test]
+    fn light_ansi_is_generated_from_the_dark_hues() {
+        for (ix, (made, spec)) in TerminalPalette::LIGHT.ansi.iter().zip(LIGHT_ANSI).enumerate() {
+            let want = spec.rgb();
+            let off = [(made.r, want.r), (made.g, want.g), (made.b, want.b)]
+                .iter()
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap_or(0);
+            assert!(off <= 1, "ANSI {ix}: {made:?}, generated {want:?}");
+        }
+    }
+
+    /// One hue per ANSI slot across the modes (R7): a red is the same red on black and on
+    /// paper, so code and a program's output read alike in either.
+    #[test]
+    fn ansi_slots_keep_their_hue_across_modes() {
+        let chromatic = (1..=6).chain(9..=14);
+        for ix in chromatic {
+            let (dark, light) =
+                (TerminalPalette::DARK.ansi[ix].oklch(), TerminalPalette::LIGHT.ansi[ix].oklch());
+            let apart = (dark.h - light.h).abs();
+            let apart = apart.min(360.0 - apart);
+            let within = if ix % 8 == 2 { 15.0 } else { 10.0 };
+            assert!(apart <= within, "ANSI {ix}: {:.0}° dark, {:.0}° light", dark.h, light.h);
+        }
+        for ix in [0, 7, 8, 15] {
+            let grey = TerminalPalette::LIGHT.ansi[ix].oklch();
+            assert!(grey.c <= NEUTRAL_CHROMA, "ANSI {ix} is a neutral: {grey:?}");
+        }
+    }
+
+    /// A bright is at least as strong as its normal against the ground, in both modes (R7):
+    /// "bright" means "stronger", never "paler", and in light the normals sit within 8 Lc of
+    /// each other. Dark keeps One Dark's uneven normals, which the person chose.
+    #[test]
+    fn ansi_brights_are_at_least_as_strong_as_their_normals() {
+        for (name, palette) in [("dark", TerminalPalette::DARK), ("light", TerminalPalette::LIGHT)]
+        {
+            let strength = |ix: usize| palette.ansi[ix].apca(palette.bg).abs();
+            for ix in 1..=6 {
+                let (normal, bright) = (strength(ix), strength(ix + 8));
+                assert!(
+                    bright >= normal,
+                    "{name}: ANSI {} at Lc {bright:.0}, {ix} at {normal:.0}",
+                    ix + 8
+                );
+            }
+        }
+        let light: Vec<f32> =
+            (1..=6).map(|ix| TerminalPalette::LIGHT.ansi[ix].apca(LIGHT_BG).abs()).collect();
+        let (least, most) =
+            light.iter().fold((f32::MAX, f32::MIN), |(lo, hi), lc| (lo.min(*lc), hi.max(*lc)));
+        assert!(most - least <= 8.0, "light normals span Lc {least:.0} to {most:.0}");
     }
 
     /// Terminal text in the theme's own colours reads without any minimum contrast: every ANSI

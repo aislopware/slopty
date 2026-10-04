@@ -6494,3 +6494,37 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - Tests: one hue per meaning across both modes, one neutral hue, nearer is lighter in both
     modes, the dividing hairline is seen equally, and the agent's colour stays apart from
     waiting under every vision. The kit's card, button and secondary tests follow the rims.
+
+- ✅ **Light shadows are the ink, in three layers** (2026-10-04, light pass phase 2, from
+  `.research/light-premium-2026-10-04.md` §3.4). Black shadows on warm paper read as grey
+  smudges. The light elevation's shade is now the warm ink, `oklch(0.24 0.012 85)` =
+  `#221f19`, so a shadow is a deeper paper (Radix tints its light greys the same way). Dark
+  keeps black.
+  - What floats: `0 1 1 0` at 5 %, `0 4 8 −4` at 6 % and `0 16 32 −8` at 11 %, which is
+    Geist's menu and modal shape a notch firmer for the half-point ring. Dark keeps its two
+    layers. `Elevation::shadow` holds three slots, and `Shadow::NONE` fills a slot a mode
+    does not use, which the kit skips.
+  - What rests: `0 1 1 0` at 4 % and `0 1 2 0` at 3 % (Primer's resting small).
+  - The scrim is the ink at 0.20 (`alpha::SCRIM_ON_PAPER`), not black at 0.16, so the work
+    behind a sheet keeps its material. The solid's contact and the sunk shade take the ink
+    by the same token.
+  - The old bound "no halo to the sides" (6 pt) becomes a ratio: a soft layer reaches at most
+    8 pt aside and a third of its reach below.
+  - Tests: `elevation_and_density` (R8: black in dark, the ink in light, layers tightest
+    first) and the kit's `the_elevation_is_layers_of_the_shade_and_a_lit_edge_in_dark` (every
+    drop layer and the scrim are the shade).
+
+- ✅ **The light terminal palette is generated from the dark one's hues** (2026-10-04, light
+  pass phase 3, §3.5 and §3.6). GitHub light's palette had other hues than One Dark's, uneven
+  normals (Lc 72 to 85), and brights paler than their normals. Each light ANSI colour now
+  keeps its dark slot's hue, with green moved to the brand's 148°. Normals sit at OKLCH
+  L 0.525 and brights at 0.465, so a bright is stronger on paper as it is on black. Chroma is
+  as high as sRGB allows, up to a cap per hue. The greys are the one neutral. Dark stays One
+  Dark, uneven normals and all, since the person chose it.
+  - Code comments take ANSI 8, the shell's dim slot, in both modes instead of the chrome's
+    muted grey. Muted is held near body strength by the chrome's AA rule, while ANSI 8 clears
+    AA on the code's ground and still recedes.
+  - Tests (R7): `light_ansi_is_generated_from_the_dark_hues` regenerates every slot from its
+    OKLCH; `ansi_slots_keep_their_hue_across_modes` (within 10°, green 15°, neutral greys);
+    `ansi_brights_are_at_least_as_strong_as_their_normals` (both modes, light normals within
+    8 Lc); `a_comment_is_the_dim_slot_and_still_reads`.

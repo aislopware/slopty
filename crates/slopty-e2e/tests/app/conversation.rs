@@ -192,6 +192,13 @@ async fn an_agents_questions_are_answered_in_the_thread() {
     let split = dump.a11y_node("RadioButton", Some("Split")).unwrap();
     assert!(split.focused, "the first answer has the keyboard: {:#?}", dump.a11y);
     golden(drv, &dir, "thread-questions").await;
+    stack.set_appearance("dark").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+    golden(drv, &dir, "thread-questions-dark").await;
+    stack.set_appearance("light").unwrap();
+    let drv = &mut stack.driver;
+    drv.wait_for("the light theme", STEP, |d| !d.dark).await.unwrap();
 
     click(drv, "RadioButton", "Unified").await;
     // ⌘↵ goes on at once; a newer gpui-kit also goes on by itself a moment after the pick.
