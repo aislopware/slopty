@@ -232,6 +232,11 @@ pub struct Awake {
 /// What `slopty worker doctor` shows: the daemon's own view of its permissions and links.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Health {
+    /// This worker, as the server's directory lists it.
+    pub worker: WorkerId,
+    /// The server it registers with and how its link stands; `None` while no server is set
+    /// and it runs on its own.
+    pub server: Option<ServerHealth>,
     /// Daemon version.
     pub version: String,
     /// Path of the daemon binary (which is what TCC grants permissions to).
@@ -255,6 +260,37 @@ pub struct Health {
     pub sessions: usize,
     /// Seconds since the daemon started.
     pub uptime_secs: u64,
+}
+
+/// The server a worker registers with, as its doctor says it ([`Health::server`]).
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct ServerHealth {
+    /// Its address as set (`studio:45560`, `127.0.0.1:45560`).
+    pub address: String,
+    /// How the link to it stands.
+    pub link: LinkState,
+}
+
+/// How a worker's link to its server stands. A worker that cannot reach its server says so
+/// here, never silently.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LinkState {
+    /// The first dial since the worker started or its server changed has not ended yet.
+    Dialling,
+    /// Registered: the server lists this worker and holds its lease.
+    Linked,
+    /// Not linked: the last try ended, and the worker dials again on its redial rule.
+    Redialling {
+        /// How the last try ended.
+        why: String,
+    },
+    /// Turned away, or unable to dial at all: nothing changes until someone acts, though the
+    /// worker asks again now and then.
+    Refused {
+        /// Why, and what would let it in.
+        why: String,
+    },
 }
 
 /// This machine's Tailscale, as the daemon reads it.

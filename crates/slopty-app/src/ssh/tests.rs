@@ -171,6 +171,8 @@ fn deployed() -> Deployed {
     Deployed {
         platform: Platform { os: Os::MacOs, arch: Arch::Arm64 },
         health: Health {
+            worker: WorkerId::nil(),
+            server: None,
             version: "0.1.0".to_owned(),
             exe: "/Users/me/.slopty/deploy/slopty-worker".to_owned(),
             caps: WorkerCaps {

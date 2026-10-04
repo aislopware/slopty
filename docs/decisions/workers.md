@@ -1097,3 +1097,18 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   against 45 s before (`docs/MEASUREMENTS.md` 2026-10-04). Tests: `slopty-app`
   `a_wake_dials_a_held_worker_once_rather_than_holding_again`; `slopty-client`
   `a_resume_keeps_a_live_link_and_gives_up_a_dead_one_at_once`.
+
+- ✅ **The doctor names the worker and says whether its server answers** (2026-10-04,
+  server-default batch 1, `.research/server-default-2026-10-04.md` §4.2 A2). The server becomes
+  the default, so a worker that cannot reach its server must say so, and never fail silently.
+  `Health` now carries the worker's id, the one the server's directory lists, and `server`:
+  the address it registers with and how the link stands. That is `dialling` until the first
+  try ends, `linked` once welcomed, `redialling` with how the last try ended, or `refused`
+  with why (the tailnet policy, a different build, no endpoint to dial from). `None` means no
+  server is set. The link task records each try's end before the next, and a server cleared
+  from `settings.toml` clears it. `slopty worker doctor` prints the worker's id and a ✔ or ✘
+  line for the server. The app and the deploy read the new fields from batch 2 on. Tests:
+  ctl goldens `ctl_reply_doctor`, `ctl_health_unregistered` and `ctl_server_links`;
+  `slopty-workerd` `the_doctor_names_the_worker_and_whether_its_server_answers` (a stand-in
+  server welcomes it, then drops it); `slopty-cli`
+  `doctor_report_names_the_binary_and_flags_missing_permissions`.

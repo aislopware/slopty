@@ -618,6 +618,8 @@ mod tests {
 
         fn health(exe: &str, uptime_secs: u64) -> Health {
             Health {
+                worker: slopty_core::WorkerId::nil(),
+                server: None,
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 exe: exe.to_owned(),
                 caps: slopty_proto::server::WorkerCaps::bare(slopty_proto::server::Os::MacOs),

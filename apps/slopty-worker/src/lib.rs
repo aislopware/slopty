@@ -222,6 +222,9 @@ pub(crate) struct Daemon {
     /// The agents' threads, kept under the data dir, and served to clients; `None` when they
     /// could not be opened there.
     pub threads: Option<threads::Threads>,
+    /// The server registered with and how the link to it stands, for the doctor; `None` while
+    /// none is set.
+    pub server_link: Arc<tokio::sync::watch::Sender<Option<slopty_proto::ctl::ServerHealth>>>,
 }
 
 impl Daemon {
@@ -352,9 +355,12 @@ fn join_server(
         Ok(endpoint) => endpoint,
         Err(e) => {
             tracing::warn!(error = %e, "no endpoint to dial the server from; running on our own");
+            let why = format!("no endpoint to dial the server from: {e}");
+            server::stands(daemon, &addr, slopty_proto::ctl::LinkState::Refused { why });
             return None;
         }
     };
+    server::stands(daemon, &addr, slopty_proto::ctl::LinkState::Dialling);
     let launch = slopty_worker::orchestrate::Launch {
         relay: slopty_agent::hooks::relay_beside_this_binary(),
         claude_mod: daemon.claude_mod.clone(),
@@ -473,6 +479,7 @@ async fn follow_settings(
                 joined = join_server(&daemon, addr, &data_dir);
             } else {
                 tracing::info!("[worker] server cleared: running on our own");
+                daemon.server_link.send_replace(None);
             }
         }
         for key in waits {
@@ -727,6 +734,7 @@ async fn run(displays: Displays, sources: slopty_input::sources::Sources) -> Res
         inboxes,
         reports_turn: Arc::default(),
         session_key,
+        server_link: Arc::new(tokio::sync::watch::Sender::new(None)),
         displays,
         sources,
         threads,

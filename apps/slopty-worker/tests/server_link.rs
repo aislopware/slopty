@@ -265,6 +265,59 @@ mod tests {
         );
     }
 
+    /// The doctor names the worker as the server lists it and says how its server answers:
+    /// not linked while the server has not welcomed it, linked once it has, and dialling again,
+    /// with why, once the server drops it.
+    #[tokio::test]
+    async fn the_doctor_names_the_worker_and_whether_its_server_answers() {
+        use slopty_proto::ctl::{CtlReply, CtlRequest, Health, LinkState};
+
+        async fn doctor(dir: &Path) -> Health {
+            let CtlReply::Doctor(health) = ctl(dir, &CtlRequest::Doctor).await else {
+                panic!("a doctor's answer");
+            };
+            *health
+        }
+        async fn until(dir: &Path, what: &str, pred: impl Fn(&LinkState) -> bool) -> Health {
+            let waiting = async {
+                loop {
+                    let health = doctor(dir).await;
+                    if health.server.as_ref().is_some_and(|s| pred(&s.link)) {
+                        return health;
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+            };
+            tokio::time::timeout(STEP, waiting).await.unwrap_or_else(|_| panic!("{what}"))
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ServerListener::bind("127.0.0.1:0".parse().unwrap(), Admission::new(Vec::new()))
+                .unwrap();
+        let at = server.local_addr().unwrap();
+        let _daemons = daemons(dir.path(), at).await;
+        let before = doctor(dir.path()).await;
+        let said = before.server.expect("a server is set");
+        assert_eq!(said.address, at.to_string());
+        assert_ne!(said.link, LinkState::Linked, "not welcomed yet");
+
+        let link = tokio::time::timeout(STEP, server.accept()).await.unwrap().unwrap();
+        let (peer, reg) = Peer::welcome(link).await;
+        let linked = until(dir.path(), "linked", |l| *l == LinkState::Linked).await;
+        assert_eq!(linked.worker, reg.worker, "the worker the server lists");
+
+        peer.conn.close(0_u32.into(), b"server restarting");
+        let dropped =
+            until(dir.path(), "dialling again", |l| matches!(l, LinkState::Redialling { .. }))
+                .await;
+        let said = dropped.server.map(|s| s.link);
+        assert!(
+            matches!(&said, Some(LinkState::Redialling { why }) if !why.is_empty()),
+            "it says why: {said:?}"
+        );
+    }
+
     /// Once registered, the worker publishes its thread table to the server, all of it first:
     /// a Claude Code session that starts in a terminal is a row there, naming that terminal,
     /// for the server's attention ladder.

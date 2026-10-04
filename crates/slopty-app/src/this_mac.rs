@@ -842,6 +842,8 @@ mod tests {
     fn a_health_report_reads_as_the_checklists_doctor() {
         use slopty_proto::ctl::Tailscale;
         let health = slopty_proto::ctl::Health {
+            worker: slopty_core::WorkerId::nil(),
+            server: None,
             version: "0.3.0".to_owned(),
             exe: "/Applications/Slopty.app/Contents/MacOS/slopty-worker".to_owned(),
             caps: slopty_proto::server::WorkerCaps {

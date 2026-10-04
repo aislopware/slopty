@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
-use slopty_proto::ctl::{CtlReply, CtlRequest, PasteboardAccess, Tailscale};
+use slopty_proto::ctl::{CtlReply, CtlRequest, LinkState, PasteboardAccess, Tailscale};
 
 use crate::{deploy, service};
 
@@ -184,6 +184,29 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
             format!("{} no Tailscale this daemon can read: no tailnet peer gets in", mark(false))
         }
     };
+    let server = match &h.server {
+        None => format!("{} no server set: this worker runs on its own", mark(false)),
+        Some(s) => match &s.link {
+            LinkState::Linked => {
+                format!("{} registered with the server at {}", mark(true), s.address)
+            }
+            LinkState::Dialling => format!("… dialling the server at {}", s.address),
+            LinkState::Redialling { why } => {
+                format!(
+                    "{} the server at {} is not linked ({why}); dialling again",
+                    mark(false),
+                    s.address
+                )
+            }
+            LinkState::Refused { why } => {
+                format!(
+                    "{} the server at {} does not take this worker: {why}",
+                    mark(false),
+                    s.address
+                )
+            }
+        },
+    };
     let ranges = if h.allow.is_empty() {
         "admits loopback and the tailnet".to_owned()
     } else {
@@ -205,6 +228,8 @@ fn doctor_report(h: &slopty_proto::ctl::Health, desktop: bool) -> String {
     let lines = [
         vec![
             format!("slopty-worker {}  ({})", h.version, h.exe),
+            format!("worker {}", h.worker),
+            server,
             format!("up {} s · listening on {}", h.uptime_secs, h.listen),
             ranges,
             tailscale,
@@ -277,6 +302,11 @@ mod tests {
     #[test]
     fn doctor_report_names_the_binary_and_flags_missing_permissions() {
         let h = slopty_proto::ctl::Health {
+            worker: slopty_core::WorkerId::nil(),
+            server: Some(slopty_proto::ctl::ServerHealth {
+                address: "studio:45560".to_owned(),
+                link: LinkState::Linked,
+            }),
             version: "0.3.0".to_owned(),
             exe: "/opt/slopty/bin/slopty-worker".to_owned(),
             caps: WorkerCaps {
@@ -297,6 +327,8 @@ mod tests {
         };
         let report = doctor_report(&h, true);
         assert!(report.contains("/opt/slopty/bin/slopty-worker"));
+        assert!(report.contains(&format!("worker {}\n", h.worker)), "{report}");
+        assert!(report.contains("✔ registered with the server at studio:45560"), "{report}");
         assert!(report.contains("✔ Screen Recording"));
         assert!(report.contains("✘ Accessibility"));
         assert!(report.contains("2 clients connected, 3 sessions"));
@@ -348,6 +380,25 @@ mod tests {
         };
         assert!(doctor_report(&full, true).contains("✘ Thread logs cannot be written: disk full"));
         assert!(!doctor_report(&wakes, true).contains("cannot be written"));
+        let link = |link| {
+            let server =
+                Some(slopty_proto::ctl::ServerHealth { address: "studio:45560".to_owned(), link });
+            doctor_report(&slopty_proto::ctl::Health { server, ..h.clone() }, true)
+        };
+        let down = link(LinkState::Redialling { why: "connection refused".to_owned() });
+        assert!(
+            down.contains(
+                "✘ the server at studio:45560 is not linked (connection refused); dialling again"
+            ),
+            "{down}"
+        );
+        let refused = link(LinkState::Refused { why: "not granted".to_owned() });
+        assert!(
+            refused.contains("✘ the server at studio:45560 does not take this worker: not granted"),
+            "{refused}"
+        );
+        let own = doctor_report(&slopty_proto::ctl::Health { server: None, ..h.clone() }, true);
+        assert!(own.contains("✘ no server set: this worker runs on its own"), "{own}");
         let linux = doctor_report(&h, false);
         assert!(!linux.contains("Screen Recording") && !linux.contains("Accessibility"), "{linux}");
         assert!(linux.contains("no desktop to stream here"), "{linux}");

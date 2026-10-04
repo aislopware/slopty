@@ -3,9 +3,9 @@
 Slopty is a remote-coding workstation in three roles. **Workers** (macOS; Linux for terminals
 and agents) expose shells, agents, windows and displays. One **server** keeps the worker
 directory and the orchestration verbs, and is never on the data path. **Clients** (the macOS,
-iPhone and iPad app, the `slopty` CLI, and AI agents over MCP) show the workers' items as tiles
-in one niri-style scrolling workspace, several workers mixed, with Claude Code agents surfaced
-as first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
+iPhone and iPad app, and the `slopty` CLI that people and AI agents run) show the workers'
+items as tiles in one niri-style scrolling workspace, several workers mixed, with Claude Code
+agents surfaced as first-class objects. Everything is Rust. Floor: macOS 26.5 / iOS 26.5, Apple silicon.
 
 This file is the map. Rulings and their evidence live under [docs/decisions/](DECISIONS.md), one file per topic.
 
@@ -344,9 +344,10 @@ sockets under `<data dir>/run/` and logs in `~/Library/Logs/Slopty`, bootstraps 
 waits for the daemon to answer; `uninstall` and `service` undo and report. The CLI finds the
 installed socket by itself, so `slopty worker status` works without launchd's environment.
 `slopty worker doctor` asks the running daemon about itself (`CtlRequest::Doctor` →
-`Health`): Screen Recording and Accessibility as *that binary* sees them (TCC grants are per
-executable, so the report names the path to add), listen address, admitted ranges, connected
-clients, sessions;
+`Health`): the worker's id and how its link to the server stands (address, then dialling,
+linked, redialling or refused, with why), Screen Recording and Accessibility as *that binary*
+sees them (TCC grants are per executable, so the report names the path to add), listen
+address, admitted ranges, connected clients, sessions;
 exit status 1 while a permission is missing, so it can gate a setup script. For an ad-hoc
 (`cargo build`) binary "per executable" means per build: the cdhash changes and the grant is gone,
 silently. `cargo xtask sign` (and `xtask run worker`, which calls it) signs both daemons under
@@ -375,7 +376,7 @@ matches output from a per-session mark, as `expect` does. `slopty-worker::ports`
 listeners in each terminal's process tree through libproc. The server's hub answers two verbs
 itself: `Events`, a long poll on a bounded log of what it hears from every worker (liveness,
 terminals opened and closed, agent status changes) read from a cursor, which is how one agent
-watches the whole fleet over stateless HTTP; and `ForgetWorker`. Each event it logs is pushed
+watches the whole fleet (`slopty events`); and `ForgetWorker`. Each event it logs is pushed
 as it is, `FromServer::Event(HubEvent)`, to every client and agent link. A link gets the state
 (`Directory`, then `Terminals`, then `Projects`) on connect and again when it falls behind, and replaces what it
 showed with it. Files are read in ranges of at
@@ -387,65 +388,71 @@ lost its answer to a timeout or a dropped link asks again and gets the first out
 terminal. The CLI and MCP give every mutating verb a key and resend under it on `Interrupted`.
 Rulings in `docs/decisions/topology.md`.
 
-**Projects.** The server also keeps projects: one goal, its tasks as a tree with dependencies,
-and a timeline, beside `workers.json` in `projects.json` (`slopty-server::project`, persisted by
-`store::ProjectStore`). The hub sends every durable change to a keeper, which keeps its own
-replica and appends the change to `projects.log` as a JSON line once a burst settles (250 ms).
-It writes the whole file again, compact, only when the log passes 8 MiB and at shutdown, so
-nothing the store does holds the hub's lock. A file that fails to read stops the server; one
-that fails to parse is set aside as `<name>.bad-<ms>`, and a log line cut short at its end is
-passed over. The hub answers the project verbs itself (`ProjectCreate` … `TaskSpawn`,
-`TaskReport`, `TaskGet`, `WorkingOn`, `PlacementSuggest`, `WorkerFacts`,
-`slopty-proto::orchestration`):
+**Projects.** The server also keeps projects: one goal, its tasks side by side (one level, with
+dependencies), and a timeline, beside `workers.json` in `projects.json`
+(`slopty-server::project`, persisted by `store::ProjectStore`). The hub sends every durable
+change to a keeper, which keeps its own replica and appends the change to `projects.log` as a
+JSON line once a burst settles (250 ms). It writes the whole file again, compact, only when the
+log passes 8 MiB and at shutdown, so nothing the store does holds the hub's lock. A file that
+fails to read stops the server; one that fails to parse is set aside as `<name>.bad-<ms>`, and
+a log line cut short at its end is passed over. The hub answers the project verbs itself
+(`ProjectCreate` … `TaskSpawn`, `TaskReport`, `TaskGet`, `TaskTell`, `WorkingOn`,
+`WorkerFacts`, `slopty-proto::orchestration`):
 - Every link says who it speaks for (`slopty_server::Speaker`): a client is the person, an MCP
   surface an agent, and the CLI inside a Slopty terminal (`Role::Shell`) an agent when an agent
   runs there, when it works on a project, when an agent opened or typed into it, or when the
   server does not know it. Only the person answers a permission, merges a task or records its
-  verifier, and only the person's read of a conversation holds its prompts.
+  verifier, and only the person's read of a thread holds its prompts. Only the orchestrator
+  makes, starts and tells tasks; a task's agent moves and reports its own.
 - The hub chooses every terminal's id (the start's token): a start whose answer was lost still
   counts, and its terminal goes on its task when the worker announces it. An agent it starts
   begins in `default` mode with bypass mode locked off in its settings, unless the person allows
   looser modes for the project, and a report of a looser mode from such a terminal closes it.
-- A task's agent reports up its tree (`TaskReport`: checkpoint, needs input, stuck, done). The
-  hub batches reports per node (`slopty-server::deliver`), pushes a batch to the node's worker
-  (`FromServer::Deliver`), and the agent's own `SessionStart`, `UserPromptSubmit` and `Stop`
-  hooks hand it over (`slopty hook reports`, `slopty_agent::reports`). Nothing is typed into a
-  terminal.
+- A task's agent reports its work done to the orchestrator (`TaskReport`). The hub batches
+  what goes to each agent (`slopty-server::deliver`): reports, the person's and the
+  orchestrator's words, and the server's notices of a task's agent that ended its turn, waits
+  on the person or exited without reporting (`project::turns`). It pushes a batch to the
+  agent's worker (`FromServer::Deliver`), and the agent's own `SessionStart`,
+  `UserPromptSubmit` and `Stop` hooks hand it over (`slopty hook reports`,
+  `slopty_agent::reports`). Nothing is typed into a terminal.
 - Each worker reports open facts (`ToServer::Facts`: toolchains, GPUs, power, its person's
   labels and probe commands, from `slopty-worker::facts`). The hub adds the facts it knows
-  itself (os, cpus, memory, load, live agents), and `list_workers` shows them all.
-- A task's placement is `{ pin, require, prefer, near, avoid }`, with the rules in CEL over the
-  facts (`slopty-server::placement`). A rule's worst case is counted before it runs, and ranking
-  runs on the blocking pool under a deadline. `TaskSpawn` ranks the workers outside the lock, then
-  reserves the chosen worker under it. A start counts against every limit from that reservation
-  until its terminal is live. The hub then forwards an ordinary `SpawnAgent`, or an
-  `OpenTerminal` for a command task, with `SLOPTY_PROJECT` and `SLOPTY_TASK` last in its env.
-  The new terminal is assigned to the task, and a start that can no longer be assigned is
+  itself (os, cpus, memory, load, live agents, repos), and `slopty workers --json` shows them
+  all. The orchestrator reads them and names the worker in `task_start`.
+- `TaskSpawn` starts a task on its pinned worker, or on one with room: beside a clone of the
+  project's repository when the task named no directory, then the fewest live agents, the least
+  load and the name (`slopty-server::placement`). Either way the worker is online and has the
+  agent installed. The hub reserves the worker under its lock, and a start counts against the
+  fleet's live agents from that reservation until its terminal is live. The hub then forwards
+  an ordinary `SpawnAgent`, an `OpenTerminal` for a command task, or a `StartThread` for an
+  agent run as a thread, with `SLOPTY_PROJECT` and `SLOPTY_TASK` last in its env. The new
+  terminal or thread is assigned to the task, and a start that can no longer be assigned is
   closed.
-- The limits are a project's own (`Limits`), under the person's bounds from `[server.projects]`
-  in `settings.toml` (`Hub::set_policy`). The bounds also hold the fleet-wide count of live
-  agents and the projects allowed flags that loosen Claude Code's permissions.
-- A claim is refused when it overlaps a live task's paths, compared after NFC and case folding.
-  Every move between states is checked, and a move back into a live state claims the paths
-  again.
-- An assigned task follows its agent's status while it is running, waiting or blocked. Its
-  assignment ends when the session closes. A worker that registers again is reconciled against
-  its session list.
+- The person's `[server.projects]` bounds in `settings.toml` (`Hub::set_policy`) hold the
+  fleet-wide count of live agents and the projects allowed flags that loosen Claude Code's
+  permissions. A project's own `Limits` hold its review limit: while that many of its tasks
+  wait on the person, no new task starts.
+- Every move between states is checked. An assigned task follows its agent's status while it
+  is running, waiting or blocked. Its assignment ends when the session closes. A worker that
+  registers again is reconciled against its session list.
 - Workers send `ToServer::Report`: the `AgentBranch` from the status line, plus the native
   subagents and task-list items from the `SubagentStart`/`SubagentStop`/`TaskCreated`/
   `TaskCompleted` hooks (`Hook::report`, forwarded by `ctl` on the daemon's `reports`
-  channel). The hub keeps these per node, beside the tasks. A report that arrives before its
+  channel). The hub keeps these per task, beside the tasks. A report that arrives before its
   session is assigned is held until it is.
 
 Every change is logged and pushed as `Happening::Project(ProjectUpdate)`, a delta: the record,
 the one task as its card, or the one native that changed, and the timeline entry.
 `FromServer::Projects` comes in parts of at most 8 MiB and carries the event sequence number it
-is current as of, so a client can drop a replayed update logged at or below it. The worker's own agent spawn adds `--mcp-config=` naming `slopty mcp`
-(`slopty_agent::hooks::with_mcp`). Every session gets `SLOPTY_SERVER`, so `slopty mcp` and the
-CLI inside it find the server. With no project or task named, they act on the session's own:
-the server's record of the session first, then `SLOPTY_PROJECT` and `SLOPTY_TASK`
-(`slopty_tools::Scope`). Tests start `slopty-stub-claude`, never `claude`. Rulings in
-`docs/decisions/projects.md`.
+is current as of, so a client can drop a replayed update logged at or below it. The worker's
+own agent spawn adds `--mcp-config=` naming `slopty mcp` (`slopty_agent::hooks::with_mcp`),
+which serves the project's eight tools (`slopty_tools::tools`: `project_status`, `task_get`,
+`task_start`, `task_update`, `task_report`, `task_tell`, `task_wait`, `read_thread`). Every
+other verb is the `slopty` CLI, which an agent runs in its shell. Every session gets
+`SLOPTY_SERVER`, so `slopty mcp` and the CLI inside it find the server. With no project or task
+named, they act on the session's own: the server's record of the session first, then
+`SLOPTY_PROJECT` and `SLOPTY_TASK` (`slopty_tools::Scope`). Tests start `slopty-stub-claude`,
+never `claude`. Rulings in `docs/decisions/projects.md`.
 
 **Verify and merge.** Each project has one lane on the server (`slopty-server::hub::queue`). It
 runs one job at a time, and it reads each next job from the tasks (`Projects::next_job`), so
@@ -455,24 +462,19 @@ the store is the queue and a restart takes it up where it stood:
   detached checkout the project keeps in that clone (`~/slopty/verify/<project>`,
   `slopty-worker::repo::verify`). The step carries that terminal, and the last line shows as
   progress. The exit comes from the session's own exit state.
-- With a reviewer asked for (`Project::review`), a pass starts one before the task is queued
-  (`hub::review`). It is a Claude Code session the server starts on the orchestrator's worker,
-  read-only (`--disallowedTools Edit,Write,NotebookEdit`), in a checkout of the verified
-  commit with the task's diff beside it (`Verb::ReviewCheckout`, `slopty-worker::repo::review`).
-  The step names its terminal, so the person can open it. The lane goes on beside it. Its
-  `review_report` (`Verb::TaskReview`), or the person's, queues the task or gives it back with
-  the findings.
-- A pass (or an approval) queues the task (`Merge::Queued`). The head of the queue is rebased onto the target in
-  the same checkout (`Verb::Rebase`), verified again unless the rebase left the commit that
-  passed, and the target is fast-forwarded (`Verb::FastForward`). That is a compare and swap
-  on the commit it was rebased onto, made with `merge --ff-only` in a worktree that has the
-  target checked out, and `update-ref` otherwise. It pushes only when the project's `push` is
-  on.
+- A pass leaves the task ready to merge, and the person's Merge (`TaskMerge`) queues it
+  (`Merge::Queued`). The head of the queue is rebased onto the target in the same checkout
+  (`Verb::Rebase`), each commit carrying its task and thread as trailers, verified again unless
+  the rebase left the tree that passed, and the target is fast-forwarded (`Verb::FastForward`).
+  That is a compare and swap on the commit it was rebased onto, made with `merge --ff-only` in a
+  worktree that has the target checked out, and `update-ref` otherwise. It pushes only when the
+  project's `push` is on.
 - A failure or a conflict gives the task back (`Hub::give_back`) as a notice through
-  `deliver`, which the agent's hooks hand over. A task on another machine is first sent the
-  target, as `slopty/<project>/target` in its clone (`Hub::send_target`, the home trip
-  reversed), so it can rebase onto what the queue judged it against with pushing off. A reason that is not the task's holds the lane
-  until a worker registers or the project changes.
+  `deliver`, which the agent's hooks hand over; past three give-backs it waits for the person
+  instead. A task on another machine is first sent the target, as `slopty/<project>/target` in
+  its clone (`Hub::send_target`, the home trip reversed), so it can rebase onto what the queue
+  judged it against with pushing off. A reason that is not the task's holds the lane until a
+  worker registers or the project changes.
 
 Crates: `slopty-engine` (trait + libghostty-vt backend), `slopty-grid` (frame model, diff, cache),
 `slopty-predict`, `slopty-pty` (openpty/spawn, async master, ptyd protocol + client),
@@ -1062,7 +1064,7 @@ order. The replace field previews each match struck through with its replacement
 matcher, rewrites the file through `slopty_platform::fs::replace` (atomic, permissions kept) and
 answers `SearchEvent::Replaced` with the new stamps and the files it skipped. An open file tile
 sees the new stamp on its watcher's next look. Scripts and agents reach the same search through
-`Verb::Search` (`slopty search`, the `search_files` MCP tool), one capped reply in path order.
+`Verb::Search` (`slopty search`), one capped reply in path order.
 
 A **browser tile** (`ItemKind::Browser { url }`, `slopty-ui::browser`) shows a web page,
 usually a port on the worker, in the platform's `WKWebView` (`slopty_platform::web`). The window
@@ -1672,8 +1674,8 @@ same deploy with `--update` runs from a wrong-build tile's "Update"
 | `slopty-agent` | Claude Code hook payloads → per-session `AgentStatus` | worker |
 | `slopty-worker` | session manager, mux, fan-out, the orchestration verbs, worker capabilities, listening ports | worker |
 | `slopty-tailnet` | the local Tailscale daemon's `LocalAPI`: peers and paths, `whois` and grants, admission policy | all |
-| `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, the MCP tools | all |
-| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, claims, placement), QUIC and MCP front ends | server |
+| `slopty-tools` | the orchestration verbs as one contract: name resolution, each verb, bulk files, JSON/text views, and a project's MCP tools | all |
+| `slopty-server` | the control plane: worker registry and leases, verb dispatch, the state file, projects (store, placement, verify and merge), QUIC and MCP front ends | server |
 | `slopty-client` | client session state, the item registry mirror, the layout model, grouping tiles by their facts (`groups`) | client |
 | `slopty-settings` | `settings.toml` schema, defaults, loading with fallback, data dir | client |
 | `slopty-theme` | design tokens, dark and light variants | client |

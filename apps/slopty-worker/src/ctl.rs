@@ -144,7 +144,10 @@ const fn pasteboard_access(access: slopty_platform::pasteboard_access::Access) -
 
 async fn doctor(daemon: &Daemon) -> Health {
     let caps = daemon.caps.borrow().clone();
+    let server = daemon.server_link.borrow().clone();
     Health {
+        worker: daemon.id,
+        server,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         exe: std::env::current_exe().map_or_else(|_| "?".to_owned(), |p| p.display().to_string()),
         caps,

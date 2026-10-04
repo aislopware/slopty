@@ -24,6 +24,7 @@ use slopty_net::{HostAddr, NetError};
 use slopty_proto::WorkerMsg;
 use slopty_proto::agent::SessionAgent;
 use slopty_proto::codec::CodecError;
+use slopty_proto::ctl::{LinkState, ServerHealth};
 use slopty_proto::orchestration::{ErrorCode, Outcome, Verb};
 use slopty_proto::project::{AgentReport, Fact, Facts};
 use slopty_proto::server::{FromServer, Refusal, Registration, Role, ToServer, WorkerCaps};
@@ -108,7 +109,13 @@ pub struct Watched {
     pub facts: watch::Receiver<Facts>,
 }
 
+/// Say how the link to the server at `addr` stands, for the doctor.
+pub fn stands(daemon: &Daemon, addr: &HostAddr, link: LinkState) {
+    daemon.server_link.send_replace(Some(ServerHealth { address: addr.to_string(), link }));
+}
+
 /// Stay registered with the server at `addr`, dialing from `endpoint`, until the daemon stops.
+/// Each try's end is said for the doctor ([`stands`]) before the next.
 pub async fn run(
     daemon: Daemon,
     orchestrator: Orchestrator,
@@ -120,16 +127,23 @@ pub async fn run(
     loop {
         let ended =
             session(&daemon, &orchestrator, &endpoint, &addr, watched.clone(), &mut redial).await;
+        let redialling = |why: String| stands(&daemon, &addr, LinkState::Redialling { why });
         match ended {
-            Ok(why) => tracing::info!(server = %addr, why, "server link ended"),
+            Ok(why) => {
+                tracing::info!(server = %addr, why, "server link ended");
+                redialling(why.to_owned());
+            }
             // It lets go of that link within the lease's idle timeout; the redials, two
             // seconds apart at most, find it gone.
             Err(Ended::Duplicate) => {
                 tracing::info!(server = %addr, "the server still holds our last link; retrying");
+                redialling("the server still holds this worker's last link".to_owned());
             }
             // The tailnet policy may grant it later; the redials find out.
             Err(Ended::NotGranted) => {
-                tracing::warn!(server = %addr, "the tailnet policy does not grant this machine the worker role");
+                let why = "the tailnet policy does not grant this machine the worker role";
+                tracing::warn!(server = %addr, "{why}");
+                stands(&daemon, &addr, LinkState::Refused { why: why.to_owned() });
             }
             // It changes only when someone updates it or this worker: asked again after a while.
             Err(Ended::WrongBuild(wrong)) => {
@@ -138,11 +152,17 @@ pub async fn run(
                     server = %addr, server_build, this,
                     "the server runs a different build; update whichever is behind"
                 );
+                let why = format!(
+                    "the server runs build {server_build} and this worker {this}; update \
+                     whichever is behind"
+                );
+                stands(&daemon, &addr, LinkState::Refused { why });
                 tokio::time::sleep(slopty_net::redial::WRONG_BUILD).await;
                 continue;
             }
             Err(Ended::Failed(e)) => {
                 tracing::info!(server = %addr, error = %e, "server link failed");
+                redialling(format!("{e:#}"));
             }
         }
         tokio::time::sleep(redial.next(std::time::Instant::now())).await;
@@ -205,6 +225,7 @@ async fn session(
         };
     let ServerLink { conn, remote, name, tx, mut rx, .. } = link;
     redial.linked(std::time::Instant::now());
+    stands(daemon, addr, LinkState::Linked);
     tracing::info!(server = %name, %remote, "registered with the server");
     let (out, out_rx) = mpsc::channel::<ToServer>(OUT_DEPTH);
     let mut writer = tokio::spawn(write(tx, out_rx));

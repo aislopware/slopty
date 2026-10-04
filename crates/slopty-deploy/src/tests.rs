@@ -124,6 +124,8 @@ impl Host {
 
 fn health() -> Health {
     Health {
+        worker: slopty_core::WorkerId::nil(),
+        server: None,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         exe: "/Users/me/Library/Application Support/Slopty/bin/slopty-worker".to_owned(),
         caps: WorkerCaps {

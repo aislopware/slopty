@@ -1,0 +1,5 @@
+---
+source: crates/slopty-proto/tests/golden.rs
+expression: line
+---
+[{"state":"dialling"},{"state":"linked"},{"state":"redialling","why":"connection refused"},{"state":"refused","why":"the tailnet policy does not grant this machine the worker role"}]
