@@ -14,7 +14,6 @@ mod conn;
 mod ctl;
 mod dnd;
 mod files;
-mod follow;
 mod handoff;
 mod modsock;
 mod paths;
@@ -187,8 +186,9 @@ pub(crate) struct Daemon {
     pub home: String,
     /// Its `settings.toml`, which a client opens to edit this machine's settings.
     pub settings: String,
-    /// Who follows which agent's conversation, and the permission prompts held for them.
-    pub follows: Arc<parking_lot::Mutex<follow::Follows>>,
+    /// Who follows which session's thread, the permission prompts held for them, and what the
+    /// hooks said of each session.
+    pub follows: Arc<parking_lot::Mutex<threads::hold::Follows>>,
     /// Slopty's Claude Code mod as written under the data dir, and the socket it posts to;
     /// `None` when it could not be written, and agents run without it.
     pub claude_mod: Option<slopty_agent::claude_mod::Installed>,
@@ -258,7 +258,7 @@ impl Daemon {
             follows.board.forget(session);
             follows.holds.forget(session)
         };
-        follow::release(self, released);
+        threads::hold::release(self, released);
         let _sent = self.events.send(slopty_proto::WorkerMsg::SessionClosed { session, reason });
         for delta in self.items.remove_session(session, by) {
             let _sent = self.events.send(slopty_proto::WorkerMsg::Items(delta));
@@ -365,7 +365,7 @@ fn join_server(
         daemon.items.clone(),
         daemon.events.clone(),
         launch,
-        Arc::new(follow::Orchestrated(daemon.clone())),
+        Arc::new(threads::hold::Orchestrated(daemon.clone())),
     );
     if let Some(threads) = &daemon.threads {
         orchestrator.set_task_threads(Arc::new(threads.clone()));

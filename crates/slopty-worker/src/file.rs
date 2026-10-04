@@ -3,12 +3,8 @@
 //! [`read()`] takes a text file whole, up to [`FILE_BYTES`], or a picture or PDF whole
 //! ([`media`]), or says why not; [`announce`] says how that read goes on the wire; [`write()`]
 //! is the tile's save, which replaces the file whole (`slopty_platform::fs::replace`).
-//!
-//! [`mention`] is the other way the conversation face reaches the disk: the paths an `@` in its
-//! composer picks from.
 
 pub mod media;
-pub mod mention;
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};

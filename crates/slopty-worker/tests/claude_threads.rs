@@ -1,6 +1,6 @@
 //! Claude Code observed into the thread host, end to end on the worker's side: the daemon's
-//! broadcast and a session's sources are played by the test (a status, a held prompt, hooks
-//! heard, the mod's board), the transcripts are a real Claude Code's, recorded
+//! broadcast, its held prompts and a session's sources are played by the test (a status, a held
+//! prompt, hooks heard, the mod's board), the transcripts are a real Claude Code's, recorded
 //! (`slopty-agent/tests/fixtures`), written into a session directory as the agent would write
 //! them, and the threads are judged from the host.
 
@@ -219,7 +219,7 @@ mod claude_threads {
     async fn a_session_becomes_a_thread_and_comes_back_after_a_restart() {
         let rig = Rig::new();
         let host = rig.host();
-        let (observer, _driver) = rig.observe(&host);
+        let (observer, driver) = rig.observe(&host);
         let thread = thread_of(NATIVE);
         rig.status(AgentStatus::Working);
         rig.write("tools");
@@ -256,7 +256,7 @@ mod claude_threads {
             asked_ms: WallMs::from_millis(1),
             until_ms: WallMs::from_millis(2),
         };
-        rig.events.send(WorkerMsg::Permission(PermissionEvent::Asked(Box::new(prompt)))).unwrap();
+        driver.permission(PermissionEvent::Asked(Box::new(prompt)));
         rig.status(AgentStatus::Blocked(slopty_proto::agent::BlockReason::Permission {
             tool: "Bash".to_owned(),
         }));

@@ -24,7 +24,6 @@ mod threads {
     use slopty_core::{ClientId, SessionId};
     use slopty_net::client::{bind_client, connect_addr};
     use slopty_net::{ClientMsg, WorkerMsg};
-    use slopty_proto::conversation::ConversationRequest;
     use slopty_proto::handshake::Hello;
     use slopty_proto::terminal::{OpenSession, TermRequest, TermSize};
     use slopty_proto::thread::wire::{
@@ -32,7 +31,8 @@ mod threads {
         ThreadRequest,
     };
     use slopty_proto::thread::{
-        AgentId, Cap, Cursor, IntentId, Request, RequestState, TableState, ThreadId, ThreadState,
+        AgentId, AskId, Cap, Cursor, IntentId, Request, RequestState, TableState, ThreadId,
+        ThreadState,
     };
     use tokio::io::{AsyncBufReadExt as _, BufReader};
     use tokio::process::{Child, Command};
@@ -182,7 +182,7 @@ mod threads {
     /// One client: its link, and its copies of the table and of one thread, kept from nothing
     /// but what the link brings.
     struct Client {
-        _endpoint: slopty_net::Endpoint,
+        endpoint: slopty_net::Endpoint,
         link: WorkerLink,
         events: mpsc::Receiver<LinkEvent>,
         table: TableState,
@@ -209,7 +209,7 @@ mod threads {
             let mut link = WorkerLink::start(conn);
             let events = link.events().unwrap();
             Self {
-                _endpoint: endpoint,
+                endpoint,
                 link,
                 events,
                 table: TableState::default(),
@@ -224,10 +224,17 @@ mod threads {
             self.link.send(ClientMsg::Thread(req)).await.unwrap();
         }
 
-        /// Answer requests from this client from now on.
+        /// Keep the thread table from now on, where every thread's requests show: this client
+        /// answers a yes or no whoever follows the thread.
         async fn answer_requests(&self) {
-            let on = ConversationRequest::Approvals { on: true };
-            self.link.send(ClientMsg::Conversation(on)).await.unwrap();
+            self.send(ThreadRequest::Table { have: None }).await;
+        }
+
+        /// End this client's connection, as a client that quits does.
+        async fn leave(self) {
+            self.endpoint.close(0_u32.into(), b"done");
+            let _drained =
+                tokio::time::timeout(Duration::from_secs(1), self.endpoint.wait_idle()).await;
         }
 
         /// Follow `thread` from where this copy stands.
@@ -684,6 +691,326 @@ mod threads {
         for session in [first, second] {
             a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
         }
+    }
+
+    /// A held prompt's request on the thread, once there is one open.
+    async fn asked(client: &mut Client) -> Request {
+        client.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
+        client.state().open_requests().next().unwrap().clone()
+    }
+
+    /// A prompt is held while a client follows the session's thread, shown there as a request,
+    /// and nobody else's: answered "always" from the thread, Claude Code is told to allow with
+    /// what the suggestions grant, and a second answer finds nothing. One whose relay goes away
+    /// is withdrawn, and one the last follower leaves goes back to the TUI undecided. With
+    /// nobody following and nobody keeping the table, the relay is let go at once. The
+    /// follower keeps no table: a second client finds the thread for it.
+    #[tokio::test]
+    async fn a_prompt_is_held_while_its_thread_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let main = dir.path().join("s1.jsonl");
+        let captured = std::fs::read_to_string(fixture("tools").join("transcript.jsonl")).unwrap();
+        std::fs::write(&main, captured).unwrap();
+        let ask = first_ask("s1", &main);
+
+        let started = std::time::Instant::now();
+        assert_eq!(printed(relay(dir.path(), session, &ask)).await, "", "nobody answers");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        let thread = slopty_agent::observed::thread_of("s1");
+        let mut finder = Client::connect(&daemons, ClientId::new()).await;
+        finder.send(ThreadRequest::Table { have: None }).await;
+        finder.until(|c| c.table.rows.contains_key(&thread)).await;
+        finder.leave().await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.is_some()).await;
+
+        let held = relay(dir.path(), session, &ask);
+        let request = asked(&mut a).await;
+        let always =
+            Intent::Answer { ask: request.id.clone(), choice: "always".to_owned(), message: None };
+        assert_eq!(a.intent(IntentId::new(), thread, always.clone()).await, Outcome::Done);
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        let decision = &output["hookSpecificOutput"]["decision"];
+        assert_eq!(decision["behavior"], "allow", "{output}");
+        assert_eq!(decision["updatedPermissions"], ask["permission_suggestions"], "{output}");
+        let again = a.intent(IntentId::new(), thread, always).await;
+        assert!(matches!(again, Outcome::Refused { .. }), "{again:?}");
+
+        let mut gone = relay(dir.path(), session, &ask);
+        let request = asked(&mut a).await;
+        gone.start_kill().unwrap();
+        let withdrawn = |c: &Client| {
+            c.state()
+                .requests
+                .iter()
+                .any(|r| r.id == request.id && r.state == RequestState::Withdrawn)
+        };
+        a.until(withdrawn).await;
+
+        let released = relay(dir.path(), session, &ask);
+        asked(&mut a).await;
+        a.send(ThreadRequest::Unfollow { thread }).await;
+        assert_eq!(printed(released).await, "", "no decision: the TUI's dialog");
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// A client that keeps the thread table, following nothing, answers a yes or no from its
+    /// row, and the relay prints its answer; a question is not held for it. A hold for it ends
+    /// a second before the relay's wait would, undecided; it can hand a held prompt to the TUI
+    /// at once; and once it leaves, what only it could answer goes back to the TUI and the
+    /// next prompt is let go at once. The bounded hold is a control-socket request, as the
+    /// relay's.
+    #[tokio::test]
+    async fn the_tables_holder_answers_without_following_and_the_tui_asks_otherwise() {
+        use slopty_proto::ctl::{CtlReply, CtlRequest, Decision, PermissionAnswer, PermissionAsk};
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        a.answer_requests().await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let main = dir.path().join("s1.jsonl");
+        std::fs::write(&main, "").unwrap();
+        let ask = first_ask("s1", &main);
+        let thread = slopty_agent::observed::thread_of("s1");
+        // The request on the thread's row that is not one of `done`, once one is open.
+        let fresh = |c: &Client, done: &[AskId]| {
+            let row = c.table.rows.get(&thread)?;
+            row.requests.iter().map(|r| r.id.clone()).find(|id| !done.contains(id))
+        };
+        let mut done = Vec::new();
+
+        let held = relay(dir.path(), session, &ask);
+        a.until(|c| fresh(c, &done).is_some()).await;
+        let request = fresh(&a, &done).unwrap();
+        done.push(request.clone());
+        let allow = Intent::Answer { ask: request, choice: "allow".to_owned(), message: None };
+        assert_eq!(a.intent(IntentId::new(), thread, allow).await, Outcome::Done);
+        let output: serde_json::Value = serde_json::from_str(&printed(held).await).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["decision"]["behavior"], "allow");
+
+        let mut question = ask.clone();
+        question["tool_name"] = "AskUserQuestion".into();
+        let started = std::time::Instant::now();
+        assert_eq!(printed(relay(dir.path(), session, &question)).await, "");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+
+        let bounded = CtlRequest::Permission(PermissionAsk {
+            session,
+            payload: ask.to_string(),
+            wait_ms: 2_500,
+        });
+        let started = std::time::Instant::now();
+        let sock = dir.path().join("worker.sock");
+        let reply = tokio::spawn(async move { ctl(&sock, &bounded).await });
+        a.until(|c| fresh(c, &done).is_some()).await;
+        done.push(fresh(&a, &done).unwrap());
+        let reply = reply.await.unwrap();
+        assert_eq!(reply, CtlReply::Permission(PermissionAnswer { decision: Decision::Pass }));
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(1_400), "{waited:?}");
+
+        let handed = relay(dir.path(), session, &ask);
+        a.until(|c| fresh(c, &done).is_some()).await;
+        let request = fresh(&a, &done).unwrap();
+        done.push(request.clone());
+        let release = Intent::Release { ask: request };
+        assert_eq!(a.intent(IntentId::new(), thread, release).await, Outcome::Done);
+        assert_eq!(printed(handed).await, "", "no decision: the TUI's dialog");
+
+        // The terminal stays open: its end would release the prompt by itself.
+        let orphaned = relay(dir.path(), session, &ask);
+        a.until(|c| fresh(c, &done).is_some()).await;
+        a.leave().await;
+        assert_eq!(printed(orphaned).await, "", "nobody is left to answer");
+        let started = std::time::Instant::now();
+        assert_eq!(printed(relay(dir.path(), session, &ask)).await, "", "nobody answers now");
+        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+    }
+
+    /// One request to the worker's control socket, as the relay and the CLI write it.
+    async fn ctl(
+        sock: &Path,
+        request: &slopty_proto::ctl::CtlRequest,
+    ) -> slopty_proto::ctl::CtlReply {
+        use tokio::io::AsyncWriteExt as _;
+        let mut stream = tokio::net::UnixStream::connect(sock).await.unwrap();
+        let mut line = serde_json::to_vec(request).unwrap();
+        line.push(b'\n');
+        stream.write_all(&line).await.unwrap();
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).await.unwrap();
+        serde_json::from_str(reply.trim()).unwrap()
+    }
+
+    /// Where the agent runs Slopty's mod, a follower of its thread sees what the model writes
+    /// before the transcript has it: nothing until a hello from a verified Claude Code, then
+    /// each block as it grows, gone once the transcript's entry for it has come. The events are
+    /// the official build's own (`cargo xtask fixtures claude-mod`), posted to the mod socket.
+    #[tokio::test]
+    async fn a_trusted_mod_streams_live_blocks_that_the_transcript_settles() {
+        use slopty_proto::thread::{ItemBody, ToolState};
+        let dir = tempfile::tempdir().unwrap();
+        let daemons = daemons(dir.path()).await;
+        let mut a = Client::connect(&daemons, ClientId::new()).await;
+        let session = open_shell(&mut a, dir.path()).await;
+        let recorded = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../crates/slopty-agent/tests/fixtures/mod/bash");
+        let main = dir.path().join("projects/s1.jsonl");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        std::fs::write(&main, "").unwrap();
+        let start = serde_json::json!({
+            "hook_event_name": "SessionStart", "source": "startup", "session_id": "s1",
+            "transcript_path": main, "cwd": dir.path(),
+        });
+        assert_eq!(printed(relay(dir.path(), session, &start)).await, "");
+        let thread = slopty_agent::observed::thread_of("s1");
+        a.send(ThreadRequest::Table { have: None }).await;
+        a.until(|c| c.table.rows.contains_key(&thread)).await;
+        a.follow(thread).await;
+        a.until(|c| c.thread.is_some()).await;
+
+        let socket = dir.path().join("worker.mod.sock");
+        let batches: Vec<serde_json::Value> =
+            std::fs::read_to_string(recorded.join("events.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut batch: serde_json::Value = serde_json::from_str(line).unwrap();
+                    batch["session"] = serde_json::Value::String(session.to_string());
+                    batch
+                })
+                .collect();
+        let has = |batch: &serde_json::Value, kind: &str| {
+            batch["events"].as_array().unwrap().iter().any(|e| e["kind"] == kind)
+        };
+        let stops: Vec<usize> =
+            batches.iter().enumerate().filter(|(_, b)| has(b, "stop")).map(|(i, _)| i).collect();
+        let [first_stop, second_stop] = stops[..] else { panic!("two steps: {stops:?}") };
+        let bye = batches.iter().position(|b| has(b, "bye")).unwrap();
+        let hello = batches.iter().position(|b| has(b, "hello")).unwrap();
+        let first_text = batches.iter().position(|b| has(b, "text")).unwrap();
+
+        // A piece before any hello, and after a hello from a Claude Code the mod was not
+        // verified against: neither shows.
+        assert_eq!(post(&socket, &batches[first_text]).await, 204);
+        let mut unknown = batches[hello].clone();
+        unknown["events"][0]["claude"] = "0.0.1".into();
+        assert_eq!(post(&socket, &unknown).await, 204);
+        assert_eq!(post(&socket, &batches[first_text]).await, 204);
+        let mut elsewhere = batches[first_text].clone();
+        elsewhere["session"] = "00000000-0000-4000-8000-000000000000".into();
+        assert_eq!(post(&socket, &elsewhere).await, 404, "no such session here");
+
+        // What the model is writing: its answers, and the calls whose input still streams.
+        let texts = |s: &ThreadState| -> Vec<String> {
+            s.items
+                .iter()
+                .filter(|i| i.id.0.starts_with("live:"))
+                .filter_map(|i| match &i.body {
+                    ItemBody::Text(text) => Some(text.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let streaming = |s: &ThreadState| -> Vec<String> {
+            s.items
+                .iter()
+                .filter_map(|i| match &i.body {
+                    ItemBody::Tool(call) if call.state == ToolState::Streaming => {
+                        Some(call.input.text.clone())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let live = |s: &ThreadState| texts(s).len() + streaming(s).len();
+
+        // The first step, as the model writes it: the answer, then the Bash call's input.
+        for batch in &batches[..first_stop] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        let first_step = |c: &Client| {
+            let s = c.state();
+            texts(s) == ["Let me run it."]
+                && streaming(s) == [r#"{"command": "echo hi", "description": "Say hi"}"#]
+        };
+        a.until(first_step).await;
+        assert_eq!(a.state().items.len(), 2, "nothing in the transcript yet");
+
+        // The step stops and the transcript gets the answer and the call: both settle.
+        assert_eq!(post(&socket, &batches[first_stop]).await, 204);
+        // Written now, not when it was recorded: an entry stamped long before the follower saw
+        // the block is an older one, so the stamps go.
+        let transcript: Vec<String> = std::fs::read_to_string(recorded.join("transcript.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: serde_json::Value = serde_json::from_str(line).unwrap();
+                record.as_object_mut().unwrap().remove("timestamp");
+                record.to_string()
+            })
+            .collect();
+        let result = transcript.iter().position(|l| l.contains(r#""type":"tool_result""#)).unwrap();
+        let (before, after) = transcript.split_at(result);
+        let append = |lines: &[String]| {
+            let mut file = std::fs::OpenOptions::new().append(true).open(&main).unwrap();
+            std::io::Write::write_all(&mut file, format!("{}\n", lines.join("\n")).as_bytes())
+                .unwrap();
+            std::time::Instant::now()
+        };
+        // Settled by the entries, well before the grace that clears a block nothing settles.
+        let soon = slopty_agent::live::SETTLE_GRACE / 2;
+        let written = append(before);
+        a.until(|c| live(c.state()) == 0 && c.state().items.len() > 2).await;
+        assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
+
+        // The second step streams, and settles when the transcript has the rest.
+        for batch in &batches[first_stop + 1..second_stop] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        a.until(|c| texts(c.state()).iter().any(|t| t == "Done: the command said hi.")).await;
+        for batch in &batches[second_stop..bye] {
+            assert_eq!(post(&socket, batch).await, 204);
+        }
+        let written = append(after);
+        a.until(|c| live(c.state()) == 0).await;
+        assert!(written.elapsed() < soon, "settled in {:?}", written.elapsed());
+        let whole = entries(&main);
+        // Every entry the transcript has, and nothing the mod wrote beside them.
+        let settled = |c: &Client| {
+            let mut now = ids(c.state());
+            let mut want = whole.clone();
+            now.sort();
+            want.sort();
+            now == want
+        };
+        a.until(settled).await;
+        a.until(|c| c.state().meters.cost_micro_usd.is_some()).await;
+        assert_eq!(a.state().meters.context_window, Some(200_000), "the mod's measure");
+        assert_eq!(post(&socket, &batches[bye]).await, 204);
+
+        a.link.send(ClientMsg::Term { session, req: TermRequest::Close }).await.unwrap();
+    }
+
+    /// Post one batch to the mod socket as the mod does; the answer's status.
+    async fn post(socket: &Path, batch: &serde_json::Value) -> u16 {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        let body = batch.to_string();
+        let head = format!(
+            "POST /v1/events HTTP/1.1\r\nhost: slopty\r\ncontent-type: application/json\r\n\
+             content-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        answer.split_whitespace().nth(1).and_then(|code| code.parse().ok()).unwrap_or(0)
     }
 
     /// What the stand-in recorded of how it was started, once it has.

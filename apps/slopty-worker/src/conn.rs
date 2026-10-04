@@ -14,7 +14,6 @@ use std::sync::Arc;
 use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
-use slopty_proto::conversation::{ConversationRequest, PermissionEvent};
 use slopty_proto::datagram::ClientDatagram;
 use slopty_proto::folder::Listing;
 use slopty_proto::handoff::HandoffReply;
@@ -339,7 +338,6 @@ async fn run(daemon: &Daemon, client: AcceptedClient) -> Result<&'static str, Ne
         order: InputOrder::default(),
         screen_order: ScreenOrder::default(),
         copies: slopty_net::echo::Copies::from_env(),
-        follows: HashMap::new(),
         threads: crate::threads::Following::default(),
         searches: slopty_worker::search::Searches::default(),
         saves,
@@ -656,9 +654,6 @@ async fn relay_events(
         match events.recv().await {
             // The worker's clipboard goes only to the clients that want it now.
             Ok(WorkerMsg::Clip(ClipMsg::Offer(_))) if !daemon.clip.is_watching(link) => {}
-            // A permission prompt goes only to the clients that may answer it.
-            Ok(WorkerMsg::Permission(event))
-                if !daemon.follows.lock().holds.tells(link, event.session(), event.ask()) => {}
             Ok(msg) => {
                 if let WorkerMsg::SessionClosed { session, .. } = &msg {
                     let _sent = done.send(Done::SessionClosed(*session));
@@ -671,7 +666,7 @@ async fn relay_events(
                 tracing::warn!(lagged = n, "missed worker events; sending the state again");
                 // What is queued is older than the state about to be read; skip it.
                 events = events.resubscribe();
-                if resync(&daemon, link, &mut heard, &out, &done).await.is_err() {
+                if resync(&daemon, &mut heard, &out, &done).await.is_err() {
                     break "writer gone";
                 }
             }
@@ -682,12 +677,10 @@ async fn relay_events(
 }
 
 /// Send the client the state the broadcast carries, for events it missed: the sessions opened
-/// and closed since, the item registry, the agents, the ports and the permission prompts held for
-/// the sessions it follows. Clipboard offers are not repeated; the next copy offers again. `Err`
-/// when the writer is gone.
+/// and closed since, the item registry, the agents and the ports. Clipboard offers are not
+/// repeated; the next copy offers again. `Err` when the writer is gone.
 async fn resync(
     daemon: &Daemon,
-    link: slopty_worker::clip::Link,
     heard: &mut Heard,
     out: &mpsc::Sender<WorkerMsg>,
     done: &mpsc::UnboundedSender<Done>,
@@ -718,9 +711,6 @@ async fn resync(
     msgs.extend(branches.into_iter().map(WorkerMsg::AgentBranch));
     let ports = daemon.ports.lock().known();
     msgs.extend(ports.into_iter().map(|(session, ports)| WorkerMsg::Ports { session, ports }));
-    msgs.extend(daemon.follows.lock().holds.shown_to(link).map(|(_ask, held)| {
-        WorkerMsg::Permission(PermissionEvent::Asked(Box::new(held.prompt.clone())))
-    }));
     for msg in msgs {
         if heard.admit(&msg) {
             out.send(msg).await.map_err(|_gone| ())?;
@@ -894,9 +884,6 @@ struct Peer<'d> {
     screen_order: ScreenOrder,
     /// How echoes' datagram copies go, if they do.
     copies: Option<slopty_net::echo::Copies>,
-    /// The agents' conversations this client follows: each one's task takes its requests
-    /// here, and ends when the sender goes.
-    follows: HashMap<SessionId, mpsc::UnboundedSender<crate::follow::Command>>,
     /// The threads this client keeps a table of and follows.
     threads: crate::threads::Following,
     /// The text search this client runs, stopped by its next one and with the connection.
@@ -926,7 +913,7 @@ impl Drop for Peer<'_> {
             let _sent = self.daemon.presence.send((session, false));
         }
         let released = self.daemon.follows.lock().holds.leave(self.link);
-        crate::follow::release(self.daemon, released);
+        crate::threads::hold::release(self.daemon, released);
         self.daemon.wake.lock().client_left();
     }
 }
@@ -1055,7 +1042,6 @@ impl Peer<'_> {
             ClientMsg::HandoffCaps(caps) => self.daemon.handoffs.lock().caps(self.client, caps),
             ClientMsg::Clip(msg) => self.clip(msg),
             ClientMsg::Xfer(msg) => self.xfer(msg),
-            ClientMsg::Conversation(req) => self.conversation(req),
             ClientMsg::Thread(req) => {
                 let mut at = crate::threads::Origin {
                     daemon: self.daemon,
@@ -1065,8 +1051,7 @@ impl Peer<'_> {
                     client: self.client,
                     tasks: &mut self.tasks,
                 };
-                let conversations = &self.follows;
-                self.threads.handle(&mut at, req, &|session| conversations.contains_key(&session));
+                self.threads.handle(&mut at, req);
             }
             ClientMsg::InstallHooks => {
                 let (client, out) = (self.client, self.out.clone());
@@ -1103,7 +1088,6 @@ impl Peer<'_> {
             Done::SessionClosed(session) => {
                 self.order.forget(session);
                 drop(self.attached.remove(&session));
-                self.unfollow(session);
             }
             Done::Ended(why) => return Some(why),
         }
@@ -1123,76 +1107,6 @@ impl Peer<'_> {
                 self.screen_order.forget(id);
             }
         }
-    }
-
-    fn conversation(&mut self, req: ConversationRequest) {
-        match req {
-            ConversationRequest::Follow { session } => self.follow(session),
-            ConversationRequest::Unfollow { session } => self.unfollow(session),
-            ConversationRequest::Answer { session, ask, verdict } => {
-                crate::follow::answer(self.daemon, self.link, self.client, session, ask, verdict);
-            }
-            ConversationRequest::Expand { session, thread, reference } => {
-                match self.follows.get(&session) {
-                    Some(task) => {
-                        let _gone = task.send(crate::follow::Command::Expand { thread, reference });
-                    }
-                    None => {
-                        tracing::debug!(client = %self.client, %session, "expand while not following");
-                    }
-                }
-            }
-            ConversationRequest::Search { session, query, limit } => {
-                if let Some(task) = self.follows.get(&session) {
-                    let _gone = task.send(crate::follow::Command::Search { query, limit });
-                }
-            }
-            ConversationRequest::Approvals { on } => {
-                tracing::info!(client = %self.client, on, "approvals");
-                crate::follow::approvals(self.daemon, self.link, on, |msg| self.post(msg));
-            }
-            ConversationRequest::Release { session, ask } => {
-                crate::follow::hand_back(self.daemon, self.link, self.client, session, ask);
-            }
-        }
-    }
-
-    /// Follow `session`'s conversation: its stream opens on a task of its own, and the prompts
-    /// already held for it are shown first.
-    fn follow(&mut self, session: SessionId) {
-        if self.follows.contains_key(&session) {
-            return;
-        }
-        if self.daemon.worker.get(session).is_err() {
-            self.fail(session, &WorkerError::NoSuchSession);
-            return;
-        }
-        let (held, seen) = {
-            let mut follows = self.daemon.follows.lock();
-            let ids = follows.holds.follow(session, self.link);
-            let held = ids.len();
-            crate::follow::show_held(&follows, ids, |msg| self.post(msg));
-            (held, follows.board.watch(session))
-        };
-        tracing::info!(client = %self.client, %session, held, "follow");
-        let (commands, taken) = mpsc::unbounded_channel();
-        let (daemon, conn) = (self.daemon.clone(), self.conn.clone());
-        self.tasks.spawn(crate::follow::stream(daemon, conn, session, seen, taken));
-        self.follows.insert(session, commands);
-    }
-
-    /// Stop following `session`: its stream finishes, and when this was the last follower the
-    /// prompts held for it go back to the TUI.
-    fn unfollow(&mut self, session: SessionId) {
-        if self.follows.remove(&session).is_none() {
-            return;
-        }
-        tracing::info!(client = %self.client, %session, "unfollow");
-        if self.threads.follows_session(session) {
-            return;
-        }
-        let released = self.daemon.follows.lock().holds.unfollow(session, self.link);
-        crate::follow::release(self.daemon, released);
     }
 
     fn clip(&mut self, msg: ClipMsg) {

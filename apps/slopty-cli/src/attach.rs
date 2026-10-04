@@ -204,7 +204,6 @@ async fn run(session: Session, id: SessionId) -> Result<ExitCode> {
                     | LinkEvent::Term { .. }
                     | LinkEvent::Ports { .. }
                     | LinkEvent::XferFailed { .. }
-                    | LinkEvent::Conversation { .. }
                     | LinkEvent::Thread { .. },
                 ) => {}
                 Some(LinkEvent::Disconnected(why)) => break Err(anyhow::anyhow!("disconnected: {why}")),

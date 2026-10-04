@@ -1,9 +1,9 @@
 //! Claude Code, observed, on the worker: the IO half of the adapter
 //! (`slopty_agent::observed` is the codec).
 //!
-//! It runs beside today's conversation path and changes nothing of it. It hears what every
-//! client hears (the daemon's broadcast: each agent's status as the tracker merged it, the
-//! permission prompts held), and what the hooks and the mod said of each session
+//! It hears what every client hears (the daemon's broadcast: each agent's status as the tracker
+//! merged it), the permission prompts the daemon holds and settles, in order
+//! ([`Driver::permission`]), and what the hooks and the mod said of each session
 //! ([`Sources::seen`]). A task per terminal session running Claude Code reads its transcripts
 //! on the blocking pool, at once after a hook and on a [`TICK`] between, and puts what the codec
 //! makes of it all into the [`Host`]: a thread per Claude Code session, one per subagent.
@@ -115,6 +115,13 @@ impl Driver {
         rx.await.unwrap_or(Expanded::Gone)
     }
 
+    /// A prompt Claude Code asks in terminal `session` is held for the people who can answer it,
+    /// or one held is settled: it opens or settles a request on the session's thread. One held
+    /// where nothing is observed yet starts observing it. Told in the order the holds decide.
+    pub fn permission(&self, event: PermissionEvent) {
+        let _gone = self.0.send((event.session(), Input::Permission(event)));
+    }
+
     /// Slopty started Claude Code in terminal `session` on session `native`, in `cwd`: observe
     /// it from now on, its thread begun at once. The thread, or `None` when nothing observes.
     pub async fn begin(&self, session: SessionId, native: String, cwd: String) -> Option<ThreadId> {
@@ -143,7 +150,6 @@ pub fn spawn(
                     Ok(WorkerMsg::Agent(event)) if event.kind == AgentKind::ClaudeCode => {
                         (event.session, Input::Status(Box::new(event)))
                     }
-                    Ok(WorkerMsg::Permission(event)) => (event.session(), Input::Permission(event)),
                     Ok(WorkerMsg::SessionClosed { session, .. }) => {
                         sessions.remove(&session);
                         cwds.remove(&session);
@@ -165,8 +171,7 @@ pub fn spawn(
                         continue;
                     }
                     Ok(_) => continue,
-                    // A status missed is told again with the next change; a prompt missed is in
-                    // the TUI's own dialog.
+                    // A status missed is told again with the next change.
                     Err(broadcast::error::RecvError::Lagged(missed)) => {
                         tracing::debug!(missed, "the observed sessions missed events");
                         continue;
@@ -174,9 +179,9 @@ pub fn spawn(
                     Err(broadcast::error::RecvError::Closed) => return,
                 },
                 // An ask of a session observed nowhere is dropped, and its asker hears so; a
-                // begin is what starts observing it.
+                // begin, or a prompt held, is what starts observing it.
                 Some((session, input)) = asks.recv() => {
-                    if matches!(input, Input::Begin { .. }) {
+                    if matches!(input, Input::Begin { .. } | Input::Permission(_)) {
                         (session, input)
                     } else {
                         if let Some(tx) = sessions.get(&session)

@@ -1,7 +1,8 @@
 //! The thread host on the daemon (`slopty_worker::thread`).
 //!
 //! Every Claude Code session the daemon sees is observed into the agent-neutral thread model,
-//! beside today's conversation path, every Codex thread is followed, and a pi thread or the thread
+//! its permission prompts held for the thread's followers ([`hold`]), every Codex thread is
+//! followed, and a pi thread or the thread
 //! of any ACP agent is started and driven here. A Claude Code thread is started in one of the
 //! daemon's terminals and observed, and a Codex thread is started over the person's Codex daemon.
 //! They are served to clients: the table on the control stream, a stream per followed thread, and
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use hold::Orchestrated;
 use slopty_agent::codex::shared::Setting;
 use slopty_core::{ClientId, SessionId};
 use slopty_net::{Connection, WorkerMsg};
@@ -41,7 +43,8 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinSet};
 
 use crate::Daemon;
-use crate::follow::Orchestrated;
+
+pub mod hold;
 
 /// What an observed session needs of the daemon.
 struct Observed(Daemon);
@@ -325,18 +328,12 @@ enum Command {
 impl Following {
     /// Whether a followed thread's agent runs in `session`: the prompts held there are held
     /// for this connection while it is.
-    pub fn follows_session(&self, session: SessionId) -> bool {
+    fn follows_session(&self, session: SessionId) -> bool {
         self.threads.values().any(|(_, terminal)| *terminal == Some(session))
     }
 
-    /// Take `req` from the client on `at`. `conversations` says whether the connection follows
-    /// a session's conversation the old way, which holds its prompts too.
-    pub fn handle(
-        &mut self,
-        at: &mut Origin<'_>,
-        req: ThreadRequest,
-        conversations: &dyn Fn(SessionId) -> bool,
-    ) {
+    /// Take `req` from the client on `at`.
+    pub fn handle(&mut self, at: &mut Origin<'_>, req: ThreadRequest) {
         let Some(threads) = at.daemon.threads.clone() else {
             tracing::debug!(client = %at.client, "a thread request, with no threads here");
             if let ThreadRequest::Intent { id, .. } | ThreadRequest::Start { id, .. } = req {
@@ -360,6 +357,8 @@ impl Following {
                 if let Some(old) = self.table.take() {
                     old.abort();
                 }
+                // Every thread's requests show in the table, so its holder answers approvals.
+                at.daemon.follows.lock().holds.approve(at.link);
                 self.table = Some(at.tasks.spawn(table(threads.host, have, at.out.clone())));
             }
             ThreadRequest::Follow { thread, have, turns, max_latency_ms } => {
@@ -375,11 +374,9 @@ impl Following {
                     threads.codex.wake(thread);
                 }
                 let terminal = state.meta.terminal;
+                // Its prompts are held for this client while it follows, and shown on the thread.
                 if let Some(session) = terminal {
-                    let mut follows = at.daemon.follows.lock();
-                    let ids = follows.holds.follow(session, at.link);
-                    crate::follow::show_held(&follows, ids, |msg| at.post(msg));
-                    drop(follows);
+                    at.daemon.follows.lock().holds.follow(session, at.link);
                 }
                 tracing::info!(client = %at.client, %thread, ?have, "follow thread");
                 let follower =
@@ -393,10 +390,9 @@ impl Following {
                 tracing::info!(client = %at.client, %thread, "unfollow thread");
                 if let Some(session) = terminal
                     && !self.follows_session(session)
-                    && !conversations(session)
                 {
                     let released = at.daemon.follows.lock().holds.unfollow(session, at.link);
-                    crate::follow::release(at.daemon, released);
+                    hold::release(at.daemon, released);
                 }
             }
             ThreadRequest::Page { thread, before, turns } => {
@@ -860,14 +856,14 @@ fn decide(
             match (held(ask), verdict) {
                 (None, _) => refused(format!("no request {}", ask.0)),
                 (_, None) => refused(format!("no choice {choice}")),
-                (Some(held), Some(verdict)) => answered(crate::follow::answer(
-                    who.daemon, who.link, who.client, session, held, verdict,
-                )),
+                (Some(held), Some(verdict)) => {
+                    answered(hold::answer(who.daemon, who.link, who.client, session, held, verdict))
+                }
             }
         }
         Intent::Release { ask } => match held(ask) {
             Some(held) => {
-                answered(crate::follow::hand_back(who.daemon, who.link, who.client, session, held))
+                answered(hold::hand_back(who.daemon, who.link, who.client, session, held))
             }
             // Asked in the agent's own terminal with nothing held here: it is there already.
             None if asked_in_terminal(state, ask) => Outcome::Done,

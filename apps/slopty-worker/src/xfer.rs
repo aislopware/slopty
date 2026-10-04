@@ -78,9 +78,6 @@ async fn take(
         Uni::Session { session, .. } => {
             tracing::debug!(%client, %session, "a client opened a session stream; ignored");
         }
-        Uni::Conversation { session, .. } => {
-            tracing::debug!(%client, %session, "a client opened a conversation stream; ignored");
-        }
         Uni::Thread { thread, .. } => {
             tracing::debug!(%client, %thread, "a client opened a thread stream; ignored");
         }

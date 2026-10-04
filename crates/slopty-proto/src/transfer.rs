@@ -72,12 +72,6 @@ pub enum UniHead {
     },
     /// Either way: raw bytes follow, `header.size - header.offset` of them.
     Bulk(BulkHeader),
-    /// Worker → client: the [`crate::conversation::ConversationEvent`]s of one followed agent
-    /// session follow, with the same framing.
-    Conversation {
-        /// The terminal session the agent runs in.
-        session: SessionId,
-    },
     /// Worker → client: the [`crate::thread::wire::ThreadFrame`]s of one followed agent thread
     /// follow, with the same framing.
     Thread {

@@ -70,7 +70,8 @@ async fn handle(daemon: Daemon, stream: UnixStream) -> Result<()> {
         CtlRequest::Permission(ask) => match heard(&daemon, ask.session, &ask.payload).await {
             Ok((hook, _changed)) => {
                 let wait = Duration::from_millis(ask.wait_ms);
-                let decision = crate::follow::ask(&daemon, ask.session, &hook, wait, closed(rd));
+                let decision =
+                    crate::threads::hold::ask(&daemon, ask.session, &hook, wait, closed(rd));
                 CtlReply::Permission(PermissionAnswer { decision: decision.await })
             }
             Err(message) => CtlReply::Error { message },

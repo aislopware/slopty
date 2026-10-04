@@ -1171,47 +1171,44 @@ per tile, worker, project node, project and fleet, and sent to every link as
 `FromServer::Ladder` whenever a rung moves. A person's client says where they are
 (`ToServer::Presence`: desk or handheld, active, the tiles on screen). A thread that comes to
 need them, fails or finishes is a `FromServer::Notice` to the clients they are at, none while
-its tile is on screen and no handheld while they are at a desk. The model lands beside today's
-Claude path, described below, which it replaces once the clients switch over.
+its tile is on screen and no handheld while they are at a desk. Claude Code reaches it as
+described below.
 
-Claude Code only, for now, and always through its own TUI, which stays the source of truth.
-Slopty reads the agent's state and points the human at the terminal that needs them. It is
-also gaining a conversation face over that TUI, toggled per tile (decisions, "Claude Code gets
-a conversation face; the TUI stays the source of truth"). The face is a read-only projection
-of what the worker decodes from the transcript and the hooks (`slopty_agent::conversation`,
-typed entries with tool calls paired to their results, one thread per subagent), a composer
-that types into the same PTY, and approval cards answered through the blocking
-`PermissionRequest` hook (`slopty_agent::permission`). A status-line wrapper
-(`slopty hook statusline`) forwards the context, cost and rate-limit meters and still prints
-the person's own line, and the pull request and worktree that line is given
-(`WorkerMsg::AgentBranch`). The entry types are wire types (`slopty_proto::conversation`), which
-the decoder builds directly. A client follows a session (`ConversationRequest::Follow`); the
-worker then opens a conversation stream for it (`UniHead::Conversation`, at
-`CONVERSATION_PRIORITY`, below the terminals and video) and a task per follow
-(`apps/slopty-worker/src/follow.rs`) reads the transcript and every subagent's file
-(`slopty_agent::conversation::Transcripts`, on the blocking pool, every 250 ms and at each hook)
-and sends the conversation as it stands, then each change, and the meters. Permission prompts go
-to the followers on the control stream (`WorkerMsg::Permission`): the relay's
-`CtlRequest::Permission` is held while someone follows the session
-(`slopty_worker::conversation::Holds`), or, for a plain yes-or-no tool call, while a client has
-asked for approvals (`ConversationRequest::Approvals`, at most `APPROVAL_HOLD`), which is what
-lets a notification's Allow and Deny, or a row's under the navigator's *Needs you*, answer it. The first answer is the decision
-the relay prints. The last follower or approver leaving, the wait running out, the relay going
-away or a client's `ConversationRequest::Release` (sent when the session's TUI is the tile in
-front) hands it back undecided, so the TUI shows its own dialog. Where Claude Code runs Slopty's mod (a plugin
-whose TypeScript function hooks the worker embeds and writes under its data dir,
-`slopty_agent::claude_mod`), the face also gets what the model is writing before the
-transcript has it. The mod posts its events over HTTP to the worker's mod socket
-(`worker.mod.sock`, `apps/slopty-worker/src/modsock.rs`). They are heard only after its hello
-names a recorded Claude Code (`slopty_agent::live::gate`, `MOD_CLAUDE_VERSIONS`), and they go
-to the followers as live blocks (`ConversationEvent::Live`), each cleared right after the
-transcript change that settles it. Agents the worker starts load the mod, and so does a
-`claude` typed in a Slopty shell: the shell integration's `claude` function asks `slopty hook
-wire` for the words, which wire it as the worker wires its own (the relay, the tools with a
-server, a pinned conversation, the mod). Everywhere else,
-the hooks, the transcript and the status line are the whole face (decisions, "Slopty's Claude
-Code mod is the live channel"). The decoder, the relay, the wrapper, the wire, the worker, the mod and the face are
-built. The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
+Claude Code runs through its own TUI, which stays the source of truth. The worker observes
+each session into the thread model (`slopty_worker::thread::claude`, `slopty_agent::observed`):
+it reads the transcript and every subagent's file (`slopty_agent::conversation::Transcripts`,
+on the blocking pool, every 250 ms and at each hook), one thread per session and per subagent,
+and a client sees it as any thread, on a thread stream. A composer types into the same PTY
+(`slopty_worker::thread::compose`). A status-line wrapper (`slopty hook statusline`) forwards
+the context, cost and rate-limit meters and still prints the person's own line, and the pull
+request and worktree that line is given (`WorkerMsg::AgentBranch`).
+
+Permission prompts are answered through the blocking `PermissionRequest` hook
+(`slopty_agent::permission`). The relay's `CtlRequest::Permission` is held on the worker
+(`apps/slopty-worker/src/threads/hold.rs`, `slopty_worker::conversation::Holds`) while a
+client follows the session's thread, or, for a plain yes-or-no tool call, while a client keeps
+the thread table (at most `APPROVAL_HOLD`), since every thread's requests show in its rows:
+that is what lets a notification's Allow and Deny, or a row under the navigator's *Needs you*,
+answer it. A held prompt is told to the session's thread observer
+(`thread::claude::Driver::permission`), which opens a request on the thread; the first
+`Intent::Answer` is the decision the relay prints. The last follower letting the thread go,
+nobody left who could answer, the wait running out, the relay going away or an
+`Intent::Release` (sent when the session's TUI is the tile in front) hands it back undecided,
+so the TUI shows its own dialog.
+
+Where Claude Code runs Slopty's mod (a plugin whose TypeScript function hooks the worker embeds
+and writes under its data dir, `slopty_agent::claude_mod`), the thread also gets what the model
+is writing before the transcript has it. The mod posts its events over HTTP to the worker's mod
+socket (`worker.mod.sock`, `apps/slopty-worker/src/modsock.rs`). They are heard only after its
+hello names a recorded Claude Code (`slopty_agent::live::gate`, `MOD_CLAUDE_VERSIONS`), and they
+become live items on the thread, each gone once the transcript's entry settles it
+(`slopty_agent::live::Overlay`). Agents the worker starts load the mod, and so does a `claude`
+typed in a Slopty shell: the shell integration's `claude` function asks `slopty hook wire` for
+the words, which wire it as the worker wires its own (the relay, the tools with a server, a
+pinned conversation, the mod). Everywhere else, the hooks, the transcript and the status line
+are the whole thread (decisions, "Slopty's Claude Code mod is the live channel").
+
+The bar's "+ agent" pill and ⌘⇧T (`NewAgent`) open a terminal running `claude` (a bare name,
 resolved on the worker through the login shell), which, like ⌘N's shell, starts in the active
 terminal's directory when there is one (`WorkspaceView::active_cwd`, the session's OSC 7 cwd as
 the worker last reported it), else the worker's default; the palette's "New agent in <dir>" line

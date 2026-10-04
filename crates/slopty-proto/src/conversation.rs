@@ -1,20 +1,15 @@
-//! The conversation face of a coding agent's session: what a client that follows a session is
-//! sent, and what it answers.
+//! What the worker decodes from Claude Code's transcript and hooks, before the thread model.
 //!
 //! The worker is the only place that reads Claude Code's transcript (the tolerant decoder in
-//! `slopty-agent`); clients get the typed entries here. A client that follows a session
-//! ([`ConversationRequest::Follow`]) is sent the conversation on a unidirectional stream of its
-//! own that opens with [`crate::transfer::UniHead::Conversation`] and carries
-//! [`ConversationEvent`]s at a priority below the terminals, the control stream and video, so a
-//! long history never holds up an echo. Permission prompts are small and urgent: they go on the
-//! control stream as [`crate::WorkerMsg::Permission`], to the followers only.
+//! `slopty-agent`), and `slopty_agent::observed` turns what it reads into the agent-neutral
+//! thread model (`crate::thread`), which is what clients are sent. The types here are that
+//! decoder's vocabulary, and the parts of it the thread model and the hooks share.
 //!
 //! **Entries.** A thread ([`ThreadId`]) is the session's own conversation or one subagent's.
 //! Each [`Entry`] keeps its id across reads (a tool call's `tool_use_id`, else the record's
-//! uuid), so a [`Change::Upsert`] replaces what a client holds; a result that arrives later
+//! uuid), so a [`Change::Upsert`] replaces what came before; a result that arrives later
 //! comes back as an upsert of the call it belongs to. Every text is clipped on the worker
-//! ([`Clipped`]); a clipped one carries a [`TextRef`] that [`ConversationRequest::Expand`]
-//! resolves.
+//! ([`Clipped`]); a clipped one carries a [`TextRef`] to the whole of it.
 //!
 //! **Turns.** Beside its entries, a thread's turns carry what the transcript says of each one
 //! and no entry shows: the models that answered, the tokens they read and wrote, the context
@@ -22,22 +17,19 @@
 //! ([`Change::Turn`], keyed by the prompt that opened the turn).
 //!
 //! **Live blocks.** Where Claude Code runs Slopty's mod, the worker also hears the answer,
-//! thinking and tool input as the model writes them, before the transcript has them. They go
-//! as [`ConversationEvent::Live`]: uncommitted text a client shows at the end of its thread,
-//! cleared once the transcript settles it.
+//! thinking and tool input as the model writes them, before the transcript has them ([`Live`]):
+//! uncommitted text shown at the end of its thread, cleared once the transcript settles it.
 //!
 //! **Background output.** A command Claude Code runs in the background writes to a file of its
-//! own, not to the transcript. The worker tails that file while the command runs and sends its
-//! end as [`ConversationEvent::Output`]; how the command ended comes with its entry.
+//! own, not to the transcript. The worker tails that file while the command runs ([`Output`]);
+//! how the command ended comes with its entry.
 //!
 //! **Images.** An entry names a picture ([`Image`]) by its digest and its size, never with its
-//! bytes. A client asks for the bytes when the picture comes into view
-//! ([`ConversationRequest::Expand`] of its [`Image::at`]) and keeps them by digest, so a picture
-//! that shows twice travels once.
+//! bytes, which are fetched by [`Image::at`] when the picture comes into view.
 //!
-//! **The composer's menus.** The same stream carries the slash commands the agent takes
-//! ([`ConversationEvent::Commands`]) and the answer to a follower's `@` search of the agent's
-//! working directory ([`ConversationRequest::Search`], [`ConversationEvent::Found`]).
+//! **Permission prompts.** A prompt the worker holds for the people who can answer it
+//! ([`PermissionPrompt`]) and its end ([`PermissionEvent`]) stay on the worker: the thread
+//! observer makes each a request on the session's thread.
 
 use serde::{Deserialize, Serialize};
 use slopty_core::{ClientId, SessionId, WallMs};
@@ -98,7 +90,7 @@ pub enum Part {
     Patch,
     /// An image: the message's content block at `index`, or, with `tool_use_id`, the block at
     /// `index` of that call's result (a result with no image block keeps its picture in
-    /// `toolUseResult.file`, as block 0). Its bytes come as [`ConversationEvent::Image`].
+    /// `toolUseResult.file`, as block 0).
     Image {
         /// The call whose result holds it; `None` for a picture in a prompt.
         tool_use_id: Option<String>,
@@ -903,131 +895,6 @@ pub struct RateWindow {
     pub resets_at: Option<u64>,
 }
 
-/// Most characters of a text [`ConversationRequest::Expand`] sends; past it the text comes
-/// clipped still, its head kept.
-pub const EXPAND_CHARS: usize = 1_000_000;
-
-/// Client → worker, about the conversation face.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub enum ConversationRequest {
-    /// Follow a session's conversation. The worker opens a conversation stream and sends the
-    /// conversation as it stands, then every change as the transcript grows, and from now on
-    /// sends this client the session's permission prompts, those already waiting first.
-    /// Following a session already followed changes nothing.
-    Follow {
-        /// The terminal session the agent runs in.
-        session: SessionId,
-    },
-    /// Stop following: the worker finishes the stream. When the last follower goes, the
-    /// session's waiting prompts are released to the TUI's own dialog.
-    Unfollow {
-        /// The session.
-        session: SessionId,
-    },
-    /// Answer a permission prompt. The first answer wins; one that comes after the prompt was
-    /// answered or released, or from a client it was not shown to (one that neither follows the
-    /// session nor answers [`Self::Approvals`]), is dropped.
-    Answer {
-        /// The session.
-        session: SessionId,
-        /// [`PermissionPrompt::ask`].
-        ask: u64,
-        /// The answer.
-        verdict: Verdict,
-    },
-    /// Send the whole of a clipped text (one whose `full` is set), as
-    /// [`ConversationEvent::Expanded`] on the session's conversation stream, or an image's
-    /// bytes ([`Part::Image`]) as [`ConversationEvent::Image`]. Only while following.
-    Expand {
-        /// The session.
-        session: SessionId,
-        /// The thread the text is in.
-        thread: ThreadId,
-        /// Where the whole text is.
-        reference: TextRef,
-    },
-    /// Files and folders under the agent's working directory that `query` matches, for an
-    /// `@` mention; answered as [`ConversationEvent::Found`] on the session's conversation
-    /// stream. Only while following.
-    Search {
-        /// The session.
-        session: SessionId,
-        /// What follows the `@`; empty lists the top of the tree.
-        query: String,
-        /// Paths wanted at most.
-        limit: u32,
-    },
-    /// Answer permission prompts from outside the conversation (a notification, the inbox), or
-    /// stop. While on, the worker holds a yes-or-no prompt of any session for a bounded time
-    /// even when nobody follows it, and sends it here as it sends a follower's. The last
-    /// client to stop hands such prompts back to the TUI.
-    Approvals {
-        /// Answer them from now on.
-        on: bool,
-    },
-    /// Hand a held prompt back to the TUI now, undecided: the person is at the terminal and
-    /// answers there. Taken as an answer is: only from a client the prompt was shown to, and
-    /// only while it is still held.
-    Release {
-        /// The session.
-        session: SessionId,
-        /// [`PermissionPrompt::ask`].
-        ask: u64,
-    },
-}
-
-/// Worker → client on a conversation stream.
-#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
-pub enum ConversationEvent {
-    /// Changes to apply in order. The stream's first frame starts with
-    /// [`Change::Reset`] for every thread, and so does the first after the agent moved on to
-    /// another transcript (`/clear`, `/resume`): what follows it up to
-    /// [`ConversationEvent::Current`] is the conversation as it stands.
-    Changes(Vec<Change>),
-    /// The conversation as it stood has been sent in full; what comes after is live.
-    Current,
-    /// The status line's meters, when they change, and first when following begins.
-    Meters(Meters),
-    /// The answer to [`ConversationRequest::Expand`].
-    Expanded {
-        /// The thread asked about.
-        thread: ThreadId,
-        /// The text asked for.
-        reference: TextRef,
-        /// The whole text, clipped at [`EXPAND_CHARS`]; `None` when the transcript no longer
-        /// has it.
-        text: Option<Clipped>,
-    },
-    /// Blocks the model is writing now, ahead of the transcript, in order. Only where the
-    /// agent runs Slopty's Claude Code mod, and only after [`ConversationEvent::Current`].
-    Live(Vec<Live>),
-    /// What background commands have printed since they were last sent, each as the end of
-    /// its output now. Sent after [`ConversationEvent::Current`], and all again after a
-    /// [`Change::Reset`] of every thread.
-    Output(Vec<Output>),
-    /// The answer to [`ConversationRequest::Expand`] for an image.
-    Image {
-        /// The thread asked about.
-        thread: ThreadId,
-        /// The image asked for.
-        reference: TextRef,
-        /// Its bytes; `None` when the transcript no longer has it or it is larger than
-        /// [`IMAGE_BYTES`].
-        blob: Option<Blob>,
-    },
-    /// The slash commands the agent takes, the whole list: sent after
-    /// [`ConversationEvent::Current`] and again whenever it changes.
-    Commands(Vec<SlashCommand>),
-    /// The answer to [`ConversationRequest::Search`].
-    Found {
-        /// The query answered, so a stale answer can be told from the current one.
-        query: String,
-        /// Paths relative to the agent's working directory, best first; a directory ends in
-        /// `/`.
-        paths: Vec<String>,
-    },
-}
-
 /// A slash command the agent takes, for the composer's menu.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct SlashCommand {
@@ -1066,16 +933,6 @@ pub struct Output {
     pub tail: Clipped,
     /// Bytes it has written.
     pub bytes: u64,
-}
-
-/// An image's bytes, named by their digest.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct Blob {
-    /// BLAKE3 of `data`, in hex, as [`Image::digest`].
-    pub digest: String,
-    /// The encoded picture, as its [`Image::media_type`] says.
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
 }
 
 /// A block the model is writing, not yet in the transcript.
@@ -1137,10 +994,11 @@ pub enum LiveKind {
     },
 }
 
-/// Worker → client on the control stream: a followed session's permission prompts.
+/// A permission prompt held on the worker, or its end, as the session's thread observer hears
+/// it.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum PermissionEvent {
-    /// Claude Code asks, and the worker holds the question for the session's followers.
+    /// Claude Code asks, and the worker holds the question for whoever can answer it.
     Asked(Box<PermissionPrompt>),
     /// The prompt is no longer waiting.
     Settled {
@@ -1174,7 +1032,7 @@ impl PermissionEvent {
 }
 
 /// A permission Claude Code asks for before running a tool, held while a client follows the
-/// session or, for a yes-or-no prompt, while one answers [`ConversationRequest::Approvals`].
+/// session's thread or, for a yes-or-no prompt, while one keeps the thread table.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct PermissionPrompt {
     /// The terminal session the agent runs in.
@@ -1267,8 +1125,8 @@ pub enum Settled {
         by: ClientId,
     },
     /// Handed back undecided: the TUI shows its own dialog now. The last follower or approver
-    /// left, a client released it ([`ConversationRequest::Release`]), or the worker held it
-    /// as long as it may.
+    /// left, a client handed it to the TUI (`Intent::Release` on its request), or the worker
+    /// held it as long as it may.
     Released,
     /// Claude Code stopped waiting (the turn was interrupted, the agent quit).
     Withdrawn,

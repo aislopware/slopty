@@ -9,10 +9,8 @@
 //!   → client, one per attached terminal) carries [`terminal::TermEvent`]s with the same framing;
 //!   input goes back on the control stream so it is never head-of-line blocked behind a large
 //!   frame. A bulk stream (either way, lower priority) carries a file or a large clipboard
-//!   representation as raw bytes. A conversation stream (worker → client, one per followed agent
-//!   session, below the session streams) carries [`conversation::ConversationEvent`]s, and a thread
-//!   stream (worker → client, one per followed agent thread, at the same priority) carries
-//!   [`thread::wire::ThreadFrame`]s.
+//!   representation as raw bytes. A thread stream (worker → client, one per followed agent thread,
+//!   below the session streams) carries [`thread::wire::ThreadFrame`]s.
 //! * **Tunnel streams** — client-opened bidirectional streams after the control stream, one per
 //!   forwarded TCP connection, opening with [`transfer::TunnelOpen`].
 //! * **Datagrams** — unreliable QUIC datagrams, each opening with one [`datagram::Channel`] byte.
@@ -137,8 +135,6 @@ pub enum ClientMsg {
     Clip(transfer::ClipMsg),
     /// File transfer control.
     Xfer(transfer::XferMsg),
-    /// Follow an agent's conversation, answer its permission prompts.
-    Conversation(conversation::ConversationRequest),
     /// List a directory for a folder tile; answered with `WorkerMsg::Folder`.
     ListFolder {
         /// An absolute directory on the worker, or `~/…` in its home.
@@ -209,7 +205,6 @@ impl ClientMsg {
             Self::WriteFile { .. } => "WriteFile",
             Self::Clip(_) => "Clip",
             Self::Xfer(_) => "Xfer",
-            Self::Conversation(_) => "Conversation",
             Self::ListFolder { .. } => "ListFolder",
             Self::Search(_) => "Search",
             Self::Handoff(_) => "Handoff",
@@ -311,9 +306,6 @@ pub enum WorkerMsg {
     /// What the worker can do changed since [`handshake::HelloAck::caps`]: a permission
     /// granted or taken, a display attached.
     Caps(server::WorkerCaps),
-    /// A permission prompt of a session this client follows, or of any session while it answers
-    /// approvals (`ConversationRequest::Approvals`), or its end.
-    Permission(conversation::PermissionEvent),
     /// The answer to `ClientMsg::ListFolder`.
     Folder {
         /// The path asked for, as asked.
@@ -399,7 +391,6 @@ impl WorkerMsg {
             Self::Ports { .. } => "Ports",
             Self::Path(_) => "Path",
             Self::Caps(_) => "Caps",
-            Self::Permission(_) => "Permission",
             Self::Folder { .. } => "Folder",
             Self::SessionChanged(_) => "SessionChanged",
             Self::Failed { .. } => "Failed",

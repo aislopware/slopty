@@ -5836,6 +5836,16 @@ cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_convers
   -- --ignored --nocapture
 ```
 
+The conversation stream is gone (2026-10-04): a session is followed as its thread now. The
+same measurement follows the session's thread on a thread stream
+(`echo_beside_a_followed_thread`, the lag read from the answers' items as they start); it has
+not been run on the thread path yet.
+
+```sh
+cargo test -p slopty-workerd --release --test e2e echo_beside_a_followed_thread \
+  -- --ignored --nocapture
+```
+
 ## 2026-09-27 — typing over a shaped link: guesses that look final, and the round trip at link-up
 
 Scenario (d) of the smooth suite through `slopty-shape`'s relay (`typing_over_a_shaped_round_trip_on_the_mac`),

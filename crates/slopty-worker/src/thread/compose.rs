@@ -1,7 +1,7 @@
 //! The composer of an observed agent: what a person sends a thread whose agent's own TUI runs
 //! in a terminal here, typed into that terminal by the worker.
 //!
-//! It types what the face typed from the client before: a message as a paste (bracketed where
+//! It types as a person would: a message as a paste (bracketed where
 //! the TUI asked for it), [`SUBMIT_PAUSE`], then Enter; a command (`/model opus`) as typed
 //! text, the pause, then Enter; an interrupt as Esc. Every write goes through the guard
 //! orchestration's own input does ([`may_type`]): nothing is typed while the agent asks a

@@ -1,5 +1,5 @@
-//! Following agents' conversations: who follows which session, the permission prompts held for
-//! them, and what the hooks tell a follower between two reads of the transcript.
+//! Claude Code's permission prompts held for the people who can answer them, and what the
+//! hooks and the mod said of each session between two reads of its transcript.
 //!
 //! **Held prompts.** Claude Code runs the `PermissionRequest` hook synchronously, and the relay
 //! asks the worker for a decision (`CtlRequest::Permission`). [`Holds`] decides what becomes of
@@ -7,15 +7,17 @@
 //!
 //! - nobody can answer it: it is handed back at once, undecided, and the TUI shows its own dialog
 //!   as if there were no hook;
-//! - someone follows the session: it is held under a new id and shown to the followers; the first
-//!   answer from one of them takes it, and anything after that finds nothing to take;
-//! - nobody follows, but a client answers approvals (from a notification or the inbox) and the
-//!   prompt is a yes or no ([`Held::approvable`]): it is held the same way for the approvers, for a
-//!   shorter time the caller sets ([`Reach::Approvers`]);
-//! - the last follower unfollows (the person went back to the TUI), nobody who could answer it is
-//!   connected any more, a client hands it to the TUI, the worker has held it as long as it may, or
-//!   the relay went away: it is released, undecided. A release and an answer race for the same
-//!   entry, and whichever comes first takes it.
+//! - a client follows the session's thread: it is held under a new id and shown on the thread as a
+//!   request; the first answer from a follower takes it, and anything after that finds nothing to
+//!   take;
+//! - nobody follows, but a client keeps the thread table, where every thread's requests show (a
+//!   notification's "Allow", the inbox), and the prompt is a yes or no ([`Held::approvable`]): it
+//!   is held the same way for those approvers, for a shorter time the caller sets
+//!   ([`Reach::Approvers`]);
+//! - the last follower lets the thread go (the person went back to the TUI), nobody who could
+//!   answer it is connected any more, a client hands it to the TUI, the worker has held it as long
+//!   as it may, or the relay went away: it is released, undecided. A release and an answer race for
+//!   the same entry, and whichever comes first takes it.
 //!
 //! `R` is what the caller keeps with a held prompt (the reply channel, the prompt as shown);
 //! the machine only ever hands it back once.
@@ -24,28 +26,21 @@
 //! that reads a session's conversation or starts its agent until the session ends
 //! ([`Holds::forget`]).
 //!
-//! **What followers watch.** [`Board`] keeps each session's [`Seen`] behind a watch: the hooks
-//! heard, the latest meters, the subagent files named, and the blocks Slopty's Claude Code mod
-//! reports as the model writes them. The mod is heard only after its `hello` passed
-//! `slopty_agent::live::gate`; a session whose mod was refused says so in the log once and is
-//! followed from the transcript alone.
-//!
-//! **One read for every follower.** The board also keeps each followed session's [`Reader`]:
-//! the session's transcripts, decoded once however many clients follow, each read's changes
-//! broadcast to all of them, and the conversation as it stands handed to one that joins.
+//! **What the hooks said.** [`Board`] keeps each session's [`Seen`] behind a watch, which the
+//! session's thread observer waits on: the hooks heard, the latest meters, the subagent files
+//! named, and the blocks Slopty's Claude Code mod reports as the model writes them. The mod is
+//! heard only after its `hello` passed `slopty_agent::live::gate`; a session whose mod was
+//! refused says so in the log once and is observed from the transcript alone.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use slopty_agent::Hook;
-use slopty_agent::conversation::Transcripts;
-use slopty_agent::conversation::output::Outputs;
 use slopty_agent::live::{self, ModEvent};
 use slopty_core::SessionId;
-use slopty_proto::conversation::{Change, Meters, Output};
-use tokio::sync::{broadcast, watch};
+use slopty_proto::conversation::Meters;
+use tokio::sync::watch;
 
 use crate::clip::Link;
 
@@ -56,9 +51,10 @@ pub const ORCHESTRATION: Link = 0;
 /// Who a prompt is held for, as it is asked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
-    /// The session's followers (and the approvers too, for a yes or no).
+    /// The followers of the session's thread (and the approvers too, for a yes or no).
     Followers,
-    /// Nobody follows the session: the clients that answer approvals, for a bounded time.
+    /// Nobody follows the session's thread: the clients that keep the thread table, for a
+    /// bounded time.
     Approvers,
 }
 
@@ -73,7 +69,8 @@ pub struct Held<R> {
     pub reply: R,
 }
 
-/// Who follows which session, who answers approvals, and the permission prompts held for them.
+/// Who follows which session's thread, who keeps the thread table, and the permission prompts
+/// held for them.
 #[derive(Debug)]
 pub struct Holds<R> {
     /// The last id given; ids start at 1.
@@ -95,16 +92,14 @@ impl<R> Default for Holds<R> {
 }
 
 impl<R> Holds<R> {
-    /// `link` follows `session`. Returns the ids of the prompts already held for it, which the
-    /// new follower is to be shown.
-    pub fn follow(&mut self, session: SessionId, link: Link) -> Vec<u64> {
+    /// `link` follows `session`'s thread, which shows the prompts already held for it.
+    pub fn follow(&mut self, session: SessionId, link: Link) {
         self.followers.entry(session).or_default().insert(link);
-        self.held.iter().filter(|(_id, held)| held.session == session).map(|(id, _)| *id).collect()
     }
 
-    /// `link` stops following `session`. When no follower is left, every prompt held for the
-    /// session is released and handed back, to be answered undecided: the person went back to
-    /// the TUI, whoever else answers approvals.
+    /// `link` stops following `session`'s thread. When no follower is left, every prompt held
+    /// for the session is released and handed back, to be answered undecided: the person went
+    /// back to the TUI, whoever else answers approvals.
     pub fn unfollow(&mut self, session: SessionId, link: Link) -> Vec<(u64, Held<R>)> {
         let Some(links) = self.followers.get_mut(&session) else { return Vec::new() };
         links.remove(&link);
@@ -115,22 +110,10 @@ impl<R> Holds<R> {
         self.held.extract_if(.., |_id, held| held.session == session).collect()
     }
 
-    /// `link` answers approvals from now on. Returns the ids of the yes-or-no prompts held that
-    /// it is to be shown, those it already sees as a follower left out.
-    pub fn approve(&mut self, link: Link) -> Vec<u64> {
+    /// `link` keeps the thread table, where every request shows: it answers approvals from now
+    /// until its connection ends.
+    pub fn approve(&mut self, link: Link) {
         self.approvers.insert(link);
-        self.held
-            .iter()
-            .filter(|(_id, held)| held.approvable && !self.follows(link, held.session))
-            .map(|(id, _)| *id)
-            .collect()
-    }
-
-    /// `link` stops answering approvals. Every prompt nobody else can answer now is released
-    /// and handed back.
-    pub fn stop_approving(&mut self, link: Link) -> Vec<(u64, Held<R>)> {
-        self.approvers.remove(&link);
-        self.orphans()
     }
 
     /// `link`'s connection ended: it stops following everything and answering approvals, and
@@ -141,7 +124,12 @@ impl<R> Holds<R> {
             !links.is_empty()
         });
         self.approvers.remove(&link);
-        self.orphans()
+        let (followers, approvers) = (&self.followers, !self.approvers.is_empty());
+        self.held
+            .extract_if(.., |_id, held| {
+                !(followers.contains_key(&held.session) || held.approvable && approvers)
+            })
+            .collect()
     }
 
     /// `session` ended: nobody follows it any more, and every prompt held for it is handed back.
@@ -150,7 +138,7 @@ impl<R> Holds<R> {
         self.held.extract_if(.., |_id, held| held.session == session).collect()
     }
 
-    /// Whether `link` follows `session`.
+    /// Whether `link` follows `session`'s thread.
     #[must_use]
     pub fn follows(&self, link: Link, session: SessionId) -> bool {
         self.followers.get(&session).is_some_and(|links| links.contains(&link))
@@ -218,26 +206,6 @@ impl<R> Holds<R> {
             .map(|(id, held)| (*id, &held.reply))
     }
 
-    /// The prompts shown to `link`, oldest first: what it is to be shown again when it missed
-    /// the broadcast.
-    pub fn shown_to(&self, link: Link) -> impl Iterator<Item = (u64, &R)> {
-        self.held
-            .iter()
-            .filter(move |(_id, held)| self.shown(link, held))
-            .map(|(id, held)| (*id, &held.reply))
-    }
-
-    /// Whether news of prompt `ask` of `session` goes to `link`: while it is held, whether it
-    /// is shown to it; once settled, whether it may have been (the client drops news of a
-    /// prompt it never had).
-    #[must_use]
-    pub fn tells(&self, link: Link, session: SessionId, ask: u64) -> bool {
-        match self.held.get(&ask) {
-            Some(held) => self.shown(link, held),
-            None => self.follows(link, session) || self.approves(link),
-        }
-    }
-
     /// A held prompt.
     #[must_use]
     pub fn get(&self, ask: u64) -> Option<&Held<R>> {
@@ -247,22 +215,12 @@ impl<R> Holds<R> {
     fn shown(&self, link: Link, held: &Held<R>) -> bool {
         self.follows(link, held.session) || (held.approvable && self.approves(link))
     }
-
-    /// Hand back every prompt nobody can answer any more.
-    fn orphans(&mut self) -> Vec<(u64, Held<R>)> {
-        let (followers, approvers) = (&self.followers, !self.approvers.is_empty());
-        self.held
-            .extract_if(.., |_id, held| {
-                !(followers.contains_key(&held.session) || held.approvable && approvers)
-            })
-            .collect()
-    }
 }
 
-/// What the hooks said of one session since following began, as a follow task watches it.
+/// What the hooks and the mod said of one session, as its thread observer watches it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Seen {
-    /// Hooks heard: the transcript has likely grown, so a follower reads it now rather than
+    /// Hooks heard: the transcript has likely grown, so the observer reads it now rather than
     /// at its next tick.
     pub hooks: u64,
     /// The status line's latest meters.
@@ -284,104 +242,12 @@ pub enum Trust {
     Refused,
 }
 
-/// Reads a follower may fall behind by before it is sent the conversation whole again.
-const BEHIND: usize = 64;
-
-/// What one read of a session's transcripts changed, as every follower is sent it.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Read {
-    /// The conversation's changes, in order.
-    pub changes: Vec<Change>,
-    /// What the background commands printed since the last read.
-    pub outputs: Vec<Output>,
-}
-
-/// A session's transcripts, read once for every follower of the session.
-///
-/// Each read's [`Read`] goes out on a broadcast; a follower that joins is handed the
-/// conversation as it stands and the reads after it ([`Self::join`]). Kept on the [`Board`]
-/// while anyone follows, behind an async lock that a read holds on the blocking pool, so a
-/// join lands between two reads and misses none.
-#[derive(Debug)]
-pub struct Reader {
-    transcripts: Transcripts,
-    sent: broadcast::Sender<Arc<Read>>,
-    reads: u64,
-}
-
-/// A [`Reader`] as its followers hold it.
-pub type SharedReader = Arc<tokio::sync::Mutex<Reader>>;
-
-impl Default for Reader {
-    fn default() -> Self {
-        Self { transcripts: Transcripts::default(), sent: broadcast::channel(BEHIND).0, reads: 0 }
-    }
-}
-
-impl Reader {
-    /// Read what the session's files gained (`Transcripts::read`, the main transcript `main`
-    /// and the subagent files `known`) and send it to every follower. Blocking.
-    pub fn read(&mut self, main: &Path, known: &[PathBuf]) {
-        self.reads = self.reads.wrapping_add(1);
-        let changes = self.transcripts.read(main, known);
-        let outputs = self.transcripts.outputs();
-        if !changes.is_empty() || !outputs.is_empty() {
-            // Nobody listening is no error: a joiner catching up before it subscribes.
-            let _heard = self.sent.send(Arc::new(Read { changes, outputs }));
-        }
-    }
-
-    /// A follower starts: the reads to come, and the conversation as it stands. That is a
-    /// reset of every thread, then each thread's entries, task list and turns, then the end of
-    /// every background command's output, as a first read would send them. Blocking: the
-    /// outputs are read from their files.
-    #[must_use]
-    pub fn join(&self) -> (broadcast::Receiver<Arc<Read>>, Read) {
-        let conversation = self.transcripts.conversation();
-        let mut changes = vec![Change::Reset { thread: None }];
-        for thread in conversation.threads() {
-            changes.extend(
-                conversation
-                    .entries(thread)
-                    .iter()
-                    .map(|entry| Change::Upsert { thread: thread.clone(), entry: entry.clone() }),
-            );
-            let tasks = conversation.tasks(thread);
-            if !tasks.is_empty() {
-                changes.push(Change::Tasks { thread: thread.clone(), tasks: tasks.to_vec() });
-            }
-            changes.extend(
-                conversation
-                    .turns(thread)
-                    .iter()
-                    .map(|turn| Change::Turn { thread: thread.clone(), turn: turn.clone() }),
-            );
-        }
-        let outputs = Outputs::default().read(conversation);
-        (self.sent.subscribe(), Read { changes, outputs })
-    }
-
-    /// The transcripts as read so far, for a follower that asks for a whole text or a picture.
-    #[must_use]
-    pub const fn transcripts(&self) -> &Transcripts {
-        &self.transcripts
-    }
-
-    /// How many times the files were read.
-    #[must_use]
-    pub const fn reads(&self) -> u64 {
-        self.reads
-    }
-}
-
-/// Every session's [`Seen`], each behind a watch its followers wait on.
+/// Every session's [`Seen`], each behind a watch its observer waits on.
 #[derive(Debug, Default)]
 pub struct Board {
     sessions: HashMap<SessionId, watch::Sender<Seen>>,
     /// Each session's mod, once it said hello.
     mods: HashMap<SessionId, Trust>,
-    /// Each followed session's reader, alive while a follower holds it.
-    readers: HashMap<SessionId, Weak<tokio::sync::Mutex<Reader>>>,
 }
 
 impl Board {
@@ -407,7 +273,7 @@ impl Board {
     }
 
     /// The mod in `session` reported `events`, at `now`. A `hello` decides whether it is heard
-    /// ([`live::gate`]); nothing else counts until one passed. Followers wake only when the
+    /// ([`live::gate`]); nothing else counts until one passed. Watchers wake only when the
     /// blocks or the meters changed.
     pub fn reported(&mut self, session: SessionId, events: &[ModEvent], now: Instant) {
         let mut trust = self.mods.get(&session).copied();
@@ -457,23 +323,10 @@ impl Board {
         self.seen(session).subscribe()
     }
 
-    /// The reader of `session`'s transcripts, and whether it is new: a new one has read nothing
-    /// yet, and nothing reads it on a tick until its taker sees to that. It lasts while a
-    /// follower holds it.
-    pub fn reader(&mut self, session: SessionId) -> (SharedReader, bool) {
-        if let Some(reader) = self.readers.get(&session).and_then(Weak::upgrade) {
-            return (reader, false);
-        }
-        let reader = SharedReader::default();
-        self.readers.insert(session, Arc::downgrade(&reader));
-        (reader, true)
-    }
-
     /// The session is gone; its watchers see the sender close.
     pub fn forget(&mut self, session: SessionId) {
         self.sessions.remove(&session);
         self.mods.remove(&session);
-        self.readers.remove(&session);
     }
 
     fn seen(&mut self, session: SessionId) -> &watch::Sender<Seen> {
@@ -483,8 +336,6 @@ impl Board {
 
 #[cfg(test)]
 mod tests {
-    use slopty_proto::conversation::{Entry, Task, ThreadId, Turn};
-
     use super::*;
 
     const A: Link = 1;
@@ -580,22 +431,20 @@ mod tests {
         assert_eq!(holds.ask(s, false, |_| "again"), None, "nobody follows s now");
     }
 
-    /// A client that starts following while a prompt is held is shown it; ids are never reused.
+    /// A client that starts following while a prompt is held can answer it; ids are never
+    /// reused.
     #[test]
-    fn a_new_follower_is_shown_what_is_waiting() {
+    fn a_new_follower_answers_what_is_waiting() {
         let mut holds = Holds::default();
         let s = session(1);
-        assert_eq!(holds.follow(s, A), Vec::<u64>::new());
+        holds.follow(s, A);
         let one = holds.ask(s, false, |_| ()).expect("held");
         let two = holds.ask(s, false, |_| ()).expect("held");
-        assert_eq!(holds.follow(s, B), [one, two]);
-        assert_eq!(holds.follow(s, B), [one, two], "following twice is following once");
-        let shown: Vec<u64> = holds.shown_to(B).map(|(id, _reply)| id).collect();
-        assert_eq!(shown, [one, two], "what a follower that missed the broadcast is sent again");
-        assert_eq!(holds.shown_to(3).count(), 0, "nothing for a client that follows nothing");
-        assert!(holds.release(one).is_some());
-        holds.unfollow(s, A);
-        holds.unfollow(s, B);
+        holds.follow(s, B);
+        holds.follow(s, B);
+        assert!(holds.answer(B, s, one).is_some(), "a follower that came later answers");
+        assert!(holds.unfollow(s, A).is_empty(), "B still follows");
+        assert_eq!(holds.unfollow(s, B).len(), 1, "following twice is following once");
         holds.follow(s, A);
         assert!(holds.ask(s, false, |_| ()).is_some_and(|three| three > two), "a fresh id");
     }
@@ -606,9 +455,9 @@ mod tests {
     fn orchestration_follows_until_the_session_ends() {
         let mut holds = Holds::default();
         let (s, t) = (session(1), session(2));
-        assert_eq!(holds.follow(s, ORCHESTRATION), Vec::<u64>::new());
+        holds.follow(s, ORCHESTRATION);
         let first = holds.ask(s, false, |_| "first").expect("held for orchestration");
-        assert_eq!(holds.follow(s, A), [first], "a client that follows later is shown it");
+        holds.follow(s, A);
         assert_eq!(holds.answer(ORCHESTRATION, s, first).map(|h| h.reply), Some("first"));
         let second = holds.ask(s, false, |_| "second").expect("held");
         holds.follow(t, ORCHESTRATION);
@@ -621,10 +470,10 @@ mod tests {
         assert!(holds.unfollow(s, A).is_empty(), "the connection's own unfollow finds nothing");
     }
 
-    /// A client that answers approvals has a yes or no held for it with nobody following, and
-    /// is shown what already waits; a question waits only for followers. It answers or hands a
-    /// prompt back as a follower does, and the last approver going releases what only it could
-    /// answer, while a follower's unfollow still releases the session's prompts to the TUI.
+    /// A client that keeps the thread table has a yes or no held for it with nobody following;
+    /// a question waits only for followers. It answers or hands a prompt back as a follower
+    /// does, and the last approver leaving releases what only it could answer, while a
+    /// follower's unfollow still releases the session's prompts to the TUI.
     #[test]
     fn an_approver_is_held_for_without_following() {
         let mut holds = Holds::default();
@@ -633,31 +482,24 @@ mod tests {
         holds.follow(t, B);
         let question = holds.ask(t, false, |_| "question").expect("held for the follower");
         let waiting = holds.ask(t, true, |_| "waiting").expect("held for the follower");
-        assert_eq!(
-            holds.approve(A),
-            [waiting],
-            "shown the yes or no already held, not the question"
-        );
-        assert_eq!(holds.approve(B), Vec::<u64>::new(), "a follower already sees them");
-        assert!(holds.stop_approving(B).is_empty(), "A still answers");
+        holds.approve(A);
+        assert!(holds.approves(A) && !holds.approves(B));
         assert_eq!(holds.reach(s, true), Some(Reach::Approvers));
         assert_eq!(holds.ask(s, false, |_| "question"), None, "a question needs a follower");
         let yes = holds.ask(s, true, |_| "yes").expect("held for the approvers");
-        assert!(holds.tells(A, s, yes) && !holds.tells(A, t, question), "only the yes or no");
-        assert_eq!(holds.shown_to(A).map(|(id, _)| id).collect::<Vec<_>>(), [waiting, yes]);
+        assert_eq!(holds.answer(A, t, question), None, "the question is not shown to A");
         assert_eq!(holds.answer(A, s, yes).map(|h| h.reply), Some("yes"), "an approver answers");
-        let no = holds.ask(s, true, |_| "no").expect("held");
-        let released = holds.stop_approving(A);
-        assert_eq!(released, [(no, Held { session: s, approvable: true, reply: "no" })]);
-        assert!(holds.get(waiting).is_some(), "B still follows t");
-        holds.approve(A);
         let kept = holds.ask(s, true, |_| "kept").expect("held");
         holds.follow(s, B);
         let gone: Vec<u64> = holds.leave(B).into_iter().map(|(id, _)| id).collect();
         assert_eq!(gone, [question], "the question only B could answer");
         assert!(holds.get(waiting).is_some() && holds.get(kept).is_some(), "A answers the rest");
+        let orphaned: Vec<u64> = holds.leave(A).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(orphaned, [waiting, kept], "nobody is left to answer");
         holds.follow(s, B);
+        let again = holds.ask(s, true, |_| "again").expect("held for the follower");
         assert_eq!(holds.unfollow(s, B).len(), 1, "the person went back to the TUI");
+        assert!(holds.get(again).is_none());
     }
 
     /// The board keeps the latest meters and the named subagent files, and wakes a watcher on
@@ -691,203 +533,6 @@ mod tests {
         assert_eq!(seen.borrow_and_update().subagents.len(), 1, "a compaction gets no thread");
         board.forget(s);
         assert!(seen.has_changed().is_err(), "the watch closes with the session");
-    }
-
-    fn append(path: &Path, text: &str) {
-        use std::io::Write as _;
-        let mut file =
-            std::fs::OpenOptions::new().create(true).append(true).open(path).expect("open");
-        file.write_all(text.as_bytes()).expect("write");
-    }
-
-    fn prompt(uuid: &str, parent: Option<&str>, text: &str) -> String {
-        let record = serde_json::json!({
-            "type": "user", "uuid": uuid, "parentUuid": parent,
-            "timestamp": "2026-09-27T03:15:25.849Z",
-            "message": { "role": "user", "content": text },
-        });
-        format!("{record}\n")
-    }
-
-    /// The entries' ids, in order, and the resets.
-    fn ids(changes: &[Change]) -> Vec<String> {
-        changes
-            .iter()
-            .filter_map(|change| match change {
-                Change::Upsert { thread, entry } => Some(format!("{thread:?} {}", entry.id)),
-                Change::Reset { thread } => Some(format!("reset {thread:?}")),
-                _ => None,
-            })
-            .collect()
-    }
-
-    type Model = BTreeMap<ThreadId, (Vec<Entry>, Vec<Task>, BTreeMap<String, Turn>)>;
-
-    /// The conversation a client holds once it applied `changes`.
-    fn applied(changes: &[Change]) -> Model {
-        let mut model = Model::new();
-        for change in changes.iter().cloned() {
-            match change {
-                Change::Upsert { thread, entry } => {
-                    let entries = &mut model.entry(thread).or_default().0;
-                    match entries.iter_mut().find(|e| e.id == entry.id) {
-                        Some(old) => *old = entry,
-                        None => entries.push(entry),
-                    }
-                }
-                Change::Remove { thread, id } => {
-                    model.entry(thread).or_default().0.retain(|e| e.id != id);
-                }
-                Change::Tasks { thread, tasks } => model.entry(thread).or_default().1 = tasks,
-                Change::Turn { thread, turn } => {
-                    model.entry(thread).or_default().2.insert(turn.prompt.clone(), turn);
-                }
-                Change::Reset { thread: Some(thread) } => {
-                    model.remove(&thread);
-                }
-                Change::Reset { thread: None } => model.clear(),
-            }
-        }
-        model
-    }
-
-    /// Two followers of a session are sent the same changes from one read of its files, a read
-    /// that finds nothing sends nothing, and a follower that comes later is handed the
-    /// conversation as a first read of the files would give it. The reader lasts while a
-    /// follower holds it.
-    #[test]
-    fn followers_share_one_read_and_a_late_one_gets_it_whole() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let main = dir.path().join("s1.jsonl");
-        append(&main, &prompt("u1", None, "hello"));
-        let mut board = Board::default();
-        let s = session(1);
-        let (reader, fresh) = board.reader(s);
-        assert!(fresh, "nobody followed yet");
-        let mut read = reader.try_lock().expect("unlocked");
-        read.read(&main, &[]);
-        let (mut a, first) = read.join();
-        assert_eq!(ids(&first.changes), ["reset None", "Main u1"]);
-        let (again, fresh) = board.reader(s);
-        assert!(!fresh && Arc::ptr_eq(&again, &reader), "the second follower shares it");
-        let (mut b, _now) = read.join();
-
-        append(&main, &prompt("u2", Some("u1"), "and then"));
-        read.read(&main, &[]);
-        let (to_a, to_b) = (a.try_recv().expect("A is sent it"), b.try_recv().expect("B too"));
-        assert!(Arc::ptr_eq(&to_a, &to_b), "one read for both");
-        assert_eq!(ids(&to_a.changes), ["Main u2"]);
-        read.read(&main, &[]);
-        assert!(a.try_recv().is_err(), "a read that finds nothing sends nothing");
-        assert_eq!(read.reads(), 3);
-
-        let (_c, late) = read.join();
-        assert_eq!(ids(&late.changes), ["reset None", "Main u1", "Main u2"]);
-        let whole = Transcripts::default().read(&main, &[]);
-        assert_eq!(applied(&late.changes), applied(&whole), "as a first read gives it");
-        assert!(applied(&late.changes).values().all(|(_, _, turns)| !turns.is_empty()));
-
-        drop(read);
-        drop((again, reader));
-        assert!(board.reader(s).1, "the last follower gone, the next starts afresh");
-        board.forget(s);
-        assert!(board.readers.is_empty());
-    }
-
-    /// What following one session costs per tick with `FOLLOWERS` clients: each decoding the
-    /// transcripts on its own (the path this replaced, `Transcripts` per follower) against one
-    /// shared read sent to all. On the captured `tools` session with its subagent: a tick that
-    /// finds nothing new, and the second half of the session appended a record per tick.
-    #[test]
-    #[ignore = "measurement"]
-    fn follower_read_cost() {
-        const FOLLOWERS: usize = 4;
-        const IDLE_TICKS: u32 = 2_000;
-        const REPLAYS: u32 = 20;
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../slopty-agent/tests/fixtures/conversation/tools");
-        let captured = std::fs::read_to_string(fixture.join("transcript.jsonl")).expect("fixture");
-        let lines: Vec<&str> = captured.lines().collect();
-        let (first, rest) = lines.split_at(lines.len() / 2);
-        let dir = tempfile::tempdir().expect("tempdir");
-        let main = dir.path().join("s1.jsonl");
-        let subagents = slopty_agent::conversation::subagents_dir(&main);
-        std::fs::create_dir_all(&subagents).expect("mkdir");
-        for entry in std::fs::read_dir(fixture.join("subagents")).expect("subagents") {
-            let path = entry.expect("entry").path();
-            std::fs::copy(&path, subagents.join(path.file_name().expect("name"))).expect("copy");
-        }
-        let start = || std::fs::write(&main, format!("{}\n", first.join("\n"))).expect("write");
-        let micros = |d: std::time::Duration| d.as_secs_f64() * 1e6;
-
-        for round in 1..=3 {
-            start();
-            let mut own: Vec<Transcripts> =
-                std::iter::repeat_with(Transcripts::default).take(FOLLOWERS).collect();
-            for t in &mut own {
-                let _all = (t.read(&main, &[]), t.outputs());
-            }
-            let clock = Instant::now();
-            for _ in 0..IDLE_TICKS {
-                for t in &mut own {
-                    let _nothing = (t.read(&main, &[]), t.outputs());
-                }
-            }
-            let idle_own = micros(clock.elapsed()) / f64::from(IDLE_TICKS);
-
-            let mut reader = Reader::default();
-            reader.read(&main, &[]);
-            let _listening: Vec<_> =
-                std::iter::repeat_with(|| reader.join().0).take(FOLLOWERS).collect();
-            let clock = Instant::now();
-            for _ in 0..IDLE_TICKS {
-                reader.read(&main, &[]);
-            }
-            let idle_shared = micros(clock.elapsed()) / f64::from(IDLE_TICKS);
-
-            let (mut grow_own, mut grow_shared) = (0.0, 0.0);
-            for _ in 0..REPLAYS {
-                start();
-                let mut own: Vec<Transcripts> =
-                    std::iter::repeat_with(Transcripts::default).take(FOLLOWERS).collect();
-                for t in &mut own {
-                    let _all = (t.read(&main, &[]), t.outputs());
-                }
-                let clock = Instant::now();
-                for line in rest {
-                    append(&main, &format!("{line}\n"));
-                    for t in &mut own {
-                        let _grown = (t.read(&main, &[]), t.outputs());
-                    }
-                }
-                grow_own += micros(clock.elapsed());
-
-                start();
-                let mut reader = Reader::default();
-                reader.read(&main, &[]);
-                let mut followers: Vec<_> =
-                    std::iter::repeat_with(|| reader.join().0).take(FOLLOWERS).collect();
-                let clock = Instant::now();
-                for line in rest {
-                    append(&main, &format!("{line}\n"));
-                    reader.read(&main, &[]);
-                    for follower in &mut followers {
-                        while let Ok(read) = follower.try_recv() {
-                            let _sent = Arc::unwrap_or_clone(read);
-                        }
-                    }
-                }
-                grow_shared += micros(clock.elapsed());
-            }
-            let per_record =
-                f64::from(REPLAYS) * f64::from(u32::try_from(rest.len()).expect("few"));
-            eprintln!(
-                "round {round}, {FOLLOWERS} followers: idle tick {idle_own:.1} -> {idle_shared:.1} µs, \
-                 a record appended {:.1} -> {:.1} µs",
-                grow_own / per_record,
-                grow_shared / per_record,
-            );
-        }
     }
 
     fn mod_event(value: &serde_json::Value) -> ModEvent {

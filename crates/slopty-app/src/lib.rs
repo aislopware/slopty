@@ -2221,8 +2221,7 @@ impl Workspace {
             // The field's own pad and this put its text on the tailnet rows' glyphs.
             .pl(px(spacing.xs))
             .rounded(px(radii.sm))
-            .bg(hsla(s.hover))
-            .map(|el| kit::sunk(el, theme, 0.0))
+            .map(|el| kit::field(el, theme))
             .text_size(px(ty.ui_size))
             .child(
                 Input::new(&adding.address)
@@ -2698,8 +2697,8 @@ impl Workspace {
             .font_family(self.theme.typography.ui_family.clone())
     }
 
-    /// A key cap of the bar: a plate of the `hover` wash with no hairline, `pressed` while held,
-    /// the accent fill with its ink when `lit` (armed or toggled on). A word ("Esc", "Paste")
+    /// A key cap of the bar: raised off the bar ([`kit::raised`]), `pressed` while held, the
+    /// accent fill with its ink when `lit` (armed or toggled on). A word ("Esc", "Paste")
     /// is set small, as a keyboard sets its word keys; a glyph at the title size, so an arrow
     /// reads at a glance on a 36 pt cap.
     fn key_cap(&self, id: String, label: &str, lit: bool) -> gpui::Stateful<gpui::Div> {
@@ -2721,7 +2720,7 @@ impl Workspace {
                 if lit {
                     kit::solid(el, &self.theme)
                 } else {
-                    el.text_color(hsla(s.text)).bg(hsla(s.hover))
+                    kit::raised(el.text_color(hsla(s.text)), &self.theme)
                 }
             })
             .when(!lit, |el| el.active(|el| el.bg(hsla(s.pressed))))
@@ -3211,12 +3210,6 @@ fn apply_link_event(
         }
         LinkEvent::XferFailed { xfer, error } => {
             view.update(cx, |v, cx| v.xfer_failed(xfer, &error.to_string(), cx));
-        }
-        LinkEvent::Conversation { session, event } => {
-            view.update(cx, |v, cx| v.conversation_event(session, event, cx));
-        }
-        LinkEvent::Control(WorkerMsg::Permission(event)) => {
-            view.update(cx, |v, cx| v.permission_event(event, cx));
         }
         LinkEvent::Handoff { event, received } => {
             view.update(cx, |v, cx| v.handoff_event(key, event, received, cx));

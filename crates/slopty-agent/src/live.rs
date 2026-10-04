@@ -7,7 +7,7 @@
 //! is heard only after its `hello` passes [`gate`].
 //!
 //! Two halves keep the blocks. The worker keeps one [`Board`] per session, fed by the events:
-//! the blocks in flight and those that stopped a moment ago. Each follower keeps an
+//! the blocks in flight and those that stopped a moment ago. Each observed thread keeps an
 //! [`Overlay`]: what it has shown of the board, which [`Overlay::update`] brings up to date as
 //! [`Live`] starts and appends, and which the transcript settles ([`Overlay::settle`]): a text
 //! block when an answer with the same text is upserted in its thread, a thinking block when

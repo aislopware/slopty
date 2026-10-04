@@ -1697,3 +1697,88 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
   - Tests: `an_aside_keeps_its_mark_until_it_is_kept_or_forgotten`
     (`slopty-worker/tests/threads.rs`); goldens `intent_aside`, `intent_discard`,
     `intent_keep_aside`.
+
+- ✅ **Claude Code's prompts are held for thread follows, and the conversation stream is gone**
+  (2026-10-04, item 7 of the readiness audit). Every agent reaches a client as a thread, so the
+  old Claude Code follow stream had no reader left.
+  - **Who a prompt is held for.**
+    - A client that follows the session's thread (`ThreadRequest::Follow` of a thread with a
+      terminal) holds every prompt there.
+    - A client that keeps the thread table (`ThreadRequest::Table`) holds a yes or no, for
+      `APPROVAL_HOLD` at most, since every thread's requests show in its rows. That is a
+      notification's Allow, or the inbox. It took `ConversationRequest::Approvals`, which every
+      app client sent anyway.
+    - Orchestration follows as before.
+    - The machine (`slopty_worker::conversation::Holds`) is unchanged but smaller: nothing is
+      shown per link any more, so `shown_to`, `tells` and `stop_approving` are deleted.
+  - **How it is shown.** The hold (`apps/slopty-worker/src/threads/hold.rs`) tells the
+    session's thread observer directly (`thread::claude::Driver::permission`), in the order it
+    decides, and the observer opens or settles the request on the thread.
+    - That replaces the daemon broadcast, where a lagging receiver could drop a prompt.
+    - A prompt for a terminal nothing observes yet starts observing it, as it did.
+  - **Answers.** Answers go only through `Intent::Answer`, and the hand-back to the TUI only
+    through `Intent::Release`, both on the thread's request.
+    - The last follower letting the thread go, its connection ending, the wait running out or
+      the relay going away still hand a prompt back undecided.
+  - **Deleted.**
+    - From the wire: `ConversationRequest`, `ConversationEvent`, `ClientMsg::Conversation`,
+      `WorkerMsg::Permission`, `UniHead::Conversation` and its goldens, and `Blob` and
+      `EXPAND_CHARS` with them.
+    - From the transport and the client: `slopty_net::streams::{open_conversation,
+      CONVERSATION_PRIORITY}`, `Uni::Conversation` and `LinkEvent::Conversation`.
+    - From the worker: its follow stream (`follow.rs`), its shared transcript reader
+      (`conversation::Reader`), and its `@` walk (`file::mention`). The thread composer uses
+      `FindFiles`.
+    - `PermissionEvent` and `PermissionPrompt` stay, as the worker's own vocabulary between the
+      hold and the observer.
+  - Tests:
+    - In `slopty-workerd/tests/threads.rs`: `a_prompt_is_held_while_its_thread_is_followed` (it
+      replaces the follow test of the e2e),
+      `the_tables_holder_answers_without_following_and_the_tui_asks_otherwise` (the approver
+      test), `a_trusted_mod_streams_live_blocks_that_the_transcript_settles` (live blocks
+      through the thread).
+    - `an_approver_is_held_for_without_following` and `a_new_follower_answers_what_is_waiting`
+      (`slopty_worker::conversation`).
+    - The measurement `echo_beside_a_followed_thread` (e2e, ignored).
+
+- ✅ **The person's stop holds deliveries to that agent until they speak again** (2026-10-04,
+  A2 of the T3 Code delta study). A report that fell due a minute after the person stopped an
+  orchestrator was posted to its idle session and started it working again.
+  - **The signal.** The interrupt record in Claude Code's transcript ("[Request interrupted by
+    user]") already ends the turn as `Idle` with the detail "interrupted"
+    (`transcript::INTERRUPTED`, `Progress::is_interrupt`). The daemon's `Tracker` now keeps that
+    as a flag, and only the person's next prompt (`UserPromptSubmit`) or a new session lifts it.
+    A later idle hook (`Notification` idle_prompt) does not, nor does the transcript alone for a
+    hooked agent.
+  - **The guard.** `orchestrate::may_deliver` is `may_type` plus a refusal while the flag
+    stands (`AgentTable::interrupted`, `DaemonAgents::interrupted`). The worker's post to the
+    server's orchestrator (`server.rs` `may_post`) asks it. A batch held there is not dropped:
+    it rides with the person's next prompt.
+  - Tests: `reports_wait_for_the_person_after_they_stop_the_agent`
+    (`slopty-workerd/tests/server_link.rs`; it fails with `may_type` in its place),
+    `an_interrupted_turn_goes_idle_from_the_transcript` and
+    `the_table_keeps_the_persons_stop_until_their_next_prompt` (`slopty-agent`).
+
+- ✅ **An agent left waiting only on its commands says so** (2026-10-04, A6 of the T3 Code
+  delta study, the adapter half). A dev server the agent left running held its row at
+  `Waiting` with the kind `task`, which the server cannot tell from a subagent or a monitor.
+  - The observed adapter names the wait `command` (`Wait::COMMAND`) when every task it counts is
+    a running `SHELL` task of the main thread and no scheduled prompt is set. Its text is the
+    commands' titles. Anything else stays `task` (`Wait::TASK`).
+  - The wait is worded again when the transcript starts or ends a task while the agent waits.
+    The hooks often count a command before the transcript names it, so the wait turns from
+    `task` to `command` once it does. A count the transcript does not show (a monitor) keeps
+    it at `task`.
+  - The kind is open, so the wire did not change. The server's settle reads `command` as at rest
+    for a finished task (`ladder::COMMANDS_WAIT`).
+  - Test: `a_wait_on_commands_left_running_names_them` (`slopty-agent` observed tests).
+
+- ✅ **A Codex thread another client rewrote is read again, its held messages kept**
+  (2026-10-04). Codex's `thread/reverted` says a client rewrote the thread's history in place.
+  The worker takes the thread up again (`thread/resume`) and reads it whole, and the messages
+  the person queued are put back ahead of anything queued since.
+  - **A revert that undid the running turn.** A queued message waits for the turn under way to
+    end. When the re-read shows no turn under way, nothing is left to end, so the message goes
+    as the next turn at once. Before, it stayed held until some later notice about the thread.
+  - Test: `a_reverted_thread_is_read_again_and_keeps_its_held_message`
+    (`slopty-worker/tests/codex.rs`; without the send after the re-read it fails).
