@@ -562,11 +562,11 @@ fn a_line_names_the_turn_that_wrote_it_under_the_pointer(cx: &mut TestAppContext
     let first = center(cx, "review-line-1-0-0");
     cx.simulate_mouse_move(first, None, Modifiers::none());
     cx.run_until_parked();
-    assert!(cx.debug_bounds("review-line-1-0-0-author").is_none());
+    assert!(cx.debug_bounds("review-author-1-0-0").is_none());
     let written = center(cx, "review-line-1-0-2");
     cx.simulate_mouse_move(written, None, Modifiers::none());
     cx.run_until_parked();
-    click(cx, "review-line-1-0-2-author");
+    click(cx, "review-author-1-0-2");
     assert_eq!(*heard.borrow(), [ReviewEvent::OpenThread(Opens { thread, turn: Some(TurnId(1)) })]);
     assert!(cx.debug_bounds("review-draft").is_none(), "no comment started");
     assert!(intents(&sent).is_empty(), "nothing sent");

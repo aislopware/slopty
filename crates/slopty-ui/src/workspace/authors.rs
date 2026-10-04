@@ -76,4 +76,18 @@ impl WorkspaceView {
         }
         cx.notify();
     }
+
+    /// Each open review names its lines' authors as every surface names a thread.
+    pub(super) fn settle_review_writers(&self, cx: &mut Context<Self>) {
+        let reviews: Vec<_> = self.open_reviews().cloned().collect();
+        for view in reviews {
+            let writers = view
+                .read(cx)
+                .authoring_threads()
+                .into_iter()
+                .filter_map(|t| Some((t, self.writer_of(t)?)))
+                .collect();
+            view.update(cx, |v, cx| v.set_writers(writers, cx));
+        }
+    }
 }

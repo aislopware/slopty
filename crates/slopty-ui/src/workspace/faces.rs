@@ -177,6 +177,11 @@ impl WorkspaceView {
         view
     }
 
+    /// Every review tile open.
+    pub(super) fn open_reviews(&self) -> impl Iterator<Item = &Entity<ReviewView>> {
+        self.faces.threads.reviews.values()
+    }
+
     /// The review tile of `thread`, while one is open.
     #[must_use]
     pub fn review_of(&self, thread: ThreadId) -> Option<&Entity<ReviewView>> {
@@ -248,16 +253,19 @@ impl WorkspaceView {
         self.faces.threads.items.get(&item)
     }
 
-    /// What a thread tile's header says: the thread's title as its worker's table says it.
+    /// A thread's name, the one every surface calls it by: a thread tile's header, the
+    /// navigator, the inbox, and who wrote a line. Where its agent runs in a tile here, the
+    /// tile's title (the name the person gave it, its project role, or what the agent titled
+    /// itself); else its title as its worker's table says it.
     #[must_use]
     pub fn thread_title(&self, thread: ThreadId) -> String {
-        self.faces
-            .threads
-            .titles
-            .get(&thread)
-            .filter(|t| !t.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| THREAD.to_owned())
+        let tile = self.thread_terminal(thread).and_then(|session| {
+            self.items().find_map(|(_, item)| match item.kind {
+                ItemKind::Terminal { session: s } if s == session => Some(self.tile_title(item)),
+                _ => None,
+            })
+        });
+        tile.or_else(|| self.thread_named(thread)).unwrap_or_else(|| THREAD.to_owned())
     }
 
     /// The agent `item` shows, by its [`AgentId`] name: a thread's, or the one at work in a
@@ -337,18 +345,10 @@ impl WorkspaceView {
         self.faces.threads.hubs.get(&key)
     }
 
-    /// `thread` as the person sees it here: its agent, and the title of the tile its agent's
-    /// terminal shows in, else its title as its worker's table last said.
+    /// `thread` as a line's author: its agent, and its name ([`Self::thread_title`]).
     pub(super) fn writer_of(&self, thread: ThreadId) -> Option<crate::authorship::Writer> {
         let agent = self.faces.threads.agents.get(&thread)?.clone();
-        let tile = self.thread_terminal(thread).and_then(|session| {
-            self.items().find_map(|(_, item)| match item.kind {
-                ItemKind::Terminal { session: s } if s == session => Some(self.tile_title(item)),
-                _ => None,
-            })
-        });
-        let title = tile.or_else(|| self.thread_named(thread)).unwrap_or_default();
-        Some(crate::authorship::Writer { agent, title })
+        Some(crate::authorship::Writer { agent, title: self.thread_title(thread) })
     }
 
     /// The worker whose table holds `thread`.

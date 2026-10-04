@@ -1861,6 +1861,7 @@ impl gpui::Render for WorkspaceView {
         self.settle_reviews(cx);
         self.settle_agent_screens(cx);
         self.settle_going(cx);
+        self.settle_review_writers(cx);
         self.sync_projects(window, cx);
         self.give_pending_focus(window, cx);
         self.follow_secure_input(cx);

@@ -584,8 +584,11 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     as its diff ends (its blob): the first 16 files listed as the review comes, the rest when
     the pointer first crosses one of their lines. No hover asks anything.
   - **Quiet until looked at.** A file tile names the caret line's author in a small pill in
-    the corner of the text: the thread's title (its agent while untitled), the turn, and how
-    long ago. The pill hides while the edit differs from the file as read, since its lines no
+    the corner of the text: the thread's name, the turn, and how long ago. A thread has one
+    name on every surface (`WorkspaceView::thread_title`): the title of the tile its agent
+    runs in here (the person's name for it, its project role, or the agent's own title), else
+    its title as its worker's table says. The navigator, a thread tile, the inbox and both
+    authors' tags read it. The pill hides while the edit differs from the file as read, since its lines no
     longer match the answer. A review names a line's author at the line's end while the
     pointer is on it, as "Turn N" within the thread's own review. A press on either opens the
     thread where its agent's tile shows it, else in its own tile, and scrolls to the turn's
@@ -600,8 +603,8 @@ How Slopty runs, shows and steers coding agents of every kind. The research, wit
     - `a_file_is_asked_once_per_change` (`slopty-client`).
     - `the_carets_line_names_the_turn_that_wrote_it` (file tile),
       `a_line_names_the_turn_that_wrote_it_under_the_pointer` (review) and
-      `a_turn_gone_to_shows_from_its_message_paging_back_to_it` (thread view), all in
-      `slopty-ui`.
+      `a_turn_gone_to_shows_from_its_message_paging_back_to_it` (thread view) and
+      `a_thread_goes_by_its_agents_tile_everywhere` (workspace), all in `slopty-ui`.
     - The app e2e `a_line_names_the_turn_that_wrote_it_and_opens_it`, with goldens
       `file-author` and `file-author-dark`.
 - ✅ **The thread composer's menus never blank, and a waiting message is changed in place**

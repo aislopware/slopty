@@ -1,11 +1,12 @@
-//! Who wrote a line of the review: under the pointer, at the line's end, the turn that brought
-//! it in, or the thread when another did; a press opens that thread at that turn.
+//! Who wrote a line of the review: at the end of the line under the pointer, the turn that
+//! brought it in, or the thread when another did; a press opens that thread at that turn.
 //!
 //! Each file's authors are asked of the worker for the file as the diff ends
 //! ([`Stamp::Blob`](slopty_client::threads::Stamp::Blob)): a file that has moved on since says
 //! nothing, since its lines would be numbered otherwise. The first files are asked as the review
 //! comes; the rest as the pointer first crosses one of their lines.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
@@ -15,6 +16,7 @@ use gpui::{
 };
 use slopty_client::threads::Stamp;
 use slopty_core::WallMs;
+use slopty_proto::thread::ThreadId;
 use slopty_proto::thread::wire::Authors;
 
 use super::{ReviewEvent, ReviewView};
@@ -22,11 +24,6 @@ use crate::authorship::{self, Authored, Opens, Writer};
 
 /// The files asked as a review comes, in the list's order; the rest wait for the pointer.
 const ASKED_FIRST: usize = 16;
-
-/// The group a line's row and its tag share: the tag shows while the pointer is on the row.
-pub(super) fn line_group(id: &str) -> SharedString {
-    SharedString::from(format!("{id}-hover"))
-}
 
 impl ReviewView {
     /// Ask who wrote the lines of the first files listed, and take what is held already.
@@ -67,6 +64,25 @@ impl ReviewView {
         }
     }
 
+    /// The threads the lines' authors name, for the host to name ([`Self::set_writers`]).
+    #[must_use]
+    pub fn authoring_threads(&self) -> Vec<ThreadId> {
+        let mut threads: Vec<ThreadId> =
+            self.authored.values().flat_map(|a| a.authors.runs.iter().map(|r| r.thread)).collect();
+        threads.sort_unstable();
+        threads.dedup();
+        threads
+    }
+
+    /// Name the threads the lines' authors name as every other surface does; a thread left
+    /// out goes by its row in this worker's table.
+    pub fn set_writers(&mut self, writers: HashMap<ThreadId, Writer>, cx: &mut Context<Self>) {
+        if self.writers != writers {
+            self.writers = writers;
+            cx.notify();
+        }
+    }
+
     /// `authors` with the names of its threads, as this worker's table knows them.
     fn with_writers(&self, authors: Arc<Authors>, cx: &App) -> Authored {
         let rows = &self.hub.read(cx).threads().rows().rows;
@@ -81,21 +97,46 @@ impl ReviewView {
         Authored { authors, writers }
     }
 
-    /// The tag of the line numbered `line` on the new side of the file at `at`, shown while
-    /// the pointer is on row `group`; nothing for a line no thread is known to have written.
+    /// The pointer came onto row `row` (a file, a hunk, a place), or left it: its author shows
+    /// while it is there, and its file's authors are asked the first time.
+    pub(super) fn hover_line(
+        &mut self,
+        row: (usize, usize, usize),
+        hovered: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if hovered {
+            if !self.authors_asked.contains(&row.0) {
+                self.author_file(row.0, cx);
+            }
+            if self.hovered != Some(row) {
+                self.hovered = Some(row);
+                cx.notify();
+            }
+        } else if self.hovered == Some(row) {
+            self.hovered = None;
+            cx.notify();
+        }
+    }
+
+    /// The tag of row `row`, whose line on the new side is numbered `line`, while the pointer
+    /// is on it; nothing for a line no thread is known to have written.
     pub(super) fn author_tag(
         &self,
-        at: usize,
+        row: (usize, usize, usize),
         line: Option<u32>,
-        group: &str,
         cx: &Context<Self>,
     ) -> Option<AnyElement> {
+        if self.hovered != Some(row) {
+            return None;
+        }
+        let (at, hunk, ix) = row;
         let authored = self.authored.get(&at)?;
         let run = authored.at(line?)?;
-        let writer = authored.writers.get(&run.thread);
+        let writer = self.writers.get(&run.thread).or_else(|| authored.writers.get(&run.thread));
         let own = Some(self.thread);
         let opens = Opens { thread: run.thread, turn: run.turn };
-        let id = SharedString::from(format!("{group}-author"));
+        let id = SharedString::from(format!("review-author-{at}-{hunk}-{ix}"));
         let tag = authorship::tag(&self.theme, id, run, writer, own, WallMs::now())
             .bg(crate::colors::hsla(self.theme.content()))
             // A press on the tag is the tag's: it starts no comment on the line under it.
@@ -105,16 +146,28 @@ impl ReviewView {
                     cx.emit(ReviewEvent::OpenThread(opens));
                 }))
             });
-        let group = line_group(group);
         Some(
             div()
                 .absolute()
                 .top_0()
                 .right(self.z(self.theme.spacing.sm))
-                .invisible()
-                .group_hover(group, gpui::StyleRefinement::visible)
                 .child(tag)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+impl ReviewView {
+    /// Hold `authors` as the answer for the file at `at`.
+    pub(crate) fn take_authors(&mut self, at: usize, authors: Authors, cx: &mut Context<Self>) {
+        let authored = self.with_writers(Arc::new(authors), cx);
+        self.authored.insert(at, authored);
+        cx.notify();
+    }
+
+    /// The name the host gave `thread`.
+    pub(crate) fn writer(&self, thread: ThreadId) -> Option<&Writer> {
+        self.writers.get(&thread)
     }
 }

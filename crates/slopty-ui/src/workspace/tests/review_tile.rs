@@ -103,3 +103,60 @@ fn a_thread_s_review_opens_as_a_tile_of_its_own_and_goes_with_it(cx: &mut TestAp
     cx.run_until_parked();
     assert!(view.read_with(cx, |v, _| v.review_of(thread).is_none()), "let go with its tile");
 }
+
+/// A thread is named the same everywhere: where its agent runs in a tile here, by that tile's
+/// title, in the navigator, a thread tile's header and the author of a line in a review, not
+/// by the title its worker's table gives it.
+#[gpui::test]
+fn a_thread_goes_by_its_agents_tile_everywhere(cx: &mut TestAppContext) {
+    use slopty_proto::thread::TurnId;
+    use slopty_proto::thread::wire::{AuthorRun, Authors};
+
+    let (view, cx) = still_workspace(cx);
+    let studio = connect(&view, cx, 1, "studio");
+    let session = SessionId::new();
+    let agent = opens(&view, cx, &studio, session, studio.me, 1);
+    let key = studio.key;
+    view.update_in(cx, |v, _w, cx| {
+        v.agent_event(AgentEvent { status: AgentStatus::Working, ..blocked(session) }, cx);
+        v.threads_linked(key, cx);
+    });
+    let mut state = crate::conversation::thread::fixtures::thread("edit");
+    state.meta.terminal = Some(session);
+    state.meta.title = "What the table says".to_owned();
+    let thread = state.meta.id;
+    let table = TableFrame::Snapshot {
+        cursor: Cursor { epoch: 1, seq: 1 },
+        rows: vec![state.row(WallMs::ZERO)],
+    };
+    view.update_in(cx, |v, _w, cx| v.thread_table(key, &table, cx));
+    let by = studio.me;
+    let named = ItemOp::Rename { id: agent.item, name: Some("Login fix".to_owned()) };
+    view.update_in(cx, |v, _w, cx| {
+        v.apply_sync(key, ItemSync::Delta { version: 2, by, op: named }, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.thread_title(thread)), "Login fix");
+
+    let review = view.update_in(cx, |v, window, cx| v.open_review(key, thread, window, cx));
+    let authors = Authors {
+        thread: Some(thread),
+        path: "src/lib.rs".to_owned(),
+        modified_ms: None,
+        blob: Some("b".to_owned()),
+        runs: vec![AuthorRun {
+            start: 1,
+            lines: 1,
+            thread,
+            turn: Some(TurnId(1)),
+            commit: None,
+            at_ms: WallMs::ZERO,
+        }],
+        absent: None,
+    };
+    review.update(cx, |r, cx| r.take_authors(0, authors, cx));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let named = review.read_with(cx, |r, _| r.writer(thread).map(|w| w.title.clone()));
+    assert_eq!(named.as_deref(), Some("Login fix"));
+}

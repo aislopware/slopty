@@ -38,7 +38,7 @@ use slopty_theme::{Theme, Typography};
 
 use super::findings::{self, Finding};
 use super::model::{self, Comment, Model, Note, Scope, Side};
-use crate::authorship::{Authored, Opens};
+use crate::authorship::{Authored, Opens, Writer};
 use crate::colors::{hsla, hsla_alpha};
 use crate::conversation::diff::{self, Block, Kind, Line};
 use crate::conversation::lines::{self, Ink};
@@ -203,6 +203,10 @@ pub struct ReviewView {
     authored: HashMap<usize, Authored>,
     /// The files whose authors were asked for this review.
     authors_asked: HashSet<usize>,
+    /// The threads its lines' authors name, as the host names them ([`Self::set_writers`]).
+    writers: HashMap<ThreadId, Writer>,
+    /// The row under the pointer, by its file, hunk and place: who wrote it shows there.
+    hovered: Option<(usize, usize, usize)>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -275,6 +279,8 @@ impl ReviewView {
             focus: cx.focus_handle(),
             authored: HashMap::new(),
             authors_asked: HashSet::new(),
+            writers: HashMap::new(),
+            hovered: None,
             _subscriptions: vec![writing, hearing, watching],
         };
         view.hub.update(cx, |hub, cx| hub.open(thread, cx));
@@ -1465,7 +1471,7 @@ impl ReviewView {
         let ink = self.ink(at);
         let id = format!("review-line-{at}-{hunk}-{ix}");
         let new = line.new.filter(|_| line.kind != Kind::Removed);
-        let tag = self.author_tag(at, new, &id, cx);
+        let tag = self.author_tag((at, hunk, ix), new, cx);
         self.pickable(id, (at, hunk, ix), ink.unified(line), tag, cx)
     }
 
@@ -1477,7 +1483,7 @@ impl ReviewView {
         let Some(pair) = pairs.get(ix).copied() else { return div().into_any_element() };
         let ink = self.ink(at);
         let id = format!("review-pair-{at}-{hunk}-{ix}");
-        let tag = self.author_tag(at, pair.1.and_then(|l| l.new), &id, cx);
+        let tag = self.author_tag((at, hunk, ix), pair.1.and_then(|l| l.new), cx);
         self.pickable(id, (at, hunk, ix), ink.split(pair), tag, cx)
     }
 
@@ -1498,11 +1504,9 @@ impl ReviewView {
             .is_some_and(|span| span.holds(at, hunk, ix));
         let wash = hsla_alpha(self.theme.surfaces.accent, slopty_theme::alpha::FAINT);
         let selector = id.clone();
-        let group = authors::line_group(&id);
         div()
             .id(ElementId::Name(id.into()))
             .debug_selector(move || selector)
-            .group(group)
             .relative()
             .w_full()
             .cursor_pointer()
@@ -1512,9 +1516,7 @@ impl ReviewView {
             .when(picked, |el| el.child(div().absolute().inset_0().bg(wash)))
             .children(tag)
             .on_hover(cx.listener(move |this, hovered: &bool, _w, cx| {
-                if *hovered && !this.authors_asked.contains(&at) {
-                    this.author_file(at, cx);
-                }
+                this.hover_line((at, hunk, ix), *hovered, cx);
             }))
             .on_mouse_down(
                 MouseButton::Left,
