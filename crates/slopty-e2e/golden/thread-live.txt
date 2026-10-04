@@ -28,7 +28,6 @@ Button │ Copy message
 Button │ Preparing Bash
 MultilineTextInput │ Message (focused)
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Send

@@ -34,7 +34,6 @@ Status │ Attaching screen-recording.mov, ↑ 0%
 Button │ Remove screen-recording.mov
 MultilineTextInput │ Message (focused)
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Opus 5.5
 Button │ 1 finished
 Button │ Commit

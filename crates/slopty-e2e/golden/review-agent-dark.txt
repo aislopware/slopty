@@ -38,14 +38,13 @@ Button │ Copy message
 Button │ Worked 31 s: Edited refresh.rs
 Article │ The refresh now retries three times with one key, and saves the token.
 Button │ Copy message
-Article │ You: /code-review b8c7aacf9d647c2d2a1d896323f9ff05a05247be...51483d52aed3ca6f696c22bbf01a36a61831b05c
+Article │ You: /code-review 48c664d5fdffe6e763626adcf85467fb248381fa...73dcb0e944e34833931f67cb3513d9e6786fb575
 Button │ Branch from here
 Button │ Copy message
 Article │ I reviewed the change and found two things to fix.
 Button │ Copy message
 MultilineTextInput │ Message
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Review the changes

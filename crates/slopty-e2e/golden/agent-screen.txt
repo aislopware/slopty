@@ -39,7 +39,6 @@ Button │ computer-use: app_click
 Status │ Working
 MultilineTextInput │ Message (focused)
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Watch Synthetic editor

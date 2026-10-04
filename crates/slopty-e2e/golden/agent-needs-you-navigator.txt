@@ -33,7 +33,6 @@ Dialog │ Bash
 Button │ Answer in the terminal
 MultilineTextInput │ Message
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Send
@@ -46,7 +45,6 @@ Group │ Thread
 Status │ Nothing here yet
 MultilineTextInput │ Message (focused)
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Send
 Group │ Status

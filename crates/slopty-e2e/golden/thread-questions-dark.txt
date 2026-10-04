@@ -46,7 +46,6 @@ Group │ Edits · notes.txt
 Button │ Review
 MultilineTextInput │ Message
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Opus 5.5
 Button │ Commit
 Button │ Review the changes

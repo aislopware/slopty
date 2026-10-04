@@ -45,7 +45,6 @@ Group │ Edits · notes.txt
 Button │ Review
 MultilineTextInput │ Message (focused)
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Opus 5.5
 Label │ Mode, Default
 Button │ Commit

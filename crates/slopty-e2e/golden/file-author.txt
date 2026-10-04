@@ -47,7 +47,6 @@ Group │ Edits · refresh.rs
 Button │ Review
 MultilineTextInput │ Message
 Button │ Attach files
-Button │ Ask aside
 Button │ Model, Claude
 Button │ Commit
 Button │ Review the changes
