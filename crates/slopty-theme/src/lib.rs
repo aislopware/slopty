@@ -510,13 +510,6 @@ impl Typography {
         (self.ui_size - 2.0).max(6.0)
     }
 
-    /// Leaving: [`Self::small`] under a second name, for `slopty-ui/src/project` until it
-    /// moves. One size has one name, as Radix's and Geist's steps do.
-    #[must_use]
-    pub fn meta(&self) -> f32 {
-        self.small()
-    }
-
     /// Secondary chrome (base − 1): bar labels, pills, folds, tool summaries, section labels,
     /// a row's second line, a bar's readouts, a status word. `MonoCode`'s most used size: 12 is
     /// the chrome's workhorse, and a row's facts are told from its title by their tone, not a
@@ -524,12 +517,6 @@ impl Typography {
     #[must_use]
     pub fn small(&self) -> f32 {
         (self.ui_size - 1.0).max(7.0)
-    }
-
-    /// Leaving: [`Self::title`] under a second name, as [`Self::meta`] is.
-    #[must_use]
-    pub fn prose(&self) -> f32 {
-        self.title()
     }
 
     /// Titles of panels and dialogs, and prose read at length: an assistant's answer and the
@@ -807,11 +794,6 @@ pub struct Surfaces {
     pub selected: Tint,
     /// What is held down: a step past `selected`, so a press reads apart from a hover.
     pub pressed: Tint,
-    /// Leaving: `hover` over the content, solid, for the call sites not yet on the washes
-    /// (`slopty-ui/src/project`).
-    pub raised: Rgb,
-    /// Leaving: `selected` over the content, solid, as `raised` is.
-    pub overlay: Rgb,
     /// A terminal block's head band, the rows its command was typed on: the content with a few
     /// hundredths of the ink, as Zed's active line is, in both variants. It is its own step so
     /// a band under an unfocused header (on `panel`) does not read as a second header, and so it
@@ -1193,8 +1175,6 @@ impl Surfaces {
             hover,
             selected,
             pressed,
-            raised: hover.over(content),
-            overlay: selected.over(content),
             band,
             border: hairline(t.border, NON_TEXT),
             border_subtle: hairline(t.border_subtle, NON_TEXT / LEVEL),
@@ -1438,10 +1418,12 @@ impl Curve {
 
 /// How chrome moves: durations and curves, one set for every animation.
 ///
-/// Every duration stays at or under 160 ms but a sheet's: an overlay that takes longer to arrive
-/// than a key takes to type reads as waiting. What moves is opacity and a small translate, never
-/// the scale of text. Under Reduce Motion all of it lands at once (`slopty_ui::kit::motion`),
-/// but for what says work is live: the working mark breathes in opacity over [`Self::breath`].
+/// Every duration stays at or under 160 ms but a sheet's and streamed text's: an overlay that
+/// takes longer to arrive than a key takes to type reads as waiting, where words an agent is
+/// writing are read as they come and lift with its pace. What moves is opacity and a small
+/// translate, never the scale of text. Under Reduce Motion all of it lands at once
+/// (`slopty_ui::kit::motion`), but for what says work is live: the working mark breathes in opacity
+/// over [`Self::breath`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Motion {
     /// A hover or press arriving, and a cursor changing: instant, so the pointer never waits.
@@ -1466,6 +1448,15 @@ pub struct Motion {
     /// Half a caret blink: shown this long, then hidden as long (Ghostty's cadence). The pace of
     /// a blink, not a transition: nothing eases.
     pub blink: std::time::Duration,
+    /// The longest the words an agent streams take to lift to full colour. The lift follows the
+    /// stream, three of its gaps long, from `fade` up to this, so a quick stream lifts briskly
+    /// and a slow one's newest words stay veiled about until the next arrive. An answer's first
+    /// words come after a pause, so they lift over the whole of it.
+    pub stream: std::time::Duration,
+    /// How much later each word of one streamed chunk starts lifting than the word before it:
+    /// a six-word chunk lights up in 60 ms, one gesture with a gradient inside it, well under
+    /// the gap to the next chunk.
+    pub stream_stagger: std::time::Duration,
     /// The curve of everything but a sheet: fast out of the gate, a long soft landing.
     pub ease_out: Curve,
     /// A sheet's curve: a drawer's, which follows a finger's flick.
@@ -1483,6 +1474,8 @@ impl Motion {
         sheet: std::time::Duration::from_millis(200),
         breath: std::time::Duration::from_millis(2_400),
         blink: std::time::Duration::from_millis(600),
+        stream: std::time::Duration::from_millis(400),
+        stream_stagger: std::time::Duration::from_millis(10),
         ease_out: Curve { p1: (0.22, 1.0), p2: (0.36, 1.0) },
         drawer: Curve { p1: (0.32, 0.72), p2: (0.0, 1.0) },
     };
@@ -2146,8 +2139,8 @@ mod tests {
     /// surfaces rather than against the one they usually sit on: a status label follows its
     /// tile, and the tile can be on any of them.
     ///
-    /// Derived at the steps without the lift, dark `text_muted` read 4.48 on `overlay` and
-    /// light `accent`, `error`, `success` and `text_muted` about 4.40.
+    /// Derived at the steps without the lift, dark `text_muted` read 4.48 on `selected` over the
+    /// content and light `accent`, `error`, `success` and `text_muted` about 4.40.
     #[test]
     fn chrome_text_clears_wcag_aa() {
         for (name, bg) in BACKGROUNDS {
@@ -2726,6 +2719,8 @@ mod tests {
         assert!(motion.exit < motion.fade, "what leaves goes quicker than it came");
         assert!(motion.unhover > motion.hover, "and lets go softly");
         assert!(motion.hover.is_zero(), "hover is instant");
+        assert!(motion.fade < motion.stream, "a stream's lift has room to follow its pace");
+        assert!(motion.stream_stagger * 6 < motion.fade, "a chunk lights up as one gesture");
     }
 
     #[test]

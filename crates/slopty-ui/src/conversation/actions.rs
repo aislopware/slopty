@@ -13,5 +13,7 @@ gpui::actions!(
         QueueMessage,
         /// Take the last waiting message into the thread's composer to change it.
         EditLastQueued,
+        /// Choose when the thread's draft goes: at a time, or once another thread rests.
+        SendLater,
     ]
 );

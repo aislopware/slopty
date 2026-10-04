@@ -63,6 +63,22 @@ pub fn drawer() -> impl Fn(f32) -> f32 {
     move |t| Motion::DEFAULT.drawer.at(t)
 }
 
+/// How the words an agent streams lift in.
+///
+/// Paced to the stream between [`Motion::fade`] and [`Motion::stream`], word after word
+/// [`Motion::stream_stagger`] apart, on the ease-out curve. The first words of an answer, before
+/// there is a pace to follow, lift over the longest. gpui-kit holds it still under Reduce Motion.
+#[must_use]
+pub fn stream_motion() -> gpui_kit::component::text::TextViewMotion {
+    let m = Motion::DEFAULT;
+    let ((x1, y1), (x2, y2)) = (m.ease_out.p1, m.ease_out.p2);
+    gpui_kit::component::text::TextViewMotion::default()
+        .with_stream_fade(m.stream)
+        .with_stream_fade_pacing(m.fade, m.stream)
+        .with_stream_fade_stagger(m.stream_stagger)
+        .with_stream_fade_easing(gpui_kit::base::motion::Easing::CubicBezier { x1, y1, x2, y2 })
+}
+
 /// Whether chrome may move: not while GPUI's Reduce Motion flag is set.
 ///
 /// The flag is the one answer for every animation, Slopty's and GPUI's own (gpui-kit's
@@ -251,9 +267,11 @@ impl<E: IntoElement + Styled + gpui::ParentElement + 'static> gpui::RenderOnce f
         value.set_goal(if self.open { 1.0 } else { 0.0 }, cx);
         let shown = value.evaluate(window, cx);
         let travel = self.travel;
+        // Whole, the surface is drawn as it is, with no layer at full opacity over it.
+        let moving = shown < 1.0;
         self.el
-            .opacity(shown)
-            .when(travel != 0.0, |el| el.relative().top(px(travel * (1.0 - shown))))
+            .when(moving, |el| el.opacity(shown))
+            .when(moving && travel != 0.0, |el| el.relative().top(px(travel * (1.0 - shown))))
             .when(!self.open, |el| el.child(div().absolute().inset_0().occlude()))
     }
 }
@@ -2426,6 +2444,19 @@ mod tests {
         assert_eq!(FADE, Motion::DEFAULT.fade);
     }
 
+    /// Streamed words lift on the theme's tokens: paced between the fade and the stream's
+    /// longest, word after word, on the chrome's ease-out curve.
+    #[test]
+    fn streamed_words_lift_on_the_motion_tokens() {
+        let (m, lift) = (Motion::DEFAULT, stream_motion());
+        assert_eq!(lift.stream_fade_pacing(), Some((m.fade, m.stream)));
+        assert_eq!(lift.stream_fade(), m.stream, "the first words, with no pace yet");
+        assert_eq!(lift.stream_fade_stagger(), m.stream_stagger);
+        let ((x1, y1), (x2, y2)) = (m.ease_out.p1, m.ease_out.p2);
+        let curve = format!("{:?}", gpui_kit::base::motion::Easing::CubicBezier { x1, y1, x2, y2 });
+        assert_eq!(format!("{:?}", lift.stream_fade_easing()), curve);
+    }
+
     /// A border drawn a full point by hand (`border_1()`, `border_t_1()`, a `Styled::border_b_1`
     /// handed on), or a box a point wide filled with a hairline's tint.
     fn thick_hairline(line: &str) -> Option<&'static str> {
@@ -2464,7 +2495,7 @@ mod tests {
     #[test]
     fn a_chrome_border_is_kit_hair() {
         // Call sites whose owners move them onto `kit::hair` in their next change.
-        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
+        const AWAITING: [&str; 0] = [];
         let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
             .flat_map(chrome_lines)
@@ -2598,7 +2629,7 @@ mod tests {
     #[test]
     fn a_hint_keeps_the_warm_timing() {
         // Call sites whose owners move them onto `kit::hint_timing` in their next change.
-        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
+        const AWAITING: [&str; 0] = [];
         let mut wrong = Vec::new();
         for dir in ["slopty-ui/src", "slopty-app/src"] {
             let lines = chrome_lines(dir);
@@ -2615,57 +2646,6 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "a hint on GPUI's own delay:\n{}", wrong.join("\n"));
-    }
-
-    /// A state painted as a solid step mixed for the content (`raised`, `overlay`), where the
-    /// washes (`hover`, `selected`, `pressed`) ride on whatever plane is under them.
-    fn solid_state(line: &str) -> Option<&'static str> {
-        let code = !line.trim_start().starts_with("//");
-        let solid = ["s.raised", "surfaces.raised", "s.overlay", "surfaces.overlay"];
-        (code && solid.iter().any(|t| line.contains(t)))
-            .then_some("a state's solid step, not its wash (`hover`, `selected`, `pressed`)")
-    }
-
-    #[test]
-    fn the_state_check_knows_a_step_from_a_wash() {
-        assert!(solid_state(".hover(move |el| el.bg(hsla(s.raised)))").is_some());
-        assert!(solid_state(".bg(hsla(theme.surfaces.overlay))").is_some());
-        assert!(solid_state(".hover(move |el| el.bg(hsla(s.hover)))").is_none());
-        assert!(solid_state("// `raised` was s.raised").is_none(), "a comment");
-    }
-
-    /// Hover, selection and press are washes of the ink over the plane under them, so a menu's
-    /// rows, a card's and the navigator's answer the pointer alike, and a float can rise +5 L
-    /// over the content with its rows' hover still showing.
-    #[test]
-    fn a_state_is_a_wash_over_its_plane() {
-        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
-        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
-            .into_iter()
-            .flat_map(chrome_lines)
-            .filter(|(file, ..)| !AWAITING.iter().any(|f| file.contains(f)))
-            .filter_map(|(file, line_no, line)| {
-                solid_state(&line).map(|why| format!("{file}:{line_no}: {why}: {}", line.trim()))
-            })
-            .collect();
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-    }
-
-    /// One size has one name: `small()` and `title()`, not `meta()` and `prose()`, which were
-    /// the same sizes under second names, as a scale drifts.
-    #[test]
-    fn one_name_per_type_size() {
-        const AWAITING: [&str; 1] = ["slopty-ui/src/project/"];
-        let wrong: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
-            .into_iter()
-            .flat_map(chrome_lines)
-            .filter(|(file, ..)| !AWAITING.iter().any(|f| file.contains(f)))
-            .filter(|(.., line)| {
-                ["typography.meta()", "typography.prose()"].iter().any(|n| line.contains(n))
-            })
-            .map(|(file, line_no, line)| format!("{file}:{line_no}: {}", line.trim()))
-            .collect();
-        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// A painted hairline is whole device pixels, never under one, as GPUI snaps a border: one

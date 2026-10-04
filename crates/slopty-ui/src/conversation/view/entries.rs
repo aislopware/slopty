@@ -17,7 +17,7 @@ use gpui::{
     InteractiveElement as _, IntoElement as _, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, Window, div, px, relative,
 };
-use gpui_kit::component::text::{TextView, TextViewStyle};
+use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_core::WallMs;
 use slopty_proto::conversation::{
     Body, Clipped, Compact, Entry, LiveKind, Note, NoteKind, Prompt, ThreadId, ToolCall,
@@ -1374,7 +1374,11 @@ impl ConversationView {
                 .text_color(hsla(s.text_secondary))
                 .child(
                     self.markdown_view(format!("live-md-{}-{key}", self.session), &block.text)
-                        .stream_fade(crate::kit::motion(cx)),
+                        .motion(if crate::kit::motion(cx) {
+                            crate::kit::stream_motion()
+                        } else {
+                            TextViewMotion::default()
+                        }),
                 )
                 .into_any_element(),
             LiveKind::Thinking => {

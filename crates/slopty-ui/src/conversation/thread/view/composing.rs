@@ -18,6 +18,9 @@
 //!   words, and no chip waits for an upload that never starts. ↵ while one is still on its way up
 //!   arms the message: it goes as soon as the last one lands, and an upload that fails disarms it,
 //!   saying so, rather than sending without the file.
+//! - **Recall.** ↑ on the first line of an empty composer brings back the message sent before, ↓ on
+//!   the last line the one after, past the newest to an empty draft, as a shell does. A recalled
+//!   message that is edited is a draft like any other, and the arrows move in it.
 //! - **Editing.** A waiting message's words take the composer and the draft is put aside; ↵ sends
 //!   the change (`Intent::Edit`) and brings the draft back, Esc brings it back unchanged. A message
 //!   that goes meanwhile leaves its words in the composer as a new draft, the one put aside after
@@ -35,7 +38,7 @@ use gpui::{
 };
 use gpui_kit::component::input::RopeExt as _;
 use slopty_proto::thread::wire::Intent;
-use slopty_proto::thread::{Cap, Command, Delivery, IntentId, Mode, Model};
+use slopty_proto::thread::{Cap, Command, Delivery, IntentId, ItemBody, Mode, Model};
 
 use super::{ThreadView, ThreadViewEvent};
 use crate::colors::hsla;
@@ -69,6 +72,8 @@ pub(super) enum MenuRows {
     Models(Vec<Model>),
     /// The modes the agent can switch to, opened from the mode chip.
     Modes(Vec<Mode>),
+    /// When to send the draft, opened from the clock by the send button.
+    Later(Vec<super::later::LaterRow>),
 }
 
 impl MenuRows {
@@ -79,6 +84,7 @@ impl MenuRows {
             Self::Hint => 0,
             Self::Models(models) => models.len(),
             Self::Modes(modes) => modes.len(),
+            Self::Later(rows) => rows.len(),
         }
     }
 }
@@ -124,9 +130,36 @@ pub(super) struct Composing {
     /// ↵ was pressed while an attachment was on its way up: the message goes, so, in the window
     /// it was pressed in, once the last one lands.
     armed: Option<(Delivery, gpui::AnyWindowHandle)>,
+    /// The sent message recalled into the composer, by how far back it is, and its words.
+    recall: Option<(usize, String)>,
+    /// The menu of when to send is open.
+    later_menu: bool,
+    /// When the draft goes, where it is set to go later.
+    later: Option<Delivery>,
 }
 
 impl Composing {
+    /// Whether the menu of when to send is open.
+    pub(super) const fn later_open(&self) -> bool {
+        self.later_menu
+    }
+
+    /// Open or shut the menu of when to send.
+    pub(super) const fn open_later(&mut self, open: bool) {
+        self.later_menu = open;
+    }
+
+    /// When the draft goes, where it is set to go later.
+    pub(super) const fn later(&self) -> Option<Delivery> {
+        self.later
+    }
+
+    /// Set when the draft goes, or let ↵ say again; the menu shuts.
+    pub(super) const fn set_later(&mut self, later: Option<Delivery>) {
+        self.later = later;
+        self.later_menu = false;
+    }
+
     /// Whether a waiting message is being changed.
     pub(super) const fn editing(&self) -> bool {
         self.editing.is_some()
@@ -189,6 +222,9 @@ impl ThreadView {
             let modes = self.state(cx).map(|s| s.meta.modes.clone()).unwrap_or_default();
             return (!modes.is_empty()).then_some(MenuRows::Modes(modes));
         }
+        if self.composing.later_open() {
+            return Some(MenuRows::Later(self.later_rows(cx)));
+        }
         match self.menu_token(cx)? {
             Token::Command { query } => {
                 let all = self.commands(cx);
@@ -241,7 +277,11 @@ impl ThreadView {
         }
         let token = {
             let composer = self.composer.read(cx);
-            menu::token(&composer.value(), composer.cursor())
+            let value = composer.value();
+            if self.composing.recall.as_ref().is_some_and(|(_, words)| *words != *value) {
+                self.composing.recall = None;
+            }
+            menu::token(&value, composer.cursor())
         };
         let menu = &mut self.composing;
         if menu.dismissed.is_some_and(|at| token.as_ref().is_none_or(|t| t.start() != at)) {
@@ -314,9 +354,8 @@ impl ThreadView {
 
     /// Esc with the menu open closes it for the word the caret is in. Whether it was open.
     pub(super) fn menu_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.composing.models || self.composing.modes {
-            self.composing.models = false;
-            self.composing.modes = false;
+        if self.composing.models || self.composing.modes || self.composing.later_open() {
+            self.close_chip_menus();
             cx.notify();
             return true;
         }
@@ -339,6 +378,13 @@ impl ThreadView {
                 self.composing.models = false;
                 let _id = self.intent(Intent::SetModel { model: model.id.clone() }, cx);
                 cx.notify();
+                return;
+            }
+            (MenuRows::Later(rows), _) => {
+                let Some(row) = rows.get(ix) else { return };
+                self.send_later(Some(row.delivery), cx);
+                // The draft is what is being sent later: the keyboard goes back to it.
+                self.composer.update(cx, |c, cx| c.focus(window, cx));
                 return;
             }
             (MenuRows::Modes(modes), _) => {
@@ -378,6 +424,67 @@ impl ThreadView {
         cx.notify();
     }
 
+    /// The messages sent in this thread, newest first, each once where it was sent twice running.
+    /// One the agent cut short is left out: its head is not what was typed.
+    fn sent_messages(&self, cx: &App) -> Vec<String> {
+        let Some(state) = self.state(cx) else { return Vec::new() };
+        let mut sent: Vec<String> = state
+            .items
+            .iter()
+            .rev()
+            .filter_map(|item| match &item.body {
+                ItemBody::User(message) if message.text.full.is_none() => {
+                    Some(message.text.text.clone())
+                }
+                _ => None,
+            })
+            .filter(|words| !words.trim().is_empty())
+            .collect();
+        sent.dedup();
+        sent
+    }
+
+    /// ↑ (`-1`) on the draft's first line or ↓ (`1`) on its last, with the composer empty or
+    /// holding a recalled message: the message sent before or after it. Whether recall took
+    /// the key.
+    pub(super) fn recall(
+        &mut self,
+        delta: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let (draft, caret) = {
+            let composer = self.composer.read(cx);
+            (composer.value().to_string(), composer.cursor())
+        };
+        let at = match &self.composing.recall {
+            Some((at, words)) if *words == draft => Some(*at),
+            _ if draft.is_empty() => None,
+            _ => return false,
+        };
+        let (before, after) = draft.split_at(caret.min(draft.len()));
+        if (delta < 0 && before.contains('\n')) || (delta > 0 && after.contains('\n')) {
+            return false;
+        }
+        let next = match (at, delta < 0) {
+            (None, true) => 0,
+            (Some(at), true) => at.saturating_add(1),
+            (None, false) => return false,
+            (Some(0), false) => {
+                self.composing.recall = None;
+                self.set_draft("", 0, window, cx);
+                return true;
+            }
+            (Some(at), false) => at.saturating_sub(1),
+        };
+        let Some(words) = self.sent_messages(cx).into_iter().nth(next) else {
+            return at.is_some();
+        };
+        self.set_draft(&words, words.len(), window, cx);
+        self.composing.recall = Some((next, words));
+        true
+    }
+
     /// Put `text` in the composer with the caret at byte `caret`, and bring the menus in step.
     pub(super) fn set_draft(
         &mut self,
@@ -402,6 +509,7 @@ impl ThreadView {
             MenuRows::Commands(_) => "Commands",
             MenuRows::Models(_) => "Models",
             MenuRows::Modes(_) => "Modes",
+            MenuRows::Later(_) => "Send later",
             MenuRows::Paths(_) | MenuRows::Hint => "Files",
         };
         let body: Vec<AnyElement> = match &rows {
@@ -418,6 +526,9 @@ impl ThreadView {
             }
             MenuRows::Paths(None) => vec![self.menu_note("Searching…")],
             MenuRows::Hint => vec![self.menu_note("Type to find a file or folder")],
+            MenuRows::Later(rows) => {
+                rows.iter().enumerate().map(|(ix, row)| self.later_row(ix, row, cx)).collect()
+            }
             MenuRows::Modes(modes) => {
                 let now = self.state(cx).and_then(|s| s.meters.mode.clone());
                 modes
@@ -471,7 +582,12 @@ impl ThreadView {
     }
 
     /// One row of the menu, the keyboard's filled, a click picking it.
-    fn menu_row(&self, ix: usize, label: String, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+    pub(super) fn menu_row(
+        &self,
+        ix: usize,
+        label: String,
+        cx: &Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let theme = &self.theme;
         let s = theme.surfaces;
         let selected = ix == self.composing.selected;
@@ -536,10 +652,20 @@ impl ThreadView {
             .into_any_element()
     }
 
+    /// Shut the menus the composer's foot opens: the models, the modes, when to send. The
+    /// keyboard starts the next one from its first row.
+    pub(super) const fn close_chip_menus(&mut self) {
+        self.composing.models = false;
+        self.composing.modes = false;
+        self.composing.later_menu = false;
+        self.composing.selected = 0;
+    }
+
     /// The mode chip's menu open or shut; open, the keyboard walks it from its first row.
     pub(super) fn toggle_modes(&mut self, cx: &mut Context<Self>) {
-        self.composing.modes = !self.composing.modes;
-        self.composing.models = false;
+        let open = !self.composing.modes;
+        self.close_chip_menus();
+        self.composing.modes = open;
         self.composing.selected = 0;
         cx.notify();
     }
@@ -585,8 +711,9 @@ impl ThreadView {
 
     /// The model chip's menu open or shut; open, the keyboard walks it from its first row.
     pub(super) fn toggle_models(&mut self, cx: &mut Context<Self>) {
-        self.composing.models = !self.composing.models;
-        self.composing.modes = false;
+        let open = !self.composing.models;
+        self.close_chip_menus();
+        self.composing.models = open;
         self.composing.selected = 0;
         cx.notify();
     }

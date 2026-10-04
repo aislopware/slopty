@@ -2691,9 +2691,9 @@ impl Workspace {
             .font_family(self.theme.typography.ui_family.clone())
     }
 
-    /// A key cap of the bar: a plate of `raised` with no hairline, `overlay` while pressed, the
-    /// accent fill with its ink when `lit` (armed or toggled on). A word ("Esc", "Paste") is
-    /// set small, as a keyboard sets its word keys; a glyph at the title size, so an arrow
+    /// A key cap of the bar: a plate of the `hover` wash with no hairline, `pressed` while held,
+    /// the accent fill with its ink when `lit` (armed or toggled on). A word ("Esc", "Paste")
+    /// is set small, as a keyboard sets its word keys; a glyph at the title size, so an arrow
     /// reads at a glance on a 36 pt cap.
     fn key_cap(&self, id: String, label: &str, lit: bool) -> gpui::Stateful<gpui::Div> {
         let s = &self.theme.surfaces;

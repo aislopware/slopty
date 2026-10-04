@@ -5475,7 +5475,11 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
   - `Hairline` is renamed `Tint` (the ink at a share: a hairline or a wash). `raised` and
     `overlay` remain only as the solid composites over the content for the call sites lane W
     still holds (`slopty-ui/src/project`, `slopty-app/src/lib.rs`, `ssh.rs`), and go when
-    those move.
+    those move. (Amended 2026-10-04: they moved, and `raised` and `overlay` are deleted with
+    `Typography::meta` and `prose`, the same sizes as `small` and `title` under second names.
+    The compiler now holds what the lints `a_state_is_a_wash_over_its_plane` and
+    `one_name_per_type_size` held, so those lints are gone, and no file is waived from the
+    hairline and hint lints.)
   - Lints in `kit.rs`: `a_chrome_border_is_kit_hair` (no `border_1()`-style point borders or
     point-wide boxes filled with a hairline's tint) and `a_state_is_a_wash_over_its_plane` (no
     `raised` or `overlay`), each with its own check-the-check test. Tests: theme
@@ -5846,3 +5850,99 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     a focus handle) names itself when Tab reaches it, on the warm group's wait
     (`kit::hint_timing` composes unchanged), and Esc hides the hint before any binding, the
     focus staying. Test: `kit::tests::a_hint_shows_for_the_keyboard_and_esc_hides_it_first`.
+
+- ✅ **An answer's new words lift in at the stream's pace** (2026-10-04, lane F's gpui-kit #7
+  `TextViewMotion::with_stream_fade_pacing`, pinned; stage 4 item 8, its stream fade).
+  - The thread view showed an answer's words as they arrived, with no lift. The older
+    conversation view lifted them over gpui-kit's fixed 280 ms. A fixed lift is wrong at both
+    ends: on a quick stream the tail stays grey, and on a slow one each chunk lights up and
+    then sits still until the next arrives, so the text pulses.
+  - **Paced.** `kit::stream_motion` lifts each update's words over three times the running
+    gap between updates (gpui-kit's rule). It keeps that between `Motion::fade` (120 ms) and
+    `Motion::stream` (400 ms), two new theme tokens, and lifts faster when updates queue
+    behind. Each word starts `Motion::stream_stagger` (10 ms) after the one before, on the
+    chrome's ease-out curve. An answer's first words come after the agent's pause and have
+    no pace to follow yet, so they lift over the longest, which is how gpui-kit counts a
+    pause past its bounds.
+  - **Where.** In the thread view, only the latest turn's answer lifts. It keeps lifting
+    once the turn settles, so its last words finish instead of snapping. An earlier turn's
+    text, a "Show all" on it, and anything under Reduce Motion land at once. The older
+    conversation view's live block uses the same motion.
+  - Tests: `conversation::thread::tests::face::the_latest_answer_s_new_words_lift_in`
+    (counts the fade's repaint ticks; it fails if every turn lifts or none does),
+    `kit::tests::streamed_words_lift_on_the_motion_tokens`, and theme
+    `a_curve_runs_from_rest_to_landed` (the stream's bounds and stagger).
+
+- ✅ **The thread view recalls what was sent, reads a plan as a card, and opens a picture
+  large** (2026-10-04, `.research/t3code-ui-2026-10-03.md` §3.2; stage 4 item 8). The thread
+  view had none of what the conversation view gives here, and T3 Code has all three.
+  - **Recall.** ↑ on the first line of an empty composer brings back the message sent
+    before. ↓ on the last line brings back the one after, and past the newest it empties the
+    draft. Inside a recalled message of several lines the arrows move the caret first, as T3
+    does at the first visual line. The conversation view takes the key whatever the line,
+    which left the caret stuck in a long recalled prompt. A recalled message that is edited
+    is the person's draft, and the arrows leave it alone. A message that arrived clipped is
+    left out, since its head is not what was typed. One sent twice running is recalled once.
+    The open menu still takes the arrows first.
+  - **A plan is a card** (`ToolDetail::Plan`): its heading as its title, how it stands only
+    where it was put to the person ("Awaiting approval", "Not approved"; Codex's stated plan
+    says nothing), a copy, and its Markdown at the prose size. A plan over 16 lines shows 12
+    until "Show the whole plan". It stands outside a settled turn's fold where it was
+    proposed, is not one of the fold's steps, and joins no group of quiet calls. While it
+    waits it is edged in the warn tone and takes the answers, as a call's card does.
+    Scrolled away, the tray names it "Plan ready" with the way back. It no longer copies
+    the plan's words into the tray.
+  - **A picture opens large** on a press, fitted over the thread on the scrim, with its
+    words ("1600 × 1200 · PNG · 240 KB", the conversation view's, now shared). Esc closes it
+    from the composer or anywhere else in the thread, and the Esc that closes it never also
+    stops the turn under way. A press anywhere closes it.
+  - Tests: `conversation::thread::tests::composing::up_recalls_the_messages_sent_and_down_comes_back`,
+    `conversation::thread::tests::face::a_plan_is_a_card_that_takes_its_answer`,
+    `conversation::thread::tests::face::a_picture_opens_large_and_esc_closes_it`,
+    `conversation::thread::rows::tests::a_plan_stands_outside_the_fold_and_out_of_a_group`,
+    `conversation::thread::view::plan::tests::{a_plan_says_how_it_stands_only_where_it_was_asked,
+    a_long_plan_shows_its_head_until_opened}`.
+
+- ✅ **An agent asleep is woken from its thread, and an attempt is picked from its row**
+  (2026-10-04, lane A's `Intent::Wake`/`Liveness::Asleep`/`Cap::SLEEP` and lane P's R11
+  `Attempts`/`Verb::TaskPick`).
+  - **Wake.** An agent put to sleep keeps its composer: the line over it says "{agent} is
+    asleep. Your next message wakes it", with a pause mark where an exited agent has the power
+    mark. Where the agent sleeps through Slopty's door (`Cap::SLEEP`), a Wake button beside the
+    line sends `Intent::Wake`. Anywhere else there is no button, because only the next message
+    wakes it. Test: `conversation::thread::tests::doors::an_agent_asleep_is_woken_by_wake_or_the_next_message`.
+  - **Pick.** While none of a task's attempts is picked, the task's row says "Trying" (lane
+    P's word) and every attempt that has not failed offers Pick. Pick is also in the palette
+    as "Pick this attempt", on the board's bare `p` as its other row actions are, and sends
+    `Verb::TaskPick`, saying "Picked #8 to land; the other attempts stop". No attempt offers
+    Merge until it is picked, because only the picked one joins the merge queue. After the
+    pick, only it offers Merge and none offers Pick. Test:
+    `workspace::tests::projects::an_attempt_is_picked_from_its_row`.
+
+- ✅ **A message can be sent later, and what waits says when it goes** (2026-10-04, lane A's
+  `Delivery::At`/`After`/`Draft` on `Cap::SCHEDULE`).
+  - **The composer.** Where the agent takes a message the worker holds until its moment, a
+    clock beside the send button opens a menu over the field. It offers "In 30 minutes", "In
+    an hour", "In 3 hours" and "Tomorrow morning" (09:00 in this machine's zone), each with
+    its time at the right. Under them, one line for each of the worker's six most recently
+    changed other threads: "When “Fix the parser” rests", once that thread has been at rest
+    for a minute. A minute is long enough that a turn's quick follow-up is not taken for its
+    end. A pick writes "Sends at 14:35" or "Sends tomorrow 09:00" over the field, with an ×
+    to take it off, and the send button says Schedule with the clock. ↵ or ⌘↵ then sends the
+    draft held until then, and the next draft goes as ↵ sends. "Send later…" is in the
+    palette, with no default key, as the palette rule has it. The keyboard goes back to the
+    draft after a pick.
+  - **What waits.** A waiting message in the tray says when it goes ("14:35", "Tomorrow
+    09:00"), what it waits on ("When “Fix the parser” rests", or "When another thread rests"
+    where the table does not name it), or "Draft". A held one says why it is held, as before.
+    A message the worker keeps offers Send now (`Intent::Promote`) where the agent takes one
+    into the turn under way (`Cap::STEER`, the cap the wire puts on Promote), beside Edit and
+    Take back. Take back now also holds where only `Cap::SCHEDULE` does. Each row is a list
+    item named by its words and where it stands, so a screen reader hears when it goes.
+  - Day words read forward too ("Tomorrow", a weekday within the week, a date past it), so a
+    time to come reads as a time gone does.
+  - Tests: `conversation::thread::tests::composing::{a_draft_is_sent_later_from_the_clock,
+    a_held_message_says_when_and_goes_now_on_a_press}`,
+    `conversation::thread::view::later::tests::{a_held_message_says_when_it_goes,
+    the_times_run_forward_from_now}`, `conversation::figures::tests::{tomorrow_at_an_hour_reads_as_tomorrow_then,
+    a_message_s_day_reads_by_how_far_back_it_is}`.

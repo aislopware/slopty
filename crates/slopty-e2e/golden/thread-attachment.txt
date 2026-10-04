@@ -36,6 +36,7 @@ Button │ Attach files
 Button │ Model, Opus 5.5
 Button │ 1 in the background
 Button │ Context 34% of 200k
+Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker

@@ -533,6 +533,8 @@ impl ThreadView {
             ("thread-stop", IconName::Square, "Stop")
         } else if self.composing.editing() {
             ("thread-send", IconName::Check, "Update")
+        } else if self.later().is_some() {
+            ("thread-send", IconName::Clock, "Schedule")
         } else if !working {
             ("thread-send", IconName::ArrowUp, "Send")
         } else if self.send_now(cx) == Delivery::Queue {
@@ -629,6 +631,7 @@ impl ThreadView {
                     .text_size(self.z(theme.typography.title()))
                     .children(self.exited_line(cx))
                     .children(self.menu_section(cx))
+                    .children(self.later_strip(cx))
                     .children(self.notice_strip())
                     .children(self.editing_strip(cx))
                     .children(self.attachment_chips(cx))
@@ -673,6 +676,7 @@ impl ThreadView {
                     .child(self.where_facts(cx))
                     .children(self.meter(cx))
                     .children(self.handoff_button(cx))
+                    .children(self.later_button(cx))
                     .child(self.send_button(cx)),
             )
             .into_any_element()

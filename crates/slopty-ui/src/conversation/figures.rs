@@ -225,7 +225,7 @@ pub fn stamp(at: WallMs, now: WallMs) -> Option<String> {
 }
 
 /// How `day` reads beside a time for a reader on `today`, both days since the Unix epoch:
-/// nothing for today.
+/// nothing for today, and a day to come as one gone ("Tomorrow", "Mon", "6 Oct").
 fn day_words(day: i64, today: i64) -> Option<String> {
     const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
     const MONTHS: [&str; 12] =
@@ -233,7 +233,8 @@ fn day_words(day: i64, today: i64) -> Option<String> {
     match today.checked_sub(day)? {
         0 => None,
         1 => Some("Yesterday".to_owned()),
-        2..=6 => {
+        -1 => Some("Tomorrow".to_owned()),
+        2..=6 | -6..=-2 => {
             let weekday = usize::try_from(day.rem_euclid(7)).ok()?;
             WEEKDAYS.get(weekday).map(|&d| d.to_owned())
         }
@@ -242,6 +243,20 @@ fn day_words(day: i64, today: i64) -> Option<String> {
             Some(format!("{date} {}", MONTHS.get(month.checked_sub(1)?)?))
         }
     }
+}
+
+/// `hour`:00 tomorrow in this machine's zone, for a reader at `now`.
+#[must_use]
+pub fn tomorrow_at(hour: u8, now: WallMs) -> Option<WallMs> {
+    let secs = i64::try_from(now.as_millis() / 1_000).ok()?;
+    let today = secs.checked_add(utc_offset(secs))?.div_euclid(86_400);
+    let local = today
+        .checked_add(1)?
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour).checked_mul(3_600)?)?;
+    // The zone's offset then, not now: a night that changes the clocks lands on the hour.
+    let utc = local.checked_sub(utc_offset(local))?;
+    Some(WallMs::from_millis(u64::try_from(utc).ok()?.checked_mul(1_000)?))
 }
 
 /// The month (1 to 12) and its day of `day`, days since the Unix epoch (Howard Hinnant's
@@ -468,6 +483,19 @@ mod tests {
         assert_eq!(day_words(0, today).as_deref(), Some("1 Jan"));
         assert_eq!(month_and_date(20_729), (10, 3));
         assert_eq!(month_and_date(19_782), (2, 29), "2024's leap day");
+        assert_eq!(day_words(today + 1, today).as_deref(), Some("Tomorrow"));
+        assert_eq!(day_words(today + 2, today).as_deref(), Some("Mon"), "a day to come");
+        assert_eq!(day_words(today + 9, today).as_deref(), Some("12 Oct"));
+    }
+
+    /// Tomorrow at an hour is that hour on the next day in this machine's zone, however late
+    /// today it is asked.
+    #[test]
+    fn tomorrow_at_an_hour_reads_as_tomorrow_then() {
+        let now = WallMs::now();
+        let at = tomorrow_at(9, now).expect("a time");
+        assert!(at > now);
+        assert_eq!(stamp(at, now).as_deref(), Some("Tomorrow 09:00"));
     }
 
     use slopty_core::WallMs;

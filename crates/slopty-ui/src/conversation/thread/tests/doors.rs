@@ -1,6 +1,6 @@
 //! What the person asks of an agent beyond a message, through the agent's own doors, and what
 //! the thread says when the worker turns it down: a refusal in words, a denial with a reason,
-//! the agent's own TUI for a request, and an exited agent taken up again.
+//! the agent's own TUI for a request, an exited agent taken up again, and one asleep woken.
 
 use gpui::{Modifiers, TestAppContext};
 use slopty_core::SessionId;
@@ -256,4 +256,27 @@ fn an_exited_pi_thread_goes_on_with_the_next_message(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("enter");
     assert_eq!(intents(&sent).len(), 1, "the message goes, and starts pi again");
     assert_eq!(starts(&sent), Vec::<(slopty_proto::thread::IntentId, Vec<String>)>::new());
+}
+
+/// An agent put to sleep keeps its composer, whose line says the next message wakes it; where
+/// it sleeps by Slopty's door, Wake beside the line wakes it at once, and nowhere else.
+#[gpui::test]
+fn an_agent_asleep_is_woken_by_wake_or_the_next_message(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.liveness = Liveness::Asleep { since_ms: slopty_core::WallMs::from_millis(1_000) };
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-exited-line").is_some(), "the line over the composer");
+    assert!(cx.debug_bounds("thread-exited").is_none(), "the composer stays");
+    assert!(cx.debug_bounds("thread-wake").is_none(), "no door where the agent has none");
+
+    state.meta.caps = vec![Cap::named(Cap::SLEEP)];
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    click(cx, "thread-wake");
+    assert_eq!(intents(&sent), [Intent::Wake]);
 }

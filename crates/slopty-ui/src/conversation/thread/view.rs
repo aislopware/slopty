@@ -24,7 +24,7 @@ use gpui::{
     Styled as _, Subscription, Task, Window, div, list, px, relative,
 };
 use gpui_kit::component::input::{self, InputEvent, TextareaState};
-use gpui_kit::component::text::{TextView, TextViewStyle};
+use gpui_kit::component::text::{TextView, TextViewMotion, TextViewStyle};
 use slopty_client::threads::{Mirror, Sent};
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::{Expanded, Intent};
@@ -40,7 +40,7 @@ use super::rows::{self, Fold, Input, Row};
 use crate::colors::hsla;
 use crate::conversation::composer::Attach;
 use crate::conversation::diff::Block;
-use crate::conversation::{CTX, CycleDensity, EditLastQueued, Interrupt, QueueMessage};
+use crate::conversation::{CTX, CycleDensity, EditLastQueued, Interrupt, QueueMessage, SendLater};
 use crate::icons::{Glyph, IconName, IconSize, Status};
 use crate::kit::{self, ButtonKind};
 
@@ -101,8 +101,10 @@ mod composing;
 pub mod denying;
 pub mod editing;
 pub mod exited;
+mod later;
 mod notes;
 mod pictures;
+mod plan;
 mod tools;
 mod trail;
 mod tray;
@@ -169,6 +171,8 @@ pub struct ThreadView {
     open: HashSet<TurnId>,
     /// Calls and reasoning the reader opened.
     items_open: HashSet<ItemId>,
+    /// The picture open large over the thread.
+    viewing: Option<slopty_proto::thread::Image>,
     /// Groups of quiet calls the reader opened, by their first call.
     groups: HashSet<ItemId>,
     /// Clipped texts the reader asked to see whole.
@@ -294,6 +298,7 @@ impl ThreadView {
             composer,
             open: HashSet::new(),
             items_open: HashSet::new(),
+            viewing: None,
             groups: HashSet::new(),
             whole: HashSet::new(),
             asked_at: 0,
@@ -624,11 +629,14 @@ impl ThreadView {
             self.composer.update(cx, |c, cx| c.clean(window, cx));
             return;
         }
+        // A draft set to go later goes then, whichever key sent it.
+        let delivery = self.later().unwrap_or(delivery);
         if self.composing.uploading() {
             self.arm(delivery, window, cx);
             return;
         }
         let Some(text) = self.take_message(cx) else { return };
+        self.send_later(None, cx);
         let _id = self.intent(Intent::Send { text, delivery, attachments: Vec::new() }, cx);
         self.composer.update(cx, |c, cx| c.clean(window, cx));
         self.list.scroll_to_end();
@@ -887,12 +895,14 @@ impl ThreadView {
         style
     }
 
-    fn markdown(&self, id: String, text: &str) -> AnyElement {
+    /// `text` as prose; `streams` lifts the words it gains in as they arrive.
+    fn markdown(&self, id: String, text: &str, streams: bool) -> AnyElement {
         let theme = Arc::clone(&self.shared);
         let zoom = self.zoom;
         TextView::markdown(ElementId::Name(id.into()), SharedString::from(text.to_owned()))
             .style(self.prose_style())
             .selectable(true)
+            .motion(if streams { kit::stream_motion() } else { TextViewMotion::default() })
             .code_block_actions(move |block, _window, _cx| {
                 crate::conversation::view::code_actions(&theme, zoom, block)
             })
@@ -1126,12 +1136,16 @@ impl ThreadView {
     }
 
     fn text_row(&self, ix: usize, id: &ItemId, cx: &mut Context<Self>) -> AnyElement {
-        let Some((clipped, at_ms)) = self.item(ix, id, cx).and_then(|i| match &i.body {
-            ItemBody::Text(text) => Some((text.clone(), i.at_ms)),
+        let Some((clipped, at_ms, turn)) = self.item(ix, id, cx).and_then(|i| match &i.body {
+            ItemBody::Text(text) => Some((text.clone(), i.at_ms, i.turn)),
             _ => None,
         }) else {
             return div().into_any_element();
         };
+        // The latest turn's answer, not only one under way, so its last words finish lifting
+        // after the turn settles.
+        let streams = kit::motion(cx)
+            && self.state(cx).and_then(ThreadState::last_turn).is_some_and(|t| t.id == turn);
         let (text, clipped_more) = self.text_of(id, &clipped, cx);
         let theme = &self.theme;
         let label = SharedString::from(kit::first_line(&text).to_owned());
@@ -1147,7 +1161,7 @@ impl ThreadView {
             .line_height(relative(theme.typography.prose_line_height))
             .text_color(hsla(theme.surfaces.text))
             .group(message_group(id))
-            .child(self.markdown(format!("text-{}", id.0), &text))
+            .child(self.markdown(format!("text-{}", id.0), &text, streams))
             .when(clipped_more, |el| el.child(self.show_all(id, &clipped, cx)))
             .child(self.message_actions(id, at_ms, text.clone(), false, cx))
             .into_any_element()
@@ -1676,6 +1690,7 @@ impl Render for ThreadView {
         let header = self.header_bar(cx);
         let trail = self.trail_bar(cx);
         let rows = self.list_region(cx);
+        let viewer = self.picture_viewer(cx);
         // A subagent takes no messages: its thread is read, and answered from the bar.
         let composes = !self.in_subagent();
         let bar = self.activity_bar(composes, window.viewport_size().height, cx);
@@ -1693,20 +1708,32 @@ impl Render for ThreadView {
             .on_action(cx.listener(|this, _: &EditLastQueued, window, cx| {
                 this.edit_last_queued(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &SendLater, window, cx| {
+                if this.schedules(cx) {
+                    this.toggle_later(cx);
+                    this.composer.update(cx, |c, cx| c.focus(window, cx));
+                }
+            }))
+            // Esc outside the composer: a picture open large closes first, so the key that
+            // closes it never also stops the turn.
             .on_action(cx.listener(|this, _: &Interrupt, window, cx| {
-                if !this.leave_subagent(window, cx) {
+                if !this.close_picture(cx) && !this.leave_subagent(window, cx) {
                     this.interrupt(cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CycleDensity, _w, cx| this.every_step(cx)))
-            // The composer's menu and a change to a waiting message take the arrows, ↵, ⇥ and
+            // The composer's menu, recall and a change to a waiting message take the arrows, ↵, ⇥ and
             // Esc before the field does; Esc otherwise stops the turn under way. While an input
             // method composes, these keys are all its own.
             .capture_action(cx.listener(|this, _: &input::MoveUp, window, cx| {
-                this.menu_key(window, cx, |this, _w, cx| this.menu_step(-1, cx));
+                this.menu_key(window, cx, |this, w, cx| {
+                    this.menu_step(-1, cx) || this.recall(-1, w, cx)
+                });
             }))
             .capture_action(cx.listener(|this, _: &input::MoveDown, window, cx| {
-                this.menu_key(window, cx, |this, _w, cx| this.menu_step(1, cx));
+                this.menu_key(window, cx, |this, w, cx| {
+                    this.menu_step(1, cx) || this.recall(1, w, cx)
+                });
             }))
             .capture_action(cx.listener(|this, enter: &input::Enter, window, cx| {
                 if !enter.shift && !enter.secondary {
@@ -1718,13 +1745,15 @@ impl Render for ThreadView {
             }))
             .capture_action(cx.listener(|this, _: &input::Escape, window, cx| {
                 this.menu_key(window, cx, |this, window, cx| {
-                    this.menu_close(cx)
+                    this.close_picture(cx)
+                        || this.menu_close(cx)
                         || this.cancel_edit(window, cx)
                         || this.leave_subagent(window, cx)
                         || this.stop_by_key(cx)
                 });
             }))
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -1736,6 +1765,7 @@ impl Render for ThreadView {
             .children(trail)
             .child(rows)
             .child(self.foot(bar, composer))
+            .children(viewer)
     }
 }
 

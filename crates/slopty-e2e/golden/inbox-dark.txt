@@ -31,6 +31,7 @@ Button │ Answer in the terminal
 MultilineTextInput │ Message
 Button │ Attach files
 Button │ Model, Claude
+Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker

@@ -22,6 +22,7 @@ Button │ Answer in the terminal
 MultilineTextInput │ Message
 Button │ Attach files
 Button │ Model, Claude
+Button │ Send later
 Button │ Send
 Group │ Fix the login redirect
 Heading │ terminal Fix the login redirect
@@ -33,6 +34,7 @@ Status │ Nothing here yet
 MultilineTextInput │ Message (focused)
 Button │ Attach files
 Button │ Model, Claude
+Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker

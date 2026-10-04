@@ -73,6 +73,7 @@ Status │ Nothing here yet
 MultilineTextInput │ Message
 Button │ Attach files
 Button │ Model, Claude
+Button │ Send later
 Button │ Send
 Group │ Status
 Status │ studio

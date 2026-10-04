@@ -1,15 +1,17 @@
 //! The thread's face: a request answered where its call is, the composer's chips and its one
-//! solid, and the way down to the newest row.
+//! solid, the way down to the newest row, and an answer's new words lifting in.
 
 use gpui::{
     Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point,
     px,
 };
+use gpui_kit::component::text::TextViewState;
 use slopty_core::WallMs;
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
     AskId, BackgroundTask, Cap, Changed, Clipped, Compaction, Item, ItemBody, ItemId, Model,
-    Notice, Phase, Retry, ToolCall, ToolState, Turn, TurnId, TurnState, Usage, kind,
+    Notice, Phase, Request, Retry, ThreadState, ToolCall, ToolDetail, ToolState, Turn, TurnId,
+    TurnState, Usage, kind,
 };
 
 use super::{approval, hub, intents, snapshot, view};
@@ -395,4 +397,206 @@ fn a_turn_that_retries_says_so(cx: &mut TestAppContext) {
     hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
     cx.run_until_parked();
     assert!(cx.debug_bounds("thread-retrying").is_some(), "retrying, not just working");
+}
+
+/// How often the thread's Markdown repaints over the next few fade ticks, nothing else
+/// moving: only text lifting in repaints on a timer.
+fn lift_ticks(cx: &mut VisualTestContext, repaints: &std::cell::Cell<usize>) -> usize {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let before = repaints.get();
+    for _ in 0..3 {
+        cx.executor().advance_clock(std::time::Duration::from_millis(40));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    repaints.get().saturating_sub(before)
+}
+
+/// The words the latest turn's answer gains lift in as they arrive, paced to the stream, and
+/// an earlier turn's do not; under Reduce Motion they land at once.
+#[gpui::test]
+fn the_latest_answer_s_new_words_lift_in(cx: &mut TestAppContext) {
+    let repaints = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let counted = std::rc::Rc::clone(&repaints);
+    cx.update(|cx| {
+        cx.observe_new(move |_: &mut TextViewState, _, cx| {
+            let counted = std::rc::Rc::clone(&counted);
+            cx.observe_self(move |_, _| counted.set(counted.get().saturating_add(1))).detach();
+        })
+        .detach();
+    });
+    let (hub, _sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    let settled = Turn {
+        state: TurnState::Complete,
+        ended_ms: Some(WallMs::from_millis(2_000)),
+        ..live_turn()
+    };
+    state.turns = vec![settled, Turn { id: TurnId(2), ..live_turn() }];
+    let answer = |id: &str, turn: u32, text: &str| Item {
+        turn: TurnId(turn),
+        ..item(id, ItemBody::Text(Clipped::whole(text)))
+    };
+    state.items = vec![answer("t1", 1, "Earlier"), answer("t2", 2, "Reading")];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    let mut seq = 1_u64;
+    let mut show = |state: &ThreadState, cx: &mut VisualTestContext| {
+        seq = seq.saturating_add(1);
+        hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), seq), cx));
+        cx.run_until_parked();
+    };
+    show(&state, cx);
+    assert_eq!(lift_ticks(cx, &repaints), 0, "at rest nothing repaints");
+
+    state.items[0] = answer("t1", 1, "Earlier, and a correction of it");
+    show(&state, cx);
+    assert_eq!(lift_ticks(cx, &repaints), 0, "an earlier turn's words land at once");
+
+    state.items[1] = answer("t2", 2, "Reading the parser and its tests");
+    show(&state, cx);
+    assert!(lift_ticks(cx, &repaints) >= 3, "the latest answer's lift on the fade's ticks");
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.update(|window, _| window.refresh());
+    lift_ticks(cx, &repaints);
+    state.items[1] = answer("t2", 2, "Reading the parser and its tests, then the lexer");
+    show(&state, cx);
+    assert_eq!(lift_ticks(cx, &repaints), 0, "under Reduce Motion they land at once");
+}
+
+/// A plan put to the person is a card in the thread, its title from its heading, its head
+/// shown until opened, the answers on it; scrolled away, the tray says "Plan ready" with the
+/// way back to it and no second copy of its words.
+#[gpui::test]
+fn a_plan_is_a_card_that_takes_its_answer(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.phase = Phase::NeedsYou;
+    state.turns = vec![live_turn()];
+    let steps = (1..=30).map(|n| format!("{n}. Step {n}")).collect::<Vec<_>>().join("\n");
+    let words = format!("# Split the parser\n\n{steps}");
+    let mut asked = approval("p");
+    asked.kind = Request::PLAN.to_owned();
+    asked.item = Some(ItemId("plan".to_owned()));
+    asked.text = Some(Clipped::whole(&words));
+    state.requests = vec![asked];
+    state.items = vec![item(
+        "plan",
+        ItemBody::Tool(Box::new(ToolCall {
+            name: "ExitPlanMode".to_owned(),
+            kind: kind::PLAN.to_owned(),
+            title: "Propose a plan".to_owned(),
+            input: Clipped::default(),
+            state: ToolState::Pending { ask: AskId("p".to_owned()) },
+            output: None,
+            images: Vec::new(),
+            detail: Some(ToolDetail::Plan { text: Clipped::whole(&words) }),
+            child: None,
+            ended_ms: None,
+        })),
+    )];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 1), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        tree.iter().any(|n| n.is("Article", Some("Plan: Split the parser, Awaiting approval"))),
+        "named by its heading and how it stands"
+    );
+    let card = cx.debug_bounds("plan-plan").expect("a card");
+    let short = card.size.height;
+    let more = cx.debug_bounds("plan-more-plan").expect("a long plan shows its head");
+    cx.simulate_click(more.center(), Modifiers::none());
+    let opened = cx.debug_bounds("plan-plan").expect("still a card").size.height;
+    assert!(opened > short, "opened, the whole plan: {short:?} then {opened:?}");
+    assert!(cx.debug_bounds("plan-more-plan").is_none());
+    assert!(cx.debug_bounds("request-p").is_none(), "answered on the card");
+    let allow = cx.debug_bounds("answer-p-allow").expect("the answers on the card");
+    assert!(cx.debug_bounds("plan-plan").expect("drawn").contains(&allow.center()));
+
+    // Taller than the view, so the newest row's place puts the plan above it.
+    state.items.push(Item {
+        turn: TurnId(1),
+        ..item("t", ItemBody::Text(Clipped::whole(&"More words.\n\n".repeat(120))))
+    });
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 2), cx));
+    cx.run_until_parked();
+    scroll(cx, -100_000.0);
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(cx.debug_bounds("request-p").is_some(), "the tray carries it while it is away");
+    assert!(tree.iter().any(|n| n.label.as_deref() == Some("Plan ready")), "named, not copied");
+    assert!(!tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.contains("1. Step 1"))));
+    let allow = cx.debug_bounds("answer-p-allow").expect("answered from the tray");
+    cx.simulate_click(allow.center(), Modifiers::none());
+    assert!(
+        matches!(intents(&sent).as_slice(), [Intent::Answer { choice, .. }] if choice == "allow"),
+        "{:?}",
+        intents(&sent)
+    );
+}
+
+/// A picture sent with a message opens large over the thread on a press, saying what it is;
+/// Esc closes it, from the composer or outside it, and never also stops the turn under way.
+/// A press anywhere on it closes it too.
+#[gpui::test]
+fn a_picture_opens_large_and_esc_closes_it(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = fixtures::empty();
+    let thread = state.meta.id;
+    state.status.phase = Phase::Working;
+    let picture = slopty_proto::thread::Image {
+        digest: "d1".to_owned(),
+        media_type: "image/png".to_owned(),
+        bytes: 245_760,
+        width: 1_600,
+        height: 1_200,
+        at: slopty_proto::thread::ContentRef("blob:d1".to_owned()),
+    };
+    state.turns = vec![live_turn()];
+    state.items = vec![item(
+        "u",
+        ItemBody::User(slopty_proto::thread::UserMessage {
+            text: Clipped::whole("Look at this"),
+            images: vec![picture],
+            command: None,
+            intent: None,
+        }),
+    )];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let open = |cx: &mut VisualTestContext| {
+        let at = cx.debug_bounds("picture-d1").expect("the picture").center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+    };
+
+    open(cx);
+    assert!(cx.debug_bounds("picture-viewer").is_some(), "open large");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        tree.iter()
+            .any(|n| n.label.as_deref()
+                == Some("Picture, 1600 \u{d7} 1200 \u{b7} PNG \u{b7} 240 KB"))
+    );
+    cx.simulate_keystrokes("escape");
+    assert!(cx.debug_bounds("picture-viewer").is_none(), "Esc closes it");
+    open(cx);
+    cx.dispatch_action(crate::conversation::Interrupt);
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("picture-viewer").is_none(), "Esc outside the composer too");
+    assert!(intents(&sent).is_empty(), "and the turn goes on: {:?}", intents(&sent));
+
+    open(cx);
+    let viewer = cx.debug_bounds("picture-viewer").expect("open again");
+    cx.simulate_click(viewer.origin + point(px(4.0), px(4.0)), Modifiers::none());
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("picture-viewer").is_none(), "a press closes it");
 }

@@ -36,7 +36,7 @@ use super::recap::{Recap, RecapKind};
 use super::spend::{CONTEXT_WARN_BP, MetersBySession, NodeSpend, dollars, limit_line, worked};
 use super::{
     AddressComments, ApproveTask, CancelTask, DeleteProject, EditBudget, EditChecks, FixCi, Lens,
-    MergeTask, OpenNode, PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext,
+    MergeTask, OpenNode, PickAttempt, PushTask, ResolveConflicts, RetryTask, RunTaskOn, SelectNext,
     SelectPrevious, ShowBoard, ShowMachines, ShowTerminal, ShowTimeline, ShowTree, StartProposed,
     StartTask, StopTaskAgent, TellOrchestrator, ToggleAskToStart, TogglePush,
 };
@@ -896,6 +896,8 @@ pub(crate) const PROPOSED: &str = "Proposed";
 pub(crate) const START_ALL: &str = "Start all";
 /// A proposal's word in its row, for a task its orchestrator would start.
 pub(crate) const PROPOSED_WORD: &str = "Proposed";
+/// A task several attempts try, none picked yet ([`slopty_proto::project::Attempts`]).
+pub(crate) const TRYING_WORD: &str = "Trying";
 /// The plan band with no finished task to estimate from.
 pub(crate) const NO_ESTIMATE: &str = "No finished task to estimate from yet";
 /// "Start all" with nothing proposed.
@@ -997,6 +999,7 @@ const fn verb_of(action: TaskAction) -> &'static str {
         TaskAction::PushAgain => "push again",
         TaskAction::Cancel => "cancel",
         TaskAction::Stop => "stop",
+        TaskAction::Pick => "pick",
     }
 }
 
@@ -1679,7 +1682,15 @@ impl ProjectView {
         let title = card.map_or_else(|| ORCHESTRATOR.to_owned(), |c| c.title.clone());
         // A row under "Needs you" says no word its heading says.
         let word = card.filter(|_| mark.is_none()).map(|c| {
-            let word = if c.proposed.is_some() { PROPOSED_WORD } else { state_word(c.state) };
+            let trying = c.attempts.as_ref().is_some_and(|a| a.picked.is_none())
+                && c.state != TaskState::Merged;
+            let word = if c.proposed.is_some() {
+                PROPOSED_WORD
+            } else if trying {
+                TRYING_WORD
+            } else {
+                state_word(c.state)
+            };
             (word, board_tone(theme, state_status(c.state)))
         });
         let actions = node.and_then(|task| self.actions(board, task, prefix, cx));
@@ -3483,6 +3494,9 @@ impl Render for ProjectView {
             }))
             .on_action(cx.listener(|this, _: &PushTask, _w, cx| {
                 this.act_on_picked(TaskAction::PushAgain, cx);
+            }))
+            .on_action(cx.listener(|this, _: &PickAttempt, _w, cx| {
+                this.act_on_picked(TaskAction::Pick, cx);
             }))
             .on_action(cx.listener(|this, _: &CancelTask, _w, cx| {
                 this.act_on_picked(TaskAction::Cancel, cx);

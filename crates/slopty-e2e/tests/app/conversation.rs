@@ -653,7 +653,7 @@ async fn the_thread_shows_the_work_beyond_words() {
     drv.wait_for("the build in the background", STEP, |d| {
         labels(d, "Status").iter().any(|l| l == building)
             && labels(d, "Button").iter().any(|l| l.starts_with("Plan, 1 of 3 done"))
-            && has(d, "Image", picture)
+            && has(d, "Button", picture)
     })
     .await
     .unwrap();
@@ -676,18 +676,18 @@ async fn the_thread_shows_the_work_beyond_words() {
     .unwrap();
     golden(drv, &dir, "thread-work").await;
     drv.keys("ctrl-o").await.unwrap();
-    // Every step open: the thinking, and the screenshot the `Read` returned on its call.
+    // Every step open: the screenshot the `Read` returned on its call, and above the plan's
+    // card the thinking.
     drv.wait_for("every step", STEP, |d| {
-        has(d, "Button", "Thought")
-            && has(d, "Button", "Read /work/shots/header.png")
-            && has(d, "Image", picture)
+        has(d, "Button", "Read /work/shots/header.png") && has(d, "Button", picture)
     })
     .await
     .unwrap();
     golden(drv, &dir, "thread-work-open").await;
+    scroll_up_until(drv, "the thinking", |d: &Dump| has(d, "Button", "Thought")).await;
     // Above the steps: the prompt, with the screenshot pasted on it.
     let prompt = |d: &Dump| {
-        labels(d, "Article").iter().any(|l| l.starts_with("You: ")) && has(d, "Image", picture)
+        labels(d, "Article").iter().any(|l| l.starts_with("You: ")) && has(d, "Button", picture)
     };
     scroll_up_until(drv, "the prompt", prompt).await;
     stack.shutdown().await;

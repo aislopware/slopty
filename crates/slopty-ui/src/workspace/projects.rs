@@ -879,6 +879,11 @@ impl WorkspaceView {
             },
             TaskAction::RunOn => return self.open_run_on(&project, task, cx),
             TaskAction::Start => Verb::TaskStart { project, task, pin: None },
+            TaskAction::Pick => {
+                let said = format!("Picked #{task} to land; the other attempts stop");
+                let verb = Verb::TaskPick { project, attempt: task };
+                return self.send_to_server(verb, move |this, cx| this.show_notice(said, cx), cx);
+            }
             TaskAction::Cancel => {
                 let change = TaskChange {
                     state: Some(TaskState::Failed),

@@ -263,6 +263,9 @@ pub enum TaskAction {
     Cancel,
     /// End its agent's terminal; the task waits for its next start.
     Stop,
+    /// Pick this attempt to land: it joins the merge queue once verified, and the task's
+    /// other attempts stop.
+    Pick,
 }
 
 impl TaskAction {
@@ -281,6 +284,7 @@ impl TaskAction {
             Self::PushAgain => "Push again",
             Self::Cancel => "Cancel task",
             Self::Stop => "Stop its agent",
+            Self::Pick => "Pick",
         }
     }
 
@@ -305,6 +309,7 @@ impl TaskAction {
             Self::PushAgain => "push-again",
             Self::Cancel => "cancel",
             Self::Stop => "stop",
+            Self::Pick => "pick",
         };
         format!("{prefix}-{word}-{task}")
     }
@@ -904,7 +909,17 @@ impl Board {
         if live && conflicted {
             out.push(TaskAction::ResolveConflicts);
         }
-        if card.state == TaskState::Done && card.merge.is_none() && self.open_todos(task) == 0 {
+        // An attempt waits on the person's pick: the one picked lands, so only it merges.
+        let attempt = self.attempt_of(card);
+        if attempt.is_some_and(|a| a.picked.is_none()) && card.state != TaskState::Failed {
+            out.push(TaskAction::Pick);
+        }
+        let lands = attempt.is_none_or(|a| a.picked == Some(task));
+        if card.state == TaskState::Done
+            && card.merge.is_none()
+            && self.open_todos(task) == 0
+            && lands
+        {
             out.push(TaskAction::Merge);
         }
         let retried = |kind: StepKind| match kind {
@@ -930,6 +945,16 @@ impl Board {
             out.push(TaskAction::RunOn);
         }
         out
+    }
+
+    /// The attempts `card` is one of, when it is an attempt at its parent
+    /// ([`slopty_proto::project::ATTEMPT_KIND`]).
+    fn attempt_of(&self, card: &TaskCard) -> Option<&slopty_proto::project::Attempts> {
+        if card.kind != slopty_proto::project::ATTEMPT_KIND {
+            return None;
+        }
+        let parent = self.tasks.get(&card.parent?)?;
+        parent.attempts.as_ref().filter(|a| a.tried.contains(&card.id))
     }
 
     /// What the person can do to `task` beyond what moves it on ([`Self::actions`]): stop its
@@ -1023,6 +1048,7 @@ impl Board {
             | TaskAction::Approve
             | TaskAction::RunOn
             | TaskAction::Start
+            | TaskAction::Pick
             | TaskAction::PushAgain
             | TaskAction::Cancel
             | TaskAction::Stop => None,

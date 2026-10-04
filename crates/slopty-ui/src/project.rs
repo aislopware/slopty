@@ -65,6 +65,8 @@ gpui::actions!(
         ResolveConflicts,
         /// Push the target again for the task the keyboard stands on, whose push failed.
         PushTask,
+        /// Pick the attempt the keyboard stands on to land; the task's other attempts stop.
+        PickAttempt,
         /// Give up the task the keyboard stands on.
         CancelTask,
         /// End the terminal of the agent of the task the keyboard stands on.
@@ -102,6 +104,7 @@ pub fn key_bindings() -> Vec<crate::keymap::Command> {
         Command::new(Scope::Project, "merge_task", MergeTask, &["m"], BOARD),
         Command::new(Scope::Project, "retry_task", RetryTask, &["r"], BOARD),
         Command::new(Scope::Project, "approve_task", ApproveTask, &["a"], BOARD),
+        Command::new(Scope::Project, "pick_attempt", PickAttempt, &["p"], BOARD),
         Command::new(Scope::Project, "fix_ci", FixCi, &[], BOARD),
         Command::new(Scope::Project, "address_comments", AddressComments, &[], BOARD),
         Command::new(Scope::Project, "resolve_conflicts", ResolveConflicts, &[], BOARD),
@@ -134,6 +137,7 @@ pub fn palette_items(bindings: &[gpui::KeyBinding]) -> Vec<crate::palette::Palet
         line("Merge the task", IconName::GitBranch, Box::new(MergeTask)),
         line("Retry the task", IconName::RotateCw, Box::new(RetryTask)),
         line("Approve the task's work", IconName::Check, Box::new(ApproveTask)),
+        line("Pick this attempt", IconName::CircleCheck, Box::new(PickAttempt)),
         line("Tell the task's agent to fix CI", IconName::Wrench, Box::new(FixCi)),
         line(
             "Tell the task's agent to address the comments",

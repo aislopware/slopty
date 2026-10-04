@@ -265,7 +265,7 @@ const APP: &[Option<&str>] = &[None];
 pub fn defaults() -> Vec<Command> {
     use Scope::{Conversation, File, Folder, Inbox, Page, Project, Search, Terminal, Workspace};
 
-    use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
+    use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage, SendLater};
     use crate::terminal as t;
 
     fn c(
@@ -431,6 +431,7 @@ pub fn defaults() -> Vec<Command> {
         c(Conversation, "interrupt", Interrupt, &["escape"], &[FACE]),
         c(Conversation, "queue_message", QueueMessage, &["cmd-enter"], &[THREAD_INPUT]),
         c(Conversation, "edit_last_queued", EditLastQueued, &["alt-up"], &[THREAD_INPUT]),
+        c(Conversation, "send_later", SendLater, &[], &[THREAD_INPUT]),
         c(Conversation, "previous_prompt", t::PrevPrompt, &["cmd-up"], &[FACE, FACE_INPUT]),
         c(Conversation, "next_prompt", t::NextPrompt, &["cmd-down"], &[FACE, FACE_INPUT]),
         c(Conversation, "find", t::Find, &["cmd-f"], &[FACE, FACE_INPUT]),

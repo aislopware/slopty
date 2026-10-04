@@ -621,7 +621,7 @@ pub(super) fn glyph_margin(theme: &Theme) -> f32 {
 /// The height of a row's first and second lines, the navigator's and the inbox's alike.
 pub(super) fn line_heights(theme: &Theme) -> (f32, f32) {
     let typo = &theme.typography;
-    (typo.ui_size * TILE_LINE, typo.meta() * TILE_LINE)
+    (typo.ui_size * TILE_LINE, typo.small() * TILE_LINE)
 }
 
 /// A tile as its row shows it.

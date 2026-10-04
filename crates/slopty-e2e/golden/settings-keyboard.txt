@@ -310,6 +310,8 @@ ListItem │ Queue message │ ⌘↩
 Button │ Keys for Queue message │ ⌘↩
 ListItem │ Edit the last queued message │ ⌥↑
 Button │ Keys for Edit the last queued message │ ⌥↑
+ListItem │ Send later…
+Button │ Keys for Send later…
 ListItem │ Previous prompt │ ⌘↑
 Button │ Keys for Previous prompt │ ⌘↑
 ListItem │ Next prompt │ ⌘↓
@@ -436,6 +438,8 @@ ListItem │ Retry the task │ R
 Button │ Keys for Retry the task │ R
 ListItem │ Approve the task's work │ A
 Button │ Keys for Approve the task's work │ A
+ListItem │ Pick this attempt │ P
+Button │ Keys for Pick this attempt │ P
 ListItem │ Tell the task's agent to fix CI
 Button │ Keys for Tell the task's agent to fix CI
 ListItem │ Tell the task's agent to address the comments

@@ -198,7 +198,7 @@ impl ThreadView {
             sections.push(self.edited_section(&bar.edited, cx));
         }
         for queued in &bar.queue {
-            sections.push(self.queued_line(queued, bar.can_withdraw, cx));
+            sections.push(self.queued_line(queued, bar.can_withdraw, bar.can_promote, cx));
         }
         if !bar.background.is_empty() {
             sections.push(self.background_section(&bar.background));
@@ -484,6 +484,10 @@ impl ThreadView {
                 None => (self.choice_buttons(request, cx), self.release_button(request, cx)),
             };
         let asking = self.asking.as_ref().filter(|a| *a.ask() == request.id);
+        // A plan put to the person is read on its card in the thread: the tray names it and
+        // keeps the way to it and the answers, not a second copy of its words.
+        let carded = request.kind == Request::PLAN
+            && request.item.as_ref().and_then(|item| self.call_row(item)).is_some();
         let (title, counter) = match asking {
             Some(asking) => {
                 let header = asking.questions().current(cx).and_then(|q| q.header.clone());
@@ -497,11 +501,16 @@ impl ThreadView {
                     counter,
                 )
             }
+            None if carded => ("Plan ready".to_owned(), None),
             None => (request.title.clone(), None),
         };
-        let text = request.text.as_ref().map(|t| t.text.clone()).or_else(|| {
-            asking.is_none().then(|| request.questions.first().map(|q| q.text.clone())).flatten()
-        });
+        let text =
+            request.text.as_ref().filter(|_| !carded).map(|t| t.text.clone()).or_else(|| {
+                asking
+                    .is_none()
+                    .then(|| request.questions.first().map(|q| q.text.clone()))
+                    .flatten()
+            });
         // A command is code; anything else the agent says is a sentence.
         let code = request.kind == Request::APPROVAL;
         let scroll = match placement {
@@ -567,7 +576,11 @@ impl ThreadView {
             .id(ElementId::Name(format!("request-{id}").into()))
             .debug_selector(move || format!("request-{id}"))
             .role(Role::Dialog)
-            .aria_label(SharedString::from(request.title.clone()))
+            .aria_label(SharedString::from(if carded {
+                "Plan ready".to_owned()
+            } else {
+                request.title.clone()
+            }))
             .w_full()
             .flex()
             .flex_col()
@@ -730,12 +743,14 @@ impl ThreadView {
             .into_any_element()
     }
 
-    /// A waiting message: its first line, where it is, and the ways to change it or take it
-    /// back while the worker holds it.
+    /// A waiting message: its first line, where it is (when one held for later goes, or what
+    /// it waits on), and the ways to change it, send it now or take it back while the worker
+    /// holds it.
     fn queued_line(
         &self,
         queued: &crate::conversation::thread::activity::Queued,
         can_change: bool,
+        can_promote: bool,
         cx: &Context<Self>,
     ) -> AnyElement {
         let s = self.theme.surfaces;
@@ -748,15 +763,25 @@ impl ThreadView {
             (_, _, true, _) => Some("Taking back".to_owned()),
             (.., Some((_, _, reason))) => Some(format!("Not changed: {reason}")),
             (Some(why), ..) => Some(why.clone()),
-            (None, false, ..) => Some("Sending".to_owned()),
-            (None, true, false, None) => None,
+            (None, false, ..) if !super::later::kept(queued.delivery) => Some("Sending".to_owned()),
+            (None, ..) => {
+                super::later::when_words(queued.delivery, slopty_core::WallMs::now(), |t| {
+                    self.thread_title(t, cx)
+                })
+            }
         };
+        let scheduled = super::later::kept(queued.delivery);
         let open = can_change && queued.on_worker && !queued.withdrawing;
         let editable = open && !queued.going && !self.composing.editing();
         // The words the composer takes: a refused change's, so they are not lost.
         let words = refused.as_ref().map_or_else(|| queued.text.clone(), |(_, t, _)| t.clone());
+        let first = kit::first_line(&queued.text).to_owned();
+        let said = state.as_ref().map_or_else(|| first.clone(), |st| format!("{first}, {st}"));
         self.section()
+            .id(ElementId::Name(format!("queued-{pending}").into()))
             .debug_selector(move || format!("queued-{pending}"))
+            .role(Role::ListItem)
+            .aria_label(SharedString::from(said))
             .text_color(hsla(s.text_secondary))
             .child(self.slot().child(self.icon(IconName::Clock, s.text_muted)))
             .child(
@@ -792,6 +817,14 @@ impl ThreadView {
                 el.child(
                     self.icon_button(format!("edit-dismiss-{pending}"), IconName::X, "Dismiss")
                         .on_click(cx.listener(move |this, _ev, _w, cx| this.dismiss(intent, cx))),
+                )
+            })
+            .when(open && scheduled && can_promote && !queued.going, |el| {
+                el.child(
+                    self.icon_button(format!("promote-{pending}"), IconName::ArrowUp, "Send now")
+                        .on_click(cx.listener(move |this, _ev, _w, cx| {
+                            let _id = this.intent(Intent::Promote { pending }, cx);
+                        })),
                 )
             })
             .when(open && queued.edit.is_none(), |el| {

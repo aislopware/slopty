@@ -5,7 +5,7 @@
 
 use gpui::{Action, KeyBinding, actions};
 
-use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage};
+use crate::conversation::{CycleDensity, EditLastQueued, Interrupt, QueueMessage, SendLater};
 use crate::icons::IconName;
 use crate::keymap::Scope;
 use crate::palette::PaletteItem;
@@ -435,6 +435,7 @@ pub fn palette_items() -> Vec<PaletteItem> {
         w("Stop the agent", IconName::Square, Box::new(Interrupt)),
         w("Queue message", IconName::Clock, Box::new(QueueMessage)),
         w("Edit the last queued message", IconName::Pencil, Box::new(EditLastQueued)),
+        w("Send later\u{2026}", IconName::Clock, Box::new(SendLater)),
         w("Larger text", IconName::AArrowUp, Box::new(FontLarger)),
         w("Smaller text", IconName::AArrowDown, Box::new(FontSmaller)),
         w("Default text size", IconName::Type, Box::new(FontReset)),

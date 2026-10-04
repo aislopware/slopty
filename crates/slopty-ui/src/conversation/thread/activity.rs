@@ -27,6 +27,8 @@ pub struct Queued {
     pub intent: IntentId,
     /// What it says.
     pub text: String,
+    /// When it goes: with the turn, or held until its moment.
+    pub delivery: Delivery,
     /// Where it is, in words, when something holds it.
     pub held: Option<String>,
     /// The worker has it; until then it is on its way from here.
@@ -100,6 +102,8 @@ pub struct Activity<'a> {
     pub can_stop: bool,
     /// Whether a waiting message can be withdrawn from here.
     pub can_withdraw: bool,
+    /// Whether a waiting message can be sent now from here, into the turn under way.
+    pub can_promote: bool,
 }
 
 impl<'a> Activity<'a> {
@@ -124,6 +128,7 @@ impl<'a> Activity<'a> {
                 let mut queued = Queued {
                     intent: p.intent,
                     text: p.text.clone(),
+                    delivery: p.delivery,
                     held: match &p.state {
                         PendingState::Held { reason } => Some(reason.clone()),
                         PendingState::Waiting | PendingState::Sending => None,
@@ -151,15 +156,27 @@ impl<'a> Activity<'a> {
             })
             .collect();
         queue.extend(threads.unshown(thread).filter_map(|s| match &s.intent {
-            Intent::Send { text, delivery: Delivery::Queue, .. } if !s.failed() => Some(Queued {
-                intent: s.id,
-                text: text.clone(),
-                held: None,
-                on_worker: false,
-                withdrawing: false,
-                going: false,
-                edit: None,
-            }),
+            Intent::Send { text, delivery, .. }
+                if !s.failed()
+                    && matches!(
+                        delivery,
+                        Delivery::Queue
+                            | Delivery::At { .. }
+                            | Delivery::After { .. }
+                            | Delivery::Draft
+                    ) =>
+            {
+                Some(Queued {
+                    intent: s.id,
+                    text: text.clone(),
+                    delivery: *delivery,
+                    held: None,
+                    on_worker: false,
+                    withdrawing: false,
+                    going: false,
+                    edit: None,
+                })
+            }
             _ => None,
         }));
         Self {
@@ -175,7 +192,8 @@ impl<'a> Activity<'a> {
                 tasks
             },
             can_stop: state.meta.can(Cap::STOP_TASK),
-            can_withdraw: state.meta.can(Cap::QUEUE),
+            can_withdraw: state.meta.can(Cap::QUEUE) || state.meta.can(Cap::SCHEDULE),
+            can_promote: state.meta.can(Cap::STEER),
         }
     }
 

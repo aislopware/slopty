@@ -1,12 +1,13 @@
 //! The composer beyond its text: its `/` and `@` menus, attachments, changing a message that
-//! waits in the queue, what the send button says, and the meter's panel.
+//! waits in the queue, what the send button says, the meter's panel, and recalling what was
+//! sent.
 
 use gpui::{Modifiers, MouseButton, TestAppContext};
 use slopty_core::{SessionId, WallMs};
 use slopty_proto::thread::wire::Intent;
 use slopty_proto::thread::{
-    AgentId, Cap, Changed, Command, Delivery, IntentId, Limit, Pending, PendingState, Phase,
-    ThreadState, Turn, TurnId, TurnState, Usage,
+    AgentId, Cap, Changed, Clipped, Command, Delivery, IntentId, Item, ItemBody, ItemId, Limit,
+    Pending, PendingState, Phase, ThreadState, Turn, TurnId, TurnState, Usage, UserMessage,
 };
 
 use super::{asked, hub, intents, snapshot, view};
@@ -462,4 +463,129 @@ fn the_meter_opens_its_panel_and_compacts_on_a_press(cx: &mut TestAppContext) {
     let compact = cx.debug_bounds("thread-compact").expect("Compact context").center();
     cx.simulate_click(compact, Modifiers::none());
     assert_eq!(intents(&sent), [Intent::Compact]);
+}
+
+fn sent_message(id: &str, words: &str) -> Item {
+    Item {
+        id: ItemId(id.to_owned()),
+        turn: TurnId(1),
+        at_ms: WallMs::ZERO,
+        body: ItemBody::User(UserMessage {
+            text: Clipped::whole(words),
+            images: Vec::new(),
+            command: None,
+            intent: None,
+        }),
+    }
+}
+
+/// ↑ on the first line of an empty composer brings back the message sent before, and ↓ on the
+/// last line the one after, down to an empty draft. Inside a recalled message of two lines the
+/// arrows move the caret first, and a draft of the person's own is left alone.
+#[gpui::test]
+fn up_recalls_the_messages_sent_and_down_comes_back(cx: &mut TestAppContext) {
+    let (hub, _sent) = hub(cx, None);
+    let mut state = state();
+    let thread = state.meta.id;
+    state.items =
+        vec![sent_message("u1", "Count the lines"), sent_message("u2", "Read it\nthen fix it")];
+    hub.update(cx, ThreadHub::connected);
+    let (view, cx) = view(cx, &hub, thread);
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let draft = |cx: &mut gpui::VisualTestContext| view.read_with(cx, ThreadView::draft);
+
+    cx.simulate_keystrokes("up");
+    assert_eq!(draft(cx), "Read it\nthen fix it", "the newest first");
+    cx.simulate_keystrokes("up");
+    assert_eq!(draft(cx), "Read it\nthen fix it", "the caret climbs to the first line");
+    cx.simulate_keystrokes("up");
+    assert_eq!(draft(cx), "Count the lines");
+    cx.simulate_keystrokes("up");
+    assert_eq!(draft(cx), "Count the lines", "nothing before the first");
+    cx.simulate_keystrokes("down");
+    assert_eq!(draft(cx), "Read it\nthen fix it");
+    cx.simulate_keystrokes("down");
+    assert_eq!(draft(cx), "", "past the newest, an empty draft");
+
+    cx.simulate_input("mine");
+    cx.simulate_keystrokes("up");
+    assert_eq!(draft(cx), "mine", "a draft of one's own is not replaced");
+}
+
+/// Where the agent takes a message held until its moment, the clock by the send button opens
+/// the times to send at; a pick says when over the field and turns Send into Schedule, and ↵
+/// sends the draft held until then. Taken off, ↵ sends as before. With no such door there is
+/// no clock.
+#[gpui::test]
+fn a_draft_is_sent_later_from_the_clock(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = state();
+    let thread = state.meta.id;
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state.clone(), 0), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("thread-later-open").is_none(), "no door, no clock");
+
+    state.meta.caps.push(Cap::named(Cap::SCHEDULE));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 1), cx));
+    cx.run_until_parked();
+    let click = |cx: &mut gpui::VisualTestContext, what: &'static str| {
+        let at = cx.debug_bounds(what).unwrap_or_else(|| panic!("{what}")).center();
+        cx.simulate_click(at, Modifiers::none());
+        cx.run_until_parked();
+    };
+    click(cx, "thread-later-open");
+    assert!(cx.debug_bounds("thread-menu").is_some(), "the times");
+    let before = WallMs::now();
+    click(cx, "thread-menu-1");
+    assert!(cx.debug_bounds("thread-menu").is_none(), "a pick closes the menu");
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(tree.iter().any(|n| n.is("Button", Some("Schedule"))), "the send button says so");
+    assert!(
+        tree.iter().any(|n| n.label.as_deref().is_some_and(|l| l.starts_with("Sends at "))),
+        "and the line over the field"
+    );
+
+    cx.simulate_input("Check the nightly build");
+    cx.simulate_keystrokes("enter");
+    let said = intents(&sent);
+    let [Intent::Send { text, delivery: Delivery::At { at_ms }, .. }] = said.as_slice() else {
+        panic!("held until its time: {:?}", intents(&sent))
+    };
+    assert_eq!(text, "Check the nightly build");
+    let hour = at_ms.millis_since(before);
+    assert!((3_590_000..=3_610_000).contains(&hour), "in an hour: {hour} ms");
+    assert!(cx.debug_bounds("thread-later").is_none(), "the next draft goes as ↵ sends");
+}
+
+/// What waits for its moment says in the tray when it goes or what it waits on, and offers
+/// Send now where the agent takes a message into the turn under way.
+#[gpui::test]
+fn a_held_message_says_when_and_goes_now_on_a_press(cx: &mut TestAppContext) {
+    let (hub, sent) = hub(cx, None);
+    let mut state = working(state());
+    let thread = state.meta.id;
+    state.meta.caps.push(Cap::named(Cap::SCHEDULE));
+    let mut held = waiting("after the other one");
+    held.delivery =
+        Delivery::After { thread: slopty_proto::thread::ThreadId::new(), settle_ms: 60_000 };
+    state.pending = vec![held.clone()];
+    hub.update(cx, ThreadHub::connected);
+    let (_view, cx) = view(cx, &hub, thread);
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    hub.update(cx, |hub, cx| hub.frame(thread, snapshot(state, 0), cx));
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    assert!(
+        tree.iter()
+            .any(|n| n.is("ListItem", Some("after the other one, When another thread rests"))),
+        "what it waits on"
+    );
+    let now = format!("promote-{}", held.intent).leak();
+    let at = cx.debug_bounds(now).expect("Send now").center();
+    cx.simulate_click(at, Modifiers::none());
+    assert_eq!(intents(&sent), [Intent::Promote { pending: held.intent }]);
 }

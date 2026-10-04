@@ -33,6 +33,7 @@ Button │ Model, Opus 5.5
 Label │ Mode, Default
 Button │ Review the changes
 Button │ Context 34% of 200k
+Button │ Send later
 Button │ Send
 Group │ Status
 Status │ e2e-worker

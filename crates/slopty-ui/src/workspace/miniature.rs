@@ -94,7 +94,7 @@ impl WorkspaceView {
                 .min_w_0()
                 .overflow_hidden()
                 .text_ellipsis()
-                .text_size(px(t.meta()))
+                .text_size(px(t.small()))
                 .text_color(muted)
                 .child(SharedString::from(meta))
         });

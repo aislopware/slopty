@@ -1820,3 +1820,56 @@ fn a_project_s_failure_is_said_as_it_lands(cx: &mut TestAppContext) {
     assert_eq!(note.body, "#1 Wire the board: its verifier failed");
     assert_eq!(view.update(cx, |v, _| v.take_project_news()), [], "taken once");
 }
+
+/// A task tried by several attempts says "Trying" until one is picked. Each attempt that has
+/// not failed offers Pick, which sends `TaskPick`, and no attempt merges before it is picked;
+/// once one is, only it offers Merge and none offers Pick.
+#[gpui::test]
+fn an_attempt_is_picked_from_its_row(cx: &mut TestAppContext) {
+    use slopty_proto::project::{ATTEMPT_KIND, Attempts};
+    let (view, cx) = workspace(cx);
+    let setup = setup(&view, cx);
+    let (_, orchestrator) = setup.orchestrator;
+    let (caller, mut queue) = slopty_client::server::ServerCaller::queued();
+    let mut tried = card(7, "Split the parser", TaskState::Running, None);
+    tried.attempts = Some(Attempts { tried: vec![TaskId(8), TaskId(9)], picked: None });
+    let attempt = |n: u32, state: TaskState| {
+        let mut a = card(n, "One attempt", state, Some(7));
+        a.kind = ATTEMPT_KIND.to_owned();
+        a
+    };
+    view.update_in(cx, |v, _w, cx| {
+        v.set_server_caller(Some(caller));
+        v.project_update(11, task_changed("board", tried.clone(), None), cx);
+        v.project_update(12, task_changed("board", attempt(8, TaskState::Done), None), cx);
+        v.project_update(13, task_changed("board", attempt(9, TaskState::Failed), None), cx);
+        v.show_board(orchestrator, true, cx);
+    });
+    cx.run_until_parked();
+    let project = fixtures::id("board");
+    cx.update(|window, _cx| window.set_a11y_active(true));
+    view.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let tree = cx.update(|window, _cx| crate::a11y::tree(window));
+    let row = tree
+        .iter()
+        .filter_map(|n| n.label.as_deref())
+        .find(|l| l.starts_with("Split the parser"))
+        .expect("the task's row");
+    assert!(row.contains("Trying"), "{row}");
+    assert!(cx.debug_bounds("project-row-merge-8").is_none(), "not picked, not merged");
+    assert!(cx.debug_bounds("project-row-pick-9").is_none(), "a failed attempt is not picked");
+
+    click(cx, "project-row-pick-8");
+    assert_eq!(sent(&mut queue, cx, done), [Verb::TaskPick { project, attempt: TaskId(8) }]);
+    assert_eq!(
+        view.read_with(cx, |v, _| v.toast_text()).as_deref(),
+        Some("Picked #8 to land; the other attempts stop")
+    );
+
+    tried.attempts = Some(Attempts { tried: vec![TaskId(8), TaskId(9)], picked: Some(TaskId(8)) });
+    view.update_in(cx, |v, _w, cx| v.project_update(14, task_changed("board", tried, None), cx));
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("project-row-pick-8").is_none(), "picked once");
+    assert!(cx.debug_bounds("project-row-merge-8").is_some(), "the one picked lands");
+}

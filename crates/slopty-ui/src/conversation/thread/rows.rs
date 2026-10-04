@@ -192,11 +192,21 @@ const fn bubble(sent: &Sent) -> bool {
     }
 }
 
+/// Whether `item` is a plan the agent proposed: a document read as an answer is, never folded
+/// into the work or grouped with the calls that only looked.
+#[must_use]
+pub fn plan(item: &Item) -> bool {
+    matches!(&item.body, ItemBody::Tool(call) if matches!(call.detail, Some(ToolDetail::Plan { .. })))
+}
+
 /// A settled turn: its message, the fold over its work, then its answer, the last thing the
-/// agent wrote. Opened, the work shows between the fold and the answer.
+/// agent wrote. A plan stands outside the fold where it was proposed. Opened, the work shows
+/// between the fold and the answer.
 fn turn_rows(built: &mut Built, turn: TurnId, items: &[Item], run: Range<usize>, open: bool) {
     let answer = items.iter().rposition(|i| matches!(i.body, ItemBody::Text(_)));
-    let work = |ix: usize, i: &Item| Some(ix) != answer && !matches!(i.body, ItemBody::User(_));
+    let work = |ix: usize, i: &Item| {
+        Some(ix) != answer && !matches!(i.body, ItemBody::User(_)) && !plan(i)
+    };
     let has_work = items.iter().enumerate().any(|(ix, i)| work(ix, i));
     let mut folded = false;
     for (ix, item) in items.iter().enumerate() {
@@ -220,6 +230,9 @@ const GROUP: usize = 2;
 
 /// Whether `item` is a call that only looked and is done: a group's kind of call.
 fn groups(item: &Item) -> bool {
+    if plan(item) {
+        return false;
+    }
     match &item.body {
         ItemBody::Tool(call) => {
             quiet(call)
@@ -352,7 +365,7 @@ impl Fold {
     fn count(&mut self, items: &[Item]) {
         let fold = self;
         let bump = |n: &mut u32| *n = n.saturating_add(1);
-        for item in items {
+        for item in items.iter().filter(|i| !plan(i)) {
             let ItemBody::Tool(call) = &item.body else { continue };
             bump(&mut fold.steps);
             if matches!(call.state, ToolState::Failed) {
@@ -623,6 +636,44 @@ mod tests {
             ],
             "opened, the work shows in its order"
         );
+    }
+
+    /// A plan is read as an answer is: it stands outside a settled turn's fold where it was
+    /// proposed, is not one of the fold's steps, and joins no group of quiet calls.
+    #[test]
+    fn a_plan_stands_outside_the_fold_and_out_of_a_group() {
+        let plan = |id: &str, turn: u32| {
+            tool(id, turn, kind::PLAN, Some(ToolDetail::Plan { text: Clipped::whole("1. Do") }))
+        };
+        let settled = state(
+            vec![turn(1, TurnState::Complete, 5)],
+            vec![user("u", 1), read("r", 1), plan("p", 1), text("end", 1)],
+        );
+        let none = HashSet::new();
+        let rows =
+            build(Input { state: &settled, unshown: &[], open: &none, groups: &HashSet::new() });
+        let id = |s: &str| ItemId(s.to_owned());
+        assert_eq!(
+            rows,
+            [
+                Row::User { item: id("u") },
+                Row::Fold { turn: TurnId(1), open: false },
+                Row::Tool { item: id("p") },
+                Row::Text { item: id("end") },
+            ]
+        );
+        let t = turn(1, TurnState::Complete, 5);
+        assert_eq!(Fold::of(&t, &settled.items).steps, 1, "the read, not the plan");
+
+        let mut live = turn(1, TurnState::Active, 0);
+        live.ended_ms = None;
+        let mut working =
+            state(vec![live], vec![user("u", 1), read("r1", 1), plan("p", 1), read("r2", 1)]);
+        working.status.phase = Phase::Working;
+        let rows =
+            build(Input { state: &working, unshown: &[], open: &none, groups: &HashSet::new() });
+        assert!(rows.contains(&Row::Tool { item: id("p") }), "{rows:?}");
+        assert!(!rows.iter().any(|r| matches!(r, Row::Group { .. })), "{rows:?}");
     }
 
     #[test]

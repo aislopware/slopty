@@ -150,7 +150,7 @@ fn bash_standing(bash: &BashDetail) -> (Standing, String) {
 
 /// A plan's title (its first heading, else its first line) and the Markdown under it.
 #[must_use]
-pub(super) fn plan_parts(plan: &str) -> (String, &str) {
+pub(in crate::conversation) fn plan_parts(plan: &str) -> (String, &str) {
     let trimmed = plan.trim_start();
     let (first, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
     match first.trim().strip_prefix('#') {

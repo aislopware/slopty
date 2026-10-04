@@ -47,13 +47,25 @@ pub(super) fn thumb_size(image: &Image) -> (f32, f32) {
 /// What a picture is, in words: "1600 × 1200 · PNG · 240 KB".
 #[must_use]
 pub(super) fn describe(image: &Image) -> String {
-    let kind = image.media_type.strip_prefix("image/").unwrap_or(&image.media_type).to_uppercase();
+    picture_words(image.width, image.height, &image.media_type, image.bytes)
+}
+
+/// What a picture `width` × `height` of `media_type`, `bytes` long, is in words; a size its
+/// header did not give is left out.
+#[must_use]
+pub(in crate::conversation) fn picture_words(
+    width: u32,
+    height: u32,
+    media_type: &str,
+    bytes: u64,
+) -> String {
+    let kind = media_type.strip_prefix("image/").unwrap_or(media_type).to_uppercase();
     let mut parts = Vec::new();
-    if image.width > 0 && image.height > 0 {
-        parts.push(format!("{} \u{d7} {}", image.width, image.height));
+    if width > 0 && height > 0 {
+        parts.push(format!("{width} \u{d7} {height}"));
     }
     parts.push(kind);
-    parts.push(kit::size_label(image.bytes));
+    parts.push(kit::size_label(bytes));
     parts.join(" \u{b7} ")
 }
 

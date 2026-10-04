@@ -128,6 +128,10 @@ impl ThreadView {
             .then(|| self.shown_waiting(cx).cloned())
             .flatten()
             .map(|request| self.answers_row(self.answer_buttons(&request, cx)));
+        if let Some(ToolDetail::Plan { text }) = &call.detail {
+            let answers = answers.map(gpui::IntoElement::into_any_element);
+            return self.plan_card(id, call, text, answers, cx);
+        }
         let theme = &self.theme;
         let s = theme.surfaces;
         match look {

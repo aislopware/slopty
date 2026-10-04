@@ -37,6 +37,7 @@ use gpui::{
     Subscription, Task, Window, div, list, px,
 };
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+pub(in crate::conversation) use media::picture_words;
 pub use parts::HeaderChips;
 pub(in crate::conversation) use parts::context_ring;
 pub use review::Scope;
@@ -47,6 +48,7 @@ use slopty_proto::conversation::{
     Verdict,
 };
 use slopty_theme::Theme;
+pub(in crate::conversation) use work::plan_parts;
 
 use super::approval::Approvals;
 use super::composer::Attach;
