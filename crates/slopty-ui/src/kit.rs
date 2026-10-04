@@ -21,6 +21,15 @@ use slopty_theme::{Motion, Rgb, Theme, Typography, Variant, alpha};
 
 use crate::colors::{hsla, hsla_alpha};
 
+mod change;
+mod disclosure;
+mod fit;
+mod spark;
+pub use change::{Gliding, Rolling, on_change};
+pub use disclosure::Disclosure;
+pub use fit::{FitLabel, fit_label};
+pub use spark::Spark;
+
 /// What a find bar says before anything is typed. The terminal and the file tile share it: the
 /// same bar, the same word.
 pub const FIND_PLACEHOLDER: &str = "Find";
@@ -444,6 +453,12 @@ pub fn size_label(bytes: u64) -> String {
         1_024..1_048_576 => format!("{:.0} KB", n / 1_024.0),
         _ => format!("{:.1} MB", n / 1_048_576.0),
     }
+}
+
+/// `n` and a noun, plural past one: "1 file", "3 files".
+#[must_use]
+pub fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// The first line of `text` with something on it, trimmed.
@@ -1157,6 +1172,38 @@ pub fn icon_toggle(
         .bg(hsla(s.selected))
 }
 
+/// A tick box at the chrome's zoom `k`, the size of an inline icon.
+///
+/// A sunk hairline square while off, the neutral [`solid`] with its tick while on, as macOS
+/// draws one. The caller makes it, or the row it leads, the thing pressed, with
+/// `Role::CheckBox` and `aria_toggled`.
+#[must_use]
+pub fn tick_box(theme: &Theme, on: bool, k: f32) -> Div {
+    let s = theme.surfaces;
+    let side = px(theme.typography.icon() * k);
+    let el = div()
+        .flex_none()
+        .size(side)
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(theme.radii.xs * k))
+        .border(hair(theme));
+    if on {
+        solid(el, theme).border_color(hsla(s.solid)).child(
+            crate::icons::icon(
+                theme,
+                crate::icons::IconName::Check,
+                crate::icons::IconSize::Inline,
+                hsla(s.solid_ink),
+            )
+            .size(px(theme.typography.small() * k)),
+        )
+    } else {
+        sunk(el.border_color(hsla(s.border)), theme, theme.hair())
+    }
+}
+
 /// The side of the disc an empty state's mark sits in, in points at zoom 1: `HeroUI`'s small
 /// empty state's, the glyph at the inline icon size in its middle.
 pub const NOTICE_DISC: f32 = 40.0;
@@ -1572,7 +1619,7 @@ mod tests {
             crate::workspace::SESSION_ENDED,
             crate::workspace::CLOSE_TILE,
             crate::workspace::FULLSCREEN_TILE,
-            crate::workspace::ASK,
+            crate::workspace::NEW_AGENT,
             crate::workspace::NO_WORKERS,
             crate::workspace::NO_WORKERS_NEXT,
             crate::workspace::ADD_WORKER,
@@ -2190,18 +2237,16 @@ mod tests {
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
-    /// What floats as a sheet (a dialog, a menu, the inbox, the workers' popover, a toast, the
-    /// add-worker panel) is rounded at `radii.lg`, the rows' radius plus the pad round them. A
-    /// hint and a pill keep their control's radius: at 12 a 20 pt hint is a lozenge.
+    /// What floats as a sheet (a dialog, a menu, a toast, the add-worker panel) is rounded at
+    /// `radii.lg`, the rows' radius plus the pad round them. A hint and a pill keep their
+    /// control's radius: at 12 a 20 pt hint is a lozenge.
     #[test]
     fn a_floating_surface_is_rounded_lg() {
-        const SHEETS: [(&str, &str); 7] = [
+        const SHEETS: [(&str, &str); 5] = [
             ("slopty-ui/src/kit.rs", "pub fn dialog("),
             ("slopty-ui/src/conversation/view/parts.rs", "\"composer-shell\""),
             ("slopty-ui/src/conversation/view/parts.rs", ".id(\"conversation-find\")"),
             ("slopty-ui/src/workspace/titlebar.rs", "fn menu_panel("),
-            ("slopty-ui/src/workspace/statusbar.rs", ".id(\"hosts\")"),
-            ("slopty-ui/src/workspace/inbox.rs", ".id(\"inbox\")"),
             ("slopty-app/src/lib.rs", ".id(\"add-worker\")"),
         ];
         let lines: Vec<_> =
@@ -2257,11 +2302,10 @@ mod tests {
     }
 
     /// Chrome context (a header's directory, the status bar's path, the palette's column, a
-    /// row's second line) is in the UI face. The mono face is for a port's number, the
-    /// settings file, and an address read to judge it (a held-back page's hint), and nothing
-    /// else calls for it.
+    /// row's second line) is in the UI face. The mono face is for the settings file and an
+    /// address read to judge it (a held-back page's hint), and nothing else calls for it.
     #[test]
-    fn the_mono_face_is_for_ports_and_the_settings_file() {
+    fn the_mono_face_is_for_the_settings_file_and_addresses() {
         let uses: Vec<String> = ["slopty-ui/src", "slopty-app/src"]
             .into_iter()
             .flat_map(chrome_lines)
@@ -2271,16 +2315,12 @@ mod tests {
             .map(|(file, line_no, _)| format!("{file}:{line_no}"))
             .collect();
         let allowed = |at: &String| {
-            [
-                "slopty-ui/src/workspace/tile.rs",
-                "slopty-ui/src/settings_editor.rs",
-                "slopty-ui/src/kit.rs",
-            ]
-            .iter()
-            .any(|file| at.contains(file))
+            ["slopty-ui/src/settings_editor.rs", "slopty-ui/src/kit.rs"]
+                .iter()
+                .any(|file| at.contains(file))
         };
-        assert!(uses.iter().all(allowed), "mono outside ports and settings: {uses:#?}");
-        assert_eq!(uses.len(), 3, "the port pill, the settings field, the address: {uses:#?}");
+        assert!(uses.iter().all(allowed), "mono outside the settings and addresses: {uses:#?}");
+        assert_eq!(uses.len(), 2, "the settings field, the address: {uses:#?}");
     }
 
     /// A list typed at (the palette, a picker) floats on the bare [`anchor`]; the modals that
