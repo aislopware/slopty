@@ -29,7 +29,9 @@ pub mod store;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-pub use hub::{Acting, GONE_AFTER, Hub, Lan, Lease, Speaker, SystemLan, WAIT_CAP_MS};
+pub use hub::{
+    Acting, GONE_AFTER, Hold, Hub, KeepAwake, Lan, Lease, Speaker, SystemLan, WAIT_CAP_MS,
+};
 pub use mcp::Mcp;
 use slopty_net::admission::Admission;
 use slopty_net::server::ServerListener;

@@ -42,16 +42,31 @@ struct Args {
     print_addr: bool,
 }
 
-/// The `[server]` table of the `settings.toml` beside `data_dir` (the Slopty data directory
+/// What the server reads of the `settings.toml` beside its data directory.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+struct Read {
+    /// `[server]`.
+    server: slopty_settings::ServerSettings,
+    /// `[worker] keep_awake`: what keeps this machine awake, its worker and its server alike.
+    keep_awake: slopty_settings::KeepAwake,
+}
+
+impl Read {
+    fn of(settings: slopty_settings::Settings) -> Self {
+        Self { server: settings.server, keep_awake: settings.worker.keep_awake }
+    }
+}
+
+/// What the server reads of the `settings.toml` beside `data_dir` (the Slopty data directory
 /// the server's own lives in, which the worker and the app read too); the defaults when it
 /// does not read.
-fn settings(data_dir: &std::path::Path) -> slopty_settings::ServerSettings {
+fn settings(data_dir: &std::path::Path) -> Read {
     let root = data_dir.parent().unwrap_or(data_dir);
     let loaded = slopty_settings::Settings::load(&slopty_settings::path_in(root));
     if let Some(e) = &loaded.error {
         tracing::warn!(error = %e, "settings.toml ignored; no extra ranges, default project bounds");
     }
-    loaded.settings.server
+    Read::of(loaded.settings)
 }
 
 /// The `settings.toml` beside `data_dir`, which [`settings`] reads.
@@ -59,31 +74,53 @@ fn settings_path(data_dir: &std::path::Path) -> PathBuf {
     slopty_settings::path_in(data_dir.parent().unwrap_or(data_dir))
 }
 
-/// Which parts of `[server]` a change of the file touched.
+/// Which parts of what the server reads a change of the file touched.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Changed {
     allow: bool,
     projects: bool,
+    keep_awake: bool,
 }
 
 /// What changed from `before` to `now`, named field by field so a new key is decided here.
-fn changed(
-    before: &slopty_settings::ServerSettings,
-    now: &slopty_settings::ServerSettings,
-) -> Changed {
-    let slopty_settings::ServerSettings { allow, projects } = now;
-    Changed { allow: *allow != before.allow, projects: *projects != before.projects }
+fn changed(before: &Read, now: &Read) -> Changed {
+    let Read { server: slopty_settings::ServerSettings { allow, projects }, keep_awake } = now;
+    Changed {
+        allow: *allow != before.server.allow,
+        projects: *projects != before.server.projects,
+        keep_awake: *keep_awake != before.keep_awake,
+    }
+}
+
+/// What `[worker] keep_awake` lets keep the server's machine awake.
+const fn keep_awake(keep: slopty_settings::KeepAwake) -> slopty_server::KeepAwake {
+    match keep {
+        slopty_settings::KeepAwake::Working => slopty_server::KeepAwake::Working,
+        slopty_settings::KeepAwake::Attached => slopty_server::KeepAwake::Attached,
+        slopty_settings::KeepAwake::Never => slopty_server::KeepAwake::Never,
+    }
+}
+
+/// The machine's idle-sleep assertion, taken while the hub holds it.
+#[derive(Debug, Default)]
+struct Assertion(Option<slopty_platform::Activity>);
+
+impl slopty_server::Hold for Assertion {
+    fn system(&mut self, hold: bool) {
+        self.0 = hold.then(|| slopty_platform::Activity::system_awake("Slopty fleet at work"));
+        tracing::info!(hold, "system sleep hold");
+    }
 }
 
 /// Follow the file at `path` for as long as the server runs, looking `every` so often, and
-/// hand `apply` each `[server]` that differs from the one applied before (`applied` at first)
+/// hand `apply` each [`Read`] that differs from the one applied before (`applied` at first)
 /// with what in it changed: every key takes effect as the file changes. A file that does not
 /// parse changes nothing.
 async fn follow_settings(
     path: PathBuf,
     every: std::time::Duration,
-    mut applied: slopty_settings::ServerSettings,
-    apply: impl Fn(&slopty_settings::ServerSettings, Changed),
+    mut applied: Read,
+    apply: impl Fn(&Read, Changed),
 ) -> ! {
     let mut seen = slopty_settings::follow::Seen::of(&path);
     loop {
@@ -96,7 +133,7 @@ async fn follow_settings(
             tracing::warn!(error = %e, "settings.toml ignored; what was applied stays");
             continue;
         }
-        let now = loaded.settings.server;
+        let now = Read::of(loaded.settings);
         let what = changed(&applied, &now);
         if what != Changed::default() {
             apply(&now, what);
@@ -151,7 +188,7 @@ async fn main() -> Result<()> {
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("create data dir {}", data_dir.display()))?;
     let settings = settings(&data_dir);
-    let admission = admission(&settings);
+    let admission = admission(&settings.server);
     let followed = admission.clone();
     let settings_path = settings_path(&data_dir);
     let config = Config {
@@ -164,17 +201,22 @@ async fn main() -> Result<()> {
         admission,
     };
     let server = Server::start(config).await.context("start (is another server running?)")?;
-    server.hub().set_policy(policy(&settings.projects));
+    server.hub().set_policy(policy(&settings.server.projects));
+    server.hub().keep_awake(Box::new(Assertion::default()), keep_awake(settings.keep_awake));
     let hub = server.hub().clone();
     let every = slopty_settings::follow::POLL;
     tokio::spawn(follow_settings(settings_path, every, settings, move |now, changed| {
         if changed.allow {
-            tracing::info!(ranges = ?now.allow, "[server] allow changed: applied");
-            followed.set_ranges(parse_allow(&now.allow, "[server]"));
+            tracing::info!(ranges = ?now.server.allow, "[server] allow changed: applied");
+            followed.set_ranges(parse_allow(&now.server.allow, "[server]"));
         }
         if changed.projects {
             tracing::info!("[server.projects] changed: applied");
-            hub.set_policy(policy(&now.projects));
+            hub.set_policy(policy(&now.server.projects));
+        }
+        if changed.keep_awake {
+            tracing::info!(keep_awake = ?now.keep_awake, "[worker] keep_awake changed: applied");
+            hub.set_keep_awake(keep_awake(now.keep_awake));
         }
     }));
     if args.print_addr {
@@ -216,7 +258,7 @@ mod tests {
         let applied = settings(&data_dir);
         let follow =
             tokio::spawn(follow_settings(path.clone(), every, applied, move |now, what| {
-                let _heard = told.send((now.allow.clone(), what));
+                let _heard = told.send((now.server.allow.clone(), what));
             }));
         let after_a_poll = || tokio::time::sleep(every * 10);
         std::fs::write(&path, "[font]\nmono_size = 15.0\n").unwrap();
@@ -224,7 +266,7 @@ mod tests {
         assert!(heard.try_recv().is_err(), "nothing of the server's changed");
         std::fs::write(&path, "[server]\nallow = [\"10.8.0.0/24\"]\n").unwrap();
         after_a_poll().await;
-        let allow = Changed { allow: true, projects: false };
+        let allow = Changed { allow: true, ..Changed::default() };
         assert_eq!(heard.try_recv().ok(), Some((vec!["10.8.0.0/24".to_owned()], allow)));
         std::fs::write(&path, "[server\n").unwrap();
         after_a_poll().await;
@@ -232,8 +274,12 @@ mod tests {
         let text = "[server]\nallow = [\"10.8.0.0/24\"]\n[server.projects]\nlive_agents = 3\n";
         std::fs::write(&path, text).unwrap();
         after_a_poll().await;
-        let projects = Changed { allow: false, projects: true };
+        let projects = Changed { projects: true, ..Changed::default() };
         assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(projects));
+        std::fs::write(&path, format!("{text}[worker]\nkeep_awake = \"never\"\n")).unwrap();
+        after_a_poll().await;
+        let keep = Changed { keep_awake: true, ..Changed::default() };
+        assert_eq!(heard.try_recv().ok().map(|(_, what)| what), Some(keep), "the machine's own");
         follow.abort();
     }
 
@@ -243,11 +289,14 @@ mod tests {
     fn the_allow_list_comes_from_the_shared_settings() {
         let root = tempfile::tempdir().unwrap();
         let data_dir = root.path().join("server");
-        assert!(admission(&settings(&data_dir)).ranges().is_empty(), "no range by default");
+        assert!(admission(&settings(&data_dir).server).ranges().is_empty(), "no range by default");
         let text = "[server]\nallow = [\"10.8.0.0/24\", \"bogus\"]\n";
         std::fs::write(root.path().join("settings.toml"), text).unwrap();
-        let ranges: Vec<String> =
-            admission(&settings(&data_dir)).ranges().iter().map(ToString::to_string).collect();
+        let ranges: Vec<String> = admission(&settings(&data_dir).server)
+            .ranges()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(ranges, ["10.8.0.0/24"]);
     }
 
@@ -258,7 +307,7 @@ mod tests {
     fn the_project_bounds_come_from_the_shared_settings() {
         let root = tempfile::tempdir().unwrap();
         let data_dir = root.path().join("server");
-        let default = policy(&settings(&data_dir).projects);
+        let default = policy(&settings(&data_dir).server.projects);
         assert_eq!(
             default.bounds,
             super::Bounds::default(),
@@ -268,7 +317,7 @@ mod tests {
         let text = "[server.projects]\nlive_agents = 3\n\
                     permission_flags = [\"nightly\", \"Not A Name\"]\n";
         std::fs::write(root.path().join("settings.toml"), text).unwrap();
-        let set = policy(&settings(&data_dir).projects);
+        let set = policy(&settings(&data_dir).server.projects);
         assert_eq!(set.bounds.live_agents, 3);
         assert_eq!(
             set.permission_flags.into_iter().collect::<Vec<_>>(),
@@ -280,14 +329,14 @@ mod tests {
             "[server.projects]\nlive_agents = 5000\n",
         )
         .unwrap();
-        let over = policy(&settings(&data_dir).projects);
+        let over = policy(&settings(&data_dir).server.projects);
         assert_eq!(over.bounds, super::Bounds::default(), "past a ceiling, the defaults hold");
         std::fs::write(
             root.path().join("settings.toml"),
             "[server.projects]\ncomprehension_depth = 3\n",
         )
         .unwrap();
-        let deep = policy(&settings(&data_dir).projects);
+        let deep = policy(&settings(&data_dir).server.projects);
         assert_eq!(deep.bounds, super::Bounds::default(), "a rule's cost stays bounded");
     }
 }

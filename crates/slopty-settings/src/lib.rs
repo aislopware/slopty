@@ -734,7 +734,8 @@ pub struct WorkerSettings {
     ///
     /// What keeps this Mac out of idle sleep: a client attached or an agent at work, a client
     /// attached only, or nothing (the Mac sleeps as its own settings say, a streamed display
-    /// too). Applied at once.
+    /// too). A server on this Mac follows it too, counting every client linked to it and every
+    /// worker's agents. Applied at once.
     #[schemars(title = "Keep awake")]
     pub keep_awake: KeepAwake,
     /// How long a client's display waits for it to return; 0 ends it.

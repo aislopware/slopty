@@ -29,6 +29,7 @@ use slopty_proto::thread::wire::{TableFrame, ThreadRow};
 use slopty_proto::thread::{AgentId, Liveness, Phase, Request, ThreadId, Wait};
 use tokio::sync::{Notify, broadcast, mpsc};
 
+use super::awake::{Awake, Hold, Policy as KeepAwake};
 use super::{Hub, WeakHub};
 use crate::project::Projects;
 
@@ -57,6 +58,8 @@ pub(super) struct Board {
     /// Each subagent thread last told to the projects as a native ([`Self::native_moves`]),
     /// with the seat it was told under and whether it had stopped.
     natives_said: HashMap<(WorkerId, ThreadId), (SessionId, bool)>,
+    /// The hold on the server's machine that the seats and the tables imply.
+    awake: Awake,
 }
 
 /// A person's client link.
@@ -70,6 +73,35 @@ struct Sitting {
 }
 
 impl Board {
+    /// Hold the machine through `hold` from now on, under `policy`.
+    pub(super) fn keep_awake(&mut self, hold: Box<dyn Hold>, policy: KeepAwake) {
+        let (linked, working) = self.linked_and_working();
+        self.awake.keep(hold, policy, linked, working);
+    }
+
+    /// Hold the machine under `policy` from now on.
+    pub(super) fn set_keep_awake(&mut self, policy: KeepAwake) {
+        let (linked, working) = self.linked_and_working();
+        self.awake.set_policy(policy, linked, working);
+    }
+
+    /// Whether a person's client is linked, and whether an agent is at work on any worker: a
+    /// thread whose agent is there working, or waiting on its own background work.
+    fn linked_and_working(&self) -> (bool, bool) {
+        let working = self
+            .tables
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(|r| there(r) && matches!(r.status.phase, Phase::Working | Phase::Waiting));
+        (!self.seats.is_empty(), working)
+    }
+
+    /// Hold the machine as the seats and the tables imply now.
+    fn settle_awake(&mut self) {
+        let (linked, working) = self.linked_and_working();
+        self.awake.settle(linked, working);
+    }
+
     /// Take in a worker's table frame. A snapshot replaces what it published before.
     pub(super) fn take(&mut self, worker: WorkerId, frame: TableFrame) {
         let table = self.tables.entry(worker).or_default();
@@ -313,6 +345,7 @@ impl Drop for Seated {
         if state.board.seats.remove(&self.link).is_some_and(|s| s.presence.is_some()) {
             hub.announce(FromServer::Present(state.board.present()));
         }
+        state.board.settle_awake();
         drop(state);
     }
 }
@@ -332,6 +365,7 @@ impl Hub {
     pub fn seat(&self, link: u64, name: String, tx: mpsc::Sender<FromServer>) -> Seated {
         let mut state = self.inner.state.lock();
         state.board.seats.insert(link, Sitting { name, tx, presence: None });
+        state.board.settle_awake();
         drop(state);
         Seated { hub: self.downgrade(), link }
     }
@@ -396,6 +430,7 @@ impl Hub {
         let state = &mut *guard;
         let live = &state.workers;
         state.board.tables.retain(|worker, _| live.contains_key(worker));
+        state.board.settle_awake();
         let ladder = ladder(&state.board.tables, &state.projects);
         if ladder == state.board.published {
             return;

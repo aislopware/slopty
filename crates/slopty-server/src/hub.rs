@@ -60,6 +60,7 @@ use tokio::sync::{Notify, broadcast, mpsc, oneshot, watch};
 use crate::deliver::Deliveries;
 use crate::project::{Caller, Change, Drove, Keep, Projects, ProjectsFile, Starting, Watched};
 
+mod awake;
 mod codex;
 mod ladder;
 mod outcomes;
@@ -68,6 +69,7 @@ mod queue;
 mod settle;
 mod steps;
 
+pub use awake::{Hold, Policy as KeepAwake};
 pub use ladder::Seated;
 
 /// How long an unreachable worker has to reconnect before it is presumed gone (Nomad's TTL plus

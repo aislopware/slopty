@@ -233,6 +233,26 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     `Wake`, so only a change of what is held reaches an assertion, and the agents' tick stops
     sampling processor time when agents cannot hold (`Wake::counts_agents`). Read at start,
     like the rest of `[worker]`. Test: `wake::tests::the_policy_decides_what_keeps_the_machine_awake`.
+  - Amended 2026-10-05 (server-default A6 and A7): **the server keeps its machine awake while
+    the fleet works.** Every notice to another device, every project step and every wake goes
+    through the server, so a server Mac idling to sleep silenced the agents on every other
+    machine. The hub holds `Activity::system_awake` while a person's client is linked or any
+    worker's thread is working, or waiting on its own background work, as the tables the
+    workers publish say (`hub::awake`). No message is added: the hub already holds every
+    table. Only a change of the hold reaches the assertion. The server follows the machine's
+    own `[worker] keep_awake`, as the file changes: one choice for the worker and the server of
+    one Mac, not a second key. `attached` counts linked clients only, and `never` holds
+    nothing.
+    - A hold does not keep a laptop awake with its lid closed. On a Mac with a battery of its
+      own (`slopty_platform::power::has_battery`, from the I/O Kit's power-source snapshot; a
+      UPS is no battery of its own), the setup's Server line for a server started here is an
+      advisory: it sleeps with its lid closed, and the phone hears nothing from the other
+      machines then.
+    - Tests: `hub::awake` `the_server_holds_the_mac_awake_while_an_agent_works_or_a_client_links`
+      and `the_policy_decides_what_holds`; `slopty-serverd`
+      `an_edit_of_the_file_is_applied_as_it_is_read` (the machine's `keep_awake`);
+      `this_mac` `the_server_line_follows_the_server_then_the_workers_link` (the laptop advisory);
+      `power::tests::the_power_sources_read`.
 
 - ✅ **Hosts are added by address and keyed by their `WorkerId`** (2026-09-24, with the transport
   ruling **Plaintext QUIC on noq, standalone; iroh removed**). A host is typed as `host[:port]` —
