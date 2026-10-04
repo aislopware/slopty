@@ -170,6 +170,16 @@ and its run supersedes the red one. The tests a runner's virtual Mac cannot run 
 hardware) are listed in nextest's `ci` profile and run in every local `cargo gate --full`.
 `docs/DEV.md` ("Gate") has the flags and the workflow.
 
+### VideoToolbox
+A runner's virtual Mac shares its host's media engine, and at times its encoder stops ("No real
+codec", `docs/decisions/video.md`). The tests that code then hang in the driver, past any kill.
+So CI runs the `videotoolbox` test group on its own after the rest, under a 10-minute deadline.
+If that run fails on a runner whose encoder logged that it stopped, the lane passes with a
+warning. Any other failure fails the lane. So a change to the coding path (`slopty-codec`,
+`slopty-capture`, the worker's `screen`) runs the group on this Mac's real encoder before it
+lands:
+`cargo nextest run -p slopty-codec -p slopty-worker -E 'group(videotoolbox)'`.
+
 ## Live lane in a VM
 A test that moves the real pointer, posts HID events, locks the screen, reaches the login window
 or needs a TCC grant runs in a macOS guest, never on this Mac (someone works on it over Parsec)

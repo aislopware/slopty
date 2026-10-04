@@ -756,10 +756,18 @@ fn test_lane(
     let _fresh = sh.push_env(BINS_FRESH, "1");
     // Test binaries run out of `run/`, not `deps/` (`crate::runner`).
     let runner = crate::runner::command()?;
-    let filter: Vec<String> = only.map_or_else(Vec::new, |packages| {
-        let expr = packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>();
-        vec!["--no-tests=warn".to_owned(), "-E".to_owned(), expr.join(" | ")]
+    let only = only.map(|packages| {
+        packages.iter().map(|p| format!("package(={p})")).collect::<Vec<_>>().join(" | ")
     });
+    let apart = profile == NEXTEST_CI_PROFILE && cfg!(target_os = "macos");
+    let rest = match (&only, apart) {
+        (Some(only), true) => Some(format!("({only}) & !{VIDEOTOOLBOX}")),
+        (Some(only), false) => Some(only.clone()),
+        (None, true) => Some(format!("!{VIDEOTOOLBOX}")),
+        (None, false) => None,
+    };
+    let filter: Vec<String> = rest
+        .map_or_else(Vec::new, |rest| vec!["--no-tests=warn".to_owned(), "-E".to_owned(), rest]);
     let tree = Utf8PathBuf::from_path_buf(sh.current_dir())
         .map_err(|p| anyhow::anyhow!("the tree's path is not UTF-8: {}", p.display()))?;
     // Beside the JUnit report, which CI keeps.
@@ -776,9 +784,76 @@ fn test_lane(
         );
         (tests, join(doctests))
     });
+    let videotoolbox = if apart {
+        let expr = only
+            .map_or_else(|| VIDEOTOOLBOX.to_owned(), |only| format!("({only}) & {VIDEOTOOLBOX}"));
+        videotoolbox_step(
+            cmd!(sh, "cargo nextest run {p...} --profile {profile} --no-tests=pass -E {expr}")
+                .env(crate::runner::RUNNER_VAR, &runner),
+        )
+    } else {
+        Ok(())
+    };
     let ptys = ptys.finish();
     print!("{}", ptys.report());
-    both(both(tests, doctests), ptys.verdict())
+    both(both(both(tests, doctests), videotoolbox), ptys.verdict())
+}
+
+/// The nextest test group of the tests that code through VideoToolbox (`.config/nextest.toml`).
+const VIDEOTOOLBOX: &str = "group(videotoolbox)";
+
+/// How long the VideoToolbox tests may take on a runner. Green, the slowest shard's took under
+/// two minutes.
+const VIDEOTOOLBOX_DEADLINE: Duration = Duration::from_mins(10);
+
+/// Run the VideoToolbox tests on their own, after the rest, and judge a failure by whether the
+/// runner's encoder had stopped.
+///
+/// A hosted runner's virtual Mac shares its host's media engine. At times its encoder stops
+/// ("No real codec", `docs/decisions/video.md`) with only a few dozen clients open (run
+/// 37185543085: 46). Every test that codes then times out, and its killed process stays stuck in
+/// exit inside the driver, where no signal ends it, so nextest waited on it until the job was
+/// cancelled. Here a run past [`VIDEOTOOLBOX_DEADLINE`] is killed. A failure on a runner whose
+/// encoder said it stopped says nothing of the change, so it is a warning. Any other failure
+/// fails the lane. A change to the coding path runs these tests on a Mac's real encoder before it
+/// lands (`docs/TESTING.md`, "VideoToolbox").
+fn videotoolbox_step(command: xshell::Cmd<'_>) -> Result<()> {
+    use std::os::unix::process::CommandExt as _;
+
+    println!("▶ videotoolbox");
+    let started = Instant::now();
+    let mut command = std::process::Command::from(command);
+    command.process_group(0);
+    let mut child = command.spawn().context("videotoolbox: nextest failed to start")?;
+    let group = child.id();
+    let (done, waited) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _sent = done.send(child.wait());
+    });
+    let passed = if let Ok(status) = waited.recv_timeout(VIDEOTOOLBOX_DEADLINE) {
+        status.context("videotoolbox: waiting on nextest")?.success()
+    } else {
+        println!("  the run passed {VIDEOTOOLBOX_DEADLINE:?}: killing it");
+        let _killed = std::process::Command::new("/bin/kill")
+            .args(["-KILL", "--", &format!("-{group}")])
+            .status();
+        false
+    };
+    let took = started.elapsed();
+    if passed {
+        println!("  ✓ videotoolbox ({took:.1?})");
+        return Ok(());
+    }
+    if crate::watchdog::encoder_stopped() {
+        println!(
+            "::warning title=VideoToolbox::this runner's video encoder stopped (\"No real \
+             codec\"), so its VideoToolbox tests say nothing of the change"
+        );
+        println!("  ⚠ videotoolbox ({took:.1?}): the runner's encoder stopped");
+        return Ok(());
+    }
+    println!("  ✘ videotoolbox ({took:.1?})");
+    anyhow::bail!("step failed: videotoolbox")
 }
 
 /// How long the CI nextest run goes before [`crate::watchdog`] reports what it waits on. The

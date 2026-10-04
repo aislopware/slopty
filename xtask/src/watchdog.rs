@@ -229,8 +229,8 @@ fn host() -> String {
             "--style",
             "compact",
             "--predicate",
-            "eventMessage CONTAINS \"No real codec\" OR eventMessage CONTAINS \"stalling for \
-             detach\" OR eventMessage CONTAINS \"err=-12908\"",
+            "process != \"log\" AND (eventMessage CONTAINS \"No real codec\" OR eventMessage \
+             CONTAINS \"stalling for detach\" OR eventMessage CONTAINS \"err=-12908\")",
         ])
         .output();
     if let Ok(said) = said {
@@ -241,6 +241,31 @@ fn host() -> String {
         }
     }
     text
+}
+
+/// Whether this Mac's video encoder said in the last half hour that it has stopped: a virtual
+/// Mac's paravirtual encoder service logs "No real codec" once it can no longer reach its host's
+/// (`docs/decisions/video.md`). A Mac on its own hardware never does.
+#[cfg(target_os = "macos")]
+pub fn encoder_stopped() -> bool {
+    Command::new("log")
+        .args([
+            "show",
+            "--last",
+            "30m",
+            "--style",
+            "compact",
+            "--predicate",
+            "process == \"VTEncoderXPCService\" AND eventMessage CONTAINS \"No real codec\"",
+        ])
+        .output()
+        .is_ok_and(|said| String::from_utf8_lossy(&said.stdout).contains("No real codec"))
+}
+
+/// Whether this machine's video encoder stopped: off macOS there is none to ask.
+#[cfg(not(target_os = "macos"))]
+pub const fn encoder_stopped() -> bool {
+    false
 }
 
 /// What the machine says of its video encoder: nothing off macOS.
