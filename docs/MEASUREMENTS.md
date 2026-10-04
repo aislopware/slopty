@@ -14692,3 +14692,37 @@ Measured with the change and with it switched off, three runs each:
 So macOS's allocator keeps the freed buffer as dirty pages in its large cache, which the process
 reuses and the system reclaims under pressure. The footprint does not move. With no number to
 show for it, the change was not taken, and the two measurement additions were not kept.
+
+## 2026-10-05 — a stream of file events waits its turn
+
+The `FSEvents` tests (`fsevents::tests::a_stream_*`) and the folder follower's (`fswatch`
+`follow::*`) failed under load, each at its 10 s wait for a stream to be up, and passed alone.
+`FSEventStreamStart` was timed by itself (`one_start_after_another`, an ignored test in
+`crates/slopty-worker/src/fsevents.rs`), on this Mac (macOS 27):
+
+- **One process, starts one after another:** 0.40 to 0.45 s each once warm (1.65 s for the
+  first), in a temporary folder, in `/private/tmp` and under the home folder alike. Item events,
+  no defer, watching the root, or none of these flags: the same. Starting from a given event id
+  instead of now: the same. A shell making and deleting 200 files in a loop beside it: 0.46 to
+  0.70 s.
+- **Several processes at once**, three starts each: 4 at once took 0.8 to 2.2 s a start, and
+  16 at once took up to 40.7 s, rising by about 0.4 s for each start ahead of it.
+
+So fseventsd starts one stream at a time for the whole system. A start waits for every start
+another process asked for first, whatever it watches, and that is the time to "up". The
+follower is right meanwhile: it lists its folders again once the stream is up, and kqueue
+follows their entries all along. The tests were wrong to bound that wait at 10 s. A full run of
+the worker's tests starts streams from the `find` index tests beside the two that the
+`fsevents` group lets run, and other lanes' runs start theirs too.
+
+The waits for a stream to be up are now a 90 s guard against one that never comes, and no
+sleep was added. Stress run, while a separate-target `cargo check -p slopty-client` built
+beside it and four other processes started streams nonstop (660 starts: p50 2.4 s, p90 3.6 s,
+max 7.6 s):
+
+```sh
+cargo nextest run -p slopty-worker -E 'binary(fswatch) | test(/^fsevents::tests::/)' --stress-count 20
+```
+
+All 20 iterations passed, 15 tests each (394 s). Under that load one start's p90 was already
+3.6 s, so the old 10 s bound left room for two starts queued ahead of a test's own.

@@ -142,10 +142,9 @@ filter = '''
 '''
 test-group = 'videotoolbox'
 
-# fseventsd starts one stream at a time, about a second each on macOS 27 (up to 2.7 s seen), and
-# every FSEvents call of a process waits meanwhile. The folder follower's tests each wait for
-# their stream to be up: fourteen side by side queued the last start past their 10 s bound, and
-# two at a time they pass.
+# fseventsd starts one stream at a time for the whole system (0.4 s each on macOS 27), so the
+# tests that wait for a stream run two at a time to keep the run's own share of that queue small.
+# Their 90 s wait is only a hang guard.
 [test-groups.fsevents]
 max-threads = 2
 

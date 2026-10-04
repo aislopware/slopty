@@ -25,8 +25,11 @@ mod follow {
 
     /// Longer than any report takes on a loaded machine, short of a stuck test.
     const WITHIN: Duration = Duration::from_secs(3);
-    /// Longer than fseventsd takes to start a stream (up to 2.7 s seen on macOS 27).
-    const STREAM_UP: Duration = Duration::from_secs(10);
+    /// Only a guard against a stream that never comes up. fseventsd starts one stream at a time
+    /// for the whole system, 0.4 to 1 s each on macOS 27, so a start waits behind every other
+    /// process's: sixteen asked at once, the last was up after 40 s (MEASUREMENTS.md, "a
+    /// stream of file events waits its turn").
+    const STREAM_UP: Duration = Duration::from_secs(90);
 
     fn key(path: &Path) -> String {
         path.to_string_lossy().into_owned()

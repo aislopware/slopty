@@ -279,8 +279,11 @@ mod tests {
 
     use super::*;
 
-    /// Longer than fseventsd takes to start a stream on a loaded machine (2.7 s seen).
-    const UP: Duration = Duration::from_secs(10);
+    /// Only a guard against a stream that never comes up. fseventsd starts one stream at a time
+    /// for the whole system, 0.4 to 1 s each on macOS 27, so a start waits behind every other
+    /// process's: sixteen asked at once, the last was up after 40 s (MEASUREMENTS.md, "a
+    /// stream of file events waits its turn").
+    const UP: Duration = Duration::from_secs(90);
 
     /// Says when the handler that holds it is dropped.
     struct Released(mpsc::SyncSender<()>);
@@ -368,6 +371,33 @@ mod tests {
         let made = std::iter::from_fn(|| events.recv_timeout(UP).ok())
             .find(|(path, flags)| *path == file && flags & kFSEventStreamEventFlagItemCreated != 0);
         assert!(made.is_some(), "the file made before this stream began is heard");
+    }
+
+    /// What one start costs, `FSEVENTS_STARTS` times (5 unless set). Run several at once to see
+    /// fseventsd take the starts one at a time: `for i in 1 2 3 4; do cargo nextest run -p
+    /// slopty-worker --lib --run-ignored only one_start_after_another --no-capture & done`.
+    #[test]
+    #[ignore = "a measurement: cargo nextest run -p slopty-worker --lib --run-ignored only one_start_after_another --no-capture"]
+    fn one_start_after_another() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(root.path()).unwrap();
+        let count = std::env::var("FSEVENTS_STARTS").ok().and_then(|v| v.parse().ok()).unwrap_or(5);
+        let took: Vec<u128> = std::iter::repeat_with(|| {
+            let asked = Instant::now();
+            let stream = Stream::start(
+                &[&dir],
+                None,
+                0.01,
+                "io.slopty.fsevents.test.cost",
+                Box::new(|_: &Path, _: Flags| {}),
+            );
+            let took = asked.elapsed().as_millis();
+            assert!(stream.is_some(), "FSEvents refused the stream");
+            took
+        })
+        .take(count)
+        .collect();
+        println!("MEASURE FSEventStreamStart: {took:?} ms");
     }
 
     #[test]
