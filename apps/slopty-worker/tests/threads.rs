@@ -694,8 +694,19 @@ mod threads {
     }
 
     /// A held prompt's request on the thread, once there is one open.
+    ///
+    /// A loaded machine can open the block's "asked in the terminal" card first, when the hook
+    /// comes after [`slopty_agent::observed::ASK_GRACE`]; the held prompt then withdraws it. So
+    /// the wait is for the one open request to be the held one.
     async fn asked(client: &mut Client) -> Request {
-        client.until(|c| c.thread.as_ref().is_some_and(|s| s.open_requests().count() == 1)).await;
+        let held = |r: &Request| !r.id.0.starts_with("terminal-");
+        client
+            .until(|c| {
+                c.thread
+                    .as_ref()
+                    .is_some_and(|s| s.open_requests().count() == 1 && s.open_requests().all(held))
+            })
+            .await;
         client.state().open_requests().next().unwrap().clone()
     }
 
