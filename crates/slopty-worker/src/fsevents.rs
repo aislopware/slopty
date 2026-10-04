@@ -59,6 +59,9 @@ pub struct Stream {
     queue: DispatchRetained<DispatchQueue>,
     /// The boxed handler the callback reads, the stream's until `drop` takes it back.
     handler: *mut Box<Handler>,
+    /// The id it hears every event after: the one it was started after, or for a stream
+    /// started from now, the current id read once it started.
+    since: FSEventStreamEventId,
 }
 
 impl std::fmt::Debug for Stream {
@@ -127,8 +130,12 @@ impl Stream {
         }
         // SAFETY: as above, now scheduled.
         let started = unsafe { FSEventStreamStart(stream) };
+        // Read once started: every event numbered after it reaches this stream. One read before
+        // could come before writes made just ahead of the start yet numbered after the read.
+        // SAFETY: `FSEventsGetCurrentEventId` takes nothing and returns an id (FSEvents.h).
+        let since = after.unwrap_or_else(|| unsafe { FSEventsGetCurrentEventId() });
         // Dropped unstarted, it is invalidated and released like a running one.
-        let running = Self { raw: stream, queue, handler };
+        let running = Self { raw: stream, queue, handler, since };
         started.then_some(running)
     }
 }
@@ -179,15 +186,18 @@ impl Starting {
             if kept.strong_count() == 0 {
                 return;
             }
-            // Read here, off the caller's thread: both calls wait for any other stream of the
-            // process starting.
-            let heard = before
-                .and_then(|b| b.upgrade())
-                .and_then(|b| b.lock().as_ref().map(Stream::latest));
-            // SAFETY: `FSEventsGetCurrentEventId` takes nothing and returns an id (FSEvents.h).
-            let after = heard.unwrap_or_else(|| unsafe { FSEventsGetCurrentEventId() });
+            // A first stream starts from now: its caller reads its paths again once it is up.
+            // Replaying from the current id would hand it writes made just before, which
+            // fseventsd numbers only after that id was read. The ids are read here, off the
+            // caller's thread, since the calls wait for any other stream of the process starting.
+            let after = before.map(|b| {
+                let heard = b.upgrade().and_then(|b| b.lock().as_ref().map(Stream::latest));
+                // SAFETY: `FSEventsGetCurrentEventId` takes nothing and returns an id
+                // (FSEvents.h).
+                heard.unwrap_or_else(|| unsafe { FSEventsGetCurrentEventId() })
+            });
             let roots: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-            let Some(stream) = Stream::start(&roots, Some(after), latency, label, handler) else {
+            let Some(stream) = Stream::start(&roots, after, latency, label, handler) else {
                 tracing::info!(label, "no FSEvents stream");
                 return;
             };
@@ -202,11 +212,13 @@ impl Starting {
 }
 
 impl Stream {
-    /// The id of the last event this stream handed its handler, or the one it was started
-    /// after while none has come (FSEvents.h, `FSEventStreamGetLatestEventId`).
+    /// The id of the last event this stream handed its handler, or `since` while none
+    /// has come. `FSEventStreamGetLatestEventId` (FSEvents.h) gives back what the stream was
+    /// made with until an event comes, which for a stream started from now is no id at all.
     fn latest(&self) -> FSEventStreamEventId {
         // SAFETY: a stream made in `start` and not yet released: only `drop` does that.
-        unsafe { FSEventStreamGetLatestEventId(self.raw) }
+        let id = unsafe { FSEventStreamGetLatestEventId(self.raw) };
+        if id == kFSEventStreamEventIdSinceNow { self.since } else { id }
     }
 }
 
