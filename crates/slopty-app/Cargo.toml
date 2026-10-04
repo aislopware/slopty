@@ -33,6 +33,8 @@ data-encoding.workspace = true
 gpui = { workspace = true, features = [ "profiler" ] }
 gpui-kit.workspace = true
 gpui_platform = { workspace = true, optional = true }
+# The code a phone or iPad scans for the server's address (`invite`).
+qrcode.workspace = true
 serde_json.workspace = true
 # A hang of the main thread, filed as a report next to the crashes (`hangs`).
 slopty-crash.workspace = true

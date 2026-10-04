@@ -25,7 +25,12 @@ gpui.workspace = true
 gpui-kit.workspace = true
 gpui_ios.workspace = true
 objc2.workspace = true
-objc2-foundation = { workspace = true, features = [ "NSDictionary", "NSSet", "NSURL" ] }
+objc2-foundation = { workspace = true, features = [
+    "NSDictionary",
+    "NSEnumerator",
+    "NSSet",
+    "NSURL",
+] }
 # The app and scene delegates, and `UIApplicationMain`.
 objc2-ui-kit = { workspace = true, features = [
     "UIApplication",

@@ -23,6 +23,7 @@
 mod e2e;
 pub mod finder;
 mod hangs;
+mod invite;
 pub mod menus;
 pub mod net;
 mod presence;
@@ -44,6 +45,8 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, WindowOptions, div, px,
 };
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
+pub use invite::actions::ConnectDevice;
+pub use invite::open_link;
 pub use settings::actions::{OpenAbout, OpenKeyboardShortcuts, OpenSettings};
 use slopty_client::LinkEvent;
 use slopty_client::layout::WorkerKey;
@@ -514,6 +517,8 @@ pub struct Workspace {
     /// The system's wakes, unlocks, returns to the front and path changes ([`watch_resumes`]).
     resume_watch: Option<slopty_platform::resume::Watch>,
     adding: Option<Adding>,
+    /// The code a phone or iPad scans for the server, while it is up.
+    inviting: Option<invite::Invite>,
     /// Networking runtime; connects run there.
     runtime: tokio::runtime::Handle,
     /// The window, for focusing from a task or a banner.
@@ -681,6 +686,7 @@ impl Workspace {
             contrast_watch: None,
             resume_watch: None,
             adding: None,
+            inviting: None,
             runtime,
             window: None,
             settings_path,
@@ -3161,6 +3167,7 @@ impl Render for Workspace {
             sheet.follow_secure(window, cx);
         }
         let adding = self.adding.as_ref().map(|adding| self.add_worker_panel(adding, window, cx));
+        let inviting = self.inviting.as_ref().map(|invite| self.invite_dialog(invite, window, cx));
         let root = match self.split_view {
             Some(size) => div().w(size.width).h(size.height),
             None => div().size_full(),
@@ -3174,6 +3181,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ConnectServer, window, cx| {
                 this.show_add_worker(Panel::Server, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ConnectDevice, window, cx| {
+                this.show_invite(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopyTailnetGrant, _window, cx| this.copy_grant(cx)))
             .on_action(cx.listener(|this, _: &UseThisMac, window, cx| {
@@ -3210,6 +3220,7 @@ impl Render for Workspace {
                     .child(div().w_full().h(insets.bottom).bg(hsla(band)))
             })
             .when_some(adding, gpui::ParentElement::child)
+            .when_some(inviting, gpui::ParentElement::child)
             .when_some(settings_editor, gpui::ParentElement::child)
     }
 }
@@ -3508,6 +3519,7 @@ fn app_commands() -> Vec<slopty_ui::keymap::Command> {
         app_command("about", OpenAbout, &[]),
         app_command("add_worker", AddWorker, &["cmd-shift-h"]),
         app_command("connect_server", ConnectServer, &[]),
+        app_command("connect_device", ConnectDevice, &[]),
         app_command("copy_tailnet_grant", CopyTailnetGrant, &[]),
         app_command("update_all_workers", UpdateAllWorkers, &[]),
         app_command("update_server", UpdateServer, &[]),
@@ -3554,6 +3566,7 @@ fn app_palette_items() -> Vec<slopty_ui::palette::PaletteItem> {
         item(KEYBOARD_SHORTCUTS, IconName::Keyboard, Box::new(OpenKeyboardShortcuts)),
         item(ABOUT, IconName::Info, Box::new(OpenAbout)),
         item("Connect to a server", IconName::Link, Box::new(ConnectServer)),
+        item(invite::TITLE, IconName::Smartphone, Box::new(ConnectDevice)),
         item(server::COPY_GRANT, IconName::Copy, Box::new(CopyTailnetGrant)),
         item("Add a machine\u{2026}", IconName::Plus, Box::new(AddWorker)),
         item(ssh::UPDATE_ALL, IconName::Download, Box::new(UpdateAllWorkers)),
@@ -3786,6 +3799,20 @@ pub fn open_workspace(
                 let Some(window) = for_notifications.read(cx).window else { return };
                 let _handled = window.update(cx, |_root, _window, cx| {
                     for_notifications.update(cx, |ws, cx| ws.open_notification(&tap, cx));
+                });
+            });
+        }
+    })
+    .detach();
+    // A link the system opened Slopty with ([`invite`]): the person's Camera read a code.
+    let mut links = invite::links();
+    let for_links = workspace.clone();
+    cx.spawn(async move |cx| {
+        while let Some(url) = links.recv().await {
+            cx.update(|cx| {
+                let Some(window) = for_links.read(cx).window else { return };
+                let _handled = window.update(cx, |_root, window, cx| {
+                    for_links.update(cx, |ws, cx| ws.open_link(&url, window, cx));
                 });
             });
         }

@@ -535,6 +535,10 @@ fn apply(
 ) -> Reply {
     match command {
         Command::Ping => Reply::Ok,
+        Command::OpenLink { url } => {
+            crate::invite::open_link(url);
+            Reply::Ok
+        }
         Command::Contrast { increased } => {
             let contrast = if increased {
                 slopty_theme::Contrast::Increased

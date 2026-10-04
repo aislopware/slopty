@@ -98,6 +98,16 @@ async fn tailnet_status() -> Option<slopty_tailnet::Status> {
     slopty_tailnet::LocalApi::find()?.status().await.ok()
 }
 
+/// This machine's name on the tailnet: its `MagicDNS` name, or its tailnet address where
+/// `MagicDNS` is off; `None` with no tailnet up here.
+pub(crate) async fn tailnet_name() -> Option<String> {
+    let me = tailnet_status().await.filter(slopty_tailnet::Status::running)?.me?;
+    match me.name() {
+        "" => me.ipv4().map(|ip| ip.to_string()),
+        name => Some(name.to_owned()),
+    }
+}
+
 /// Which app this is, by platform, as workers and the server show it.
 #[cfg(target_os = "ios")]
 const NAME: &str = "Slopty for iPhone";

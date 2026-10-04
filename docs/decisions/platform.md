@@ -723,3 +723,34 @@ See `docs/DECISIONS.md` for the legend. Newest entries go at the end.
     and not done.
   - Tests: `slopty-app` `this_mac::tests::slopty_runs_its_worker_only_from_applications`,
     `this_mac_asks_before_it_ends_sessions_or_installs_from_a_download`.
+
+- ✅ **A phone or iPad finds the server from a Mac's code** (2026-10-05). The palette's "Connect a
+  phone or iPad" shows a QR code of `slopty://connect?server=<host:port>`, with the address in
+  type under it and "Copy link" for a device with no camera to hand.
+  - **The device's own Camera reads it.** iOS hands the link to Slopty through its URL scheme
+    (`CFBundleURLTypes`, scheme `slopty`), so Slopty asks for no camera and draws no scanner. The
+    scene's delegate gives each link to `slopty_app::open_link`, at a launch from its connection
+    options and later from `scene:openURLContexts:`. Links wait in an inbox until the workspace
+    listens. `gpui_ios` lets no embedder register GPUI's own open-URL callback, so the links do
+    not go through it.
+  - **A link fills in and never connects.** Any page or app can open such a link, so it opens
+    "Connect to a server" with the address in the field, and the person presses Connect. Only
+    the exact form is taken: that scheme and host, one `server` pair, a DNS name or IP address,
+    and an explicit port. Anything else is dropped, logged at debug.
+  - **The address the device reaches.** A server elsewhere is given as this app reaches it. A
+    server on this Mac, which the app reaches over loopback, is given by this Mac's `MagicDNS`
+    name, or by its tailnet address where `MagicDNS` is off. With no tailnet, the dialog says
+    to type the VPN address on the device.
+  - **Dark on light in both appearances.** The modules are the light theme's text on its page,
+    with the standard four-module quiet zone, at medium error correction, in whole points per
+    module. Scanners need dark on light, and many do not read an inverted code.
+  - Tests: `slopty-app` `invite::tests` (strict parsing, round trip, quiet zone, contrast, the
+    field filled without a connect, Esc). `slopty-e2e` `gallery::the_code_for_a_phone_names_this_mac_on_the_tailnet`
+    (goldens `invite`, `invite-dark`, the code and its address masked since the port is the
+    run's) and `ios::a_link_from_a_mac_s_code_fills_the_server_s_address`. The simulator test
+    hands the link in where the scene's delegate does (`Command::OpenLink`), because `simctl
+    openurl` stops at the system's "Open in Slopty?" confirmation, which only a person may
+    answer.
+  - **A launch with no link.** `-[UISceneConnectionOptions URLContexts]` is marked nonnull but
+    returns nil on a launch without a link, and objc2's generated getter panics on that. The
+    delegate reads it as optional through `msg_send!`.

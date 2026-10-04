@@ -13,7 +13,9 @@
 use std::time::Duration;
 
 use slopty_e2e::harness::artifacts_dir;
-use slopty_e2e::snapshot::{MAC_TOLERANCE as TOLERANCE, assert_matches};
+use slopty_e2e::snapshot::{
+    MAC_TOLERANCE as TOLERANCE, PixelRect, assert_matches, assert_matches_masked,
+};
 use slopty_e2e::{Command, Driver, Dump, Stack};
 
 /// How long a worker round trip may take.
@@ -854,5 +856,78 @@ async fn a_tabbed_column_draws_its_tab_row() {
     assert!(dump.a11y.iter().all(|n| n.label.as_deref() != Some("2/2")), "{:#?}", dump.a11y);
     drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
     golden(drv, &dir, "tabbed-column").await;
+    stack.shutdown().await;
+}
+
+/// This Mac on the tailnet as its Tailscale would describe it, with no peer to list.
+const TAILNET_NAMING_THIS_MAC: &str = r#"{"BackendState":"Running","Self":{"ID":"n1","HostName":"mac-studio","DNSName":"mac-studio.tail1234.ts.net.","OS":"macOS","TailscaleIPs":["100.64.0.7"]},"Peer":null}"#;
+
+/// The node labelled `label` with `role`, as device pixels.
+fn pixels(dump: &Dump, role: &str, label: &str) -> PixelRect {
+    let node =
+        dump.a11y_node(role, Some(label)).unwrap_or_else(|| panic!("{label}: {:#?}", dump.a11y));
+    let scale = dump.window.scale;
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "window pixels")]
+    node.bounds.map(|points| (points * scale).round().max(0.0) as u32)
+}
+
+/// "Connect a phone or iPad" from the palette: the server listens on this Mac's loopback, so
+/// the code carries this Mac's name on the tailnet with the server's port, in both themes.
+/// The port is the run's own, so the code and the address under it are left out of the
+/// comparison; the dialog round them is held to the golden.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn the_code_for_a_phone_names_this_mac_on_the_tailnet() {
+    let mut stack = Stack::launch("e2e-worker").await.unwrap();
+    let dir = stack.dir.path().to_path_buf();
+    std::fs::write(stack.path("tailnet.json"), TAILNET_NAMING_THIS_MAC).unwrap();
+    let port = stack.server.address().rsplit(':').next().unwrap().to_owned();
+    let reached = format!("mac-studio.tail1234.ts.net:{port}");
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    drv.keys("cmd-shift-p").await.unwrap();
+    drv.wait_for("the palette", STEP, |d| d.a11y_node("Dialog", Some("Commands")).is_some())
+        .await
+        .unwrap();
+    drv.type_text("phone or ipad").await.unwrap();
+    drv.wait_for("the line", STEP, |d| {
+        d.a11y.iter().any(|n| {
+            n.role == "ListBoxOption"
+                && n.label.as_deref().is_some_and(|l| l.starts_with("Connect a phone or iPad"))
+        })
+    })
+    .await
+    .unwrap();
+    drv.keys("enter").await.unwrap();
+    let code = format!("Code for {reached}");
+    let d = drv
+        .wait_for("the code for this Mac's name", STEP, |d| {
+            d.a11y_node("Dialog", Some("Connect a phone or iPad")).is_some()
+                && d.a11y_node("Image", Some(&code)).is_some()
+        })
+        .await
+        .unwrap();
+    assert!(d.a11y_node("Label", Some(&reached)).is_some(), "{:#?}", d.a11y);
+    assert_eq!(labels(&d, "Button").iter().filter(|b| *b == "Copy link").count(), 1);
+    drv.ok(&Command::Move { x: PARK.0, y: PARK.1 }).await.unwrap();
+    for (name, dark) in [("invite", false), ("invite-dark", true)] {
+        if dark {
+            stack.set_appearance("dark").unwrap();
+            stack.driver.wait_for("the dark theme", STEP, |d| d.dark).await.unwrap();
+        }
+        let drv = &mut stack.driver;
+        let d = settled(drv).await;
+        let masks = [pixels(&d, "Image", &code), pixels(&d, "Label", &reached)];
+        let frame = drv.render(&dir.join(format!("{name}.png"))).await.unwrap();
+        assert_matches_masked(name, &frame, TOLERANCE, &artifacts_dir(), &masks).unwrap();
+    }
+    let drv = &mut stack.driver;
+    drv.keys("escape").await.unwrap();
+    drv.wait_for("the dialog closed", STEP, |d| {
+        d.a11y_node("Dialog", Some("Connect a phone or iPad")).is_none()
+    })
+    .await
+    .unwrap();
     stack.shutdown().await;
 }

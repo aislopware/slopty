@@ -323,6 +323,12 @@ settings:
           - UIInterfaceOrientationLandscapeRight
         NSLocalNetworkUsageDescription: Slopty connects to your workers on the local network.
         CADisableMinimumFrameDurationOnPhone: true
+        # The code a Mac shows for its server is a `slopty://connect` link: the Camera app opens
+        # it here, with the address filled in (`slopty_app::invite`).
+        CFBundleURLTypes:
+          - CFBundleURLName: {BUNDLE_ID}.connect
+            CFBundleURLSchemes:
+              - slopty
         UIApplicationSupportsIndirectInputEvents: true
         # A page's downloads land in Documents; these show them in the Files app.
         UIFileSharingEnabled: true

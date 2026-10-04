@@ -13,8 +13,9 @@ use std::ffi::{c_char, c_int, c_void};
 
 use gpui::WindowOptions;
 use gpui_ios::ios::ffi;
+use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{ClassType as _, MainThreadMarker, MainThreadOnly, define_class};
+use objc2::{ClassType as _, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_foundation::{NSDictionary, NSObject, NSSet, NSString};
 use objc2_ui_kit::{
     UIApplication, UIApplicationDelegate, UIApplicationLaunchOptionsKey, UIOpenURLContext,
@@ -91,7 +92,7 @@ define_class!(
             &self,
             scene: &UIScene,
             _session: &UISceneSession,
-            _options: &UISceneConnectionOptions,
+            options: &UISceneConnectionOptions,
         ) {
             let Some(scene) = scene.downcast_ref::<UIWindowScene>() else {
                 return;
@@ -99,6 +100,16 @@ define_class!(
             ffi::gpui_ios_set_window_scene(object_ptr(scene));
             // Each window drives its own display link, paused while idle (gpui_ios frame pacing).
             run();
+            // A link that launched the app comes with the connection, not as an open later.
+            // SAFETY: UIKit rule: `-[UISceneConnectionOptions URLContexts]` takes no argument
+            // and returns an `NSSet<UIOpenURLContext *>`. The header marks it nonnull, but a
+            // launch with no link returns nil, which the generated binding panics on, so the
+            // result is read as optional.
+            let contexts: Option<Retained<NSSet<UIOpenURLContext>>> =
+                unsafe { msg_send![options, URLContexts] };
+            if let Some(contexts) = contexts {
+                open_links(&contexts);
+            }
         }
 
         #[unsafe(method(sceneWillEnterForeground:))]
@@ -123,16 +134,24 @@ define_class!(
 
         #[unsafe(method(scene:openURLContexts:))]
         fn open_url_contexts(&self, _scene: &UIScene, contexts: &NSSet<UIOpenURLContext>) {
-            if let Some(url) =
-                contexts.anyObject().and_then(|context| context.URL().absoluteString())
-            {
-                ffi::gpui_ios_handle_open_url(object_ptr(&*url));
-            }
+            open_links(contexts);
         }
     }
 
     unsafe impl UIWindowSceneDelegate for SceneDelegate {}
 );
+
+/// Hand each link the system opened the app with to the workspace (`slopty_app::open_link`),
+/// which takes only its own kind. Straight there rather than through GPUI's open-URL callback,
+/// which `gpui_ios` lets no embedder register, and which a cold launch would reach before
+/// the workspace listens.
+fn open_links(contexts: &NSSet<UIOpenURLContext>) {
+    for context in contexts {
+        if let Some(url) = context.URL().absoluteString() {
+            slopty_app::open_link(url.to_string());
+        }
+    }
+}
 
 /// An Objective-C object as the untyped pointer `gpui_ios`'s entry points take. They borrow it
 /// for the call; UIKit keeps each object alive for longer than that.

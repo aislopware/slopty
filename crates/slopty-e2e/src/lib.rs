@@ -105,6 +105,14 @@ pub enum Button {
 pub enum Command {
     /// Liveness.
     Ping,
+    /// Hand the app a link the system opened it with, where the iOS scene's delegate hands it
+    /// (`slopty_app::open_link`). `simctl openurl` would come through an "Open in Slopty?"
+    /// confirmation that only a person may answer. On a device, the person's tap on the
+    /// Camera's banner is that answer.
+    OpenLink {
+        /// The link.
+        url: String,
+    },
     /// Hand the app a resume, as the system's watch would (`slopty_platform::resume`):
     /// `woke`, `screens-woke`, `session-active`, `unlocked`, `foreground` or `path-changed`.
     /// Nothing sleeps and no network changes.

@@ -91,10 +91,8 @@ ListItem │ Forwarded ports
 Button │ Keys for Forwarded ports
 ListItem │ Name this tile │ ⌘E
 Button │ Keys for Name this tile │ ⌘E
-ListItem │ Find in every tile │ ⇧⌘F
-Button │ Keys for Find in every tile │ ⇧⌘F
-ListItem │ Search in files │ ⌥⌘F
-Button │ Keys for Search in files │ ⌥⌘F
+ListItem │ Search in files │ ⇧⌘F
+Button │ Keys for Search in files │ ⇧⌘F
 ListItem │ Into the column on the left │ ⌘[
 Button │ Keys for Into the column on the left │ ⌘[
 ListItem │ Into the column on the right │ ⌘]
@@ -125,6 +123,8 @@ ListItem │ Add a machine… │ ⇧⌘H
 Button │ Keys for Add a machine… │ ⇧⌘H
 ListItem │ Connect to a server
 Button │ Keys for Connect to a server
+ListItem │ Connect a phone or iPad
+Button │ Keys for Connect a phone or iPad
 ListItem │ Copy the tailnet grant for Slopty's clients
 Button │ Keys for Copy the tailnet grant for Slopty's clients
 ListItem │ Update all machines
@@ -327,18 +327,6 @@ ListItem │ Next screen │ ⇟, ␣
 Button │ Keys for Next screen │ ⇟, ␣
 ListItem │ Previous screen │ ⇞, ⇧␣
 Button │ Keys for Previous screen │ ⇞, ⇧␣
-ListItem │ Next page │ →
-Button │ Keys for Next page │ →
-ListItem │ Previous page │ ←
-Button │ Keys for Previous page │ ←
-ListItem │ First page │ ↖
-Button │ Keys for First page │ ↖
-ListItem │ Last page │ ↘
-Button │ Keys for Last page │ ↘
-ListItem │ Copy selected text │ ⌘C
-Button │ Keys for Copy selected text │ ⌘C
-ListItem │ Select all text │ ⌘A
-Button │ Keys for Select all text │ ⌘A
 Heading │ Folders
 ListItem │ Select previous │ ↑
 Button │ Keys for Select previous │ ↑

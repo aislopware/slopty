@@ -355,4 +355,50 @@ mod tests {
         }
         stack.shutdown().await;
     }
+    /// A `slopty://connect` link, what the Camera opens from a Mac's code, opens Slopty at
+    /// "Connect to a server" with the address in the field and connects nothing until the
+    /// person presses Connect. A link that is not exactly that changes nothing. The link comes
+    /// in where the scene's delegate hands it over, since `simctl openurl` stops at a
+    /// confirmation only a person may answer.
+    #[tokio::test]
+    #[ignore = "live: cargo xtask e2e ios"]
+    async fn a_link_from_a_mac_s_code_fills_the_server_s_address() {
+        let simulator = simulator();
+        let mut stack =
+            Stack::launch_first_run_on_simulator("e2e-ios-link", simulator).await.unwrap();
+        stack.driver.wait_for("the connect panel", STEP, |d| d.adding).await.unwrap();
+        let field = |d: &Dump| {
+            d.a11y_node("TextInput", Some("Server address")).and_then(|n| n.value.clone())
+        };
+
+        let link = |url: String| Command::OpenLink { url };
+        stack.driver.ok(&link("slopty://connect?server=home-server".to_owned())).await.unwrap();
+        tokio::time::sleep(SETTLE).await;
+        let d = stack.driver.dump().await.unwrap();
+        assert_eq!(field(&d).unwrap_or_default(), "", "a link with no port: {:#?}", d.a11y);
+
+        let server = stack.server.address().to_owned();
+        stack.driver.ok(&link(format!("slopty://connect?server={server}"))).await.unwrap();
+        stack
+            .driver
+            .wait_for("the address in the field", STEP, |d| {
+                field(d).as_deref() == Some(server.as_str())
+            })
+            .await
+            .unwrap();
+        // A moment for a connect the link should not have started.
+        tokio::time::sleep(SETTLE).await;
+        let d = stack.driver.dump().await.unwrap();
+        assert!(d.adding && d.workers.is_empty(), "a link alone connects nothing: {d:#?}");
+
+        stack.driver.keys("enter").await.unwrap();
+        stack
+            .driver
+            .wait_for("connected on the person's press", STEP, |d| {
+                !d.adding && !d.workers.is_empty()
+            })
+            .await
+            .unwrap();
+        stack.shutdown().await;
+    }
 }
