@@ -54,6 +54,7 @@ pub(crate) fn serve(
 ) {
     let (tx, mut rx) = mpsc::channel::<Request>(16);
     runtime.spawn(listen(socket, tx));
+    #[cfg(target_os = "macos")]
     let handle = runtime.clone();
     cx.spawn(async move |cx| {
         // GPUI's fades run on the wall clock, so a frame and the same state drawn from scratch a
