@@ -1921,36 +1921,40 @@ mod golden {
     /// Kitty drag and drop (OSC 72): a drag over a program that asks for drops, and its answers.
     #[test]
     fn drag_and_drop() {
-        use slopty_proto::terminal::{DropOperation, DropPoint, DropRep};
+        use slopty_proto::drag::{DragId, DragItem, FileMeta};
+        use slopty_proto::terminal::{DropOperation, DropPoint};
+        use slopty_proto::transfer::{ClipFormat, ClipType, Rep};
         let at = DropPoint { col: 3, row: 2, x: 28, y: 40, copy: true, moves: false };
         let uris = "text/uri-list".to_owned();
         let term = |req| ClientMsg::Term { session: session(), req };
-        snap(
-            "client_term_drag_over",
-            &term(TermRequest::DragOver { at, mimes: vec![uris.clone()] }),
-        );
+        let file = FileMeta {
+            name: "a.txt".to_owned(),
+            size: 5,
+            folder: false,
+            mode: 0o644,
+            mtime_ms: WallMs::ZERO,
+            path: None,
+        };
+        let text = Rep {
+            kind: ClipType::Format(ClipFormat::Text),
+            size: Some(5),
+            hash: None,
+            inline: None,
+        };
+        let items = vec![
+            DragItem { file: Some(file), promised: None, reps: Vec::new() },
+            DragItem { file: None, promised: None, reps: vec![text] },
+        ];
+        let drag = DragId::from_uuid(Uuid::from_u128(0xd2a6));
+        snap("client_term_drag_enter", &term(TermRequest::DragEnter { drag, items }));
+        snap("client_term_drag_over", &term(TermRequest::DragOver { at }));
         snap("client_term_drag_leave", &term(TermRequest::DragLeave));
+        snap("client_term_drop", &term(TermRequest::Drop { at }));
         snap(
-            "client_term_drop",
-            &term(TermRequest::Drop {
-                at,
-                reps: vec![
-                    DropRep { mime: uris.clone(), data: None },
-                    DropRep { mime: "text/plain".to_owned(), data: Some(b"a.txt".to_vec()) },
-                ],
-            }),
+            "client_term_drop_files",
+            &term(TermRequest::DropFiles { drag, landed: Some(vec!["/w/a.txt".to_owned()]) }),
         );
-        snap(
-            "client_term_drop_data",
-            &term(TermRequest::DropData {
-                mime: uris.clone(),
-                data: Some(b"file:///w/a.txt\r\n".to_vec()),
-            }),
-        );
-        snap(
-            "client_term_drop_data_gone",
-            &term(TermRequest::DropData { mime: uris.clone(), data: None }),
-        );
+        snap("client_term_drop_files_gone", &term(TermRequest::DropFiles { drag, landed: None }));
         snap("worker_term_drop_target", &TermEvent::DropTarget { accepts: true });
         snap(
             "worker_term_drop_accepted",

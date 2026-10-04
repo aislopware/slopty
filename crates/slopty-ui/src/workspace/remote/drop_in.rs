@@ -11,6 +11,13 @@
 //!
 //! A drag out of a worker's app that comes back over a tile of that same worker carries the
 //! worker's own files by their paths there, and nothing comes down or goes up for it.
+//!
+//! Over the grid of a terminal whose program asks for drops (Kitty drag and drop), the drag is
+//! the program's (`docs/decisions/terminal.md`, "Drops are read lazily"): it too is read once
+//! as it enters, and the terminal tile keeps what it carries. The program hears what the items
+//! are and none of their bytes; what it accepts goes up while the drag hovers, its files into
+//! the drag's landing, and anything else it reads on the drop the worker fetches from the tile.
+//! A terminal whose program does not ask takes the drag as GPUI hands it, and types its paths.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -31,13 +38,27 @@ use slopty_proto::transfer::{RepRef, Source};
 
 use super::{Upload, WorkspaceView};
 use crate::screen::ScreenView;
+#[cfg(target_os = "macos")]
+use crate::terminal::{DropHook, DropNews, SinkDropped};
 
 /// A drag from this device over the window: the remote tile it is over, if any, and a drop
 /// waiting for its promised files.
 #[derive(Debug, Default)]
 pub struct DropIn {
     over: Option<OverTile>,
+    /// The terminal whose program the drag is over.
+    #[cfg(target_os = "macos")]
+    term: Option<OverTerm>,
     waiting: Option<Waiting>,
+}
+
+/// The terminal a drag is over, its program asking for drops.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+struct OverTerm {
+    tile: TileRef,
+    session: slopty_core::SessionId,
+    drag: Option<DragId>,
 }
 
 /// What a drag from this device carries, as the platform hands it over.
@@ -81,12 +102,19 @@ struct Waiting {
     drag: DragId,
     at: Point<Pixels>,
     items: Vec<u16>,
+    /// A terminal's drop, for its program: the promised files go up with the drag's own.
+    #[cfg(target_os = "macos")]
+    term: Option<slopty_core::SessionId>,
 }
 
 impl DropIn {
     /// The drag the window is carrying to a worker, if it is.
     #[must_use]
     pub fn drag(&self) -> Option<DragId> {
+        #[cfg(target_os = "macos")]
+        if let Some(drag) = self.term.and_then(|t| t.drag) {
+            return Some(drag);
+        }
         self.over.as_ref().and_then(|o| o.drag.as_ref()).map(|(d, _)| *d)
     }
 }
@@ -124,6 +152,9 @@ impl WorkspaceView {
         use slopty_platform::file_drop::Over;
         use slopty_proto::drag::DragOp;
         let Carried { board, allowed, own } = carried;
+        if let Some(over) = self.drag_over_terminal(state, p, board, cx) {
+            return over;
+        }
         let target = self.remote_body(p);
         if let Some(over) = &state.over
             && Some(over.tile) == target
@@ -168,8 +199,129 @@ impl WorkspaceView {
 
     /// The drag left the window from over a remote tile, or ended there with no drop.
     pub fn drag_left(&mut self, state: &mut DropIn, cx: &mut Context<Self>) {
+        #[cfg(target_os = "macos")]
+        self.leave_terminal(state, cx);
         if let Some(over) = state.over.take() {
             self.leave_tile(&over, cx);
+        }
+    }
+
+    /// The terminal under `p` whose program takes a drag there.
+    #[cfg(target_os = "macos")]
+    fn terminal_taking(&self, p: Point<Pixels>, cx: &Context<Self>) -> Option<OverTerm> {
+        let (tile, true) = self.under(p)? else { return None };
+        let Some(ItemKind::Terminal { session }) = self.item(tile).map(|i| &i.kind) else {
+            return None;
+        };
+        let view = self.terminals.get(session)?;
+        let over = OverTerm { tile, session: *session, drag: None };
+        view.read(cx).takes_drag_at(p).then_some(over)
+    }
+
+    /// The drag at `p` over a terminal whose program takes it: it enters the program, read
+    /// once, and moves over it; `None` when it is not over one, having left the one it was.
+    #[cfg(target_os = "macos")]
+    fn drag_over_terminal(
+        &mut self,
+        state: &mut DropIn,
+        p: Point<Pixels>,
+        board: &dyn slopty_platform::pasteboard::Pasteboard,
+        cx: &mut Context<Self>,
+    ) -> Option<slopty_platform::file_drop::Over> {
+        use slopty_platform::file_drop::Over;
+        let target = self.terminal_taking(p, cx);
+        if let (Some(was), Some(now)) = (state.term, target)
+            && was.session == now.session
+        {
+            let view = self.terminals.get(&now.session)?.clone();
+            return Some(Over::Remote(drag_op(view.update(cx, |v, cx| v.sink_move(p, cx)))));
+        }
+        self.leave_terminal(state, cx);
+        let mut term = target?;
+        let read = dnd::read(board);
+        if read.is_empty() {
+            return None;
+        }
+        if let Some(over) = state.over.take() {
+            self.leave_tile(&over, cx);
+        }
+        let view = self.terminals.get(&term.session)?.clone();
+        let store = dnd::term::TermDrag::new(read);
+        term.drag = Some(store.drag());
+        tracing::info!(drag = %store.drag(), session = %term.session, "drag over a program asking for drops");
+        let hook = Self::drop_hook(term.tile, cx);
+        let op = view.update(cx, |v, cx| {
+            v.sink_enter(store, hook, cx);
+            v.sink_move(p, cx)
+        });
+        state.term = Some(term);
+        Some(Over::Remote(drag_op(op)))
+    }
+
+    /// Where `tile`'s terminal tells what goes up for its drag: run on the workspace once the
+    /// terminal's own update is done.
+    #[cfg(target_os = "macos")]
+    fn drop_hook(tile: TileRef, cx: &Context<Self>) -> DropHook {
+        let workspace = cx.entity().downgrade();
+        Rc::new(move |news, cx: &mut gpui::App| {
+            let workspace = workspace.clone();
+            cx.defer(move |cx| {
+                let _gone = workspace.update(cx, |w, cx| w.term_drop_news(tile, news, cx));
+            });
+        })
+    }
+
+    /// `tile`'s terminal says what goes up for the drag over it: representations its program
+    /// accepted, inline or as streams ahead of other transfers; its files, into the drag's
+    /// landing; and once the program is done with the drop, nothing more.
+    #[cfg(target_os = "macos")]
+    fn term_drop_news(&mut self, tile: TileRef, news: DropNews, cx: &mut Context<Self>) {
+        match news {
+            DropNews::Push(pushes) => {
+                let Some(remote) = self.remote(tile.worker) else { return };
+                for (rep, bytes) in pushes {
+                    remote.send_clip(rep, Fetched::Data(bytes), true);
+                }
+            }
+            DropNews::Upload(drag, files) => self.upload_term_drag(tile, drag, &files, None, cx),
+            DropNews::Ended(drag, operation) => {
+                tracing::info!(%drag, ?operation, "terminal drop ended");
+                self.stop_drag_uploads(drag, cx);
+            }
+        }
+    }
+
+    /// Send `files` of `drag` into its landing on `tile`'s worker, for the program of its
+    /// terminal, which is told they will not come if they cannot go.
+    #[cfg(target_os = "macos")]
+    fn upload_term_drag(
+        &mut self,
+        tile: TileRef,
+        drag: DragId,
+        files: &[std::path::PathBuf],
+        scratch: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ItemKind::Terminal { session }) = self.item(tile).map(|i| i.kind.clone()) else {
+            Self::discard_landing(scratch, cx);
+            return;
+        };
+        let upload = Upload { drag: Some(drag), scratch, ..Upload::to_shell(tile, session) };
+        if (files.is_empty() || !self.upload(tile, files, upload, cx))
+            && let Some(view) = self.terminals.get(&session).cloned()
+        {
+            view.update(cx, |v, cx| v.files_failed(Some(drag), cx));
+        }
+    }
+
+    /// The drag left the terminal it was over: its program hears it, and what goes up for it
+    /// stops.
+    #[cfg(target_os = "macos")]
+    fn leave_terminal(&mut self, state: &mut DropIn, cx: &mut Context<Self>) {
+        let Some(was) = state.term.take() else { return };
+        let Some(view) = self.terminals.get(&was.session).cloned() else { return };
+        if let Some(drag) = view.update(cx, |v, cx| v.sink_leave(cx)) {
+            self.stop_drag_uploads(drag, cx);
         }
     }
 
@@ -204,6 +356,9 @@ impl WorkspaceView {
         promised: usize,
         cx: &mut Context<Self>,
     ) -> Taken {
+        if let Some(term) = state.term.take() {
+            return self.drop_on_terminal(state, term, p, cx);
+        }
         let Some(over) = state.over.take() else { return Taken::Refused };
         let (Some((drag, items)), Some(screen)) =
             (over.drag.clone(), self.screen(over.tile.item).cloned())
@@ -224,14 +379,56 @@ impl WorkspaceView {
             return sent(screen.update(cx, |v, cx| v.drag_drop(p, Vec::new(), cx)));
         }
         screen.update(cx, |v, cx| v.drag_hold(p, cx));
-        state.waiting = Some(Waiting { tile: over.tile, drag, at: p, items });
+        state.waiting = Some(Waiting { tile: over.tile, drag, at: p, items, term: None });
         Taken::CallIn
+    }
+
+    /// Dropped at `p` on `term`, whose program the drag was over: the program has it unless
+    /// it refused it. Promised files it wants are called in, to go up with the drag's own.
+    #[cfg(target_os = "macos")]
+    fn drop_on_terminal(
+        &self,
+        state: &mut DropIn,
+        term: OverTerm,
+        p: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Taken {
+        let Some(view) = self.terminals.get(&term.session).cloned() else { return Taken::Refused };
+        match view.update(cx, |v, cx| v.sink_drop(p, cx)) {
+            SinkDropped::Refused => Taken::Refused,
+            SinkDropped::Taken { drag, call_in: false } => {
+                tracing::info!(%drag, session = %term.session, "dropped on a program");
+                Taken::AsIs
+            }
+            SinkDropped::Taken { drag, call_in: true } => {
+                let session = Some(term.session);
+                let waiting =
+                    Waiting { tile: term.tile, drag, at: p, items: Vec::new(), term: session };
+                state.waiting = Some(waiting);
+                Taken::CallIn
+            }
+        }
     }
 
     /// The files a remote drop's promises wrote are here, or failed: they are named in the
     /// drop, which goes to the worker, and go up into its landing.
     fn drag_arrived(&mut self, waiting: Waiting, dropped: &Dropped, cx: &mut Context<Self>) {
-        let Waiting { tile, drag, at, items } = waiting;
+        #[cfg(target_os = "macos")]
+        if let Some(session) = waiting.term {
+            if !dropped.failed.is_empty() {
+                self.show_failure(format!("Not sent: {}", dropped.failed.join("; ")), cx);
+            }
+            let mut files = self
+                .terminals
+                .get(&session)
+                .map(|v| v.read(cx).sink_files(waiting.drag))
+                .unwrap_or_default();
+            files.extend(dropped.paths.iter().cloned());
+            let scratch = dropped.landing.clone();
+            self.upload_term_drag(waiting.tile, waiting.drag, &files, scratch, cx);
+            return;
+        }
+        let Waiting { tile, drag, at, items, .. } = waiting;
         let promised = items
             .iter()
             .enumerate()
@@ -393,5 +590,17 @@ impl DropSink for Sink {
                 slopty_platform::file_drop::discard(landing);
             }
         }
+    }
+}
+
+/// What a drop on a terminal does, as the drag shows it.
+#[cfg(target_os = "macos")]
+const fn drag_op(operation: slopty_proto::terminal::DropOperation) -> slopty_proto::drag::DragOp {
+    use slopty_proto::drag::DragOp;
+    use slopty_proto::terminal::DropOperation;
+    match operation {
+        DropOperation::None => DragOp::None,
+        DropOperation::Copy => DragOp::Copy,
+        DropOperation::Move => DragOp::Move,
     }
 }

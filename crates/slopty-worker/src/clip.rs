@@ -103,7 +103,7 @@ fn first_generation() -> u64 {
 
 /// `path` as a `file://` URL, the bytes of a [`ClipFormat::FileUrls`] representation.
 #[must_use]
-fn file_url(path: &Path) -> String {
+pub(crate) fn file_url(path: &Path) -> String {
     use std::fmt::Write as _;
     use std::os::unix::ffi::OsStrExt as _;
     let mut url = String::from("file://");

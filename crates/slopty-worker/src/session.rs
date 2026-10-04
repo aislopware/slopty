@@ -13,6 +13,7 @@ use slopty_core::{ClientId, SessionId};
 use slopty_engine::ghostty::{CommandBlock, Position, ScreenText, TextLines, TextSince};
 use slopty_engine::{Compression, EngineConfig, EngineEvent, GhosttyEngine, ImageUpload, Memory};
 use slopty_proto::codec;
+use slopty_proto::drag::{DragId, DragItem};
 use slopty_proto::terminal::{
     ColorOverrides, FRAMES_UNREACHED_BYTES, Frame, MAX_FETCH_LINES, MAX_OSC52_BYTES, PointerShape,
     Progress, ProgressState, Restored, TermColors, TermError, TermEvent, TermRequest, TermSize,
@@ -165,6 +166,8 @@ enum Cmd {
     Detach { client: ClientId, sink: Option<ClientSink> },
     Reserve { client: ClientId },
     Request { client: ClientId, req: TermRequest, at: tokio::time::Instant },
+    DragEnter { client: ClientId, drag: DragId, items: Vec<DragItem>, fetch: DragFetch },
+    DragData { drag: DragId, data: DragData },
     Snapshot { reply: oneshot::Sender<Snapshot> },
     ResizeUnviewed { size: TermSize, reply: oneshot::Sender<u16> },
     Probe { reply: oneshot::Sender<Probe> },
@@ -365,6 +368,8 @@ impl std::fmt::Debug for Cmd {
             Self::Detach { .. } => "Detach",
             Self::Reserve { .. } => "Reserve",
             Self::Request { .. } => "Request",
+            Self::DragEnter { .. } => "DragEnter",
+            Self::DragData { .. } => "DragData",
             Self::Snapshot { .. } => "Snapshot",
             Self::ResizeUnviewed { .. } => "ResizeUnviewed",
             Self::Probe { .. } => "Probe",
@@ -429,6 +434,24 @@ impl SessionHandle {
             self.draft.store(pending, Ordering::Release);
         }
         self.send(Cmd::Request { client, req, at: tokio::time::Instant::now() })
+    }
+
+    /// `client`'s drag `drag` of `items` entered the terminal
+    /// ([`TermRequest::DragEnter`]); what its program asks for that `client` did not push is
+    /// fetched through `fetch`, its connection.
+    pub fn drag_enter(
+        &self,
+        client: ClientId,
+        drag: DragId,
+        items: Vec<DragItem>,
+        fetch: DragFetch,
+    ) -> Result<(), WorkerError> {
+        self.send(Cmd::DragEnter { client, drag, items, fetch })
+    }
+
+    /// Bytes of drag `drag`, pushed by its viewer or fetched from it.
+    pub fn drag_data(&self, drag: DragId, data: DragData) -> Result<(), WorkerError> {
+        self.send(Cmd::DragData { drag, data })
     }
 
     /// A person has typed into the session and not pressed Enter since: what they wrote may
@@ -1048,6 +1071,7 @@ impl Actor {
                 | EngineEvent::Bell
                 | EngineEvent::Notification { .. }
                 | EngineEvent::DropAccepted { .. }
+                | EngineEvent::DropWants { .. }
                 | EngineEvent::DropConcluded { .. }
                 | EngineEvent::ClipboardWrite { .. } => {}
             }
@@ -1613,6 +1637,7 @@ impl Actor {
                 EngineEvent::DropAccepted { operation, mimes } => {
                     self.drop_accepted(operation, mimes);
                 }
+                EngineEvent::DropWants { index } => self.drop_wants(index),
                 EngineEvent::DropConcluded { operation } => self.drop_concluded(operation),
                 EngineEvent::ClipboardWrite { text } => {
                     // Same ceiling as pasteboard sync: a program can OSC 52 a whole file, and
@@ -2200,6 +2225,14 @@ impl Actor {
                 self.held.push_back((client, req, at));
             }
             Cmd::Request { client, req, at } => self.request(client, req, at),
+            Cmd::DragEnter { client, drag, items, fetch } => {
+                self.dnd(client, dnd::Act::Enter { drag, items, fetch: Some(fetch) });
+            }
+            Cmd::DragData { drag, data } => {
+                if let Some(client) = self.drops_client(drag) {
+                    self.dnd(client, dnd::Act::Data { drag, data });
+                }
+            }
             Cmd::Snapshot { reply } => {
                 let _ignored = reply.send(Snapshot {
                     title: self.title.clone(),
@@ -2405,13 +2438,16 @@ impl Actor {
             TermRequest::Focus { focused } => {
                 return self.focus(client, focused);
             }
-            TermRequest::DragOver { at, mimes } => {
-                return self.dnd(client, dnd::Act::Over { at, mimes });
+            // A connection hands a drag in with where to fetch its data
+            // ([`SessionHandle::drag_enter`]); one without that has only what it pushes.
+            TermRequest::DragEnter { drag, items } => {
+                return self.dnd(client, dnd::Act::Enter { drag, items, fetch: None });
             }
+            TermRequest::DragOver { at } => return self.dnd(client, dnd::Act::Over { at }),
             TermRequest::DragLeave => return self.dnd(client, dnd::Act::Left),
-            TermRequest::Drop { at, reps } => return self.dnd(client, dnd::Act::Drop { at, reps }),
-            TermRequest::DropData { mime, data } => {
-                return self.dnd(client, dnd::Act::Data { mime, data });
+            TermRequest::Drop { at } => return self.dnd(client, dnd::Act::Drop { at }),
+            TermRequest::DropFiles { drag, landed } => {
+                return self.dnd(client, dnd::Act::Files { drag, landed });
             }
             TermRequest::FetchLines { start, count } => {
                 match self.engine.lines(start, count.min(MAX_FETCH_LINES)) {
@@ -2511,6 +2547,8 @@ fn premultiplied_bgra(mut pixels: Vec<u8>) -> Vec<u8> {
 }
 
 mod dnd;
+
+pub use dnd::{DragData, DragFetch, MAX_DROP_REP_BYTES};
 mod paste;
 
 #[cfg(test)]

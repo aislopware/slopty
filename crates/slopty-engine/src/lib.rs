@@ -29,7 +29,7 @@ pub mod placeholder;
 pub mod search;
 
 pub use ghostty::{
-    ClipboardSource, Compression, DropOperation, DropPoint, DropRep, GhosttyEngine, Joined, Memory,
+    ClipboardSource, Compression, DropOperation, DropPoint, Dropped, GhosttyEngine, Joined, Memory,
     PasteRep, TEXT_MIME,
 };
 pub use graphics::ImageUpload;
@@ -75,7 +75,15 @@ pub enum EngineEvent {
         /// The MIME types it wants of the drag, most wanted first; empty when it did not say.
         mimes: Vec<String>,
     },
-    /// The drop ended: the program concluded it, or another drag replaced it.
+    /// The program asked for the dropped type at `index` of the drop's list, whose bytes are
+    /// not here: they are to be fetched and given ([`GhosttyEngine::drop_data`], or streamed
+    /// with [`GhosttyEngine::drop_chunk`] and [`GhosttyEngine::drop_end`]). Told once per
+    /// type until it is given or found gone.
+    DropWants {
+        /// Its index in the drop's list.
+        index: usize,
+    },
+    /// The drop ended: the program concluded it, refused it, or another drag replaced it.
     DropConcluded {
         /// What the program did with the data.
         operation: DropOperation,

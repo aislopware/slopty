@@ -19,3 +19,5 @@ pub use view::{
     ScrollPageUp, ScrollToBottom, ScrollToTop, SelectAll, Selection, TOOK_MIN, TerminalView,
     TerminalViewEvent, key_bindings,
 };
+#[cfg(target_os = "macos")]
+pub use view::{DropHook, DropNews, SinkDropped};

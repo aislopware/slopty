@@ -2,19 +2,23 @@
 //!
 //! The drag happens on a client and the program runs here, so the engine is the protocol's
 //! terminal end: a viewer's drag over the tile is reported to the program, the program's answer
-//! goes back for the drag's feedback, and on the drop the program reads the representations it
-//! wants. Files are given as `file://` URLs of the copies uploaded to this machine, never of the
+//! goes back for the drag's feedback, and on the drop the program reads the types it wants.
+//! Files are given as `file://` URLs of the copies uploaded to this machine, never of the
 //! client's own files, so the program opens them itself.
 //!
-//! A representation may be given on the drop or after it (an upload finishing): a request for
-//! one that is still coming waits for it, and requests are answered in the order made.
+//! The drop's bytes are read lazily, as upstream ghostty reads a native drop (#14536): a type
+//! may be given before the program asks for it (the client pushed what the program accepted),
+//! or only once it asks, when the engine says it wants it ([`EngineEvent::DropWants`]) and its
+//! bytes come whole or as a stream. Requests are answered in the order made. A drop the
+//! program never accepted is refused, as kitty refuses one: it would never be read or
+//! concluded.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use libghostty_vt::Terminal;
 use libghostty_vt::kitty::dnd::{Errno, Event, Operation, Operations, Position};
-pub use slopty_proto::terminal::{DropOperation, DropPoint, DropRep};
+pub use slopty_proto::terminal::{DropOperation, DropPoint};
 
 use super::GhosttyEngine;
 use crate::{EngineError, EngineEvent};
@@ -48,20 +52,38 @@ const fn position(at: DropPoint) -> Position {
 pub(super) struct Drops {
     /// What the program did during the last write, in order.
     events: Vec<Event>,
-    /// The drop the program may read, until it concludes it.
-    reps: Vec<Rep>,
+    /// The drop the program may read, by its index in the drop's list, until it concludes it.
+    reps: Vec<RepState>,
 }
 
-/// A representation as the engine holds it.
-struct Rep {
-    mime: String,
-    state: RepState,
-}
-
+/// Where the bytes of one dropped type are.
+#[derive(Default)]
 enum RepState {
-    Coming,
+    /// Not here, and not asked for.
+    #[default]
+    Absent,
+    /// Asked for ([`EngineEvent::DropWants`]), and not here yet.
+    Wanted,
+    /// Arriving as a stream before the program asked: held until it does.
+    Arriving(Vec<u8>),
+    /// Streaming straight into the answer to the program's request `id`.
+    Streaming(u32),
+    /// Here whole.
     Here(Vec<u8>),
+    /// Will not come.
     Gone,
+}
+
+/// What became of a drop.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Dropped {
+    /// The program does not ask for drops: it was told nothing.
+    NotAsked,
+    /// The program never accepted the drag (it did not answer, or answered none): the drop is
+    /// refused and concluded as nothing.
+    Refused,
+    /// The program has the drop, and reads what it wants of it.
+    Given,
 }
 
 /// The callback's side: what happened, and a flag the write path reads for free.
@@ -120,50 +142,125 @@ impl GhosttyEngine {
         Ok(())
     }
 
-    /// The viewer dropped `reps` onto the terminal at `at`; the program reads what it wants of
-    /// them until it concludes the drop. `false` when the program does not ask for drops.
+    /// The viewer dropped a drag of `mimes` onto the terminal at `at`; the program reads what it
+    /// wants of it until it concludes the drop. Nothing of it is here yet: what the program asks
+    /// for is wanted ([`EngineEvent::DropWants`]) unless given first. A drag the program never
+    /// accepted is refused: it hears the drag leave, and the drop concludes as nothing.
     ///
     /// # Errors
     ///
     /// libghostty-vt failing.
-    pub fn dropped(&mut self, at: DropPoint, reps: Vec<DropRep>) -> Result<bool, EngineError> {
-        let mimes: Vec<String> = reps.iter().map(|r| r.mime.clone()).collect();
+    pub fn dropped(&mut self, at: DropPoint, mimes: &[String]) -> Result<Dropped, EngineError> {
+        if !self.term.dnd_drop_registered()? {
+            return Ok(Dropped::NotAsked);
+        }
+        let accepted = self.term.dnd_drop_accepted()?;
+        if accepted.is_none_or(|op| op == Operation::None) {
+            let _told = self.term.dnd_drop_leave()?;
+            self.drop_ended(DropOperation::None);
+            self.after_dnd();
+            return Ok(Dropped::Refused);
+        }
         let mime_refs: Vec<&str> = mimes.iter().map(String::as_str).collect();
         let told = self.term.dnd_drop(position(at), &mime_refs)?;
         if told == Some(true) {
             self.drop_ended(DropOperation::None);
         }
         if told.is_some() {
-            self.drops.drops.borrow_mut().reps = reps
-                .into_iter()
-                .map(|r| Rep {
-                    mime: r.mime,
-                    state: r.data.map_or(RepState::Coming, RepState::Here),
-                })
-                .collect();
+            let mut drops = self.drops.drops.borrow_mut();
+            drops.reps.clear();
+            drops.reps.resize_with(mimes.len(), RepState::default);
         }
         self.after_dnd();
-        Ok(told.is_some())
+        Ok(if told.is_some() { Dropped::Given } else { Dropped::NotAsked })
     }
 
-    /// The bytes of the dropped `mime` that were still coming, or `None` when they will not
-    /// come (the upload failed). A request waiting for them is answered.
+    /// The whole bytes of the dropped type at `index`, or `None` when they will not come. A
+    /// request waiting for them is answered; given ahead of one, they wait for it.
     ///
     /// # Errors
     ///
     /// libghostty-vt failing.
-    pub fn drop_data(&mut self, mime: &str, data: Option<Vec<u8>>) -> Result<(), EngineError> {
-        {
+    pub fn drop_data(&mut self, index: usize, data: Option<Vec<u8>>) -> Result<(), EngineError> {
+        if let Some(rep) = self.drops.drops.borrow_mut().reps.get_mut(index) {
+            *rep = data.map_or(RepState::Gone, RepState::Here);
+        }
+        self.serve_drop()
+    }
+
+    /// More bytes of the dropped type at `index`, as they stream in. The program's request for
+    /// it, when it is the one being answered, gets them at once; otherwise they are held for it.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn drop_chunk(&mut self, index: usize, bytes: &[u8]) -> Result<(), EngineError> {
+        let serving = self.serving(index)?;
+        let mut drops = self.drops.drops.borrow_mut();
+        let Some(rep) = drops.reps.get_mut(index) else { return Ok(()) };
+        match (std::mem::take(rep), serving) {
+            (RepState::Absent | RepState::Wanted | RepState::Streaming(_), Some(id)) => {
+                *rep = RepState::Streaming(id);
+                drop(drops);
+                self.term.dnd_drop_respond_data(id, bytes)?;
+            }
+            (RepState::Absent | RepState::Wanted, None) => {
+                *rep = RepState::Arriving(bytes.to_vec());
+            }
+            (RepState::Arriving(mut held), _) => {
+                held.extend_from_slice(bytes);
+                *rep = RepState::Arriving(held);
+            }
+            // Given already, or gone: a late stream adds nothing.
+            (state, _) => *rep = state,
+        }
+        Ok(())
+    }
+
+    /// The stream of the dropped type at `index` ended: `complete` when all of it came. A
+    /// request it streamed into is ended (or failed), and the next one served.
+    ///
+    /// # Errors
+    ///
+    /// libghostty-vt failing.
+    pub fn drop_end(&mut self, index: usize, complete: bool) -> Result<(), EngineError> {
+        let ended = {
             let mut drops = self.drops.drops.borrow_mut();
-            if let Some(rep) = drops
-                .reps
-                .iter_mut()
-                .find(|r| r.mime == mime && matches!(r.state, RepState::Coming))
-            {
-                rep.state = data.map_or(RepState::Gone, RepState::Here);
+            let Some(rep) = drops.reps.get_mut(index) else { return Ok(()) };
+            match std::mem::take(rep) {
+                // Streamed into the answer, so not kept: asked again, it is wanted again.
+                RepState::Streaming(id) => Some(id),
+                RepState::Arriving(held) if complete => {
+                    *rep = RepState::Here(held);
+                    None
+                }
+                RepState::Arriving(_) | RepState::Wanted | RepState::Absent => {
+                    *rep = if complete { RepState::Here(Vec::new()) } else { RepState::Gone };
+                    None
+                }
+                state => {
+                    *rep = state;
+                    None
+                }
+            }
+        };
+        if let Some(id) = ended {
+            if complete {
+                self.term.dnd_drop_respond_end(id)?;
+            } else {
+                self.term.dnd_drop_respond_error(id, Errno::Eio)?;
             }
         }
         self.serve_drop()
+    }
+
+    /// The program's request being answered, when it is for the dropped type at `index`.
+    fn serving(&self, index: usize) -> Result<Option<u32>, EngineError> {
+        Ok(self
+            .term
+            .dnd_drop_request()?
+            .filter(|r| usize::try_from(r.mime_index).ok() == Some(index))
+            .map(|r| r.id))
     }
 
     /// What the program did with drops during a write: told as events, and its requests
@@ -224,15 +321,24 @@ impl GhosttyEngine {
         self.events.borrow_mut().push(EngineEvent::DropConcluded { operation });
     }
 
-    /// Answer the program's drop requests while their data is here.
+    /// Answer the program's drop requests while their data is here, and say which type the
+    /// first waiting one wants.
     fn serve_drop(&mut self) -> Result<(), EngineError> {
         while let Some(request) = self.term.dnd_drop_request()? {
             let id = request.id;
             let index = usize::try_from(request.mime_index).unwrap_or(usize::MAX);
             let answer = {
-                let drops = self.drops.drops.borrow();
-                match drops.reps.get(index).map(|r| &r.state) {
-                    Some(RepState::Coming) => return Ok(()),
+                let mut drops = self.drops.drops.borrow_mut();
+                match drops.reps.get_mut(index) {
+                    Some(rep @ RepState::Absent) => {
+                        *rep = RepState::Wanted;
+                        drop(drops);
+                        self.events.borrow_mut().push(EngineEvent::DropWants { index });
+                        return Ok(());
+                    }
+                    Some(RepState::Wanted | RepState::Arriving(_) | RepState::Streaming(_)) => {
+                        return Ok(());
+                    }
                     Some(RepState::Here(data)) => Ok(data.clone()),
                     Some(RepState::Gone) => Err(Errno::Eio),
                     None => Err(Errno::Enoent),

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use slopty_core::{ClientId, WallMs, XferId};
+use slopty_core::{ClientId, SessionId, WallMs, XferId};
 use slopty_net::streams::{self, RawRecv, Uni};
 use slopty_net::{Connection, NetError, WorkerMsg};
 use slopty_proto::file::{FILE_BYTES, WriteResult};
@@ -15,6 +15,7 @@ use slopty_proto::transfer::{
 use slopty_worker::clip::MAX_REP_BYTES;
 use slopty_worker::screen::drag::Heard;
 use slopty_worker::xfer::{Again, Claim, Landed, Receiving, XferError, outgoing, resume_points};
+use slopty_worker::{DragData, MAX_DROP_REP_BYTES};
 use tokio::io::AsyncReadExt as _;
 use tokio::sync::mpsc;
 
@@ -83,6 +84,12 @@ async fn take(
         }
         Uni::Bulk { header, mut rx } => match header.purpose.clone() {
             Purpose::Upload => receive(daemon, header, rx, out).await,
+            Purpose::Rep { rep }
+                if let Source::Drag(drag) = rep.source
+                    && let Some(session) = daemon.dnd.term_session(drag) =>
+            {
+                stream_drop(&daemon, session, rep, &header, rx).await;
+            }
             Purpose::Rep { rep } => {
                 let bytes = read_rep(&daemon, &header, &rep, &mut rx).await;
                 if bytes.is_none() {
@@ -144,6 +151,48 @@ async fn read_rep(
     (bytes.len() as u64 == header.size).then_some(bytes)
 }
 
+/// A representation of a terminal drag, handed to its session as it streams in, so the
+/// program reads it as it arrives and the worker never holds it whole. One past
+/// [`MAX_DROP_REP_BYTES`], or longer or shorter than its header said, ends as not whole.
+async fn stream_drop(
+    daemon: &Daemon,
+    session: SessionId,
+    rep: RepRef,
+    header: &BulkHeader,
+    mut rx: RawRecv,
+) {
+    let RepRef { source: Source::Drag(drag), item, kind } = rep else { return };
+    let Ok(handle) = daemon.worker.get(session) else {
+        rx.stop();
+        return;
+    };
+    let max = MAX_DROP_REP_BYTES as u64;
+    let mut got = 0_u64;
+    let complete = loop {
+        if header.size > max {
+            rx.stop();
+            break false;
+        }
+        match rx.chunk(CHUNK).await {
+            Ok(Some(bytes)) => {
+                got = got.saturating_add(bytes.len() as u64);
+                if got > header.size {
+                    rx.stop();
+                    break false;
+                }
+                let chunk = DragData::Chunk { item, kind: kind.clone(), bytes };
+                if handle.drag_data(drag, chunk).is_err() {
+                    rx.stop();
+                    return;
+                }
+            }
+            Ok(None) => break got == header.size,
+            Err(_) => break false,
+        }
+    };
+    let _gone = handle.drag_data(drag, DragData::End { item, kind, complete });
+}
+
 /// A stream's bytes, when it carries all its header announced and that is no more than `max`
 /// (a file tile's save).
 async fn read_whole(header: &BulkHeader, rx: &mut RawRecv, max: u64) -> Option<Vec<u8>> {
@@ -194,7 +243,9 @@ async fn receive(
         }
         Err(e) => {
             tracing::info!(%xfer, %name, error = %e, "upload failed");
-            if let Some(drag) = daemon.transfers.drag_of(xfer) {
+            if let Some(drag) = daemon.transfers.drag_of(xfer)
+                && daemon.dnd.term_session(drag).is_none()
+            {
                 daemon.dnd.drags().tell(drag, Heard::Failed(format!("{name}: {e}")));
             }
             let failed = XferMsg::Failed { xfer, name: Some(name), error: e.to_string() };
@@ -211,7 +262,8 @@ async fn receive(
     let finished = daemon.transfers.landed(xfer, &name, landed);
     drop(claim);
     let Some(finished) = finished else { return };
-    if let Some(drag) = finished.drag {
+    // A terminal's drag hears its files land from its client, which names them in the drop.
+    if let Some(drag) = finished.drag.filter(|d| daemon.dnd.term_session(*d).is_none()) {
         for (name, path) in finished.names.iter().zip(&finished.paths) {
             let landed = Heard::Landed { name: name.clone(), path: path.clone() };
             daemon.dnd.drags().tell(drag, landed);

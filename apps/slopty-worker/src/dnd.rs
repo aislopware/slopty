@@ -8,11 +8,12 @@
 //! by the next drag, and the drag it carried hears that it went. It speaks
 //! [`slopty_proto::dnd`] over its stdin and stdout, framed by [`slopty_proto::codec`].
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytes::BytesMut;
 use parking_lot::Mutex;
-use slopty_core::ClientId;
+use slopty_core::{ClientId, SessionId};
 use slopty_input::{DragStep, InputError};
 use slopty_proto::codec;
 use slopty_proto::dnd::{FromHelper, ToHelper};
@@ -108,9 +109,52 @@ pub struct Dnd {
     /// Where a drag's files land (`Transfers::drag_dir`).
     transfers: Arc<Transfers>,
     helper: Link,
+    /// The terminal drags lately entered, newest last, the session each is over and whose it
+    /// is: their data goes to that session, never near the drag crossing the worker.
+    terms: Mutex<VecDeque<TermDrag>>,
+}
+
+/// Most terminal drags [`Dnd`] remembers: one per viewer at a time, and a few just dropped
+/// whose data still comes.
+const TERM_DRAGS: usize = 16;
+
+/// A client's drag over a terminal.
+#[derive(Clone, Copy, Debug)]
+struct TermDrag {
+    drag: DragId,
+    session: SessionId,
+    client: ClientId,
 }
 
 impl Dnd {
+    /// `client`'s drag `drag` is over terminal `session`: its data goes there.
+    pub fn term_drag(&self, drag: DragId, session: SessionId, client: ClientId) {
+        let mut terms = self.terms.lock();
+        terms.retain(|t| t.drag != drag);
+        if terms.len() >= TERM_DRAGS {
+            terms.pop_front();
+        }
+        terms.push_back(TermDrag { drag, session, client });
+    }
+
+    /// The terminal session `drag` is over or was dropped on, if it is a terminal's.
+    #[must_use]
+    pub fn term_session(&self, drag: DragId) -> Option<SessionId> {
+        self.terms.lock().iter().find(|t| t.drag == drag).map(|t| t.session)
+    }
+
+    /// `client`'s drag left terminal `session` without a drop: it is forgotten, and whatever
+    /// of its files reached its landing goes, since no program will read them.
+    pub fn term_left(&self, session: SessionId, client: ClientId) {
+        let mut terms = self.terms.lock();
+        let at = terms.iter().rposition(|t| t.session == session && t.client == client);
+        let left = at.and_then(|at| terms.remove(at));
+        drop(terms);
+        if let Some(left) = left {
+            self.discard_landing(left.drag);
+        }
+    }
+
     /// The drag crossing the worker, and what is heard for it.
     #[must_use]
     pub const fn drags(&self) -> &Arc<Drags> {
@@ -131,7 +175,14 @@ impl Dnd {
         if record.is_some() {
             tracing::info!("drops are recorded, not carried");
         }
-        Self { drags: Arc::default(), record, drag_board: None, transfers, helper: Arc::default() }
+        Self {
+            drags: Arc::default(),
+            record,
+            drag_board: None,
+            transfers,
+            helper: Arc::default(),
+            terms: Mutex::default(),
+        }
     }
 
     /// No drag yet, and `helper` in the helper's place: a test's.
@@ -139,7 +190,14 @@ impl Dnd {
     #[must_use]
     pub fn with_helper(transfers: Arc<Transfers>, helper: mpsc::UnboundedSender<ToHelper>) -> Self {
         let helper = Arc::new(Mutex::new(Some(helper)));
-        Self { drags: Arc::default(), record: None, drag_board: None, transfers, helper }
+        Self {
+            drags: Arc::default(),
+            record: None,
+            drag_board: None,
+            transfers,
+            helper,
+            terms: Mutex::default(),
+        }
     }
 
     /// Watch drags out on the pasteboard called `name` in place of the system's drag

@@ -2604,23 +2604,102 @@ exec sleep 60"#;
         let _killed = child.kill().await;
     }
 
+    /// A drag of one file, as a client names it entering.
+    fn file_drag() -> Vec<slopty_proto::drag::DragItem> {
+        use slopty_proto::drag::{DragItem, FileMeta};
+        let file = FileMeta {
+            name: "a.txt".to_owned(),
+            size: 14,
+            folder: false,
+            mode: 0o644,
+            mtime_ms: slopty_core::WallMs::ZERO,
+            path: None,
+        };
+        vec![DragItem { file: Some(file), promised: None, reps: Vec::new() }]
+    }
+
+    /// A drag of one text, none of it inline.
+    fn text_drag() -> Vec<slopty_proto::drag::DragItem> {
+        use slopty_proto::drag::DragItem;
+        use slopty_proto::transfer::{ClipFormat, ClipType, Rep};
+        let rep =
+            Rep { kind: ClipType::Format(ClipFormat::Text), size: None, hash: None, inline: None };
+        vec![DragItem { file: None, promised: None, reps: vec![rep] }]
+    }
+
+    /// Wait until the bash stand-in wrote `name` into `dir`.
+    async fn written(dir: &std::path::Path, name: &str) {
+        let path = dir.join(name);
+        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+        while !path.exists() {
+            assert!(std::time::Instant::now() < deadline, "never wrote {}", path.display());
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// A drop that reaches the worker after the program stopped asking for drops is told back
     /// to its viewer, whose drop then goes the way it goes without the protocol.
     #[tokio::test]
     async fn a_drop_on_a_program_not_asking_is_told_back() {
-        use slopty_proto::terminal::{DropPoint, DropRep};
+        use slopty_proto::drag::DragId;
+        use slopty_proto::terminal::DropPoint;
 
         let (session, mut child) = start(&["/bin/sh", "-c", "echo ready; exec sleep 60"]);
         let (tx, mut rx) = viewer(256);
         let client = ClientId::new();
         session.attach(client, size(40, 6), tx).unwrap();
         let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
-        let reps = vec![DropRep { mime: "text/uri-list".to_owned(), data: None }];
-        session.request(client, TermRequest::Drop { at: DropPoint::default(), reps }).unwrap();
+        let drag = DragId::new();
+        session.request(client, TermRequest::DragEnter { drag, items: file_drag() }).unwrap();
+        session.request(client, TermRequest::Drop { at: DropPoint::default() }).unwrap();
         let (seen, _) =
             wait_for(&mut rx, |ev, _| ev.iter().any(|e| matches!(e, TermEvent::DropTarget { .. })))
                 .await;
         assert!(seen.contains(&TermEvent::DropTarget { accepts: false }), "{seen:?}");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// A drop the program never accepted is refused, as kitty refuses one: the program is not
+    /// given it, and the viewer hears it concluded as nothing at once.
+    #[tokio::test]
+    async fn a_drop_the_program_never_accepted_is_refused() {
+        use slopty_proto::drag::DragId;
+        use slopty_proto::terminal::{DropOperation, DropPoint};
+
+        let script = r#"stty -echo -icanon
+printf '\033]72;t=a;text/uri-list\033\\ready\n'
+IFS= read -r -d '\' moved
+printf '\033]72;t=m:o=0\033\\'
+IFS= read -r -d '\' next; printf '%s\n' "$next" > "$0/next"
+exec sleep 60"#;
+        let dir = tempfile::tempdir().unwrap();
+        let (session, mut child) =
+            start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
+        let (tx, mut rx) = viewer(256);
+        let client = ClientId::new();
+        session.attach(client, size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        let drag = DragId::new();
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        session.request(client, TermRequest::DragEnter { drag, items: file_drag() }).unwrap();
+        session.request(client, TermRequest::DragOver { at }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
+        })
+        .await;
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        let (seen, _) = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropConcluded { .. }))
+        })
+        .await;
+        assert!(
+            seen.contains(&TermEvent::DropConcluded { operation: DropOperation::None }),
+            "{seen:?}"
+        );
+        written(dir.path(), "next").await;
+        let next = std::fs::read_to_string(dir.path().join("next")).unwrap();
+        assert!(!next.contains("t=M"), "the program is not given the drop: {next:?}");
         session.close();
         let _killed = child.kill().await;
     }
@@ -2630,10 +2709,9 @@ exec sleep 60"#;
     /// waits while the upload finishes, gets the worker path, opens it itself and concludes.
     #[tokio::test]
     async fn a_dropped_file_reaches_a_program_asking_for_drops_as_the_workers_copy() {
-        use std::time::Instant;
-
         use slopty_client::term::DragAnswer;
-        use slopty_proto::terminal::{DropOperation, DropPoint, DropRep};
+        use slopty_proto::drag::DragId;
+        use slopty_proto::terminal::{DropOperation, DropPoint};
 
         // Ask for file lists; accept the drag; on the drop ask for the list, open the file it
         // names and keep its bytes; then say the copy is done.
@@ -2657,16 +2735,6 @@ exec sleep 60"#;
         let at_file = |name: &str| dir.path().join(name);
         let (session, mut child) =
             start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
-        let until = |name: &str| {
-            let path = at_file(name);
-            async move {
-                let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
-                while !path.exists() {
-                    assert!(Instant::now() < deadline, "never wrote {}", path.display());
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            }
-        };
         let (tx, mut rx) = viewer(256);
         let client = ClientId::new();
         session.attach(client, size(40, 6), tx).unwrap();
@@ -2679,32 +2747,30 @@ exec sleep 60"#;
         let _seen = wait_for(&mut late, |_, s| text(s).contains("ready")).await;
         assert!(late.state.drop_target(), "told on attach");
 
+        let drag = DragId::new();
         let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
         let uris = "text/uri-list".to_owned();
-        session.request(client, TermRequest::DragOver { at, mimes: vec![uris.clone()] }).unwrap();
+        session.request(client, TermRequest::DragEnter { drag, items: file_drag() }).unwrap();
+        session.request(client, TermRequest::DragOver { at }).unwrap();
         let _seen = wait_for(&mut rx, |ev, _| {
             ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
         })
         .await;
         assert_eq!(
             rx.state.drag_answer(),
-            Some(&DragAnswer::Accepted {
-                operation: DropOperation::Copy,
-                mimes: vec![uris.clone()]
-            })
+            Some(&DragAnswer::Accepted { operation: DropOperation::Copy, mimes: vec![uris] })
         );
-        until("moved").await;
+        written(dir.path(), "moved").await;
 
         // The drop goes at once; its list comes when the upload has landed on the worker.
-        let reps = vec![DropRep { mime: uris.clone(), data: None }];
-        session.request(client, TermRequest::Drop { at, reps }).unwrap();
-        until("dropped").await;
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        written(dir.path(), "dropped").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!at_file("got").exists(), "the program waits for the upload");
         let landed = dir.path().join("landed.txt");
         std::fs::write(&landed, b"uploaded bytes").unwrap();
-        let list = format!("file://{}\r\n", landed.display()).into_bytes();
-        session.request(client, TermRequest::DropData { mime: uris, data: Some(list) }).unwrap();
+        let landed = Some(vec![landed.display().to_string()]);
+        session.request(client, TermRequest::DropFiles { drag, landed }).unwrap();
         let _seen = wait_for(&mut rx, |ev, _| {
             ev.iter().any(|e| matches!(e, TermEvent::DropConcluded { .. }))
         })
@@ -2713,7 +2779,7 @@ exec sleep 60"#;
             rx.state.drag_answer(),
             Some(&DragAnswer::Concluded { operation: DropOperation::Copy })
         );
-        until("done").await;
+        written(dir.path(), "done").await;
 
         assert!(std::fs::read_to_string(at_file("moved")).unwrap().contains("t=m:x=2:y=1"));
         assert!(std::fs::read_to_string(at_file("dropped")).unwrap().contains("t=M:x=2:y=1"));
@@ -2721,5 +2787,179 @@ exec sleep 60"#;
         assert_eq!(late.state.drag_answer(), None, "the answers are the dragging viewer's");
         session.close();
         let _killed = child.kill().await;
+    }
+
+    /// The program asks on the drop for a text nobody pushed: the session fetches it from the
+    /// dragging viewer's connection, once, under the drag, and streams what comes back into
+    /// the program's answer as it arrives. The same text pushed during the hover answers at
+    /// once, with nothing fetched.
+    #[tokio::test]
+    async fn a_dropped_text_is_fetched_when_the_program_asks() {
+        use slopty_proto::WorkerMsg;
+        use slopty_proto::drag::DragId;
+        use slopty_proto::terminal::DropPoint;
+        use slopty_proto::transfer::{ClipFormat, ClipMsg, ClipType, RepRef, Source};
+        use slopty_worker::DragData;
+
+        // Accept text; on each drop ask for `text/plain` (the second type), decode each chunk
+        // of the answer into got<n>, and conclude.
+        let script = r#"stty -echo -icanon
+printf '\033]72;t=a;text/plain\033\\ready\n'
+for n in 1 2; do
+  IFS= read -r -d '\' moved
+  printf '\033]72;t=m:o=1;text/plain\033\\'
+  IFS= read -r -d '\' dropped; : > "$0/dropped$n"
+  printf '\033]72;t=r:x=2\033\\'
+  : > "$0/part$n"
+  while IFS= read -r -d '\' x; do
+    x=$(printf '%s' "$x" | tr -d '\033')
+    case $x in *\;*\;*) printf '%s' "${x##*;}" | base64 -d >> "$0/part$n";; *) break;; esac
+  done
+  mv "$0/part$n" "$0/got$n"
+  printf '\033]72;t=r:o=1\033\\'
+done
+exec sleep 60"#;
+        let dir = tempfile::tempdir().unwrap();
+        let (session, mut child) =
+            start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
+        let (tx, mut rx) = viewer(256);
+        let client = ClientId::new();
+        session.attach(client, size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        let (fetch, mut fetched) = mpsc::channel::<WorkerMsg>(8);
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        let kind = ClipType::Format(ClipFormat::Text);
+
+        // Lazy: nothing pushed, so the program's request is fetched.
+        let drag = DragId::new();
+        session.drag_enter(client, drag, text_drag(), fetch.clone()).unwrap();
+        session.request(client, TermRequest::DragOver { at }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
+        })
+        .await;
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        let asked = tokio::time::timeout(Duration::from_secs(30), fetched.recv()).await.unwrap();
+        let rep = RepRef { source: Source::Drag(drag), item: 0, kind: kind.clone() };
+        let max = Some(slopty_worker::MAX_DROP_REP_BYTES as u64);
+        assert_eq!(asked, Some(WorkerMsg::Clip(ClipMsg::Fetch { rep, max, urgent: true })));
+        for part in ["héllo ", "wörld"] {
+            let bytes = bytes::Bytes::from(part.as_bytes().to_vec());
+            session
+                .drag_data(drag, DragData::Chunk { item: 0, kind: kind.clone(), bytes })
+                .unwrap();
+        }
+        session
+            .drag_data(drag, DragData::End { item: 0, kind: kind.clone(), complete: true })
+            .unwrap();
+        written(dir.path(), "got1").await;
+        assert_eq!(std::fs::read_to_string(dir.path().join("got1")).unwrap(), "héllo wörld");
+
+        // Pushed during the hover: answered at once, nothing fetched.
+        let drag = DragId::new();
+        session.drag_enter(client, drag, text_drag(), fetch).unwrap();
+        session.request(client, TermRequest::DragOver { at }).unwrap();
+        let bytes = b"pushed".to_vec();
+        session.drag_data(drag, DragData::Whole { item: 0, kind, bytes }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
+        })
+        .await;
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        written(dir.path(), "got2").await;
+        assert_eq!(std::fs::read_to_string(dir.path().join("got2")).unwrap(), "pushed");
+        assert!(fetched.try_recv().is_err(), "nothing fetched for a pushed text");
+        session.close();
+        let _killed = child.kill().await;
+    }
+
+    /// The session's peak footprint over a drop of an 8 MiB text the program asked for, given
+    /// whole (`streamed` false: as the worker held a type before drops were read lazily) or in
+    /// 64 KiB chunks as a bulk stream brings them. The stand-in hands what it reads straight to
+    /// a file, so what is measured is the worker's side.
+    async fn drop_footprint(streamed: bool) -> u64 {
+        use slopty_proto::drag::DragId;
+        use slopty_proto::terminal::DropPoint;
+        use slopty_proto::transfer::{ClipFormat, ClipType};
+        use slopty_worker::DragData;
+
+        let script = r#"stty -echo -icanon
+printf '\033]72;t=a;text/plain\033\\ready\n'
+IFS= read -r -d '\' moved
+printf '\033]72;t=m:o=1;text/plain\033\\'
+IFS= read -r -d '\' dropped
+printf '\033]72;t=r:x=2\033\\'
+exec cat > "$0/raw""#;
+        let dir = tempfile::tempdir().unwrap();
+        let (session, mut child) =
+            start(&["/bin/bash", "-c", script, dir.path().to_str().unwrap()]);
+        let (tx, mut rx) = viewer(4096);
+        let client = ClientId::new();
+        session.attach(client, size(40, 6), tx).unwrap();
+        let _seen = wait_for(&mut rx, |_, s| text(s).contains("ready")).await;
+        let (fetch, mut fetched) = mpsc::channel(8);
+        let drag = DragId::new();
+        let at = DropPoint { col: 2, row: 1, x: 20, y: 24, copy: true, moves: false };
+        session.drag_enter(client, drag, text_drag(), fetch).unwrap();
+        session.request(client, TermRequest::DragOver { at }).unwrap();
+        let _seen = wait_for(&mut rx, |ev, _| {
+            ev.iter().any(|e| matches!(e, TermEvent::DropAccepted { .. }))
+        })
+        .await;
+        session.request(client, TermRequest::Drop { at }).unwrap();
+        let _asked = tokio::time::timeout(Duration::from_secs(30), fetched.recv()).await.unwrap();
+
+        let text: bytes::Bytes = (0..slopty_worker::MAX_DROP_REP_BYTES)
+            .map(|i| b"abcdefghijklmnopqrstuvwxyz\n"[i % 27])
+            .collect::<Vec<u8>>()
+            .into();
+        let before = slopty_testkit::process::own().unwrap().peak_footprint;
+        let kind = ClipType::Format(ClipFormat::Text);
+        if streamed {
+            for at in (0..text.len()).step_by(64 << 10) {
+                let bytes = text.slice(at..at.saturating_add(64 << 10).min(text.len()));
+                session
+                    .drag_data(drag, DragData::Chunk { item: 0, kind: kind.clone(), bytes })
+                    .unwrap();
+            }
+            session.drag_data(drag, DragData::End { item: 0, kind, complete: true }).unwrap();
+        } else {
+            let bytes = text.to_vec();
+            session.drag_data(drag, DragData::Whole { item: 0, kind, bytes }).unwrap();
+        }
+        // The answer ends with an empty message for the request.
+        let raw = dir.path().join("raw");
+        let end = b"\x1b]72;t=r:x=2\x1b\\";
+        let deadline = std::time::Instant::now().checked_add(Duration::from_secs(60)).unwrap();
+        loop {
+            let bytes = std::fs::read(&raw).unwrap_or_default();
+            if bytes.ends_with(end) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the answer never ended");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let peak = slopty_testkit::process::own().unwrap().peak_footprint;
+        session.close();
+        let _killed = child.kill().await;
+        peak.saturating_sub(before)
+    }
+
+    /// M3 of the lazy drop: what holding a dropped type whole costs the worker, against
+    /// streaming it into the program's answer. Each in a process of its own (nextest), since
+    /// the peak is the process's.
+    #[tokio::test]
+    #[ignore = "measurement: cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint"]
+    async fn drop_footprint_whole() {
+        let grew = drop_footprint(false).await;
+        println!("MEASURE drop of 8 MiB given whole: peak footprint +{} KiB", grew >> 10);
+    }
+
+    /// See [`drop_footprint_whole`].
+    #[tokio::test]
+    #[ignore = "measurement: cargo nextest run -p slopty-worker --test session_actor --run-ignored only drop_footprint"]
+    async fn drop_footprint_streamed() {
+        let grew = drop_footprint(true).await;
+        println!("MEASURE drop of 8 MiB streamed: peak footprint +{} KiB", grew >> 10);
     }
 }

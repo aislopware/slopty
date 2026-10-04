@@ -4,7 +4,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use slopty_core::{SessionId, WallMs};
 use slopty_grid::{Cursor, Line, LineIndex, MAX_COLS, MAX_ROWS, RowUpdate, TermModes};
 
+use crate::drag::{DragId, DragItem};
 use crate::input::{CellMetrics, KeyEvent, MouseEvent};
+use crate::transfer::{ClipFormat, ClipType};
 
 /// Terminal size in cells.
 ///
@@ -288,34 +290,97 @@ pub enum TermRequest {
     /// offer, as a window's input waits behind its ⌘V. It has no datagram copy, which could
     /// overtake the offer.
     PastePicture(PasteChord),
-    /// This client's drag of `mimes` is over the tile at `at`, while the program asks for drops
-    /// ([`TermEvent::DropTarget`]). Answered with [`TermEvent::DropAccepted`].
+    /// This client's drag of `items` entered the tile, while the program asks for drops
+    /// ([`TermEvent::DropTarget`]). The items carry no bytes: the program is offered their
+    /// types ([`drop_offer`]), and what it accepts the client pushes up as the program answers
+    /// ([`TermEvent::DropAccepted`]), the rest only when the program asks for it on the drop
+    /// ([`crate::transfer::ClipMsg::Fetch`] under [`crate::transfer::Source::Drag`]). One drag
+    /// per client is over a tile at a time; a new one replaces it.
+    DragEnter {
+        /// The drag, as its representations are named in fetches.
+        drag: DragId,
+        /// What it carries: its files, the files it promises, and its data's types.
+        items: Vec<DragItem>,
+    },
+    /// The drag that entered is over the cell at `at`. Answered with
+    /// [`TermEvent::DropAccepted`].
     DragOver {
         /// Where.
         at: DropPoint,
-        /// The MIME types the drag carries.
-        mimes: Vec<String>,
     },
     /// This client's drag left the tile without dropping.
     DragLeave,
-    /// This client dropped `reps` on the tile at `at`. The program reads what it wants of them,
-    /// then concludes ([`TermEvent::DropConcluded`]).
+    /// This client dropped its drag on the tile at `at`. The program reads what it wants of
+    /// it, then concludes ([`TermEvent::DropConcluded`]); a program that never accepted the
+    /// drag is not given it, and the drop concludes as nothing at once.
     Drop {
         /// Where.
         at: DropPoint,
-        /// What the drop carries.
-        reps: Vec<DropRep>,
     },
-    /// The bytes of a representation of this client's drop that [`TermRequest::Drop`] said
-    /// were still coming, such as the `file://` URLs of its files once they are uploaded to
-    /// the worker. `None` when they will not come.
-    DropData {
-        /// The representation's MIME type.
-        mime: String,
-        /// Its bytes.
-        #[serde(with = "serde_bytes")]
-        data: Option<Vec<u8>>,
+    /// The files of this client's drag `drag`, its own and those its promises wrote, have
+    /// landed at `landed` on the worker, which gives the program their `file://` URLs as
+    /// `text/uri-list`. `None` when they will not come. They go up from the moment the program
+    /// accepts `text/uri-list` (or at the drop, for promised files), so they may land before
+    /// the drop or after it, or after a new drag has entered: they name their drag.
+    DropFiles {
+        /// Whose.
+        drag: DragId,
+        /// Where they landed, in item order.
+        landed: Option<Vec<String>>,
     },
+}
+
+/// The MIME type a drop of files is offered as.
+pub const URI_LIST: &str = "text/uri-list";
+
+/// The MIME type plain text is also offered as: kitty's clients ask for it rather than for
+/// [`ClipFormat::Text`]'s `text/plain;charset=utf-8`.
+pub const PLAIN_TEXT: &str = "text/plain";
+
+/// Where the bytes of a type a drop offers come from.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum DropFrom {
+    /// The `file://` URLs of the drag's files once they landed ([`TermRequest::DropFiles`]).
+    Files,
+    /// Representation `kind` of item `item` of the drag.
+    Rep {
+        /// Which item, counted from 0.
+        item: u16,
+        /// Which representation.
+        kind: ClipType,
+    },
+}
+
+/// The MIME types a drag of `items` offers a program, in order, and where each one's bytes
+/// come from.
+///
+/// [`URI_LIST`] comes first when the drag carries or promises files, then each other
+/// representation in item order, plain text under both its names. A type without a MIME name
+/// (an Apple type only) is not offered, and a type two items carry is offered for the first.
+/// Both ends work it out alike, so a program's request by index names the same bytes on each.
+#[must_use]
+pub fn drop_offer(items: &[DragItem]) -> Vec<(String, DropFrom)> {
+    let mut offer: Vec<(String, DropFrom)> = Vec::new();
+    if items.iter().any(|i| i.file.is_some() || i.promised.is_some()) {
+        offer.push((URI_LIST.to_owned(), DropFrom::Files));
+    }
+    for (item, entry) in (0_u16..).zip(items) {
+        for rep in &entry.reps {
+            let Some(format) = rep.kind.format() else { continue };
+            let names: &[&str] = match format {
+                ClipFormat::FileUrls => continue,
+                ClipFormat::Text => &[ClipFormat::Text.mime(), PLAIN_TEXT],
+                other => &[other.mime()],
+            };
+            for name in names {
+                if offer.iter().all(|(mime, _)| mime != name) {
+                    let from = DropFrom::Rep { item, kind: rep.kind.clone() };
+                    offer.push(((*name).to_owned(), from));
+                }
+            }
+        }
+    }
+    offer
 }
 
 /// Where a drag is over a terminal, and what it allows (Kitty drag and drop, OSC 72).
@@ -344,16 +409,6 @@ pub enum DropOperation {
     Copy,
     /// The data is moved.
     Move,
-}
-
-/// One representation of a drop: its MIME type, and its bytes once they are here.
-#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
-pub struct DropRep {
-    /// The MIME type, such as `text/uri-list`.
-    pub mime: String,
-    /// Its bytes; `None` while they are still coming ([`TermRequest::DropData`]).
-    #[serde(with = "serde_bytes")]
-    pub data: Option<Vec<u8>>,
 }
 
 /// What a [`TermRequest::PastePicture`] applies once the worker's pasteboard holds the
@@ -401,10 +456,11 @@ impl TermRequest {
             | Self::Search { .. }
             | Self::Colors(_)
             | Self::Reached { .. }
+            | Self::DragEnter { .. }
             | Self::DragOver { .. }
             | Self::DragLeave
             | Self::Drop { .. }
-            | Self::DropData { .. } => false,
+            | Self::DropFiles { .. } => false,
         }
     }
 }
@@ -857,4 +913,56 @@ pub struct Restored {
     /// What the session was opened to run; empty for the login shell. A client may offer it
     /// again, never run it unasked.
     pub command: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drag::FileMeta;
+    use crate::transfer::Rep;
+
+    fn rep(kind: ClipType) -> Rep {
+        Rep { kind, size: None, hash: None, inline: None }
+    }
+
+    /// Files first as one list, then each type once, plain text under both its names; an
+    /// Apple-only type and a second item's same type are not offered.
+    #[test]
+    fn a_drop_offers_each_type_once_files_first() {
+        let file = FileMeta {
+            name: "a".to_owned(),
+            size: 1,
+            folder: false,
+            mode: 0o644,
+            mtime_ms: WallMs::ZERO,
+            path: None,
+        };
+        let format = |f| rep(ClipType::Format(f));
+        let items = vec![
+            DragItem {
+                file: None,
+                promised: None,
+                reps: vec![format(ClipFormat::Html), format(ClipFormat::Text)],
+            },
+            DragItem { file: Some(file), promised: None, reps: Vec::new() },
+            DragItem {
+                file: None,
+                promised: None,
+                reps: vec![
+                    rep(ClipType::Apple("com.adobe.pdf".to_owned())),
+                    format(ClipFormat::Html),
+                ],
+            },
+        ];
+        let offer = drop_offer(&items);
+        let mimes: Vec<&str> = offer.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(mimes, [URI_LIST, "text/html", "text/plain;charset=utf-8", PLAIN_TEXT]);
+        let text = DropFrom::Rep { item: 0, kind: ClipType::Format(ClipFormat::Text) };
+        assert_eq!(offer[0].1, DropFrom::Files);
+        assert_eq!((&offer[2].1, &offer[3].1), (&text, &text), "one rep, two names");
+        let promised =
+            DragItem { file: None, promised: Some("public.png".to_owned()), reps: Vec::new() };
+        assert_eq!(drop_offer(&[promised]), [(URI_LIST.to_owned(), DropFrom::Files)]);
+        assert_eq!(drop_offer(&[]), []);
+    }
 }

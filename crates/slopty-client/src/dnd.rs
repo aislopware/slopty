@@ -295,6 +295,7 @@ impl Hover {
 }
 
 pub mod out;
+pub mod term;
 
 #[cfg(test)]
 mod tests;

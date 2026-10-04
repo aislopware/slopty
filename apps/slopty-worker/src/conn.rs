@@ -15,6 +15,7 @@ use slopty_core::{ClientId, SessionId, StreamId, XferId};
 use slopty_net::worker::AcceptedClient;
 use slopty_net::{ClientMsg, Connection, NetError, WorkerMsg};
 use slopty_proto::datagram::ClientDatagram;
+use slopty_proto::drag::{DragId, DragItem};
 use slopty_proto::folder::Listing;
 use slopty_proto::handoff::HandoffReply;
 use slopty_proto::handshake::HelloAck;
@@ -26,12 +27,12 @@ use slopty_proto::screen::{
 use slopty_proto::terminal::{
     CloseReason, SessionSummary, TermError, TermEvent, TermRequest, TermSize,
 };
-use slopty_proto::transfer::{ClipMsg, Dest, RepRef, XferMsg};
-use slopty_worker::WorkerError;
+use slopty_proto::transfer::{ClipMsg, Dest, RepRef, Source, XferMsg};
 use slopty_worker::clip::{Paste, PasteKind};
 use slopty_worker::screen::{StreamControl, listing};
 use slopty_worker::session::{ClientSink, Outbound, SessionHandle};
 use slopty_worker::xfer::Begun;
+use slopty_worker::{DragData, WorkerError};
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -1140,6 +1141,22 @@ impl Peer<'_> {
                     crate::xfer::send_clip(&daemon, &conn, &out, rep, max, urgent).await;
                 });
             }
+            ClipMsg::Data { rep: RepRef { source: Source::Drag(drag), item, kind }, bytes }
+                if self.daemon.dnd.term_session(drag).is_some() =>
+            {
+                self.term_drag_data(drag, DragData::Whole { item, kind, bytes });
+            }
+            ClipMsg::TooBig { rep: RepRef { source: Source::Drag(drag), item, kind }, size }
+                if self.daemon.dnd.term_session(drag).is_some() =>
+            {
+                tracing::debug!(client = %self.client, item, size, "drag data too big for a drop");
+                self.term_drag_data(drag, DragData::Gone { item, kind });
+            }
+            ClipMsg::Unavailable { source: Source::Drag(drag) }
+                if self.daemon.dnd.term_session(drag).is_some() =>
+            {
+                self.term_drag_data(drag, DragData::AllGone);
+            }
             ClipMsg::Data { rep, bytes } => self.clip_data(&rep, Some(bytes)),
             ClipMsg::TooBig { rep, size } => {
                 tracing::debug!(client = %self.client, item = rep.item, size, "client clipboard too big");
@@ -1293,7 +1310,8 @@ impl Peer<'_> {
             }
             // The client could not read a file of a drag's upload: the drop cannot land whole.
             XferMsg::Failed { xfer, name, error }
-                if let Some(drag) = self.daemon.transfers.drag_of(xfer) =>
+                if let Some(drag) = self.daemon.transfers.drag_of(xfer)
+                    && self.daemon.dnd.term_session(drag).is_none() =>
             {
                 let file = name.unwrap_or_else(|| "a file".to_owned());
                 let heard = slopty_worker::screen::drag::Heard::Failed(format!("{file}: {error}"));
@@ -1492,8 +1510,35 @@ impl Peer<'_> {
                     }
                 });
             }
+            TermRequest::DragEnter { drag, items } => self.drag_enter(session, drag, items),
+            TermRequest::DragLeave => {
+                self.daemon.dnd.term_left(session, self.client);
+                self.request(session, TermRequest::DragLeave);
+            }
             input if input.is_input() => self.input(Input::Term(session, input)),
             other => self.request(session, other),
+        }
+    }
+
+    /// This client's drag `drag` entered `session`'s terminal: its data is routed there, and
+    /// what its program asks for is fetched over this connection.
+    fn drag_enter(&self, session: SessionId, drag: DragId, items: Vec<DragItem>) {
+        self.daemon.dnd.term_drag(drag, session, self.client);
+        let entered = self
+            .daemon
+            .worker
+            .get(session)
+            .and_then(|h| h.drag_enter(self.client, drag, items, self.out.clone()));
+        if let Err(e) = entered {
+            self.fail(session, &e);
+        }
+    }
+
+    /// `data` of drag `drag` goes to the terminal it is over, if it is a terminal's.
+    fn term_drag_data(&self, drag: DragId, data: DragData) {
+        let session = self.daemon.dnd.term_session(drag);
+        if let Some(h) = session.and_then(|s| self.daemon.worker.get(s).ok()) {
+            let _gone = h.drag_data(drag, data);
         }
     }
 

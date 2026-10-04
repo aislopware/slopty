@@ -1,10 +1,11 @@
-//! Drags from this Mac onto a remote display, in the real app against a real worker: the app's
-//! drop destination is handed each step of the drag as the platform's would hand it
-//! (`Command::DragOver`, `DragDrop`, `DragLeave`), the files go up into the drag's landing on the
-//! worker as it hovers, and the worker carries the drag on the drawn display
-//! (`SLOPTY_SYNTHETIC_SCREEN`). The worker records its drops (`SLOPTY_DND_RECORD`): no helper
-//! starts and no system drag runs there, a scripted one answers each step with the operation the
-//! test chose, and each release writes what the landing held at that moment. So the test owns
+//! Drags from this Mac onto a remote display or a terminal's program, in the real app against a
+//! real worker: the app's drop destination is handed each step of the drag as the platform's
+//! would hand it (`Command::DragOver`, `DragDrop`, `DragLeave`), and the files go up into the
+//! drag's landing on the worker as it hovers. The worker carries a drag over the drawn display
+//! (`SLOPTY_SYNTHETIC_SCREEN`) and records its drops (`SLOPTY_DND_RECORD`): no helper starts and
+//! no system drag runs there, a scripted one answers each step with the operation the test
+//! chose, and each release writes what the landing held at that moment. A drag over a terminal
+//! goes to a bash stand-in the test starts there, which asks for drops itself. So the test owns
 //! everything it drives and judges the drop on digests, never on a picture.
 
 #![cfg(target_os = "macos")]
@@ -229,5 +230,106 @@ async fn a_refused_or_left_drag_leaves_nothing_on_the_worker() {
     println!("MEASURE left drag: its landing gone {:.1} ms after", cleared.as_secs_f64() * 1e3);
 
     assert!(std::fs::read_to_string(&record).unwrap_or_default().is_empty(), "never let go");
+    stack.shutdown().await;
+}
+
+/// A program that asks for drops of files and answers a move, so the step that reads move
+/// proves its answer reached the app. For each of two drops it waits for the drop, asks for the
+/// file list, copies every file it names into `<dir>/got<n>/`, and concludes; `<dir>/done<n>`
+/// says it has them all.
+const TAKES_FILES: &str = r#"stty -echo -icanon
+printf '\033]72;t=a;text/uri-list\033\\'; echo ready
+for n in 1 2; do
+  while IFS= read -r -d '\' x; do case $x in *t=m*) break;; esac; done
+  printf '\033]72;t=m:o=2;text/uri-list\033\\'
+  while IFS= read -r -d '\' x; do case $x in *t=M*) break;; esac; done
+  printf '\033]72;t=r:x=1\033\\'
+  data=''
+  while IFS= read -r -d '\' x; do
+    x=$(printf '%s' "$x" | tr -d '\033')
+    case $x in *\;*\;*) data="$data${x##*;}";; *) break;; esac
+  done
+  mkdir -p "$0/got$n"
+  printf '%s' "$data" | base64 -d | tr -d '\r' | while IFS= read -r url; do
+    cp "${url#file://}" "$0/got$n/"
+  done
+  printf '\033]72;t=r:o=2\033\\'
+  : > "$0/done$n"
+done
+exec sleep 600"#;
+
+/// Wait until `path` is there; how long it took.
+async fn there(path: &Path) -> Duration {
+    let start = Instant::now();
+    while start.elapsed() < STEP {
+        if path.exists() {
+            return start.elapsed();
+        }
+        tokio::time::sleep(POLL).await;
+    }
+    panic!("{} never came", path.display());
+}
+
+/// Files dragged from this Mac over a program that asks for drops (Kitty drag and drop), over a
+/// link shaped as a tailnet's: they go up into the drag's landing from the moment the program
+/// accepts them, and on the drop the program reads the worker's copies, which hold the bytes of
+/// the sources here. Dropped once they are up, the program has them a round trip or two after
+/// the drop; dropped at once, it waits for the upload.
+#[tokio::test]
+#[ignore = "live: cargo xtask e2e app"]
+async fn files_dropped_on_a_program_asking_for_drops_reach_it_as_the_workers_copies() {
+    let scratch = tempfile::tempdir().unwrap();
+    let files = sources(scratch.path());
+    let out = scratch.path().join("program");
+    std::fs::create_dir_all(&out).unwrap();
+    let (mut stack, _link) =
+        Stack::launch_shaped("e2e-worker", &[], slopty_e2e::harness::TAILNET).await.unwrap();
+    let drops = stack.dir.path().join("drops");
+    let drv = &mut stack.driver;
+    drv.ok(&Command::Resize { width: WINDOW.0, height: WINDOW.1 }).await.unwrap();
+    first_shell(drv).await;
+    let command =
+        ["/bin/bash", "-c", TAKES_FILES, &out.display().to_string()].map(str::to_owned).to_vec();
+    drv.ok(&Command::Open { command, count: 1 }).await.unwrap();
+    let dump = drv
+        .wait_for("the program asking for drops", STEP, |d| {
+            d.terminals.iter().any(|t| t.rows.iter().any(|r| r.contains("ready")))
+        })
+        .await
+        .unwrap();
+    let session = dump.terminals.iter().find(|t| t.rows.iter().any(|r| r.contains("ready")));
+    let session = session.map(|t| t.session.clone());
+    let item = dump.items.iter().find(|i| i.session == session).expect("its tile");
+    let [x, y, w, h] = item.bounds;
+    let at = (x + w / 2.0, y + h / 2.0);
+    let paths: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+
+    // Dropped once the upload the acceptance began is whole.
+    let (drag, answered) = hover(drv, &paths, at, "move").await;
+    let landing = drops.join(&drag);
+    let accepted = Instant::now();
+    whole(&landing.join("frames.bin"), BIG).await;
+    let up = accepted.elapsed();
+    assert!(drv.drag_drop(at.0, at.1).await.unwrap(), "the drop is taken");
+    let read = there(&out.join("done1")).await;
+    println!(
+        "MEASURE drop on a program, pre-uploaded: first step → accepted {:.1} ms, upload of {} MiB {:.1} ms, drop → program has the files {:.1} ms",
+        answered.as_secs_f64() * 1e3,
+        BIG >> 20,
+        up.as_secs_f64() * 1e3,
+        read.as_secs_f64() * 1e3,
+    );
+    assert_eq!(digests(&walk(&out.join("got1"))), digests(&files), "the program's copies");
+
+    // Dropped as soon as the program accepted: it waits for the upload.
+    let (_drag, _answered) = hover(drv, &paths, at, "move").await;
+    assert!(drv.drag_drop(at.0, at.1).await.unwrap(), "the drop is taken");
+    let read = there(&out.join("done2")).await;
+    println!(
+        "MEASURE drop on a program, at once: drop → program has the {} MiB {:.1} ms",
+        BIG >> 20,
+        read.as_secs_f64() * 1e3,
+    );
+    assert_eq!(digests(&walk(&out.join("got2"))), digests(&files), "the program's copies");
     stack.shutdown().await;
 }

@@ -347,6 +347,9 @@ pub struct TerminalView {
     keys_down: Vec<String>,
     /// A drag of files over the grid of a program that asks for drops.
     file_drag: Option<file_drag::FileDrag>,
+    /// The drags the window's drop sink carries over the grid of a program asking for drops.
+    #[cfg(target_os = "macos")]
+    sink_drags: file_drag::SinkDrags,
     metrics: Option<CellMetrics>,
     pending_size: Option<TermSize>,
     font_family: Option<SharedString>,
@@ -561,6 +564,8 @@ impl TerminalView {
             key_seq: 0,
             keys_down: Vec::new(),
             file_drag: None,
+            #[cfg(target_os = "macos")]
+            sink_drags: file_drag::SinkDrags::default(),
             metrics: None,
             pending_size: None,
             font_family: None,
@@ -2557,6 +2562,10 @@ impl TerminalView {
             self.predictor.flush();
             self.selection = None;
         }
+        #[cfg(target_os = "macos")]
+        if matches!(event, TermEvent::DropAccepted { .. } | TermEvent::DropConcluded { .. }) {
+            self.sink_heard(&event, cx);
+        }
         let effects = self.state.apply(event);
         if self.state.epoch() != epoch_before {
             tracing::info!(session = %self.session, epoch = ?self.state.epoch(), "line numbering changed");
@@ -4419,6 +4428,9 @@ fn texture_of(pixels: &TermImage) -> Option<Arc<gpui::RenderImage>> {
 }
 
 mod file_drag;
+
+#[cfg(target_os = "macos")]
+pub use file_drag::{DropHook, DropNews, SinkDropped};
 #[cfg(test)]
 mod paint_oracle;
 
@@ -8131,20 +8143,17 @@ mod tests {
         while let Ok(msg) = rx.try_recv() {
             let ClientMsg::Term { req, .. } = msg else { continue };
             out.push(match req {
-                TermRequest::DragOver { at, mimes } => {
-                    format!("over {},{} {}", at.col, at.row, mimes.join(","))
+                TermRequest::DragEnter { items, .. } => {
+                    let names: Vec<&str> =
+                        items.iter().filter_map(|i| Some(i.file.as_ref()?.name.as_str())).collect();
+                    format!("enter {}", names.join(","))
                 }
+                TermRequest::DragOver { at } => format!("over {},{}", at.col, at.row),
                 TermRequest::DragLeave => "leave".to_owned(),
-                TermRequest::Drop { at, reps } => {
-                    let reps: Vec<String> = reps
-                        .iter()
-                        .map(|r| format!("{}{}", r.mime, if r.data.is_some() { "+" } else { "" }))
-                        .collect();
-                    format!("drop {},{} {}", at.col, at.row, reps.join(","))
-                }
-                TermRequest::DropData { mime, data } => match data {
-                    Some(d) => format!("data {mime} {}", String::from_utf8_lossy(&d)),
-                    None => format!("data {mime} gone"),
+                TermRequest::Drop { at } => format!("drop {},{}", at.col, at.row),
+                TermRequest::DropFiles { landed, .. } => match landed {
+                    Some(paths) => format!("files {}", paths.join(",")),
+                    None => "files gone".to_owned(),
                 },
                 TermRequest::Paste { text, .. } => format!("paste {text}"),
                 _ => continue,
@@ -8168,7 +8177,10 @@ mod tests {
         let cell = |cx: &mut VisualTestContext, col, row| {
             view.read_with(cx, |view, _| at_cell(view, col, row))
         };
-        let paths = || ExternalPaths(std::iter::once("/here/a b.txt".into()).collect());
+        let dir = tempfile::tempdir().expect("a directory");
+        let file = dir.path().join("a b.txt");
+        std::fs::write(&file, b"bytes").expect("a file");
+        let paths = || ExternalPaths(std::iter::once(file.clone()).collect());
         let drag = |cx: &mut VisualTestContext, moves: &[gpui::Point<Pixels>]| {
             let (first, rest) = moves.split_first().expect("a move");
             cx.simulate_event(FileDropEvent::Entered { position: *first, paths: paths() });
@@ -8177,7 +8189,7 @@ mod tests {
             }
         };
         let landed = |cx: &mut VisualTestContext| {
-            view.update(cx, |view, cx| view.files_landed(&["/w/a b.txt".to_owned()], cx));
+            view.update(cx, |view, cx| view.files_landed(None, &["/w/a b.txt".to_owned()], cx));
         };
 
         // Not asking: the drag is the tile's, and the paths are typed.
@@ -8187,47 +8199,39 @@ mod tests {
         landed(cx);
         assert_eq!(drag_requests(&mut rx), ["paste '/w/a b.txt' "]);
 
-        // Asking: told per cell, then the drop, then the URLs.
+        // Asking: told of the drag's files, then per cell, then the drop, then where they
+        // landed.
         view.update(cx, |view, cx| view.apply(TermEvent::DropTarget { accepts: true }, cx));
         drag(cx, &[a, a, b]);
         cx.simulate_event(FileDropEvent::Submit { position: b });
-        assert_eq!(
-            drag_requests(&mut rx),
-            ["over 2,1 text/uri-list", "over 4,1 text/uri-list", "drop 4,1 text/uri-list"]
-        );
+        assert_eq!(drag_requests(&mut rx), ["enter a b.txt", "over 2,1", "over 4,1", "drop 4,1"]);
         landed(cx);
-        assert_eq!(drag_requests(&mut rx), ["data text/uri-list file:///w/a%20b.txt\r\n"]);
+        assert_eq!(drag_requests(&mut rx), ["files /w/a b.txt"]);
 
         // An upload that fails is told as not coming.
         drag(cx, &[a]);
         cx.simulate_event(FileDropEvent::Submit { position: a });
-        view.update(cx, |view, cx| view.files_failed(cx));
-        assert_eq!(
-            drag_requests(&mut rx),
-            ["over 2,1 text/uri-list", "drop 2,1 text/uri-list", "data text/uri-list gone"]
-        );
+        view.update(cx, |view, cx| view.files_failed(None, cx));
+        assert_eq!(drag_requests(&mut rx), ["enter a b.txt", "over 2,1", "drop 2,1", "files gone"]);
 
         // Refused: no drop, the drag just leaves.
         drag(cx, &[b]);
         let refused = TermEvent::DropAccepted { operation: DropOperation::None, mimes: vec![] };
         view.update(cx, |view, cx| view.apply(refused, cx));
         cx.simulate_event(FileDropEvent::Submit { position: b });
-        assert_eq!(drag_requests(&mut rx), ["over 4,1 text/uri-list", "leave"]);
+        assert_eq!(drag_requests(&mut rx), ["enter a b.txt", "over 4,1", "leave"]);
 
         // A new drag is not held to the last one's refusal.
         drag(cx, &[a]);
         cx.simulate_event(FileDropEvent::Submit { position: a });
-        view.update(cx, |view, cx| view.files_failed(cx));
-        assert_eq!(
-            drag_requests(&mut rx),
-            ["over 2,1 text/uri-list", "drop 2,1 text/uri-list", "data text/uri-list gone"]
-        );
+        view.update(cx, |view, cx| view.files_failed(None, cx));
+        assert_eq!(drag_requests(&mut rx), ["enter a b.txt", "over 2,1", "drop 2,1", "files gone"]);
 
         // A drag that leaves the window leaves the program.
         drag(cx, &[b]);
         cx.simulate_event(FileDropEvent::Exited);
         cx.run_until_parked();
-        assert_eq!(drag_requests(&mut rx), ["over 4,1 text/uri-list", "leave"]);
+        assert_eq!(drag_requests(&mut rx), ["enter a b.txt", "over 4,1", "leave"]);
     }
 
     /// A key's release goes to the program only while it asks for releases (Kitty keyboard

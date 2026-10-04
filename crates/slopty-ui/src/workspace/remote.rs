@@ -490,6 +490,17 @@ impl WorkspaceView {
     /// A clipboard message from `key`. Its fetch of another worker's offer, which this client
     /// relayed, is answered by fetching from that worker, off the main thread.
     pub fn clip_message(&self, key: WorkerKey, msg: ClipMsg, cx: &Context<Self>) {
+        // The program a drag was dropped on reads what it carries: the person's own drop,
+        // whatever the clipboard shares.
+        #[cfg(target_os = "macos")]
+        if let ClipMsg::Fetch { rep, max, urgent } = &msg
+            && let Some(fetched) = self.drag_fetch(rep, *max, cx)
+        {
+            if let Some(to) = self.remote(key) {
+                to.send_clip(rep.clone(), fetched, *urgent);
+            }
+            return;
+        }
         let Some(clip) = self.clip.clone() else { return };
         // Not shared: the worker's copies stay its own, and none of this Mac's is handed over.
         if !self.clip_shared(key) {
@@ -550,6 +561,14 @@ impl WorkspaceView {
             | ClipMsg::TooBig { .. }
             | ClipMsg::Unavailable { .. } => {}
         }
+    }
+
+    /// The answer to a fetch of a drag a terminal tile carries; `None` when `rep` is no
+    /// terminal's drag.
+    #[cfg(target_os = "macos")]
+    fn drag_fetch(&self, rep: &RepRef, max: Option<u64>, cx: &Context<Self>) -> Option<Fetched> {
+        let slopty_proto::transfer::Source::Drag(drag) = rep.source else { return None };
+        self.terminals.values().find_map(|v| v.read(cx).drag_fetch(drag, rep.item, &rep.kind, max))
     }
 
     /// Attachment `id` of `session`'s face goes up to a directory of its own on the worker, its
@@ -655,7 +674,8 @@ impl WorkspaceView {
     /// told they will not come.
     fn terminal_upload_failed(&self, upload: &Upload, cx: &mut Context<Self>) {
         if let Some(view) = upload.session.and_then(|s| self.terminals.get(&s)).cloned() {
-            view.update(cx, |view, cx| view.files_failed(cx));
+            let drag = upload.drag;
+            view.update(cx, |view, cx| view.files_failed(drag, cx));
         }
     }
 
@@ -801,7 +821,8 @@ impl WorkspaceView {
                 match upload.session {
                     // The shell types their paths, or a program that took the drop reads them.
                     Some(session) if let Some(view) = self.terminals.get(&session).cloned() => {
-                        view.update(cx, |view, cx| view.files_landed(&paths, cx));
+                        let drag = upload.drag;
+                        view.update(cx, |view, cx| view.files_landed(drag, &paths, cx));
                     }
                     // The shell closed while they went up (across a relink, say): said, so the
                     // files are not lost track of.
